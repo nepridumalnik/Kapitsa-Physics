@@ -303,3 +303,106 @@ fn capsule_local_bounds_rejects_overflow() {
 
     assert!(capsule.local_bounds().is_none());
 }
+
+#[rstest]
+#[case::tilted_axis(
+    Vec3::new(2.0, -3.0, 4.0),
+    Vec3::new(-4.0, 5.0, -6.0),
+    Vec3::new(-4.5, -3.5, -6.5),
+    Vec3::new(2.5, 5.5, 4.5),
+)]
+#[case::reversed_axis(
+    Vec3::new(-4.0, 5.0, -6.0),
+    Vec3::new(2.0, -3.0, 4.0),
+    Vec3::new(-4.5, -3.5, -6.5),
+    Vec3::new(2.5, 5.5, 4.5),
+)]
+fn cylinder_local_bounds(
+    #[case] start: Vec3,
+    #[case] end: Vec3,
+    #[case] min: Vec3,
+    #[case] max: Vec3,
+) {
+    let cylinder = Cylinder::new(start, end, 0.5).expect("valid cylinder");
+
+    assert_eq!(cylinder.local_bounds(), Aabb::new(min, max));
+}
+
+#[rstest]
+#[case::forward(
+    Vec3::new(2.0, -3.0, 4.0),
+    Vec3::new(-4.0, 5.0, -6.0),
+    0.5,
+    2.0,
+    Vec3::new(-6.0, -3.5, -8.0),
+    Vec3::new(2.5, 7.0, 4.5),
+)]
+#[case::reversed_with_radii(
+    Vec3::new(-4.0, 5.0, -6.0),
+    Vec3::new(2.0, -3.0, 4.0),
+    2.0,
+    0.5,
+    Vec3::new(-6.0, -3.5, -8.0),
+    Vec3::new(2.5, 7.0, 4.5),
+)]
+fn tapered_capsule_local_bounds(
+    #[case] start: Vec3,
+    #[case] end: Vec3,
+    #[case] start_radius: f32,
+    #[case] end_radius: f32,
+    #[case] min: Vec3,
+    #[case] max: Vec3,
+) {
+    let capsule =
+        TaperedCapsule::new(start, end, start_radius, end_radius).expect("valid tapered capsule");
+
+    assert_eq!(capsule.local_bounds(), Aabb::new(min, max));
+}
+
+#[rstest]
+#[case::forward(
+    Vec3::new(2.0, -3.0, 4.0),
+    Vec3::new(-4.0, 5.0, -6.0),
+    0.5,
+    2.0,
+    Vec3::new(-6.0, -3.5, -8.0),
+    Vec3::new(2.5, 7.0, 4.5),
+)]
+#[case::reversed_with_radii(
+    Vec3::new(-4.0, 5.0, -6.0),
+    Vec3::new(2.0, -3.0, 4.0),
+    2.0,
+    0.5,
+    Vec3::new(-6.0, -3.5, -8.0),
+    Vec3::new(2.5, 7.0, 4.5),
+)]
+fn tapered_cylinder_local_bounds(
+    #[case] start: Vec3,
+    #[case] end: Vec3,
+    #[case] start_radius: f32,
+    #[case] end_radius: f32,
+    #[case] min: Vec3,
+    #[case] max: Vec3,
+) {
+    let cylinder =
+        TaperedCylinder::new(start, end, start_radius, end_radius).expect("valid tapered cylinder");
+
+    assert_eq!(cylinder.local_bounds(), Aabb::new(min, max));
+}
+
+#[rstest]
+fn cylindrical_local_bounds_reject_overflow() {
+    let start = Vec3::new(f32::MAX, 0.0, 0.0);
+    let end = Vec3::new(f32::MAX, 0.0, 1.0);
+
+    let cylinder = Cylinder::new(start, end, f32::MAX).expect("valid cylinder");
+    assert!(cylinder.local_bounds().is_none());
+
+    let tapered_capsule =
+        TaperedCapsule::new(start, end, f32::MAX, f32::MAX).expect("valid tapered capsule");
+    assert!(tapered_capsule.local_bounds().is_none());
+
+    let tapered_cylinder =
+        TaperedCylinder::new(start, end, f32::MAX, f32::MAX).expect("valid tapered cylinder");
+    assert!(tapered_cylinder.local_bounds().is_none());
+}

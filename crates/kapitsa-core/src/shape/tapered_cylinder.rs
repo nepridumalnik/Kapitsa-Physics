@@ -1,3 +1,4 @@
+use crate::aabb::Aabb;
 use glam::Vec3;
 
 /// Conical frustum with positive radii at both ends of its local axis.
@@ -41,5 +42,14 @@ impl TaperedCylinder {
 
     pub fn end_radius(&self) -> f32 {
         self.end_radius
+    }
+
+    pub fn local_bounds(&self) -> Option<Aabb> {
+        let start_radius = Vec3::splat(self.start_radius);
+        let end_radius = Vec3::splat(self.end_radius);
+        Aabb::new(
+            (self.start - start_radius).min(self.end - end_radius),
+            (self.start + start_radius).max(self.end + end_radius),
+        )
     }
 }
