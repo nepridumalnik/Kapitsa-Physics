@@ -4,6 +4,8 @@
 //! local endpoints, vertices, or a grid origin. A collider's transform places
 //! this geometry in world space.
 
+use crate::aabb::Aabb;
+
 mod capsule;
 mod convex;
 mod cuboid;
@@ -46,6 +48,33 @@ pub enum Shape {
     HeightField(HeightField),
     LevelSet(LevelSet),
     SkinnedTriangleMesh(SkinnedTriangleMesh),
+}
+
+impl Shape {
+    /// Returns finite local-space bounds when they are available.
+    ///
+    /// `None` means that finite bounds are unavailable; it does not mean that
+    /// the shape has no collisions.
+    pub fn local_bounds(&self) -> Option<Aabb> {
+        match self {
+            Self::Sphere(shape) => shape.local_bounds(),
+            Self::Cuboid(shape) => shape.local_bounds(),
+            Self::Plane(_) => None,
+            Self::Capsule(shape) => shape.local_bounds(),
+            Self::Cylinder(shape) => shape.local_bounds(),
+            Self::TaperedCapsule(shape) => shape.local_bounds(),
+            Self::TaperedCylinder(shape) => shape.local_bounds(),
+            Self::Triangle(shape) => shape.local_bounds(),
+            Self::Convex(shape) => shape.local_bounds(),
+            Self::TriangleMesh(shape) => shape.local_bounds(),
+            Self::HeightField(shape) => shape.local_bounds(),
+            Self::LevelSet(shape) => shape.local_bounds(),
+            Self::SkinnedTriangleMesh(_) => {
+                // TODO: Compute bounds from the current skinned vertices after skinning exists.
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]

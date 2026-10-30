@@ -498,3 +498,108 @@ fn level_set_local_bounds_cover_only_grid_nodes() {
         Aabb::new(Vec3::new(-3.0, 2.0, -5.0), Vec3::new(-2.0, 4.0, 4.0))
     );
 }
+
+#[rstest]
+fn shape_local_bounds_dispatches_to_finite_shapes(
+    tetrahedron: (Vec<Vec3>, Vec<[usize; 3]>),
+    triangle_mesh: TriangleMesh,
+) {
+    let (vertices, faces) = tetrahedron;
+    let convex = Convex::new(vertices, faces).expect("valid convex tetrahedron");
+    let height_field = HeightField::from_vec(2, 2, Vec2::ONE, vec![0.0, 0.0, 0.0, 1.0])
+        .expect("valid height field");
+    let level_set = LevelSet::from_vec(Vec3::ZERO, [2, 2, 2], Vec3::ONE, vec![0.0; 8])
+        .expect("valid level set");
+
+    let shapes = [
+        (
+            Shape::Sphere(Sphere::new(1.0).expect("valid sphere")),
+            Vec3::splat(-1.0),
+            Vec3::ONE,
+        ),
+        (
+            Shape::Cuboid(Cuboid::new(2.0, 2.0, 2.0).expect("valid cuboid")),
+            Vec3::splat(-1.0),
+            Vec3::ONE,
+        ),
+        (
+            Shape::Capsule(Capsule::new(Vec3::ZERO, Vec3::Z, 0.5).expect("valid capsule")),
+            Vec3::splat(-0.5),
+            Vec3::new(0.5, 0.5, 1.5),
+        ),
+        (
+            Shape::Cylinder(Cylinder::new(Vec3::ZERO, Vec3::Z, 0.5).expect("valid cylinder")),
+            Vec3::splat(-0.5),
+            Vec3::new(0.5, 0.5, 1.5),
+        ),
+        (
+            Shape::TaperedCapsule(
+                TaperedCapsule::new(Vec3::ZERO, Vec3::Z, 0.25, 0.5).expect("valid tapered capsule"),
+            ),
+            Vec3::new(-0.5, -0.5, -0.25),
+            Vec3::new(0.5, 0.5, 1.5),
+        ),
+        (
+            Shape::TaperedCylinder(
+                TaperedCylinder::new(Vec3::ZERO, Vec3::Z, 0.25, 0.5)
+                    .expect("valid tapered cylinder"),
+            ),
+            Vec3::new(-0.5, -0.5, -0.25),
+            Vec3::new(0.5, 0.5, 1.5),
+        ),
+        (
+            Shape::Triangle(Triangle::new(Vec3::ZERO, Vec3::X, Vec3::Y).expect("valid triangle")),
+            Vec3::ZERO,
+            Vec3::new(1.0, 1.0, 0.0),
+        ),
+        (Shape::Convex(convex), Vec3::ZERO, Vec3::ONE),
+        (
+            Shape::TriangleMesh(triangle_mesh),
+            Vec3::ZERO,
+            Vec3::new(1.0, 1.0, 0.0),
+        ),
+        (Shape::HeightField(height_field), Vec3::ZERO, Vec3::ONE),
+        (Shape::LevelSet(level_set), Vec3::ZERO, Vec3::ONE),
+    ];
+
+    for (shape, min, max) in shapes {
+        assert_eq!(shape.local_bounds(), Aabb::new(min, max));
+    }
+}
+
+#[rstest]
+fn shape_local_bounds_returns_none_for_plane() {
+    let plane = Plane::new(0.0, 1.0, 0.0, 0.0).expect("valid plane");
+
+    assert!(Shape::Plane(plane).local_bounds().is_none());
+}
+
+#[rstest]
+fn shape_local_bounds_returns_none_for_skinned_mesh(
+    triangle_mesh: TriangleMesh,
+    vertex_influences: Vec<Vec<BoneInfluence>>,
+) {
+    let skinned_mesh = SkinnedTriangleMesh::new(
+        triangle_mesh,
+        vec!["root".into()],
+        vertex_influences,
+        Affine3A::IDENTITY,
+        vec![Affine3A::IDENTITY],
+    )
+    .expect("valid skinned mesh");
+
+    assert!(
+        Shape::SkinnedTriangleMesh(skinned_mesh)
+            .local_bounds()
+            .is_none()
+    );
+}
+
+#[rstest]
+fn shape_local_bounds_propagates_overflow() {
+    let start = Vec3::new(f32::MAX, 0.0, 0.0);
+    let end = Vec3::new(f32::MAX, 0.0, 1.0);
+    let cylinder = Cylinder::new(start, end, f32::MAX).expect("valid cylinder");
+
+    assert!(Shape::Cylinder(cylinder).local_bounds().is_none());
+}
