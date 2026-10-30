@@ -1,0 +1,11 @@
+[package]
+name = "kapitsa-core"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+kapitsa-math = { path = "../kapitsa-math" }
+
+[dev-dependencies]
+rstest = "0.28"
