@@ -1,3 +1,4 @@
+use crate::aabb::Aabb;
 use glam::Vec3;
 
 /// Triangulated surface in local coordinates; may be open or nonconvex.
@@ -43,5 +44,13 @@ impl TriangleMesh {
 
     pub fn triangles(&self) -> &[[usize; 3]] {
         &self.triangles
+    }
+
+    pub fn local_bounds(&self) -> Option<Aabb> {
+        let (&first, rest) = self.vertices.split_first()?;
+        let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
+            (min.min(vertex), max.max(vertex))
+        });
+        Aabb::new(min, max)
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::aabb::Aabb;
 use glam::Vec3;
 
 /// Closed, consistently outward-wound, triangulated convex polyhedron.
@@ -94,5 +95,13 @@ impl Convex {
 
     pub fn faces(&self) -> &[[usize; 3]] {
         &self.faces
+    }
+
+    pub fn local_bounds(&self) -> Option<Aabb> {
+        let (&first, rest) = self.vertices.split_first()?;
+        let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
+            (min.min(vertex), max.max(vertex))
+        });
+        Aabb::new(min, max)
     }
 }

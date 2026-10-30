@@ -1,3 +1,4 @@
+use crate::aabb::Aabb;
 use glam::Vec3;
 
 /// Nondegenerate triangle in collider-local coordinates.
@@ -23,5 +24,13 @@ impl Triangle {
 
     pub fn vertices(&self) -> [Vec3; 3] {
         self.vertices
+    }
+
+    pub fn local_bounds(&self) -> Option<Aabb> {
+        let (&first, rest) = self.vertices.split_first()?;
+        let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
+            (min.min(vertex), max.max(vertex))
+        });
+        Aabb::new(min, max)
     }
 }

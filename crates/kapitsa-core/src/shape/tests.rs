@@ -406,3 +406,67 @@ fn cylindrical_local_bounds_reject_overflow() {
         TaperedCylinder::new(start, end, f32::MAX, f32::MAX).expect("valid tapered cylinder");
     assert!(tapered_cylinder.local_bounds().is_none());
 }
+
+#[rstest]
+#[case::arbitrary_coordinates(
+    [
+        Vec3::new(-4.0, 2.0, 3.0),
+        Vec3::new(1.0, 5.0, -2.0),
+        Vec3::new(3.0, -1.0, 4.0),
+    ],
+    Vec3::new(-4.0, -1.0, -2.0),
+    Vec3::new(3.0, 5.0, 4.0),
+)]
+#[case::flat_on_z(
+    [
+        Vec3::new(-1.0, 2.0, 0.0),
+        Vec3::new(3.0, -4.0, 0.0),
+        Vec3::new(2.0, 5.0, 0.0),
+    ],
+    Vec3::new(-1.0, -4.0, 0.0),
+    Vec3::new(3.0, 5.0, 0.0),
+)]
+fn triangle_local_bounds(#[case] vertices: [Vec3; 3], #[case] min: Vec3, #[case] max: Vec3) {
+    let triangle = Triangle::from_vertices(vertices).expect("valid triangle");
+
+    assert_eq!(triangle.local_bounds(), Aabb::new(min, max));
+}
+
+#[rstest]
+fn convex_local_bounds_cover_all_vertices() {
+    let translation = Vec3::new(-3.0, -4.0, -5.0);
+    let vertices = vec![
+        translation,
+        translation + Vec3::new(2.0, 1.0, 0.0),
+        translation + Vec3::new(0.0, 3.0, 1.0),
+        translation + Vec3::new(1.0, 0.0, 4.0),
+    ];
+    let faces = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+    let convex = Convex::new(vertices, faces).expect("valid convex tetrahedron");
+
+    assert_eq!(
+        convex.local_bounds(),
+        Aabb::new(Vec3::new(-3.0, -4.0, -5.0), Vec3::splat(-1.0))
+    );
+}
+
+#[rstest]
+fn triangle_mesh_local_bounds_include_unindexed_vertices() {
+    let vertices = vec![
+        Vec3::new(-4.0, 1.0, -2.0),
+        Vec3::new(3.0, 1.0, -2.0),
+        Vec3::new(0.0, 5.0, -2.0),
+        Vec3::new(1.0, -3.0, 4.0),
+        Vec3::new(-2.0, 0.0, 6.0),
+        Vec3::new(9.0, 0.0, 0.0),
+        Vec3::new(0.0, 8.0, 0.0),
+        Vec3::new(0.0, 0.0, 15.0),
+    ];
+    let triangles = vec![[0, 1, 2], [3, 4, 0]];
+    let mesh = TriangleMesh::new(vertices, triangles).expect("valid triangle mesh");
+
+    assert_eq!(
+        mesh.local_bounds(),
+        Aabb::new(Vec3::new(-4.0, -3.0, -2.0), Vec3::new(9.0, 8.0, 15.0))
+    );
+}
