@@ -10,7 +10,6 @@ mod cuboid;
 mod cylinder;
 mod height_field;
 mod level_set;
-mod ml_level_set;
 mod plane;
 mod skinned_triangle_mesh;
 mod sphere;
@@ -25,7 +24,6 @@ pub use cuboid::Cuboid;
 pub use cylinder::Cylinder;
 pub use height_field::HeightField;
 pub use level_set::LevelSet;
-pub use ml_level_set::{MlLevelSet, MlLevelSetBone};
 pub use plane::Plane;
 pub use skinned_triangle_mesh::{BoneInfluence, SkinnedTriangleMesh};
 pub use sphere::Sphere;
@@ -47,8 +45,7 @@ pub enum Shape {
     TriangleMesh(TriangleMesh),
     HeightField(HeightField),
     LevelSet(LevelSet),
-    MlLevelSet(Box<MlLevelSet>),
-    SkinnedTriangleMesh(Box<SkinnedTriangleMesh>),
+    SkinnedTriangleMesh(SkinnedTriangleMesh),
 }
 
 #[cfg(test)]

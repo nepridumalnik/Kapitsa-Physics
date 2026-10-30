@@ -2,9 +2,8 @@ use glam::{Affine3A, Vec2, Vec3};
 use rstest::{fixture, rstest};
 
 use super::{
-    BoneInfluence, Capsule, Convex, Cuboid, Cylinder, HeightField, LevelSet, MlLevelSet,
-    MlLevelSetBone, Plane, Shape, SkinnedTriangleMesh, Sphere, TaperedCapsule, TaperedCylinder,
-    Triangle, TriangleMesh,
+    BoneInfluence, Capsule, Convex, Cuboid, Cylinder, HeightField, LevelSet, Plane, Shape,
+    SkinnedTriangleMesh, Sphere, TaperedCapsule, TaperedCylinder, Triangle, TriangleMesh,
 };
 
 #[fixture]
@@ -25,17 +24,6 @@ fn vertex_influences() -> Vec<Vec<BoneInfluence>> {
     (0..3)
         .map(|_| vec![BoneInfluence::new(0, 1.0).expect("valid bone influence")])
         .collect()
-}
-
-#[fixture]
-fn valid_bone() -> MlLevelSetBone {
-    MlLevelSetBone::new(
-        "root".into(),
-        Affine3A::IDENTITY,
-        Affine3A::IDENTITY,
-        vec![0],
-    )
-    .expect("valid bone")
 }
 
 #[rstest]
@@ -239,31 +227,6 @@ fn level_set_rejects_invalid_grid(
 }
 
 #[rstest]
-fn ml_level_set_accepts_valid_network_and_bones(valid_bone: MlLevelSetBone) {
-    let level_set = MlLevelSet::from_vec(
-        Vec3::ZERO,
-        [Vec3::X, Vec3::Y, Vec3::Z],
-        vec![vec![0.0, 1.0]],
-        vec![vec![2]],
-        vec![valid_bone],
-        1,
-        1.0,
-    )
-    .expect("valid ML level set");
-    let shape = Shape::MlLevelSet(Box::new(level_set));
-    assert!(matches!(shape, Shape::MlLevelSet(_)));
-}
-
-#[rstest]
-#[case::empty_name("")]
-#[case::whitespace_name("  ")]
-fn ml_level_set_bone_rejects_empty_name(#[case] name: &str) {
-    assert!(
-        MlLevelSetBone::new(name.into(), Affine3A::IDENTITY, Affine3A::IDENTITY, vec![]).is_none()
-    );
-}
-
-#[rstest]
 fn skinned_triangle_mesh_accepts_matching_vertex_influences(
     triangle_mesh: TriangleMesh,
     vertex_influences: Vec<Vec<BoneInfluence>>,
@@ -276,7 +239,7 @@ fn skinned_triangle_mesh_accepts_matching_vertex_influences(
         vec![Affine3A::IDENTITY],
     )
     .expect("valid skinned mesh");
-    let shape = Shape::SkinnedTriangleMesh(Box::new(skinned));
+    let shape = Shape::SkinnedTriangleMesh(skinned);
     assert!(matches!(shape, Shape::SkinnedTriangleMesh(_)));
 }
 

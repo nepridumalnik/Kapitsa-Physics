@@ -9,8 +9,7 @@ pub struct BoneInfluence {
 
 impl BoneInfluence {
     pub fn new(bone_index: usize, weight: f32) -> Option<Self> {
-        (weight.is_finite() && weight > 0.0 && weight <= 1.0)
-            .then_some(Self { bone_index, weight })
+        (weight.is_finite() && weight > 0.0 && weight <= 1.0).then_some(Self { bone_index, weight })
     }
 
     pub fn bone_index(&self) -> usize {
@@ -24,6 +23,9 @@ impl BoneInfluence {
 
 /// Mesh with local reference bone transforms and per-vertex influences.
 /// Bone hierarchies and skinning evaluation are outside this data type.
+/// TODO: Implement skeletal deformation, reference/current vertex positions,
+/// dynamic bounding boxes, and spatial acceleration structures.
+/// Also add PIMPL.
 pub struct SkinnedTriangleMesh {
     mesh: TriangleMesh,
     bone_names: Vec<String>,
