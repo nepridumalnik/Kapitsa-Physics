@@ -1,5 +1,6 @@
 use glam::Vec2;
 
+/// Row-major height samples on a regular local XY grid.
 pub struct HeightField {
     rows: usize,
     columns: usize,
@@ -14,13 +15,13 @@ impl HeightField {
         grid_spacing: Vec2,
         heights: Vec<f32>,
     ) -> Option<Self> {
-        let expected_height_count = rows.checked_mul(columns)?;
-
+        let count = rows.checked_mul(columns)?;
         if rows < 2
             || columns < 2
-            || expected_height_count != heights.len()
+            || count != heights.len()
             || !grid_spacing.is_finite()
             || grid_spacing.min_element() <= 0.0
+            || !(grid_spacing * Vec2::new((columns - 1) as f32, (rows - 1) as f32)).is_finite()
             || !heights.iter().all(|height| height.is_finite())
         {
             return None;

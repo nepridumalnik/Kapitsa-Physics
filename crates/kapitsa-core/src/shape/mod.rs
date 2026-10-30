@@ -1,3 +1,9 @@
+//! Collision geometry in collider-local coordinates.
+//!
+//! Sphere and Cuboid are centered at the local origin. Other shapes may store
+//! local endpoints, vertices, or a grid origin. A collider's transform places
+//! this geometry in world space.
+
 mod capsule;
 mod convex;
 mod cuboid;
@@ -29,20 +35,21 @@ pub use triangle::Triangle;
 pub use triangle_mesh::TriangleMesh;
 
 pub enum Shape {
-    // Primitives
     Sphere(Sphere),
-    Cube(Cuboid),
+    Cuboid(Cuboid),
     Plane(Plane),
     Capsule(Capsule),
     Cylinder(Cylinder),
     TaperedCapsule(TaperedCapsule),
     TaperedCylinder(TaperedCylinder),
     Triangle(Triangle),
-    // Complex geometry
     Convex(Convex),
     TriangleMesh(TriangleMesh),
     HeightField(HeightField),
     LevelSet(LevelSet),
-    MlLevelSet(MlLevelSet),
-    SkinnedTriangleMesh(SkinnedTriangleMesh),
+    MlLevelSet(Box<MlLevelSet>),
+    SkinnedTriangleMesh(Box<SkinnedTriangleMesh>),
 }
+
+#[cfg(test)]
+mod tests;

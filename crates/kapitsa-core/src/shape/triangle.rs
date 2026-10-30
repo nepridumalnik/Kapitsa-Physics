@@ -1,5 +1,6 @@
 use glam::Vec3;
 
+/// Nondegenerate triangle in collider-local coordinates.
 pub struct Triangle {
     vertices: [Vec3; 3],
 }
@@ -14,12 +15,10 @@ impl Triangle {
             return None;
         }
 
-        let area_vector = (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0]);
-        if !area_vector.length_squared().is_finite() || area_vector.length_squared() == 0.0 {
-            return None;
-        }
-
-        Some(Self { vertices })
+        let area_squared = (vertices[1] - vertices[0])
+            .cross(vertices[2] - vertices[0])
+            .length_squared();
+        (area_squared.is_finite() && area_squared > 0.0).then_some(Self { vertices })
     }
 
     pub fn vertices(&self) -> [Vec3; 3] {

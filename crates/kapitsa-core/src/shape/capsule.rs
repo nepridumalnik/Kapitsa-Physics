@@ -1,5 +1,6 @@
 use glam::Vec3;
 
+/// Capsule swept along a segment in collider-local coordinates.
 pub struct Capsule {
     start: Vec3,
     end: Vec3,
@@ -8,7 +9,13 @@ pub struct Capsule {
 
 impl Capsule {
     pub fn new(start: Vec3, end: Vec3, radius: f32) -> Option<Self> {
-        (start.is_finite() && end.is_finite() && radius.is_finite() && radius > 0.0)
+        let length = (end - start).length();
+        (start.is_finite()
+            && end.is_finite()
+            && length.is_finite()
+            && length > 0.0
+            && radius.is_finite()
+            && radius > 0.0)
             .then_some(Self { start, end, radius })
     }
 

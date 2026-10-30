@@ -1,3 +1,4 @@
+/// Sphere centered at the collider-local origin.
 pub struct Sphere {
     radius: f32,
 }

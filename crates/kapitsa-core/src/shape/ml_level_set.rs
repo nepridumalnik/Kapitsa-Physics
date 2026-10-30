@@ -1,5 +1,6 @@
 use glam::{Affine3A, Vec3};
 
+/// Model-backed distance field parameters; evaluation is not implemented here.
 pub struct MlLevelSet {
     training_grid_min: Vec3,
     training_grid_axes: [Vec3; 3],
@@ -70,7 +71,7 @@ impl MlLevelSet {
         total_rotation_components: usize,
         signed_distance_scaling: f32,
     ) -> Option<Self> {
-        let grid_determinant =
+        let determinant =
             training_grid_axes[0].dot(training_grid_axes[1].cross(training_grid_axes[2]));
 
         if !training_grid_min.is_finite()
@@ -79,8 +80,8 @@ impl MlLevelSet {
                     || !axis.length_squared().is_finite()
                     || axis.length_squared() == 0.0
             })
-            || !grid_determinant.is_finite()
-            || grid_determinant == 0.0
+            || !determinant.is_finite()
+            || determinant == 0.0
             || model_weights.is_empty()
             || model_weights.len() != model_weight_shapes.len()
             || !active_bones_are_valid(&active_bones, total_rotation_components)
@@ -91,14 +92,14 @@ impl MlLevelSet {
         }
 
         for (weights, shape) in model_weights.iter().zip(&model_weight_shapes) {
-            let weight_count = shape.iter().try_fold(1_usize, |product, dimension| {
-                product.checked_mul(*dimension)
+            let count = shape.iter().try_fold(1_usize, |product, &dimension| {
+                product.checked_mul(dimension)
             })?;
 
             if shape.is_empty()
                 || shape.contains(&0)
                 || weights.is_empty()
-                || weight_count != weights.len()
+                || count != weights.len()
                 || !weights.iter().all(|weight| weight.is_finite())
             {
                 return None;

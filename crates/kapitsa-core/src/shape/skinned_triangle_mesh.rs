@@ -9,7 +9,8 @@ pub struct BoneInfluence {
 
 impl BoneInfluence {
     pub fn new(bone_index: usize, weight: f32) -> Option<Self> {
-        (weight.is_finite() && weight > 0.0).then_some(Self { bone_index, weight })
+        (weight.is_finite() && weight > 0.0 && weight <= 1.0)
+            .then_some(Self { bone_index, weight })
     }
 
     pub fn bone_index(&self) -> usize {
@@ -21,6 +22,8 @@ impl BoneInfluence {
     }
 }
 
+/// Mesh with local reference bone transforms and per-vertex influences.
+/// Bone hierarchies and skinning evaluation are outside this data type.
 pub struct SkinnedTriangleMesh {
     mesh: TriangleMesh,
     bone_names: Vec<String>,
@@ -97,10 +100,7 @@ fn vertex_influences_are_valid(influences: &[Vec<BoneInfluence>], bone_count: us
 
         let mut total_weight = 0.0;
         for (index, influence) in vertex_influences.iter().enumerate() {
-            if influence.bone_index >= bone_count
-                || !influence.weight.is_finite()
-                || influence.weight <= 0.0
-            {
+            if influence.bone_index >= bone_count {
                 return false;
             }
             if vertex_influences[..index]

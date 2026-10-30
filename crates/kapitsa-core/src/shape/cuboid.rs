@@ -1,5 +1,6 @@
 use glam::Vec3;
 
+/// Axis-aligned cuboid centered at the collider-local origin.
 pub struct Cuboid {
     size: Vec3,
 }
@@ -15,5 +16,9 @@ impl Cuboid {
 
     pub fn size(&self) -> Vec3 {
         self.size
+    }
+
+    pub fn half_extents(&self) -> Vec3 {
+        self.size * 0.5
     }
 }

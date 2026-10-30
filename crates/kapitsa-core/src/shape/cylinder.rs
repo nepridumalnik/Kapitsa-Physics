@@ -1,5 +1,6 @@
 use glam::Vec3;
 
+/// Finite cylinder whose cap centers are local-space `start` and `end`.
 pub struct Cylinder {
     start: Vec3,
     end: Vec3,
@@ -8,12 +9,11 @@ pub struct Cylinder {
 
 impl Cylinder {
     pub fn new(start: Vec3, end: Vec3, radius: f32) -> Option<Self> {
-        let axis = end - start;
-
+        let length = (end - start).length();
         (start.is_finite()
             && end.is_finite()
-            && axis.length_squared().is_finite()
-            && axis.length_squared() > 0.0
+            && length.is_finite()
+            && length > 0.0
             && radius.is_finite()
             && radius > 0.0)
             .then_some(Self { start, end, radius })

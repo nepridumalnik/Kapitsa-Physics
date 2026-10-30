@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 
+/// Closed, consistently outward-wound, triangulated convex polyhedron.
 pub struct Convex {
     vertices: Vec<Vec3>,
     faces: Vec<[usize; 3]>,
@@ -16,64 +17,70 @@ impl Convex {
             return None;
         }
 
-        let mut minimum = Vec3::splat(f32::INFINITY);
-        let mut maximum = Vec3::splat(f32::NEG_INFINITY);
-        for vertex in &vertices {
-            minimum = minimum.min(*vertex);
-            maximum = maximum.max(*vertex);
-        }
+        let (minimum, maximum) = vertices.iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(min, max), &vertex| (min.min(vertex), max.max(vertex)),
+        );
         let extent = (maximum - minimum).max_element();
         if !extent.is_finite() || extent <= 0.0 {
             return None;
         }
-        let plane_tolerance = extent * f32::EPSILON * 8.0;
 
-        let mut used_vertices = vec![false; vertices.len()];
-        let mut edge_counts = HashMap::new();
+        let tolerance = extent * f32::EPSILON * 8.0;
+        let mut used = vec![false; vertices.len()];
+        let mut edges = HashMap::<(usize, usize), (usize, isize)>::new();
+        let reference = vertices[0];
+        let mut volume_six = 0.0_f64;
 
-        for [a, b, c] in &faces {
-            if *a >= vertices.len() || *b >= vertices.len() || *c >= vertices.len() {
+        for &[a, b, c] in &faces {
+            if a >= vertices.len() || b >= vertices.len() || c >= vertices.len() {
                 return None;
             }
             if a == b || b == c || c == a {
                 return None;
             }
 
-            let area = (vertices[*b] - vertices[*a]).cross(vertices[*c] - vertices[*a]);
-            let area_squared = area.length_squared();
-            if !area_squared.is_finite() || area_squared == 0.0 {
+            let ab = vertices[b] - vertices[a];
+            let ac = vertices[c] - vertices[a];
+            let area = ab.cross(ac);
+            let area_length = area.length();
+            if !area_length.is_finite() || area_length <= 0.0 {
                 return None;
             }
 
-            let normal = area / area_squared.sqrt();
-            let mut has_positive_distance = false;
-            let mut has_negative_distance = false;
-            for vertex in &vertices {
-                let distance = normal.dot(*vertex - vertices[*a]);
-                has_positive_distance |= distance > plane_tolerance;
-                has_negative_distance |= distance < -plane_tolerance;
-            }
-            if has_positive_distance && has_negative_distance {
+            // Every vertex must be on or behind the outward-facing plane.
+            let normal = area / area_length;
+            if vertices
+                .iter()
+                .any(|&vertex| normal.dot(vertex - vertices[a]) > tolerance)
+            {
                 return None;
             }
 
-            used_vertices[*a] = true;
-            used_vertices[*b] = true;
-            used_vertices[*c] = true;
+            used[a] = true;
+            used[b] = true;
+            used[c] = true;
+            volume_six += (vertices[a] - reference)
+                .dot((vertices[b] - reference).cross(vertices[c] - reference))
+                as f64;
 
-            for (from, to) in [(*a, *b), (*b, *c), (*c, *a)] {
-                let edge = if from < to { (from, to) } else { (to, from) };
-                let (count, winding): &mut (usize, isize) =
-                    edge_counts.entry(edge).or_insert((0, 0));
+            for (from, to) in [(a, b), (b, c), (c, a)] {
+                let key = (from.min(to), from.max(to));
+                let (count, winding) = edges.entry(key).or_insert((0, 0));
                 *count += 1;
                 *winding += if from < to { 1 } else { -1 };
+                if *count > 2 {
+                    return None;
+                }
             }
         }
 
-        if !used_vertices.into_iter().all(|used| used)
-            || !edge_counts
+        if !used.into_iter().all(|value| value)
+            || !edges
                 .values()
-                .all(|(count, winding)| *count == 2 && *winding == 0)
+                .all(|&(count, winding)| count == 2 && winding == 0)
+            || !volume_six.is_finite()
+            || volume_six <= 0.0
         {
             return None;
         }
