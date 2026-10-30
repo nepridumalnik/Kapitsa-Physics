@@ -1,3 +1,4 @@
+use crate::aabb::Aabb;
 use glam::{Affine3A, Vec2, Vec3};
 use rstest::{fixture, rstest};
 
@@ -248,4 +249,57 @@ fn skinned_triangle_mesh_accepts_matching_vertex_influences(
 #[case::weight_above_one(1.5)]
 fn bone_influence_rejects_invalid_weight(#[case] weight: f32) {
     assert!(BoneInfluence::new(0, weight).is_none());
+}
+
+#[rstest]
+#[case::small(0.5)]
+#[case::large(2.0)]
+#[case::maximum(f32::MAX)]
+fn sphere_local_bounds(#[case] radius: f32) {
+    let sphere = Sphere::new(radius).expect("valid sphere");
+    let extent = Vec3::splat(radius);
+
+    assert_eq!(sphere.local_bounds(), Aabb::new(-extent, extent));
+}
+
+#[test]
+fn cuboid_local_bounds() {
+    let cuboid = Cuboid::new(2.0, 4.0, 6.0).expect("valid cuboid");
+
+    assert_eq!(
+        cuboid.local_bounds(),
+        Aabb::new(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0),)
+    );
+}
+
+#[test]
+fn cuboid_local_bounds_with_maximum_size() {
+    let cuboid = Cuboid::from_vec(Vec3::splat(f32::MAX)).expect("valid cuboid");
+
+    let half = Vec3::splat(f32::MAX * 0.5);
+
+    assert_eq!(cuboid.local_bounds(), Aabb::new(-half, half));
+}
+
+#[test]
+fn capsule_local_bounds() {
+    let capsule = Capsule::new(Vec3::new(1.0, -2.0, 3.0), Vec3::new(-4.0, 5.0, -6.0), 0.5)
+        .expect("valid capsule");
+
+    assert_eq!(
+        capsule.local_bounds(),
+        Aabb::new(Vec3::new(-4.5, -2.5, -6.5), Vec3::new(1.5, 5.5, 3.5),)
+    );
+}
+
+#[test]
+fn capsule_local_bounds_rejects_overflow() {
+    let capsule = Capsule::new(
+        Vec3::new(f32::MAX, 0.0, 0.0),
+        Vec3::new(f32::MAX, 0.0, 1.0),
+        f32::MAX,
+    )
+    .expect("valid capsule");
+
+    assert!(capsule.local_bounds().is_none());
 }

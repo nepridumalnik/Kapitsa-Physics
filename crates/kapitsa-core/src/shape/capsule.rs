@@ -1,3 +1,4 @@
+use crate::aabb::Aabb;
 use glam::Vec3;
 
 /// Capsule swept along a segment in collider-local coordinates.
@@ -29,5 +30,14 @@ impl Capsule {
 
     pub fn radius(&self) -> f32 {
         self.radius
+    }
+
+    pub fn local_bounds(&self) -> Option<Aabb> {
+        let radius = Vec3::splat(self.radius);
+
+        Aabb::new(
+            self.start.min(self.end) - radius,
+            self.start.max(self.end) + radius,
+        )
     }
 }

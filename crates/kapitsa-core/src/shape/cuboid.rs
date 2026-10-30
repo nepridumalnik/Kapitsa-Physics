@@ -1,3 +1,4 @@
+use crate::aabb::Aabb;
 use glam::Vec3;
 
 /// Axis-aligned cuboid centered at the collider-local origin.
@@ -20,5 +21,10 @@ impl Cuboid {
 
     pub fn half_extents(&self) -> Vec3 {
         self.size * 0.5
+    }
+
+    pub fn local_bounds(&self) -> Option<Aabb> {
+        let half = self.half_extents();
+        Aabb::new(-half, half)
     }
 }
