@@ -1,3 +1,4 @@
+use crate::aabb::Aabb;
 use glam::Vec3;
 
 /// Row-major 3D signed-distance samples with X as the fastest-changing index.
@@ -59,5 +60,16 @@ impl LevelSet {
 
     pub fn signed_distances(&self) -> &[f32] {
         &self.signed_distances
+    }
+
+    pub fn local_bounds(&self) -> Option<Aabb> {
+        let span = Vec3::new(
+            (self.dimensions[0] - 1) as f32,
+            (self.dimensions[1] - 1) as f32,
+            (self.dimensions[2] - 1) as f32,
+        );
+        let last_node = self.origin + self.grid_spacing * span;
+
+        Aabb::new(self.origin.min(last_node), self.origin.max(last_node))
     }
 }

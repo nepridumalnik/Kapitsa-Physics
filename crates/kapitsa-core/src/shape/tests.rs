@@ -470,3 +470,31 @@ fn triangle_mesh_local_bounds_include_unindexed_vertices() {
         Aabb::new(Vec3::new(-4.0, -3.0, -2.0), Vec3::new(9.0, 8.0, 15.0))
     );
 }
+
+#[rstest]
+fn height_field_local_bounds_use_grid_extent_and_height_range() {
+    let heights = vec![-4.0, 2.0, -1.0, 6.0, 3.0, 5.0];
+    let height_field =
+        HeightField::from_vec(3, 2, Vec2::new(2.0, 0.5), heights).expect("valid height field");
+
+    assert_eq!(
+        height_field.local_bounds(),
+        Aabb::new(Vec3::new(0.0, 0.0, -4.0), Vec3::new(2.0, 1.0, 6.0))
+    );
+}
+
+#[rstest]
+fn level_set_local_bounds_cover_only_grid_nodes() {
+    let level_set = LevelSet::from_vec(
+        Vec3::new(-3.0, 2.0, -5.0),
+        [3, 2, 4],
+        Vec3::new(0.5, 2.0, 3.0),
+        vec![1000.0; 24],
+    )
+    .expect("valid level set");
+
+    assert_eq!(
+        level_set.local_bounds(),
+        Aabb::new(Vec3::new(-3.0, 2.0, -5.0), Vec3::new(-2.0, 4.0, 4.0))
+    );
+}

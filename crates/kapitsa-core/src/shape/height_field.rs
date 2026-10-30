@@ -1,4 +1,5 @@
-use glam::Vec2;
+use crate::aabb::Aabb;
+use glam::{Vec2, Vec3};
 
 /// Row-major height samples on a regular local XY grid.
 pub struct HeightField {
@@ -49,5 +50,20 @@ impl HeightField {
 
     pub fn heights(&self) -> &[f32] {
         &self.heights
+    }
+
+    pub fn local_bounds(&self) -> Option<Aabb> {
+        let (&first_height, remaining_heights) = self.heights.split_first()?;
+        let (min_height, max_height) = remaining_heights
+            .iter()
+            .fold((first_height, first_height), |(min, max), &height| {
+                (min.min(height), max.max(height))
+            });
+        let span = self.grid_spacing * Vec2::new((self.columns - 1) as f32, (self.rows - 1) as f32);
+
+        Aabb::new(
+            Vec3::new(0.0, 0.0, min_height),
+            Vec3::new(span.x, span.y, max_height),
+        )
     }
 }
