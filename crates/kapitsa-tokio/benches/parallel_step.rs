@@ -20,7 +20,7 @@ use kapitsa_math::{Mat3, Vec3};
 use kapitsa_tokio::{PhysicsClientError, PhysicsController, PhysicsSimulation, SchedulerConfig};
 use tokio::{
     runtime::{Builder, Runtime},
-    sync::{mpsc, watch},
+    sync::{broadcast, mpsc, watch},
 };
 
 #[allow(dead_code, unused_imports)]
@@ -29,11 +29,14 @@ mod marshalling {
     mod client;
     #[path = "../../src/marshalling/command.rs"]
     mod command;
+    #[path = "../../src/marshalling/events.rs"]
+    mod events;
     #[path = "../../src/marshalling/snapshot.rs"]
     mod snapshot;
 
     pub(crate) use client::PhysicsClient;
     pub(crate) use command::{PhysicsCommand, PhysicsCommandResult, apply_command};
+    pub(crate) use events::{CollisionEventBatch, CollisionEvents};
     pub(crate) use snapshot::PhysicsSnapshot;
 }
 
@@ -892,8 +895,15 @@ fn snapshot_read_sample(body_count: usize) -> Result<Duration, Box<dyn Error>> {
     let (command_tx, _command_rx) = mpsc::channel(1);
     let (_command_state_tx, command_state_rx) = watch::channel(Some(command_tx));
     let (_snapshot_tx, snapshot_rx) = watch::channel(initial);
+    let (collision_events, _) = broadcast::channel(4);
     let clients = (0..4)
-        .map(|_| marshalling::PhysicsClient::new(command_state_rx.clone(), snapshot_rx.clone()))
+        .map(|_| {
+            marshalling::PhysicsClient::new(
+                command_state_rx.clone(),
+                snapshot_rx.clone(),
+                collision_events.clone(),
+            )
+        })
         .collect::<Vec<_>>();
 
     let started = Instant::now();

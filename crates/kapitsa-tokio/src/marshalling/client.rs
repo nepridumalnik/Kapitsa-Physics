@@ -11,9 +11,12 @@ use kapitsa_core::{
     world::{BodyId, ColliderId},
 };
 use kapitsa_math::Vec3;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-use super::{PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot, command::CommandRequest};
+use super::{
+    CollisionEventBatch, CollisionEvents, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot,
+    command::CommandRequest,
+};
 use crate::PhysicsClientError;
 
 /// Thread-safe handle for submitting physics commands and reading snapshots.
@@ -21,16 +24,19 @@ use crate::PhysicsClientError;
 pub struct PhysicsClient {
     command_tx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
     snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
+    collision_events: broadcast::Sender<CollisionEventBatch>,
 }
 
 impl PhysicsClient {
     pub(crate) fn new(
         command_tx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
         snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
+        collision_events: broadcast::Sender<CollisionEventBatch>,
     ) -> Self {
         Self {
             command_tx,
             snapshot_rx,
+            collision_events,
         }
     }
 
@@ -286,6 +292,11 @@ impl PhysicsClient {
         }
     }
 
+    /// Subscribes to bounded collision event batches from successful physics steps.
+    pub fn subscribe_collision_events(&self) -> CollisionEvents {
+        CollisionEvents::new(self.collision_events.subscribe(), self.command_tx.clone())
+    }
+
     /// Returns an `Arc` to the latest published snapshot without waiting.
     pub fn snapshot(&self) -> Arc<PhysicsSnapshot> {
         Arc::clone(&self.snapshot_rx.borrow())
@@ -355,7 +366,7 @@ mod tests {
         world::PhysicsWorld,
     };
     use kapitsa_math::Vec3;
-    use tokio::sync::{mpsc, oneshot, watch};
+    use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
     use super::PhysicsClient;
     use crate::{
@@ -376,6 +387,7 @@ mod tests {
     fn running_client(capacity: usize) -> ClientHarness {
         let (command_tx, command_rx) = mpsc::channel(capacity);
         let (command_state_tx, command_state_rx) = watch::channel(Some(command_tx));
+        let (collision_events, _) = broadcast::channel(4);
         let initial = Arc::new(PhysicsSnapshot::from_world(
             &PhysicsWorld::new(),
             0,
@@ -383,7 +395,7 @@ mod tests {
         ));
         let (snapshot_tx, snapshot_rx) = watch::channel(initial);
         ClientHarness {
-            client: PhysicsClient::new(command_state_rx, snapshot_rx),
+            client: PhysicsClient::new(command_state_rx, snapshot_rx, collision_events),
             receiver: command_rx,
             _command_tx: command_state_tx,
             _snapshot_tx: snapshot_tx,
@@ -638,7 +650,8 @@ mod tests {
             Duration::ZERO,
         ));
         let (_snapshot_tx, snapshot_rx) = watch::channel(initial);
-        let client = PhysicsClient::new(state_rx, snapshot_rx);
+        let (collision_events, _) = broadcast::channel(4);
+        let client = PhysicsClient::new(state_rx, snapshot_rx, collision_events);
         assert!(matches!(
             client.submit(add_body()).await,
             Err(PhysicsClientError::NotRunning)

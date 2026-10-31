@@ -1,0 +1,166 @@
+use std::fmt;
+
+use kapitsa_core::collision::CollisionEvent;
+use tokio::sync::{broadcast, mpsc, watch};
+
+use super::command::CommandRequest;
+
+/// Collision events committed by one physics step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CollisionEventBatch {
+    step: u64,
+    events: Vec<CollisionEvent>,
+}
+
+impl CollisionEventBatch {
+    pub(crate) fn new(step: u64, events: Vec<CollisionEvent>) -> Self {
+        Self { step, events }
+    }
+
+    /// Returns the successful physics step associated with this batch.
+    pub fn step(&self) -> u64 {
+        self.step
+    }
+
+    /// Returns the collision lifecycle events committed by this step.
+    pub fn events(&self) -> &[CollisionEvent] {
+        &self.events
+    }
+}
+
+/// Failure returned while receiving collision event batches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollisionEventStreamError {
+    /// The bounded event channel discarded this many earlier batches.
+    Lagged { missed_batches: u64 },
+    /// The simulation stopped before another batch was received.
+    NotRunning,
+    /// The simulation and its event sender were dropped.
+    ChannelClosed,
+}
+
+impl fmt::Display for CollisionEventStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lagged { missed_batches } => {
+                write!(
+                    formatter,
+                    "collision event stream missed {missed_batches} batches"
+                )
+            }
+            Self::NotRunning => formatter.write_str("physics simulation is not running"),
+            Self::ChannelClosed => formatter.write_str("collision event channel is closed"),
+        }
+    }
+}
+
+impl std::error::Error for CollisionEventStreamError {}
+
+/// Subscription to bounded collision event batches.
+pub struct CollisionEvents {
+    receiver: broadcast::Receiver<CollisionEventBatch>,
+    running: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
+}
+
+impl CollisionEvents {
+    pub(crate) fn new(
+        receiver: broadcast::Receiver<CollisionEventBatch>,
+        running: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
+    ) -> Self {
+        Self { receiver, running }
+    }
+
+    /// Waits for the next committed event batch.
+    ///
+    /// Returns `Lagged` with the number of discarded batches instead of hiding loss.
+    /// A stopped simulation returns `NotRunning`; the same subscription can be
+    /// used again after the simulation restarts.
+    pub async fn next_batch(&mut self) -> Result<CollisionEventBatch, CollisionEventStreamError> {
+        loop {
+            if self.running.borrow().is_none() {
+                return match self.receiver.try_recv() {
+                    Ok(batch) => Ok(batch),
+                    Err(broadcast::error::TryRecvError::Lagged(missed_batches)) => {
+                        Err(CollisionEventStreamError::Lagged { missed_batches })
+                    }
+                    Err(broadcast::error::TryRecvError::Empty) => {
+                        Err(CollisionEventStreamError::NotRunning)
+                    }
+                    Err(broadcast::error::TryRecvError::Closed) => {
+                        Err(CollisionEventStreamError::ChannelClosed)
+                    }
+                };
+            }
+            tokio::select! {
+                batch = self.receiver.recv() => match batch {
+                    Ok(batch) => return Ok(batch),
+                    Err(broadcast::error::RecvError::Lagged(missed_batches)) => {
+                        return Err(CollisionEventStreamError::Lagged { missed_batches });
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(CollisionEventStreamError::ChannelClosed);
+                    }
+                },
+                changed = self.running.changed() => {
+                    if changed.is_err() {
+                        return Err(CollisionEventStreamError::ChannelClosed);
+                    }
+                    if self.running.borrow().is_none() {
+                        return Err(CollisionEventStreamError::NotRunning);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::{broadcast, mpsc, watch};
+
+    use super::{CollisionEventBatch, CollisionEventStreamError, CollisionEvents};
+
+    type RunningState = Option<mpsc::Sender<super::CommandRequest>>;
+
+    fn running_state() -> (watch::Sender<RunningState>, watch::Receiver<RunningState>) {
+        let (commands, _receiver) = mpsc::channel(1);
+        watch::channel(Some(commands))
+    }
+
+    #[tokio::test]
+    async fn lagged_batches_report_the_exact_loss_and_receiver_can_continue() {
+        let (events, receiver) = broadcast::channel(1);
+        let (_running_tx, running_rx) = running_state();
+        let mut subscription = CollisionEvents::new(receiver, running_rx);
+        for step in 1..=3 {
+            events
+                .send(CollisionEventBatch::new(step, Vec::new()))
+                .unwrap();
+        }
+
+        assert_eq!(
+            subscription.next_batch().await,
+            Err(CollisionEventStreamError::Lagged { missed_batches: 2 })
+        );
+        assert_eq!(subscription.next_batch().await.unwrap().step(), 3);
+    }
+
+    #[tokio::test]
+    async fn subscription_reports_stop_and_resumes_after_restart() {
+        let (events, receiver) = broadcast::channel(4);
+        let (running_tx, running_rx) = running_state();
+        let mut subscription = CollisionEvents::new(receiver, running_rx);
+        running_tx.send_replace(None);
+        assert_eq!(
+            subscription.next_batch().await,
+            Err(CollisionEventStreamError::NotRunning)
+        );
+
+        let (commands, _receiver) = mpsc::channel(1);
+        running_tx.send_replace(Some(commands));
+        events
+            .send(CollisionEventBatch::new(7, Vec::new()))
+            .unwrap();
+        assert_eq!(subscription.next_batch().await.unwrap().step(), 7);
+    }
+}

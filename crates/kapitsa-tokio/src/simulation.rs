@@ -3,18 +3,21 @@ use std::{sync::Arc, time::Duration};
 use kapitsa_core::world::PhysicsWorld;
 use tokio::{
     runtime::Handle,
-    sync::{mpsc, watch},
+    sync::{broadcast, mpsc, watch},
     task::JoinHandle,
     time::Instant,
 };
 
 use crate::{
     PhysicsController, SchedulerConfig, SimulationError, SimulationMetrics, SimulationState,
-    marshalling::{CommandRequest, PhysicsClient, PhysicsSnapshot, apply_command},
+    marshalling::{
+        CollisionEventBatch, CommandRequest, PhysicsClient, PhysicsSnapshot, apply_command,
+    },
 };
 
 const COMMAND_QUEUE_CAPACITY: usize = 1024;
 const MAX_COMMANDS_PER_STEP: usize = 1024;
+const COLLISION_EVENT_BATCH_CAPACITY: usize = 64;
 
 struct SimulationTaskOutput {
     controller: PhysicsController,
@@ -31,6 +34,7 @@ pub struct PhysicsSimulation {
     command_rx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
     snapshot_tx: watch::Sender<Arc<PhysicsSnapshot>>,
     snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
+    collision_events_tx: broadcast::Sender<CollisionEventBatch>,
     simulation_time: Duration,
     metrics_tx: watch::Sender<SimulationMetrics>,
     metrics_rx: watch::Receiver<SimulationMetrics>,
@@ -59,6 +63,7 @@ impl PhysicsSimulation {
         let (metrics_tx, metrics_rx) = watch::channel(controller.metrics());
         let (command_tx, command_rx) = watch::channel(None);
         let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
+        let (collision_events_tx, _) = broadcast::channel(COLLISION_EVENT_BATCH_CAPACITY);
         Self {
             controller: Some(controller),
             task: None,
@@ -67,6 +72,7 @@ impl PhysicsSimulation {
             command_rx,
             snapshot_tx,
             snapshot_rx,
+            collision_events_tx,
             simulation_time: Duration::ZERO,
             metrics_tx,
             metrics_rx,
@@ -107,6 +113,7 @@ impl PhysicsSimulation {
         let metrics_tx = self.metrics_tx.clone();
         let command_state_tx = self.command_tx.clone();
         let snapshot_tx = self.snapshot_tx.clone();
+        let collision_events_tx = self.collision_events_tx.clone();
         let mut simulation_time = self.simulation_time;
         self.stop = Some(stop_tx);
         self.task = Some(runtime.spawn(async move {
@@ -116,6 +123,7 @@ impl PhysicsSimulation {
                 stop_rx,
                 &metrics_tx,
                 &snapshot_tx,
+                &collision_events_tx,
                 &mut simulation_time,
             )
             .await;
@@ -206,7 +214,11 @@ impl PhysicsSimulation {
     /// }
     /// ```
     pub fn client(&self) -> PhysicsClient {
-        PhysicsClient::new(self.command_rx.clone(), self.snapshot_rx.clone())
+        PhysicsClient::new(
+            self.command_rx.clone(),
+            self.snapshot_rx.clone(),
+            self.collision_events_tx.clone(),
+        )
     }
 
     /// Borrows the world while the simulation is stopped.
@@ -247,6 +259,7 @@ async fn run_simulation(
     mut stop: watch::Receiver<bool>,
     metrics: &watch::Sender<SimulationMetrics>,
     snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
+    collision_events: &broadcast::Sender<CollisionEventBatch>,
     simulation_time: &mut Duration,
 ) -> Result<(), SimulationError> {
     let mut previous = Instant::now();
@@ -271,12 +284,13 @@ async fn run_simulation(
         add_elapsed(&mut accumulator, now.duration_since(previous))?;
         previous = now;
 
-        run_catch_up_batch(
+        run_catch_up_batch_inner(
             controller,
             &mut commands,
             &stop,
             metrics,
             snapshots,
+            Some(collision_events),
             simulation_time,
             &mut reusable_snapshot,
             &mut accumulator,
@@ -296,12 +310,41 @@ async fn run_simulation(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn run_catch_up_batch(
     controller: &mut PhysicsController,
     commands: &mut mpsc::Receiver<CommandRequest>,
     stop: &watch::Receiver<bool>,
     metrics: &watch::Sender<SimulationMetrics>,
     snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
+    simulation_time: &mut Duration,
+    reusable_snapshot: &mut Option<PhysicsSnapshot>,
+    accumulator: &mut Duration,
+    previous: &mut Instant,
+) -> Result<(), SimulationError> {
+    run_catch_up_batch_inner(
+        controller,
+        commands,
+        stop,
+        metrics,
+        snapshots,
+        None,
+        simulation_time,
+        reusable_snapshot,
+        accumulator,
+        previous,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_catch_up_batch_inner(
+    controller: &mut PhysicsController,
+    commands: &mut mpsc::Receiver<CommandRequest>,
+    stop: &watch::Receiver<bool>,
+    metrics: &watch::Sender<SimulationMetrics>,
+    snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
+    collision_events: Option<&broadcast::Sender<CollisionEventBatch>>,
     simulation_time: &mut Duration,
     reusable_snapshot: &mut Option<PhysicsSnapshot>,
     accumulator: &mut Duration,
@@ -329,6 +372,15 @@ pub(crate) async fn run_catch_up_batch(
         );
         let previous_snapshot = snapshots.send_replace(Arc::new(snapshot));
         PhysicsSnapshot::recycle(previous_snapshot, reusable_snapshot);
+        if let Some(collision_events) =
+            collision_events.filter(|sender| sender.receiver_count() > 0)
+        {
+            let batch = CollisionEventBatch::new(
+                controller.metrics().total_steps,
+                controller.world()?.collision_events().to_vec(),
+            );
+            let _ = collision_events.send(batch);
+        }
         *accumulator -= step_duration;
         let completed_at = Instant::now();
         add_elapsed(accumulator, completed_at.duration_since(*previous))?;
@@ -380,8 +432,12 @@ mod tests {
         world::{BodyId, PhysicsWorld},
     };
     use kapitsa_math::{Mat3, Vec3};
+    use tokio::sync::broadcast;
 
-    use super::{PhysicsSimulation, add_elapsed, run_catch_up_batch, run_simulation};
+    use super::{
+        COLLISION_EVENT_BATCH_CAPACITY, PhysicsSimulation, add_elapsed, run_catch_up_batch,
+        run_catch_up_batch_inner, run_simulation,
+    };
     use crate::{
         PhysicsController, SchedulerConfig, SchedulerError, SimulationError, SimulationState,
         marshalling::PhysicsSnapshot,
@@ -478,6 +534,72 @@ mod tests {
         .await
         .expect("stopped batch");
         assert_eq!(controller.metrics().total_steps, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collision_event_batch_uses_the_snapshot_step_number() {
+        let config = SchedulerConfig {
+            max_catch_up_steps: 1,
+            adaptive: false,
+            ..SchedulerConfig::default()
+        };
+        let mut controller =
+            PhysicsController::new(PhysicsWorld::new(), config).expect("controller");
+        let quantum = controller.step_duration();
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (_command_tx, mut command_rx) = tokio::sync::mpsc::channel(1);
+        let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
+        let (snapshot_tx, snapshot_rx) = snapshot_channel(&controller);
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let mut simulation_time = Duration::ZERO;
+        let mut reusable_snapshot = None;
+        let mut accumulator = quantum;
+        let mut previous = tokio::time::Instant::now();
+
+        run_catch_up_batch_inner(
+            &mut controller,
+            &mut command_rx,
+            &stop_rx,
+            &metrics_tx,
+            &snapshot_tx,
+            Some(&event_tx),
+            &mut simulation_time,
+            &mut reusable_snapshot,
+            &mut accumulator,
+            &mut previous,
+        )
+        .await
+        .expect("step batch");
+
+        let batch = event_rx.recv().await.expect("event batch");
+        assert_eq!(batch.step(), 1);
+        assert_eq!(batch.step(), snapshot_rx.borrow().step());
+        assert!(batch.events().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collision_subscription_reports_stop_and_resumes_after_restart() {
+        let mut simulation = PhysicsSimulation::new(PhysicsWorld::new());
+        let client = simulation.client();
+        let mut events = client.subscribe_collision_events();
+        simulation.start().expect("start");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let first = events.next_batch().await.expect("first batch");
+        simulation.stop().await.expect("stop");
+
+        loop {
+            match events.next_batch().await {
+                Ok(_) | Err(crate::CollisionEventStreamError::Lagged { .. }) => continue,
+                Err(crate::CollisionEventStreamError::NotRunning) => break,
+                Err(error) => panic!("unexpected event stream error: {error}"),
+            }
+        }
+
+        simulation.start().expect("restart");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let resumed = events.next_batch().await.expect("resumed batch");
+        assert!(resumed.step() > first.step());
+        simulation.stop().await.expect("final stop");
     }
 
     #[tokio::test(start_paused = true)]
@@ -829,6 +951,7 @@ mod tests {
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
         let (snapshot_tx, _) = snapshot_channel(&controller);
+        let (collision_events, _) = broadcast::channel(COLLISION_EVENT_BATCH_CAPACITY);
         let (_command_tx, command_rx) = tokio::sync::mpsc::channel(1024);
         drop(stop_tx);
         let mut simulation_time = Duration::ZERO;
@@ -838,6 +961,7 @@ mod tests {
             stop_rx,
             &metrics_tx,
             &snapshot_tx,
+            &collision_events,
             &mut simulation_time,
         )
         .await
