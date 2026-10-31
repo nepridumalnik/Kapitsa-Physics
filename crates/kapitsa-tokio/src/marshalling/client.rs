@@ -236,14 +236,21 @@ impl PhysicsClient {
     /// Intermediate snapshots may be skipped. Returns [`PhysicsClientError::NotRunning`]
     /// when the simulation stops before publishing another snapshot.
     pub async fn next_snapshot(&mut self) -> Result<Arc<PhysicsSnapshot>, PhysicsClientError> {
+        if self.command_tx.borrow().is_none() {
+            return Err(PhysicsClientError::NotRunning);
+        }
+
+        // A new call always starts waiting from the latest publication, even
+        // when another read left the watch version marked as unseen.
+        {
+            let _ = self.snapshot_rx.borrow_and_update();
+        }
+
         loop {
-            if self.command_tx.borrow().is_none() {
-                return Err(PhysicsClientError::NotRunning);
-            }
             tokio::select! {
                 changed = self.snapshot_rx.changed() => {
                     changed.map_err(|_| PhysicsClientError::ChannelClosed)?;
-                    return Ok(Arc::clone(&self.snapshot_rx.borrow()));
+                    return Ok(Arc::clone(&self.snapshot_rx.borrow_and_update()));
                 }
                 changed = self.command_tx.changed() => {
                     if changed.is_err() {
@@ -317,6 +324,14 @@ mod tests {
         PhysicsCommand::AddBody {
             body: RigidBody::new_static(Transform::identity()),
         }
+    }
+
+    fn snapshot(step: u64) -> Arc<PhysicsSnapshot> {
+        Arc::new(PhysicsSnapshot::from_world(
+            &PhysicsWorld::new(),
+            step,
+            Duration::ZERO,
+        ))
     }
 
     fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
@@ -494,5 +509,127 @@ mod tests {
             Err(PhysicsClientError::NotRunning)
         ));
         drop(state_tx);
+    }
+
+    #[tokio::test]
+    async fn snapshot_then_next_snapshot_waits_for_new_publication() {
+        let ClientHarness {
+            mut client,
+            _command_tx,
+            _snapshot_tx,
+            ..
+        } = running_client(1);
+        let current = client.snapshot();
+        let mut next = Box::pin(client.next_snapshot());
+        assert!(matches!(poll_once(next.as_mut()), Poll::Pending));
+
+        let published = snapshot(0);
+        _snapshot_tx.send_replace(Arc::clone(&published));
+        let received = match poll_once(next.as_mut()) {
+            Poll::Ready(Ok(snapshot)) => snapshot,
+            Poll::Ready(Err(error)) => panic!("unexpected error: {error}"),
+            Poll::Pending => panic!("publication should wake the receiver"),
+        };
+
+        assert!(!Arc::ptr_eq(&current, &received));
+        assert!(Arc::ptr_eq(&published, &received));
+    }
+
+    #[tokio::test]
+    async fn next_snapshot_does_not_return_preexisting_unread_version() {
+        let ClientHarness {
+            mut client,
+            _command_tx,
+            _snapshot_tx,
+            ..
+        } = running_client(1);
+        let preexisting = snapshot(1);
+        _snapshot_tx.send_replace(Arc::clone(&preexisting));
+        let _ = client.snapshot();
+
+        let mut next = Box::pin(client.next_snapshot());
+        assert!(matches!(poll_once(next.as_mut()), Poll::Pending));
+
+        let published = snapshot(1);
+        _snapshot_tx.send_replace(Arc::clone(&published));
+        let received = match poll_once(next.as_mut()) {
+            Poll::Ready(Ok(snapshot)) => snapshot,
+            Poll::Ready(Err(error)) => panic!("unexpected error: {error}"),
+            Poll::Pending => panic!("publication should wake the receiver"),
+        };
+
+        assert!(!Arc::ptr_eq(&preexisting, &received));
+        assert!(Arc::ptr_eq(&published, &received));
+    }
+
+    #[tokio::test]
+    async fn next_snapshot_receives_publication_after_call() {
+        let ClientHarness {
+            mut client,
+            _command_tx,
+            _snapshot_tx,
+            ..
+        } = running_client(1);
+        let mut next = Box::pin(client.next_snapshot());
+        assert!(matches!(poll_once(next.as_mut()), Poll::Pending));
+
+        let published = snapshot(1);
+        _snapshot_tx.send_replace(Arc::clone(&published));
+        let received = match poll_once(next.as_mut()) {
+            Poll::Ready(Ok(snapshot)) => snapshot,
+            Poll::Ready(Err(error)) => panic!("unexpected error: {error}"),
+            Poll::Pending => panic!("publication should wake the receiver"),
+        };
+        assert!(Arc::ptr_eq(&published, &received));
+    }
+
+    #[tokio::test]
+    async fn next_snapshot_does_not_lose_racing_publication() {
+        let ClientHarness {
+            mut client,
+            _command_tx,
+            _snapshot_tx,
+            ..
+        } = running_client(1);
+        let mut next = Box::pin(client.next_snapshot());
+
+        // The first poll fixes the baseline and registers the watch wait. A
+        // publication before the future is polled again must still be seen.
+        assert!(matches!(poll_once(next.as_mut()), Poll::Pending));
+        let published = snapshot(0);
+        _snapshot_tx.send_replace(Arc::clone(&published));
+
+        let received = match poll_once(next.as_mut()) {
+            Poll::Ready(Ok(snapshot)) => snapshot,
+            Poll::Ready(Err(error)) => panic!("unexpected error: {error}"),
+            Poll::Pending => panic!("racing publication should remain observable"),
+        };
+        assert!(Arc::ptr_eq(&published, &received));
+    }
+
+    #[tokio::test]
+    async fn next_snapshot_returns_not_running_on_stop() {
+        let ClientHarness {
+            mut client,
+            _command_tx,
+            _snapshot_tx,
+            ..
+        } = running_client(1);
+        let mut next = Box::pin(client.next_snapshot());
+        assert!(matches!(poll_once(next.as_mut()), Poll::Pending));
+
+        _command_tx.send_replace(None);
+        assert!(matches!(
+            poll_once(next.as_mut()),
+            Poll::Ready(Err(PhysicsClientError::NotRunning))
+        ));
+    }
+
+    #[test]
+    fn snapshot_remains_nonblocking() {
+        let harness = running_client(1);
+        let current = harness.client.snapshot();
+        assert_eq!(current.step(), 0);
+        assert_eq!(current.len(), 0);
     }
 }

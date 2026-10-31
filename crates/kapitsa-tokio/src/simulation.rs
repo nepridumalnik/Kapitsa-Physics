@@ -601,18 +601,14 @@ mod tests {
         );
 
         simulation.start().expect("start");
-        let refreshed = tokio::time::timeout(Duration::from_secs(1), client.next_snapshot())
-            .await
-            .expect("start snapshot arrives")
-            .expect("running snapshot");
-        assert_eq!(refreshed.step(), 0);
-
-        let next = tokio::spawn(async move { client.next_snapshot().await });
+        let mut next = Box::pin(client.next_snapshot());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(next.as_mut().poll(&mut context), Poll::Pending));
         tokio::time::advance(Duration::from_millis(17)).await;
         let stepped = tokio::time::timeout(Duration::from_secs(1), next)
             .await
             .expect("step snapshot arrives")
-            .expect("snapshot task")
             .expect("running snapshot");
         assert_eq!(stepped.step(), 1);
         assert!(stepped.simulation_time() > Duration::ZERO);

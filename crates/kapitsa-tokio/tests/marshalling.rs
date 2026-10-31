@@ -58,7 +58,7 @@ async fn commands_steps_snapshots_remove_and_recreate_bodies() {
     ));
 
     simulation.start().expect("start");
-    assert_eq!(next_snapshot(&mut client).await.step(), 0);
+    assert!(next_snapshot(&mut client).await.step() > 0);
 
     let id = tokio::time::timeout(Duration::from_secs(5), client.add_body(dynamic_body()))
         .await
@@ -104,7 +104,7 @@ async fn cloned_clients_do_not_lose_concurrent_body_commands() {
     let mut simulation = simulation(PhysicsWorld::new());
     let mut reader = simulation.client();
     simulation.start().expect("start");
-    assert_eq!(next_snapshot(&mut reader).await.step(), 0);
+    assert!(next_snapshot(&mut reader).await.step() > 0);
 
     let mut clients = JoinSet::new();
     for _ in 0..100 {
@@ -143,7 +143,7 @@ async fn queued_cancellation_applies_and_stop_discards_other_session_requests() 
     let mut simulation = simulation(PhysicsWorld::new());
     let mut client = simulation.client();
     simulation.start().expect("start");
-    assert_eq!(next_snapshot(&mut client).await.step(), 0);
+    assert!(next_snapshot(&mut client).await.step() > 0);
 
     let mut cancelled = Box::pin(client.add_body(RigidBody::new_static(Transform::identity())));
     assert!(matches!(poll_once(cancelled.as_mut()), Poll::Pending));
@@ -166,11 +166,8 @@ async fn queued_cancellation_applies_and_stop_discards_other_session_requests() 
 
     simulation.start().expect("restart with fresh queue");
     let restarted = next_snapshot(&mut client).await;
-    assert_eq!(restarted.step(), prior_snapshot.step());
-    assert_eq!(
-        restarted.simulation_time(),
-        prior_snapshot.simulation_time()
-    );
+    assert!(restarted.step() > prior_snapshot.step());
+    assert!(restarted.simulation_time() > prior_snapshot.simulation_time());
     assert_eq!(restarted.len(), 1);
     simulation.stop().await.expect("second stop");
 }
