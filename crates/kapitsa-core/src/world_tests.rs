@@ -3,6 +3,7 @@ use kapitsa_math::{Mat3, Vec3};
 use super::{BodyId, ColliderId, PhysicsWorld, StepError, WorldError, allocate_world_id};
 use crate::{
     collider::{Collider, CollisionFilter},
+    collision::CollisionError,
     containers::{DensePool, DensePoolError},
     mass::MassProperties,
     material::PhysicsMaterial,
@@ -151,6 +152,60 @@ fn dynamic_bodies_reject_surface_geometry_but_allow_convex_shapes() {
             .add_collider(static_body, Collider::new(triangle, Transform::identity()))
             .is_ok()
     );
+}
+
+#[test]
+fn invalid_material_fails_step_without_changing_body_or_forces() {
+    let mut world = PhysicsWorld::new();
+    let mut body = dynamic_body();
+    body.apply_force(Vec3::X).expect("apply force");
+    let body_id = world.add_body(body).expect("add body");
+    let collider_id = world
+        .add_collider(body_id, collider(1.0))
+        .expect("add collider");
+    let mut foreign_storage = crate::material::MaterialStorage::new();
+    let foreign_material = foreign_storage
+        .insert(PhysicsMaterial::default())
+        .expect("add foreign material");
+    world
+        .collider_mut(collider_id)
+        .expect("collider")
+        .set_material(Some(foreign_material));
+    let original = *world.body(body_id).expect("body");
+
+    assert_eq!(
+        world.step(0.1),
+        Err(StepError::Collision(CollisionError::InvalidMaterial))
+    );
+    assert_eq!(world.body(body_id), Some(&original));
+    assert!(world.collision_events().is_empty());
+}
+
+#[test]
+fn invalid_material_fails_shard_commit_before_any_body_changes() {
+    let mut world = PhysicsWorld::new();
+    let body_id = world.add_body(dynamic_body()).expect("add body");
+    let collider_id = world
+        .add_collider(body_id, collider(1.0))
+        .expect("add collider");
+    let mut foreign_storage = crate::material::MaterialStorage::new();
+    let foreign_material = foreign_storage
+        .insert(PhysicsMaterial::default())
+        .expect("add foreign material");
+    world
+        .collider_mut(collider_id)
+        .expect("collider")
+        .set_material(Some(foreign_material));
+    let original = *world.body(body_id).expect("body");
+    let mut shards = vec![Vec::new()];
+    world.fill_step_shards(&mut shards).expect("fill shards");
+    shards[0][0].integrate(0.1).expect("predict body");
+
+    assert_eq!(
+        world.commit_step_shards(&shards),
+        Err(StepError::Collision(CollisionError::InvalidMaterial))
+    );
+    assert_eq!(world.body(body_id), Some(&original));
 }
 
 #[test]
@@ -607,7 +662,7 @@ fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), World
     );
     assert_eq!(world.body(first_id), Some(&first_original));
     assert_eq!(world.body(failing_id), Some(&failing_original));
-    assert!(world.step_scratch.is_empty());
+    assert!(world.collision_system.context.predicted_states.is_empty());
 
     world
         .body_mut(failing_id)
@@ -651,9 +706,12 @@ fn repeated_steps_are_deterministic_and_reuse_the_scratch_buffer() -> Result<(),
         second.step(1.0 / 120.0).expect("valid step");
         assert_eq!(first.body(first_id), second.body(second_id));
     }
-    let capacity = first.step_scratch.capacity();
+    let capacity = first.collision_system.context.predicted_states.capacity();
     first.step(1.0 / 120.0).expect("valid step");
-    assert_eq!(first.step_scratch.capacity(), capacity);
+    assert_eq!(
+        first.collision_system.context.predicted_states.capacity(),
+        capacity
+    );
     Ok(())
 }
 

@@ -18,7 +18,7 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 
 use crate::{
     collider::Collider,
-    collision::{CollisionConfig, CollisionError, CollisionEvent},
+    collision::{CollisionConfig, CollisionError, CollisionEvent, CollisionSystem},
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
     rigid_body::{BodyState, RigidBody, predict},
@@ -42,9 +42,7 @@ pub struct PhysicsWorld {
     bodies: DensePool<BodyEntry>,
     colliders: DensePool<ColliderEntry>,
     materials: MaterialStorage,
-    step_scratch: Vec<(BodyId, BodyState)>,
-    collision_config: CollisionConfig,
-    collision_events: Vec<CollisionEvent>,
+    collision_system: CollisionSystem,
 }
 
 /// Opaque copied body data used to predict and atomically commit a world step.
@@ -81,24 +79,20 @@ impl PhysicsWorld {
             bodies: DensePool::new(),
             colliders: DensePool::new(),
             materials: MaterialStorage::new(),
-            step_scratch: Vec::new(),
-            collision_config: CollisionConfig::default_const(),
-            collision_events: Vec::new(),
+            collision_system: CollisionSystem::new(),
         }
     }
 
     pub fn collision_config(&self) -> CollisionConfig {
-        self.collision_config
+        self.collision_system.config()
     }
 
     pub fn set_collision_config(&mut self, config: CollisionConfig) -> Result<(), CollisionError> {
-        config.validate()?;
-        self.collision_config = config;
-        Ok(())
+        self.collision_system.set_config(config)
     }
 
     pub fn collision_events(&self) -> &[CollisionEvent] {
-        &self.collision_events
+        self.collision_system.events()
     }
 
     pub fn add_material(&mut self, material: PhysicsMaterial) -> Result<MaterialId, WorldError> {
@@ -185,10 +179,12 @@ impl PhysicsWorld {
 
     /// Advances every body by one fixed timestep, atomically committing the results.
     pub fn step(&mut self, dt: f64) -> Result<(), StepError> {
-        self.step_scratch.clear();
         if !dt.is_finite() || dt <= 0.0 {
             return Err(StepError::InvalidDeltaTime);
         }
+        self.validate_collision_inputs()
+            .map_err(StepError::Collision)?;
+        self.collision_system.begin_step();
 
         for (dense_id, entry) in self.bodies.iter() {
             let body_id = BodyId {
@@ -196,19 +192,21 @@ impl PhysicsWorld {
                 dense: dense_id,
             };
             match predict(&entry.body, dt) {
-                Ok(state) => self.step_scratch.push((body_id, state)),
+                Ok(state) => self.collision_system.stage_prediction(body_id, state),
                 Err(cause) => {
-                    self.step_scratch.clear();
+                    self.collision_system.abort_step();
                     return Err(StepError::BodyIntegration { body_id, cause });
                 }
             }
         }
 
-        for ((dense_id, entry), (body_id, state)) in self
-            .bodies
-            .iter_mut()
-            .zip(self.step_scratch.iter().copied())
-        {
+        for ((dense_id, entry), (body_id, state)) in self.bodies.iter_mut().zip(
+            self.collision_system
+                .context
+                .predicted_states
+                .iter()
+                .copied(),
+        ) {
             debug_assert_eq!(
                 BodyId {
                     world: self.world_id,
@@ -218,7 +216,31 @@ impl PhysicsWorld {
             );
             entry.body.commit_integrated_state(state);
         }
-        self.step_scratch.clear();
+        self.collision_system.commit_step();
+        Ok(())
+    }
+
+    fn validate_collision_inputs(&self) -> Result<(), CollisionError> {
+        self.collision_system.config().validate()?;
+        for (_, entry) in self.colliders.iter() {
+            if entry
+                .collider
+                .material()
+                .is_some_and(|id| !self.materials.contains(id))
+            {
+                return Err(CollisionError::InvalidMaterial);
+            }
+            let body = self
+                .bodies
+                .get(entry.body.dense)
+                .filter(|_| entry.body.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            if body.body.physics().body_type() == crate::rigid_body::BodyType::Dynamic
+                && !entry.collider.shape().is_convex()
+            {
+                return Err(CollisionError::UnsupportedDynamicGeometry);
+            }
+        }
         Ok(())
     }
 
@@ -278,11 +300,21 @@ impl PhysicsWorld {
             return Err(StepError::InvalidStepResults);
         }
 
+        self.validate_collision_inputs()
+            .map_err(StepError::Collision)?;
+        self.collision_system.begin_step();
+        for step in shards.iter().flatten() {
+            if let Some(state) = step.predicted {
+                self.collision_system.stage_prediction(step.body_id, state);
+            }
+        }
+
         for ((_, entry), step) in self.bodies.iter_mut().zip(shards.iter().flatten()) {
             if let Some(state) = step.predicted {
                 entry.body.commit_integrated_state(state);
             }
         }
+        self.collision_system.commit_step();
         Ok(())
     }
 
