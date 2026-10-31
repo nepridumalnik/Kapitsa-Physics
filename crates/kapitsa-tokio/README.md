@@ -70,11 +70,15 @@ lag a command that just completed because publication happens only after the
 next successful physics step. Initial snapshots describe the current world
 and step count, including edits made through `world_mut()` while stopped.
 
-Snapshots store live bodies densely and use a hash index keyed by the full
-world-scoped body ID. The simulation task recycles a prior snapshot's buffers
-when its `Arc` has no other owners. A reader may retain old frames; publication
-does not wait for those readers and never changes a published snapshot. In that
-case the task drops that buffer when possible and builds into another one.
+Snapshots store live bodies densely. Dense worlds use direct slot indexing;
+sparse worlds use a hash index keyed by the full world-scoped body ID. A
+hysteresis policy avoids switching representations as density fluctuates near
+the threshold, and oversized buffers are released after a substantial world
+shrink. The simulation task recycles a prior snapshot only after
+`Arc::try_unwrap` confirms that it has no other owners. A reader may retain old
+frames; publication does not wait for those readers and never changes a
+published snapshot. If a reader still owns a frame, the task builds into
+another buffer.
 
 ```rust
 use kapitsa_core::{

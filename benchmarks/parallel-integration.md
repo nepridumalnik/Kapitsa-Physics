@@ -144,3 +144,79 @@ all-body lookup from 22.33 to 18.51 ms at 4,096 bodies, and from 97.86 to
 
 These measurements are specific to this machine, runtime, and workload; use the
 benchmark for comparisons rather than treating the timings as guarantees.
+
+## Adaptive Snapshot Storage Compared with `aeadef`
+
+Measured with the release benchmark on 2026-10-31. Each value is the median of
+five samples of 12 successful physics steps. Scenario setup is excluded. The
+`aeadef` row uses a benchmark-only reproduction of that commit's compact
+`Vec<SnapshotEntry>` plus `HashMap<BodyId, usize>` layout and buffer recycling,
+without the later shrink policy. Both layouts run the same world mutations,
+1,000 body lookups, complete body iteration, and watch publication per step.
+The 1,000 lookup calls cycle through live IDs when a scenario has fewer than
+1,000 bodies.
+
+### Timings
+
+Times are milliseconds per 12 steps.
+
+| Scenario | Layout | Rebuild | 1k lookups | Full iteration | Publish | Physics + snapshot full time |
+|---|---|---:|---:|---:|---:|---:|
+| Dense 20k stable | Adaptive | 1.95 | 0.049 | 0.20 | 0.012 | 85.71 |
+|  | `aeadef` | 13.11 | 0.258 | 0.25 | 0.010 | 96.34 |
+| Sparse, 20k slots / 100 live | Adaptive | 0.05 | 0.223 | <0.01 | 0.003 | 0.85 |
+|  | `aeadef` | 0.06 | 0.184 | <0.01 | 0.002 | 0.80 |
+| Shrink, 20k to 100 | Adaptive | 0.17 | 0.221 | <0.01 | 0.002 | 0.93 |
+|  | `aeadef` | 0.09 | 0.196 | <0.01 | 0.005 | 0.91 |
+| Grow, 100 to 20k | Adaptive | 3.01 | 0.048 | 0.21 | 0.014 | 86.24 |
+|  | `aeadef` | 15.45 | 0.391 | 0.37 | 0.010 | 99.20 |
+| Oscillation, 180 / 220 live | Adaptive | 0.05 | 0.053 | <0.01 | 0.004 | 1.11 |
+|  | `aeadef` | 0.10 | 0.181 | <0.01 | 0.003 | 1.22 |
+| Retained Arc, 20k to 100 | Adaptive | 0.07 | 0.223 | <0.01 | 0.004 | 0.83 |
+|  | `aeadef` | 0.07 | 0.184 | <0.01 | 0.003 | 0.84 |
+
+Dense lookup uses direct slot indexing and reduced lookup time from 0.258 ms to
+0.049 ms per sample. The dense snapshot estimate fell from 3,172.0 KiB to
+2,656.2 KiB (16.3%). At 20k bodies, rebuilding and all measured snapshot work
+also took less time in this run. Sparse steady-state storage and timings were
+similar. Shrink adds about 0.08 ms of build time while releasing more than
+3 MiB; later stable sparse rebuilds use the smaller buffers.
+
+### Capacity, Estimated Memory, and Recycling
+
+Capacities are `entries / active index`. Memory estimates count the `Vec` and
+`HashMap` payload capacities for one currently published snapshot; they exclude
+allocator metadata, hash table control bytes, and separately retained older
+snapshots. Reused and reclaimed values are buffer counts over 12 publications.
+Switches count Dense/Sparse changes between consecutive published snapshots.
+The legacy layout has no such modes.
+
+| Scenario | Layout | Capacity | Estimated memory | Reused / reclaimed | Index switches |
+|---|---|---:|---:|---:|---:|
+| Dense 20k stable | Adaptive | 20,000 / 20,000 | 2,656.2 KiB | 11 / 12 | 0 |
+|  | `aeadef` | 20,000 / 28,672 | 3,172.0 KiB | 11 / 12 | — |
+| Sparse, 20k slots / 100 live | Adaptive | 100 / 112 | 15.1 KiB | 11 / 12 | 0 |
+|  | `aeadef` | 100 / 112 | 15.1 KiB | 11 / 12 | — |
+| Shrink, 20k to 100 | Adaptive | 100 / 112 | 15.1 KiB | 11 / 12 | 1 |
+|  | `aeadef` | 20,000 / 28,672 | 3,172.0 KiB | 11 / 12 | — |
+| Grow, 100 to 20k | Adaptive | 20,000 / 20,000 | 2,656.2 KiB | 11 / 12 | 1 |
+|  | `aeadef` | 20,000 / 28,672 | 3,172.0 KiB | 11 / 12 | — |
+| Oscillation, 180 / 220 live | Adaptive | 220 / 1,000 | 35.3 KiB | 12 / 12 | 0 |
+|  | `aeadef` | 1,000 / 1,792 | 167.0 KiB | 12 / 12 | — |
+| Retained Arc, 20k to 100 | Adaptive | 100 / 112 | 15.1 KiB | 0 / 0 | 1 |
+|  | `aeadef` | 100 / 112 | 15.1 KiB | 0 / 0 | — |
+
+After shrinking from 20,000 bodies to 100, the adaptive buffer retained 15.1 KiB
+instead of the legacy layout's 3,172.0 KiB, a 99.5% reduction in estimated
+snapshot payload. The high-slot sparse scenario confirms that the active index
+tracks 100 live bodies rather than the 20,000-slot span. Oscillation kept the
+Dense index selected between the hysteresis thresholds without repeated mode
+changes; it starts with a warmed Dense buffer for the 1,000-slot world before
+alternating between 180 and 220 live bodies. In the retained-Arc scenario, the
+benchmark verified that the old 20,000-body frame still contained its original
+data while the current 100-body frame was published; recycling remained
+unavailable while readers held frames.
+
+These are single-machine microbenchmark results. The retained-Arc memory row
+describes the current snapshot only; reader-held historical snapshots add their
+own memory until those `Arc`s are dropped.

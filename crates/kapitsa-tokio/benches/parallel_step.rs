@@ -1,8 +1,9 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     error::Error,
     future::Future,
     hint::black_box,
+    mem::size_of,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
@@ -11,9 +12,9 @@ use std::{
 
 use kapitsa_core::{
     mass::MassProperties,
-    rigid_body::RigidBody,
+    rigid_body::{BodyState, RigidBody},
     transform::Transform,
-    world::{BodyStep, PhysicsWorld, StepError},
+    world::{BodyId, BodyStep, PhysicsWorld, StepError},
 };
 use kapitsa_math::{Mat3, Vec3};
 use kapitsa_tokio::{PhysicsClientError, PhysicsController, PhysicsSimulation, SchedulerConfig};
@@ -234,12 +235,175 @@ struct SnapshotSample {
     physics: Duration,
     build: Duration,
     lookup: Duration,
+    iteration: Duration,
     publication: Duration,
+    entries_capacity: usize,
+    index_capacity: usize,
     storage_bytes: usize,
-    legacy_slot_bytes: usize,
     reused_buffers: usize,
     reclaimed_buffers: usize,
-    capacity_growths_after_reuse: usize,
+    index_switches: usize,
+}
+
+trait SnapshotBench: Sized {
+    fn from_world(world: &PhysicsWorld, step: u64, time: Duration) -> Self;
+    fn take_reusable(reusable: &mut Option<Self>) -> (Self, bool);
+    fn recycle(previous: Arc<Self>, reusable: &mut Option<Self>) -> bool;
+    fn rebuild(&mut self, world: &PhysicsWorld, step: u64, time: Duration);
+    fn body(&self, id: BodyId) -> Option<&BodyState>;
+    fn visit_bodies(&self);
+    fn len(&self) -> usize;
+    fn step(&self) -> u64;
+    fn capacities(&self) -> (usize, usize);
+    fn storage_bytes(&self) -> usize;
+    fn dense_index(&self) -> Option<bool>;
+}
+
+impl SnapshotBench for marshalling::PhysicsSnapshot {
+    fn from_world(world: &PhysicsWorld, step: u64, time: Duration) -> Self {
+        Self::from_world(world, step, time)
+    }
+
+    fn take_reusable(reusable: &mut Option<Self>) -> (Self, bool) {
+        Self::take_reusable(reusable)
+    }
+
+    fn recycle(previous: Arc<Self>, reusable: &mut Option<Self>) -> bool {
+        Self::recycle(previous, reusable)
+    }
+
+    fn rebuild(&mut self, world: &PhysicsWorld, step: u64, time: Duration) {
+        Self::rebuild(self, world, step, time);
+    }
+
+    fn body(&self, id: BodyId) -> Option<&BodyState> {
+        Self::body(self, id)
+    }
+
+    fn visit_bodies(&self) {
+        for (id, state) in self.bodies() {
+            black_box((id, state));
+        }
+    }
+
+    fn len(&self) -> usize {
+        Self::len(self)
+    }
+
+    fn step(&self) -> u64 {
+        Self::step(self)
+    }
+
+    fn capacities(&self) -> (usize, usize) {
+        self.buffer_capacities()
+    }
+
+    fn storage_bytes(&self) -> usize {
+        self.estimated_storage_bytes()
+    }
+
+    fn dense_index(&self) -> Option<bool> {
+        Some(self.uses_dense_index())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LegacyEntry {
+    id: BodyId,
+    state: BodyState,
+}
+
+/// Benchmark-only copy of the aeadef Vec + HashMap snapshot layout.
+struct LegacySnapshot {
+    step: u64,
+    entries: Vec<LegacyEntry>,
+    indices: HashMap<BodyId, usize>,
+}
+
+impl LegacySnapshot {
+    fn empty() -> Self {
+        Self {
+            step: 0,
+            entries: Vec::new(),
+            indices: HashMap::new(),
+        }
+    }
+}
+
+impl SnapshotBench for LegacySnapshot {
+    fn from_world(world: &PhysicsWorld, step: u64, _time: Duration) -> Self {
+        let mut snapshot = Self::empty();
+        snapshot.rebuild(world, step, Duration::ZERO);
+        snapshot
+    }
+
+    fn take_reusable(reusable: &mut Option<Self>) -> (Self, bool) {
+        match reusable.take() {
+            Some(snapshot) => (snapshot, true),
+            None => (Self::empty(), false),
+        }
+    }
+
+    fn recycle(previous: Arc<Self>, reusable: &mut Option<Self>) -> bool {
+        match Arc::try_unwrap(previous) {
+            Ok(snapshot) => {
+                *reusable = Some(snapshot);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn rebuild(&mut self, world: &PhysicsWorld, step: u64, _time: Duration) {
+        let body_count = world.body_count();
+        self.entries.clear();
+        self.indices.clear();
+        self.entries.reserve(body_count);
+        self.indices.reserve(body_count);
+        for (id, body) in world.bodies() {
+            let position = self.entries.len();
+            self.entries.push(LegacyEntry {
+                id,
+                state: *body.state(),
+            });
+            self.indices.insert(id, position);
+        }
+        self.step = step;
+    }
+
+    fn body(&self, id: BodyId) -> Option<&BodyState> {
+        self.indices
+            .get(&id)
+            .and_then(|position| self.entries.get(*position))
+            .map(|entry| &entry.state)
+    }
+
+    fn visit_bodies(&self) {
+        for entry in &self.entries {
+            black_box((entry.id, &entry.state));
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn step(&self) -> u64 {
+        self.step
+    }
+
+    fn capacities(&self) -> (usize, usize) {
+        (self.entries.capacity(), self.indices.capacity())
+    }
+
+    fn storage_bytes(&self) -> usize {
+        self.entries.capacity() * size_of::<LegacyEntry>()
+            + self.indices.capacity() * size_of::<(BodyId, usize)>()
+    }
+
+    fn dense_index(&self) -> Option<bool> {
+        None
+    }
 }
 
 async fn report_marshalling() -> Result<(), Box<dyn Error>> {
@@ -301,90 +465,153 @@ async fn report_marshalling() -> Result<(), Box<dyn Error>> {
 }
 
 async fn report_snapshot_recycling() -> Result<(), Box<dyn Error>> {
-    println!("\nsnapshot storage/recycling ({STEPS} physical steps, {SAMPLES} samples, median)");
     println!(
-        "Each sample reports all-live-body lookup time and full controller-step plus snapshot/publication wall time."
+        "\nadaptive snapshots vs aeadef Vec + HashMap ({STEPS} steps/sample, {SAMPLES} samples, median)"
+    );
+    println!(
+        "Each step measures rebuild, 1,000 lookups, full bodies iteration, watch publication, and physics-step wall time. World setup and scenario mutations are excluded."
     );
 
-    for (size, body_count) in BODY_COUNTS {
-        let mut fresh = snapshot_samples(body_count, false, false, false).await?;
-        report_snapshot_sample(
-            &format!("A dense {size}, fresh"),
-            median_snapshot(&mut fresh),
-        );
-
-        let mut held = snapshot_samples(body_count, false, true, true).await?;
-        report_snapshot_sample(
-            &format!("C dense {size}, retain 3 old Arcs"),
-            median_snapshot(&mut held),
-        );
-
-        let mut recycled = snapshot_samples(body_count, false, true, false).await?;
-        report_snapshot_sample(
-            &format!("D dense {size}, normal reuse"),
-            median_snapshot(&mut recycled),
-        );
+    for scenario in SnapshotScenario::ALL {
+        let mut adaptive = snapshot_samples::<marshalling::PhysicsSnapshot>(scenario).await?;
+        let mut legacy = snapshot_samples::<LegacySnapshot>(scenario).await?;
+        report_snapshot_sample(scenario.name, "adaptive", median_snapshot(&mut adaptive));
+        report_snapshot_sample(scenario.name, "aeadef", median_snapshot(&mut legacy));
     }
-
-    let mut sparse = snapshot_samples(20_000, true, true, false).await?;
-    report_snapshot_sample(
-        "B sparse 20,000 slots, 100 live, reuse",
-        median_snapshot(&mut sparse),
-    );
     Ok(())
 }
 
-async fn snapshot_samples(
-    body_count: usize,
-    sparse: bool,
-    recycle_buffers: bool,
+#[derive(Clone, Copy)]
+struct SnapshotScenario {
+    name: &'static str,
+    initial_slots: usize,
+    starting_live: usize,
+    target_live: usize,
+    sparse_start: bool,
+    shrink_before_measurement: bool,
+    oscillate: bool,
     retain_old_frames: bool,
+}
+
+impl SnapshotScenario {
+    const ALL: [Self; 6] = [
+        Self {
+            name: "Dense 20k stable",
+            initial_slots: 20_000,
+            starting_live: 20_000,
+            target_live: 20_000,
+            sparse_start: false,
+            shrink_before_measurement: false,
+            oscillate: false,
+            retain_old_frames: false,
+        },
+        Self {
+            name: "Sparse 20k slots / 100 live",
+            initial_slots: 20_000,
+            starting_live: 100,
+            target_live: 100,
+            sparse_start: true,
+            shrink_before_measurement: false,
+            oscillate: false,
+            retain_old_frames: false,
+        },
+        Self {
+            name: "Shrink 20k -> 100",
+            initial_slots: 20_000,
+            starting_live: 20_000,
+            target_live: 100,
+            sparse_start: false,
+            shrink_before_measurement: true,
+            oscillate: false,
+            retain_old_frames: false,
+        },
+        Self {
+            name: "Grow 100 -> 20k",
+            initial_slots: 20_000,
+            starting_live: 100,
+            target_live: 20_000,
+            sparse_start: true,
+            shrink_before_measurement: false,
+            oscillate: false,
+            retain_old_frames: false,
+        },
+        Self {
+            name: "Oscillation 180/220",
+            initial_slots: 1_000,
+            starting_live: 1_000,
+            target_live: 220,
+            sparse_start: false,
+            shrink_before_measurement: true,
+            oscillate: true,
+            retain_old_frames: false,
+        },
+        Self {
+            name: "Retained Arc, 20k -> 100",
+            initial_slots: 20_000,
+            starting_live: 20_000,
+            target_live: 100,
+            sparse_start: false,
+            shrink_before_measurement: true,
+            oscillate: false,
+            retain_old_frames: true,
+        },
+    ];
+}
+
+async fn snapshot_samples<S: SnapshotBench>(
+    scenario: SnapshotScenario,
 ) -> Result<Vec<SnapshotSample>, Box<dyn Error>> {
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
-        samples
-            .push(snapshot_sample(body_count, sparse, recycle_buffers, retain_old_frames).await?);
+        samples.push(snapshot_sample::<S>(scenario).await?);
     }
     Ok(samples)
 }
 
-async fn snapshot_sample(
-    body_count: usize,
-    sparse: bool,
-    recycle_buffers: bool,
-    retain_old_frames: bool,
+async fn snapshot_sample<S: SnapshotBench>(
+    scenario: SnapshotScenario,
 ) -> Result<SnapshotSample, Box<dyn Error>> {
-    let mut world = make_world(body_count, WORKLOADS[0])?;
-    let mut ids = world.bodies().map(|(id, _)| id).collect::<Vec<_>>();
-    if sparse {
-        let remove_count = body_count.saturating_sub(100);
-        for id in &ids[..remove_count] {
-            world
-                .remove_body(*id)
-                .ok_or("missing sparse benchmark body")?;
-        }
-        ids = world.bodies().map(|(id, _)| id).collect();
+    let mut world = make_world(scenario.initial_slots, WORKLOADS[0])?;
+    if scenario.sparse_start {
+        retain_last_bodies(&mut world, scenario.starting_live)?;
     }
-    let legacy_slot_bytes = ids
-        .iter()
-        .map(|id| id.index())
-        .max()
-        .map_or(0, marshalling::PhysicsSnapshot::legacy_slot_storage_bytes);
-
     let mut controller = PhysicsController::new(world, config(1))?;
-    let initial = Arc::new(marshalling::PhysicsSnapshot::from_world(
-        controller.world()?,
-        0,
-        Duration::ZERO,
-    ));
+    let initial = Arc::new(S::from_world(controller.world()?, 0, Duration::ZERO));
+    let initial_body = controller
+        .world()?
+        .bodies()
+        .next()
+        .ok_or("snapshot benchmark world is empty")?
+        .0;
+    let held_initial = scenario.retain_old_frames.then(|| Arc::clone(&initial));
     let (snapshot_tx, snapshot_rx) = watch::channel(initial);
+    let mut reusable = if scenario.oscillate {
+        Some(S::from_world(controller.world()?, 0, Duration::ZERO))
+    } else {
+        None
+    };
+
+    if scenario.shrink_before_measurement {
+        retain_last_bodies(controller.world_mut()?, scenario.target_live)?;
+    } else if scenario.target_live > scenario.starting_live {
+        grow_world(controller.world_mut()?, scenario.target_live)?;
+    }
+    let mut lookup_ids = controller
+        .world()?
+        .bodies()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
     let mut retained = VecDeque::with_capacity(3);
-    let mut reusable = None;
+    let mut last_mode = snapshot_rx.borrow().dense_index();
     let mut simulation_time = Duration::ZERO;
     let dt = Duration::from_secs_f64(1.0 / 60.0);
     let mut sample = SnapshotSample::default();
 
-    for _ in 0..STEPS {
+    for step_index in 0..STEPS {
+        if scenario.oscillate {
+            oscillate_world(controller.world_mut()?, &mut lookup_ids)?;
+        }
+
         let step_started = Instant::now();
         let stats = controller.step().await?;
         sample.physics += stats.step_duration;
@@ -392,56 +619,110 @@ async fn snapshot_sample(
             .checked_add(dt)
             .ok_or("benchmark simulation time overflow")?;
 
+        let (mut snapshot, reused) = S::take_reusable(&mut reusable);
+        sample.reused_buffers += usize::from(reused);
         let build_started = Instant::now();
-        let snapshot = if recycle_buffers {
-            let (mut snapshot, reused) = marshalling::PhysicsSnapshot::take_reusable(&mut reusable);
-            sample.reused_buffers += usize::from(reused);
-            let previous_capacities = snapshot.buffer_capacities();
-            snapshot.rebuild(
-                controller.world()?,
-                controller.metrics().total_steps,
-                simulation_time,
-            );
-            if reused && snapshot.buffer_capacities() != previous_capacities {
-                sample.capacity_growths_after_reuse += 1;
-            }
-            snapshot
-        } else {
-            marshalling::PhysicsSnapshot::from_world(
-                controller.world()?,
-                controller.metrics().total_steps,
-                simulation_time,
-            )
-        };
+        snapshot.rebuild(
+            controller.world()?,
+            controller.metrics().total_steps,
+            simulation_time,
+        );
         sample.build += build_started.elapsed();
-        sample.storage_bytes = snapshot.estimated_storage_bytes();
-        sample.legacy_slot_bytes = legacy_slot_bytes;
+
+        let mode = snapshot.dense_index();
+        if last_mode.is_some() && mode.is_some() && last_mode != mode {
+            sample.index_switches += 1;
+        }
+        last_mode = mode;
+        let (entries_capacity, index_capacity) = snapshot.capacities();
+        sample.entries_capacity = entries_capacity;
+        sample.index_capacity = index_capacity;
+        sample.storage_bytes = snapshot.storage_bytes();
 
         let lookup_started = Instant::now();
-        for id in &ids {
-            black_box(snapshot.body(*id));
+        for index in 0..1_000 {
+            let id = lookup_ids[index % lookup_ids.len()];
+            black_box(snapshot.body(id));
         }
         sample.lookup += lookup_started.elapsed();
 
+        let iteration_started = Instant::now();
+        snapshot.visit_bodies();
+        sample.iteration += iteration_started.elapsed();
+
         let publication_started = Instant::now();
         let previous = snapshot_tx.send_replace(Arc::new(snapshot));
-        if retain_old_frames {
+        sample.publication += publication_started.elapsed();
+        if scenario.retain_old_frames {
             retained.push_back(Arc::clone(&previous));
             if retained.len() > 3 {
                 retained.pop_front();
             }
         }
-        if recycle_buffers && marshalling::PhysicsSnapshot::recycle(previous, &mut reusable) {
+        if S::recycle(previous, &mut reusable) {
             sample.reclaimed_buffers += 1;
         }
-        sample.publication += publication_started.elapsed();
         sample.total += step_started.elapsed();
 
         if snapshot_rx.borrow().step() != controller.metrics().total_steps {
             return Err("benchmark publication does not match the completed step".into());
         }
+        if scenario.oscillate && lookup_ids.len() != if step_index % 2 == 0 { 180 } else { 220 } {
+            return Err("oscillation benchmark did not reach its requested live count".into());
+        }
+    }
+
+    if let Some(old) = held_initial {
+        if old.len() != scenario.initial_slots
+            || old.step() != 0
+            || old.body(initial_body).is_none()
+        {
+            return Err("retained benchmark snapshot was changed or lost".into());
+        }
+        if controller.world()?.body_count() != scenario.target_live {
+            return Err("retained benchmark world did not shrink".into());
+        }
     }
     Ok(sample)
+}
+
+fn retain_last_bodies(world: &mut PhysicsWorld, live: usize) -> Result<(), Box<dyn Error>> {
+    let ids = world.bodies().map(|(id, _)| id).collect::<Vec<_>>();
+    let remove_count = ids.len().saturating_sub(live);
+    for id in &ids[..remove_count] {
+        world.remove_body(*id).ok_or("missing benchmark body")?;
+    }
+    Ok(())
+}
+
+fn grow_world(world: &mut PhysicsWorld, target: usize) -> Result<(), Box<dyn Error>> {
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    while world.body_count() < target {
+        let index = world.body_count();
+        world.add_body(make_dynamic_body(index, &mass)?)?;
+    }
+    Ok(())
+}
+
+fn oscillate_world(
+    world: &mut PhysicsWorld,
+    lookup_ids: &mut Vec<BodyId>,
+) -> Result<(), Box<dyn Error>> {
+    if lookup_ids.len() == 220 {
+        for id in lookup_ids.iter().take(40) {
+            world
+                .remove_body(*id)
+                .ok_or("missing oscillating benchmark body")?;
+        }
+    } else {
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        for _ in 0..40 {
+            let index = world.body_count();
+            world.add_body(make_dynamic_body(index, &mass)?)?;
+        }
+    }
+    *lookup_ids = world.bodies().map(|(id, _)| id).collect();
+    Ok(())
 }
 
 fn median_snapshot(samples: &mut [SnapshotSample]) -> SnapshotSample {
@@ -449,18 +730,20 @@ fn median_snapshot(samples: &mut [SnapshotSample]) -> SnapshotSample {
     samples[samples.len() / 2]
 }
 
-fn report_snapshot_sample(label: &str, sample: SnapshotSample) {
+fn report_snapshot_sample(scenario: &str, implementation: &str, sample: SnapshotSample) {
     println!(
-        "{label:42} build={:7.2} ms lookup={:7.2} ms publish={:6.3} ms full={:7.2} ms storage={:7.1} KiB legacy-slots={:7.1} KiB reused={} reclaimed={} capacity-growths={}",
+        "{scenario:31} {implementation:8} build={:7.2} ms lookup1k={:6.3} ms iterate={:7.2} ms publish={:6.3} ms full={:7.2} ms cap={:6}/{:6} memory={:7.1} KiB reused={} reclaimed={} switches={}",
         millis(sample.build),
         millis(sample.lookup),
+        millis(sample.iteration),
         millis(sample.publication),
         millis(sample.total),
+        sample.entries_capacity,
+        sample.index_capacity,
         sample.storage_bytes as f64 / 1024.0,
-        sample.legacy_slot_bytes as f64 / 1024.0,
         sample.reused_buffers,
         sample.reclaimed_buffers,
-        sample.capacity_growths_after_reuse,
+        sample.index_switches,
     );
 }
 
@@ -667,18 +950,23 @@ fn make_world(body_count: usize, workload: Workload) -> Result<PhysicsWorld, Box
             continue;
         }
 
-        let scale = index as f64 * 0.001 + 1.0;
-        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
-        body.set_linear_velocity(Vec3::new(scale, -scale, 0.5 * scale))?;
-        body.set_angular_velocity(Vec3::new(0.1 * scale, 0.2, -0.3))?;
-        body.apply_force(Vec3::new(0.25, -0.5 * scale, 0.75))?;
-        body.apply_torque(Vec3::new(-0.1 * scale, 0.2, 0.05))?;
+        let mut body = make_dynamic_body(index, &mass)?;
         if index < static_count + sleeping_count {
             body.sleep()?;
         }
         world.add_body(body)?;
     }
     Ok(world)
+}
+
+fn make_dynamic_body(index: usize, mass: &MassProperties) -> Result<RigidBody, Box<dyn Error>> {
+    let scale = index as f64 * 0.001 + 1.0;
+    let mut body = RigidBody::new_dynamic(Transform::identity(), *mass)?;
+    body.set_linear_velocity(Vec3::new(scale, -scale, 0.5 * scale))?;
+    body.set_angular_velocity(Vec3::new(0.1 * scale, 0.2, -0.3))?;
+    body.apply_force(Vec3::new(0.25, -0.5 * scale, 0.75))?;
+    body.apply_torque(Vec3::new(-0.1 * scale, 0.2, 0.05))?;
+    Ok(body)
 }
 
 async fn static_sharded_step(

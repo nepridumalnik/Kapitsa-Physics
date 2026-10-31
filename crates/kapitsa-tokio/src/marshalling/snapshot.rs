@@ -80,6 +80,11 @@ impl PhysicsSnapshot {
     }
 
     #[allow(dead_code)]
+    pub(crate) fn uses_dense_index(&self) -> bool {
+        matches!(self.index, SnapshotIndex::Dense(_))
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn estimated_storage_bytes(&self) -> usize {
         let index_bytes = match &self.index {
             SnapshotIndex::Dense(index) => index.capacity() * size_of::<usize>(),
