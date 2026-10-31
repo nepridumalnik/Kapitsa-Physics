@@ -48,6 +48,33 @@ impl Transform {
         self.rotation * vector
     }
 
+    /// Composes this transform with a local transform applied before it.
+    pub fn compose(&self, local: &Self) -> Result<Self, TransformError> {
+        let translation = self.rotation * local.translation + self.translation;
+        if !translation.is_finite() {
+            return Err(TransformError::CompositionOverflow);
+        }
+
+        let rotation = self.rotation * local.rotation;
+        let rotation_length_squared = rotation.length_squared();
+        if !rotation.is_finite()
+            || !rotation_length_squared.is_finite()
+            || rotation_length_squared <= 0.0
+        {
+            return Err(TransformError::CompositionOverflow);
+        }
+
+        let rotation = rotation.normalize();
+        if !rotation.is_finite() || !rotation.is_normalized() {
+            return Err(TransformError::CompositionOverflow);
+        }
+
+        Ok(Self {
+            translation,
+            rotation,
+        })
+    }
+
     pub fn inverse(&self) -> Result<Self, TransformError> {
         let rotation = self.rotation.conjugate();
         let translation = rotation * -self.translation;

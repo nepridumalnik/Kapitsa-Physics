@@ -174,3 +174,84 @@ fn inverse_rejects_overflow() {
 
     assert_eq!(transform.inverse(), Err(TransformError::InverseOverflow));
 }
+
+#[test]
+fn composing_identity_transforms_returns_identity() {
+    assert_eq!(
+        Transform::identity()
+            .compose(&Transform::identity())
+            .expect("identity composition"),
+        Transform::identity()
+    );
+}
+
+#[test]
+fn composition_adds_parent_and_local_translations() {
+    let parent =
+        Transform::new(Vec3::new(3.0, 4.0, 5.0), Quat::IDENTITY).expect("valid parent transform");
+    let local =
+        Transform::new(Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY).expect("valid local transform");
+
+    let composed = parent.compose(&local).expect("valid composition");
+
+    assert_eq!(composed.translation(), Vec3::new(4.0, 6.0, 8.0));
+}
+
+#[test]
+fn parent_rotation_rotates_local_translation() {
+    let parent = Transform::new(
+        Vec3::ZERO,
+        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+    )
+    .expect("valid parent transform");
+    let local = Transform::new(Vec3::X, Quat::IDENTITY).expect("valid local transform");
+
+    let composed = parent.compose(&local).expect("valid composition");
+
+    assert_vec3_close(composed.translation(), Vec3::Y);
+}
+
+#[test]
+fn composition_multiplies_parent_rotation_by_local_rotation() {
+    let parent =
+        Transform::new(Vec3::ZERO, Quat::from_rotation_z(0.7)).expect("valid parent transform");
+    let local =
+        Transform::new(Vec3::ZERO, Quat::from_rotation_x(-0.4)).expect("valid local transform");
+
+    let composed = parent.compose(&local).expect("valid composition");
+
+    assert_vec3_close(
+        composed.transform_vector(Vec3::Z),
+        parent.transform_vector(local.transform_vector(Vec3::Z)),
+    );
+    assert!(composed.rotation().is_normalized());
+}
+
+#[test]
+fn composed_transform_matches_sequential_point_transforms() {
+    let parent = Transform::new(Vec3::new(3.0, -2.0, 5.0), Quat::from_rotation_y(0.6))
+        .expect("valid parent transform");
+    let local = Transform::new(Vec3::new(-1.0, 4.0, 2.0), Quat::from_rotation_x(-0.3))
+        .expect("valid local transform");
+    let point = Vec3::new(2.0, -3.0, 1.0);
+
+    let composed = parent.compose(&local).expect("valid composition");
+
+    assert_vec3_close(
+        composed.transform_point(point),
+        parent.transform_point(local.transform_point(point)),
+    );
+}
+
+#[test]
+fn composition_rejects_translation_overflow() {
+    let parent =
+        Transform::new(Vec3::splat(f32::MAX), Quat::IDENTITY).expect("valid parent transform");
+    let local =
+        Transform::new(Vec3::splat(f32::MAX), Quat::IDENTITY).expect("valid local transform");
+
+    assert_eq!(
+        parent.compose(&local),
+        Err(TransformError::CompositionOverflow)
+    );
+}

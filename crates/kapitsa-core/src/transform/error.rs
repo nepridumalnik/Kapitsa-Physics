@@ -1,11 +1,12 @@
 use std::fmt;
 
-/// Reason a rigid transform could not be constructed or inverted.
+/// Reason a rigid transform could not be constructed, composed, or inverted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransformError {
     NonFiniteTranslation,
     InvalidRotation,
     InverseOverflow,
+    CompositionOverflow,
 }
 
 impl fmt::Display for TransformError {
@@ -16,6 +17,9 @@ impl fmt::Display for TransformError {
                 formatter.write_str("rotation must be a finite unit quaternion")
             }
             Self::InverseOverflow => formatter.write_str("inverse translation is not finite"),
+            Self::CompositionOverflow => {
+                formatter.write_str("composed transform exceeds the finite range")
+            }
         }
     }
 }
