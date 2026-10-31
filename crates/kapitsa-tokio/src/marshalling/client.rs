@@ -386,6 +386,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn available_mpsc_capacity_accepts_concurrent_requests_on_first_poll() {
+        let ClientHarness {
+            client,
+            mut receiver,
+            ..
+        } = running_client(128);
+        let mut submissions = (0..100)
+            .map(|_| Box::pin(client.submit(add_body())))
+            .collect::<Vec<_>>();
+        for submission in &mut submissions {
+            assert!(matches!(poll_once(submission.as_mut()), Poll::Pending));
+        }
+
+        let mut received = 0;
+        while receiver.try_recv().is_ok() {
+            received += 1;
+        }
+        assert_eq!(received, 100);
+    }
+
+    #[tokio::test]
     async fn cancelling_before_send_does_not_enqueue_a_command() {
         let ClientHarness {
             client,
