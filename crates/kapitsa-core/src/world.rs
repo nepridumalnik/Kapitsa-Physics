@@ -24,12 +24,13 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 }
 
 use crate::{
+    aabb::Aabb,
     collider::Collider,
     collision::{
         CcdHit, CcdMotion, CollisionConfig, CollisionError, CollisionEvent, CollisionInteraction,
         CollisionPair, CollisionSystem, ContactInfo, ContactManifold, ContactPoint, OverlapHit,
         QueryError, QueryFilter, Ray, RayHit, ShapeHit, SolverBody, SolverManifold, SolverMaterial,
-        overlaps_shape, raycast_shape, sweep_shape,
+        overlaps_shape, raycast_shape, spatial_index::SpatialIndex, sweep_shape,
     },
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
@@ -157,6 +158,10 @@ pub struct PhysicsWorld {
     colliders: DensePool<ColliderEntry>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
+    query_index: Option<SpatialIndex>,
+    query_index_dirty: bool,
+    query_proxies: Vec<(ColliderId, Aabb)>,
+    unbounded_query_colliders: Vec<ColliderId>,
 }
 
 /// Opaque copied body data used to predict and atomically commit a world step.
@@ -195,6 +200,10 @@ impl PhysicsWorld {
             colliders: DensePool::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
+            query_index: None,
+            query_index_dirty: false,
+            query_proxies: Vec::new(),
+            unbounded_query_colliders: Vec::new(),
         }
     }
 
@@ -213,42 +222,31 @@ impl PhysicsWorld {
     pub fn raycast(&self, ray: Ray, filter: QueryFilter) -> Result<Option<RayHit>, QueryError> {
         ray.validate()?;
         let mut closest = None;
-        for (dense_id, entry) in self.colliders.iter() {
-            if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
-                continue;
+        if self.query_index_dirty {
+            for (dense_id, _) in self.colliders.iter() {
+                let collider = ColliderId {
+                    world: self.world_id,
+                    dense: dense_id,
+                };
+                self.update_raycast_hit(collider, ray, filter, &mut closest)?;
             }
-            let body = self
-                .bodies
-                .get(entry.body.dense)
-                .filter(|_| entry.body.world == self.world_id)
-                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
-            let transform = body
-                .body
-                .state()
-                .transform()
-                .compose(&entry.collider.local_transform())
-                .map_err(|_| QueryError::ArithmeticOverflow)?;
-            let Some((position, normal, distance)) = raycast_shape(
-                entry.collider.shape(),
-                transform,
-                ray,
-                entry.collider.query_bvh(),
-                entry.collider.query_vertices(),
-            )?
-            else {
-                continue;
-            };
-            if closest.is_none_or(|hit: RayHit| distance < hit.distance) {
-                closest = Some(RayHit {
-                    body: entry.body,
-                    collider: ColliderId {
-                        world: self.world_id,
-                        dense: dense_id,
+        } else {
+            for collider in self.unbounded_query_colliders.iter().copied() {
+                self.update_raycast_hit(collider, ray, filter, &mut closest)?;
+            }
+            if let Some(index) = &self.query_index {
+                let mut stack = Vec::new();
+                let max_distance = closest.map_or(ray.max_distance, |hit: RayHit| hit.distance);
+                index.query_ray(
+                    ray.origin,
+                    ray.direction,
+                    max_distance,
+                    &mut stack,
+                    |collider| {
+                        self.update_raycast_hit(collider, ray, filter, &mut closest)
+                            .map(|hit| hit.map(|hit| hit.distance))
                     },
-                    position,
-                    normal,
-                    distance,
-                });
+                )?;
             }
         }
         Ok(closest)
@@ -267,8 +265,28 @@ impl PhysicsWorld {
         if !displacement.is_finite() {
             return Err(QueryError::InvalidInput);
         }
+        let end_translation = transform
+            .translation()
+            .checked_add(displacement)
+            .ok_or(QueryError::ArithmeticOverflow)?;
+        let end_transform = crate::transform::Transform::new(end_translation, transform.rotation())
+            .map_err(|_| QueryError::ArithmeticOverflow)?;
+        let start_bounds = shape
+            .world_bounds(&transform)
+            .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
+            .ok_or(QueryError::UnsupportedQueryShape)?;
+        let end_bounds = shape
+            .world_bounds(&end_transform)
+            .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
+            .ok_or(QueryError::UnsupportedQueryShape)?;
+        let candidates = self.query_candidates(start_bounds.union(&end_bounds))?;
         let mut closest = None;
-        for (dense_id, entry) in self.colliders.iter() {
+        for collider_id in candidates {
+            let entry = self
+                .colliders
+                .get(collider_id.dense)
+                .filter(|_| collider_id.world == self.world_id)
+                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
             if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
                 continue;
             }
@@ -299,13 +317,12 @@ impl PhysicsWorld {
             if !position.is_finite() || !hit.normal.is_finite() || !hit.toi.is_finite() {
                 return Err(QueryError::ArithmeticOverflow);
             }
-            if closest.is_none_or(|current: ShapeHit| hit.toi < current.toi) {
+            if closest.is_none_or(|current: ShapeHit| {
+                hit.toi < current.toi || (hit.toi == current.toi && collider_id < current.collider)
+            }) {
                 closest = Some(ShapeHit {
                     body: entry.body,
-                    collider: ColliderId {
-                        world: self.world_id,
-                        dense: dense_id,
-                    },
+                    collider: collider_id,
                     position,
                     normal: hit.normal,
                     toi: hit.toi,
@@ -325,8 +342,18 @@ impl PhysicsWorld {
         if !shape.is_convex() {
             return Err(QueryError::UnsupportedQueryShape);
         }
+        let bounds = shape
+            .world_bounds(&transform)
+            .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
+            .ok_or(QueryError::UnsupportedQueryShape)?;
+        let candidates = self.query_candidates(bounds)?;
         let mut overlaps = Vec::new();
-        for (dense_id, entry) in self.colliders.iter() {
+        for collider_id in candidates {
+            let entry = self
+                .colliders
+                .get(collider_id.dense)
+                .filter(|_| collider_id.world == self.world_id)
+                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
             if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
                 continue;
             }
@@ -351,16 +378,196 @@ impl PhysicsWorld {
             )? {
                 overlaps.push(OverlapHit {
                     body: entry.body,
-                    collider: ColliderId {
-                        world: self.world_id,
-                        dense: dense_id,
-                    },
+                    collider: collider_id,
                 });
             }
         }
         overlaps.sort_by_key(|hit| (hit.body, hit.collider));
         *output = overlaps;
         Ok(())
+    }
+
+    fn query_candidates(&self, bounds: Aabb) -> Result<Vec<ColliderId>, QueryError> {
+        let mut candidates = Vec::new();
+        if self.query_index_dirty || self.query_index.is_none() {
+            candidates
+                .try_reserve(self.colliders.len())
+                .map_err(|_| QueryError::Geometry(CollisionError::SpatialIndexCapacityExceeded))?;
+            candidates.extend(self.colliders.iter().map(|(dense, _)| ColliderId {
+                world: self.world_id,
+                dense,
+            }));
+            return Ok(candidates);
+        }
+
+        let mut stack = Vec::new();
+        self.query_index
+            .as_ref()
+            .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?
+            .query_readonly(bounds, &mut stack, &mut candidates)
+            .map_err(QueryError::Geometry)?;
+        candidates
+            .try_reserve(self.unbounded_query_colliders.len())
+            .map_err(|_| QueryError::Geometry(CollisionError::SpatialIndexCapacityExceeded))?;
+        candidates.extend(self.unbounded_query_colliders.iter().copied());
+        Ok(candidates)
+    }
+
+    fn update_raycast_hit(
+        &self,
+        collider_id: ColliderId,
+        ray: Ray,
+        filter: QueryFilter,
+        closest: &mut Option<RayHit>,
+    ) -> Result<Option<RayHit>, QueryError> {
+        let entry = self
+            .colliders
+            .get(collider_id.dense)
+            .filter(|_| collider_id.world == self.world_id)
+            .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+        if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
+            return Ok(None);
+        }
+        let body = self
+            .bodies
+            .get(entry.body.dense)
+            .filter(|_| entry.body.world == self.world_id)
+            .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+        let transform = body
+            .body
+            .state()
+            .transform()
+            .compose(&entry.collider.local_transform())
+            .map_err(|_| QueryError::ArithmeticOverflow)?;
+        let mut limited_ray = ray;
+        limited_ray.max_distance = closest.map_or(ray.max_distance, |hit| hit.distance);
+        let Some((position, normal, distance)) = raycast_shape(
+            entry.collider.shape(),
+            transform,
+            limited_ray,
+            entry.collider.query_bvh(),
+            entry.collider.query_vertices(),
+        )?
+        else {
+            return Ok(None);
+        };
+        let hit = RayHit {
+            body: entry.body,
+            collider: collider_id,
+            position,
+            normal,
+            distance,
+        };
+        if closest.is_none_or(|current| {
+            distance < current.distance
+                || (distance == current.distance && collider_id < current.collider)
+        }) {
+            *closest = Some(hit);
+        }
+        Ok(Some(hit))
+    }
+
+    fn mark_query_index_dirty(&mut self) {
+        self.query_index_dirty = true;
+        if let Some(index) = &mut self.query_index {
+            index.mark_dirty();
+        }
+    }
+
+    fn committed_collider_bounds(
+        &self,
+        collider_id: ColliderId,
+    ) -> Result<Option<Aabb>, CollisionError> {
+        let entry = self
+            .colliders
+            .get(collider_id.dense)
+            .filter(|_| collider_id.world == self.world_id)
+            .ok_or(CollisionError::InvalidContact)?;
+        let body = self
+            .bodies
+            .get(entry.body.dense)
+            .filter(|_| entry.body.world == self.world_id)
+            .ok_or(CollisionError::InvalidContact)?;
+        entry
+            .collider
+            .world_bounds(&body.body.state().transform())
+            .map_err(|_| CollisionError::GeometryBounds)
+    }
+
+    fn update_query_index_for_collider(&mut self, collider_id: ColliderId) {
+        if self.query_index_dirty {
+            return;
+        }
+        let bounds = match self.committed_collider_bounds(collider_id) {
+            Ok(bounds) => bounds,
+            Err(_) => {
+                self.mark_query_index_dirty();
+                return;
+            }
+        };
+        let Some(bounds) = bounds else {
+            return;
+        };
+        let bounds = match expanded_query_bounds(bounds) {
+            Ok(bounds) => bounds,
+            Err(_) => {
+                self.mark_query_index_dirty();
+                return;
+            }
+        };
+        let result = self
+            .query_index
+            .get_or_insert_with(SpatialIndex::new)
+            .insert(collider_id, bounds);
+        if result.is_err() {
+            self.mark_query_index_dirty();
+        }
+    }
+
+    fn rebuild_query_index(&mut self) {
+        self.query_proxies.clear();
+        let build_result = (|| {
+            for (dense_id, entry) in self.colliders.iter() {
+                let collider_id = ColliderId {
+                    world: self.world_id,
+                    dense: dense_id,
+                };
+                let body = self
+                    .bodies
+                    .get(entry.body.dense)
+                    .filter(|_| entry.body.world == self.world_id)
+                    .ok_or(CollisionError::InvalidContact)?;
+                let bounds = entry
+                    .collider
+                    .world_bounds(&body.body.state().transform())
+                    .map_err(|_| CollisionError::GeometryBounds)?;
+                if let Some(bounds) = bounds {
+                    self.query_proxies
+                        .try_reserve(1)
+                        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    self.query_proxies
+                        .push((collider_id, expanded_query_bounds(bounds)?));
+                }
+            }
+            Ok::<(), CollisionError>(())
+        })();
+        if build_result.is_err() {
+            self.mark_query_index_dirty();
+            return;
+        }
+        if self.query_index.is_none() && self.query_proxies.is_empty() {
+            self.query_index_dirty = false;
+            return;
+        }
+        let result = self
+            .query_index
+            .get_or_insert_with(SpatialIndex::new)
+            .synchronize(&self.query_proxies);
+        if result.is_err() {
+            self.mark_query_index_dirty();
+        } else {
+            self.query_index_dirty = false;
+        }
     }
 
     pub fn add_material(&mut self, material: PhysicsMaterial) -> Result<MaterialId, WorldError> {
@@ -440,6 +647,7 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return None;
         }
+        self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.bodies.get_mut(id.dense).map(|entry| &mut entry.body)
     }
@@ -482,22 +690,7 @@ impl PhysicsWorld {
 
         #[cfg(feature = "bench-internals")]
         let commit_started = Instant::now();
-        for ((dense_id, entry), (body_id, state)) in self.bodies.iter_mut().zip(
-            self.collision_system
-                .context
-                .predicted_states
-                .iter()
-                .copied(),
-        ) {
-            debug_assert_eq!(
-                BodyId {
-                    world: self.world_id,
-                    dense: dense_id,
-                },
-                body_id
-            );
-            entry.body.commit_integrated_state(state);
-        }
+        self.commit_predicted_states();
         self.collision_system.commit_step();
         #[cfg(feature = "bench-internals")]
         self.collision_system
@@ -587,6 +780,42 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    fn commit_predicted_states(&mut self) {
+        {
+            let world_id = self.world_id;
+            let colliders = &self.colliders;
+            let query_index = &mut self.query_index;
+            let query_index_dirty = &mut self.query_index_dirty;
+            for ((dense_id, entry), (body_id, state)) in self.bodies.iter_mut().zip(
+                self.collision_system
+                    .context
+                    .predicted_states
+                    .iter()
+                    .copied(),
+            ) {
+                let current_id = BodyId {
+                    world: world_id,
+                    dense: dense_id,
+                };
+                debug_assert_eq!(current_id, body_id);
+                let transform_changed = entry.body.state().transform() != state.transform();
+                entry.body.commit_integrated_state(state);
+                if transform_changed
+                    && !*query_index_dirty
+                    && let Some(index) = query_index.as_mut()
+                    && update_query_index_for_body(index, colliders, world_id, body_id, entry)
+                        .is_err()
+                {
+                    *query_index_dirty = true;
+                    index.mark_dirty();
+                }
+            }
+        }
+        if self.query_index_dirty {
+            self.rebuild_query_index();
+        }
+    }
+
     fn prepare_collision_candidates(&mut self, dt: f64) -> Result<(), CollisionError> {
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
@@ -622,7 +851,19 @@ impl PhysicsWorld {
     #[cfg(feature = "bench-internals")]
     #[doc(hidden)]
     pub fn collision_step_metrics(&self) -> crate::collision::CollisionStepMetrics {
-        self.collision_system.benchmark_metrics()
+        let mut metrics = self.collision_system.benchmark_metrics();
+        let query_index_bytes = self
+            .query_index
+            .as_ref()
+            .map_or(0, SpatialIndex::retained_capacity_bytes)
+            .saturating_add(
+                self.query_proxies.capacity() * std::mem::size_of::<(ColliderId, Aabb)>(),
+            )
+            .saturating_add(
+                self.unbounded_query_colliders.capacity() * std::mem::size_of::<ColliderId>(),
+            );
+        metrics.committed_query_index_bytes = query_index_bytes;
+        metrics
     }
 
     fn process_continuous_collisions(&mut self, dt: f64) -> Result<(), CollisionError> {
@@ -1734,22 +1975,7 @@ impl PhysicsWorld {
 
         #[cfg(feature = "bench-internals")]
         let commit_started = Instant::now();
-        for ((dense_id, entry), (body_id, state)) in self.bodies.iter_mut().zip(
-            self.collision_system
-                .context
-                .predicted_states
-                .iter()
-                .copied(),
-        ) {
-            debug_assert_eq!(
-                BodyId {
-                    world: self.world_id,
-                    dense: dense_id,
-                },
-                body_id
-            );
-            entry.body.commit_integrated_state(state);
-        }
+        self.commit_predicted_states();
         self.collision_system.commit_step();
         #[cfg(feature = "bench-internals")]
         self.collision_system
@@ -1782,6 +2008,12 @@ impl PhysicsWorld {
             return Err(WorldError::InvalidColliderId);
         }
         collider.prepare_query_geometry()?;
+        let has_finite_bounds = collider.local_bounds().ok().flatten().is_some();
+        if !has_finite_bounds {
+            self.unbounded_query_colliders
+                .try_reserve(1)
+                .map_err(|_| WorldError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+        }
 
         let dense = self
             .colliders
@@ -1805,6 +2037,11 @@ impl PhysicsWorld {
         if let Some(entry) = self.bodies.get_mut(body.dense) {
             entry.first_collider = Some(id);
         }
+        if has_finite_bounds {
+            self.update_query_index_for_collider(id);
+        } else {
+            self.unbounded_query_colliders.push(id);
+        }
         self.collision_system.mark_spatial_dirty();
         Ok(id)
     }
@@ -1826,6 +2063,7 @@ impl PhysicsWorld {
             .get_mut(id.dense)
             .ok_or(CollisionError::InvalidSkinPose)?;
         entry.collider.set_skin_pose(matrices)?;
+        self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.collision_system.invalidate_collider_contacts(id);
         Ok(())
@@ -1845,6 +2083,7 @@ impl PhysicsWorld {
         if self.colliders.get(id.dense).is_some() {
             self.collision_system.invalidate_collider_contacts(id);
         }
+        self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.colliders
             .get_mut(id.dense)
@@ -1881,6 +2120,18 @@ impl PhysicsWorld {
         }) {
             return None;
         }
+
+        if !self.query_index_dirty {
+            let remove_failed = self
+                .query_index
+                .as_mut()
+                .is_some_and(|index| index.remove(id).is_err());
+            if remove_failed {
+                self.mark_query_index_dirty();
+            }
+        }
+        self.unbounded_query_colliders
+            .retain(|collider| *collider != id);
 
         let removed = self.colliders.remove(id.dense)?;
         if let Some(prev) = prev {
@@ -1931,6 +2182,7 @@ impl PhysicsWorld {
 
     /// Mutably iterates over bodies in dense storage order, which may change after removal.
     pub fn bodies_mut(&mut self) -> impl Iterator<Item = (BodyId, &mut RigidBody)> {
+        self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.bodies.iter_mut().map(|(dense, entry)| {
             (
@@ -2003,6 +2255,52 @@ fn body_point_velocity(
         .linear_velocity()
         .checked_add(angular_velocity)
         .ok_or(CollisionError::ArithmeticOverflow)
+}
+
+fn update_query_index_for_body(
+    index: &mut SpatialIndex,
+    colliders: &DensePool<ColliderEntry>,
+    world_id: u64,
+    body_id: BodyId,
+    body: &BodyEntry,
+) -> Result<(), CollisionError> {
+    let mut next = body.first_collider;
+    while let Some(collider_id) = next {
+        if collider_id.world != world_id {
+            return Err(CollisionError::InvalidContact);
+        }
+        let entry = colliders
+            .get(collider_id.dense)
+            .filter(|entry| entry.body == body_id)
+            .ok_or(CollisionError::InvalidContact)?;
+        if let Some(bounds) = entry
+            .collider
+            .world_bounds(&body.body.state().transform())
+            .map_err(|_| CollisionError::GeometryBounds)?
+        {
+            if !index.contains_bounds(collider_id, bounds)? {
+                index.update(collider_id, expanded_query_bounds(bounds)?)?;
+            }
+        } else {
+            index.remove(collider_id)?;
+        }
+        next = entry.next;
+    }
+    Ok(())
+}
+
+fn expanded_query_bounds(bounds: Aabb) -> Result<Aabb, CollisionError> {
+    const MARGIN: f64 = 0.1;
+    let margin = Vec3::splat(MARGIN);
+    let min = bounds
+        .min()
+        .checked_sub(margin)
+        .ok_or(CollisionError::GeometryBounds)?;
+    let max = bounds
+        .max()
+        .checked_add(margin)
+        .ok_or(CollisionError::GeometryBounds)?;
+    Aabb::new(min, max).map_err(|_| CollisionError::GeometryBounds)
 }
 
 fn upsert_interaction(

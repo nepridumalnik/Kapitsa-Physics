@@ -175,9 +175,15 @@ resolves impacts in chronological order. Exceeding `max_ccd_impacts` returns
 All queries read the current committed transforms, honor collision filters,
 and return `QueryError` for invalid input, unsupported shapes, arithmetic
 failures, or non-convergent geometry. Sweep and overlap query shapes must be
-convex. Query traversal currently checks colliders directly rather than using
-the step broadphase index; see the measured query workload in
-`benchmarks/collisions.md`.
+convex. `raycast`, `sweep`, and `overlaps` use a separate committed-geometry
+AABB tree to select finite-shape candidates; infinite planes are checked
+separately. The index does not reuse predicted step broadphase data. Its
+fat bounds conservatively cover small body movement and are refreshed when
+committed geometry leaves a proxy. Exact shape queries decide every result.
+Mutable body or collider access invalidates the tree, so read-only queries use
+a full scan until the next successful step rebuilds it. Equal-distance hits
+are ordered by `ColliderId`; overlap results remain sorted. See the measured
+query workload and step-maintenance cost in `benchmarks/collisions.md`.
 
 ## Events and errors
 

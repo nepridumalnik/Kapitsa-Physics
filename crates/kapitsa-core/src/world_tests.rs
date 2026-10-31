@@ -1,11 +1,14 @@
-use kapitsa_math::{Affine3, Mat3, Vec3};
+use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
 
 use super::{
     BodyId, ColliderId, PhysicsWorld, StepError, WorldError, allocate_world_id, upsert_interaction,
 };
 use crate::{
-    collider::{Collider, CollisionFilter},
-    collision::{CollisionError, CollisionInteraction, CollisionPair, ContactInfo},
+    collider::{Collider, CollisionFilter, CollisionMode},
+    collision::{
+        CollisionError, CollisionInteraction, CollisionPair, ContactInfo, OverlapHit, QueryFilter,
+        Ray, RayHit, ShapeHit,
+    },
     containers::{DensePool, DensePoolError},
     mass::MassProperties,
     material::PhysicsMaterial,
@@ -130,6 +133,301 @@ fn interaction_index_preserves_duplicate_merge_rules_and_resets_with_step_scratc
             .interaction_indices
             .as_ref()
             .is_none_or(|indices| indices.is_empty())
+    );
+}
+
+fn world_query_results(
+    world: &PhysicsWorld,
+    ray: Ray,
+    query_shape: &Shape,
+    query_transform: Transform,
+    displacement: Vec3,
+    filter: QueryFilter,
+) -> (Option<RayHit>, Option<ShapeHit>, Vec<OverlapHit>) {
+    let ray_hit = world.raycast(ray, filter).unwrap();
+    let sweep_hit = world
+        .sweep(query_shape, query_transform, displacement, filter)
+        .unwrap();
+    let mut overlaps = Vec::new();
+    world
+        .overlaps(query_shape, query_transform, filter, &mut overlaps)
+        .unwrap();
+    (ray_hit, sweep_hit, overlaps)
+}
+
+fn assert_world_queries_match_full_scan(
+    world: &mut PhysicsWorld,
+    ray: Ray,
+    query_shape: &Shape,
+    query_transform: Transform,
+    displacement: Vec3,
+    filter: QueryFilter,
+) {
+    if world.query_index_dirty {
+        let scanned = world_query_results(
+            world,
+            ray,
+            query_shape,
+            query_transform,
+            displacement,
+            filter,
+        );
+        world.rebuild_query_index();
+        let indexed = world_query_results(
+            world,
+            ray,
+            query_shape,
+            query_transform,
+            displacement,
+            filter,
+        );
+        assert_eq!(indexed, scanned);
+    } else {
+        let indexed = world_query_results(
+            world,
+            ray,
+            query_shape,
+            query_transform,
+            displacement,
+            filter,
+        );
+        world.mark_query_index_dirty();
+        let scanned = world_query_results(
+            world,
+            ray,
+            query_shape,
+            query_transform,
+            displacement,
+            filter,
+        );
+        assert_eq!(indexed, scanned);
+        world.rebuild_query_index();
+    }
+}
+
+#[test]
+fn committed_query_index_matches_full_scan_across_queries_and_world_mutations() {
+    let mut world = PhysicsWorld::new();
+    let plane_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let plane = world
+        .add_collider(
+            plane_body,
+            Collider::new(
+                Shape::Plane(crate::shape::Plane::new(0.0, 1.0, 0.0, 0.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    let tie_transform = Transform::new(Vec3::new(5.0, 2.0, 0.0), Quat::IDENTITY).unwrap();
+    let first_body = world
+        .add_body(RigidBody::new_static(tie_transform))
+        .unwrap();
+    let first = world.add_collider(first_body, collider(0.5)).unwrap();
+    let second_body = world
+        .add_body(RigidBody::new_static(tie_transform))
+        .unwrap();
+    let second = world.add_collider(second_body, collider(0.5)).unwrap();
+
+    let sensor_body = world
+        .add_body(RigidBody::new_static(
+            Transform::new(Vec3::new(2.0, 2.0, 0.0), Quat::IDENTITY).unwrap(),
+        ))
+        .unwrap();
+    let mut sensor_collider = collider(0.5);
+    sensor_collider.set_mode(CollisionMode::Sensor);
+    let sensor = world.add_collider(sensor_body, sensor_collider).unwrap();
+
+    let moving_body = world
+        .add_body(
+            RigidBody::new_dynamic(
+                Transform::new(Vec3::new(20.0, 20.0, 0.0), Quat::IDENTITY).unwrap(),
+                MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    world
+        .body_mut(moving_body)
+        .unwrap()
+        .set_linear_velocity(Vec3::X * 10.0)
+        .unwrap();
+    let moving = world.add_collider(moving_body, collider(0.5)).unwrap();
+
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).unwrap();
+    let skinned = SkinnedTriangleMesh::new(
+        mesh,
+        vec![String::from("root")],
+        (0..3)
+            .map(|_| vec![BoneInfluence::new(0, 1.0).unwrap()])
+            .collect(),
+        Affine3::IDENTITY,
+        vec![Affine3::IDENTITY],
+    )
+    .unwrap();
+    let mesh_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let mesh_collider = world
+        .add_collider(
+            mesh_body,
+            Collider::new(Shape::SkinnedTriangleMesh(skinned), Transform::identity()),
+        )
+        .unwrap();
+
+    let ray = Ray::new(Vec3::new(0.0, 2.0, 0.0), Vec3::X, 30.0).unwrap();
+    let query_shape = Shape::Sphere(Sphere::new(0.25).unwrap());
+    let query_transform = Transform::new(Vec3::new(5.0, 2.0, 0.0), Quat::IDENTITY).unwrap();
+    let filter = QueryFilter::default();
+    assert_world_queries_match_full_scan(
+        &mut world,
+        ray,
+        &query_shape,
+        query_transform,
+        Vec3::X * 10.0,
+        filter,
+    );
+    assert_eq!(
+        world.raycast(ray, filter).unwrap().unwrap().collider,
+        first.min(second)
+    );
+
+    let include_sensors = QueryFilter {
+        include_sensors: true,
+        ..filter
+    };
+    assert_world_queries_match_full_scan(
+        &mut world,
+        ray,
+        &query_shape,
+        query_transform,
+        Vec3::X * 10.0,
+        include_sensors,
+    );
+    assert_eq!(
+        world
+            .raycast(ray, include_sensors)
+            .unwrap()
+            .unwrap()
+            .collider,
+        sensor
+    );
+    let plane_ray = Ray::new(Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, 10.0).unwrap();
+    assert_eq!(
+        world.raycast(plane_ray, filter).unwrap().unwrap().collider,
+        plane
+    );
+
+    world.remove_collider(first).unwrap();
+    let replacement_body = world
+        .add_body(RigidBody::new_static(tie_transform))
+        .unwrap();
+    let replacement = world.add_collider(replacement_body, collider(0.5)).unwrap();
+    assert_ne!(replacement, first);
+    assert_world_queries_match_full_scan(
+        &mut world,
+        ray,
+        &query_shape,
+        query_transform,
+        Vec3::X * 10.0,
+        filter,
+    );
+    assert_eq!(
+        world.raycast(ray, filter).unwrap().unwrap().collider,
+        replacement
+    );
+
+    world
+        .body_mut(replacement_body)
+        .unwrap()
+        .set_transform(Transform::new(Vec3::new(12.0, 2.0, 0.0), Quat::IDENTITY).unwrap())
+        .unwrap();
+    assert_world_queries_match_full_scan(
+        &mut world,
+        ray,
+        &query_shape,
+        query_transform,
+        Vec3::X * 20.0,
+        filter,
+    );
+
+    world
+        .collider_mut(second)
+        .unwrap()
+        .set_filter(CollisionFilter::new(1, 0));
+    assert_world_queries_match_full_scan(
+        &mut world,
+        ray,
+        &query_shape,
+        query_transform,
+        Vec3::X * 20.0,
+        filter,
+    );
+
+    world
+        .set_skin_pose(
+            mesh_collider,
+            &[Affine3::from_translation(Vec3::new(50.0, 0.0, 0.0))],
+        )
+        .unwrap();
+    let skin_query_transform = Transform::new(Vec3::new(50.2, 0.2, 0.0), Quat::IDENTITY).unwrap();
+    assert_world_queries_match_full_scan(
+        &mut world,
+        ray,
+        &query_shape,
+        skin_query_transform,
+        Vec3::ZERO,
+        filter,
+    );
+    let mut skin_overlaps = Vec::new();
+    world
+        .overlaps(
+            &query_shape,
+            skin_query_transform,
+            filter,
+            &mut skin_overlaps,
+        )
+        .unwrap();
+    assert!(
+        skin_overlaps
+            .iter()
+            .any(|hit| hit.collider == mesh_collider)
+    );
+
+    world.step(0.001).unwrap();
+    let small_move_ray = Ray::new(Vec3::new(0.0, 20.0, 0.0), Vec3::X, 30.0).unwrap();
+    assert_world_queries_match_full_scan(
+        &mut world,
+        small_move_ray,
+        &query_shape,
+        Transform::new(Vec3::new(20.01, 20.0, 0.0), Quat::IDENTITY).unwrap(),
+        Vec3::ZERO,
+        filter,
+    );
+    assert_eq!(
+        world
+            .raycast(small_move_ray, filter)
+            .unwrap()
+            .unwrap()
+            .collider,
+        moving
+    );
+
+    world.step(0.1).unwrap();
+    let moved_ray = Ray::new(Vec3::new(0.0, 20.0, 0.0), Vec3::X, 30.0).unwrap();
+    assert_world_queries_match_full_scan(
+        &mut world,
+        moved_ray,
+        &query_shape,
+        Transform::new(Vec3::new(21.0, 20.0, 0.0), Quat::IDENTITY).unwrap(),
+        Vec3::ZERO,
+        filter,
+    );
+    assert_eq!(
+        world.raycast(moved_ray, filter).unwrap().unwrap().collider,
+        moving
     );
 }
 

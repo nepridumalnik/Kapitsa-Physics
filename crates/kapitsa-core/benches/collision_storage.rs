@@ -27,6 +27,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             argument.as_str(),
             "island_1000"
                 | "islands_500"
+                | "stationary_1000"
+                | "moving_1000"
                 | "dynamic_static_500"
                 | "contacts_1000"
                 | "queries_1000"
@@ -50,6 +52,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             "islands_500",
             "500 islands x 2 dynamic",
             five_hundred_islands,
+        ),
+        (
+            "stationary_1000",
+            "1,000 separated Dynamic, stationary",
+            stationary_dynamic_1000,
+        ),
+        (
+            "moving_1000",
+            "1,000 separated Dynamic, moving",
+            moving_dynamic_1000,
         ),
         (
             "dynamic_static_500",
@@ -120,7 +132,7 @@ fn print_step_metrics(
     metrics: CollisionStepMetrics,
 ) {
     println!(
-        "{label:32} step={:.3}/{:.3}/{:.3} ms min/median/max | candidates={} contacts={} islands={} | island={:.3} ms solver={:.3} ms | body_copies={} manifold_copies={} growth={} B retained={} B peak_sampled={} B",
+        "{label:40} step={:.3}/{:.3}/{:.3} ms min/median/max | candidates={} contacts={} islands={} | island={:.3} ms solver={:.3} ms events={:.3} ms commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch={} B query_index={} B peak_sampled={} B",
         millis(min),
         millis(median),
         millis(max),
@@ -129,10 +141,13 @@ fn print_step_metrics(
         metrics.island_count,
         millis(metrics.island_build),
         millis(metrics.solver),
+        millis(metrics.events),
+        millis(metrics.commit),
         metrics.solver_body_copies,
         metrics.solver_manifold_copies,
         metrics.logical_capacity_growth_bytes,
         metrics.retained_scratch_bytes,
+        metrics.committed_query_index_bytes,
         metrics.peak_scratch_bytes,
     );
 }
@@ -204,6 +219,32 @@ fn thousand_dynamic_static_contacts() -> Result<PhysicsWorld, Box<dyn Error>> {
         ] {
             add_static_sphere(&mut world, center + offset)?;
         }
+    }
+    Ok(world)
+}
+
+fn stationary_dynamic_1000() -> Result<PhysicsWorld, Box<dyn Error>> {
+    separated_dynamic_1000(Vec3::ZERO)
+}
+
+fn moving_dynamic_1000() -> Result<PhysicsWorld, Box<dyn Error>> {
+    separated_dynamic_1000(Vec3::X)
+}
+
+fn separated_dynamic_1000(velocity: Vec3) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = mass()?;
+    for index in 0..1_000 {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(index as f64 * 2.0, 0.0, 0.0), Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(velocity)?;
+        let body = world.add_body(body)?;
+        world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?;
     }
     Ok(world)
 }

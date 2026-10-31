@@ -163,3 +163,41 @@ Run this focused comparison with:
 ```powershell
 cargo bench -p kapitsa-core --features bench-internals --bench collision_interactions
 ```
+
+## Committed spatial queries, stage 10
+
+Queries use a separate committed-geometry AABB tree. Its leaf bounds are
+expanded by 0.1 world units; small motion stays inside a proxy, and the tree
+replaces a proxy only when committed geometry leaves it. Exact ray, sweep, and
+overlap routines still determine hits. Direct mutable access marks the index
+dirty and queries use the full-scan fallback until a successful step rebuilds
+it. Infinite planes are tested separately.
+
+Release samples on 2026-11-01, with 20,000 static spheres and the same ray
+distribution used in the earlier 100-ray full-scan sample:
+
+| Workload | Min / median / max | Per ray median |
+|---|---:|---:|
+| Full scan, 1,000 rays (stage 3) | 12,494 / 12,602 / 12,791 ms | 12.602 ms |
+| Committed tree, 1,000 rays (stage 10) | 0.792 / 0.797 / 0.798 ms | 0.797 us |
+
+The per-ray medians differ by about 15,800x. Setup is outside timing and the
+ray scene is the same. The query index
+retained-capacity estimate was 8,864 KiB for these 20,000 colliders; the
+existing step scratch estimate was 16,420 KiB. Estimates cover vector
+capacities and hash-table entry payload, not allocator metadata or control
+bytes.
+
+Index maintenance was measured separately on 1,000 separated Dynamic spheres
+(five independently built worlds; one warmup):
+
+| Workload | Step min / median / max | Commit median |
+|---|---:|---:|
+| Stationary | 0.834 / 0.868 / 0.899 ms | 0.006 ms |
+| Moving at 1 unit/s | 0.914 / 0.942 / 0.981 ms | 0.111 ms |
+
+The moving median was 0.074 ms above the stationary median, with commit time
+0.105 ms higher. Fat proxies avoided exact tree reinsertion for this single
+small movement. For context, the 20,000-body no-contact benchmark's step median
+was 27.516 ms versus 27.696 ms in the pre-index stage 3 sample; those ranges
+overlap, so the full-step comparison does not show a measurable change.

@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{aabb::Aabb, collision::CollisionError, world::ColliderId};
+use kapitsa_math::Vec3;
+
+use super::QueryError;
 
 #[derive(Clone, Copy)]
 struct Node {
@@ -138,6 +141,23 @@ impl SpatialIndex {
         Ok(true)
     }
 
+    pub(crate) fn contains_bounds(
+        &self,
+        collider: ColliderId,
+        bounds: Aabb,
+    ) -> Result<bool, CollisionError> {
+        let Some(leaf) = self.leaves.get(&collider).copied() else {
+            return Ok(false);
+        };
+        let proxy = self.node(leaf)?.bounds;
+        Ok(proxy.min().x <= bounds.min().x
+            && proxy.min().y <= bounds.min().y
+            && proxy.min().z <= bounds.min().z
+            && proxy.max().x >= bounds.max().x
+            && proxy.max().y >= bounds.max().y
+            && proxy.max().z >= bounds.max().z)
+    }
+
     pub(crate) fn query(
         &mut self,
         bounds: Aabb,
@@ -169,6 +189,132 @@ impl SpatialIndex {
                     .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
                 self.query_stack.push(right);
                 self.query_stack.push(left);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn query_readonly(
+        &self,
+        bounds: Aabb,
+        stack: &mut Vec<usize>,
+        output: &mut Vec<ColliderId>,
+    ) -> Result<(), CollisionError> {
+        stack.clear();
+        output.clear();
+        if let Some(root) = self.root {
+            stack
+                .try_reserve(1)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            stack.push(root);
+        }
+        while let Some(index) = stack.pop() {
+            let node = *self.node(index)?;
+            if !node.bounds.intersects(&bounds) {
+                continue;
+            }
+            if let Some(collider) = node.collider {
+                output
+                    .try_reserve(1)
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                output.push(collider);
+            } else {
+                let left = node.left.ok_or(CollisionError::InvalidContact)?;
+                let right = node.right.ok_or(CollisionError::InvalidContact)?;
+                stack
+                    .try_reserve(2)
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                stack.push(right);
+                stack.push(left);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn query_ray(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        mut max_distance: f64,
+        stack: &mut Vec<(usize, f64)>,
+        mut visit: impl FnMut(ColliderId) -> Result<Option<f64>, QueryError>,
+    ) -> Result<(), QueryError> {
+        stack.clear();
+        if let Some(root) = self.root
+            && let Some(entry) = ray_aabb_entry(
+                self.node(root).map_err(QueryError::Geometry)?.bounds,
+                origin,
+                direction,
+                max_distance,
+            )
+        {
+            stack
+                .try_reserve(1)
+                .map_err(|_| QueryError::Geometry(CollisionError::SpatialIndexCapacityExceeded))?;
+            stack.push((root, entry));
+        }
+        while let Some((index, entry)) = stack.pop() {
+            if entry > max_distance {
+                continue;
+            }
+            let node = *self.node(index).map_err(QueryError::Geometry)?;
+            if let Some(collider) = node.collider {
+                if let Some(hit_distance) = visit(collider)? {
+                    if !hit_distance.is_finite()
+                        || hit_distance < 0.0
+                        || hit_distance > max_distance
+                    {
+                        return Err(QueryError::ArithmeticOverflow);
+                    }
+                    max_distance = hit_distance;
+                }
+                continue;
+            }
+
+            let left = node
+                .left
+                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+            let right = node
+                .right
+                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+            let left_entry = ray_aabb_entry(
+                self.node(left).map_err(QueryError::Geometry)?.bounds,
+                origin,
+                direction,
+                max_distance,
+            );
+            let right_entry = ray_aabb_entry(
+                self.node(right).map_err(QueryError::Geometry)?.bounds,
+                origin,
+                direction,
+                max_distance,
+            );
+            match (left_entry, right_entry) {
+                (Some(left_entry), Some(right_entry)) => {
+                    stack.try_reserve(2).map_err(|_| {
+                        QueryError::Geometry(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
+                    if left_entry <= right_entry {
+                        stack.push((right, right_entry));
+                        stack.push((left, left_entry));
+                    } else {
+                        stack.push((left, left_entry));
+                        stack.push((right, right_entry));
+                    }
+                }
+                (Some(left_entry), None) => {
+                    stack.try_reserve(1).map_err(|_| {
+                        QueryError::Geometry(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
+                    stack.push((left, left_entry));
+                }
+                (None, Some(right_entry)) => {
+                    stack.try_reserve(1).map_err(|_| {
+                        QueryError::Geometry(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
+                    stack.push((right, right_entry));
+                }
+                (None, None) => {}
             }
         }
         Ok(())
@@ -472,6 +618,37 @@ impl SpatialIndex {
             + self.stale.capacity() * size_of::<ColliderId>()
             + self.query_stack.capacity() * size_of::<usize>()
     }
+}
+
+fn ray_aabb_entry(bounds: Aabb, origin: Vec3, direction: Vec3, max_distance: f64) -> Option<f64> {
+    let origins = [origin.x, origin.y, origin.z];
+    let directions = [direction.x, direction.y, direction.z];
+    let minimum = [bounds.min().x, bounds.min().y, bounds.min().z];
+    let maximum = [bounds.max().x, bounds.max().y, bounds.max().z];
+    let mut near = 0.0_f64;
+    let mut far = max_distance;
+
+    for axis in 0..3 {
+        let direction = directions[axis];
+        if direction == 0.0 {
+            if origins[axis] < minimum[axis] || origins[axis] > maximum[axis] {
+                return None;
+            }
+            continue;
+        }
+        let mut first = (minimum[axis] - origins[axis]) / direction;
+        let mut second = (maximum[axis] - origins[axis]) / direction;
+        if first > second {
+            std::mem::swap(&mut first, &mut second);
+        }
+        near = near.max(first);
+        far = far.min(second);
+        if near > far {
+            return None;
+        }
+    }
+
+    Some(near)
 }
 
 #[cfg(test)]

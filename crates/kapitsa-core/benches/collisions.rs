@@ -318,7 +318,7 @@ fn report_world(
         .max()
         .unwrap_or(0);
     println!(
-        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} ccd_impacts={} islands={} | index={:.3} broad={:.3} narrow={:.3} ccd={:.3} islands={:.3} solver={:.3} events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained~{} KiB peak_sampled~{} KiB",
+        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} ccd_impacts={} islands={} | index={:.3} broad={:.3} narrow={:.3} ccd={:.3} islands={:.3} solver={:.3} events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
         millis(min.elapsed),
         millis(median.elapsed),
         millis(max.elapsed),
@@ -338,6 +338,7 @@ fn report_world(
         median.metrics.solver_manifold_copies,
         median.metrics.logical_capacity_growth_bytes,
         median.metrics.retained_scratch_bytes / 1024,
+        median.metrics.committed_query_index_bytes / 1024,
         median.metrics.peak_scratch_bytes.max(high_water) / 1024,
     );
     Ok(())

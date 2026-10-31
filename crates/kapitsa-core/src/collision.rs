@@ -74,6 +74,8 @@ pub struct CollisionStepMetrics {
     pub retained_scratch_bytes: usize,
     /// Highest sampled retained scratch capacity during the last step.
     pub peak_scratch_bytes: usize,
+    /// Approximate retained capacity of the committed spatial query index.
+    pub committed_query_index_bytes: usize,
     /// Net increase in retained buffer capacity during this step, in bytes.
     pub logical_capacity_growth_bytes: usize,
     /// Logical copies of solver bodies created for island-local state.
@@ -100,6 +102,7 @@ impl CollisionStepMetrics {
         island_count: 0,
         retained_scratch_bytes: 0,
         peak_scratch_bytes: 0,
+        committed_query_index_bytes: 0,
         logical_capacity_growth_bytes: 0,
         solver_body_copies: 0,
         solver_manifold_copies: 0,
