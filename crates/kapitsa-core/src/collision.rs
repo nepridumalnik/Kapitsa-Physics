@@ -14,7 +14,7 @@ mod level_set;
 #[allow(dead_code)]
 mod manifold;
 #[allow(dead_code)]
-mod mesh;
+pub(crate) mod mesh;
 #[allow(dead_code)]
 mod narrow_phase;
 pub(crate) mod spatial_index;

@@ -94,6 +94,85 @@ impl TriangleBvh {
         self.triangle_count
     }
 
+    pub(crate) fn refit_vertices(
+        &mut self,
+        mesh: &TriangleMesh,
+        vertices: &[Vec3],
+    ) -> Result<(), CollisionError> {
+        if vertices.len() != mesh.vertices().len()
+            || mesh.triangles().len() != self.triangle_count
+            || !vertices.iter().all(|vertex| vertex.is_finite())
+        {
+            return Err(CollisionError::InvalidSkinPose);
+        }
+
+        let mut next_triangle_bounds = Vec::new();
+        next_triangle_bounds
+            .try_reserve_exact(self.triangle_count)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for [a, b, c] in mesh.triangles().iter().copied() {
+            let a = *vertices.get(a).ok_or(CollisionError::GeometryBounds)?;
+            let b = *vertices.get(b).ok_or(CollisionError::GeometryBounds)?;
+            let c = *vertices.get(c).ok_or(CollisionError::GeometryBounds)?;
+            next_triangle_bounds.push(triangle_bounds([a, b, c])?);
+        }
+
+        let mut next_node_bounds: Vec<Option<Aabb>> = Vec::new();
+        next_node_bounds
+            .try_reserve_exact(self.nodes.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        next_node_bounds.resize(self.nodes.len(), None);
+        for (index, node) in self.nodes.iter().copied().enumerate().rev() {
+            let bounds = match node.kind {
+                NodeKind::Leaf { start, count } => {
+                    let end = start
+                        .checked_add(count)
+                        .ok_or(CollisionError::GeometryBounds)?;
+                    let triangle_ids = self
+                        .triangles
+                        .get(start..end)
+                        .ok_or(CollisionError::GeometryBounds)?;
+                    let mut ids = triangle_ids.iter().copied();
+                    let first = ids.next().ok_or(CollisionError::GeometryBounds)?;
+                    let first_bounds = *next_triangle_bounds
+                        .get(first)
+                        .ok_or(CollisionError::GeometryBounds)?;
+                    ids.try_fold(first_bounds, |bounds, triangle| {
+                        next_triangle_bounds
+                            .get(triangle)
+                            .map(|triangle_bounds| bounds.union(triangle_bounds))
+                            .ok_or(CollisionError::GeometryBounds)
+                    })?
+                }
+                NodeKind::Branch { left, right } => {
+                    let left = next_node_bounds
+                        .get(left)
+                        .and_then(|bounds| *bounds)
+                        .ok_or(CollisionError::GeometryBounds)?;
+                    let right = next_node_bounds
+                        .get(right)
+                        .and_then(|bounds| *bounds)
+                        .ok_or(CollisionError::GeometryBounds)?;
+                    left.union(&right)
+                }
+            };
+            *next_node_bounds
+                .get_mut(index)
+                .ok_or(CollisionError::GeometryBounds)? = Some(bounds);
+        }
+        if next_node_bounds.iter().any(Option::is_none) {
+            return Err(CollisionError::GeometryBounds);
+        }
+
+        self.triangle_bounds = next_triangle_bounds;
+        for (node, bounds) in self.nodes.iter_mut().zip(next_node_bounds) {
+            if let Some(bounds) = bounds {
+                node.bounds = bounds;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn query(
         &self,
         bounds: Aabb,

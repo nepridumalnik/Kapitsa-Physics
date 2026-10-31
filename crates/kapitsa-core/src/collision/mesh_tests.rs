@@ -102,3 +102,37 @@ fn bvh_query_includes_triangles_touching_the_query_bounds() {
     bvh.query(query, &mut workspace, &mut output).unwrap();
     assert_eq!(output, vec![0, 1]);
 }
+
+#[test]
+fn refitting_bvh_moves_triangle_bounds_and_rejects_invalid_pose_without_mutation() {
+    let mesh = grid_mesh(1);
+    let mut bvh = TriangleBvh::build(&mesh).unwrap();
+    let moved = mesh
+        .vertices()
+        .iter()
+        .map(|vertex| *vertex + Vec3::new(10.0, 0.0, 0.0))
+        .collect::<Vec<_>>();
+    bvh.refit_vertices(&mesh, &moved).unwrap();
+
+    let mut workspace = MeshQueryWorkspace::default();
+    let mut output = Vec::new();
+    bvh.query(
+        Aabb::new(Vec3::new(10.0, 0.0, 0.0), Vec3::new(11.0, 1.0, 0.0)).unwrap(),
+        &mut workspace,
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(output, vec![0, 1]);
+
+    assert_eq!(
+        bvh.refit_vertices(&mesh, &[]),
+        Err(crate::collision::CollisionError::InvalidSkinPose)
+    );
+    bvh.query(
+        Aabb::new(Vec3::new(10.0, 0.0, 0.0), Vec3::new(11.0, 1.0, 0.0)).unwrap(),
+        &mut workspace,
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(output, vec![0, 1]);
+}

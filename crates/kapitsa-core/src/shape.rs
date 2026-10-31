@@ -91,7 +91,7 @@ impl Shape {
             Self::TriangleMesh(shape) => shape.local_bounds().map(Some),
             Self::HeightField(shape) => shape.local_bounds().map(Some),
             Self::LevelSet(shape) => shape.local_bounds().map(Some),
-            Self::SkinnedTriangleMesh(_) => Err(BoundsError::NotImplemented),
+            Self::SkinnedTriangleMesh(shape) => shape.local_bounds().map(Some),
         }
     }
 

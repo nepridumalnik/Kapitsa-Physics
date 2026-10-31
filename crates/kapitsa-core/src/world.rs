@@ -1,3 +1,4 @@
+use kapitsa_math::Affine3;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod error;
@@ -452,6 +453,24 @@ impl PhysicsWorld {
         }
         self.collision_system.mark_spatial_dirty();
         Ok(id)
+    }
+
+    /// Updates the deformed local vertices for a skinned-mesh collider.
+    pub fn set_skin_pose(
+        &mut self,
+        id: ColliderId,
+        matrices: &[Affine3],
+    ) -> Result<(), CollisionError> {
+        if id.world != self.world_id {
+            return Err(CollisionError::InvalidSkinPose);
+        }
+        let entry = self
+            .colliders
+            .get_mut(id.dense)
+            .ok_or(CollisionError::InvalidSkinPose)?;
+        entry.collider.set_skin_pose(matrices)?;
+        self.collision_system.mark_spatial_dirty();
+        Ok(())
     }
 
     pub fn collider(&self, id: ColliderId) -> Option<&Collider> {

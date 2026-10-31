@@ -1,4 +1,11 @@
-use crate::{aabb::Aabb, material::MaterialId, shape::Shape, transform::Transform};
+use crate::{
+    aabb::Aabb,
+    collision::{CollisionError, mesh::TriangleBvh},
+    material::MaterialId,
+    shape::{BoundsError, Shape},
+    transform::Transform,
+};
+use kapitsa_math::{Affine3, Vec3};
 
 pub mod error;
 mod filter;
@@ -19,6 +26,12 @@ pub struct Collider {
     filter: CollisionFilter,
     material: Option<MaterialId>,
     mode: CollisionMode,
+    skin_pose: Option<SkinPose>,
+}
+
+struct SkinPose {
+    vertices: Vec<Vec3>,
+    bvh: TriangleBvh,
 }
 
 impl Collider {
@@ -29,6 +42,7 @@ impl Collider {
             filter: CollisionFilter::default(),
             material: None,
             mode: CollisionMode::Solid,
+            skin_pose: None,
         }
     }
 
@@ -73,10 +87,89 @@ impl Collider {
         parent_transform: &Transform,
     ) -> Result<Option<Aabb>, ColliderError> {
         let transform = parent_transform.compose(&self.local_transform)?;
+        if let Some(pose) = &self.skin_pose {
+            return points_bounds(&pose.vertices)?
+                .transformed(&transform)
+                .map(Some)
+                .map_err(|error| ColliderError::Bounds(BoundsError::from(error)));
+        }
         self.shape
             .world_bounds(&transform)
             .map_err(ColliderError::from)
     }
+
+    pub(crate) fn set_skin_pose(&mut self, matrices: &[Affine3]) -> Result<(), CollisionError> {
+        let Shape::SkinnedTriangleMesh(skinned_mesh) = &self.shape else {
+            return Err(CollisionError::InvalidSkinPose);
+        };
+        if matrices.len() != skinned_mesh.bone_names().len()
+            || matrices.iter().any(|matrix| !matrix.is_finite())
+        {
+            return Err(CollisionError::InvalidSkinPose);
+        }
+
+        let reference_vertices = skinned_mesh.mesh().vertices();
+        let influences = skinned_mesh.vertex_influences();
+        if reference_vertices.len() != influences.len() {
+            return Err(CollisionError::InvalidSkinPose);
+        }
+        let mut vertices = Vec::new();
+        vertices
+            .try_reserve_exact(reference_vertices.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for (reference, influences) in reference_vertices.iter().zip(influences) {
+            let mut deformed = Vec3::ZERO;
+            for influence in influences {
+                let matrix = matrices
+                    .get(influence.bone_index())
+                    .ok_or(CollisionError::InvalidSkinPose)?;
+                let transformed = matrix
+                    .linear()
+                    .checked_mul_vector(*reference)
+                    .and_then(|point| point.checked_add(matrix.translation()))
+                    .ok_or(CollisionError::ArithmeticOverflow)?;
+                let weighted = transformed
+                    .checked_mul_scalar(influence.weight())
+                    .ok_or(CollisionError::ArithmeticOverflow)?;
+                deformed = deformed
+                    .checked_add(weighted)
+                    .ok_or(CollisionError::ArithmeticOverflow)?;
+            }
+            if !deformed.is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+            vertices.push(deformed);
+        }
+        points_bounds(&vertices).map_err(|_| CollisionError::InvalidSkinPose)?;
+
+        if let Some(pose) = &mut self.skin_pose {
+            pose.bvh.refit_vertices(skinned_mesh.mesh(), &vertices)?;
+            pose.vertices = vertices;
+        } else {
+            let mut bvh = TriangleBvh::build(skinned_mesh.mesh())?;
+            bvh.refit_vertices(skinned_mesh.mesh(), &vertices)?;
+            self.skin_pose = Some(SkinPose { vertices, bvh });
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn skinned_vertices(&self) -> Option<&[Vec3]> {
+        self.skin_pose.as_ref().map(|pose| pose.vertices.as_slice())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn skinned_bvh(&self) -> Option<&TriangleBvh> {
+        self.skin_pose.as_ref().map(|pose| &pose.bvh)
+    }
+}
+
+fn points_bounds(points: &[Vec3]) -> Result<Aabb, BoundsError> {
+    let (&first, rest) = points.split_first().ok_or(BoundsError::InvalidGeometry)?;
+    let (min, max) = rest.iter().fold((first, first), |(min, max), &point| {
+        (min.min(point), max.max(point))
+    });
+    Aabb::new(min, max).map_err(BoundsError::from)
 }
 
 #[cfg(test)]

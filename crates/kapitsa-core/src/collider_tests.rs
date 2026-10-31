@@ -308,7 +308,7 @@ fn plane_has_no_finite_world_bounds() {
 }
 
 #[test]
-fn skinned_mesh_bounds_error_is_preserved() {
+fn skinned_mesh_uses_reference_bounds_until_a_pose_is_set() {
     let mesh =
         TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).expect("valid mesh");
     let influences = (0..3)
@@ -329,7 +329,60 @@ fn skinned_mesh_bounds_error_is_preserved() {
 
     assert_eq!(
         collider.world_bounds(&Transform::identity()),
-        Err(ColliderError::Bounds(BoundsError::NotImplemented))
+        Ok(Some(Aabb::new(Vec3::ZERO, Vec3::X + Vec3::Y).unwrap()))
+    );
+}
+
+#[test]
+fn skinned_pose_updates_bounds_and_keeps_the_last_valid_pose_on_error() {
+    let mesh =
+        TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).expect("valid mesh");
+    let influences = (0..3)
+        .map(|_| vec![BoneInfluence::new(0, 1.0).expect("valid influence")])
+        .collect();
+    let skinned_mesh = SkinnedTriangleMesh::new(
+        mesh,
+        vec![String::from("root")],
+        influences,
+        Affine3::IDENTITY,
+        vec![Affine3::IDENTITY],
+    )
+    .expect("valid skinned mesh");
+    let mut collider = Collider::new(
+        Shape::SkinnedTriangleMesh(skinned_mesh),
+        Transform::identity(),
+    );
+    let moved = Affine3::from_translation(Vec3::new(4.0, 2.0, -1.0));
+    collider.set_skin_pose(&[moved]).unwrap();
+    let expected = Aabb::new(Vec3::new(4.0, 2.0, -1.0), Vec3::new(5.0, 3.0, -1.0)).unwrap();
+    assert_eq!(
+        collider.world_bounds(&Transform::identity()),
+        Ok(Some(expected))
+    );
+
+    assert_eq!(
+        collider.set_skin_pose(&[]),
+        Err(crate::collision::CollisionError::InvalidSkinPose)
+    );
+    assert_eq!(
+        collider.world_bounds(&Transform::identity()),
+        Ok(Some(expected))
+    );
+
+    assert_eq!(
+        collider.set_skin_pose(&[Affine3::from_translation(Vec3::splat(f64::NAN))]),
+        Err(crate::collision::CollisionError::InvalidSkinPose)
+    );
+    assert_eq!(
+        collider.set_skin_pose(&[Affine3::new(
+            kapitsa_math::Mat3::from_diagonal(Vec3::splat(f64::MAX)),
+            Vec3::splat(f64::MAX),
+        )]),
+        Err(crate::collision::CollisionError::ArithmeticOverflow)
+    );
+    assert_eq!(
+        collider.world_bounds(&Transform::identity()),
+        Ok(Some(expected))
     );
 }
 

@@ -1,4 +1,4 @@
-use kapitsa_math::{Mat3, Vec3};
+use kapitsa_math::{Affine3, Mat3, Vec3};
 
 use super::{BodyId, ColliderId, PhysicsWorld, StepError, WorldError, allocate_world_id};
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     mass::MassProperties,
     material::PhysicsMaterial,
     rigid_body::{BodyType, IntegrationError, RigidBody},
-    shape::{Shape, Sphere},
+    shape::{BoneInfluence, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh},
     transform::Transform,
 };
 use std::{collections::HashSet, sync::atomic::AtomicU64};
@@ -21,6 +21,58 @@ fn dynamic_body() -> RigidBody {
 fn collider(radius: f64) -> Collider {
     let sphere = Sphere::new(radius).expect("valid sphere");
     Collider::new(Shape::Sphere(sphere), Transform::identity())
+}
+
+#[test]
+fn world_sets_skin_pose_and_rejects_non_skin_colliders() {
+    let mut world = PhysicsWorld::new();
+    let body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let mesh =
+        TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).expect("valid mesh");
+    let influences = (0..3)
+        .map(|_| vec![BoneInfluence::new(0, 1.0).expect("valid influence")])
+        .collect();
+    let skinned = SkinnedTriangleMesh::new(
+        mesh,
+        vec![String::from("root")],
+        influences,
+        Affine3::IDENTITY,
+        vec![Affine3::IDENTITY],
+    )
+    .expect("valid skinned mesh");
+    let skinned_id = world
+        .add_collider(
+            body,
+            Collider::new(Shape::SkinnedTriangleMesh(skinned), Transform::identity()),
+        )
+        .unwrap();
+    world
+        .set_skin_pose(
+            skinned_id,
+            &[Affine3::from_translation(Vec3::new(3.0, 4.0, 5.0))],
+        )
+        .unwrap();
+    assert_eq!(
+        world
+            .collider(skinned_id)
+            .unwrap()
+            .world_bounds(&Transform::identity()),
+        Ok(Some(
+            crate::aabb::Aabb::new(Vec3::new(3.0, 4.0, 5.0), Vec3::new(4.0, 5.0, 5.0)).unwrap()
+        ))
+    );
+
+    let sphere_id = world.add_collider(body, collider(1.0)).unwrap();
+    assert_eq!(
+        world.set_skin_pose(sphere_id, &[]),
+        Err(CollisionError::InvalidSkinPose)
+    );
+    assert_eq!(
+        world.set_skin_pose(skinned_id, &[]),
+        Err(CollisionError::InvalidSkinPose)
+    );
 }
 
 #[test]
