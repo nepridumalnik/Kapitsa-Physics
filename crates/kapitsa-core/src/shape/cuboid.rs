@@ -1,5 +1,5 @@
 use crate::aabb::Aabb;
-use glam::Vec3;
+use kapitsa_math::Vec3;
 
 use super::{BoundsError, ShapeError};
 
@@ -9,7 +9,7 @@ pub struct Cuboid {
 }
 
 impl Cuboid {
-    pub fn new(x: f32, y: f32, z: f32) -> Result<Self, ShapeError> {
+    pub fn new(x: f64, y: f64, z: f64) -> Result<Self, ShapeError> {
         Self::from_vec(Vec3::new(x, y, z))
     }
 
@@ -34,6 +34,6 @@ impl Cuboid {
 
     pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let half = self.half_extents();
-        Aabb::from_f32_bounds(-half, half).map_err(BoundsError::InvalidBounds)
+        Aabb::new(-half, half).map_err(BoundsError::InvalidBounds)
     }
 }

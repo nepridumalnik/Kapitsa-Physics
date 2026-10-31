@@ -88,7 +88,7 @@ impl Shape {
     pub fn world_bounds(&self, transform: &Transform) -> Result<Option<Aabb>, BoundsError> {
         if let Self::Sphere(sphere) = self {
             let center = transform.translation();
-            let radius = f64::from(sphere.radius());
+            let radius = sphere.radius();
 
             let min = |value: f64| numeric::round_down(value).ok_or(AabbError::TransformOverflow);
             let max = |value: f64| numeric::round_up(value).ok_or(AabbError::TransformOverflow);

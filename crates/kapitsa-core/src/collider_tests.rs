@@ -1,7 +1,6 @@
 use std::error::Error;
 
-use glam::{Affine3A, Quat, Vec3 as ShapeVec3};
-use kapitsa_math::{Quat as MathQuat, Vec3};
+use kapitsa_math::{Affine3, Quat, Vec3};
 
 use crate::{
     aabb::{Aabb, AabbError},
@@ -13,20 +12,16 @@ use crate::{
     transform::{Transform, TransformError},
 };
 
-fn sphere(radius: f32) -> Shape {
+fn sphere(radius: f64) -> Shape {
     Shape::Sphere(Sphere::new(radius).expect("valid sphere"))
 }
 
 fn transform(translation: Vec3, rotation: Quat) -> Transform {
-    let rotation = MathQuat::new(
-        f64::from(rotation.x),
-        f64::from(rotation.y),
-        f64::from(rotation.z),
-        f64::from(rotation.w),
-    )
-    .try_normalize()
-    .expect("valid test rotation");
     Transform::new(translation, rotation).expect("valid transform")
+}
+
+fn rotation(axis: Vec3, angle: f64) -> Quat {
+    Quat::from_axis_angle(axis, angle).expect("valid rotation")
 }
 
 fn assert_vec3_close(actual: Vec3, expected: Vec3) {
@@ -238,7 +233,7 @@ fn parent_rotation_rotates_offset_collider() {
     let collider = Collider::new(sphere(0.5), transform(Vec3::X, Quat::IDENTITY));
     let parent = transform(
         Vec3::new(1.0, 2.0, 3.0),
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        rotation(Vec3::Z, std::f64::consts::FRAC_PI_2),
     );
 
     let bounds = collider
@@ -251,8 +246,8 @@ fn parent_rotation_rotates_offset_collider() {
 
 #[test]
 fn parent_and_local_rotations_are_composed() {
-    let local_rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
-    let parent_rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    let local_rotation = rotation(Vec3::Z, std::f64::consts::FRAC_PI_4);
+    let parent_rotation = rotation(Vec3::Z, std::f64::consts::FRAC_PI_2);
     let collider = Collider::new(
         Shape::Cuboid(Cuboid::new(2.0, 4.0, 2.0).expect("valid cuboid")),
         transform(Vec3::new(1.0, 0.0, 0.0), local_rotation),
@@ -263,15 +258,10 @@ fn parent_and_local_rotations_are_composed() {
         .world_bounds(&parent)
         .expect("valid collider bounds")
         .expect("cuboid has finite bounds");
-    let rotated_local = parent_rotation * ShapeVec3::X;
-    let composed = transform(
-        Vec3::new(
-            f64::from(rotated_local.x),
-            f64::from(rotated_local.y),
-            f64::from(rotated_local.z),
-        ),
-        parent_rotation * local_rotation,
-    );
+    let rotated_local = parent_rotation
+        .rotate_vector(Vec3::X)
+        .expect("valid rotation");
+    let composed = transform(rotated_local, parent_rotation * local_rotation);
     let expected = Aabb::new(Vec3::new(-1.0, -2.0, -1.0), Vec3::new(1.0, 2.0, 1.0))
         .expect("valid cuboid bounds")
         .transformed(&composed)
@@ -303,19 +293,16 @@ fn colliders_can_have_distinct_local_transforms_for_one_parent() {
 #[test]
 fn plane_has_no_finite_world_bounds() {
     let plane = Shape::Plane(Plane::new(0.0, 1.0, 0.0, 0.0).expect("valid plane"));
-    let collider = Collider::new(plane, transform(Vec3::X, Quat::from_rotation_z(0.2)));
-    let parent = transform(Vec3::Y, Quat::from_rotation_x(0.4));
+    let collider = Collider::new(plane, transform(Vec3::X, rotation(Vec3::Z, 0.2)));
+    let parent = transform(Vec3::Y, rotation(Vec3::X, 0.4));
 
     assert_eq!(collider.world_bounds(&parent), Ok(None));
 }
 
 #[test]
 fn skinned_mesh_bounds_error_is_preserved() {
-    let mesh = TriangleMesh::new(
-        vec![ShapeVec3::ZERO, ShapeVec3::X, ShapeVec3::Y],
-        vec![[0, 1, 2]],
-    )
-    .expect("valid mesh");
+    let mesh =
+        TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).expect("valid mesh");
     let influences = (0..3)
         .map(|_| vec![BoneInfluence::new(0, 1.0).expect("valid influence")])
         .collect();
@@ -323,8 +310,8 @@ fn skinned_mesh_bounds_error_is_preserved() {
         mesh,
         vec![String::from("root")],
         influences,
-        Affine3A::IDENTITY,
-        vec![Affine3A::IDENTITY],
+        Affine3::IDENTITY,
+        vec![Affine3::IDENTITY],
     )
     .expect("valid skinned mesh");
     let collider = Collider::new(
@@ -356,7 +343,7 @@ fn transform_overflow_is_preserved() {
 
 #[test]
 fn error_source_chain_preserves_bounds_and_aabb_errors() {
-    let collider = Collider::new(sphere(f32::MAX), Transform::identity());
+    let collider = Collider::new(sphere(f64::MAX), Transform::identity());
     let parent = transform(Vec3::splat(f64::MAX), Quat::IDENTITY);
     let error = collider
         .world_bounds(&parent)

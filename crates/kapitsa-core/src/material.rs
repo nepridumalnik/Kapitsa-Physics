@@ -7,18 +7,18 @@ pub use storage::{MaterialId, MaterialStorage};
 /// Surface friction, restitution, and density properties for a physics material.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PhysicsMaterial {
-    friction: f32,
-    static_friction: f32,
-    restitution: f32,
-    density: f32,
+    friction: f64,
+    static_friction: f64,
+    restitution: f64,
+    density: f64,
 }
 
 impl PhysicsMaterial {
     pub fn new(
-        friction: f32,
-        static_friction: f32,
-        restitution: f32,
-        density: f32,
+        friction: f64,
+        static_friction: f64,
+        restitution: f64,
+        density: f64,
     ) -> Result<Self, PhysicsMaterialError> {
         if !friction.is_finite() {
             return Err(PhysicsMaterialError::NonFiniteFriction);
@@ -53,19 +53,19 @@ impl PhysicsMaterial {
         })
     }
 
-    pub fn friction(&self) -> f32 {
+    pub fn friction(&self) -> f64 {
         self.friction
     }
 
-    pub fn static_friction(&self) -> f32 {
+    pub fn static_friction(&self) -> f64 {
         self.static_friction
     }
 
-    pub fn restitution(&self) -> f32 {
+    pub fn restitution(&self) -> f64 {
         self.restitution
     }
 
-    pub fn density(&self) -> f32 {
+    pub fn density(&self) -> f64 {
         self.density
     }
 }

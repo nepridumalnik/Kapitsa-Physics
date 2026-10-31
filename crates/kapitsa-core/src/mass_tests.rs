@@ -234,11 +234,11 @@ fn rejects_invalid_density() {
 
 #[test]
 fn rejects_overflow_and_positive_mass_underflow() {
-    let large_sphere = Shape::Sphere(Sphere::new(f32::MAX).expect("finite sphere"));
+    let large_sphere = Shape::Sphere(Sphere::new(f64::MAX).expect("finite sphere"));
     let large_cuboid =
-        Shape::Cuboid(Cuboid::new(f32::MAX, f32::MAX, f32::MAX).expect("finite cuboid"));
+        Shape::Cuboid(Cuboid::new(f64::MAX, f64::MAX, f64::MAX).expect("finite cuboid"));
     let tiny_sphere =
-        Shape::Sphere(Sphere::new(f32::from_bits(1)).expect("positive subnormal sphere"));
+        Shape::Sphere(Sphere::new(f64::from_bits(1)).expect("positive subnormal sphere"));
 
     assert_eq!(
         MassProperties::from_shape(&large_sphere, f32::MAX),

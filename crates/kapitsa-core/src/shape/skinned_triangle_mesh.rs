@@ -1,14 +1,14 @@
-use glam::Affine3A;
+use kapitsa_math::Affine3;
 
 use super::{ShapeError, TriangleMesh};
 
 pub struct BoneInfluence {
     bone_index: usize,
-    weight: f32,
+    weight: f64,
 }
 
 impl BoneInfluence {
-    pub fn new(bone_index: usize, weight: f32) -> Result<Self, ShapeError> {
+    pub fn new(bone_index: usize, weight: f64) -> Result<Self, ShapeError> {
         if !weight.is_finite() || weight <= 0.0 || weight > 1.0 {
             return Err(ShapeError::InvalidWeight);
         }
@@ -20,7 +20,7 @@ impl BoneInfluence {
         self.bone_index
     }
 
-    pub fn weight(&self) -> f32 {
+    pub fn weight(&self) -> f64 {
         self.weight
     }
 }
@@ -34,8 +34,8 @@ pub struct SkinnedTriangleMesh {
     mesh: TriangleMesh,
     bone_names: Vec<String>,
     vertex_influences: Vec<Vec<BoneInfluence>>,
-    reference_root_transform: Affine3A,
-    reference_relative_transforms: Vec<Affine3A>,
+    reference_root_transform: Affine3,
+    reference_relative_transforms: Vec<Affine3>,
 }
 
 impl SkinnedTriangleMesh {
@@ -43,8 +43,8 @@ impl SkinnedTriangleMesh {
         mesh: TriangleMesh,
         bone_names: Vec<String>,
         vertex_influences: Vec<Vec<BoneInfluence>>,
-        reference_root_transform: Affine3A,
-        reference_relative_transforms: Vec<Affine3A>,
+        reference_root_transform: Affine3,
+        reference_relative_transforms: Vec<Affine3>,
     ) -> Result<Self, ShapeError> {
         if !bone_names_are_valid(&bone_names) {
             return Err(ShapeError::InvalidBoneNames);
@@ -84,11 +84,11 @@ impl SkinnedTriangleMesh {
         &self.vertex_influences
     }
 
-    pub fn reference_root_transform(&self) -> Affine3A {
+    pub fn reference_root_transform(&self) -> Affine3 {
         self.reference_root_transform
     }
 
-    pub fn reference_relative_transforms(&self) -> &[Affine3A] {
+    pub fn reference_relative_transforms(&self) -> &[Affine3] {
         &self.reference_relative_transforms
     }
 }

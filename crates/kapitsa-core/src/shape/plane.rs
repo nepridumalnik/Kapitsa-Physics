@@ -1,4 +1,4 @@
-use glam::Vec3;
+use kapitsa_math::Vec3;
 
 use super::ShapeError;
 
@@ -6,15 +6,15 @@ use super::ShapeError;
 /// The stored normal has unit length; distance is signed.
 pub struct Plane {
     normal: Vec3,
-    distance: f32,
+    distance: f64,
 }
 
 impl Plane {
-    pub fn new(nx: f32, ny: f32, nz: f32, distance: f32) -> Result<Self, ShapeError> {
+    pub fn new(nx: f64, ny: f64, nz: f64, distance: f64) -> Result<Self, ShapeError> {
         Self::from_vec(Vec3::new(nx, ny, nz), distance)
     }
 
-    pub fn from_vec(normal: Vec3, distance: f32) -> Result<Self, ShapeError> {
+    pub fn from_vec(normal: Vec3, distance: f64) -> Result<Self, ShapeError> {
         if !normal.is_finite() || !distance.is_finite() {
             return Err(ShapeError::NonFiniteParameter);
         }
@@ -31,7 +31,9 @@ impl Plane {
             });
         }
 
-        let normal = normal / length;
+        let normal = normal
+            .try_normalize()
+            .ok_or(ShapeError::ArithmeticOverflow)?;
         let distance = distance / length;
         if !normal.is_finite() || !distance.is_finite() {
             return Err(ShapeError::ArithmeticOverflow);
@@ -44,7 +46,7 @@ impl Plane {
         self.normal
     }
 
-    pub fn distance(&self) -> f32 {
+    pub fn distance(&self) -> f64 {
         self.distance
     }
 }

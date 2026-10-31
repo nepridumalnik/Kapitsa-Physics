@@ -24,11 +24,6 @@ impl Aabb {
         Ok(Self { min, max })
     }
 
-    /// Converts legacy shape bounds while those shapes are migrated to `f64`.
-    pub(crate) fn from_f32_bounds(min: glam::Vec3, max: glam::Vec3) -> Result<Self, AabbError> {
-        Self::new(to_f64_vec3(min), to_f64_vec3(max))
-    }
-
     pub fn min(&self) -> Vec3 {
         self.min
     }
@@ -177,10 +172,6 @@ fn round_up_vec3(value: Vec3) -> Result<Vec3, AabbError> {
         numeric::round_up(value.y).ok_or(AabbError::TransformOverflow)?,
         numeric::round_up(value.z).ok_or(AabbError::TransformOverflow)?,
     ))
-}
-
-fn to_f64_vec3(value: glam::Vec3) -> Vec3 {
-    Vec3::new(f64::from(value.x), f64::from(value.y), f64::from(value.z))
 }
 
 #[cfg(test)]

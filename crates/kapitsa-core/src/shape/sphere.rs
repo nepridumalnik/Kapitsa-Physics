@@ -1,14 +1,14 @@
 use super::{BoundsError, ShapeError};
 use crate::aabb::Aabb;
-use glam::Vec3;
+use kapitsa_math::Vec3;
 
 /// Sphere centered at the collider-local origin.
 pub struct Sphere {
-    radius: f32,
+    radius: f64,
 }
 
 impl Sphere {
-    pub fn new(radius: f32) -> Result<Self, ShapeError> {
+    pub fn new(radius: f64) -> Result<Self, ShapeError> {
         if !radius.is_finite() {
             return Err(ShapeError::NonFiniteParameter);
         }
@@ -19,12 +19,12 @@ impl Sphere {
         Ok(Self { radius })
     }
 
-    pub fn radius(&self) -> f32 {
+    pub fn radius(&self) -> f64 {
         self.radius
     }
 
     pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let extent = Vec3::splat(self.radius);
-        Aabb::from_f32_bounds(-extent, extent).map_err(BoundsError::InvalidBounds)
+        Aabb::new(-extent, extent).map_err(BoundsError::InvalidBounds)
     }
 }

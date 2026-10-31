@@ -15,7 +15,7 @@ fn dynamic_body() -> RigidBody {
     RigidBody::new_dynamic(Transform::identity(), mass).expect("valid dynamic body")
 }
 
-fn collider(radius: f32) -> Collider {
+fn collider(radius: f64) -> Collider {
     let sphere = Sphere::new(radius).expect("valid sphere");
     Collider::new(Shape::Sphere(sphere), Transform::identity())
 }

@@ -28,19 +28,19 @@ fn default_uses_chaos_material_values() {
 #[test]
 fn rejects_nan_for_each_parameter() {
     assert_eq!(
-        PhysicsMaterial::new(f32::NAN, 0.0, 0.5, 1.0),
+        PhysicsMaterial::new(f64::NAN, 0.0, 0.5, 1.0),
         Err(PhysicsMaterialError::NonFiniteFriction)
     );
     assert_eq!(
-        PhysicsMaterial::new(0.5, f32::NAN, 0.5, 1.0),
+        PhysicsMaterial::new(0.5, f64::NAN, 0.5, 1.0),
         Err(PhysicsMaterialError::NonFiniteStaticFriction)
     );
     assert_eq!(
-        PhysicsMaterial::new(0.5, 0.0, f32::NAN, 1.0),
+        PhysicsMaterial::new(0.5, 0.0, f64::NAN, 1.0),
         Err(PhysicsMaterialError::NonFiniteRestitution)
     );
     assert_eq!(
-        PhysicsMaterial::new(0.5, 0.0, 0.5, f32::NAN),
+        PhysicsMaterial::new(0.5, 0.0, 0.5, f64::NAN),
         Err(PhysicsMaterialError::NonFiniteDensity)
     );
 }
@@ -49,35 +49,35 @@ fn rejects_nan_for_each_parameter() {
 fn rejects_positive_and_negative_infinity_for_each_parameter() {
     let cases = [
         (
-            [f32::INFINITY, 0.0, 0.5, 1.0],
+            [f64::INFINITY, 0.0, 0.5, 1.0],
             PhysicsMaterialError::NonFiniteFriction,
         ),
         (
-            [f32::NEG_INFINITY, 0.0, 0.5, 1.0],
+            [f64::NEG_INFINITY, 0.0, 0.5, 1.0],
             PhysicsMaterialError::NonFiniteFriction,
         ),
         (
-            [0.5, f32::INFINITY, 0.5, 1.0],
+            [0.5, f64::INFINITY, 0.5, 1.0],
             PhysicsMaterialError::NonFiniteStaticFriction,
         ),
         (
-            [0.5, f32::NEG_INFINITY, 0.5, 1.0],
+            [0.5, f64::NEG_INFINITY, 0.5, 1.0],
             PhysicsMaterialError::NonFiniteStaticFriction,
         ),
         (
-            [0.5, 0.0, f32::INFINITY, 1.0],
+            [0.5, 0.0, f64::INFINITY, 1.0],
             PhysicsMaterialError::NonFiniteRestitution,
         ),
         (
-            [0.5, 0.0, f32::NEG_INFINITY, 1.0],
+            [0.5, 0.0, f64::NEG_INFINITY, 1.0],
             PhysicsMaterialError::NonFiniteRestitution,
         ),
         (
-            [0.5, 0.0, 0.5, f32::INFINITY],
+            [0.5, 0.0, 0.5, f64::INFINITY],
             PhysicsMaterialError::NonFiniteDensity,
         ),
         (
-            [0.5, 0.0, 0.5, f32::NEG_INFINITY],
+            [0.5, 0.0, 0.5, f64::NEG_INFINITY],
             PhysicsMaterialError::NonFiniteDensity,
         ),
     ];
@@ -128,13 +128,13 @@ fn rejects_non_positive_density() {
 
 #[test]
 fn accepts_boundaries_without_friction_ordering() -> Result<(), PhysicsMaterialError> {
-    let material = PhysicsMaterial::new(0.8, 0.0, 0.0, f32::MIN_POSITIVE)?;
+    let material = PhysicsMaterial::new(0.8, 0.0, 0.0, f64::MIN_POSITIVE)?;
     let maximum_restitution = PhysicsMaterial::new(0.0, 0.5, 1.0, 1.0)?;
 
     assert_eq!(material.friction(), 0.8);
     assert_eq!(material.static_friction(), 0.0);
     assert_eq!(material.restitution(), 0.0);
-    assert_eq!(material.density(), f32::MIN_POSITIVE);
+    assert_eq!(material.density(), f64::MIN_POSITIVE);
     assert_eq!(maximum_restitution.restitution(), 1.0);
     Ok(())
 }

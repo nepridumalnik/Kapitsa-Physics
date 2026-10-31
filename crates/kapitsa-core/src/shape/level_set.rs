@@ -1,5 +1,5 @@
 use crate::aabb::Aabb;
-use glam::Vec3;
+use kapitsa_math::Vec3;
 
 use super::{BoundsError, ShapeError};
 
@@ -8,7 +8,7 @@ pub struct LevelSet {
     origin: Vec3,
     dimensions: [usize; 3],
     grid_spacing: Vec3,
-    signed_distances: Vec<f32>,
+    signed_distances: Vec<f64>,
 }
 
 impl LevelSet {
@@ -16,7 +16,7 @@ impl LevelSet {
         origin: Vec3,
         dimensions: [usize; 3],
         grid_spacing: Vec3,
-        signed_distances: Vec<f32>,
+        signed_distances: Vec<f64>,
     ) -> Result<Self, ShapeError> {
         let count = dimensions[0]
             .checked_mul(dimensions[1])
@@ -40,9 +40,9 @@ impl LevelSet {
         }
 
         let span = Vec3::new(
-            (dimensions[0] - 1) as f32,
-            (dimensions[1] - 1) as f32,
-            (dimensions[2] - 1) as f32,
+            (dimensions[0] - 1) as f64,
+            (dimensions[1] - 1) as f64,
+            (dimensions[2] - 1) as f64,
         );
         if !(origin + grid_spacing * span).is_finite() {
             return Err(ShapeError::ArithmeticOverflow);
@@ -68,19 +68,19 @@ impl LevelSet {
         self.grid_spacing
     }
 
-    pub fn signed_distances(&self) -> &[f32] {
+    pub fn signed_distances(&self) -> &[f64] {
         &self.signed_distances
     }
 
     pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let span = Vec3::new(
-            (self.dimensions[0] - 1) as f32,
-            (self.dimensions[1] - 1) as f32,
-            (self.dimensions[2] - 1) as f32,
+            (self.dimensions[0] - 1) as f64,
+            (self.dimensions[1] - 1) as f64,
+            (self.dimensions[2] - 1) as f64,
         );
         let last_node = self.origin + self.grid_spacing * span;
 
-        Aabb::from_f32_bounds(self.origin.min(last_node), self.origin.max(last_node))
+        Aabb::new(self.origin.min(last_node), self.origin.max(last_node))
             .map_err(BoundsError::InvalidBounds)
     }
 }

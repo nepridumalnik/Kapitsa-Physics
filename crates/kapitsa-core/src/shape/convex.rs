@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::aabb::Aabb;
-use glam::Vec3;
+use kapitsa_math::Vec3;
 
 use super::{BoundsError, ShapeError};
 
@@ -21,7 +21,7 @@ impl Convex {
         }
 
         let (minimum, maximum) = vertices.iter().fold(
-            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY)),
             |(min, max), &vertex| (min.min(vertex), max.max(vertex)),
         );
         let extent = (maximum - minimum).max_element();
@@ -32,7 +32,7 @@ impl Convex {
             return Err(ShapeError::DegenerateGeometry);
         }
 
-        let tolerance = extent * f32::EPSILON * 8.0;
+        let tolerance = extent * f64::EPSILON * 8.0;
         let mut used = vec![false; vertices.len()];
         let mut edges = HashMap::<(usize, usize), (usize, isize)>::new();
         let reference = vertices[0];
@@ -73,8 +73,7 @@ impl Convex {
             used[b] = true;
             used[c] = true;
             volume_six += (vertices[a] - reference)
-                .dot((vertices[b] - reference).cross(vertices[c] - reference))
-                as f64;
+                .dot((vertices[b] - reference).cross(vertices[c] - reference));
 
             for (from, to) in [(a, b), (b, c), (c, a)] {
                 let key = (from.min(to), from.max(to));
@@ -123,6 +122,6 @@ impl Convex {
         let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
             (min.min(vertex), max.max(vertex))
         });
-        Aabb::from_f32_bounds(min, max).map_err(BoundsError::InvalidBounds)
+        Aabb::new(min, max).map_err(BoundsError::InvalidBounds)
     }
 }

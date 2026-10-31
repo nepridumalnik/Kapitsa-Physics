@@ -288,7 +288,7 @@ fn is_physically_realizable(inertia: &[[f64; 3]; 3]) -> bool {
 }
 
 fn sphere_mass_properties(sphere: &Sphere, density: f64) -> (f64, [f64; 3]) {
-    let radius = f64::from(sphere.radius());
+    let radius = sphere.radius();
     let mass = density * (4.0 / 3.0) * std::f64::consts::PI * radius.powi(3);
     let inertia = (2.0 / 5.0) * mass * radius.powi(2);
     (mass, [inertia; 3])
@@ -296,9 +296,9 @@ fn sphere_mass_properties(sphere: &Sphere, density: f64) -> (f64, [f64; 3]) {
 
 fn cuboid_mass_properties(cuboid: &Cuboid, density: f64) -> (f64, [f64; 3]) {
     let size = cuboid.size();
-    let x = f64::from(size.x);
-    let y = f64::from(size.y);
-    let z = f64::from(size.z);
+    let x = size.x;
+    let y = size.y;
+    let z = size.z;
     let mass = density * x * y * z;
     let divisor = 12.0;
     let inertia = [

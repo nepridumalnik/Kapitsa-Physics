@@ -1,5 +1,5 @@
 use crate::aabb::Aabb;
-use glam::Vec3;
+use kapitsa_math::Vec3;
 
 use super::{BoundsError, ShapeError};
 
@@ -8,16 +8,16 @@ use super::{BoundsError, ShapeError};
 pub struct TaperedCapsule {
     start: Vec3,
     end: Vec3,
-    start_radius: f32,
-    end_radius: f32,
+    start_radius: f64,
+    end_radius: f64,
 }
 
 impl TaperedCapsule {
     pub fn new(
         start: Vec3,
         end: Vec3,
-        start_radius: f32,
-        end_radius: f32,
+        start_radius: f64,
+        end_radius: f64,
     ) -> Result<Self, ShapeError> {
         if !start.is_finite()
             || !end.is_finite()
@@ -56,18 +56,18 @@ impl TaperedCapsule {
         self.end
     }
 
-    pub fn start_radius(&self) -> f32 {
+    pub fn start_radius(&self) -> f64 {
         self.start_radius
     }
 
-    pub fn end_radius(&self) -> f32 {
+    pub fn end_radius(&self) -> f64 {
         self.end_radius
     }
 
     pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let start_radius = Vec3::splat(self.start_radius);
         let end_radius = Vec3::splat(self.end_radius);
-        Aabb::from_f32_bounds(
+        Aabb::new(
             (self.start - start_radius).min(self.end - end_radius),
             (self.start + start_radius).max(self.end + end_radius),
         )

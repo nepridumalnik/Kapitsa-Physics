@@ -1,5 +1,5 @@
 use crate::aabb::Aabb;
-use glam::Vec3;
+use kapitsa_math::Vec3;
 
 use super::{BoundsError, ShapeError};
 
@@ -59,6 +59,6 @@ impl TriangleMesh {
         let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
             (min.min(vertex), max.max(vertex))
         });
-        Aabb::from_f32_bounds(min, max).map_err(BoundsError::InvalidBounds)
+        Aabb::new(min, max).map_err(BoundsError::InvalidBounds)
     }
 }

@@ -1,5 +1,5 @@
 use crate::aabb::Aabb;
-use glam::Vec3;
+use kapitsa_math::Vec3;
 
 use super::{BoundsError, ShapeError};
 
@@ -39,6 +39,6 @@ impl Triangle {
         let [first, second, third] = self.vertices;
         let min = first.min(second).min(third);
         let max = first.max(second).max(third);
-        Aabb::from_f32_bounds(min, max).map_err(BoundsError::InvalidBounds)
+        Aabb::new(min, max).map_err(BoundsError::InvalidBounds)
     }
 }

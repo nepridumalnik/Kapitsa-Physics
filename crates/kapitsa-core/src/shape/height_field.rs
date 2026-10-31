@@ -1,5 +1,5 @@
 use crate::aabb::Aabb;
-use glam::{Vec2, Vec3};
+use kapitsa_math::{Vec2, Vec3};
 
 use super::{BoundsError, ShapeError};
 
@@ -8,7 +8,7 @@ pub struct HeightField {
     rows: usize,
     columns: usize,
     grid_spacing: Vec2,
-    heights: Vec<f32>,
+    heights: Vec<f64>,
 }
 
 impl HeightField {
@@ -16,7 +16,7 @@ impl HeightField {
         rows: usize,
         columns: usize,
         grid_spacing: Vec2,
-        heights: Vec<f32>,
+        heights: Vec<f64>,
     ) -> Result<Self, ShapeError> {
         let count = rows
             .checked_mul(columns)
@@ -33,7 +33,8 @@ impl HeightField {
         if grid_spacing.min_element() <= 0.0 {
             return Err(ShapeError::InvalidDimension);
         }
-        if !(grid_spacing * Vec2::new((columns - 1) as f32, (rows - 1) as f32)).is_finite() {
+        let span = grid_spacing * Vec2::new((columns - 1) as f64, (rows - 1) as f64);
+        if !span.is_finite() {
             return Err(ShapeError::ArithmeticOverflow);
         }
         if !heights.iter().all(|height| height.is_finite()) {
@@ -60,7 +61,7 @@ impl HeightField {
         self.grid_spacing
     }
 
-    pub fn heights(&self) -> &[f32] {
+    pub fn heights(&self) -> &[f64] {
         &self.heights
     }
 
@@ -74,9 +75,9 @@ impl HeightField {
             .fold((first_height, first_height), |(min, max), &height| {
                 (min.min(height), max.max(height))
             });
-        let span = self.grid_spacing * Vec2::new((self.columns - 1) as f32, (self.rows - 1) as f32);
+        let span = self.grid_spacing * Vec2::new((self.columns - 1) as f64, (self.rows - 1) as f64);
 
-        Aabb::from_f32_bounds(
+        Aabb::new(
             Vec3::new(0.0, 0.0, min_height),
             Vec3::new(span.x, span.y, max_height),
         )

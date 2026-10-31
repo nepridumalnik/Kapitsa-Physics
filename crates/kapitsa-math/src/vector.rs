@@ -87,6 +87,10 @@ impl Vec3 {
         self.x.max(self.y).max(self.z)
     }
 
+    pub fn min_element(self) -> f64 {
+        self.x.min(self.y).min(self.z)
+    }
+
     pub fn checked_add(self, rhs: Self) -> Option<Self> {
         let result = self + rhs;
         result.is_finite().then_some(result)
