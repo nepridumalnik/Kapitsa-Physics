@@ -91,6 +91,14 @@ impl ContactManifold {
             .filter_map(|point| *point)
     }
 
+    pub(crate) fn point_mut(&mut self, index: usize) -> Option<&mut ContactPoint> {
+        self.points.get_mut(index)?.as_mut()
+    }
+
+    pub(crate) fn point(&self, index: usize) -> Option<&ContactPoint> {
+        self.points.get(index)?.as_ref()
+    }
+
     pub(crate) fn insert(
         &mut self,
         point: ContactPoint,

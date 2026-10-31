@@ -17,6 +17,8 @@ mod manifold;
 pub(crate) mod mesh;
 #[allow(dead_code)]
 mod narrow_phase;
+#[allow(dead_code)]
+mod solver;
 pub(crate) mod spatial_index;
 mod step;
 #[allow(dead_code)]

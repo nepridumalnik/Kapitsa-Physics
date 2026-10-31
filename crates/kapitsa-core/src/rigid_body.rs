@@ -19,7 +19,7 @@ pub enum CcdMode {
 
 pub(crate) use integrator::predict;
 
-use kapitsa_math::{CholeskyError, Vec3};
+use kapitsa_math::{CholeskyError, Quat, Vec3};
 
 use crate::{mass::MassProperties, transform::Transform};
 
@@ -315,6 +315,65 @@ impl RigidBody {
         self.state.angular_velocity = next_angular_velocity;
         self.state.sleeping = false;
         Ok(())
+    }
+
+    pub(crate) fn apply_position_impulse(
+        &mut self,
+        impulse: Vec3,
+        point: Vec3,
+    ) -> Result<(), BodyError> {
+        if self.physics.body_type != BodyType::Dynamic {
+            return Ok(());
+        }
+        if !impulse.is_finite() || !point.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+        if impulse == Vec3::ZERO {
+            return Ok(());
+        }
+
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
+        let center = world_center_of_mass_for(self.state.transform, Some(mass))?
+            .ok_or(BodyError::BodyMustBeDynamic)?;
+        let angular_impulse = point
+            .checked_sub(center)
+            .and_then(|offset| offset.checked_cross(impulse))
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let rotation = self.state.transform.rotation();
+        let local_angular_impulse = rotation
+            .conjugate()
+            .rotate_vector(angular_impulse)
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let local_rotation_delta = solve_inertia(mass.inertia(), local_angular_impulse)?;
+        let rotation_delta = rotation
+            .rotate_vector(local_rotation_delta)
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let angle = rotation_delta
+            .checked_length()
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let rotation_delta = if angle > 0.0 {
+            Quat::from_axis_angle(rotation_delta / angle, angle)
+                .ok_or(BodyError::ArithmeticOverflow)?
+        } else {
+            Quat::IDENTITY
+        };
+        let next_rotation = (rotation_delta * rotation)
+            .try_normalize()
+            .filter(|rotation| rotation.is_normalized())
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_center = center
+            .checked_add(impulse / mass.mass())
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_translation = next_center
+            .checked_sub(
+                next_rotation
+                    .rotate_vector(mass.center_of_mass())
+                    .ok_or(BodyError::ArithmeticOverflow)?,
+            )
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_transform = Transform::new(next_translation, next_rotation)
+            .map_err(|_| BodyError::ArithmeticOverflow)?;
+        self.set_transform(next_transform)
     }
 }
 
