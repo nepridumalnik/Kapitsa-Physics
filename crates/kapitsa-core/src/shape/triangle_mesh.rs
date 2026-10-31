@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use glam::Vec3;
 
-use super::ShapeError;
+use super::{BoundsError, ShapeError};
 
 /// Triangulated surface in local coordinates; may be open or nonconvex.
 pub struct TriangleMesh {
@@ -51,11 +51,14 @@ impl TriangleMesh {
         &self.triangles
     }
 
-    pub fn local_bounds(&self) -> Option<Aabb> {
-        let (&first, rest) = self.vertices.split_first()?;
+    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+        let (&first, rest) = self
+            .vertices
+            .split_first()
+            .ok_or(BoundsError::InvalidGeometry)?;
         let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
             (min.min(vertex), max.max(vertex))
         });
-        Aabb::new(min, max).ok()
+        Aabb::new(min, max).map_err(BoundsError::InvalidBounds)
     }
 }

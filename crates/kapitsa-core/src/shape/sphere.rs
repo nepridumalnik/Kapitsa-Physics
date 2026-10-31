@@ -1,4 +1,4 @@
-use super::ShapeError;
+use super::{BoundsError, ShapeError};
 use crate::aabb::Aabb;
 use glam::Vec3;
 
@@ -23,8 +23,8 @@ impl Sphere {
         self.radius
     }
 
-    pub fn local_bounds(&self) -> Option<Aabb> {
+    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let extent = Vec3::splat(self.radius);
-        Aabb::new(-extent, extent).ok()
+        Aabb::new(-extent, extent).map_err(BoundsError::InvalidBounds)
     }
 }

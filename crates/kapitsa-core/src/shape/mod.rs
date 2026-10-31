@@ -54,28 +54,26 @@ pub enum Shape {
 }
 
 impl Shape {
-    /// Returns finite local-space bounds when they are available.
+    /// Computes finite local-space bounds when they are available.
     ///
-    /// `None` means that finite bounds are unavailable; it does not mean that
-    /// the shape has no collisions.
-    pub fn local_bounds(&self) -> Option<Aabb> {
+    /// `Ok(None)` means the shape has no finite AABB. `Err` reports a bounds
+    /// calculation error or a shape whose bounds are not implemented. In
+    /// particular, `NotImplemented` does not mean that the shape has no collisions.
+    pub fn local_bounds(&self) -> Result<Option<Aabb>, BoundsError> {
         match self {
-            Self::Sphere(shape) => shape.local_bounds(),
-            Self::Cuboid(shape) => shape.local_bounds(),
-            Self::Plane(_) => None,
-            Self::Capsule(shape) => shape.local_bounds(),
-            Self::Cylinder(shape) => shape.local_bounds(),
-            Self::TaperedCapsule(shape) => shape.local_bounds(),
-            Self::TaperedCylinder(shape) => shape.local_bounds(),
-            Self::Triangle(shape) => shape.local_bounds(),
-            Self::Convex(shape) => shape.local_bounds(),
-            Self::TriangleMesh(shape) => shape.local_bounds(),
-            Self::HeightField(shape) => shape.local_bounds(),
-            Self::LevelSet(shape) => shape.local_bounds(),
-            Self::SkinnedTriangleMesh(_) => {
-                // TODO: Compute bounds from the current skinned vertices after skinning exists.
-                None
-            }
+            Self::Sphere(shape) => shape.local_bounds().map(Some),
+            Self::Cuboid(shape) => shape.local_bounds().map(Some),
+            Self::Plane(_) => Ok(None),
+            Self::Capsule(shape) => shape.local_bounds().map(Some),
+            Self::Cylinder(shape) => shape.local_bounds().map(Some),
+            Self::TaperedCapsule(shape) => shape.local_bounds().map(Some),
+            Self::TaperedCylinder(shape) => shape.local_bounds().map(Some),
+            Self::Triangle(shape) => shape.local_bounds().map(Some),
+            Self::Convex(shape) => shape.local_bounds().map(Some),
+            Self::TriangleMesh(shape) => shape.local_bounds().map(Some),
+            Self::HeightField(shape) => shape.local_bounds().map(Some),
+            Self::LevelSet(shape) => shape.local_bounds().map(Some),
+            Self::SkinnedTriangleMesh(_) => Err(BoundsError::NotImplemented),
         }
     }
 }

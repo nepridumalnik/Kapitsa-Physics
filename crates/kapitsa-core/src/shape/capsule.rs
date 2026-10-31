@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use glam::Vec3;
 
-use super::ShapeError;
+use super::{BoundsError, ShapeError};
 
 /// Capsule swept along a segment in collider-local coordinates.
 pub struct Capsule {
@@ -42,13 +42,13 @@ impl Capsule {
         self.radius
     }
 
-    pub fn local_bounds(&self) -> Option<Aabb> {
+    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let radius = Vec3::splat(self.radius);
 
         Aabb::new(
             self.start.min(self.end) - radius,
             self.start.max(self.end) + radius,
         )
-        .ok()
+        .map_err(BoundsError::InvalidBounds)
     }
 }

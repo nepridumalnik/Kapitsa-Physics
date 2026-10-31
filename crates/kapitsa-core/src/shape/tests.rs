@@ -1,12 +1,26 @@
-use crate::aabb::Aabb;
+use crate::aabb::{Aabb, AabbError};
 use glam::{Affine3A, Vec2, Vec3};
 use rstest::{fixture, rstest};
 
 use super::{
-    BoneInfluence, Capsule, Convex, Cuboid, Cylinder, HeightField, LevelSet, Plane, Shape,
-    ShapeError, SkinnedTriangleMesh, Sphere, TaperedCapsule, TaperedCylinder, Triangle,
+    BoneInfluence, BoundsError, Capsule, Convex, Cuboid, Cylinder, HeightField, LevelSet, Plane,
+    Shape, ShapeError, SkinnedTriangleMesh, Sphere, TaperedCapsule, TaperedCylinder, Triangle,
     TriangleMesh,
 };
+
+fn expected_aabb(min: Vec3, max: Vec3) -> Aabb {
+    Aabb::new(min, max).expect("valid test bounds")
+}
+
+#[test]
+fn bounds_error_exposes_nested_aabb_error_as_source() {
+    let error = BoundsError::InvalidBounds(AabbError::NonFiniteBounds);
+
+    assert_eq!(
+        std::error::Error::source(&error).and_then(|source| source.downcast_ref::<AabbError>()),
+        Some(&AabbError::NonFiniteBounds)
+    );
+}
 
 #[fixture]
 fn tetrahedron() -> (Vec<Vec3>, Vec<[usize; 3]>) {
@@ -505,7 +519,7 @@ fn sphere_local_bounds(#[case] radius: f32) {
     let sphere = Sphere::new(radius).expect("valid sphere");
     let extent = Vec3::splat(radius);
 
-    assert_eq!(sphere.local_bounds(), Aabb::new(-extent, extent).ok());
+    assert_eq!(sphere.local_bounds(), Ok(expected_aabb(-extent, extent)));
 }
 
 #[test]
@@ -514,7 +528,10 @@ fn cuboid_local_bounds() {
 
     assert_eq!(
         cuboid.local_bounds(),
-        Aabb::new(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0),).ok()
+        Ok(expected_aabb(
+            Vec3::new(-1.0, -2.0, -3.0),
+            Vec3::new(1.0, 2.0, 3.0),
+        ))
     );
 }
 
@@ -524,7 +541,7 @@ fn cuboid_local_bounds_with_maximum_size() {
 
     let half = Vec3::splat(f32::MAX * 0.5);
 
-    assert_eq!(cuboid.local_bounds(), Aabb::new(-half, half).ok());
+    assert_eq!(cuboid.local_bounds(), Ok(expected_aabb(-half, half)));
 }
 
 #[test]
@@ -534,7 +551,10 @@ fn capsule_local_bounds() {
 
     assert_eq!(
         capsule.local_bounds(),
-        Aabb::new(Vec3::new(-4.5, -2.5, -6.5), Vec3::new(1.5, 5.5, 3.5),).ok()
+        Ok(expected_aabb(
+            Vec3::new(-4.5, -2.5, -6.5),
+            Vec3::new(1.5, 5.5, 3.5),
+        ))
     );
 }
 
@@ -547,7 +567,10 @@ fn capsule_local_bounds_rejects_overflow() {
     )
     .expect("valid capsule");
 
-    assert!(capsule.local_bounds().is_none());
+    assert_eq!(
+        capsule.local_bounds(),
+        Err(BoundsError::InvalidBounds(AabbError::NonFiniteBounds))
+    );
 }
 
 #[rstest]
@@ -571,7 +594,7 @@ fn cylinder_local_bounds(
 ) {
     let cylinder = Cylinder::new(start, end, 0.5).expect("valid cylinder");
 
-    assert_eq!(cylinder.local_bounds(), Aabb::new(min, max).ok());
+    assert_eq!(cylinder.local_bounds(), Ok(expected_aabb(min, max)));
 }
 
 #[rstest]
@@ -602,7 +625,7 @@ fn tapered_capsule_local_bounds(
     let capsule =
         TaperedCapsule::new(start, end, start_radius, end_radius).expect("valid tapered capsule");
 
-    assert_eq!(capsule.local_bounds(), Aabb::new(min, max).ok());
+    assert_eq!(capsule.local_bounds(), Ok(expected_aabb(min, max)));
 }
 
 #[rstest]
@@ -633,7 +656,7 @@ fn tapered_cylinder_local_bounds(
     let cylinder =
         TaperedCylinder::new(start, end, start_radius, end_radius).expect("valid tapered cylinder");
 
-    assert_eq!(cylinder.local_bounds(), Aabb::new(min, max).ok());
+    assert_eq!(cylinder.local_bounds(), Ok(expected_aabb(min, max)));
 }
 
 #[rstest]
@@ -642,15 +665,24 @@ fn cylindrical_local_bounds_reject_overflow() {
     let end = Vec3::new(f32::MAX, 0.0, 1.0);
 
     let cylinder = Cylinder::new(start, end, f32::MAX).expect("valid cylinder");
-    assert!(cylinder.local_bounds().is_none());
+    assert_eq!(
+        cylinder.local_bounds(),
+        Err(BoundsError::InvalidBounds(AabbError::NonFiniteBounds))
+    );
 
     let tapered_capsule =
         TaperedCapsule::new(start, end, f32::MAX, f32::MAX).expect("valid tapered capsule");
-    assert!(tapered_capsule.local_bounds().is_none());
+    assert_eq!(
+        tapered_capsule.local_bounds(),
+        Err(BoundsError::InvalidBounds(AabbError::NonFiniteBounds))
+    );
 
     let tapered_cylinder =
         TaperedCylinder::new(start, end, f32::MAX, f32::MAX).expect("valid tapered cylinder");
-    assert!(tapered_cylinder.local_bounds().is_none());
+    assert_eq!(
+        tapered_cylinder.local_bounds(),
+        Err(BoundsError::InvalidBounds(AabbError::NonFiniteBounds))
+    );
 }
 
 #[rstest]
@@ -675,7 +707,7 @@ fn cylindrical_local_bounds_reject_overflow() {
 fn triangle_local_bounds(#[case] vertices: [Vec3; 3], #[case] min: Vec3, #[case] max: Vec3) {
     let triangle = Triangle::from_vertices(vertices).expect("valid triangle");
 
-    assert_eq!(triangle.local_bounds(), Aabb::new(min, max).ok());
+    assert_eq!(triangle.local_bounds(), Ok(expected_aabb(min, max)));
 }
 
 #[rstest]
@@ -692,7 +724,10 @@ fn convex_local_bounds_cover_all_vertices() {
 
     assert_eq!(
         convex.local_bounds(),
-        Aabb::new(Vec3::new(-3.0, -4.0, -5.0), Vec3::splat(-1.0)).ok()
+        Ok(expected_aabb(
+            Vec3::new(-3.0, -4.0, -5.0),
+            Vec3::splat(-1.0),
+        ))
     );
 }
 
@@ -713,7 +748,10 @@ fn triangle_mesh_local_bounds_include_unindexed_vertices() {
 
     assert_eq!(
         mesh.local_bounds(),
-        Aabb::new(Vec3::new(-4.0, -3.0, -2.0), Vec3::new(9.0, 8.0, 15.0)).ok()
+        Ok(expected_aabb(
+            Vec3::new(-4.0, -3.0, -2.0),
+            Vec3::new(9.0, 8.0, 15.0),
+        ))
     );
 }
 
@@ -725,7 +763,10 @@ fn height_field_local_bounds_use_grid_extent_and_height_range() {
 
     assert_eq!(
         height_field.local_bounds(),
-        Aabb::new(Vec3::new(0.0, 0.0, -4.0), Vec3::new(2.0, 1.0, 6.0)).ok()
+        Ok(expected_aabb(
+            Vec3::new(0.0, 0.0, -4.0),
+            Vec3::new(2.0, 1.0, 6.0),
+        ))
     );
 }
 
@@ -741,7 +782,10 @@ fn level_set_local_bounds_cover_only_grid_nodes() {
 
     assert_eq!(
         level_set.local_bounds(),
-        Aabb::new(Vec3::new(-3.0, 2.0, -5.0), Vec3::new(-2.0, 4.0, 4.0)).ok()
+        Ok(expected_aabb(
+            Vec3::new(-3.0, 2.0, -5.0),
+            Vec3::new(-2.0, 4.0, 4.0),
+        ))
     );
 }
 
@@ -809,7 +853,7 @@ fn shape_local_bounds_dispatches_to_finite_shapes(
     ];
 
     for (shape, min, max) in shapes {
-        assert_eq!(shape.local_bounds(), Aabb::new(min, max).ok());
+        assert_eq!(shape.local_bounds(), Ok(Some(expected_aabb(min, max))));
     }
 }
 
@@ -817,7 +861,7 @@ fn shape_local_bounds_dispatches_to_finite_shapes(
 fn shape_local_bounds_returns_none_for_plane() {
     let plane = Plane::new(0.0, 1.0, 0.0, 0.0).expect("valid plane");
 
-    assert!(Shape::Plane(plane).local_bounds().is_none());
+    assert_eq!(Shape::Plane(plane).local_bounds(), Ok(None));
 }
 
 #[rstest]
@@ -834,10 +878,9 @@ fn shape_local_bounds_returns_none_for_skinned_mesh(
     )
     .expect("valid skinned mesh");
 
-    assert!(
-        Shape::SkinnedTriangleMesh(skinned_mesh)
-            .local_bounds()
-            .is_none()
+    assert_eq!(
+        Shape::SkinnedTriangleMesh(skinned_mesh).local_bounds(),
+        Err(BoundsError::NotImplemented)
     );
 }
 
@@ -847,5 +890,8 @@ fn shape_local_bounds_propagates_overflow() {
     let end = Vec3::new(f32::MAX, 0.0, 1.0);
     let cylinder = Cylinder::new(start, end, f32::MAX).expect("valid cylinder");
 
-    assert!(Shape::Cylinder(cylinder).local_bounds().is_none());
+    assert_eq!(
+        Shape::Cylinder(cylinder).local_bounds(),
+        Err(BoundsError::InvalidBounds(AabbError::NonFiniteBounds))
+    );
 }

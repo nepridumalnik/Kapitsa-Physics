@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use glam::Vec3;
 
-use super::ShapeError;
+use super::{BoundsError, ShapeError};
 
 /// Convex hull of two spheres at local-space endpoints.
 /// Neither sphere may fully contain the other.
@@ -64,13 +64,13 @@ impl TaperedCapsule {
         self.end_radius
     }
 
-    pub fn local_bounds(&self) -> Option<Aabb> {
+    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let start_radius = Vec3::splat(self.start_radius);
         let end_radius = Vec3::splat(self.end_radius);
         Aabb::new(
             (self.start - start_radius).min(self.end - end_radius),
             (self.start + start_radius).max(self.end + end_radius),
         )
-        .ok()
+        .map_err(BoundsError::InvalidBounds)
     }
 }

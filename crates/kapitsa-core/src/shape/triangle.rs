@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use glam::Vec3;
 
-use super::ShapeError;
+use super::{BoundsError, ShapeError};
 
 /// Nondegenerate triangle in collider-local coordinates.
 pub struct Triangle {
@@ -35,11 +35,10 @@ impl Triangle {
         self.vertices
     }
 
-    pub fn local_bounds(&self) -> Option<Aabb> {
-        let (&first, rest) = self.vertices.split_first()?;
-        let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
-            (min.min(vertex), max.max(vertex))
-        });
-        Aabb::new(min, max).ok()
+    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+        let [first, second, third] = self.vertices;
+        let min = first.min(second).min(third);
+        let max = first.max(second).max(third);
+        Aabb::new(min, max).map_err(BoundsError::InvalidBounds)
     }
 }
