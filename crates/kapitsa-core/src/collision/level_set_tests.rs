@@ -1,6 +1,6 @@
 use crate::{
     aabb::Aabb,
-    collision::level_set::{query_surface_cells, query_world_cells, sample},
+    collision::level_set::{cell_lipschitz_bound, query_surface_cells, query_world_cells, sample},
     shape::LevelSet,
     transform::Transform,
 };
@@ -29,6 +29,12 @@ fn interpolation_and_gradient_use_grid_spacing() {
     assert_eq!(sample.value, -1.0);
     assert_eq!(sample.gradient, Vec3::X);
     assert_eq!(sample.normal, Some(Vec3::X));
+}
+
+#[test]
+fn cell_lipschitz_bound_covers_trilinear_gradient() {
+    let field = plane_field();
+    assert!((cell_lipschitz_bound(&field, 0).unwrap() - 1.0).abs() < 1.0e-12);
 }
 
 #[test]

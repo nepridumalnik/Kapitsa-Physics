@@ -148,6 +148,99 @@ pub(crate) fn query_world_cells(
     query_surface_cells(level_set, local_bounds, output)
 }
 
+pub(crate) fn cell_lipschitz_bound(
+    level_set: &LevelSet,
+    index: u64,
+) -> Result<f64, CollisionError> {
+    let dimensions = level_set.dimensions();
+    let columns = dimensions[0] - 1;
+    let rows = dimensions[1] - 1;
+    let cells_per_plane = columns
+        .checked_mul(rows)
+        .ok_or(CollisionError::GeometryBounds)?;
+    let index = usize::try_from(index).map_err(|_| CollisionError::GeometryBounds)?;
+    let z = index / cells_per_plane;
+    let in_plane = index % cells_per_plane;
+    let y = in_plane / columns;
+    let x = in_plane % columns;
+    if z >= dimensions[2] - 1 {
+        return Err(CollisionError::GeometryBounds);
+    }
+
+    let dx = [
+        checked_difference(
+            value_at(level_set, x + 1, y, z)?,
+            value_at(level_set, x, y, z)?,
+        )?,
+        checked_difference(
+            value_at(level_set, x + 1, y + 1, z)?,
+            value_at(level_set, x, y + 1, z)?,
+        )?,
+        checked_difference(
+            value_at(level_set, x + 1, y, z + 1)?,
+            value_at(level_set, x, y, z + 1)?,
+        )?,
+        checked_difference(
+            value_at(level_set, x + 1, y + 1, z + 1)?,
+            value_at(level_set, x, y + 1, z + 1)?,
+        )?,
+    ];
+    let dy = [
+        checked_difference(
+            value_at(level_set, x, y + 1, z)?,
+            value_at(level_set, x, y, z)?,
+        )?,
+        checked_difference(
+            value_at(level_set, x + 1, y + 1, z)?,
+            value_at(level_set, x + 1, y, z)?,
+        )?,
+        checked_difference(
+            value_at(level_set, x, y + 1, z + 1)?,
+            value_at(level_set, x, y, z + 1)?,
+        )?,
+        checked_difference(
+            value_at(level_set, x + 1, y + 1, z + 1)?,
+            value_at(level_set, x + 1, y, z + 1)?,
+        )?,
+    ];
+    let dz = [
+        checked_difference(
+            value_at(level_set, x, y, z + 1)?,
+            value_at(level_set, x, y, z)?,
+        )?,
+        checked_difference(
+            value_at(level_set, x + 1, y, z + 1)?,
+            value_at(level_set, x + 1, y, z)?,
+        )?,
+        checked_difference(
+            value_at(level_set, x, y + 1, z + 1)?,
+            value_at(level_set, x, y + 1, z)?,
+        )?,
+        checked_difference(
+            value_at(level_set, x + 1, y + 1, z + 1)?,
+            value_at(level_set, x + 1, y + 1, z)?,
+        )?,
+    ];
+    let spacing = level_set.grid_spacing();
+    let x_bound = dx
+        .iter()
+        .map(|value| value.abs() / spacing.x)
+        .fold(0.0, f64::max);
+    let y_bound = dy
+        .iter()
+        .map(|value| value.abs() / spacing.y)
+        .fold(0.0, f64::max);
+    let z_bound = dz
+        .iter()
+        .map(|value| value.abs() / spacing.z)
+        .fold(0.0, f64::max);
+    let bound = x_bound.hypot(y_bound).hypot(z_bound);
+    bound
+        .is_finite()
+        .then_some(bound)
+        .ok_or(CollisionError::ArithmeticOverflow)
+}
+
 fn locate_axis(
     point: f64,
     origin: f64,

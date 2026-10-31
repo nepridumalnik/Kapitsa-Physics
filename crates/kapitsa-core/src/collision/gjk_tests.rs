@@ -1,7 +1,7 @@
 use crate::{
     collision::{
         CollisionError,
-        gjk::{GjkResult, intersect},
+        gjk::{GjkResult, distance, intersect},
     },
     shape::{Cuboid, Shape, Sphere},
     transform::Transform,
@@ -31,6 +31,41 @@ fn gjk_detects_separated_and_overlapping_spheres() {
             ..
         })
     ));
+}
+
+#[test]
+fn gjk_distance_reports_witnesses_and_handles_intersection() {
+    let sphere = Shape::Sphere(Sphere::new(1.0).expect("sphere"));
+    let first = Transform::identity();
+    let separated =
+        Transform::new(Vec3::new(5.0, 0.0, 0.0), kapitsa_math::Quat::IDENTITY).expect("transform");
+    let result = distance(&sphere, &first, &sphere, &separated).expect("distance");
+    assert!(!result.intersects);
+    assert!((result.distance - 3.0).abs() < 1.0e-12);
+    assert!((result.normal - Vec3::X).length() < 1.0e-12);
+    assert!((result.point_a - Vec3::X).length() < 1.0e-12);
+    assert!((result.point_b - Vec3::new(4.0, 0.0, 0.0)).length() < 1.0e-12);
+
+    let overlapping =
+        Transform::new(Vec3::new(1.5, 0.0, 0.0), kapitsa_math::Quat::IDENTITY).expect("transform");
+    let result = distance(&sphere, &first, &sphere, &overlapping).expect("overlap");
+    assert!(result.intersects);
+    assert_eq!(result.distance, 0.0);
+}
+
+#[test]
+fn gjk_distance_tolerance_is_independent_of_world_translation() {
+    let sphere = Shape::Sphere(Sphere::new(1.0).expect("sphere"));
+    let first = Transform::new(Vec3::new(1.0e12, 0.0, 0.0), kapitsa_math::Quat::IDENTITY)
+        .expect("transform");
+    let second = Transform::new(
+        Vec3::new(1.0e12 + 5.0, 0.0, 0.0),
+        kapitsa_math::Quat::IDENTITY,
+    )
+    .expect("transform");
+    let result = distance(&sphere, &first, &sphere, &second).expect("distance");
+    assert!(!result.intersects);
+    assert!((result.distance - 3.0).abs() < 1.0e-3);
 }
 
 #[test]
