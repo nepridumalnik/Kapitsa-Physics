@@ -6,10 +6,11 @@ license.workspace = true
 
 [dependencies]
 kapitsa-core = { path = "../kapitsa-core" }
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
 kapitsa-math = { path = "../kapitsa-math" }
+tokio = { version = "1", features = ["test-util"] }
 
 [[bench]]
 name = "parallel_step"

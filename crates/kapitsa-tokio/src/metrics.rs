@@ -124,6 +124,14 @@ impl SimulationMetrics {
         self.overload_integral = overload_integral;
     }
 
+    pub(crate) fn set_state(&mut self, state: SimulationState) {
+        self.state = state;
+    }
+
+    pub(crate) fn set_simulation_time_debt(&mut self, debt: Duration) {
+        self.simulation_time_debt = debt;
+    }
+
     pub(crate) fn record_error(&mut self) {
         self.state = SimulationState::Error;
     }
@@ -223,6 +231,14 @@ impl MetricsCollector {
             step_budget,
             overload_integral,
         );
+    }
+
+    pub(crate) fn set_state(&mut self, state: SimulationState) {
+        self.snapshot.set_state(state);
+    }
+
+    pub(crate) fn set_simulation_time_debt(&mut self, debt: Duration) {
+        self.snapshot.set_simulation_time_debt(debt);
     }
 
     pub(crate) fn record_error(&mut self) {

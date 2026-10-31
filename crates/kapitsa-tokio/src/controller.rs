@@ -85,15 +85,23 @@ pub struct PhysicsController {
 impl PhysicsController {
     pub fn new(world: PhysicsWorld, config: SchedulerConfig) -> Result<Self, SchedulerError> {
         config.validate()?;
+        Ok(Self::with_config(world, config))
+    }
+
+    pub(crate) fn with_default_config(world: PhysicsWorld) -> Self {
+        Self::with_config(world, SchedulerConfig::default())
+    }
+
+    fn with_config(world: PhysicsWorld, config: SchedulerConfig) -> Self {
         let current_hz = config.target_hz;
         let active_workers = 1;
         let step_budget = config
             .step_duration(current_hz)
             .mul_f64(config.target_utilization);
-        let adaptive = AdaptiveScheduler::new(config.clone())?;
+        let adaptive = AdaptiveScheduler::with_valid_config(config.clone());
         let metrics =
             MetricsCollector::new(config.target_hz, current_hz, active_workers, step_budget);
-        Ok(Self {
+        Self {
             world: WorldState::Available(world),
             config,
             current_hz,
@@ -101,7 +109,7 @@ impl PhysicsController {
             worker_buffers: vec![Vec::new()],
             adaptive,
             metrics,
-        })
+        }
     }
 
     /// Borrows the world between calls to [`Self::step`].
@@ -196,8 +204,16 @@ impl PhysicsController {
         ))
     }
 
-    fn step_duration(&self) -> Duration {
+    pub(crate) fn step_duration(&self) -> Duration {
         self.config.step_duration(self.current_hz)
+    }
+
+    pub(crate) fn set_simulation_state(&mut self, state: crate::SimulationState) {
+        self.metrics.set_state(state);
+    }
+
+    pub(crate) fn set_simulation_time_debt(&mut self, debt: Duration) {
+        self.metrics.set_simulation_time_debt(debt);
     }
 
     fn start_step(&mut self, step_duration: Duration) -> Result<(), SchedulerError> {

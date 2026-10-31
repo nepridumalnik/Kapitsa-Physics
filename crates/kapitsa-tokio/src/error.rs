@@ -50,3 +50,46 @@ impl From<StepError> for SchedulerError {
         Self::PhysicsStep(error)
     }
 }
+
+/// Failure returned by the autonomous physics simulation lifecycle.
+#[derive(Debug)]
+pub enum SimulationError {
+    MissingRuntime,
+    WorldUnavailable,
+    TaskRequiresStop,
+    Scheduler(SchedulerError),
+    TaskFailed(String),
+}
+
+impl fmt::Display for SimulationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingRuntime => formatter
+                .write_str("starting a physics simulation requires an active Tokio runtime"),
+            Self::WorldUnavailable => formatter
+                .write_str("physics world is only accessible while the simulation is stopped"),
+            Self::TaskRequiresStop => {
+                formatter.write_str("stop the completed simulation task before restarting")
+            }
+            Self::Scheduler(error) => write!(formatter, "physics simulation failed: {error}"),
+            Self::TaskFailed(reason) => {
+                write!(formatter, "physics simulation task failed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SimulationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Scheduler(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<SchedulerError> for SimulationError {
+    fn from(error: SchedulerError) -> Self {
+        Self::Scheduler(error)
+    }
+}

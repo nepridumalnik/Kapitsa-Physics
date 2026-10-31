@@ -57,7 +57,11 @@ pub struct AdaptiveScheduler {
 impl AdaptiveScheduler {
     pub fn new(config: SchedulerConfig) -> Result<Self, SchedulerError> {
         config.validate()?;
-        Ok(Self {
+        Ok(Self::with_valid_config(config))
+    }
+
+    pub(crate) fn with_valid_config(config: SchedulerConfig) -> Self {
+        Self {
             current_hz: config.target_hz,
             active_workers: 1,
             overload_integral: 0.0,
@@ -69,7 +73,7 @@ impl AdaptiveScheduler {
             worker_probe: None,
             rejected_worker_increase: None,
             config,
-        })
+        }
     }
 
     pub fn current_hz(&self) -> u32 {
