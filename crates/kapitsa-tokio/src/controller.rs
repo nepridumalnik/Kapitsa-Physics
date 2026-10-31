@@ -1,5 +1,7 @@
 use std::{
+    collections::VecDeque,
     mem,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -16,9 +18,17 @@ type PrepareOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
 type CommitOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
 type SequentialOutput = (PhysicsWorld, Result<(), StepError>);
 
-struct WorkerOutput {
+const BUCKETS_PER_WORKER: usize = 4;
+const MIN_BUCKET_SIZE: usize = 128;
+
+struct BucketOutput {
+    index: usize,
     shard: Vec<BodyStep>,
     error: Option<StepError>,
+}
+
+struct WorkerOutput {
+    buckets: Vec<BucketOutput>,
 }
 
 enum StepWork {
@@ -32,6 +42,7 @@ enum StepWork {
         tasks: Vec<Option<JoinHandle<WorkerOutput>>>,
         results: Vec<Option<Result<WorkerOutput, String>>>,
         next_task: usize,
+        bucket_count: usize,
     },
     Committing {
         task: JoinHandle<CommitOutput>,
@@ -81,7 +92,7 @@ pub struct PhysicsController {
     config: SchedulerConfig,
     current_hz: u32,
     active_workers: usize,
-    worker_buffers: Vec<Vec<BodyStep>>,
+    bucket_buffers: Vec<Vec<BodyStep>>,
     adaptive: AdaptiveScheduler,
     metrics: MetricsCollector,
 }
@@ -110,7 +121,7 @@ impl PhysicsController {
             config,
             current_hz,
             active_workers,
-            worker_buffers: vec![Vec::new()],
+            bucket_buffers: vec![Vec::new()],
             adaptive,
             metrics,
         }
@@ -235,7 +246,8 @@ impl PhysicsController {
 
         let started = Instant::now();
         let step_budget = step_duration.mul_f64(self.config.target_utilization);
-        if self.active_workers == 1 {
+        let worker_count = self.active_workers.min(world.body_count()).max(1);
+        if worker_count == 1 {
             let task = tokio::task::spawn_blocking(move || {
                 let result = world.step(step_duration.as_secs_f64());
                 (world, result)
@@ -251,10 +263,15 @@ impl PhysicsController {
             return Ok(());
         }
 
-        let worker_count = self.active_workers.min(world.body_count()).max(1);
-        self.worker_buffers.resize_with(worker_count, Vec::new);
-        self.worker_buffers.truncate(worker_count);
-        let buffers = mem::take(&mut self.worker_buffers);
+        let max_buckets = worker_count.saturating_mul(BUCKETS_PER_WORKER);
+        let size_limited_buckets = world
+            .body_count()
+            .div_ceil(MIN_BUCKET_SIZE)
+            .max(worker_count);
+        let bucket_count = size_limited_buckets.min(max_buckets);
+        self.bucket_buffers.resize_with(bucket_count, Vec::new);
+        self.bucket_buffers.truncate(bucket_count);
+        let buffers = mem::take(&mut self.bucket_buffers);
         let task = tokio::task::spawn_blocking(move || {
             let mut buffers = buffers;
             let result = world.fill_step_shards(&mut buffers);
@@ -342,33 +359,50 @@ impl PhysicsController {
                     };
                     match completion {
                         Ok((world, buffers, Ok(()))) => {
-                            let tasks = buffers
-                                .into_iter()
-                                .map(|mut shard| {
-                                    let task = tokio::task::spawn_blocking(move || {
+                            let bucket_count = buffers.len();
+                            let worker_count = self.active_workers.min(bucket_count).max(1);
+                            let queue = Arc::new(Mutex::new(
+                                buffers.into_iter().enumerate().collect::<VecDeque<_>>(),
+                            ));
+                            let mut tasks = Vec::with_capacity(worker_count);
+                            for _ in 0..worker_count {
+                                let queue = Arc::clone(&queue);
+                                let dt = in_flight.step_duration.as_secs_f64();
+                                tasks.push(Some(tokio::task::spawn_blocking(move || {
+                                    let mut buckets = Vec::new();
+                                    loop {
+                                        let next = queue
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .pop_front();
+                                        let Some((index, mut shard)) = next else {
+                                            break;
+                                        };
                                         let mut error = None;
                                         for body in &mut shard {
-                                            if let Err(step_error) = body
-                                                .integrate(in_flight.step_duration.as_secs_f64())
-                                            {
+                                            if let Err(step_error) = body.integrate(dt) {
                                                 error = Some(step_error);
                                                 break;
                                             }
                                         }
-                                        WorkerOutput { shard, error }
-                                    });
-                                    Some(task)
-                                })
-                                .collect::<Vec<_>>();
-                            let result_count = tasks.len();
+                                        buckets.push(BucketOutput {
+                                            index,
+                                            shard,
+                                            error,
+                                        });
+                                    }
+                                    WorkerOutput { buckets }
+                                })));
+                            }
                             self.world = WorldState::InFlight(InFlightStep {
                                 world: Some(world),
                                 work: StepWork::Integrating {
                                     tasks,
                                     results: std::iter::repeat_with(|| None)
-                                        .take(result_count)
+                                        .take(worker_count)
                                         .collect(),
                                     next_task: 0,
+                                    bucket_count,
                                 },
                                 started: in_flight.started,
                                 task_wait_duration: in_flight.task_wait_duration,
@@ -429,6 +463,7 @@ impl PhysicsController {
                                     tasks,
                                     results,
                                     next_task,
+                                    ..
                                 },
                             ..
                         }) = &mut self.world
@@ -483,7 +518,12 @@ impl PhysicsController {
 
     fn start_commit_step(&mut self) -> Result<(), SchedulerError> {
         let in_flight = self.take_in_flight()?;
-        let StepWork::Integrating { results, .. } = in_flight.work else {
+        let StepWork::Integrating {
+            results,
+            bucket_count,
+            ..
+        } = in_flight.work
+        else {
             self.world = WorldState::Lost;
             return Err(SchedulerError::WorldLost);
         };
@@ -491,16 +531,34 @@ impl PhysicsController {
             self.world = WorldState::Lost;
             return Err(SchedulerError::WorldLost);
         };
-        let mut buffers = std::iter::repeat_with(Vec::new)
-            .take(results.len())
+        let mut buckets = std::iter::repeat_with(|| None)
+            .take(bucket_count)
             .collect::<Vec<_>>();
         let mut error = None;
-        for (index, result) in results.into_iter().enumerate() {
+        for result in results {
             match result {
                 Some(Ok(output)) => {
-                    buffers[index] = output.shard;
-                    if error.is_none() {
-                        error = output.error.map(SchedulerError::from);
+                    for bucket in output.buckets {
+                        match buckets.get_mut(bucket.index) {
+                            Some(slot) if slot.is_none() => *slot = Some(bucket.shard),
+                            Some(_) => {
+                                if error.is_none() {
+                                    error = Some(SchedulerError::BlockingTaskFailed(
+                                        "duplicate bucket result".to_owned(),
+                                    ));
+                                }
+                            }
+                            None => {
+                                if error.is_none() {
+                                    error = Some(SchedulerError::BlockingTaskFailed(
+                                        "bucket result index was out of range".to_owned(),
+                                    ));
+                                }
+                            }
+                        }
+                        if error.is_none() {
+                            error = bucket.error.map(SchedulerError::from);
+                        }
                     }
                 }
                 Some(Err(reason)) => {
@@ -517,6 +575,15 @@ impl PhysicsController {
                 }
             }
         }
+        if error.is_none() && buckets.iter().any(Option::is_none) {
+            error = Some(SchedulerError::BlockingTaskFailed(
+                "bucket result was missing".to_owned(),
+            ));
+        }
+        let buffers = buckets
+            .into_iter()
+            .map(Option::unwrap_or_default)
+            .collect::<Vec<_>>();
         if let Some(error) = error {
             self.restore_available(world, buffers);
             return Err(error);
@@ -550,7 +617,7 @@ impl PhysicsController {
 
     fn restore_available(&mut self, world: PhysicsWorld, buffers: Vec<Vec<BodyStep>>) {
         self.restore_world(world);
-        self.worker_buffers = buffers;
+        self.bucket_buffers = buffers;
     }
 
     fn restore_world(&mut self, world: PhysicsWorld) {
@@ -738,6 +805,38 @@ mod tests {
             {
                 assert_eq!(parallel_id, sequential_id);
                 assert_eq!(parallel_body, sequential_body);
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_buckets_preserve_body_order_and_results_across_reused_steps() {
+        let runtime = runtime();
+        let config = config(1);
+        let quantum = config.step_duration(config.target_hz);
+        let mut controller =
+            PhysicsController::new(dynamic_world(2_048), config.clone()).expect("controller");
+        controller
+            .set_active_workers(2)
+            .expect("two active workers");
+        let ids = controller
+            .world()
+            .expect("world available")
+            .bodies()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        let mut sequential = dynamic_world(2_048);
+
+        for _ in 0..3 {
+            runtime.block_on(controller.step()).expect("parallel step");
+            sequential
+                .step(quantum.as_secs_f64())
+                .expect("sequential step");
+            for id in &ids {
+                assert_eq!(
+                    controller.world().expect("world available").body(*id),
+                    sequential.body(*id)
+                );
             }
         }
     }
