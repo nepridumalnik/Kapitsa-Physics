@@ -235,7 +235,7 @@ fn swept_bounds_cover_all_intermediate_rotations() {
         Vec3::new(3.0, 0.0, 0.0),
         Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_2).expect("rotation"),
     );
-    let bounds = swept_bounds(&rod, start, end)
+    let bounds = swept_bounds(rod.local_bounds().expect("local bounds"), start, end)
         .expect("swept bounds")
         .expect("finite bounds");
     assert!(bounds.contains(Vec3::new(1.5, 1.5, 0.0)));

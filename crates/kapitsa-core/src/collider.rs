@@ -32,6 +32,7 @@ pub struct Collider {
 
 struct SkinPose {
     vertices: Vec<Vec3>,
+    bounds: Aabb,
     bvh: TriangleBvh,
 }
 
@@ -95,7 +96,8 @@ impl Collider {
     ) -> Result<Option<Aabb>, ColliderError> {
         let transform = parent_transform.compose(&self.local_transform)?;
         if let Some(pose) = &self.skin_pose {
-            return points_bounds(&pose.vertices)?
+            return pose
+                .bounds
                 .transformed(&transform)
                 .map(Some)
                 .map_err(|error| ColliderError::Bounds(BoundsError::from(error)));
@@ -105,6 +107,19 @@ impl Collider {
             .map_err(ColliderError::from)
     }
 
+    pub(crate) fn local_bounds(&self) -> Result<Option<Aabb>, CollisionError> {
+        if let Some(pose) = &self.skin_pose {
+            return Ok(Some(pose.bounds));
+        }
+        self.shape
+            .local_bounds()
+            .map_err(|_| CollisionError::GeometryBounds)
+    }
+
+    /// Sets the skin pose used for collision during subsequent physics steps.
+    ///
+    /// Physics treats each pose as fixed for the duration of a step. Changes
+    /// between steps are discrete; CCD does not interpolate unknown bone paths.
     pub(crate) fn set_skin_pose(&mut self, matrices: &[Affine3]) -> Result<(), CollisionError> {
         let Shape::SkinnedTriangleMesh(skinned_mesh) = &self.shape else {
             return Err(CollisionError::InvalidSkinPose);
@@ -147,15 +162,20 @@ impl Collider {
             }
             vertices.push(deformed);
         }
-        points_bounds(&vertices).map_err(|_| CollisionError::InvalidSkinPose)?;
+        let bounds = points_bounds(&vertices).map_err(|_| CollisionError::InvalidSkinPose)?;
 
         if let Some(pose) = &mut self.skin_pose {
             pose.bvh.refit_vertices(skinned_mesh.mesh(), &vertices)?;
             pose.vertices = vertices;
+            pose.bounds = bounds;
         } else {
             let mut bvh = TriangleBvh::build(skinned_mesh.mesh())?;
             bvh.refit_vertices(skinned_mesh.mesh(), &vertices)?;
-            self.skin_pose = Some(SkinPose { vertices, bvh });
+            self.skin_pose = Some(SkinPose {
+                vertices,
+                bounds,
+                bvh,
+            });
         }
         Ok(())
     }

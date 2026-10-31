@@ -783,8 +783,11 @@ fn ccd_swept_bounds_cover_offset_com_rotation_arcs() {
         end_time: 1.0,
         local_transform: Transform::identity(),
     };
-    let shape = Shape::Sphere(Sphere::new(0.1).expect("sphere"));
-    let bounds = super::swept_bounds_for_trajectory(&shape, &trajectory, end)
+    let collider = Collider::new(
+        Shape::Sphere(Sphere::new(0.1).expect("sphere")),
+        Transform::identity(),
+    );
+    let bounds = super::swept_bounds_for_trajectory(&collider, &trajectory, end)
         .expect("trajectory bounds")
         .expect("finite bounds");
     let arc_sample = trajectory
@@ -793,6 +796,89 @@ fn ccd_swept_bounds_cover_offset_com_rotation_arcs() {
 
     assert!(bounds.contains(arc_sample.translation()));
     assert!(bounds.contains(arc_sample.translation() + Vec3::Y * 0.1));
+}
+
+#[test]
+fn skinned_mesh_bounds_track_pose_for_static_and_kinematic_bodies() -> Result<(), WorldError> {
+    for body_type in [BodyType::Static, BodyType::Kinematic] {
+        let mut world = PhysicsWorld::new();
+        let mesh_body = match body_type {
+            BodyType::Static => RigidBody::new_static(Transform::identity()),
+            BodyType::Kinematic => RigidBody::new_kinematic(Transform::identity()),
+            BodyType::Dynamic => unreachable!(),
+        };
+        let mesh_body_id = world.add_body(mesh_body)?;
+        let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]])
+            .expect("valid mesh");
+        let influences = (0..3)
+            .map(|_| vec![crate::shape::BoneInfluence::new(0, 1.0).expect("valid influence")])
+            .collect();
+        let skinned_mesh = SkinnedTriangleMesh::new(
+            mesh,
+            vec![String::from("root")],
+            influences,
+            Affine3::IDENTITY,
+            vec![Affine3::IDENTITY],
+        )
+        .expect("valid skinned mesh");
+        let mesh_collider = world.add_collider(
+            mesh_body_id,
+            Collider::new(
+                Shape::SkinnedTriangleMesh(skinned_mesh),
+                Transform::identity(),
+            ),
+        )?;
+        let sphere_body = world.add_body(dynamic_body())?;
+        let sphere_collider = world.add_collider(sphere_body, collider(0.5))?;
+
+        for (pose_x, sphere_x) in [(10.0, 10.25), (20.0, 20.25)] {
+            world
+                .set_skin_pose(
+                    mesh_collider,
+                    &[Affine3::from_translation(Vec3::new(pose_x, 0.0, 0.0))],
+                )
+                .expect("valid skin pose");
+            let sphere = world.body_mut(sphere_body).expect("sphere body");
+            sphere
+                .set_transform(
+                    Transform::new(Vec3::new(sphere_x, 0.25, 0.4), kapitsa_math::Quat::IDENTITY)
+                        .expect("valid transform"),
+                )
+                .expect("valid transform");
+            sphere
+                .set_linear_velocity(Vec3::ZERO)
+                .expect("valid velocity");
+
+            world.step(1.0 / 60.0).expect("contact step");
+
+            let pair = crate::collision::CollisionPair::new(mesh_collider, sphere_collider)
+                .expect("distinct colliders");
+            assert!(
+                (0..world.collision_system.candidate_count())
+                    .filter_map(|index| world.collision_system.candidate(index))
+                    .any(|candidate| candidate == pair),
+                "broadphase missed the deformed mesh at x={pose_x} for {body_type:?}"
+            );
+            let event = world
+                .collision_events()
+                .iter()
+                .find(|event| event.pair == pair)
+                .expect("collision event");
+            assert!(event.contact.is_some(), "narrowphase missed deformed mesh");
+            assert!(
+                world
+                    .body(sphere_body)
+                    .expect("sphere body")
+                    .state()
+                    .transform()
+                    .translation()
+                    .z
+                    > 0.4,
+                "solver did not separate the dynamic sphere"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[test]

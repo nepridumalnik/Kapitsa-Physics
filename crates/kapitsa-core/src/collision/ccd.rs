@@ -750,14 +750,11 @@ fn relative_swept_bounds(
 
 /// Conservative bounds for a shape over any rotation between two poses.
 pub(crate) fn swept_bounds(
-    shape: &Shape,
+    bounds: Option<Aabb>,
     start: Transform,
     end: Transform,
 ) -> Result<Option<Aabb>, CollisionError> {
-    let Some(bounds) = shape
-        .local_bounds()
-        .map_err(|_| CollisionError::GeometryBounds)?
-    else {
+    let Some(bounds) = bounds else {
         return Ok(None);
     };
     let radius = bounds
@@ -785,16 +782,13 @@ pub(crate) fn swept_bounds(
 }
 
 pub(crate) fn swept_bounds_motion(
-    shape: &Shape,
+    bounds: Option<Aabb>,
     motion: &CcdMotion<'_>,
 ) -> Result<Option<Aabb>, CollisionError> {
     if motion.is_linear() {
-        return swept_bounds(shape, motion.start, motion.end);
+        return swept_bounds(bounds, motion.start, motion.end);
     }
-    let Some(bounds) = shape
-        .local_bounds()
-        .map_err(|_| CollisionError::GeometryBounds)?
-    else {
+    let Some(bounds) = bounds else {
         return Ok(None);
     };
     let radius = bounds_radius(bounds)?;

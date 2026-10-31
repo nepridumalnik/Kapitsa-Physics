@@ -120,10 +120,11 @@ impl ColliderTrajectory {
 }
 
 fn swept_bounds_for_trajectory(
-    shape: &crate::shape::Shape,
+    collider: &Collider,
     trajectory: &ColliderTrajectory,
     end: BodyState,
 ) -> Result<Option<crate::aabb::Aabb>, CollisionError> {
+    let local_bounds = collider.local_bounds()?;
     let start_transform = trajectory.transform_at(0.0)?;
     let end_transform = end
         .transform()
@@ -131,7 +132,7 @@ fn swept_bounds_for_trajectory(
         .map_err(|_| CollisionError::ArithmeticOverflow)?;
     if trajectory.has_linear_collider_origin(end) {
         let motion = CcdMotion::linear(start_transform, end_transform)?;
-        return crate::collision::swept_bounds_motion(shape, &motion);
+        return crate::collision::swept_bounds_motion(local_bounds, &motion);
     }
     let (translation_bound, rotation_bound, _) = trajectory.path_bounds(end)?;
     let sample = |amount| trajectory.transform_at(amount);
@@ -143,7 +144,7 @@ fn swept_bounds_for_trajectory(
         rotation_bound,
         &sample,
     )?;
-    crate::collision::swept_bounds_motion(shape, &motion)
+    crate::collision::swept_bounds_motion(local_bounds, &motion)
 }
 
 /// Owns rigid bodies and colliders and assigns IDs scoped to this world instance.
@@ -539,7 +540,7 @@ impl PhysicsWorld {
                         local_transform: collider_entry.collider.local_transform(),
                     };
                     swept_bounds_for_trajectory(
-                        collider_entry.collider.shape(),
+                        &collider_entry.collider,
                         &trajectory,
                         predicted_state,
                     )?
@@ -1109,11 +1110,7 @@ impl PhysicsWorld {
                     end_time: dt,
                     local_transform: collider_entry.collider.local_transform(),
                 };
-                swept_bounds_for_trajectory(
-                    collider_entry.collider.shape(),
-                    &trajectory,
-                    end_state,
-                )?
+                swept_bounds_for_trajectory(&collider_entry.collider, &trajectory, end_state)?
             };
             self.collision_system
                 .context
@@ -1802,6 +1799,9 @@ impl PhysicsWorld {
     }
 
     /// Updates the deformed local vertices for a skinned-mesh collider.
+    ///
+    /// The pose is fixed for each physics step. Changes between steps are
+    /// discrete, and CCD does not interpolate unknown bone trajectories.
     pub fn set_skin_pose(
         &mut self,
         id: ColliderId,

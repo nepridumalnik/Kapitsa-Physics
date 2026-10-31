@@ -355,6 +355,7 @@ fn skinned_pose_updates_bounds_and_keeps_the_last_valid_pose_on_error() {
     let moved = Affine3::from_translation(Vec3::new(4.0, 2.0, -1.0));
     collider.set_skin_pose(&[moved]).unwrap();
     let expected = Aabb::new(Vec3::new(4.0, 2.0, -1.0), Vec3::new(5.0, 3.0, -1.0)).unwrap();
+    assert_eq!(collider.local_bounds(), Ok(Some(expected)));
     assert_eq!(
         collider.world_bounds(&Transform::identity()),
         Ok(Some(expected))
