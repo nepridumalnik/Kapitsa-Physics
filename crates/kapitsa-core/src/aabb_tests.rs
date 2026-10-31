@@ -247,3 +247,36 @@ fn size_rejects_overflow() {
     let aabb = Aabb::new(Vec3::splat(-f32::MAX), Vec3::splat(f32::MAX)).expect("valid AABB");
     assert_eq!(aabb.size(), Err(AabbError::SizeOverflow));
 }
+
+#[test]
+fn rotated_zero_bounds_preserve_max_translation() {
+    let aabb = bounds(Vec3::ZERO, Vec3::ZERO);
+    let translation = Vec3::new(f32::MAX, 0.0, 0.0);
+
+    let transform = Transform::new(
+        translation,
+        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+    )
+    .expect("valid transform");
+
+    assert_eq!(
+        aabb.transformed(&transform),
+        Ok(bounds(translation, translation))
+    );
+}
+
+#[test]
+fn large_translation_does_not_excessively_expand_bounds() {
+    let aabb = bounds(Vec3::splat(-1.0), Vec3::ONE);
+
+    let transform = Transform::new(
+        Vec3::new(100_000_000.0, 0.0, 0.0),
+        Quat::from_rotation_z(0.37),
+    )
+    .expect("valid transform");
+
+    let result = aabb.transformed(&transform).expect("finite bounds");
+
+    assert!(result.min().x >= 99_999_992.0);
+    assert!(result.max().x <= 100_000_008.0);
+}

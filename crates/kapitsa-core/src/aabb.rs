@@ -136,7 +136,8 @@ impl Aabb {
             return Err(AabbError::TransformOverflow);
         }
 
-        if vector_part != DVec3::ZERO || quat.w.abs() != 1.0 {
+        let source_magnitude = center.abs() + half_extents;
+        if source_magnitude != DVec3::ZERO && (vector_part != DVec3::ZERO || quat.w.abs() != 1.0) {
             // Bound f32 rounding in the absolute quaternion terms, before cancellation.
             let source_magnitude = center.abs() + half_extents;
             let absolute_vector_part = vector_part.abs();
@@ -151,8 +152,7 @@ impl Aabb {
                 absolute_vector_part.x * source_magnitude.y
                     + absolute_vector_part.y * source_magnitude.x,
             ) * (2.0 * quat.w.abs());
-            let error_scale =
-                term_one_scale + term_two_scale + term_three_scale + translation.abs();
+            let error_scale = term_one_scale + term_two_scale + term_three_scale;
             let operation_count = 12.0;
             let epsilon = f64::from(f32::EPSILON);
             let relative_error = operation_count * epsilon / (1.0 - operation_count * epsilon);
