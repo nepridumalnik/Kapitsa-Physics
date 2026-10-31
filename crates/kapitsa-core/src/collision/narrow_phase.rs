@@ -208,7 +208,7 @@ impl NarrowPhase {
             (convex, Shape::LevelSet(field)) if convex.is_convex() => self.level_set_convex(
                 pair, field, collider_b, convex, collider_a, body_a, body_b, false,
             ),
-            (Shape::Triangle(triangle), convex) if convex.is_convex() => Self::triangle_convex(
+            (Shape::Triangle(triangle), convex) if convex.is_convex() => self.triangle_convex(
                 pair,
                 triangle,
                 collider_a,
@@ -219,7 +219,7 @@ impl NarrowPhase {
                 true,
                 contact_offset,
             ),
-            (convex, Shape::Triangle(triangle)) if convex.is_convex() => Self::triangle_convex(
+            (convex, Shape::Triangle(triangle)) if convex.is_convex() => self.triangle_convex(
                 pair,
                 triangle,
                 collider_b,
@@ -462,6 +462,7 @@ impl NarrowPhase {
 
     #[allow(clippy::too_many_arguments)]
     fn triangle_convex(
+        &mut self,
         pair: CollisionPair,
         triangle: &Triangle,
         triangle_transform: &Transform,
@@ -489,22 +490,103 @@ impl NarrowPhase {
             .and_then(Vec3::try_normalize)
             .ok_or(CollisionError::InvalidContact)?;
         let center = shape_center(convex, convex_transform)?;
-        let closest = closest_point_on_triangle(center, vertices)?;
-        let radial = center
-            .checked_sub(closest)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
-        let normal_triangle_to_convex = radial.try_normalize().unwrap_or(face_normal);
-        let (convex_point, convex_feature) =
-            support_world(convex, convex_transform, -normal_triangle_to_convex)?;
-        let triangle_point = closest_point_on_triangle(convex_point, vertices)?;
-        let separation = convex_point
-            .checked_sub(triangle_point)
-            .and_then(|delta| delta.checked_dot(normal_triangle_to_convex))
-            .ok_or(CollisionError::ArithmeticOverflow)?;
-        if separation > contact_offset {
-            return Ok(None);
-        }
-        let penetration = (-separation).max(0.0);
+        let normal_for_side = triangle_normal_for_side(center, vertices[0], face_normal)?;
+        let (
+            triangle_point,
+            convex_point,
+            normal_triangle_to_convex,
+            penetration,
+            triangle_feature,
+            convex_feature,
+        ) = if let Shape::Sphere(sphere) = convex {
+            let triangle_point = closest_point_on_triangle(center, vertices)?;
+            let radial = center
+                .checked_sub(triangle_point)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let distance = radial
+                .checked_length()
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let separation = distance - sphere.radius();
+            if separation > contact_offset {
+                return Ok(None);
+            }
+            let normal = radial.try_normalize().unwrap_or(normal_for_side);
+            let convex_point = center
+                .checked_sub(
+                    normal
+                        .checked_mul_scalar(sphere.radius())
+                        .ok_or(CollisionError::ArithmeticOverflow)?,
+                )
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            (
+                triangle_point,
+                convex_point,
+                normal,
+                (-separation).max(0.0),
+                0,
+                0,
+            )
+        } else {
+            let triangle_shape = Shape::Triangle(
+                Triangle::from_vertices(triangle.vertices())
+                    .map_err(|_| CollisionError::InvalidContact)?,
+            );
+            let distance = gjk::distance(
+                &triangle_shape,
+                triangle_transform,
+                convex,
+                convex_transform,
+            )?;
+            if distance.distance > contact_offset {
+                return Ok(None);
+            }
+            if distance.intersects {
+                let intersection = gjk::intersect(
+                    &triangle_shape,
+                    triangle_transform,
+                    convex,
+                    convex_transform,
+                )?;
+                if intersection.intersects && simplex_has_resolvable_volume(&intersection.simplex)?
+                {
+                    let contact = self.epa.solve(
+                        &intersection.simplex,
+                        &triangle_shape,
+                        triangle_transform,
+                        convex,
+                        convex_transform,
+                    )?;
+                    (
+                        contact.point_a,
+                        contact.point_b,
+                        contact.normal,
+                        contact.penetration,
+                        contact.feature_a,
+                        contact.feature_b,
+                    )
+                } else {
+                    // The GJK witnesses prove an exact or tolerance-level contact.
+                    // A lower-dimensional simplex does not prove penetration depth.
+                    (
+                        distance.point_a,
+                        distance.point_b,
+                        normal_for_side,
+                        0.0,
+                        0,
+                        0,
+                    )
+                }
+            } else {
+                (
+                    distance.point_a,
+                    distance.point_b,
+                    distance.normal,
+                    0.0,
+                    0,
+                    0,
+                )
+            }
+        };
         let (point_a, point_b, normal, body_transform_a, body_transform_b, feature_id) =
             if triangle_is_a {
                 (
@@ -513,7 +595,7 @@ impl NarrowPhase {
                     normal_triangle_to_convex,
                     body_a,
                     body_b,
-                    combine_feature_ids(0, convex_feature),
+                    combine_feature_ids(triangle_feature, convex_feature),
                 )
             } else {
                 (
@@ -522,7 +604,7 @@ impl NarrowPhase {
                     -normal_triangle_to_convex,
                     body_a,
                     body_b,
-                    combine_feature_ids(convex_feature, 0),
+                    combine_feature_ids(convex_feature, triangle_feature),
                 )
             };
         make_manifold(
@@ -565,7 +647,8 @@ impl NarrowPhase {
             &mut self.mesh_candidates,
         )?;
         let mut manifold = None;
-        for triangle_index in self.mesh_candidates.iter().copied() {
+        for candidate_index in 0..self.mesh_candidates.len() {
+            let triangle_index = self.mesh_candidates[candidate_index];
             let [a, b, c] = *mesh
                 .triangles()
                 .get(triangle_index)
@@ -576,7 +659,7 @@ impl NarrowPhase {
                 *vertices.get(c).ok_or(CollisionError::GeometryBounds)?,
             ])
             .map_err(|_| CollisionError::InvalidContact)?;
-            let Some(contact) = Self::triangle_convex(
+            let Some(contact) = self.triangle_convex(
                 pair,
                 &triangle,
                 mesh_transform,
@@ -618,10 +701,11 @@ impl NarrowPhase {
             &mut self.height_field_candidates,
         )?;
         let mut manifold = None;
-        for candidate in self.height_field_candidates.iter().copied() {
+        for candidate_index in 0..self.height_field_candidates.len() {
+            let candidate = self.height_field_candidates[candidate_index];
             let triangle = Triangle::from_vertices(candidate.vertices)
                 .map_err(|_| CollisionError::InvalidContact)?;
-            let Some(contact) = Self::triangle_convex(
+            let Some(contact) = self.triangle_convex(
                 pair,
                 &triangle,
                 field_transform,
@@ -1146,6 +1230,62 @@ fn closest_point_on_triangle(point: Vec3, vertices: [Vec3; 3]) -> Result<Vec3, C
         .is_finite()
         .then_some(result)
         .ok_or(CollisionError::ArithmeticOverflow)
+}
+
+fn triangle_normal_for_side(
+    center: Vec3,
+    vertex: Vec3,
+    normal: Vec3,
+) -> Result<Vec3, CollisionError> {
+    let signed_distance = center
+        .checked_sub(vertex)
+        .and_then(|offset| offset.checked_dot(normal))
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    Ok(if signed_distance < 0.0 {
+        -normal
+    } else {
+        normal
+    })
+}
+
+fn simplex_has_resolvable_volume(simplex: &gjk::Simplex) -> Result<bool, CollisionError> {
+    if simplex.count != 4 {
+        return Ok(false);
+    }
+    let a = simplex.points[0].difference;
+    let ab = simplex.points[1]
+        .difference
+        .checked_sub(a)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let ac = simplex.points[2]
+        .difference
+        .checked_sub(a)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let ad = simplex.points[3]
+        .difference
+        .checked_sub(a)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let scale = ab
+        .abs()
+        .max_element()
+        .max(ac.abs().max_element())
+        .max(ad.abs().max_element());
+    if !scale.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    if scale == 0.0 {
+        return Ok(false);
+    }
+    let normalize = |vector: Vec3| Vec3::new(vector.x / scale, vector.y / scale, vector.z / scale);
+    let relative_volume = normalize(ab)
+        .checked_dot(
+            normalize(ac)
+                .checked_cross(normalize(ad))
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?
+        .abs();
+    Ok(relative_volume.is_finite() && relative_volume > f64::EPSILON * 128.0)
 }
 
 fn interpolate(origin: Vec3, edge: Vec3, amount: f64) -> Result<Vec3, CollisionError> {

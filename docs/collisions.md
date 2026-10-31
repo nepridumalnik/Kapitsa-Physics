@@ -110,6 +110,13 @@ persistent manifolds with feature IDs; contact impulses are cached for warm
 starting. Dynamic bodies connected by contacts are grouped into deterministically
 ordered islands.
 
+Triangles are finite, zero-thickness, two-sided surfaces. Sphere contacts use
+the closest point on the finite triangle; other convex contacts use GJK distance
+and EPA for a full-dimensional overlap. A lower-dimensional GJK contact has zero
+reported penetration because it does not establish a penetration depth. The
+configured contact offset permits proximity contacts but does not give a triangle
+physical thickness.
+
 ## Bodies, colliders, and materials
 
 `RigidBody` can be Static, Kinematic, or Dynamic. A collider has a local
