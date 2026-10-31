@@ -14,6 +14,7 @@ use crate::{
 
 type PrepareOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
 type CommitOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
+type SequentialOutput = (PhysicsWorld, Result<(), StepError>);
 
 struct WorkerOutput {
     shard: Vec<BodyStep>,
@@ -21,6 +22,9 @@ struct WorkerOutput {
 }
 
 enum StepWork {
+    Sequential {
+        task: JoinHandle<SequentialOutput>,
+    },
     Preparing {
         task: JoinHandle<PrepareOutput>,
     },
@@ -217,7 +221,7 @@ impl PhysicsController {
     }
 
     fn start_step(&mut self, step_duration: Duration) -> Result<(), SchedulerError> {
-        let world = match mem::replace(&mut self.world, WorldState::Lost) {
+        let mut world = match mem::replace(&mut self.world, WorldState::Lost) {
             WorldState::Available(world) => world,
             state @ WorldState::InFlight(_) => {
                 self.world = state;
@@ -229,12 +233,28 @@ impl PhysicsController {
             }
         };
 
+        let started = Instant::now();
+        let step_budget = step_duration.mul_f64(self.config.target_utilization);
+        if self.active_workers == 1 {
+            let task = tokio::task::spawn_blocking(move || {
+                let result = world.step(step_duration.as_secs_f64());
+                (world, result)
+            });
+            self.world = WorldState::InFlight(InFlightStep {
+                world: None,
+                work: StepWork::Sequential { task },
+                started,
+                task_wait_duration: Duration::ZERO,
+                step_duration,
+                step_budget,
+            });
+            return Ok(());
+        }
+
         let worker_count = self.active_workers.min(world.body_count()).max(1);
         self.worker_buffers.resize_with(worker_count, Vec::new);
         self.worker_buffers.truncate(worker_count);
         let buffers = mem::take(&mut self.worker_buffers);
-        let started = Instant::now();
-        let step_budget = step_duration.mul_f64(self.config.target_utilization);
         let task = tokio::task::spawn_blocking(move || {
             let mut buffers = buffers;
             let result = world.fill_step_shards(&mut buffers);
@@ -256,15 +276,53 @@ impl PhysicsController {
             let phase = match &self.world {
                 WorldState::Available(_) => return Err(SchedulerError::WorldUnavailable),
                 WorldState::InFlight(in_flight) => match in_flight.work {
-                    StepWork::Preparing { .. } => 0,
-                    StepWork::Integrating { .. } => 1,
-                    StepWork::Committing { .. } => 2,
+                    StepWork::Sequential { .. } => 0,
+                    StepWork::Preparing { .. } => 1,
+                    StepWork::Integrating { .. } => 2,
+                    StepWork::Committing { .. } => 3,
                 },
                 WorldState::Lost => return Err(SchedulerError::WorldLost),
             };
 
             match phase {
-                0 => {
+                0 => match &mut self.world {
+                    WorldState::InFlight(InFlightStep {
+                        work: StepWork::Sequential { task },
+                        task_wait_duration,
+                        ..
+                    }) => {
+                        let completion = wait_for_task(task, task_wait_duration).await;
+                        let in_flight = self.take_in_flight()?;
+                        let StepWork::Sequential { .. } = in_flight.work else {
+                            self.world = WorldState::Lost;
+                            return Err(SchedulerError::WorldLost);
+                        };
+                        match completion {
+                            Ok((world, Ok(()))) => {
+                                self.restore_world(world);
+                                return Ok(StepMeasurement {
+                                    step_duration: in_flight.started.elapsed(),
+                                    task_wait_duration: in_flight.task_wait_duration,
+                                    step_budget: in_flight.step_budget,
+                                    deadline: in_flight.step_duration,
+                                });
+                            }
+                            Ok((world, Err(error))) => {
+                                self.restore_world(world);
+                                return Err(SchedulerError::from(error));
+                            }
+                            Err(error) => {
+                                self.world = WorldState::Lost;
+                                self.update_metrics_state();
+                                return Err(SchedulerError::BlockingTaskFailed(error.to_string()));
+                            }
+                        }
+                    }
+                    WorldState::Available(_) => return Err(SchedulerError::WorldUnavailable),
+                    WorldState::InFlight(_) => continue,
+                    WorldState::Lost => return Err(SchedulerError::WorldLost),
+                },
+                1 => {
                     let completion = match &mut self.world {
                         WorldState::InFlight(InFlightStep {
                             work: StepWork::Preparing { task },
@@ -329,7 +387,7 @@ impl PhysicsController {
                         }
                     }
                 }
-                1 => {
+                2 => {
                     let task_index = match &self.world {
                         WorldState::InFlight(InFlightStep {
                             work:
@@ -491,8 +549,12 @@ impl PhysicsController {
     }
 
     fn restore_available(&mut self, world: PhysicsWorld, buffers: Vec<Vec<BodyStep>>) {
-        self.world = WorldState::Available(world);
+        self.restore_world(world);
         self.worker_buffers = buffers;
+    }
+
+    fn restore_world(&mut self, world: PhysicsWorld) {
+        self.world = WorldState::Available(world);
         self.update_metrics_state();
     }
 

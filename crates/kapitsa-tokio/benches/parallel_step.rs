@@ -11,46 +11,46 @@ use kapitsa_math::{Mat3, Vec3};
 use kapitsa_tokio::{PhysicsController, SchedulerConfig};
 use tokio::runtime::Builder;
 
-const BODY_COUNT: usize = 20_000;
-const STEPS: usize = 24;
+const BODY_COUNTS: [(&str, usize); 3] = [("small", 256), ("medium", 4_096), ("large", 20_000)];
+const STEPS: usize = 12;
 const SAMPLES: usize = 5;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let runtime = Builder::new_current_thread().build()?;
-    let mut config = SchedulerConfig {
-        max_workers: 4,
-        max_catch_up_steps: 1,
-        adaptive: false,
-        ..SchedulerConfig::default()
-    };
-    let quantum = Duration::from_secs_f64(1.0 / f64::from(config.target_hz));
+    println!("kapitsa integration benchmark; steps={STEPS}, samples={SAMPLES}, statistic=median");
 
-    println!("kapitsa integration benchmark");
-    println!("bodies={BODY_COUNT}, steps={STEPS}, samples={SAMPLES}, statistic=median");
-
-    let sequential = sample(SAMPLES, || {
-        let mut world = make_world(BODY_COUNT)?;
-        let started = Instant::now();
-        for _ in 0..STEPS {
-            world.step(quantum.as_secs_f64())?;
-        }
-        Ok(started.elapsed())
-    })?;
-    report("sequential", sequential, sequential);
-
-    for workers in [1, 2, 4] {
-        config.max_workers = workers;
-        let parallel = sample(SAMPLES, || {
-            let world = make_world(BODY_COUNT)?;
-            let mut controller = PhysicsController::new(world, config.clone())?;
-            controller.set_active_workers(workers)?;
+    for (size, body_count) in BODY_COUNTS {
+        let sequential = sample(SAMPLES, || {
+            let mut world = make_world(body_count)?;
+            let quantum = Duration::from_secs_f64(1.0 / 60.0).as_secs_f64();
             let started = Instant::now();
             for _ in 0..STEPS {
-                runtime.block_on(controller.step())?;
+                world.step(quantum)?;
             }
             Ok(started.elapsed())
         })?;
-        report(&format!("Tokio {workers} worker(s)"), parallel, sequential);
+        println!("\n{size} world: {body_count} bodies");
+        report("PhysicsWorld::step", sequential, sequential);
+
+        for workers in [1, 2] {
+            let config = SchedulerConfig {
+                max_workers: workers,
+                max_catch_up_steps: 1,
+                adaptive: false,
+                ..SchedulerConfig::default()
+            };
+            let scheduled = sample(SAMPLES, || {
+                let world = make_world(body_count)?;
+                let mut controller = PhysicsController::new(world, config.clone())?;
+                controller.set_active_workers(workers)?;
+                let started = Instant::now();
+                for _ in 0..STEPS {
+                    runtime.block_on(controller.step())?;
+                }
+                Ok(started.elapsed())
+            })?;
+            report(&format!("Tokio {workers} worker(s)"), scheduled, sequential);
+        }
     }
     Ok(())
 }
