@@ -2,6 +2,7 @@ mod config;
 mod contact;
 mod error;
 mod event;
+pub(crate) mod spatial_index;
 mod step;
 mod system;
 

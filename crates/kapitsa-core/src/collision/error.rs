@@ -11,6 +11,8 @@ pub enum CollisionError {
     NonConvergent,
     CcdLimitExceeded,
     ArithmeticOverflow,
+    SpatialIndexCapacityExceeded,
+    GeometryBounds,
     InvalidContact,
 }
 
@@ -25,6 +27,8 @@ impl fmt::Display for CollisionError {
             Self::NonConvergent => "collision calculation did not converge",
             Self::CcdLimitExceeded => "continuous collision impact limit was exceeded",
             Self::ArithmeticOverflow => "collision calculation exceeds the supported range",
+            Self::SpatialIndexCapacityExceeded => "spatial index capacity could not be reserved",
+            Self::GeometryBounds => "collision geometry bounds could not be computed",
             Self::InvalidContact => "collision calculation produced an invalid contact",
         };
         formatter.write_str(message)

@@ -139,6 +139,7 @@ impl PhysicsWorld {
             .get_mut(id.dense)
             .ok_or(WorldError::InvalidColliderId)?;
         entry.collider.set_material(material);
+        self.collision_system.mark_spatial_dirty();
         Ok(())
     }
 
@@ -170,6 +171,7 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return None;
         }
+        self.collision_system.mark_spatial_dirty();
         self.bodies.get_mut(id.dense).map(|entry| &mut entry.body)
     }
 
@@ -200,6 +202,14 @@ impl PhysicsWorld {
             }
         }
 
+        if let Err(error) = self
+            .stage_spatial_proxies()
+            .and_then(|()| self.collision_system.synchronize_spatial_index())
+        {
+            self.collision_system.abort_step();
+            return Err(StepError::Collision(error));
+        }
+
         for ((dense_id, entry), (body_id, state)) in self.bodies.iter_mut().zip(
             self.collision_system
                 .context
@@ -217,6 +227,54 @@ impl PhysicsWorld {
             entry.body.commit_integrated_state(state);
         }
         self.collision_system.commit_step();
+        Ok(())
+    }
+
+    fn stage_spatial_proxies(&mut self) -> Result<(), CollisionError> {
+        for ((body_dense, body_entry), (predicted_id, predicted_state)) in self.bodies.iter().zip(
+            self.collision_system
+                .context
+                .predicted_states
+                .iter()
+                .copied(),
+        ) {
+            let body_id = BodyId {
+                world: self.world_id,
+                dense: body_dense,
+            };
+            if predicted_id != body_id {
+                return Err(CollisionError::InvalidContact);
+            }
+            let mut next = body_entry.first_collider;
+            while let Some(collider_id) = next {
+                if collider_id.world != self.world_id {
+                    return Err(CollisionError::InvalidContact);
+                }
+                let collider_entry = self
+                    .colliders
+                    .get(collider_id.dense)
+                    .ok_or(CollisionError::InvalidContact)?;
+                if collider_entry.body != body_id {
+                    return Err(CollisionError::InvalidContact);
+                }
+                let bounds = collider_entry
+                    .collider
+                    .world_bounds(&predicted_state.transform())
+                    .map_err(|_| CollisionError::GeometryBounds)?;
+                if let Some(bounds) = bounds {
+                    self.collision_system
+                        .context
+                        .spatial_proxies
+                        .try_reserve(1)
+                        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    self.collision_system
+                        .context
+                        .spatial_proxies
+                        .push((collider_id, bounds));
+                }
+                next = collider_entry.next;
+            }
+        }
         Ok(())
     }
 
@@ -308,6 +366,13 @@ impl PhysicsWorld {
                 self.collision_system.stage_prediction(step.body_id, state);
             }
         }
+        if let Err(error) = self
+            .stage_spatial_proxies()
+            .and_then(|()| self.collision_system.synchronize_spatial_index())
+        {
+            self.collision_system.abort_step();
+            return Err(StepError::Collision(error));
+        }
 
         for ((_, entry), step) in self.bodies.iter_mut().zip(shards.iter().flatten()) {
             if let Some(state) = step.predicted {
@@ -365,6 +430,7 @@ impl PhysicsWorld {
         if let Some(entry) = self.bodies.get_mut(body.dense) {
             entry.first_collider = Some(id);
         }
+        self.collision_system.mark_spatial_dirty();
         Ok(id)
     }
 
@@ -379,6 +445,7 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return None;
         }
+        self.collision_system.mark_spatial_dirty();
         self.colliders
             .get_mut(id.dense)
             .map(|entry| &mut entry.collider)
@@ -428,6 +495,7 @@ impl PhysicsWorld {
         {
             entry.prev = prev;
         }
+        self.collision_system.mark_spatial_dirty();
         Some(removed.collider)
     }
 
@@ -462,6 +530,7 @@ impl PhysicsWorld {
 
     /// Mutably iterates over bodies in dense storage order, which may change after removal.
     pub fn bodies_mut(&mut self) -> impl Iterator<Item = (BodyId, &mut RigidBody)> {
+        self.collision_system.mark_spatial_dirty();
         self.bodies.iter_mut().map(|(dense, entry)| {
             (
                 BodyId {
