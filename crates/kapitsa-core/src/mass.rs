@@ -28,52 +28,13 @@ impl MassProperties {
             return Err(MassError::NonFiniteCenterOfMass);
         }
 
-        let columns = inertia.to_cols_array();
-        if columns.iter().any(|value| !value.is_finite()) {
-            return Err(MassError::NonFiniteInertia);
-        }
-
-        let matrix = [
-            [
-                f64::from(columns[0]),
-                f64::from(columns[3]),
-                f64::from(columns[6]),
-            ],
-            [
-                f64::from(columns[1]),
-                f64::from(columns[4]),
-                f64::from(columns[7]),
-            ],
-            [
-                f64::from(columns[2]),
-                f64::from(columns[5]),
-                f64::from(columns[8]),
-            ],
-        ];
-        for (row, column) in [(0, 1), (0, 2), (1, 2)] {
-            if !approximately_equal(matrix[row][column], matrix[column][row]) {
-                return Err(MassError::NonSymmetricInertia);
-            }
-        }
-
-        let xx = matrix[0][0];
-        let xy = (matrix[0][1] + matrix[1][0]) * 0.5;
-        let xz = (matrix[0][2] + matrix[2][0]) * 0.5;
-        let yy = matrix[1][1];
-        let yz = (matrix[1][2] + matrix[2][1]) * 0.5;
-        let zz = matrix[2][2];
-        if xx <= 0.0 {
+        let inertia = symmetrize_inertia(inertia)?;
+        let matrix = inertia_rows(inertia);
+        if !is_positive_definite(&matrix) {
             return Err(MassError::NonPositiveDefiniteInertia);
         }
-
-        let second_pivot = yy - xy * xy / xx;
-        if !second_pivot.is_finite() || second_pivot <= 0.0 {
-            return Err(MassError::NonPositiveDefiniteInertia);
-        }
-
-        let third_pivot = zz - xz * xz / xx - (yz - xy * xz / xx).powi(2) / second_pivot;
-        if !third_pivot.is_finite() || third_pivot <= 0.0 {
-            return Err(MassError::NonPositiveDefiniteInertia);
+        if !is_physically_realizable(&matrix) {
+            return Err(MassError::NonPhysicalInertia);
         }
 
         Ok(Self {
@@ -174,9 +135,155 @@ impl MassProperties {
     }
 }
 
-fn approximately_equal(first: f64, second: f64) -> bool {
-    let scale = first.abs().max(second.abs());
-    (first - second).abs() <= 8.0 * f64::from(f32::EPSILON) * scale
+fn symmetrize_inertia(inertia: Mat3) -> Result<Mat3, MassError> {
+    let mut matrix = inertia_rows(inertia);
+    if matrix.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(MassError::NonFiniteInertia);
+    }
+
+    let scale = matrix
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+    let tolerance = 8.0 * f64::from(f32::EPSILON) * scale;
+    for (row, column) in [(0, 1), (0, 2), (1, 2)] {
+        if (matrix[row][column] - matrix[column][row]).abs() > tolerance {
+            return Err(MassError::NonSymmetricInertia);
+        }
+        let average = (matrix[row][column] + matrix[column][row]) * 0.5;
+        matrix[row][column] = average;
+        matrix[column][row] = average;
+    }
+
+    Ok(Mat3::from_cols(
+        Vec3::new(
+            matrix[0][0] as f32,
+            matrix[1][0] as f32,
+            matrix[2][0] as f32,
+        ),
+        Vec3::new(
+            matrix[0][1] as f32,
+            matrix[1][1] as f32,
+            matrix[2][1] as f32,
+        ),
+        Vec3::new(
+            matrix[0][2] as f32,
+            matrix[1][2] as f32,
+            matrix[2][2] as f32,
+        ),
+    ))
+}
+
+fn inertia_rows(inertia: Mat3) -> [[f64; 3]; 3] {
+    let columns = inertia.to_cols_array();
+    [
+        [
+            f64::from(columns[0]),
+            f64::from(columns[3]),
+            f64::from(columns[6]),
+        ],
+        [
+            f64::from(columns[1]),
+            f64::from(columns[4]),
+            f64::from(columns[7]),
+        ],
+        [
+            f64::from(columns[2]),
+            f64::from(columns[5]),
+            f64::from(columns[8]),
+        ],
+    ]
+}
+
+fn is_positive_definite(matrix: &[[f64; 3]; 3]) -> bool {
+    let xx = matrix[0][0];
+    let xy = matrix[0][1];
+    let xz = matrix[0][2];
+    let yy = matrix[1][1];
+    let yz = matrix[1][2];
+    let zz = matrix[2][2];
+    if xx <= 0.0 {
+        return false;
+    }
+
+    let second_pivot = yy - xy * xy / xx;
+    if !second_pivot.is_finite() || second_pivot <= 0.0 {
+        return false;
+    }
+
+    let third_pivot = zz - xz * xz / xx - (yz - xy * xz / xx).powi(2) / second_pivot;
+    third_pivot.is_finite() && third_pivot > 0.0
+}
+
+fn is_physically_realizable(inertia: &[[f64; 3]; 3]) -> bool {
+    let inertia_scale = inertia
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+    if !inertia_scale.is_finite() || inertia_scale <= 0.0 {
+        return false;
+    }
+
+    let normalized = inertia.map(|row| row.map(|value| value / inertia_scale));
+    let half_trace = (normalized[0][0] + normalized[1][1] + normalized[2][2]) * 0.5;
+    let mut covariance = [
+        [
+            half_trace - normalized[0][0],
+            -normalized[0][1],
+            -normalized[0][2],
+        ],
+        [
+            -normalized[1][0],
+            half_trace - normalized[1][1],
+            -normalized[1][2],
+        ],
+        [
+            -normalized[2][0],
+            -normalized[2][1],
+            half_trace - normalized[2][2],
+        ],
+    ];
+    let covariance_scale = covariance
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+    if !covariance_scale.is_finite() || covariance_scale == 0.0 {
+        return false;
+    }
+    for row in &mut covariance {
+        for value in row {
+            *value /= covariance_scale;
+        }
+    }
+
+    let epsilon = f64::from(f32::EPSILON);
+    let diagonal_tolerance = 16.0 * epsilon;
+    let second_order_tolerance = 32.0 * epsilon;
+    let third_order_tolerance = 64.0 * epsilon;
+    if covariance[0][0] < -diagonal_tolerance
+        || covariance[1][1] < -diagonal_tolerance
+        || covariance[2][2] < -diagonal_tolerance
+    {
+        return false;
+    }
+
+    let minor_01 = covariance[0][0] * covariance[1][1] - covariance[0][1].powi(2);
+    let minor_02 = covariance[0][0] * covariance[2][2] - covariance[0][2].powi(2);
+    let minor_12 = covariance[1][1] * covariance[2][2] - covariance[1][2].powi(2);
+    if minor_01 < -second_order_tolerance
+        || minor_02 < -second_order_tolerance
+        || minor_12 < -second_order_tolerance
+    {
+        return false;
+    }
+
+    let determinant = covariance[0][0]
+        * (covariance[1][1] * covariance[2][2] - covariance[1][2].powi(2))
+        - covariance[0][1]
+            * (covariance[0][1] * covariance[2][2] - covariance[1][2] * covariance[0][2])
+        + covariance[0][2]
+            * (covariance[0][1] * covariance[1][2] - covariance[1][1] * covariance[0][2]);
+    determinant.is_finite() && determinant >= -third_order_tolerance
 }
 
 fn sphere_mass_properties(sphere: &Sphere, density: f64) -> (f64, [f64; 3]) {

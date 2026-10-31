@@ -119,7 +119,41 @@ fn accepts_f32_rounding_in_symmetric_components() -> Result<(), MassError> {
         Vec3::new(0.0, 0.0, 4.0),
     );
 
-    MassProperties::new(1.0, Vec3::ZERO, inertia)?;
+    let properties = MassProperties::new(1.0, Vec3::ZERO, inertia)?;
+    assert_eq!(properties.inertia().x_axis.y, properties.inertia().y_axis.x);
+    Ok(())
+}
+
+#[test]
+fn rejects_positive_definite_but_physically_impossible_inertia() {
+    let inertia = Mat3::from_diagonal(Vec3::new(10.0, 1.0, 1.0));
+
+    assert_eq!(
+        MassProperties::new(1.0, Vec3::ZERO, inertia),
+        Err(MassError::NonPhysicalInertia)
+    );
+}
+
+#[test]
+fn accepts_physical_inertia_boundaries() -> Result<(), MassError> {
+    for inertia in [
+        Mat3::from_diagonal(Vec3::new(2.0, 2.0, 4.0)),
+        Mat3::IDENTITY,
+    ] {
+        MassProperties::new(1.0, Vec3::ZERO, inertia)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn physical_inertia_validation_is_scale_independent() -> Result<(), MassError> {
+    let smallest = f32::from_bits(1);
+    let largest = f32::MAX / 4.0;
+
+    for scale in [smallest, largest] {
+        let inertia = Mat3::from_diagonal(Vec3::new(scale, scale, 2.0 * scale));
+        MassProperties::new(1.0, Vec3::ZERO, inertia)?;
+    }
     Ok(())
 }
 
