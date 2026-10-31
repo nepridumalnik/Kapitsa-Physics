@@ -43,11 +43,11 @@ Each entry is the median elapsed time for eight collision steps. The worlds cont
 
 | Bodies | `PhysicsWorld::step` | Controller x1 | Controller x2 | Controller x4 |
 |---:|---:|---:|---:|---:|
-| 256 | 2.92 ms | 3.46 ms (0.85x) | 4.19 ms (0.70x) | 4.18 ms (0.70x) |
-| 4,096 | 42.28 ms | 42.94 ms (0.98x) | 36.97 ms (1.14x) | 37.96 ms (1.11x) |
-| 20,000 | 184.05 ms | 184.28 ms (1.00x) | 184.55 ms (1.00x) | 172.90 ms (1.06x) |
+| 256 | 2.85 ms | 3.18 ms (0.89x) | 4.00 ms (0.71x) | 3.82 ms (0.75x) |
+| 4,096 | 44.48 ms | 42.09 ms (1.06x) | 36.47 ms (1.22x) | 34.52 ms (1.29x) |
+| 20,000 | 185.88 ms | 189.03 ms (0.98x) | 184.15 ms (1.01x) | 175.59 ms (1.06x) |
 
-Worker scheduling cost more for the small scene. At 4,096 bodies, two and four workers improved this collision workload by 14% and 11%; at 20,000 bodies, four workers improved it by 6%. These results apply to this workload and machine, not every collision distribution.
+Worker scheduling cost more for the small scene. At 4,096 bodies, two and four workers improved this collision workload by 22% and 29%; at 20,000 bodies, four workers improved it by 6%. These results apply to this workload and machine, not every collision distribution.
 
 ## Memory estimate limits
 

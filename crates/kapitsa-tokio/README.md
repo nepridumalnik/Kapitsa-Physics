@@ -1,5 +1,8 @@
 # kapitsa-tokio
 
+See the [collision system guide](../../docs/collisions.md) for shape support,
+materials, queries, CCD, events, and core API examples.
+
 `PhysicsSimulation` owns a world and advances it in the background at a fixed,
 adaptive rate. It uses the application's Tokio runtime and never creates a
 runtime of its own.

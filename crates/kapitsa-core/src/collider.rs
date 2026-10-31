@@ -64,14 +64,19 @@ impl Collider {
         self.filter = filter;
     }
 
-    /// Returns the assigned material ID, which may be stale after its material is removed.
+    /// Returns the assigned material ID.
     ///
-    /// Resolving the ID and choosing a fallback are responsibilities of the future contact system.
+    /// `PhysicsWorld` validates the ID before stepping. Prefer
+    /// [`PhysicsWorld::set_collider_material`](crate::world::PhysicsWorld::set_collider_material)
+    /// when assigning a material to a collider in a world.
     pub fn material(&self) -> Option<MaterialId> {
         self.material
     }
 
-    /// Assigns a material ID without checking that it exists in any material storage.
+    /// Stores a material ID without checking that it exists in a world.
+    ///
+    /// Prefer [`PhysicsWorld::set_collider_material`](crate::world::PhysicsWorld::set_collider_material)
+    /// for validated assignments.
     pub fn set_material(&mut self, material: Option<MaterialId>) {
         self.material = material;
     }
