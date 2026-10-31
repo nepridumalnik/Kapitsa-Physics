@@ -1,6 +1,6 @@
 # kapitsa-tokio
 
-`PhysicsController` runs fixed physics steps on Tokio's blocking pool. The crate
+`PhysicsController::step()` runs exactly one fixed physics step on Tokio's blocking pool. The crate
 uses the caller's runtime; it never creates a production runtime. Each step
 copies only body data into balanced shards, runs at most `active_workers` shard
 tasks, waits for all results, and commits atomically.
@@ -26,7 +26,6 @@ requires 24 consecutive steps below 55% of the working budget; frequency rises
 one level at a time before worker count is reduced. Setting `adaptive` to
 `false` keeps the configured frequency and selected worker count fixed.
 
-Catch-up work is bounded by `max_catch_up_steps`. Unprocessed simulation time
-remains in the accumulator and is reported as debt; no physics time is silently
-dropped. If the `Duration` accumulator would overflow, `advance` returns an
-error without changing the stored debt.
+The low-level controller does not track wall-clock time or catch up. It completes
+one fixed step per `step()` call. The future may be cancelled safely; the next
+call waits for the in-flight step and reports its result.

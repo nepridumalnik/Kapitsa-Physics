@@ -150,41 +150,35 @@ impl SchedulerMetrics {
     }
 }
 
-/// Per-call result returned by [`crate::PhysicsController::advance`].
+/// Statistics for one completed call to [`crate::PhysicsController::step`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct AdvanceStats {
-    pub steps_completed: usize,
-    pub budget_overruns: usize,
-    pub overload_events: usize,
+pub struct StepStats {
     pub step_duration: Duration,
     pub task_wait_duration: Duration,
+    pub step_budget: Duration,
+    pub budget_overrun: bool,
+    pub overloaded: bool,
     pub current_hz: u32,
     pub active_workers: usize,
-    pub simulation_time_debt: Duration,
-    pub currently_overloaded: bool,
     pub rolling_average_step_duration: Duration,
     pub rolling_max_step_duration: Duration,
 }
 
-impl AdvanceStats {
+impl StepStats {
     pub(crate) fn snapshot(
-        steps_completed: usize,
-        budget_overruns: usize,
-        overload_events: usize,
-        step_duration: Duration,
-        task_wait_duration: Duration,
+        measurement: StepMeasurement,
+        budget_overrun: bool,
+        adaptive: AdaptiveStatus,
         metrics: &SchedulerMetrics,
     ) -> Self {
         Self {
-            steps_completed,
-            budget_overruns,
-            overload_events,
-            step_duration,
-            task_wait_duration,
+            step_duration: measurement.step_duration,
+            task_wait_duration: measurement.task_wait_duration,
+            step_budget: measurement.step_budget,
+            budget_overrun,
+            overloaded: adaptive.overloaded,
             current_hz: metrics.current_hz(),
             active_workers: metrics.active_workers(),
-            simulation_time_debt: metrics.simulation_time_debt(),
-            currently_overloaded: metrics.currently_overloaded(),
             rolling_average_step_duration: metrics.rolling_average_step_duration(),
             rolling_max_step_duration: metrics.rolling_max_step_duration(),
         }

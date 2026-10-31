@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             controller.set_active_workers(workers)?;
             let started = Instant::now();
             for _ in 0..STEPS {
-                runtime.block_on(controller.advance(quantum))?;
+                runtime.block_on(controller.step())?;
             }
             Ok(started.elapsed())
         })?;

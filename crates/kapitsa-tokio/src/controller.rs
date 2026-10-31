@@ -7,8 +7,8 @@ use kapitsa_core::world::{BodyStep, PhysicsWorld, StepError};
 use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{
-    AdaptiveScheduler, AdvanceStats, SchedulerConfig, SchedulerError, SchedulerMetrics,
-    StepMeasurement,
+    AdaptiveScheduler, SchedulerConfig, SchedulerError, SchedulerMetrics, StepMeasurement,
+    StepStats,
 };
 
 type PrepareOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
@@ -52,7 +52,6 @@ enum WorldState {
 pub struct PhysicsController {
     world: WorldState,
     config: SchedulerConfig,
-    accumulator: Duration,
     current_hz: u32,
     active_workers: usize,
     worker_buffers: Vec<Vec<BodyStep>>,
@@ -69,7 +68,6 @@ impl PhysicsController {
         Ok(Self {
             world: WorldState::Available(world),
             config,
-            accumulator: Duration::ZERO,
             current_hz,
             active_workers,
             worker_buffers: vec![Vec::new()],
@@ -78,7 +76,7 @@ impl PhysicsController {
         })
     }
 
-    /// Borrows the world between calls to [`Self::advance`].
+    /// Borrows the world between calls to [`Self::step`].
     pub fn world(&self) -> Result<&PhysicsWorld, SchedulerError> {
         match &self.world {
             WorldState::Available(world) => Ok(world),
@@ -87,7 +85,7 @@ impl PhysicsController {
         }
     }
 
-    /// Mutates the world between calls to [`Self::advance`].
+    /// Mutates the world between calls to [`Self::step`].
     pub fn world_mut(&mut self) -> Result<&mut PhysicsWorld, SchedulerError> {
         match &mut self.world {
             WorldState::Available(world) => Ok(world),
@@ -126,68 +124,30 @@ impl PhysicsController {
         }
         self.active_workers = workers;
         self.adaptive.set_active_workers(workers);
-        self.metrics
-            .update_scheduler_state(self.current_hz, self.active_workers, self.accumulator);
+        self.update_metrics_state();
         Ok(())
     }
 
-    pub fn simulation_time_debt(&self) -> Duration {
-        self.accumulator
-    }
-
-    /// Adds elapsed wall time and runs a bounded number of fixed physics steps.
-    /// Remaining time is retained as simulation-time debt for the next call;
-    /// overflow returns an error instead of dropping accumulated time.
-    pub async fn advance(&mut self, elapsed: Duration) -> Result<AdvanceStats, SchedulerError> {
+    /// Runs exactly one fixed physics step on the Tokio blocking pool.
+    ///
+    /// If a previous call was cancelled while its step was in flight, this call
+    /// waits for and reports that step instead of starting another one.
+    pub async fn step(&mut self) -> Result<StepStats, SchedulerError> {
         Handle::try_current().map_err(|_| SchedulerError::MissingRuntime)?;
-        self.accumulator = self
-            .accumulator
-            .checked_add(elapsed)
-            .ok_or(SchedulerError::SimulationTimeOverflow)?;
-        self.update_metrics_state();
-
-        let mut steps_completed = 0;
-        let mut budget_overruns = 0;
-        let mut overload_events = 0;
-        let mut step_duration_total = Duration::ZERO;
-        let mut task_wait_total = Duration::ZERO;
-
-        if matches!(self.world, WorldState::InFlight(_)) {
-            let measurement = self.complete_pending_step().await?;
-            self.add_measurement(
-                measurement,
-                &mut steps_completed,
-                &mut budget_overruns,
-                &mut overload_events,
-                &mut step_duration_total,
-                &mut task_wait_total,
-            );
+        if !matches!(self.world, WorldState::InFlight(_)) {
+            self.start_step(self.step_duration())?;
         }
 
-        while steps_completed < self.config.max_catch_up_steps {
-            let step_duration = self.step_duration();
-            if self.accumulator < step_duration {
-                break;
-            }
-            self.start_step(step_duration)?;
-            let measurement = self.complete_pending_step().await?;
-            self.add_measurement(
-                measurement,
-                &mut steps_completed,
-                &mut budget_overruns,
-                &mut overload_events,
-                &mut step_duration_total,
-                &mut task_wait_total,
-            );
-        }
-
+        let measurement = self.complete_pending_step().await?;
+        let adaptive = self.adaptive.observe(measurement);
+        self.current_hz = adaptive.current_hz;
+        self.active_workers = adaptive.active_workers;
+        let budget_overrun = self.metrics.record_step(measurement, adaptive);
         self.update_metrics_state();
-        Ok(AdvanceStats::snapshot(
-            steps_completed,
-            budget_overruns,
-            overload_events,
-            step_duration_total,
-            task_wait_total,
+        Ok(StepStats::snapshot(
+            measurement,
+            budget_overrun,
+            adaptive,
             &self.metrics,
         ))
     }
@@ -377,13 +337,6 @@ impl PhysicsController {
                     let in_flight = self.take_in_flight()?;
                     match completion {
                         Ok((world, buffers, Ok(()))) => {
-                            let Some(accumulator) =
-                                self.accumulator.checked_sub(in_flight.step_duration)
-                            else {
-                                self.restore_available(world, buffers);
-                                return Err(SchedulerError::SimulationTimeOverflow);
-                            };
-                            self.accumulator = accumulator;
                             self.restore_available(world, buffers);
                             return Ok(StepMeasurement {
                                 step_duration: in_flight.started.elapsed(),
@@ -479,33 +432,9 @@ impl PhysicsController {
         self.update_metrics_state();
     }
 
-    fn add_measurement(
-        &mut self,
-        measurement: StepMeasurement,
-        steps_completed: &mut usize,
-        budget_overruns: &mut usize,
-        overload_events: &mut usize,
-        step_duration_total: &mut Duration,
-        task_wait_total: &mut Duration,
-    ) {
-        *steps_completed += 1;
-        let adaptive = self.adaptive.observe(measurement);
-        self.current_hz = adaptive.current_hz;
-        self.active_workers = adaptive.active_workers;
-        if self.metrics.record_step(measurement, adaptive) {
-            *budget_overruns += 1;
-        }
-        if adaptive.overloaded {
-            *overload_events += 1;
-        }
-        self.update_metrics_state();
-        *step_duration_total = step_duration_total.saturating_add(measurement.step_duration);
-        *task_wait_total = task_wait_total.saturating_add(measurement.task_wait_duration);
-    }
-
     fn update_metrics_state(&mut self) {
         self.metrics
-            .update_scheduler_state(self.current_hz, self.active_workers, self.accumulator);
+            .update_scheduler_state(self.current_hz, self.active_workers, Duration::ZERO);
     }
 }
 
@@ -567,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn advance_carries_partial_elapsed_time_and_steps_on_the_blocking_pool() {
+    fn step_runs_once_per_call_on_the_blocking_pool() {
         let runtime = runtime();
         let mut controller =
             PhysicsController::new(moving_kinematic_world(), config(4)).expect("valid controller");
@@ -579,54 +508,21 @@ mod tests {
             .expect("one body")
             .0;
 
-        let first = runtime
-            .block_on(controller.advance(Duration::from_millis(8)))
-            .expect("partial advance");
-        assert_eq!(first.steps_completed, 0);
-        assert_eq!(first.simulation_time_debt, Duration::from_millis(8));
-        assert_eq!(
-            controller
+        for expected_steps in 1..=2 {
+            let stats = runtime.block_on(controller.step()).expect("one fixed step");
+            assert!(stats.step_duration > Duration::ZERO);
+            assert!(stats.step_budget > Duration::ZERO);
+            assert_eq!(controller.metrics().total_steps(), expected_steps);
+            let translation = controller
                 .world()
                 .expect("world available")
                 .body(id)
                 .expect("body exists")
                 .state()
                 .transform()
-                .translation(),
-            Vec3::ZERO
-        );
-
-        let second = runtime
-            .block_on(controller.advance(Duration::from_millis(9)))
-            .expect("one fixed step");
-        assert_eq!(second.steps_completed, 1);
-        assert!(second.step_duration > Duration::ZERO);
-        assert!(second.task_wait_duration >= second.step_duration);
-        assert_eq!(controller.metrics().total_steps(), 1);
-        let translation = controller
-            .world()
-            .expect("world available")
-            .body(id)
-            .expect("body exists")
-            .state()
-            .transform()
-            .translation();
-        assert!((translation.x - 1.0 / 60.0).abs() <= 1.0e-9);
-    }
-
-    #[test]
-    fn catch_up_is_bounded_and_retains_simulation_time_debt() {
-        let runtime = runtime();
-        let mut controller =
-            PhysicsController::new(moving_kinematic_world(), config(2)).expect("valid controller");
-
-        let stats = runtime
-            .block_on(controller.advance(Duration::from_secs(1)))
-            .expect("bounded advance");
-
-        assert_eq!(stats.steps_completed, 2);
-        assert!(stats.simulation_time_debt >= Duration::from_millis(966));
-        assert_eq!(controller.metrics().total_steps(), 2);
+                .translation();
+            assert!((translation.x - expected_steps as f64 / 60.0).abs() <= 1.0e-9);
+        }
     }
 
     #[test]
@@ -640,10 +536,8 @@ mod tests {
         body.apply_force(Vec3::X * f64::MAX).expect("finite force");
         let id = world.add_body(body).expect("body insertion");
         let mut controller = PhysicsController::new(world, config(2)).expect("valid controller");
-        let elapsed = Duration::from_secs_f64(1.0 / 60.0);
-
         assert!(matches!(
-            runtime.block_on(controller.advance(elapsed)),
+            runtime.block_on(controller.step()),
             Err(SchedulerError::PhysicsStep(_))
         ));
         assert!(
@@ -653,7 +547,6 @@ mod tests {
                 .body(id)
                 .is_some()
         );
-        assert!(controller.simulation_time_debt() >= elapsed);
         assert_ne!(
             controller
                 .world()
@@ -667,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn world_can_be_configured_between_advances() {
+    fn world_can_be_configured_between_steps() {
         let runtime = runtime();
         let mut controller =
             PhysicsController::new(PhysicsWorld::new(), config(4)).expect("valid controller");
@@ -677,9 +570,7 @@ mod tests {
             .expect("world available")
             .add_body(RigidBody::new_kinematic(Transform::identity()))
             .expect("body insertion");
-        runtime
-            .block_on(controller.advance(Duration::from_secs_f64(1.0 / 60.0)))
-            .expect("valid advance");
+        runtime.block_on(controller.step()).expect("valid step");
 
         assert!(
             controller
@@ -706,11 +597,8 @@ mod tests {
             controller
                 .set_active_workers(workers)
                 .expect("worker count within limit");
-            let stats = runtime
-                .block_on(controller.advance(quantum))
-                .expect("parallel step");
+            let stats = runtime.block_on(controller.step()).expect("parallel step");
 
-            assert_eq!(stats.steps_completed, 1);
             assert_eq!(stats.active_workers, workers);
             let parallel = controller.world().expect("world available");
             for ((parallel_id, parallel_body), (sequential_id, sequential_body)) in
@@ -726,7 +614,6 @@ mod tests {
     fn parallel_integration_failure_waits_for_workers_and_preserves_world() {
         let runtime = runtime();
         let config = config(1);
-        let quantum = config.step_duration(config.target_hz);
         let mut world = dynamic_world(5);
         let failing_id = world.bodies().nth(2).expect("third body").0;
         let failing = world.body_mut(failing_id).expect("body exists");
@@ -749,7 +636,7 @@ mod tests {
             .expect("worker count within limit");
 
         assert!(matches!(
-            runtime.block_on(controller.advance(quantum)),
+            runtime.block_on(controller.step()),
             Err(SchedulerError::PhysicsStep(_))
         ));
         assert!(controller
@@ -758,33 +645,28 @@ mod tests {
             .bodies()
             .zip(originals)
             .all(|((id, body), (original_id, original))| id == original_id && body == &original));
-        assert_eq!(controller.simulation_time_debt(), quantum);
     }
 
     #[test]
-    fn cancelling_advance_keeps_the_in_flight_world_and_tasks() {
+    fn cancelling_step_keeps_the_in_flight_world_and_tasks() {
         let runtime = runtime();
         let config = config(1);
-        let quantum = config.step_duration(config.target_hz);
         let mut controller =
             PhysicsController::new(dynamic_world(10_000), config).expect("controller");
 
         runtime.block_on(async {
-            let mut advance = Box::pin(controller.advance(quantum));
+            let mut step = Box::pin(controller.step());
             let waker = Waker::noop();
             let mut context = Context::from_waker(waker);
-            assert!(matches!(advance.as_mut().poll(&mut context), Poll::Pending));
-            drop(advance);
+            assert!(matches!(step.as_mut().poll(&mut context), Poll::Pending));
+            drop(step);
 
             assert!(matches!(
                 controller.world(),
                 Err(SchedulerError::WorldUnavailable)
             ));
-            let stats = controller
-                .advance(Duration::ZERO)
-                .await
-                .expect("in-flight step completes");
-            assert_eq!(stats.steps_completed, 1);
+            controller.step().await.expect("in-flight step completes");
+            assert_eq!(controller.metrics().total_steps(), 1);
             assert_eq!(
                 controller.world().expect("world restored").body_count(),
                 10_000
