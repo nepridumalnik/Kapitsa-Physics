@@ -4,27 +4,40 @@ mod id;
 pub use error::WorldError;
 pub use id::{BodyId, ColliderId};
 
-use crate::{containers::DensePool, rigid_body::RigidBody};
+use crate::{collider::Collider, containers::DensePool, rigid_body::RigidBody};
 
 struct BodyEntry {
     body: RigidBody,
+    first_collider: Option<ColliderId>,
+}
+
+struct ColliderEntry {
+    collider: Collider,
+    body: BodyId,
+    prev: Option<ColliderId>,
+    next: Option<ColliderId>,
 }
 
 /// Owns rigid bodies and colliders and assigns IDs scoped to this world instance.
 pub struct PhysicsWorld {
     bodies: DensePool<BodyEntry>,
+    colliders: DensePool<ColliderEntry>,
 }
 
 impl PhysicsWorld {
     pub const fn new() -> Self {
         Self {
             bodies: DensePool::new(),
+            colliders: DensePool::new(),
         }
     }
 
     pub fn add_body(&mut self, body: RigidBody) -> Result<BodyId, WorldError> {
         self.bodies
-            .insert(BodyEntry { body })
+            .insert(BodyEntry {
+                body,
+                first_collider: None,
+            })
             .map(BodyId)
             .map_err(WorldError::from)
     }
@@ -39,6 +52,97 @@ impl PhysicsWorld {
 
     pub fn body_count(&self) -> usize {
         self.bodies.len()
+    }
+
+    pub fn add_collider(
+        &mut self,
+        body: BodyId,
+        collider: Collider,
+    ) -> Result<ColliderId, WorldError> {
+        let first = self
+            .bodies
+            .get(body.0)
+            .ok_or(WorldError::InvalidBodyId)?
+            .first_collider;
+        if first.is_some_and(|id| self.colliders.get(id.0).is_none()) {
+            return Err(WorldError::InvalidColliderId);
+        }
+
+        let id = self
+            .colliders
+            .insert(ColliderEntry {
+                collider,
+                body,
+                prev: None,
+                next: first,
+            })
+            .map(ColliderId)
+            .map_err(WorldError::from)?;
+
+        if let Some(first) = first
+            && let Some(entry) = self.colliders.get_mut(first.0)
+        {
+            entry.prev = Some(id);
+        }
+        if let Some(entry) = self.bodies.get_mut(body.0) {
+            entry.first_collider = Some(id);
+        }
+        Ok(id)
+    }
+
+    pub fn collider(&self, id: ColliderId) -> Option<&Collider> {
+        self.colliders.get(id.0).map(|entry| &entry.collider)
+    }
+
+    pub fn collider_mut(&mut self, id: ColliderId) -> Option<&mut Collider> {
+        self.colliders
+            .get_mut(id.0)
+            .map(|entry| &mut entry.collider)
+    }
+
+    pub fn collider_body(&self, id: ColliderId) -> Option<BodyId> {
+        self.colliders.get(id.0).map(|entry| entry.body)
+    }
+
+    pub fn remove_collider(&mut self, id: ColliderId) -> Option<Collider> {
+        let (body, prev, next) = {
+            let entry = self.colliders.get(id.0)?;
+            (entry.body, entry.prev, entry.next)
+        };
+        let body_entry = self.bodies.get(body.0)?;
+        if prev.is_none() && body_entry.first_collider != Some(id) {
+            return None;
+        }
+        if prev.is_some_and(|prev| {
+            self.colliders
+                .get(prev.0)
+                .is_none_or(|entry| entry.body != body || entry.next != Some(id))
+        }) || next.is_some_and(|next| {
+            self.colliders
+                .get(next.0)
+                .is_none_or(|entry| entry.body != body || entry.prev != Some(id))
+        }) {
+            return None;
+        }
+
+        let removed = self.colliders.remove(id.0)?;
+        if let Some(prev) = prev {
+            if let Some(entry) = self.colliders.get_mut(prev.0) {
+                entry.next = next;
+            }
+        } else if let Some(entry) = self.bodies.get_mut(body.0) {
+            entry.first_collider = next;
+        }
+        if let Some(next) = next
+            && let Some(entry) = self.colliders.get_mut(next.0)
+        {
+            entry.prev = prev;
+        }
+        Some(removed.collider)
+    }
+
+    pub fn collider_count(&self) -> usize {
+        self.colliders.len()
     }
 }
 
