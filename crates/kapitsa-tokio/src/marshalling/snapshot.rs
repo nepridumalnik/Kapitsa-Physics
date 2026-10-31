@@ -5,10 +5,18 @@ use kapitsa_core::{
     world::{BodyId, PhysicsWorld},
 };
 
+const DENSE_ENTER_RATIO: usize = 3;
+const DENSE_EXIT_RATIO: usize = 6;
+
 #[derive(Clone, Copy)]
 struct SnapshotEntry {
     id: BodyId,
     state: BodyState,
+}
+
+enum SnapshotIndex {
+    Dense(Vec<usize>),
+    Sparse(HashMap<BodyId, usize>),
 }
 
 /// Immutable body states published after a successful simulation step.
@@ -19,7 +27,7 @@ pub struct PhysicsSnapshot {
     step: u64,
     simulation_time: Duration,
     entries: Vec<SnapshotEntry>,
-    indices: HashMap<BodyId, usize>,
+    index: SnapshotIndex,
 }
 
 impl PhysicsSnapshot {
@@ -28,7 +36,7 @@ impl PhysicsSnapshot {
             step: 0,
             simulation_time: Duration::ZERO,
             entries: Vec::new(),
-            indices: HashMap::new(),
+            index: SnapshotIndex::Sparse(HashMap::new()),
         }
     }
 
@@ -57,13 +65,20 @@ impl PhysicsSnapshot {
 
     #[allow(dead_code)]
     pub(crate) fn buffer_capacities(&self) -> (usize, usize) {
-        (self.entries.capacity(), self.indices.capacity())
+        let index_capacity = match &self.index {
+            SnapshotIndex::Dense(index) => index.capacity(),
+            SnapshotIndex::Sparse(index) => index.capacity(),
+        };
+        (self.entries.capacity(), index_capacity)
     }
 
     #[allow(dead_code)]
     pub(crate) fn estimated_storage_bytes(&self) -> usize {
-        self.entries.capacity() * size_of::<SnapshotEntry>()
-            + self.indices.capacity() * size_of::<(BodyId, usize)>()
+        let index_bytes = match &self.index {
+            SnapshotIndex::Dense(index) => index.capacity() * size_of::<usize>(),
+            SnapshotIndex::Sparse(index) => index.capacity() * size_of::<(BodyId, usize)>(),
+        };
+        self.entries.capacity() * size_of::<SnapshotEntry>() + index_bytes
     }
 
     #[allow(dead_code)]
@@ -79,20 +94,32 @@ impl PhysicsSnapshot {
     pub(crate) fn rebuild(&mut self, world: &PhysicsWorld, step: u64, simulation_time: Duration) {
         let body_count = world.body_count();
         self.entries.clear();
-        self.indices.clear();
         self.entries.reserve(body_count);
-        self.indices.reserve(body_count);
-        self.step = step;
-        self.simulation_time = simulation_time;
-
         for (id, body) in world.bodies() {
-            let index = self.entries.len();
             self.entries.push(SnapshotEntry {
                 id,
                 state: *body.state(),
             });
-            self.indices.insert(id, index);
         }
+
+        let live = self.entries.len();
+        let span = slot_span(&self.entries);
+        let current_dense = matches!(&self.index, SnapshotIndex::Dense(_));
+        let use_dense = should_use_dense(current_dense, live, span);
+
+        if use_dense != current_dense {
+            self.index = if use_dense {
+                SnapshotIndex::Dense(Vec::new())
+            } else {
+                SnapshotIndex::Sparse(HashMap::new())
+            };
+        }
+        match &mut self.index {
+            SnapshotIndex::Dense(index) => rebuild_dense_index(index, &self.entries, span),
+            SnapshotIndex::Sparse(index) => rebuild_sparse_index(index, &self.entries),
+        }
+        self.step = step;
+        self.simulation_time = simulation_time;
     }
 
     /// Returns the total number of successful steps represented by this snapshot.
@@ -107,10 +134,16 @@ impl PhysicsSnapshot {
 
     /// Looks up a body by its complete world-scoped generational ID in expected O(1) time.
     pub fn body(&self, id: BodyId) -> Option<&BodyState> {
-        self.indices
-            .get(&id)
-            .and_then(|index| self.entries.get(*index))
-            .map(|entry| &entry.state)
+        let position = match &self.index {
+            SnapshotIndex::Dense(index) => {
+                let slot = usize::try_from(id.index()).ok()?;
+                let position = *index.get(slot)?;
+                (position != usize::MAX).then_some(position)?
+            }
+            SnapshotIndex::Sparse(index) => *index.get(&id)?,
+        };
+        let entry = self.entries.get(position)?;
+        (entry.id == id).then_some(&entry.state)
     }
 
     /// Iterates over current bodies as `(ID, state)` pairs.
@@ -129,9 +162,61 @@ impl PhysicsSnapshot {
     }
 }
 
+fn slot_span(entries: &[SnapshotEntry]) -> Option<usize> {
+    let max_index = entries.iter().map(|entry| entry.id.index()).max();
+    match max_index {
+        Some(index) => usize::try_from(index).ok()?.checked_add(1),
+        None => Some(0),
+    }
+}
+
+fn should_use_dense(current_dense: bool, live: usize, span: Option<usize>) -> bool {
+    if live == 0 {
+        return true;
+    }
+    let Some(span) = span else {
+        return false;
+    };
+    let ratio = if current_dense {
+        DENSE_EXIT_RATIO
+    } else {
+        DENSE_ENTER_RATIO
+    };
+    span <= live.saturating_mul(ratio)
+}
+
+fn rebuild_dense_index(index: &mut Vec<usize>, entries: &[SnapshotEntry], span: Option<usize>) {
+    let Some(span) = span else {
+        index.clear();
+        return;
+    };
+    index.clear();
+    index.reserve(span);
+    index.resize(span, usize::MAX);
+    for (position, entry) in entries.iter().enumerate() {
+        if let Ok(slot) = usize::try_from(entry.id.index())
+            && let Some(indexed_position) = index.get_mut(slot)
+        {
+            *indexed_position = position;
+        }
+    }
+}
+
+fn rebuild_sparse_index(index: &mut HashMap<BodyId, usize>, entries: &[SnapshotEntry]) {
+    index.clear();
+    index.reserve(entries.len());
+    for (position, entry) in entries.iter().enumerate() {
+        index.insert(entry.id, position);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, sync::Arc, time::Duration};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+        time::Duration,
+    };
 
     use kapitsa_core::{rigid_body::RigidBody, transform::Transform, world::PhysicsWorld};
     use kapitsa_math::Vec3;
@@ -148,13 +233,25 @@ mod tests {
             .collect()
     }
 
+    fn index_len(snapshot: &PhysicsSnapshot) -> usize {
+        match &snapshot.index {
+            super::SnapshotIndex::Dense(index) => index.len(),
+            super::SnapshotIndex::Sparse(index) => index.len(),
+        }
+    }
+
+    fn is_dense(snapshot: &PhysicsSnapshot) -> bool {
+        matches!(&snapshot.index, super::SnapshotIndex::Dense(_))
+    }
+
     #[test]
     fn empty_snapshot_has_no_bodies() {
         let snapshot = PhysicsSnapshot::from_world(&PhysicsWorld::new(), 0, Duration::ZERO);
         assert!(snapshot.is_empty());
         assert_eq!(snapshot.len(), 0);
         assert_eq!(snapshot.entries.len(), 0);
-        assert_eq!(snapshot.indices.len(), 0);
+        assert!(is_dense(&snapshot));
+        assert_eq!(index_len(&snapshot), 0);
         assert_eq!(snapshot.bodies().count(), 0);
     }
 
@@ -163,8 +260,9 @@ mod tests {
         let mut world = PhysicsWorld::new();
         let ids = add_bodies(&mut world, 100);
         let mut snapshot = PhysicsSnapshot::from_world(&world, 0, Duration::ZERO);
+        assert!(is_dense(&snapshot));
         assert_eq!(snapshot.entries.len(), 100);
-        assert_eq!(snapshot.indices.len(), 100);
+        assert_eq!(index_len(&snapshot), 100);
 
         for id in &ids[..90] {
             assert!(world.remove_body(*id).is_some());
@@ -173,9 +271,27 @@ mod tests {
 
         assert_eq!(snapshot.len(), 10);
         assert_eq!(snapshot.entries.len(), 10);
-        assert_eq!(snapshot.indices.len(), 10);
+        assert!(!is_dense(&snapshot));
+        assert_eq!(index_len(&snapshot), 10);
         assert!(ids[..90].iter().all(|id| snapshot.body(*id).is_none()));
         assert!(ids[90..].iter().all(|id| snapshot.body(*id).is_some()));
+    }
+
+    #[test]
+    fn dense_index_marks_removed_slots_with_the_empty_sentinel() {
+        let mut world = PhysicsWorld::new();
+        let ids = add_bodies(&mut world, 3);
+        assert!(world.remove_body(ids[1]).is_some());
+
+        let snapshot = PhysicsSnapshot::from_world(&world, 1, Duration::ZERO);
+        let super::SnapshotIndex::Dense(index) = &snapshot.index else {
+            panic!("three slots with two live bodies should use Dense");
+        };
+
+        assert_eq!(index.get(1), Some(&usize::MAX));
+        assert!(snapshot.body(ids[1]).is_none());
+        assert!(snapshot.body(ids[0]).is_some());
+        assert!(snapshot.body(ids[2]).is_some());
     }
 
     #[test]
@@ -191,8 +307,9 @@ mod tests {
 
         let snapshot = PhysicsSnapshot::from_world(&world, 4, Duration::ZERO);
 
+        assert!(!is_dense(&snapshot));
         assert_eq!(snapshot.entries.len(), 100);
-        assert_eq!(snapshot.indices.len(), 100);
+        assert_eq!(index_len(&snapshot), 100);
         assert_eq!(snapshot.entries.len(), world.body_count());
         assert!(
             snapshot
@@ -201,6 +318,68 @@ mod tests {
                 .all(|entry| entry.id.index() >= 19_900)
         );
         assert!(live_ids.iter().all(|id| snapshot.body(*id).is_some()));
+    }
+
+    #[test]
+    fn dense_sparse_transitions_preserve_all_live_body_states() {
+        let mut sparse_world = PhysicsWorld::new();
+        let sparse_ids = add_bodies(&mut sparse_world, 1_000);
+        let mut snapshot = PhysicsSnapshot::from_world(&sparse_world, 0, Duration::ZERO);
+        assert!(is_dense(&snapshot));
+        for id in &sparse_ids[..900] {
+            assert!(sparse_world.remove_body(*id).is_some());
+        }
+
+        snapshot.rebuild(&sparse_world, 1, Duration::from_millis(10));
+        assert!(!is_dense(&snapshot));
+        assert_eq!(snapshot.len(), 100);
+        assert!(
+            sparse_ids[..900]
+                .iter()
+                .all(|id| snapshot.body(*id).is_none())
+        );
+        assert!(
+            sparse_ids[900..]
+                .iter()
+                .all(|id| snapshot.body(*id).is_some())
+        );
+
+        let mut dense_world = PhysicsWorld::new();
+        let dense_ids = add_bodies(&mut dense_world, 100);
+        snapshot.rebuild(&dense_world, 2, Duration::from_millis(20));
+        assert!(is_dense(&snapshot));
+        assert_eq!(snapshot.len(), dense_world.body_count());
+        assert!(dense_ids.iter().all(|id| snapshot.body(*id).is_some()));
+        assert_eq!(snapshot.bodies().count(), 100);
+    }
+
+    #[test]
+    fn index_hysteresis_keeps_the_current_kind_between_thresholds() {
+        assert!(super::should_use_dense(false, 100, Some(300)));
+        assert!(!super::should_use_dense(false, 100, Some(301)));
+        assert!(super::should_use_dense(true, 100, Some(600)));
+        assert!(!super::should_use_dense(true, 100, Some(601)));
+        assert!(!super::should_use_dense(false, 100, Some(400)));
+        assert!(super::should_use_dense(true, 100, Some(400)));
+        assert!(!super::should_use_dense(true, usize::MAX, None));
+    }
+
+    #[test]
+    fn empty_world_uses_dense_and_empty_sparse_lookup_is_safe() {
+        let empty = PhysicsWorld::new();
+        let dense = PhysicsSnapshot::from_world(&empty, 0, Duration::ZERO);
+        assert!(is_dense(&dense));
+        assert!(dense.is_empty());
+
+        let mut foreign_world = PhysicsWorld::new();
+        let foreign = foreign_world
+            .add_body(RigidBody::new_kinematic(Transform::identity()))
+            .expect("foreign body");
+        let mut sparse = PhysicsSnapshot::empty();
+        assert!(sparse.body(foreign).is_none());
+        sparse.index = super::SnapshotIndex::Sparse(HashMap::new());
+        assert!(sparse.body(foreign).is_none());
+        assert!(sparse.bodies().next().is_none());
     }
 
     #[test]
@@ -238,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_discards_stale_generations_and_old_map_entries() {
+    fn rebuild_discards_stale_generations_and_old_index_entries() {
         let mut world = PhysicsWorld::new();
         let stale = world
             .add_body(RigidBody::new_kinematic(Transform::identity()))
@@ -253,9 +432,9 @@ mod tests {
 
         snapshot.rebuild(&world, 1, Duration::from_millis(10));
 
-        assert_eq!(snapshot.indices.len(), 1);
+        assert!(is_dense(&snapshot));
+        assert_eq!(index_len(&snapshot), 1);
         assert_eq!(snapshot.entries.len(), 1);
-        assert!(!snapshot.indices.contains_key(&stale));
         assert!(snapshot.body(stale).is_none());
         assert!(snapshot.body(replacement).is_some());
     }
