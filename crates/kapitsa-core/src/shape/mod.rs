@@ -6,6 +6,9 @@
 
 use crate::aabb::Aabb;
 
+pub mod error;
+pub use error::{BoundsError, ShapeError};
+
 mod capsule;
 mod convex;
 mod cuboid;

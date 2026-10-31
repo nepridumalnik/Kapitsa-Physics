@@ -1,5 +1,8 @@
 use glam::{Quat, Vec3};
 
+pub mod error;
+pub use error::TransformError;
+
 /// Rigid transformation consisting of translation and rotation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {

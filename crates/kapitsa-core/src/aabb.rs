@@ -1,5 +1,8 @@
 use glam::Vec3;
 
+pub mod error;
+pub use error::AabbError;
+
 /// Axis-aligned bounding box defined by minimum and maximum corners.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aabb {
