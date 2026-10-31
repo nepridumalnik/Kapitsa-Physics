@@ -11,12 +11,14 @@ use std::{
 };
 
 use kapitsa_core::{
+    collider::Collider,
     mass::MassProperties,
     rigid_body::{BodyState, RigidBody},
+    shape::{Shape, Sphere},
     transform::Transform,
     world::{BodyId, BodyStep, PhysicsWorld, StepError},
 };
-use kapitsa_math::{Mat3, Vec3};
+use kapitsa_math::{Mat3, Quat, Vec3};
 use kapitsa_tokio::{PhysicsClientError, PhysicsController, PhysicsSimulation, SchedulerConfig};
 use tokio::{
     runtime::{Builder, Runtime},
@@ -126,6 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             report("dynamic buckets x2", dynamic_buckets, sequential);
         }
     }
+    report_collision_worker_scaling(&runtime)?;
     for workload in WORKLOADS {
         report_phases(&runtime, workload)?;
     }
@@ -134,6 +137,59 @@ fn main() -> Result<(), Box<dyn Error>> {
         report_marshalling().await
     })?;
     Ok(())
+}
+
+fn report_collision_worker_scaling(runtime: &Runtime) -> Result<(), Box<dyn Error>> {
+    const WARMUP_STEPS: usize = 3;
+    const MEASURED_STEPS: usize = 12;
+    let mut medians = Vec::with_capacity(3);
+    for workers in [1, 2, 4] {
+        let elapsed = sample(SAMPLES, || {
+            let mut controller =
+                PhysicsController::new(collision_worker_world()?, config(workers))?;
+            controller.set_active_workers(workers)?;
+            for _ in 0..WARMUP_STEPS {
+                black_box(runtime.block_on(controller.step())?);
+            }
+            let started = Instant::now();
+            for _ in 0..MEASURED_STEPS {
+                black_box(runtime.block_on(controller.step())?);
+            }
+            Ok(started.elapsed().div_f64(MEASURED_STEPS as f64))
+        })?;
+        medians.push(elapsed);
+    }
+
+    println!(
+        "\ncollision solver scaling: 4,096 dynamic / 2,048 two-body islands, {MEASURED_STEPS} steps/sample after {WARMUP_STEPS} warmups"
+    );
+    for (workers, elapsed) in [1, 2, 4].into_iter().zip(medians.iter().copied()) {
+        report(
+            &format!("PhysicsController x{workers}"),
+            elapsed,
+            medians[0],
+        );
+    }
+    Ok(())
+}
+
+fn collision_worker_world() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    for pair in 0..2_048 {
+        let x = pair as f64 * 3.0;
+        for offset in [0.0, 0.9] {
+            let body = world.add_body(RigidBody::new_dynamic(
+                Transform::new(Vec3::new(x + offset, 0.0, 0.0), Quat::IDENTITY)?,
+                mass,
+            )?)?;
+            world.add_collider(
+                body,
+                Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+            )?;
+        }
+    }
+    Ok(world)
 }
 
 fn report_phases(runtime: &Runtime, workload: Workload) -> Result<(), Box<dyn Error>> {

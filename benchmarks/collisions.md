@@ -352,3 +352,46 @@ Run the focused groups with:
 cargo bench -p kapitsa-core --features bench-internals --bench collision_storage -- layouts
 cargo bench -p kapitsa-core --features bench-internals --bench collision_storage -- workers_4096
 ```
+
+## Final baseline comparison, stage 18
+
+The final comparison uses the original implementation at benchmark commit
+`336582d` and the completed implementation, built in Release mode on the same
+machine. Each row is the median of five samples; ranges are shown where they
+were captured. World construction is outside the timed region. Measurements
+include the benchmark instrumentation. Changes smaller than the sample spread
+are not treated as established improvements.
+
+| Workload | Baseline | Final | Median change | Reading |
+|---|---:|---:|---:|---|
+| 20,000 separated Dynamic spheres, one full step | 25.757 ms (25.366–25.965) | 26.620 ms (26.132–26.869) | +3.4% | Small regression; ranges do not overlap |
+| 1,000 Dynamic bodies, one 999-contact island, full step | 17.148 ms | 17.336 ms | +1.1% | Solver phase 12.201 → 12.138 ms; no material solver change |
+| 500 islands, two Dynamic bodies each | 7.784 ms | 7.994 ms | +2.7% | Ranges overlap; no measurable change |
+| 64 fast CCD impacts | 250.860 ms | 126.093 ms | −49.7% | Final CCD phase 125.888 ms; 155 candidates vs. 64 at baseline |
+| 1,000 raycasts against 20,000 static colliders | 12,258.859 ms | 0.787 ms | −99.994% | Indexed queries; final query-index estimate is 8,864 KiB |
+| 1,000 sweeps against a 20,000-triangle mesh | 240.198 ms | 245.160 ms | +2.1% | Small regression; ranges do not overlap |
+| 1,000 SkinPose updates, 1,024 vertices | 36.693 ms | 36.952 ms | +0.7% | Ranges overlap; no measurable change |
+| 1,000 Dynamic / 4,000 Static contacts | 38.643 ms | 35.360 ms | −8.5% | Improvement in this workload |
+
+For the one-island storage sample, estimated peak sampled and retained scratch
+changed from 4,034 KiB to 4,024 KiB. Explicit materialization counts remained
+1,000 body and 2,997 manifold copies per step. Logical capacity growth changed
+from 4,131,456 B to 4,121,568 B; this is a retained-capacity delta, not a
+malloc count. `ContactManifold` fell from 648 B to 616 B.
+
+The additional Tokio collision-worker workload uses 4,096 Dynamic spheres in
+2,048 two-body contact islands, with three warm-up steps and twelve measured
+steps per sample. Baseline and final medians per step were 30.62 → 30.81 ms at
+one worker, 11.04 → 10.72 ms at two workers, and 9.48 → 9.53 ms at four
+workers. These small differences do not establish a before/after worker
+speedup. The final run's full-step ranges and phase medians are in the Stage 13
+worker table above. Existing Tokio localized-collision comparisons also varied
+by scene size; see the stage-specific table earlier in this document.
+
+The primary gains are CCD candidate refresh and committed spatial queries.
+The no-contact step and mesh sweep regressions are recorded as tradeoffs. The
+packed solver-island prototype, a public reusable query object, and removing
+the adaptive Dense/Sparse snapshot index were not adopted: their workload
+comparisons did not show a consistent end-to-end benefit. Full correctness,
+memory-estimate limits, and implementation details are in
+[`docs/reviews/collision-refactoring-report.md`](../docs/reviews/collision-refactoring-report.md).
