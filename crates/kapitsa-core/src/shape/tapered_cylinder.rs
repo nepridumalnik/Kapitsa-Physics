@@ -64,7 +64,7 @@ impl TaperedCylinder {
     pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let start_radius = Vec3::splat(self.start_radius);
         let end_radius = Vec3::splat(self.end_radius);
-        Aabb::new(
+        Aabb::from_f32_bounds(
             (self.start - start_radius).min(self.end - end_radius),
             (self.start + start_radius).max(self.end + end_radius),
         )

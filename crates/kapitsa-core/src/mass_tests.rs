@@ -1,4 +1,5 @@
 use glam::{Mat3, Quat, Vec3};
+use kapitsa_math::{Quat as MathQuat, Vec3 as MathVec3};
 
 use super::{MassError, MassProperties};
 use crate::shape::{Cuboid, Plane, Shape, Sphere};
@@ -19,6 +20,19 @@ fn properties(mass: f32, center: Vec3, inertia: Mat3) -> MassProperties {
 }
 
 fn transform(translation: Vec3, rotation: Quat) -> Transform {
+    let translation = MathVec3::new(
+        f64::from(translation.x),
+        f64::from(translation.y),
+        f64::from(translation.z),
+    );
+    let rotation = MathQuat::new(
+        f64::from(rotation.x),
+        f64::from(rotation.y),
+        f64::from(rotation.z),
+        f64::from(rotation.w),
+    )
+    .try_normalize()
+    .expect("valid test rotation");
     Transform::new(translation, rotation).expect("valid transform")
 }
 
@@ -262,7 +276,7 @@ fn combines_identical_bodies_at_identical_transforms() -> Result<(), MassError> 
     let combined = MassProperties::combine(&[(body, placement), (body, placement)])?;
 
     assert_close(combined.mass(), 2.0 * body.mass());
-    assert_vec3_close(combined.center_of_mass(), placement.translation());
+    assert_vec3_close(combined.center_of_mass(), Vec3::new(3.0, -2.0, 1.0));
     assert_mat3_close(combined.inertia(), single.inertia() * 2.0);
     Ok(())
 }

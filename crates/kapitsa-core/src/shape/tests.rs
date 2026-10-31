@@ -1,6 +1,7 @@
 use crate::aabb::{Aabb, AabbError};
 use crate::transform::Transform;
 use glam::{Affine3A, Quat, Vec2, Vec3};
+use kapitsa_math::{Quat as MathQuat, Vec3 as MathVec3};
 use rstest::{fixture, rstest};
 
 use super::{
@@ -10,7 +11,24 @@ use super::{
 };
 
 fn expected_aabb(min: Vec3, max: Vec3) -> Aabb {
-    Aabb::new(min, max).expect("valid test bounds")
+    Aabb::from_f32_bounds(min, max).expect("valid test bounds")
+}
+
+fn transform(translation: Vec3, rotation: Quat) -> Transform {
+    let translation = MathVec3::new(
+        f64::from(translation.x),
+        f64::from(translation.y),
+        f64::from(translation.z),
+    );
+    let rotation = MathQuat::new(
+        f64::from(rotation.x),
+        f64::from(rotation.y),
+        f64::from(rotation.z),
+        f64::from(rotation.w),
+    )
+    .try_normalize()
+    .expect("valid test rotation");
+    Transform::new(translation, rotation).expect("valid transform")
 }
 
 #[test]
@@ -900,52 +918,63 @@ fn shape_local_bounds_propagates_overflow() {
 #[test]
 fn sphere_world_bounds_ignore_rotation() {
     let sphere = Shape::Sphere(Sphere::new(2.0).expect("valid sphere"));
-    let transform = Transform::new(Vec3::new(10.0, 5.0, -3.0), Quat::from_rotation_z(0.7))
-        .expect("valid transform");
+    let transform = transform(Vec3::new(10.0, 5.0, -3.0), Quat::from_rotation_z(0.7));
 
-    assert_eq!(
-        sphere.world_bounds(&transform),
-        Ok(Some(expected_aabb(
-            Vec3::new(8.0, 3.0, -5.0),
-            Vec3::new(12.0, 7.0, -1.0),
-        )))
-    );
+    let bounds = sphere
+        .world_bounds(&transform)
+        .expect("valid bounds")
+        .expect("sphere has finite bounds");
+    let expected_min = MathVec3::new(8.0, 3.0, -5.0);
+    let expected_max = MathVec3::new(12.0, 7.0, -1.0);
+
+    assert!(bounds.min().x <= expected_min.x);
+    assert!(bounds.min().y <= expected_min.y);
+    assert!(bounds.min().z <= expected_min.z);
+    assert!(bounds.max().x >= expected_max.x);
+    assert!(bounds.max().y >= expected_max.y);
+    assert!(bounds.max().z >= expected_max.z);
+    assert!((bounds.min() - expected_min).abs().max_element() < 1.0e-14);
+    assert!((bounds.max() - expected_max).abs().max_element() < 1.0e-14);
 }
 
 #[test]
 fn sphere_world_bounds_round_outward() {
     let sphere = Shape::Sphere(Sphere::new(1.0).expect("valid sphere"));
-    let transform = Transform::new(Vec3::new(100_000_000.0, 0.0, 0.0), Quat::IDENTITY)
-        .expect("valid transform");
+    let transform = transform(Vec3::new(100_000_000.0, 0.0, 0.0), Quat::IDENTITY);
 
     let bounds = sphere
         .world_bounds(&transform)
         .expect("valid bounds")
         .expect("finite bounds");
 
-    assert_eq!(bounds.min().x, 99_999_992.0);
-    assert_eq!(bounds.max().x, 100_000_008.0);
+    assert!(bounds.min().x <= 99_999_999.0);
+    assert!(bounds.max().x >= 100_000_001.0);
+    assert!(bounds.min().x > 99_999_998.999);
+    assert!(bounds.max().x < 100_000_001.001);
 }
 
 #[test]
 fn cuboid_world_bounds_apply_rotation_and_translation() {
     let cuboid = Shape::Cuboid(Cuboid::new(2.0, 4.0, 6.0).expect("valid cuboid"));
-    let transform = Transform::new(
+    let transform = transform(
         Vec3::new(10.0, 5.0, 0.0),
         Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-    )
-    .expect("valid transform");
+    );
 
     let bounds = cuboid
         .world_bounds(&transform)
         .expect("valid bounds")
         .expect("finite bounds");
 
-    let expected_min = Vec3::new(8.0, 4.0, -3.0);
-    let expected_max = Vec3::new(12.0, 6.0, 3.0);
+    let expected_min = MathVec3::new(8.0, 4.0, -3.0);
+    let expected_max = MathVec3::new(12.0, 6.0, 3.0);
 
-    assert!(bounds.min().cmple(expected_min).all());
-    assert!(bounds.max().cmpge(expected_max).all());
+    assert!(bounds.min().x <= expected_min.x);
+    assert!(bounds.min().y <= expected_min.y);
+    assert!(bounds.min().z <= expected_min.z);
+    assert!(bounds.max().x >= expected_max.x);
+    assert!(bounds.max().y >= expected_max.y);
+    assert!(bounds.max().z >= expected_max.z);
 
     assert!((bounds.min() - expected_min).abs().max_element() < 1.0e-4);
     assert!((bounds.max() - expected_max).abs().max_element() < 1.0e-4);
@@ -961,7 +990,8 @@ fn plane_world_bounds_are_unbounded() {
 #[test]
 fn sphere_world_bounds_report_overflow() {
     let sphere = Shape::Sphere(Sphere::new(f32::MAX).expect("valid sphere"));
-    let transform = Transform::new(Vec3::splat(f32::MAX), Quat::IDENTITY).expect("valid transform");
+    let transform =
+        Transform::new(MathVec3::splat(f64::MAX), MathQuat::IDENTITY).expect("valid transform");
 
     assert_eq!(
         sphere.world_bounds(&transform),

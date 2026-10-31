@@ -1,4 +1,4 @@
-use glam::{DMat3, DQuat, DVec3, Vec3};
+use kapitsa_math::{Mat3, Vec3, numeric};
 
 use crate::transform::Transform;
 
@@ -17,11 +17,16 @@ impl Aabb {
         if !min.is_finite() || !max.is_finite() {
             return Err(AabbError::NonFiniteBounds);
         }
-        if !min.cmple(max).all() {
+        if min.x > max.x || min.y > max.y || min.z > max.z {
             return Err(AabbError::InvertedBounds);
         }
 
         Ok(Self { min, max })
+    }
+
+    /// Converts legacy shape bounds while those shapes are migrated to `f64`.
+    pub(crate) fn from_f32_bounds(min: glam::Vec3, max: glam::Vec3) -> Result<Self, AabbError> {
+        Self::new(to_f64_vec3(min), to_f64_vec3(max))
     }
 
     pub fn min(&self) -> Vec3 {
@@ -37,18 +42,30 @@ impl Aabb {
     }
 
     pub fn size(&self) -> Result<Vec3, AabbError> {
-        match self.max - self.min {
-            size if size.is_finite() => Ok(size),
-            _ => Err(AabbError::SizeOverflow),
+        let size = self.max - self.min;
+        if size.is_finite() {
+            Ok(size)
+        } else {
+            Err(AabbError::SizeOverflow)
         }
     }
 
     pub fn contains(&self, point: Vec3) -> bool {
-        point.cmpge(self.min).all() && point.cmple(self.max).all()
+        point.x >= self.min.x
+            && point.y >= self.min.y
+            && point.z >= self.min.z
+            && point.x <= self.max.x
+            && point.y <= self.max.y
+            && point.z <= self.max.z
     }
 
     pub fn intersects(&self, other: &Self) -> bool {
-        self.min.cmple(other.max).all() && self.max.cmpge(other.min).all()
+        self.min.x <= other.max.x
+            && self.min.y <= other.max.y
+            && self.min.z <= other.max.z
+            && self.max.x >= other.min.x
+            && self.max.y >= other.min.y
+            && self.max.z >= other.min.z
     }
 
     pub fn union(&self, other: &Self) -> Self {
@@ -58,155 +75,112 @@ impl Aabb {
         }
     }
 
-    /// Transforms these local-space bounds by a rigid transform.
-    ///
-    /// The result is rounded outward to account for `f32` transform and
-    /// conversion rounding without widening exact translations.
+    /// Transforms these local-space bounds by a rigid transform and rounds
+    /// the result outward to keep it conservative.
     pub fn transformed(&self, transform: &Transform) -> Result<Self, AabbError> {
-        let min = DVec3::new(
-            f64::from(self.min.x),
-            f64::from(self.min.y),
-            f64::from(self.min.z),
-        );
-        let max = DVec3::new(
-            f64::from(self.max.x),
-            f64::from(self.max.y),
-            f64::from(self.max.z),
-        );
-        let center = min * 0.5 + max * 0.5;
-        let half_extents = max * 0.5 - min * 0.5;
+        let translation = transform.translation();
+        let rotation = transform.rotation();
+
+        if is_identity_rotation(rotation) {
+            let min = translated(self.min, translation, false)?;
+            let max = translated(self.max, translation, true)?;
+            return Self::new(min, max).map_err(|_| AabbError::TransformOverflow);
+        }
+
+        if self.min == Vec3::ZERO && self.max == Vec3::ZERO {
+            return Self::new(translation, translation).map_err(|_| AabbError::TransformOverflow);
+        }
+
+        let center = self.center();
+        let half_extents = self.max * 0.5 - self.min * 0.5;
         if !center.is_finite() || !half_extents.is_finite() {
             return Err(AabbError::TransformOverflow);
         }
 
-        let quat = transform.rotation();
-        let quat = DQuat::from_xyzw(
-            f64::from(quat.x),
-            f64::from(quat.y),
-            f64::from(quat.z),
-            f64::from(quat.w),
-        );
-        let vector_part = DVec3::new(quat.x, quat.y, quat.z);
-        let vector_length_squared = vector_part.length_squared();
-        let scalar_squared = quat.w * quat.w;
-        let rotation = DMat3::from_cols(
-            DVec3::new(
-                scalar_squared + quat.x * quat.x - quat.y * quat.y - quat.z * quat.z,
-                2.0 * (quat.x * quat.y + quat.w * quat.z),
-                2.0 * (quat.x * quat.z - quat.w * quat.y),
-            ),
-            DVec3::new(
-                2.0 * (quat.x * quat.y - quat.w * quat.z),
-                scalar_squared - quat.x * quat.x + quat.y * quat.y - quat.z * quat.z,
-                2.0 * (quat.y * quat.z + quat.w * quat.x),
-            ),
-            DVec3::new(
-                2.0 * (quat.x * quat.z + quat.w * quat.y),
-                2.0 * (quat.y * quat.z - quat.w * quat.x),
-                scalar_squared - quat.x * quat.x - quat.y * quat.y + quat.z * quat.z,
-            ),
-        );
-        let absolute_rotation = DMat3::from_cols(
-            rotation.x_axis.abs(),
-            rotation.y_axis.abs(),
-            rotation.z_axis.abs(),
-        );
-        if !rotation.x_axis.is_finite()
-            || !rotation.y_axis.is_finite()
-            || !rotation.z_axis.is_finite()
-        {
+        let rotation = rotation.to_mat3().ok_or(AabbError::TransformOverflow)?;
+        let absolute_rotation: Mat3 = rotation.abs();
+        let transformed_center = rotation
+            .checked_mul_vector(center)
+            .and_then(|value| value.checked_add(translation))
+            .ok_or(AabbError::TransformOverflow)?;
+        let transformed_half_extents = absolute_rotation
+            .checked_mul_vector(half_extents)
+            .ok_or(AabbError::TransformOverflow)?;
+
+        let scale = center
+            .abs()
+            .max_element()
+            .max(half_extents.abs().max_element())
+            .max(translation.abs().max_element());
+        let error = numeric::roundoff_bound(scale, 64).ok_or(AabbError::TransformOverflow)?
+            + 64.0 * f64::from_bits(1);
+        if !error.is_finite() {
             return Err(AabbError::TransformOverflow);
         }
 
-        let translation = transform.translation();
-        let translation = DVec3::new(
-            f64::from(translation.x),
-            f64::from(translation.y),
-            f64::from(translation.z),
-        );
-        let transformed_center = rotation * center + translation;
-        let transformed_half_extents = absolute_rotation * half_extents;
-        let mut transformed_min = transformed_center - transformed_half_extents;
-        let mut transformed_max = transformed_center + transformed_half_extents;
-        if !transformed_center.is_finite()
-            || !transformed_half_extents.is_finite()
-            || !transformed_min.is_finite()
-            || !transformed_max.is_finite()
-        {
-            return Err(AabbError::TransformOverflow);
-        }
-
-        let source_magnitude = center.abs() + half_extents;
-        if source_magnitude != DVec3::ZERO && (vector_part != DVec3::ZERO || quat.w.abs() != 1.0) {
-            // Bound f32 rounding in the absolute quaternion terms, before cancellation.
-            let absolute_vector_part = vector_part.abs();
-            let dot_scale = source_magnitude.dot(absolute_vector_part);
-            let term_one_scale = source_magnitude * (scalar_squared - vector_length_squared).abs();
-            let term_two_scale = absolute_vector_part * (2.0 * dot_scale);
-            let term_three_scale = DVec3::new(
-                absolute_vector_part.y * source_magnitude.z
-                    + absolute_vector_part.z * source_magnitude.y,
-                absolute_vector_part.z * source_magnitude.x
-                    + absolute_vector_part.x * source_magnitude.z,
-                absolute_vector_part.x * source_magnitude.y
-                    + absolute_vector_part.y * source_magnitude.x,
-            ) * (2.0 * quat.w.abs());
-            let error_scale = term_one_scale + term_two_scale + term_three_scale;
-            let operation_count = 12.0;
-            let epsilon = f64::from(f32::EPSILON);
-            let relative_error = operation_count * epsilon / (1.0 - operation_count * epsilon);
-            let underflow_error = operation_count * f64::from(f32::from_bits(1));
-            let error = error_scale * relative_error + DVec3::splat(underflow_error);
-            if !error_scale.is_finite() || !error.is_finite() {
-                return Err(AabbError::TransformOverflow);
-            }
-
-            transformed_min -= error;
-            transformed_max += error;
-        }
-        if !transformed_min.is_finite() || !transformed_max.is_finite() {
-            return Err(AabbError::TransformOverflow);
-        }
-
-        let min = Vec3::new(
-            round_down_to_f32(transformed_min.x)?,
-            round_down_to_f32(transformed_min.y)?,
-            round_down_to_f32(transformed_min.z)?,
-        );
-        let max = Vec3::new(
-            round_up_to_f32(transformed_max.x)?,
-            round_up_to_f32(transformed_max.y)?,
-            round_up_to_f32(transformed_max.z)?,
-        );
+        let error = Vec3::splat(error);
+        let min = transformed_center
+            .checked_sub(transformed_half_extents)
+            .and_then(|value| value.checked_sub(error))
+            .ok_or(AabbError::TransformOverflow)?;
+        let max = transformed_center
+            .checked_add(transformed_half_extents)
+            .and_then(|value| value.checked_add(error))
+            .ok_or(AabbError::TransformOverflow)?;
+        let min = round_down_vec3(min)?;
+        let max = round_up_vec3(max)?;
 
         Self::new(min, max).map_err(|_| AabbError::TransformOverflow)
     }
 }
 
-pub(crate) fn round_down_to_f32(value: f64) -> Result<f32, AabbError> {
-    if !value.is_finite() || value < -(f32::MAX as f64) || value > f32::MAX as f64 {
-        return Err(AabbError::TransformOverflow);
-    }
-
-    let rounded = value as f32;
-    Ok(if f64::from(rounded) > value {
-        rounded.next_down()
-    } else {
-        rounded
-    })
+fn is_identity_rotation(rotation: kapitsa_math::Quat) -> bool {
+    rotation.x == 0.0 && rotation.y == 0.0 && rotation.z == 0.0 && rotation.w.abs() == 1.0
 }
 
-pub(crate) fn round_up_to_f32(value: f64) -> Result<f32, AabbError> {
-    if !value.is_finite() || value < -(f32::MAX as f64) || value > f32::MAX as f64 {
+fn translated(value: Vec3, offset: Vec3, round_up: bool) -> Result<Vec3, AabbError> {
+    Ok(Vec3::new(
+        translated_component(value.x, offset.x, round_up)?,
+        translated_component(value.y, offset.y, round_up)?,
+        translated_component(value.z, offset.z, round_up)?,
+    ))
+}
+
+fn translated_component(value: f64, offset: f64, round_up: bool) -> Result<f64, AabbError> {
+    let sum = value + offset;
+    if !sum.is_finite() {
         return Err(AabbError::TransformOverflow);
     }
 
-    let rounded = value as f32;
-    Ok(if f64::from(rounded) < value {
-        rounded.next_up()
+    let virtual_offset = sum - value;
+    let error = (value - (sum - virtual_offset)) + (offset - virtual_offset);
+    if round_up && error > 0.0 {
+        numeric::round_up(sum).ok_or(AabbError::TransformOverflow)
+    } else if !round_up && error < 0.0 {
+        numeric::round_down(sum).ok_or(AabbError::TransformOverflow)
     } else {
-        rounded
-    })
+        Ok(sum)
+    }
+}
+
+fn round_down_vec3(value: Vec3) -> Result<Vec3, AabbError> {
+    Ok(Vec3::new(
+        numeric::round_down(value.x).ok_or(AabbError::TransformOverflow)?,
+        numeric::round_down(value.y).ok_or(AabbError::TransformOverflow)?,
+        numeric::round_down(value.z).ok_or(AabbError::TransformOverflow)?,
+    ))
+}
+
+fn round_up_vec3(value: Vec3) -> Result<Vec3, AabbError> {
+    Ok(Vec3::new(
+        numeric::round_up(value.x).ok_or(AabbError::TransformOverflow)?,
+        numeric::round_up(value.y).ok_or(AabbError::TransformOverflow)?,
+        numeric::round_up(value.z).ok_or(AabbError::TransformOverflow)?,
+    ))
+}
+
+fn to_f64_vec3(value: glam::Vec3) -> Vec3 {
+    Vec3::new(f64::from(value.x), f64::from(value.y), f64::from(value.z))
 }
 
 #[cfg(test)]

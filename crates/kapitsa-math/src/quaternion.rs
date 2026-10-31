@@ -81,6 +81,10 @@ impl Quat {
         self.x.is_finite() && self.y.is_finite() && self.z.is_finite() && self.w.is_finite()
     }
 
+    pub fn is_normalized(self) -> bool {
+        self.is_finite() && (self.length() - 1.0).abs() <= 8.0 * f64::EPSILON
+    }
+
     /// Rotates a vector, returning `None` for invalid inputs or overflow.
     pub fn rotate_vector(self, vector: Vec3) -> Option<Vec3> {
         if !vector.is_finite() {

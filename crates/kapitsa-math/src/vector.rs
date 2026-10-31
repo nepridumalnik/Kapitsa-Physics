@@ -83,6 +83,10 @@ impl Vec3 {
         Self::new(self.x.max(rhs.x), self.y.max(rhs.y), self.z.max(rhs.z))
     }
 
+    pub fn max_element(self) -> f64 {
+        self.x.max(self.y).max(self.z)
+    }
+
     pub fn checked_add(self, rhs: Self) -> Option<Self> {
         let result = self + rhs;
         result.is_finite().then_some(result)

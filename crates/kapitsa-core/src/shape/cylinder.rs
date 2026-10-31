@@ -44,7 +44,7 @@ impl Cylinder {
 
     pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let radius = Vec3::splat(self.radius);
-        Aabb::new(
+        Aabb::from_f32_bounds(
             self.start.min(self.end) - radius,
             self.start.max(self.end) + radius,
         )

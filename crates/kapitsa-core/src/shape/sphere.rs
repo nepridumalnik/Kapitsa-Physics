@@ -25,6 +25,6 @@ impl Sphere {
 
     pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let extent = Vec3::splat(self.radius);
-        Aabb::new(-extent, extent).map_err(BoundsError::InvalidBounds)
+        Aabb::from_f32_bounds(-extent, extent).map_err(BoundsError::InvalidBounds)
     }
 }

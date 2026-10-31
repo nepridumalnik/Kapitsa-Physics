@@ -9,6 +9,7 @@ pub use physics::{BodyPhysics, BodyType};
 pub use state::BodyState;
 
 use glam::{DQuat, DVec3, Vec3};
+use kapitsa_math::Vec3 as MathVec3;
 
 use crate::{mass::MassProperties, transform::Transform};
 
@@ -297,7 +298,7 @@ fn world_center_of_mass_for(
 
     let rotation = rotation_quat(transform);
     let center =
-        rotation.mul_vec3(to_dvec3(mass.center_of_mass())) + to_dvec3(transform.translation());
+        rotation.mul_vec3(to_dvec3(mass.center_of_mass())) + to_math_dvec3(transform.translation());
     if !center.is_finite()
         || center.x.abs() > f64::from(f32::MAX)
         || center.y.abs() > f64::from(f32::MAX)
@@ -311,13 +312,7 @@ fn world_center_of_mass_for(
 
 fn rotation_quat(transform: Transform) -> DQuat {
     let rotation = transform.rotation();
-    DQuat::from_xyzw(
-        f64::from(rotation.x),
-        f64::from(rotation.y),
-        f64::from(rotation.z),
-        f64::from(rotation.w),
-    )
-    .normalize()
+    DQuat::from_xyzw(rotation.x, rotation.y, rotation.z, rotation.w).normalize()
 }
 
 fn solve_inertia(inertia: glam::Mat3, right_hand_side: DVec3) -> Result<DVec3, BodyError> {
@@ -386,6 +381,10 @@ fn solve_inertia(inertia: glam::Mat3, right_hand_side: DVec3) -> Result<DVec3, B
 
 fn to_dvec3(value: Vec3) -> DVec3 {
     DVec3::new(f64::from(value.x), f64::from(value.y), f64::from(value.z))
+}
+
+fn to_math_dvec3(value: MathVec3) -> DVec3 {
+    DVec3::new(value.x, value.y, value.z)
 }
 
 fn checked_vec3(value: DVec3) -> Result<Vec3, BodyError> {

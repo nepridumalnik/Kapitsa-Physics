@@ -59,6 +59,6 @@ impl TriangleMesh {
         let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
             (min.min(vertex), max.max(vertex))
         });
-        Aabb::new(min, max).map_err(BoundsError::InvalidBounds)
+        Aabb::from_f32_bounds(min, max).map_err(BoundsError::InvalidBounds)
     }
 }

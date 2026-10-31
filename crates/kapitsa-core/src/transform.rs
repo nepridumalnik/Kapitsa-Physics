@@ -1,4 +1,4 @@
-use glam::{Quat, Vec3};
+use kapitsa_math::{Quat, Vec3};
 
 pub mod error;
 pub use error::TransformError;
@@ -15,7 +15,7 @@ impl Transform {
         if !translation.is_finite() {
             return Err(TransformError::NonFiniteTranslation);
         }
-        if !rotation.is_finite() || !rotation.is_normalized() {
+        if !rotation.is_normalized() {
             return Err(TransformError::InvalidRotation);
         }
 
@@ -41,33 +41,33 @@ impl Transform {
     }
 
     pub fn transform_point(&self, point: Vec3) -> Vec3 {
-        self.rotation * point + self.translation
+        match self.rotation.to_mat3() {
+            Some(rotation) => rotation * point + self.translation,
+            None => Vec3::splat(f64::NAN),
+        }
     }
 
     pub fn transform_vector(&self, vector: Vec3) -> Vec3 {
-        self.rotation * vector
+        match self.rotation.to_mat3() {
+            Some(rotation) => rotation * vector,
+            None => Vec3::splat(f64::NAN),
+        }
     }
 
     /// Composes this transform with a local transform applied before it.
     pub fn compose(&self, local: &Self) -> Result<Self, TransformError> {
-        let translation = self.rotation * local.translation + self.translation;
+        let Some(rotation_matrix) = self.rotation.to_mat3() else {
+            return Err(TransformError::CompositionOverflow);
+        };
+        let translation = rotation_matrix * local.translation + self.translation;
         if !translation.is_finite() {
             return Err(TransformError::CompositionOverflow);
         }
 
-        let rotation = self.rotation * local.rotation;
-        let rotation_length_squared = rotation.length_squared();
-        if !rotation.is_finite()
-            || !rotation_length_squared.is_finite()
-            || rotation_length_squared <= 0.0
-        {
-            return Err(TransformError::CompositionOverflow);
-        }
-
-        let rotation = rotation.normalize();
-        if !rotation.is_finite() || !rotation.is_normalized() {
-            return Err(TransformError::CompositionOverflow);
-        }
+        let rotation = (self.rotation * local.rotation)
+            .try_normalize()
+            .filter(|rotation| rotation.is_normalized())
+            .ok_or(TransformError::CompositionOverflow)?;
 
         Ok(Self {
             translation,
@@ -77,7 +77,10 @@ impl Transform {
 
     pub fn inverse(&self) -> Result<Self, TransformError> {
         let rotation = self.rotation.conjugate();
-        let translation = rotation * -self.translation;
+        let Some(rotation_matrix) = rotation.to_mat3() else {
+            return Err(TransformError::InverseOverflow);
+        };
+        let translation = rotation_matrix * -self.translation;
 
         if !translation.is_finite() {
             return Err(TransformError::InverseOverflow);

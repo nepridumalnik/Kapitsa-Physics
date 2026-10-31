@@ -80,7 +80,7 @@ impl LevelSet {
         );
         let last_node = self.origin + self.grid_spacing * span;
 
-        Aabb::new(self.origin.min(last_node), self.origin.max(last_node))
+        Aabb::from_f32_bounds(self.origin.min(last_node), self.origin.max(last_node))
             .map_err(BoundsError::InvalidBounds)
     }
 }

@@ -1,4 +1,4 @@
-use glam::{Quat, Vec3};
+use kapitsa_math::{Quat, Vec3};
 use rstest::rstest;
 
 use super::{Aabb, AabbError};
@@ -8,8 +8,12 @@ fn bounds(min: Vec3, max: Vec3) -> Aabb {
     Aabb::new(min, max).expect("valid AABB")
 }
 
+fn rotation(axis: Vec3, angle: f64) -> Quat {
+    Quat::from_axis_angle(axis, angle).expect("valid rotation")
+}
+
 fn assert_vec3_close(actual: Vec3, expected: Vec3) {
-    const EPSILON: f32 = 2.0e-5;
+    const EPSILON: f64 = 2.0e-5;
 
     assert!(
         (actual - expected).abs().max_element() <= EPSILON,
@@ -45,12 +49,12 @@ fn rejects_inverted_bounds(#[case] min: Vec3, #[case] max: Vec3) {
 }
 
 #[rstest]
-#[case::nan_min(Vec3::new(f32::NAN, 0.0, 0.0), Vec3::ONE)]
-#[case::nan_max(Vec3::ZERO, Vec3::new(1.0, f32::NAN, 1.0))]
-#[case::positive_infinite_min(Vec3::new(f32::INFINITY, 0.0, 0.0), Vec3::ONE)]
-#[case::negative_infinite_min(Vec3::new(f32::NEG_INFINITY, 0.0, 0.0), Vec3::ONE)]
-#[case::positive_infinite_max(Vec3::ZERO, Vec3::new(1.0, f32::INFINITY, 1.0))]
-#[case::negative_infinite_max(Vec3::ZERO, Vec3::new(1.0, f32::NEG_INFINITY, 1.0))]
+#[case::nan_min(Vec3::new(f64::NAN, 0.0, 0.0), Vec3::ONE)]
+#[case::nan_max(Vec3::ZERO, Vec3::new(1.0, f64::NAN, 1.0))]
+#[case::positive_infinite_min(Vec3::new(f64::INFINITY, 0.0, 0.0), Vec3::ONE)]
+#[case::negative_infinite_min(Vec3::new(f64::NEG_INFINITY, 0.0, 0.0), Vec3::ONE)]
+#[case::positive_infinite_max(Vec3::ZERO, Vec3::new(1.0, f64::INFINITY, 1.0))]
+#[case::negative_infinite_max(Vec3::ZERO, Vec3::new(1.0, f64::NEG_INFINITY, 1.0))]
 fn rejects_non_finite_bounds(#[case] min: Vec3, #[case] max: Vec3) {
     assert_eq!(Aabb::new(min, max), Err(AabbError::NonFiniteBounds));
 }
@@ -65,7 +69,7 @@ fn computes_center_and_size() {
 
 #[test]
 fn computes_center_without_intermediate_overflow() {
-    let aabb = bounds(Vec3::splat(-f32::MAX), Vec3::splat(f32::MAX));
+    let aabb = bounds(Vec3::splat(-f64::MAX), Vec3::splat(f64::MAX));
 
     assert_eq!(aabb.center(), Vec3::ZERO);
 }
@@ -89,13 +93,31 @@ fn translation_moves_bounds() {
 }
 
 #[test]
+fn preserves_f64_precision_through_translation() {
+    let base = 1.0e12;
+    let aabb = bounds(
+        Vec3::new(base, base, base),
+        Vec3::new(base + 2.0, base + 2.0, base + 2.0),
+    );
+    let translation = Vec3::new(0.25, -0.5, 0.75);
+    let transform = Transform::new(translation, Quat::IDENTITY).expect("valid translation");
+
+    let transformed = aabb.transformed(&transform).expect("finite bounds");
+    assert_eq!(
+        transformed.min(),
+        Vec3::new(base + 0.25, base - 0.5, base + 0.75)
+    );
+    assert_eq!(
+        transformed.max(),
+        Vec3::new(base + 2.25, base + 1.5, base + 2.75)
+    );
+}
+
+#[test]
 fn quarter_turn_around_z_swaps_x_and_y_extents() {
     let aabb = bounds(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0));
-    let transform = Transform::new(
-        Vec3::ZERO,
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-    )
-    .expect("valid rotation");
+    let transform = Transform::new(Vec3::ZERO, rotation(Vec3::Z, std::f64::consts::FRAC_PI_2))
+        .expect("valid rotation");
 
     let transformed = aabb.transformed(&transform).expect("finite bounds");
     assert_vec3_close(transformed.min(), Vec3::new(-2.0, -1.0, -3.0));
@@ -107,7 +129,7 @@ fn rotation_and_translation_are_both_applied() {
     let aabb = bounds(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0));
     let transform = Transform::new(
         Vec3::new(10.0, -4.0, 2.0),
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        rotation(Vec3::Z, std::f64::consts::FRAC_PI_2),
     )
     .expect("valid transform");
 
@@ -119,8 +141,7 @@ fn rotation_and_translation_are_both_applied() {
 #[test]
 fn arbitrary_rotation_bounds_all_transformed_corners() {
     let aabb = bounds(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(4.0, 5.0, 6.0));
-    let rotation =
-        Quat::from_rotation_x(0.37) * Quat::from_rotation_y(-0.81) * Quat::from_rotation_z(0.42);
+    let rotation = rotation(Vec3::X, 0.37) * rotation(Vec3::Y, -0.81) * rotation(Vec3::Z, 0.42);
     let transform = Transform::new(Vec3::new(2.0, -3.0, 1.5), rotation).expect("valid transform");
     let transformed = aabb.transformed(&transform).expect("finite bounds");
 
@@ -128,8 +149,12 @@ fn arbitrary_rotation_bounds_all_transformed_corners() {
         for y in [aabb.min().y, aabb.max().y] {
             for z in [aabb.min().z, aabb.max().z] {
                 let corner = transform.transform_point(Vec3::new(x, y, z));
-                assert!(corner.cmpge(transformed.min()).all());
-                assert!(corner.cmple(transformed.max()).all());
+                assert!(corner.x >= transformed.min().x);
+                assert!(corner.y >= transformed.min().y);
+                assert!(corner.z >= transformed.min().z);
+                assert!(corner.x <= transformed.max().x);
+                assert!(corner.y <= transformed.max().y);
+                assert!(corner.z <= transformed.max().z);
             }
         }
     }
@@ -149,9 +174,9 @@ fn degenerate_bounds_transform_as_a_point() {
 
 #[test]
 fn transformed_bounds_report_coordinate_overflow() {
-    let aabb = bounds(Vec3::splat(f32::MAX), Vec3::splat(f32::MAX));
+    let aabb = bounds(Vec3::splat(f64::MAX), Vec3::splat(f64::MAX));
     let transform =
-        Transform::new(Vec3::splat(f32::MAX), Quat::IDENTITY).expect("valid translation");
+        Transform::new(Vec3::splat(f64::MAX), Quat::IDENTITY).expect("valid translation");
 
     assert_eq!(
         aabb.transformed(&transform),
@@ -161,7 +186,7 @@ fn transformed_bounds_report_coordinate_overflow() {
 
 #[test]
 fn identity_transform_handles_bounds_whose_size_overflows() {
-    let aabb = bounds(Vec3::splat(-f32::MAX), Vec3::splat(f32::MAX));
+    let aabb = bounds(Vec3::splat(-f64::MAX), Vec3::splat(f64::MAX));
 
     assert_eq!(aabb.size(), Err(AabbError::SizeOverflow));
     assert_eq!(aabb.transformed(&Transform::identity()), Ok(aabb));
@@ -175,7 +200,7 @@ fn identity_transform_handles_bounds_whose_size_overflows() {
 #[case::outside_x(Vec3::new(1.1, 0.0, 0.0), false)]
 #[case::outside_y(Vec3::new(0.0, -2.1, 0.0), false)]
 #[case::outside_z(Vec3::new(0.0, 0.0, 3.1), false)]
-#[case::nan(Vec3::new(f32::NAN, 0.0, 0.0), false)]
+#[case::nan(Vec3::new(f64::NAN, 0.0, 0.0), false)]
 fn contains_point(#[case] point: Vec3, #[case] expected: bool) {
     let aabb = bounds(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0));
 
@@ -244,20 +269,17 @@ fn union_with_contained_bounds_preserves_outer_bounds() {
 
 #[test]
 fn size_rejects_overflow() {
-    let aabb = Aabb::new(Vec3::splat(-f32::MAX), Vec3::splat(f32::MAX)).expect("valid AABB");
+    let aabb = Aabb::new(Vec3::splat(-f64::MAX), Vec3::splat(f64::MAX)).expect("valid AABB");
     assert_eq!(aabb.size(), Err(AabbError::SizeOverflow));
 }
 
 #[test]
 fn rotated_zero_bounds_preserve_max_translation() {
     let aabb = bounds(Vec3::ZERO, Vec3::ZERO);
-    let translation = Vec3::new(f32::MAX, 0.0, 0.0);
+    let translation = Vec3::new(f64::MAX, 0.0, 0.0);
 
-    let transform = Transform::new(
-        translation,
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-    )
-    .expect("valid transform");
+    let transform = Transform::new(translation, rotation(Vec3::Z, std::f64::consts::FRAC_PI_2))
+        .expect("valid transform");
 
     assert_eq!(
         aabb.transformed(&transform),
@@ -269,11 +291,8 @@ fn rotated_zero_bounds_preserve_max_translation() {
 fn large_translation_does_not_excessively_expand_bounds() {
     let aabb = bounds(Vec3::splat(-1.0), Vec3::ONE);
 
-    let transform = Transform::new(
-        Vec3::new(100_000_000.0, 0.0, 0.0),
-        Quat::from_rotation_z(0.37),
-    )
-    .expect("valid transform");
+    let transform = Transform::new(Vec3::new(100_000_000.0, 0.0, 0.0), rotation(Vec3::Z, 0.37))
+        .expect("valid transform");
 
     let result = aabb.transformed(&transform).expect("finite bounds");
 

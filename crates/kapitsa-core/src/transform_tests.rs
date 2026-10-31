@@ -1,15 +1,19 @@
-use glam::{Quat, Vec3};
+use kapitsa_math::{Quat, Vec3};
 use rstest::rstest;
 
 use super::{Transform, TransformError};
 
 fn assert_vec3_close(actual: Vec3, expected: Vec3) {
-    const EPSILON: f32 = 1.0e-5;
+    const EPSILON: f64 = 1.0e-5;
 
     assert!(
         (actual - expected).abs().max_element() <= EPSILON,
         "expected {expected:?}, got {actual:?}"
     );
+}
+
+fn rotation(axis: Vec3, angle: f64) -> Quat {
+    Quat::from_axis_angle(axis, angle).expect("valid rotation")
 }
 
 #[test]
@@ -26,7 +30,7 @@ fn identity_preserves_points_and_vectors() {
 #[test]
 fn stores_translation_and_rotation() {
     let translation = Vec3::new(1.0, 2.0, 3.0);
-    let rotation = Quat::from_rotation_z(0.5);
+    let rotation = rotation(Vec3::Z, 0.5);
 
     let transform = Transform::new(translation, rotation).expect("valid transform");
 
@@ -35,9 +39,9 @@ fn stores_translation_and_rotation() {
 }
 
 #[rstest]
-#[case::nan_x(Vec3::new(f32::NAN, 0.0, 0.0))]
-#[case::positive_infinity(Vec3::new(0.0, f32::INFINITY, 0.0))]
-#[case::negative_infinity(Vec3::new(0.0, 0.0, f32::NEG_INFINITY))]
+#[case::nan_x(Vec3::new(f64::NAN, 0.0, 0.0))]
+#[case::positive_infinity(Vec3::new(0.0, f64::INFINITY, 0.0))]
+#[case::negative_infinity(Vec3::new(0.0, 0.0, f64::NEG_INFINITY))]
 fn rejects_non_finite_translation(#[case] translation: Vec3) {
     assert_eq!(
         Transform::new(translation, Quat::IDENTITY),
@@ -46,10 +50,10 @@ fn rejects_non_finite_translation(#[case] translation: Vec3) {
 }
 
 #[rstest]
-#[case::zero(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0))]
-#[case::non_unit(Quat::from_xyzw(0.0, 0.0, 0.0, 2.0))]
-#[case::nan(Quat::from_xyzw(0.0, 0.0, 0.0, f32::NAN))]
-#[case::infinity(Quat::from_xyzw(0.0, 0.0, f32::INFINITY, 1.0))]
+#[case::zero(Quat::new(0.0, 0.0, 0.0, 0.0))]
+#[case::non_unit(Quat::new(0.0, 0.0, 0.0, 2.0))]
+#[case::nan(Quat::new(0.0, 0.0, 0.0, f64::NAN))]
+#[case::infinity(Quat::new(0.0, 0.0, f64::INFINITY, 1.0))]
 fn rejects_invalid_rotation(#[case] rotation: Quat) {
     assert_eq!(
         Transform::new(Vec3::ZERO, rotation),
@@ -72,7 +76,7 @@ fn transform_point_applies_translation() {
 fn transform_point_applies_rotation_and_translation() {
     let transform = Transform::new(
         Vec3::new(10.0, 5.0, -2.0),
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        rotation(Vec3::Z, std::f64::consts::FRAC_PI_2),
     )
     .expect("valid transform");
 
@@ -86,7 +90,7 @@ fn transform_point_applies_rotation_and_translation() {
 fn transform_vector_ignores_translation() {
     let transform = Transform::new(
         Vec3::new(10.0, 20.0, 30.0),
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        rotation(Vec3::Z, std::f64::consts::FRAC_PI_2),
     )
     .expect("valid transform");
 
@@ -122,7 +126,7 @@ fn inverse_reverses_translation() {
 fn inverse_reverses_rotation_and_translation() {
     let transform = Transform::new(
         Vec3::new(2.0, 0.0, 0.0),
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        rotation(Vec3::Z, std::f64::consts::FRAC_PI_2),
     )
     .expect("valid transform");
 
@@ -139,8 +143,8 @@ fn inverse_reverses_rotation_and_translation() {
 #[case::negative(Vec3::new(-4.0, -2.0, -1.0))]
 #[case::mixed(Vec3::new(3.0, -5.0, 2.0))]
 fn inverse_restores_original_point(#[case] point: Vec3) {
-    let transform = Transform::new(Vec3::new(3.0, -5.0, 2.0), Quat::from_rotation_y(0.7))
-        .expect("valid transform");
+    let transform =
+        Transform::new(Vec3::new(3.0, -5.0, 2.0), rotation(Vec3::Y, 0.7)).expect("valid transform");
 
     let inverse = transform.inverse().expect("invertible transform");
 
@@ -152,7 +156,7 @@ fn inverse_restores_original_point(#[case] point: Vec3) {
 
 #[test]
 fn inverse_restores_original_vector() {
-    let transform = Transform::new(Vec3::new(10.0, -5.0, 3.0), Quat::from_rotation_x(0.8))
+    let transform = Transform::new(Vec3::new(10.0, -5.0, 3.0), rotation(Vec3::X, 0.8))
         .expect("valid transform");
 
     let inverse = transform.inverse().expect("invertible transform");
@@ -167,8 +171,8 @@ fn inverse_restores_original_vector() {
 #[test]
 fn inverse_rejects_overflow() {
     let transform = Transform::new(
-        Vec3::new(f32::MAX, f32::MAX, 0.0),
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
+        Vec3::new(f64::MAX, f64::MAX, 0.0),
+        rotation(Vec3::Z, std::f64::consts::FRAC_PI_4),
     )
     .expect("valid transform");
 
@@ -199,11 +203,8 @@ fn composition_adds_parent_and_local_translations() {
 
 #[test]
 fn parent_rotation_rotates_local_translation() {
-    let parent = Transform::new(
-        Vec3::ZERO,
-        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-    )
-    .expect("valid parent transform");
+    let parent = Transform::new(Vec3::ZERO, rotation(Vec3::Z, std::f64::consts::FRAC_PI_2))
+        .expect("valid parent transform");
     let local = Transform::new(Vec3::X, Quat::IDENTITY).expect("valid local transform");
 
     let composed = parent.compose(&local).expect("valid composition");
@@ -214,9 +215,8 @@ fn parent_rotation_rotates_local_translation() {
 #[test]
 fn composition_multiplies_parent_rotation_by_local_rotation() {
     let parent =
-        Transform::new(Vec3::ZERO, Quat::from_rotation_z(0.7)).expect("valid parent transform");
-    let local =
-        Transform::new(Vec3::ZERO, Quat::from_rotation_x(-0.4)).expect("valid local transform");
+        Transform::new(Vec3::ZERO, rotation(Vec3::Z, 0.7)).expect("valid parent transform");
+    let local = Transform::new(Vec3::ZERO, rotation(Vec3::X, -0.4)).expect("valid local transform");
 
     let composed = parent.compose(&local).expect("valid composition");
 
@@ -229,9 +229,9 @@ fn composition_multiplies_parent_rotation_by_local_rotation() {
 
 #[test]
 fn composed_transform_matches_sequential_point_transforms() {
-    let parent = Transform::new(Vec3::new(3.0, -2.0, 5.0), Quat::from_rotation_y(0.6))
+    let parent = Transform::new(Vec3::new(3.0, -2.0, 5.0), rotation(Vec3::Y, 0.6))
         .expect("valid parent transform");
-    let local = Transform::new(Vec3::new(-1.0, 4.0, 2.0), Quat::from_rotation_x(-0.3))
+    let local = Transform::new(Vec3::new(-1.0, 4.0, 2.0), rotation(Vec3::X, -0.3))
         .expect("valid local transform");
     let point = Vec3::new(2.0, -3.0, 1.0);
 
@@ -246,9 +246,9 @@ fn composed_transform_matches_sequential_point_transforms() {
 #[test]
 fn composition_rejects_translation_overflow() {
     let parent =
-        Transform::new(Vec3::splat(f32::MAX), Quat::IDENTITY).expect("valid parent transform");
+        Transform::new(Vec3::splat(f64::MAX), Quat::IDENTITY).expect("valid parent transform");
     let local =
-        Transform::new(Vec3::splat(f32::MAX), Quat::IDENTITY).expect("valid local transform");
+        Transform::new(Vec3::splat(f64::MAX), Quat::IDENTITY).expect("valid local transform");
 
     assert_eq!(
         parent.compose(&local),

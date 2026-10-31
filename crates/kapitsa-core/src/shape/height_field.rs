@@ -76,7 +76,7 @@ impl HeightField {
             });
         let span = self.grid_spacing * Vec2::new((self.columns - 1) as f32, (self.rows - 1) as f32);
 
-        Aabb::new(
+        Aabb::from_f32_bounds(
             Vec3::new(0.0, 0.0, min_height),
             Vec3::new(span.x, span.y, max_height),
         )

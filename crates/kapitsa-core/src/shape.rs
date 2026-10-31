@@ -4,10 +4,10 @@
 //! local endpoints, vertices, or a grid origin. A collider's transform places
 //! this geometry in world space.
 
-use glam::Vec3;
+use kapitsa_math::{Vec3, numeric};
 
 use crate::{
-    aabb::{Aabb, round_down_to_f32, round_up_to_f32},
+    aabb::{Aabb, AabbError},
     transform::Transform,
 };
 
@@ -90,12 +90,20 @@ impl Shape {
             let center = transform.translation();
             let radius = f64::from(sphere.radius());
 
-            let min = |value: f32| round_down_to_f32(f64::from(value) - radius);
-            let max = |value: f32| round_up_to_f32(f64::from(value) + radius);
+            let min = |value: f64| numeric::round_down(value).ok_or(AabbError::TransformOverflow);
+            let max = |value: f64| numeric::round_up(value).ok_or(AabbError::TransformOverflow);
 
             let bounds = Aabb::new(
-                Vec3::new(min(center.x)?, min(center.y)?, min(center.z)?),
-                Vec3::new(max(center.x)?, max(center.y)?, max(center.z)?),
+                Vec3::new(
+                    min(center.x - radius)?,
+                    min(center.y - radius)?,
+                    min(center.z - radius)?,
+                ),
+                Vec3::new(
+                    max(center.x + radius)?,
+                    max(center.y + radius)?,
+                    max(center.z + radius)?,
+                ),
             )?;
 
             return Ok(Some(bounds));

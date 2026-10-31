@@ -1,13 +1,27 @@
 use glam::{Mat3, Quat, Vec3};
+use kapitsa_math::{Quat as MathQuat, Vec3 as MathVec3};
 
 use super::{BodyType, MassProperties, RigidBody};
 use crate::transform::Transform;
 
 fn transform() -> Transform {
-    Transform::new(Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY).expect("valid transform")
+    transform_at(Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY)
 }
 
 fn transform_at(translation: Vec3, rotation: Quat) -> Transform {
+    let translation = MathVec3::new(
+        f64::from(translation.x),
+        f64::from(translation.y),
+        f64::from(translation.z),
+    );
+    let rotation = MathQuat::new(
+        f64::from(rotation.x),
+        f64::from(rotation.y),
+        f64::from(rotation.z),
+        f64::from(rotation.w),
+    )
+    .try_normalize()
+    .expect("valid test rotation");
     Transform::new(translation, rotation).expect("valid transform")
 }
 
@@ -93,7 +107,7 @@ fn dynamic_constructor_accepts_an_offset_local_center_of_mass() {
 
 #[test]
 fn dynamic_constructor_rejects_world_center_of_mass_overflow() {
-    let transform = Transform::new(Vec3::X * f32::MAX, Quat::IDENTITY).expect("finite transform");
+    let transform = transform_at(Vec3::X * f32::MAX, Quat::IDENTITY);
     let mass_properties = MassProperties::new(1.0, Vec3::X * f32::MAX, Mat3::IDENTITY)
         .expect("valid mass properties");
 

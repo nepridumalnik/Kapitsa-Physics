@@ -34,6 +34,6 @@ impl Cuboid {
 
     pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
         let half = self.half_extents();
-        Aabb::new(-half, half).map_err(BoundsError::InvalidBounds)
+        Aabb::from_f32_bounds(-half, half).map_err(BoundsError::InvalidBounds)
     }
 }

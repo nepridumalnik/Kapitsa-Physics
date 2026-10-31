@@ -85,6 +85,14 @@ impl Mat3 {
         )
     }
 
+    pub fn abs(self) -> Self {
+        Self::from_cols(
+            self.columns[0].abs(),
+            self.columns[1].abs(),
+            self.columns[2].abs(),
+        )
+    }
+
     pub const fn is_finite(self) -> bool {
         self.columns[0].is_finite() && self.columns[1].is_finite() && self.columns[2].is_finite()
     }

@@ -1,4 +1,5 @@
 use glam::{DMat3, DVec3, Mat3, Vec3};
+use kapitsa_math::Vec3 as MathVec3;
 
 use crate::{
     shape::{Cuboid, Shape, Sphere},
@@ -81,9 +82,9 @@ impl MassProperties {
 
     /// Adds a part after transforming it into this body's local coordinate system.
     pub fn push(&mut self, part: &Self, transform: &Transform) -> Result<(), MassError> {
-        let rotation = rotation_matrix(transform);
+        let rotation = rotation_matrix(transform)?;
         let part_center =
-            rotation * to_dvec3(part.center_of_mass) + to_dvec3(transform.translation());
+            rotation * to_dvec3(part.center_of_mass) + to_math_dvec3(transform.translation());
         let part_inertia = rotation * to_dmat3(part.inertia) * rotation.transpose();
         let self_center = to_dvec3(self.center_of_mass);
         let self_mass = f64::from(self.mass);
@@ -345,6 +346,10 @@ fn to_dvec3(value: Vec3) -> DVec3 {
     DVec3::new(f64::from(value.x), f64::from(value.y), f64::from(value.z))
 }
 
+fn to_math_dvec3(value: MathVec3) -> DVec3 {
+    DVec3::new(value.x, value.y, value.z)
+}
+
 fn to_dmat3(value: Mat3) -> DMat3 {
     let columns = value.to_cols_array();
     DMat3::from_cols(
@@ -366,35 +371,17 @@ fn to_dmat3(value: Mat3) -> DMat3 {
     )
 }
 
-fn rotation_matrix(transform: &Transform) -> DMat3 {
-    let rotation = transform.rotation();
-    let length = f64::from(rotation.length());
-    let x = f64::from(rotation.x) / length;
-    let y = f64::from(rotation.y) / length;
-    let z = f64::from(rotation.z) / length;
-    let w = f64::from(rotation.w) / length;
-    let x2 = x * x;
-    let y2 = y * y;
-    let z2 = z * z;
-    let w2 = w * w;
-
-    DMat3::from_cols(
-        DVec3::new(
-            w2 + x2 - y2 - z2,
-            2.0 * (x * y + w * z),
-            2.0 * (x * z - w * y),
-        ),
-        DVec3::new(
-            2.0 * (x * y - w * z),
-            w2 - x2 + y2 - z2,
-            2.0 * (y * z + w * x),
-        ),
-        DVec3::new(
-            2.0 * (x * z + w * y),
-            2.0 * (y * z - w * x),
-            w2 - x2 - y2 + z2,
-        ),
-    )
+fn rotation_matrix(transform: &Transform) -> Result<DMat3, MassError> {
+    let matrix = transform
+        .rotation()
+        .to_mat3()
+        .ok_or(MassError::ArithmeticOverflow)?;
+    let columns = matrix.to_cols_array();
+    Ok(DMat3::from_cols(
+        DVec3::new(columns[0], columns[1], columns[2]),
+        DVec3::new(columns[3], columns[4], columns[5]),
+        DVec3::new(columns[6], columns[7], columns[8]),
+    ))
 }
 
 fn parallel_axis(mass: f64, offset: DVec3) -> DMat3 {
@@ -404,8 +391,8 @@ fn parallel_axis(mass: f64, offset: DVec3) -> DMat3 {
 }
 
 fn transformed(part: &MassProperties, transform: &Transform) -> Result<MassProperties, MassError> {
-    let rotation = rotation_matrix(transform);
-    let center = rotation * to_dvec3(part.center_of_mass) + to_dvec3(transform.translation());
+    let rotation = rotation_matrix(transform)?;
+    let center = rotation * to_dvec3(part.center_of_mass) + to_math_dvec3(transform.translation());
     let inertia = rotation * to_dmat3(part.inertia) * rotation.transpose();
     MassProperties::new(part.mass, to_vec3(center)?, to_mat3(inertia)?)
 }
