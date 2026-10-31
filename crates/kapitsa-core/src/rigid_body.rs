@@ -253,6 +253,10 @@ impl RigidBody {
         self.clear_forces();
     }
 
+    pub(crate) fn set_state_preserving_forces(&mut self, state: BodyState) {
+        self.state = state;
+    }
+
     fn ensure_dynamic(&self) -> Result<(), BodyError> {
         if self.physics.body_type == BodyType::Dynamic {
             Ok(())

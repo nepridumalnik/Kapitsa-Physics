@@ -1,27 +1,39 @@
 use crate::{
+    aabb::Aabb,
     collider::CollisionMode,
-    shape::{Plane, Shape, Triangle},
+    shape::{HeightField, LevelSet, Plane, Shape, Triangle, TriangleMesh},
     transform::Transform,
 };
 use kapitsa_math::Vec3;
 
 use super::{
     CollisionError, CollisionPair,
+    ccd::CcdHit,
     epa::EpaWorkspace,
     gjk,
+    height_field::{self, HeightFieldTriangle},
     manifold::{ContactManifold, ContactPoint, combine_feature_ids},
+    mesh::{self, MeshQueryWorkspace, TriangleBvh},
     support::{support_pair, support_world},
 };
 
 /// Reusable scratch for narrow-phase contact generation.
 pub(crate) struct NarrowPhase {
     epa: EpaWorkspace,
+    mesh_workspace: MeshQueryWorkspace,
+    mesh_candidates: Vec<usize>,
+    height_field_candidates: Vec<HeightFieldTriangle>,
+    level_set_candidates: Vec<super::level_set::LevelSetCell>,
 }
 
 impl NarrowPhase {
     pub(crate) const fn new() -> Self {
         Self {
             epa: EpaWorkspace::new(),
+            mesh_workspace: MeshQueryWorkspace::new(),
+            mesh_candidates: Vec::new(),
+            height_field_candidates: Vec::new(),
+            level_set_candidates: Vec::new(),
         }
     }
 
@@ -37,6 +49,42 @@ impl NarrowPhase {
         collider_b: &Transform,
         body_b: &Transform,
         mode_b: CollisionMode,
+        contact_offset: f64,
+    ) -> Result<Option<ContactManifold>, CollisionError> {
+        self.detect_with_geometry(
+            pair,
+            shape_a,
+            collider_a,
+            body_a,
+            mode_a,
+            None,
+            None,
+            shape_b,
+            collider_b,
+            body_b,
+            mode_b,
+            None,
+            None,
+            contact_offset,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn detect_with_geometry(
+        &mut self,
+        pair: CollisionPair,
+        shape_a: &Shape,
+        collider_a: &Transform,
+        body_a: &Transform,
+        mode_a: CollisionMode,
+        bvh_a: Option<&TriangleBvh>,
+        vertices_a: Option<&[Vec3]>,
+        shape_b: &Shape,
+        collider_b: &Transform,
+        body_b: &Transform,
+        mode_b: CollisionMode,
+        bvh_b: Option<&TriangleBvh>,
+        vertices_b: Option<&[Vec3]>,
         contact_offset: f64,
     ) -> Result<Option<ContactManifold>, CollisionError> {
         if !contact_offset.is_finite() || contact_offset < 0.0 {
@@ -78,7 +126,87 @@ impl NarrowPhase {
                 contact_offset,
                 false,
             ),
-            (Shape::Triangle(triangle), convex) if convex.is_convex() => self.triangle_convex(
+            (Shape::TriangleMesh(mesh), convex) if convex.is_convex() => self.mesh_convex(
+                pair,
+                mesh,
+                vertices_a.unwrap_or_else(|| mesh.vertices()),
+                bvh_a.ok_or(CollisionError::GeometryBounds)?,
+                collider_a,
+                convex,
+                collider_b,
+                body_a,
+                body_b,
+                true,
+                contact_offset,
+            ),
+            (convex, Shape::TriangleMesh(mesh)) if convex.is_convex() => self.mesh_convex(
+                pair,
+                mesh,
+                vertices_b.unwrap_or_else(|| mesh.vertices()),
+                bvh_b.ok_or(CollisionError::GeometryBounds)?,
+                collider_b,
+                convex,
+                collider_a,
+                body_a,
+                body_b,
+                false,
+                contact_offset,
+            ),
+            (Shape::SkinnedTriangleMesh(mesh), convex) if convex.is_convex() => self.mesh_convex(
+                pair,
+                mesh.mesh(),
+                vertices_a.unwrap_or_else(|| mesh.mesh().vertices()),
+                bvh_a.ok_or(CollisionError::GeometryBounds)?,
+                collider_a,
+                convex,
+                collider_b,
+                body_a,
+                body_b,
+                true,
+                contact_offset,
+            ),
+            (convex, Shape::SkinnedTriangleMesh(mesh)) if convex.is_convex() => self.mesh_convex(
+                pair,
+                mesh.mesh(),
+                vertices_b.unwrap_or_else(|| mesh.mesh().vertices()),
+                bvh_b.ok_or(CollisionError::GeometryBounds)?,
+                collider_b,
+                convex,
+                collider_a,
+                body_a,
+                body_b,
+                false,
+                contact_offset,
+            ),
+            (Shape::HeightField(field), convex) if convex.is_convex() => self.height_field_convex(
+                pair,
+                field,
+                collider_a,
+                convex,
+                collider_b,
+                body_a,
+                body_b,
+                true,
+                contact_offset,
+            ),
+            (convex, Shape::HeightField(field)) if convex.is_convex() => self.height_field_convex(
+                pair,
+                field,
+                collider_b,
+                convex,
+                collider_a,
+                body_a,
+                body_b,
+                false,
+                contact_offset,
+            ),
+            (Shape::LevelSet(field), convex) if convex.is_convex() => self.level_set_convex(
+                pair, field, collider_a, convex, collider_b, body_a, body_b, true,
+            ),
+            (convex, Shape::LevelSet(field)) if convex.is_convex() => self.level_set_convex(
+                pair, field, collider_b, convex, collider_a, body_a, body_b, false,
+            ),
+            (Shape::Triangle(triangle), convex) if convex.is_convex() => Self::triangle_convex(
                 pair,
                 triangle,
                 collider_a,
@@ -89,7 +217,7 @@ impl NarrowPhase {
                 true,
                 contact_offset,
             ),
-            (convex, Shape::Triangle(triangle)) if convex.is_convex() => self.triangle_convex(
+            (convex, Shape::Triangle(triangle)) if convex.is_convex() => Self::triangle_convex(
                 pair,
                 triangle,
                 collider_b,
@@ -102,6 +230,150 @@ impl NarrowPhase {
             ),
             (a, b) if a.is_convex() && b.is_convex() => {
                 self.convex_convex(pair, a, collider_a, body_a, b, collider_b, body_b)
+            }
+            _ => Err(CollisionError::UnsupportedGeometryPair),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn time_of_impact(
+        &mut self,
+        shape_a: &Shape,
+        start_a: Transform,
+        end_a: Transform,
+        bvh_a: Option<&TriangleBvh>,
+        vertices_a: Option<&[Vec3]>,
+        shape_b: &Shape,
+        start_b: Transform,
+        end_b: Transform,
+        bvh_b: Option<&TriangleBvh>,
+        vertices_b: Option<&[Vec3]>,
+        sensor: bool,
+    ) -> Result<Option<CcdHit>, CollisionError> {
+        match (shape_a, shape_b) {
+            (Shape::Plane(plane), convex) if convex.is_convex() => {
+                super::ccd::plane_toi(convex, start_b, end_b, plane, start_a, end_a, sensor, true)
+            }
+            (convex, Shape::Plane(plane)) if convex.is_convex() => {
+                super::ccd::plane_toi(convex, start_a, end_a, plane, start_b, end_b, sensor, false)
+            }
+            (Shape::Triangle(triangle), convex) if convex.is_convex() => {
+                let target = Shape::Triangle(
+                    Triangle::from_vertices(triangle.vertices())
+                        .map_err(|_| CollisionError::InvalidContact)?,
+                );
+                super::ccd::convex_toi(convex, start_b, end_b, &target, start_a, end_a)
+                    .map(|hit| hit.map(reverse_hit))
+            }
+            (convex, Shape::Triangle(triangle)) if convex.is_convex() => {
+                let target = Shape::Triangle(
+                    Triangle::from_vertices(triangle.vertices())
+                        .map_err(|_| CollisionError::InvalidContact)?,
+                );
+                super::ccd::convex_toi(convex, start_a, end_a, &target, start_b, end_b)
+            }
+            (Shape::TriangleMesh(mesh), convex) if convex.is_convex() => {
+                super::ccd::triangle_mesh_toi(
+                    convex,
+                    start_b,
+                    end_b,
+                    mesh,
+                    vertices_a,
+                    bvh_a.ok_or(CollisionError::GeometryBounds)?,
+                    start_a,
+                    end_a,
+                    &mut self.mesh_workspace,
+                    &mut self.mesh_candidates,
+                )
+                .map(|hit| hit.map(reverse_hit))
+            }
+            (convex, Shape::TriangleMesh(mesh)) if convex.is_convex() => {
+                super::ccd::triangle_mesh_toi(
+                    convex,
+                    start_a,
+                    end_a,
+                    mesh,
+                    vertices_b,
+                    bvh_b.ok_or(CollisionError::GeometryBounds)?,
+                    start_b,
+                    end_b,
+                    &mut self.mesh_workspace,
+                    &mut self.mesh_candidates,
+                )
+            }
+            (Shape::SkinnedTriangleMesh(mesh), convex) if convex.is_convex() => {
+                super::ccd::triangle_mesh_toi(
+                    convex,
+                    start_b,
+                    end_b,
+                    mesh.mesh(),
+                    vertices_a,
+                    bvh_a.ok_or(CollisionError::GeometryBounds)?,
+                    start_a,
+                    end_a,
+                    &mut self.mesh_workspace,
+                    &mut self.mesh_candidates,
+                )
+                .map(|hit| hit.map(reverse_hit))
+            }
+            (convex, Shape::SkinnedTriangleMesh(mesh)) if convex.is_convex() => {
+                super::ccd::triangle_mesh_toi(
+                    convex,
+                    start_a,
+                    end_a,
+                    mesh.mesh(),
+                    vertices_b,
+                    bvh_b.ok_or(CollisionError::GeometryBounds)?,
+                    start_b,
+                    end_b,
+                    &mut self.mesh_workspace,
+                    &mut self.mesh_candidates,
+                )
+            }
+            (Shape::HeightField(field), convex) if convex.is_convex() => {
+                super::ccd::height_field_toi(
+                    convex,
+                    start_b,
+                    end_b,
+                    field,
+                    start_a,
+                    end_a,
+                    &mut self.height_field_candidates,
+                )
+                .map(|hit| hit.map(reverse_hit))
+            }
+            (convex, Shape::HeightField(field)) if convex.is_convex() => {
+                super::ccd::height_field_toi(
+                    convex,
+                    start_a,
+                    end_a,
+                    field,
+                    start_b,
+                    end_b,
+                    &mut self.height_field_candidates,
+                )
+            }
+            (Shape::LevelSet(field), convex) if convex.is_convex() => super::ccd::level_set_toi(
+                convex,
+                start_b,
+                end_b,
+                field,
+                start_a,
+                end_a,
+                &mut self.level_set_candidates,
+            )
+            .map(|hit| hit.map(reverse_hit)),
+            (convex, Shape::LevelSet(field)) if convex.is_convex() => super::ccd::level_set_toi(
+                convex,
+                start_a,
+                end_a,
+                field,
+                start_b,
+                end_b,
+                &mut self.level_set_candidates,
+            ),
+            (a, b) if a.is_convex() && b.is_convex() => {
+                super::ccd::convex_toi(a, start_a, end_a, b, start_b, end_b)
             }
             _ => Err(CollisionError::UnsupportedGeometryPair),
         }
@@ -199,7 +471,6 @@ impl NarrowPhase {
 
     #[allow(clippy::too_many_arguments)]
     fn triangle_convex(
-        &self,
         pair: CollisionPair,
         triangle: &Triangle,
         triangle_transform: &Transform,
@@ -277,6 +548,157 @@ impl NarrowPhase {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn mesh_convex(
+        &mut self,
+        pair: CollisionPair,
+        mesh: &TriangleMesh,
+        vertices: &[Vec3],
+        bvh: &TriangleBvh,
+        mesh_transform: &Transform,
+        convex: &Shape,
+        convex_transform: &Transform,
+        body_a: &Transform,
+        body_b: &Transform,
+        mesh_is_a: bool,
+        contact_offset: f64,
+    ) -> Result<Option<ContactManifold>, CollisionError> {
+        if vertices.len() != mesh.vertices().len() || bvh.triangle_count() != mesh.triangles().len()
+        {
+            return Err(CollisionError::GeometryBounds);
+        }
+        let bounds = expanded_convex_bounds(convex, convex_transform, contact_offset)?;
+        let local_bounds = mesh::local_query_bounds(bounds, mesh_transform)?;
+        bvh.query(
+            local_bounds,
+            &mut self.mesh_workspace,
+            &mut self.mesh_candidates,
+        )?;
+        let mut manifold = None;
+        for triangle_index in self.mesh_candidates.iter().copied() {
+            let [a, b, c] = *mesh
+                .triangles()
+                .get(triangle_index)
+                .ok_or(CollisionError::GeometryBounds)?;
+            let triangle = Triangle::from_vertices([
+                *vertices.get(a).ok_or(CollisionError::GeometryBounds)?,
+                *vertices.get(b).ok_or(CollisionError::GeometryBounds)?,
+                *vertices.get(c).ok_or(CollisionError::GeometryBounds)?,
+            ])
+            .map_err(|_| CollisionError::InvalidContact)?;
+            let Some(contact) = Self::triangle_convex(
+                pair,
+                &triangle,
+                mesh_transform,
+                convex,
+                convex_transform,
+                body_a,
+                body_b,
+                mesh_is_a,
+                contact_offset,
+            )?
+            else {
+                continue;
+            };
+            let feature =
+                u64::try_from(triangle_index).map_err(|_| CollisionError::ArithmeticOverflow)?;
+            merge_contact_manifold(&mut manifold, contact, body_a, body_b, feature)?;
+        }
+        Ok(manifold)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn height_field_convex(
+        &mut self,
+        pair: CollisionPair,
+        field: &HeightField,
+        field_transform: &Transform,
+        convex: &Shape,
+        convex_transform: &Transform,
+        body_a: &Transform,
+        body_b: &Transform,
+        field_is_a: bool,
+        contact_offset: f64,
+    ) -> Result<Option<ContactManifold>, CollisionError> {
+        let bounds = expanded_convex_bounds(convex, convex_transform, contact_offset)?;
+        height_field::query_world_bounds(
+            field,
+            field_transform,
+            bounds,
+            &mut self.height_field_candidates,
+        )?;
+        let mut manifold = None;
+        for candidate in self.height_field_candidates.iter().copied() {
+            let triangle = Triangle::from_vertices(candidate.vertices)
+                .map_err(|_| CollisionError::InvalidContact)?;
+            let Some(contact) = Self::triangle_convex(
+                pair,
+                &triangle,
+                field_transform,
+                convex,
+                convex_transform,
+                body_a,
+                body_b,
+                field_is_a,
+                contact_offset,
+            )?
+            else {
+                continue;
+            };
+            merge_contact_manifold(&mut manifold, contact, body_a, body_b, candidate.feature_id)?;
+        }
+        Ok(manifold)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn level_set_convex(
+        &mut self,
+        pair: CollisionPair,
+        field: &LevelSet,
+        field_transform: &Transform,
+        convex: &Shape,
+        convex_transform: &Transform,
+        body_a: &Transform,
+        body_b: &Transform,
+        field_is_a: bool,
+    ) -> Result<Option<ContactManifold>, CollisionError> {
+        let Some(hit) = super::ccd::level_set_toi(
+            convex,
+            *convex_transform,
+            *convex_transform,
+            field,
+            *field_transform,
+            *field_transform,
+            &mut self.level_set_candidates,
+        )?
+        else {
+            return Ok(None);
+        };
+        if !gjk::distance_to_point(convex, convex_transform, hit.point_b)?.intersects {
+            return Err(CollisionError::NonConvergent);
+        }
+        let (point_a, point_b, normal) = if field_is_a {
+            (hit.point_b, hit.point_a, -hit.normal)
+        } else {
+            (hit.point_a, hit.point_b, hit.normal)
+        };
+        let separation = point_b
+            .checked_sub(point_a)
+            .and_then(|delta| delta.checked_dot(normal))
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        make_manifold(
+            pair,
+            body_a,
+            body_b,
+            point_a,
+            point_b,
+            normal,
+            (-separation).max(0.0),
+            0,
+        )
+        .map(Some)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn convex_convex(
         &mut self,
         pair: CollisionPair,
@@ -330,6 +752,91 @@ impl NarrowPhase {
         )
         .map(Some)
     }
+}
+
+fn expanded_convex_bounds(
+    shape: &Shape,
+    transform: &Transform,
+    expansion: f64,
+) -> Result<Aabb, CollisionError> {
+    let bounds = shape
+        .world_bounds(transform)
+        .map_err(|_| CollisionError::GeometryBounds)?
+        .ok_or(CollisionError::UnsupportedGeometryPair)?;
+    let expansion = Vec3::splat(expansion);
+    let min = bounds
+        .min()
+        .checked_sub(expansion)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let max = bounds
+        .max()
+        .checked_add(expansion)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    Aabb::new(min, max).map_err(|_| CollisionError::GeometryBounds)
+}
+
+fn reverse_hit(hit: CcdHit) -> CcdHit {
+    CcdHit {
+        toi: hit.toi,
+        normal: -hit.normal,
+        point_a: hit.point_b,
+        point_b: hit.point_a,
+    }
+}
+
+fn merge_contact_manifold(
+    output: &mut Option<ContactManifold>,
+    source: ContactManifold,
+    body_a: &Transform,
+    body_b: &Transform,
+    feature: u64,
+) -> Result<(), CollisionError> {
+    let manifold = output.get_or_insert_with(|| ContactManifold::new(source.pair));
+    for mut point in source.points() {
+        point.feature_id = combine_feature_ids(feature, point.feature_id);
+        let point_a = body_a.transform_point(point.local_a);
+        let point_b = body_b.transform_point(point.local_b);
+        let world_position = point_a
+            .checked_add(point_b)
+            .and_then(|sum| sum.checked_mul_scalar(0.5))
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let mut duplicate = false;
+        for index in 0..manifold.len() {
+            let existing = *manifold
+                .point(index)
+                .ok_or(CollisionError::InvalidContact)?;
+            let existing_a = body_a.transform_point(existing.local_a);
+            let existing_b = body_b.transform_point(existing.local_b);
+            let existing_position = existing_a
+                .checked_add(existing_b)
+                .and_then(|sum| sum.checked_mul_scalar(0.5))
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let distance = world_position
+                .checked_sub(existing_position)
+                .and_then(Vec3::checked_length)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let scale = world_position
+                .abs()
+                .max_element()
+                .max(existing_position.abs().max_element())
+                .max(1.0);
+            if distance <= scale * f64::EPSILON * 512.0
+                && point.normal.dot(existing.normal) >= 0.995
+            {
+                if point.penetration > existing.penetration {
+                    *manifold
+                        .point_mut(index)
+                        .ok_or(CollisionError::InvalidContact)? = point;
+                }
+                duplicate = true;
+                break;
+            }
+        }
+        if !duplicate {
+            manifold.insert(point, world_position)?;
+        }
+    }
+    Ok(())
 }
 
 fn shape_center(shape: &Shape, transform: &Transform) -> Result<Vec3, CollisionError> {

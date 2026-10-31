@@ -32,6 +32,7 @@ mod step;
 mod support;
 mod system;
 
+pub(crate) use ccd::{CcdHit, interpolate, swept_bounds};
 pub use config::CollisionConfig;
 pub use contact::CollisionPair;
 pub use error::{CollisionError, QueryError};
@@ -41,7 +42,7 @@ pub use query::{OverlapHit, QueryFilter, Ray, RayHit, ShapeHit};
 pub(crate) use query::{overlaps_shape, raycast_shape, sweep_shape};
 
 pub(crate) use broad_phase::CollisionProxy;
-pub(crate) use manifold::ContactPoint;
+pub(crate) use manifold::{ContactManifold, ContactPoint};
 pub(crate) use solver::{SolverBody, SolverManifold, SolverMaterial};
 pub(crate) use step::StepContext;
 pub(crate) use system::CollisionSystem;

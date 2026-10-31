@@ -38,6 +38,12 @@ pub(crate) struct MeshQueryWorkspace {
     stack: Vec<usize>,
 }
 
+impl MeshQueryWorkspace {
+    pub(crate) const fn new() -> Self {
+        Self { stack: Vec::new() }
+    }
+}
+
 impl TriangleBvh {
     pub(crate) fn build(mesh: &TriangleMesh) -> Result<Self, CollisionError> {
         let triangle_count = mesh.triangles().len();

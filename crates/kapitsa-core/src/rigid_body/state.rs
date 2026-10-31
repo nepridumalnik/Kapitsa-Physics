@@ -30,4 +30,8 @@ impl BodyState {
     pub fn is_sleeping(&self) -> bool {
         self.sleeping
     }
+
+    pub(crate) fn set_transform(&mut self, transform: Transform) {
+        self.transform = transform;
+    }
 }

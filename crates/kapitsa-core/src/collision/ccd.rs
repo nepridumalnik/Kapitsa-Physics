@@ -68,7 +68,7 @@ pub(crate) fn convex_toi(
             Err(error) => return Err(error),
         };
         if distance.intersects {
-            return Ok(Some(distance_hit(toi, distance)));
+            return Ok(Some(distance_hit(toi, distance, transform_a, transform_b)));
         }
         if motion_bound == 0.0 {
             return Ok(None);
@@ -612,10 +612,19 @@ fn plane_gap(
     })
 }
 
-fn distance_hit(toi: f64, distance: GjkDistance) -> CcdHit {
+fn distance_hit(
+    toi: f64,
+    distance: GjkDistance,
+    transform_a: Transform,
+    transform_b: Transform,
+) -> CcdHit {
+    let center_direction = transform_b
+        .translation()
+        .checked_sub(transform_a.translation())
+        .and_then(Vec3::try_normalize);
     CcdHit {
         toi,
-        normal: distance.normal,
+        normal: center_direction.unwrap_or(distance.normal),
         point_a: distance.point_a,
         point_b: distance.point_b,
     }
@@ -676,7 +685,11 @@ fn rotation_angle(start: Quat, end: Quat) -> Result<f64, CollisionError> {
     Ok(2.0 * dot.abs().clamp(0.0, 1.0).acos())
 }
 
-fn interpolate(start: Transform, end: Transform, amount: f64) -> Result<Transform, CollisionError> {
+pub(crate) fn interpolate(
+    start: Transform,
+    end: Transform,
+    amount: f64,
+) -> Result<Transform, CollisionError> {
     let translation = start
         .translation()
         .checked_add(

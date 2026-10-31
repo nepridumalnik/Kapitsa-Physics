@@ -35,6 +35,25 @@ fn convex_toi_finds_fast_translation_impact() {
 }
 
 #[test]
+fn convex_toi_finds_fast_sphere_impact_against_a_thin_cuboid() {
+    let sphere = Shape::Sphere(Sphere::new(0.5).expect("sphere"));
+    let cuboid = Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).expect("cuboid"));
+    let start = transform(Vec3::new(-5.0, 0.0, 0.0), Quat::IDENTITY);
+    let end = transform(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY);
+    let hit = convex_toi(
+        &sphere,
+        start,
+        end,
+        &cuboid,
+        Transform::identity(),
+        Transform::identity(),
+    )
+    .expect("TOI")
+    .expect("impact");
+    assert!(hit.toi > 0.0 && hit.toi < 1.0);
+}
+
+#[test]
 fn convex_toi_accounts_for_rotation_without_endpoint_overlap() {
     let rod = Shape::Cuboid(Cuboid::new(4.0, 0.2, 0.2).expect("cuboid"));
     let sphere = Shape::Sphere(Sphere::new(0.2).expect("sphere"));

@@ -3,10 +3,12 @@ use super::{
     StepContext,
     broad_phase::BroadPhase,
     cache::ContactCache,
+    ccd::CcdHit,
     island::IslandLayout,
     manifold::ContactManifold,
+    mesh::TriangleBvh,
     narrow_phase::NarrowPhase,
-    solver::{SolverBody, SolverIsland},
+    solver::{SolverBody, SolverIsland, SolverManifold, SolverMaterial, SolverWorkspace},
     spatial_index::SpatialIndex,
 };
 use crate::collider::CollisionMode;
@@ -25,6 +27,7 @@ pub(crate) struct CollisionSystem {
     narrow_phase: NarrowPhase,
     islands: IslandLayout,
     solver_islands: Vec<SolverIsland>,
+    ccd_solver: SolverWorkspace,
     cache_staged: bool,
 }
 
@@ -42,6 +45,7 @@ impl CollisionSystem {
             narrow_phase: NarrowPhase::new(),
             islands: IslandLayout::new(),
             solver_islands: Vec::new(),
+            ccd_solver: SolverWorkspace::new(),
             cache_staged: false,
         }
     }
@@ -114,22 +118,51 @@ impl CollisionSystem {
         collider_a: &Transform,
         body_a: &Transform,
         mode_a: CollisionMode,
+        bvh_a: Option<&TriangleBvh>,
+        vertices_a: Option<&[kapitsa_math::Vec3]>,
         shape_b: &Shape,
         collider_b: &Transform,
         body_b: &Transform,
         mode_b: CollisionMode,
+        bvh_b: Option<&TriangleBvh>,
+        vertices_b: Option<&[kapitsa_math::Vec3]>,
     ) -> Result<Option<ContactManifold>, CollisionError> {
-        self.narrow_phase.detect(
+        self.narrow_phase.detect_with_geometry(
             pair,
             shape_a,
             collider_a,
             body_a,
             mode_a,
+            bvh_a,
+            vertices_a,
             shape_b,
             collider_b,
             body_b,
             mode_b,
+            bvh_b,
+            vertices_b,
             self.config.contact_offset,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn time_of_impact(
+        &mut self,
+        shape_a: &Shape,
+        start_a: Transform,
+        end_a: Transform,
+        bvh_a: Option<&TriangleBvh>,
+        vertices_a: Option<&[kapitsa_math::Vec3]>,
+        shape_b: &Shape,
+        start_b: Transform,
+        end_b: Transform,
+        bvh_b: Option<&TriangleBvh>,
+        vertices_b: Option<&[kapitsa_math::Vec3]>,
+        sensor: bool,
+    ) -> Result<Option<CcdHit>, CollisionError> {
+        self.narrow_phase.time_of_impact(
+            shape_a, start_a, end_a, bvh_a, vertices_a, shape_b, start_b, end_b, bvh_b, vertices_b,
+            sensor,
         )
     }
 
@@ -285,6 +318,30 @@ impl CollisionSystem {
             self.cache_staged = true;
         }
         Ok(())
+    }
+
+    pub(crate) fn solve_ccd_contact(
+        &mut self,
+        body_a: crate::rigid_body::RigidBody,
+        state_a: BodyState,
+        body_b: crate::rigid_body::RigidBody,
+        state_b: BodyState,
+        manifold: ContactManifold,
+        material: SolverMaterial,
+    ) -> Result<(BodyState, BodyState, ContactManifold), CollisionError> {
+        let mut bodies = [
+            SolverBody::from_prediction(body_a, state_a),
+            SolverBody::from_prediction(body_b, state_b),
+        ];
+        let mut manifolds = [SolverManifold {
+            body_a: 0,
+            body_b: 1,
+            manifold,
+            material,
+        }];
+        self.ccd_solver
+            .solve(&mut bodies, &mut manifolds, self.config)?;
+        Ok((bodies[0].state(), bodies[1].state(), manifolds[0].manifold))
     }
 
     pub(crate) fn stage_lifecycle_events(&mut self) -> Result<(), CollisionError> {

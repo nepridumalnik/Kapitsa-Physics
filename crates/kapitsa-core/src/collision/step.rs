@@ -21,6 +21,9 @@ pub(crate) struct StepContext {
     pub(crate) manifolds: Vec<ContactManifold>,
     pub(crate) solver_bodies: Vec<SolverBody>,
     pub(crate) solver_body_predictions: Vec<usize>,
+    pub(crate) ccd_states: Vec<BodyState>,
+    pub(crate) ccd_elapsed: Vec<f64>,
+    pub(crate) ccd_impact_counts: Vec<u32>,
     pub(crate) solver_manifolds: Vec<SolverManifold>,
     pub(crate) interactions: Vec<CollisionInteraction>,
     pub(crate) events: Vec<CollisionEvent>,
@@ -38,6 +41,9 @@ impl StepContext {
             manifolds: Vec::new(),
             solver_bodies: Vec::new(),
             solver_body_predictions: Vec::new(),
+            ccd_states: Vec::new(),
+            ccd_elapsed: Vec::new(),
+            ccd_impact_counts: Vec::new(),
             solver_manifolds: Vec::new(),
             interactions: Vec::new(),
             events: Vec::new(),
@@ -54,6 +60,9 @@ impl StepContext {
         self.manifolds.clear();
         self.solver_bodies.clear();
         self.solver_body_predictions.clear();
+        self.ccd_states.clear();
+        self.ccd_elapsed.clear();
+        self.ccd_impact_counts.clear();
         self.solver_manifolds.clear();
         self.interactions.clear();
         self.events.clear();

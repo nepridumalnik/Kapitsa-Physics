@@ -2,12 +2,15 @@ use crate::{
     collider::{Collider, CollisionMode},
     collision::{CollisionConfig, CollisionError, CollisionEventKind, CollisionPair},
     mass::MassProperties,
-    rigid_body::RigidBody,
-    shape::{Plane, Shape, Sphere},
+    rigid_body::{CcdMode, RigidBody},
+    shape::{
+        BoneInfluence, Capsule, Cuboid, HeightField, LevelSet, Plane, Shape, SkinnedTriangleMesh,
+        Sphere, TriangleMesh,
+    },
     transform::Transform,
     world::PhysicsWorld,
 };
-use kapitsa_math::{Mat3, Quat, Vec3};
+use kapitsa_math::{Affine3, Mat3, Quat, Vec2, Vec3};
 
 fn dynamic_body(position: Vec3, velocity: Vec3) -> RigidBody {
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
@@ -18,11 +21,20 @@ fn dynamic_body(position: Vec3, velocity: Vec3) -> RigidBody {
 }
 
 fn add_plane(world: &mut PhysicsWorld, mode: CollisionMode) -> crate::world::ColliderId {
+    add_plane_at(world, Vec3::Y, 0.0, mode)
+}
+
+fn add_plane_at(
+    world: &mut PhysicsWorld,
+    normal: Vec3,
+    distance: f64,
+    mode: CollisionMode,
+) -> crate::world::ColliderId {
     let body = world
         .add_body(RigidBody::new_static(Transform::identity()))
         .unwrap();
     let mut collider = Collider::new(
-        Shape::Plane(Plane::new(0.0, 1.0, 0.0, 0.0).unwrap()),
+        Shape::Plane(Plane::from_vec(normal, distance).unwrap()),
         Transform::identity(),
     );
     collider.set_mode(mode);
@@ -242,6 +254,476 @@ fn world_step_reports_sensor_overlap_without_changing_motion() {
             .iter()
             .any(|event| event.kind == CollisionEventKind::Impact && event.pair == pair)
     );
+}
+
+#[test]
+fn world_step_resolves_contacts_against_triangle_mesh() {
+    let mut world = PhysicsWorld::new();
+    let mesh_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let mesh = TriangleMesh::new(
+        vec![
+            Vec3::new(-5.0, 0.0, -5.0),
+            Vec3::new(5.0, 0.0, -5.0),
+            Vec3::new(5.0, 0.0, 5.0),
+            Vec3::new(-5.0, 0.0, 5.0),
+        ],
+        vec![[0, 1, 2], [0, 2, 3]],
+    )
+    .unwrap();
+    let mesh_collider = world
+        .add_collider(
+            mesh_body,
+            Collider::new(Shape::TriangleMesh(mesh), Transform::identity()),
+        )
+        .unwrap();
+    let ball = world
+        .add_body(dynamic_body(
+            Vec3::new(0.0, 0.6, 0.0),
+            Vec3::new(0.0, -10.0, 0.0),
+        ))
+        .unwrap();
+    let sphere = world
+        .add_collider(
+            ball,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(0.02).unwrap();
+
+    assert!(world.body(ball).unwrap().state().linear_velocity().y > 0.0);
+    let pair = CollisionPair::new(mesh_collider, sphere).unwrap();
+    assert!(
+        world
+            .collision_events()
+            .iter()
+            .any(|event| { event.kind == CollisionEventKind::Begin && event.pair == pair })
+    );
+}
+
+#[test]
+fn world_step_resolves_contacts_against_height_field() {
+    let mut world = PhysicsWorld::new();
+    let field_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let field = HeightField::from_vec(2, 2, Vec2::new(10.0, 10.0), vec![0.0; 4]).unwrap();
+    let rotation = Quat::from_axis_angle(Vec3::X, std::f64::consts::FRAC_PI_2).unwrap();
+    let field_collider = world
+        .add_collider(
+            field_body,
+            Collider::new(
+                Shape::HeightField(field),
+                Transform::new(Vec3::ZERO, rotation).unwrap(),
+            ),
+        )
+        .unwrap();
+    let ball = world
+        .add_body(dynamic_body(
+            Vec3::new(5.0, 0.6, 5.0),
+            Vec3::new(0.0, -10.0, 0.0),
+        ))
+        .unwrap();
+    let sphere = world
+        .add_collider(
+            ball,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(0.02).unwrap();
+
+    assert!(world.body(ball).unwrap().state().linear_velocity().y > 0.0);
+    let pair = CollisionPair::new(field_collider, sphere).unwrap();
+    assert!(
+        world
+            .collision_events()
+            .iter()
+            .any(|event| { event.kind == CollisionEventKind::Begin && event.pair == pair })
+    );
+}
+
+#[test]
+fn world_step_resolves_contacts_against_level_set() {
+    let mut world = PhysicsWorld::new();
+    let field_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let mut values = Vec::new();
+    for _ in 0..2 {
+        values.extend([-1.0, -1.0, 0.0, 0.0, 1.0, 1.0]);
+    }
+    let field =
+        LevelSet::from_vec(Vec3::new(-1.0, -1.0, -1.0), [2, 3, 2], Vec3::ONE, values).unwrap();
+    let field_collider = world
+        .add_collider(
+            field_body,
+            Collider::new(Shape::LevelSet(field), Transform::identity()),
+        )
+        .unwrap();
+    let ball = world
+        .add_body(dynamic_body(
+            Vec3::new(0.0, 0.6, 0.0),
+            Vec3::new(0.0, -10.0, 0.0),
+        ))
+        .unwrap();
+    let sphere = world
+        .add_collider(
+            ball,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(0.02).unwrap();
+
+    assert!(world.body(ball).unwrap().state().linear_velocity().y > 0.0);
+    let pair = CollisionPair::new(field_collider, sphere).unwrap();
+    assert!(
+        world
+            .collision_events()
+            .iter()
+            .any(|event| { event.kind == CollisionEventKind::Begin && event.pair == pair })
+    );
+}
+
+#[test]
+fn world_step_uses_the_current_skinned_mesh_pose() {
+    let mut world = PhysicsWorld::new();
+    let mesh_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let vertices = vec![
+        Vec3::new(-5.0, 2.0, -5.0),
+        Vec3::new(5.0, 2.0, -5.0),
+        Vec3::new(0.0, 2.0, 5.0),
+    ];
+    let mesh = TriangleMesh::new(vertices, vec![[0, 1, 2]]).unwrap();
+    let influences = (0..3)
+        .map(|_| vec![BoneInfluence::new(0, 1.0).unwrap()])
+        .collect();
+    let skinned = SkinnedTriangleMesh::new(
+        mesh,
+        vec![String::from("root")],
+        influences,
+        Affine3::IDENTITY,
+        vec![Affine3::IDENTITY],
+    )
+    .unwrap();
+    let mesh_collider = world
+        .add_collider(
+            mesh_body,
+            Collider::new(Shape::SkinnedTriangleMesh(skinned), Transform::identity()),
+        )
+        .unwrap();
+    world
+        .set_skin_pose(
+            mesh_collider,
+            &[Affine3::from_translation(Vec3::new(0.0, -2.0, 0.0))],
+        )
+        .unwrap();
+    let ball = world
+        .add_body(dynamic_body(
+            Vec3::new(0.0, 0.6, 0.0),
+            Vec3::new(0.0, -10.0, 0.0),
+        ))
+        .unwrap();
+    let sphere = world
+        .add_collider(
+            ball,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(0.02).unwrap();
+
+    assert!(world.body(ball).unwrap().state().linear_velocity().y > 0.0);
+    let pair = CollisionPair::new(mesh_collider, sphere).unwrap();
+    assert!(
+        world
+            .collision_events()
+            .iter()
+            .any(|event| { event.kind == CollisionEventKind::Begin && event.pair == pair })
+    );
+}
+
+#[test]
+fn continuous_body_does_not_tunnel_through_a_plane() {
+    let mut world = PhysicsWorld::new();
+    let plane = add_plane(&mut world, CollisionMode::Solid);
+    let mut body = dynamic_body(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, -1000.0, 0.0));
+    body.set_ccd_mode(CcdMode::Continuous);
+    let ball = world.add_body(body).unwrap();
+    let sphere = world
+        .add_collider(
+            ball,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(0.01).unwrap();
+
+    assert!(
+        world
+            .body(ball)
+            .unwrap()
+            .state()
+            .transform()
+            .translation()
+            .y
+            > 0.5
+    );
+    assert!(world.body(ball).unwrap().state().linear_velocity().y > 0.0);
+    let pair = CollisionPair::new(plane, sphere).unwrap();
+    assert!(world.collision_events().iter().any(|event| {
+        event.kind == CollisionEventKind::Impact
+            && event.pair == pair
+            && event
+                .contact
+                .is_some_and(|contact| contact.normal_impulse > 0.0)
+    }));
+}
+
+#[test]
+fn continuous_sphere_hits_a_thin_cuboid() {
+    let mut world = PhysicsWorld::new();
+    let wall = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let wall_collider = world
+        .add_collider(
+            wall,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    let mut body = dynamic_body(Vec3::new(-5.0, 0.0, 0.0), Vec3::new(1000.0, 0.0, 0.0));
+    body.set_ccd_mode(CcdMode::Continuous);
+    let ball = world.add_body(body).unwrap();
+    let sphere = world
+        .add_collider(
+            ball,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(0.01).unwrap();
+
+    assert!(
+        world
+            .body(ball)
+            .unwrap()
+            .state()
+            .transform()
+            .translation()
+            .x
+            < 0.0
+    );
+    assert!(world.body(ball).unwrap().state().linear_velocity().x < 0.0);
+    let pair = CollisionPair::new(wall_collider, sphere).unwrap();
+    assert!(world.collision_events().iter().any(|event| {
+        event.kind == CollisionEventKind::Impact
+            && event.pair == pair
+            && event
+                .contact
+                .is_some_and(|contact| contact.normal_impulse > 0.0)
+    }));
+}
+
+#[test]
+fn continuous_capsule_does_not_tunnel_through_a_plane() {
+    let mut world = PhysicsWorld::new();
+    let plane = add_plane(&mut world, CollisionMode::Solid);
+    let mut body = dynamic_body(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, -1000.0, 0.0));
+    body.set_ccd_mode(CcdMode::Continuous);
+    let capsule_body = world.add_body(body).unwrap();
+    let capsule = world
+        .add_collider(
+            capsule_body,
+            Collider::new(
+                Shape::Capsule(
+                    Capsule::new(Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 0.5).unwrap(),
+                ),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(0.01).unwrap();
+
+    assert!(
+        world
+            .body(capsule_body)
+            .unwrap()
+            .state()
+            .transform()
+            .translation()
+            .y
+            > 1.5
+    );
+    assert!(
+        world
+            .body(capsule_body)
+            .unwrap()
+            .state()
+            .linear_velocity()
+            .y
+            > 0.0
+    );
+    let pair = CollisionPair::new(plane, capsule).unwrap();
+    assert!(world.collision_events().iter().any(|event| {
+        event.kind == CollisionEventKind::Impact
+            && event.pair == pair
+            && event
+                .contact
+                .is_some_and(|contact| contact.normal_impulse > 0.0)
+    }));
+}
+
+#[test]
+fn continuous_body_resolves_relative_motion_against_a_discrete_dynamic_body() {
+    let mut world = PhysicsWorld::new();
+    let mut left_body = dynamic_body(Vec3::new(-5.0, 0.0, 0.0), Vec3::new(1000.0, 0.0, 0.0));
+    left_body.set_ccd_mode(CcdMode::Continuous);
+    let left = world.add_body(left_body).unwrap();
+    let right = world
+        .add_body(dynamic_body(
+            Vec3::new(5.0, 0.0, 0.0),
+            Vec3::new(-1000.0, 0.0, 0.0),
+        ))
+        .unwrap();
+    let shape = || {
+        Collider::new(
+            Shape::Sphere(Sphere::new(0.5).unwrap()),
+            Transform::identity(),
+        )
+    };
+    let left_collider = world.add_collider(left, shape()).unwrap();
+    let right_collider = world.add_collider(right, shape()).unwrap();
+
+    world.step(0.01).unwrap();
+
+    let left_state = world.body(left).unwrap().state();
+    let right_state = world.body(right).unwrap().state();
+    assert!(left_state.transform().translation().x < right_state.transform().translation().x);
+    assert!(left_state.linear_velocity().x < 0.0);
+    assert!(right_state.linear_velocity().x > 0.0);
+    assert!(left_state.linear_velocity().x.abs() < 1000.0);
+    assert!(right_state.linear_velocity().x.abs() < 1000.0);
+    let pair = CollisionPair::new(left_collider, right_collider).unwrap();
+    assert!(world.collision_events().iter().any(|event| {
+        event.kind == CollisionEventKind::Impact
+            && event.pair == pair
+            && event
+                .contact
+                .is_some_and(|contact| contact.normal_impulse > 0.0)
+    }));
+}
+
+#[test]
+fn continuous_sensor_reports_a_transient_crossing_without_response() {
+    let mut world = PhysicsWorld::new();
+    let plane = add_plane(&mut world, CollisionMode::Sensor);
+    let mut body = dynamic_body(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, -1000.0, 0.0));
+    body.set_ccd_mode(CcdMode::Continuous);
+    let ball = world.add_body(body).unwrap();
+    let sphere = world
+        .add_collider(
+            ball,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(0.01).unwrap();
+
+    assert!(
+        world
+            .body(ball)
+            .unwrap()
+            .state()
+            .transform()
+            .translation()
+            .y
+            < 0.0
+    );
+    assert_eq!(
+        world.body(ball).unwrap().state().linear_velocity().y,
+        -1000.0
+    );
+    let pair = CollisionPair::new(plane, sphere).unwrap();
+    assert!(world.collision_events().iter().any(|event| {
+        event.kind == CollisionEventKind::Begin
+            && event.pair == pair
+            && event.sensor
+            && event.contact.is_none()
+    }));
+    assert!(
+        !world
+            .collision_events()
+            .iter()
+            .any(|event| event.kind == CollisionEventKind::Impact && event.pair == pair)
+    );
+}
+
+#[test]
+fn ccd_impact_limit_failure_preserves_the_world_state_and_events() {
+    let mut world = PhysicsWorld::new();
+    let floor = add_plane_at(&mut world, Vec3::Y, -1.0, CollisionMode::Solid);
+    let ceiling = add_plane_at(&mut world, -Vec3::Y, -1.0, CollisionMode::Solid);
+    let mut body = dynamic_body(Vec3::ZERO, Vec3::new(0.0, 3000.0, 0.0));
+    body.set_ccd_mode(CcdMode::Continuous);
+    let ball = world.add_body(body).unwrap();
+    world
+        .add_collider(
+            ball,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    let config = CollisionConfig {
+        max_ccd_impacts: 1,
+        ..world.collision_config()
+    };
+    world.set_collision_config(config).unwrap();
+    let before_state = *world.body(ball).unwrap().state();
+    let before_events = world.collision_events().to_vec();
+
+    assert_eq!(
+        world.step(0.01),
+        Err(crate::world::StepError::Collision(
+            CollisionError::CcdLimitExceeded
+        ))
+    );
+
+    assert_eq!(*world.body(ball).unwrap().state(), before_state);
+    assert_eq!(world.collision_events(), before_events);
+    assert!(floor < ceiling);
 }
 
 #[test]
