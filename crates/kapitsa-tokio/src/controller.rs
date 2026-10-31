@@ -795,6 +795,7 @@ mod tests {
         );
         let (snapshot_tx, _) = tokio::sync::watch::channel(std::sync::Arc::new(snapshot));
         let mut simulation_time = Duration::ZERO;
+        let mut reusable_snapshot = None;
         let mut accumulator = Duration::from_secs(1);
         let mut previous = tokio::time::Instant::now();
         crate::simulation::run_catch_up_batch(
@@ -804,6 +805,7 @@ mod tests {
             &metrics_tx,
             &snapshot_tx,
             &mut simulation_time,
+            &mut reusable_snapshot,
             &mut accumulator,
             &mut previous,
         )
@@ -818,6 +820,7 @@ mod tests {
             &metrics_tx,
             &snapshot_tx,
             &mut simulation_time,
+            &mut reusable_snapshot,
             &mut accumulator,
             &mut previous,
         )

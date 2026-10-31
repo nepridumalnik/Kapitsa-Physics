@@ -40,7 +40,7 @@ remaining wall-clock wait and result ordering, not summed worker CPU time.
 | Mixed | 11.13 | 0.13 | 16.16 | 9.81 |
 | Sleeping-heavy | 9.86 | 0.12 | 12.49 | 7.81 |
 
-## Physics Marshalling
+## Physics Marshalling: Previous Baseline
 
 Measured with the same release command. These rows use dynamic worlds, 12
 steps, and medians of five samples. The simulation timer is paused and advanced
@@ -70,8 +70,77 @@ Snapshot reads are 4 clients x 1,000 calls against one immutable snapshot.
 At 20,000 bodies, building the immutable snapshot takes about 9 ms per 12
 steps, roughly 10% of the measured pipeline time. Watch publication and
 multi-client reads are each below 1 ms for the reported batch. No optimization
-was made from this single workload measurement; snapshot rebuilding is the
-main measurable marshalling cost at this size.
+was made from this baseline measurement; snapshots used slot-indexed storage
+and rebuilt fresh buffers on every step.
+
+## Compact Snapshots and Buffer Recycling
+
+Measured after compact indexed storage and `Arc::try_unwrap` recycling were
+added. Each row is the median of five samples of 12 successful controller
+steps. The snapshot scenarios also look up every live body once per step;
+"full" includes the controller step, snapshot build, those lookups, and watch
+publication. The separate API table below measures the simulation API without
+that extra all-body lookup loop. The timer is paused in simulation API samples.
+
+### A. Dense snapshots built fresh
+
+| Bodies | Build | Lookup all bodies | Publish | Full step + marshalling | Compact payload | Previous slot-array estimate |
+|---:|---:|---:|---:|---:|---:|---:|
+| 256 | 0.10 ms | 0.04 ms | 0.002 ms | 1.32 ms | 42.5 KiB | 30.0 KiB |
+| 4,096 | 4.08 ms | 0.96 ms | 0.007 ms | 22.33 ms | 680.0 KiB | 480.0 KiB |
+| 20,000 | 15.85 ms | 4.39 ms | 0.015 ms | 97.86 ms | 3,172.0 KiB | 2,343.8 KiB |
+
+### B. Sparse slot history
+
+The world starts with 20,000 bodies, then removes 19,900 and keeps the 100
+bodies with the highest slot indices.
+
+| Slots in history | Live bodies | Build | Lookup | Publish | Full step + marshalling | Compact payload | Previous slot-array estimate | Reused / reclaimed buffers | Capacity growths after reuse |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20,000 | 100 | 0.04 ms | 0.02 ms | 0.003 ms | 0.66 ms | 15.1 KiB | 2,343.8 KiB | 11 / 12 | 0 |
+
+### C and D. Retained readers and normal publication
+
+Scenario C retains three previous `Arc<PhysicsSnapshot>` values across
+publication. Scenario D drops old frames and allows the task to reuse their
+buffers.
+
+| Scenario | Bodies | Build | Lookup all bodies | Publish | Full step + marshalling | Compact payload | Reused / reclaimed buffers | Capacity growths after reuse |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| C: retain old Arcs | 256 | 0.15 ms | 0.05 ms | 0.005 ms | 1.39 ms | 42.5 KiB | 0 / 0 | 0 |
+| C: retain old Arcs | 4,096 | 2.89 ms | 0.79 ms | 0.208 ms | 19.98 ms | 680.0 KiB | 0 / 0 | 0 |
+| C: retain old Arcs | 20,000 | 17.69 ms | 5.25 ms | 1.038 ms | 101.42 ms | 3,172.0 KiB | 0 / 0 | 0 |
+| D: normal reuse | 256 | 0.09 ms | 0.04 ms | 0.002 ms | 1.24 ms | 42.5 KiB | 11 / 12 | 0 |
+| D: normal reuse | 4,096 | 1.59 ms | 0.81 ms | 0.007 ms | 18.51 ms | 680.0 KiB | 11 / 12 | 0 |
+| D: normal reuse | 20,000 | 10.39 ms | 4.47 ms | 0.015 ms | 91.19 ms | 3,172.0 KiB | 11 / 12 | 0 |
+
+In normal publication the first frame seeds the reusable buffer; 11 of the 12
+frames reused a prior buffer, and all 12 outgoing frames were successfully
+reclaimed. Capacity did not grow after reuse began. Retaining old frames did
+not block publication; `Arc::try_unwrap` simply failed and that frame was not
+recycled.
+
+The memory values estimate container payload from `Vec` and `HashMap`
+capacities; they exclude allocator metadata and hash-table control bytes. The
+previous-layout estimate is a slot-indexed `Vec<Option<Entry>>` sized to the
+maximum slot. Dense snapshots use about 35–42% more estimated payload because
+the full-ID hash index adds storage. For the sparse history, compact storage
+uses 15.1 KiB instead of an estimated 2,343.8 KiB because it stores only live
+bodies.
+
+The simulation API timings after recycling were:
+
+| Bodies | Controller wall | Simulation, no commands | Simulation, 100 `ApplyForce` per step |
+|---:|---:|---:|---:|
+| 256 | 1.14 ms | 1.34 ms | 1.70 ms |
+| 4,096 | 15.98 ms | 18.10 ms | 18.62 ms |
+| 20,000 | 76.42 ms | 89.83 ms | 90.82 ms |
+
+Compared with the previous API table, these dynamic-world medians are similar
+or faster; differences include normal run-to-run timing variation. For a
+same-run comparison, dense normal reuse reduced the measured full step plus
+all-body lookup from 22.33 to 18.51 ms at 4,096 bodies, and from 97.86 to
+91.19 ms at 20,000 bodies, relative to fresh snapshot construction.
 
 These measurements are specific to this machine, runtime, and workload; use the
 benchmark for comparisons rather than treating the timings as guarantees.

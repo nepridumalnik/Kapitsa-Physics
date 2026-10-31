@@ -62,11 +62,19 @@ that the material exists.
 
 `snapshot()` clones an `Arc` to the latest immutable `PhysicsSnapshot` without
 waiting. `next_snapshot().await` waits for a later publication, and a slow
-reader may skip intermediate snapshots. Snapshots contain copied `BodyState`
+reader may skip intermediate snapshots. Each call starts from the latest
+published version and waits for a publication after the call begins, even if
+the receiver had an unread version. Snapshots contain copied `BodyState`
 values, not references to the world; old `Arc`s remain valid. A snapshot can
 lag a command that just completed because publication happens only after the
 next successful physics step. Initial snapshots describe the current world
 and step count, including edits made through `world_mut()` while stopped.
+
+Snapshots store live bodies densely and use a hash index keyed by the full
+world-scoped body ID. The simulation task recycles a prior snapshot's buffers
+when its `Arc` has no other owners. A reader may retain old frames; publication
+does not wait for those readers and never changes a published snapshot. In that
+case the task drops that buffer when possible and builds into another one.
 
 ```rust
 use kapitsa_core::{

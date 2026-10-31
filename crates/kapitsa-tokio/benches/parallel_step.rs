@@ -228,6 +228,20 @@ struct SimulationTimes {
     steps: u64,
 }
 
+#[derive(Clone, Copy, Default)]
+struct SnapshotSample {
+    total: Duration,
+    physics: Duration,
+    build: Duration,
+    lookup: Duration,
+    publication: Duration,
+    storage_bytes: usize,
+    legacy_slot_bytes: usize,
+    reused_buffers: usize,
+    reclaimed_buffers: usize,
+    capacity_growths_after_reuse: usize,
+}
+
 async fn report_marshalling() -> Result<(), Box<dyn Error>> {
     println!(
         "\nphysics marshalling (dynamic bodies, {STEPS} steps, {SAMPLES} samples, median; Tokio timer paused)"
@@ -282,7 +296,172 @@ async fn report_marshalling() -> Result<(), Box<dyn Error>> {
             millis(reads),
         );
     }
+    report_snapshot_recycling().await?;
     Ok(())
+}
+
+async fn report_snapshot_recycling() -> Result<(), Box<dyn Error>> {
+    println!("\nsnapshot storage/recycling ({STEPS} physical steps, {SAMPLES} samples, median)");
+    println!(
+        "Each sample reports all-live-body lookup time and full controller-step plus snapshot/publication wall time."
+    );
+
+    for (size, body_count) in BODY_COUNTS {
+        let mut fresh = snapshot_samples(body_count, false, false, false).await?;
+        report_snapshot_sample(
+            &format!("A dense {size}, fresh"),
+            median_snapshot(&mut fresh),
+        );
+
+        let mut held = snapshot_samples(body_count, false, true, true).await?;
+        report_snapshot_sample(
+            &format!("C dense {size}, retain 3 old Arcs"),
+            median_snapshot(&mut held),
+        );
+
+        let mut recycled = snapshot_samples(body_count, false, true, false).await?;
+        report_snapshot_sample(
+            &format!("D dense {size}, normal reuse"),
+            median_snapshot(&mut recycled),
+        );
+    }
+
+    let mut sparse = snapshot_samples(20_000, true, true, false).await?;
+    report_snapshot_sample(
+        "B sparse 20,000 slots, 100 live, reuse",
+        median_snapshot(&mut sparse),
+    );
+    Ok(())
+}
+
+async fn snapshot_samples(
+    body_count: usize,
+    sparse: bool,
+    recycle_buffers: bool,
+    retain_old_frames: bool,
+) -> Result<Vec<SnapshotSample>, Box<dyn Error>> {
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        samples
+            .push(snapshot_sample(body_count, sparse, recycle_buffers, retain_old_frames).await?);
+    }
+    Ok(samples)
+}
+
+async fn snapshot_sample(
+    body_count: usize,
+    sparse: bool,
+    recycle_buffers: bool,
+    retain_old_frames: bool,
+) -> Result<SnapshotSample, Box<dyn Error>> {
+    let mut world = make_world(body_count, WORKLOADS[0])?;
+    let mut ids = world.bodies().map(|(id, _)| id).collect::<Vec<_>>();
+    if sparse {
+        let remove_count = body_count.saturating_sub(100);
+        for id in &ids[..remove_count] {
+            world
+                .remove_body(*id)
+                .ok_or("missing sparse benchmark body")?;
+        }
+        ids = world.bodies().map(|(id, _)| id).collect();
+    }
+    let legacy_slot_bytes = ids
+        .iter()
+        .map(|id| id.index())
+        .max()
+        .map_or(0, marshalling::PhysicsSnapshot::legacy_slot_storage_bytes);
+
+    let mut controller = PhysicsController::new(world, config(1))?;
+    let initial = Arc::new(marshalling::PhysicsSnapshot::from_world(
+        controller.world()?,
+        0,
+        Duration::ZERO,
+    ));
+    let (snapshot_tx, snapshot_rx) = watch::channel(initial);
+    let mut retained = VecDeque::with_capacity(3);
+    let mut reusable = None;
+    let mut simulation_time = Duration::ZERO;
+    let dt = Duration::from_secs_f64(1.0 / 60.0);
+    let mut sample = SnapshotSample::default();
+
+    for _ in 0..STEPS {
+        let step_started = Instant::now();
+        let stats = controller.step().await?;
+        sample.physics += stats.step_duration;
+        simulation_time = simulation_time
+            .checked_add(dt)
+            .ok_or("benchmark simulation time overflow")?;
+
+        let build_started = Instant::now();
+        let snapshot = if recycle_buffers {
+            let (mut snapshot, reused) = marshalling::PhysicsSnapshot::take_reusable(&mut reusable);
+            sample.reused_buffers += usize::from(reused);
+            let previous_capacities = snapshot.buffer_capacities();
+            snapshot.rebuild(
+                controller.world()?,
+                controller.metrics().total_steps,
+                simulation_time,
+            );
+            if reused && snapshot.buffer_capacities() != previous_capacities {
+                sample.capacity_growths_after_reuse += 1;
+            }
+            snapshot
+        } else {
+            marshalling::PhysicsSnapshot::from_world(
+                controller.world()?,
+                controller.metrics().total_steps,
+                simulation_time,
+            )
+        };
+        sample.build += build_started.elapsed();
+        sample.storage_bytes = snapshot.estimated_storage_bytes();
+        sample.legacy_slot_bytes = legacy_slot_bytes;
+
+        let lookup_started = Instant::now();
+        for id in &ids {
+            black_box(snapshot.body(*id));
+        }
+        sample.lookup += lookup_started.elapsed();
+
+        let publication_started = Instant::now();
+        let previous = snapshot_tx.send_replace(Arc::new(snapshot));
+        if retain_old_frames {
+            retained.push_back(Arc::clone(&previous));
+            if retained.len() > 3 {
+                retained.pop_front();
+            }
+        }
+        if recycle_buffers && marshalling::PhysicsSnapshot::recycle(previous, &mut reusable) {
+            sample.reclaimed_buffers += 1;
+        }
+        sample.publication += publication_started.elapsed();
+        sample.total += step_started.elapsed();
+
+        if snapshot_rx.borrow().step() != controller.metrics().total_steps {
+            return Err("benchmark publication does not match the completed step".into());
+        }
+    }
+    Ok(sample)
+}
+
+fn median_snapshot(samples: &mut [SnapshotSample]) -> SnapshotSample {
+    samples.sort_unstable_by_key(|sample| sample.total);
+    samples[samples.len() / 2]
+}
+
+fn report_snapshot_sample(label: &str, sample: SnapshotSample) {
+    println!(
+        "{label:42} build={:7.2} ms lookup={:7.2} ms publish={:6.3} ms full={:7.2} ms storage={:7.1} KiB legacy-slots={:7.1} KiB reused={} reclaimed={} capacity-growths={}",
+        millis(sample.build),
+        millis(sample.lookup),
+        millis(sample.publication),
+        millis(sample.total),
+        sample.storage_bytes as f64 / 1024.0,
+        sample.legacy_slot_bytes as f64 / 1024.0,
+        sample.reused_buffers,
+        sample.reclaimed_buffers,
+        sample.capacity_growths_after_reuse,
+    );
 }
 
 async fn controller_sample(body_count: usize) -> Result<Duration, Box<dyn Error>> {
@@ -308,6 +487,7 @@ async fn pipeline_sample(
         Duration::ZERO,
     ));
     let (snapshot_tx, _snapshot_rx) = watch::channel(initial);
+    let mut reusable = None;
     let mut simulation_time = Duration::ZERO;
     let dt = Duration::from_secs_f64(1.0 / 60.0);
     let mut times = PhaseTimes::default();
@@ -336,7 +516,8 @@ async fn pipeline_sample(
             .ok_or("benchmark simulation time overflow")?;
 
         let phase = Instant::now();
-        let snapshot = marshalling::PhysicsSnapshot::from_world(
+        let (mut snapshot, _) = marshalling::PhysicsSnapshot::take_reusable(&mut reusable);
+        snapshot.rebuild(
             controller.world()?,
             controller.metrics().total_steps,
             simulation_time,
@@ -344,7 +525,8 @@ async fn pipeline_sample(
         times.snapshot_build += phase.elapsed();
 
         let phase = Instant::now();
-        snapshot_tx.send_replace(Arc::new(snapshot));
+        let previous = snapshot_tx.send_replace(Arc::new(snapshot));
+        marshalling::PhysicsSnapshot::recycle(previous, &mut reusable);
         times.publication += phase.elapsed();
     }
     times.total = started.elapsed();
@@ -374,8 +556,7 @@ async fn simulation_sample(
     let mut reader = client.clone();
     simulation.start()?;
     tokio::task::yield_now().await;
-    let start_snapshot =
-        tokio::time::timeout(Duration::from_secs(5), reader.next_snapshot()).await??;
+    let start_snapshot = reader.snapshot();
     tokio::task::yield_now().await;
 
     let started = Instant::now();

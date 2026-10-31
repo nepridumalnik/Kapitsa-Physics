@@ -195,3 +195,59 @@ async fn body_ids_remain_valid_across_simulation_restart() {
     assert!(client.snapshot().body(id).is_some());
     simulation.stop().await.expect("second stop");
 }
+
+#[tokio::test(start_paused = true)]
+async fn held_snapshots_stay_immutable_while_clients_receive_new_publications() {
+    let mut world = PhysicsWorld::new();
+    let mut body = RigidBody::new_kinematic(Transform::identity());
+    body.set_linear_velocity(Vec3::X).expect("finite velocity");
+    let id = world.add_body(body).expect("body insertion");
+    let mut simulation = simulation(world);
+    let mut first_reader = simulation.client();
+    let mut second_reader = simulation.client();
+    simulation.start().expect("start");
+
+    let first_task = tokio::spawn(async move { first_reader.next_snapshot().await });
+    let second_task = tokio::spawn(async move { second_reader.next_snapshot().await });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(100)).await;
+    let first = first_task
+        .await
+        .expect("first reader task")
+        .expect("snapshot");
+    let second = second_task
+        .await
+        .expect("second reader task")
+        .expect("snapshot");
+    assert_eq!(first.step(), second.step());
+    let held = first.clone();
+    let held_position = held.body(id).expect("held body").transform().translation();
+
+    for _ in 0..3 {
+        let mut reader = simulation.client();
+        let task = tokio::spawn(async move { reader.next_snapshot().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let current = task.await.expect("reader task").expect("new snapshot");
+        assert!(current.step() > held.step());
+        assert!(
+            current
+                .body(id)
+                .expect("current body")
+                .transform()
+                .translation()
+                .x
+                > held_position.x
+        );
+    }
+
+    assert_eq!(
+        held.body(id)
+            .expect("held body remains immutable")
+            .transform()
+            .translation(),
+        held_position
+    );
+    assert!(simulation.metrics().total_steps >= 4);
+    simulation.stop().await.expect("stop");
+}

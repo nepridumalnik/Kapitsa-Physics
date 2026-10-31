@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, mem::size_of, sync::Arc, time::Duration};
 
 use kapitsa_core::{
     rigid_body::BodyState,
@@ -23,15 +23,57 @@ pub struct PhysicsSnapshot {
 }
 
 impl PhysicsSnapshot {
-    pub(crate) fn from_world(world: &PhysicsWorld, step: u64, simulation_time: Duration) -> Self {
-        let mut snapshot = Self {
-            step,
-            simulation_time,
+    fn empty() -> Self {
+        Self {
+            step: 0,
+            simulation_time: Duration::ZERO,
             entries: Vec::new(),
             indices: HashMap::new(),
-        };
+        }
+    }
+
+    pub(crate) fn from_world(world: &PhysicsWorld, step: u64, simulation_time: Duration) -> Self {
+        let mut snapshot = Self::empty();
         snapshot.rebuild(world, step, simulation_time);
         snapshot
+    }
+
+    pub(crate) fn take_reusable(reusable: &mut Option<Self>) -> (Self, bool) {
+        match reusable.take() {
+            Some(snapshot) => (snapshot, true),
+            None => (Self::empty(), false),
+        }
+    }
+
+    pub(crate) fn recycle(previous: Arc<Self>, reusable: &mut Option<Self>) -> bool {
+        match Arc::try_unwrap(previous) {
+            Ok(snapshot) => {
+                *reusable = Some(snapshot);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn buffer_capacities(&self) -> (usize, usize) {
+        (self.entries.capacity(), self.indices.capacity())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn estimated_storage_bytes(&self) -> usize {
+        self.entries.capacity() * size_of::<SnapshotEntry>()
+            + self.indices.capacity() * size_of::<(BodyId, usize)>()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn legacy_slot_storage_bytes(max_index: u32) -> usize {
+        match usize::try_from(max_index) {
+            Ok(index) => index
+                .saturating_add(1)
+                .saturating_mul(size_of::<Option<(u32, u32, BodyState)>>()),
+            Err(_) => usize::MAX,
+        }
     }
 
     pub(crate) fn rebuild(&mut self, world: &PhysicsWorld, step: u64, simulation_time: Duration) {
@@ -89,7 +131,7 @@ impl PhysicsSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, time::Duration};
+    use std::{collections::HashSet, sync::Arc, time::Duration};
 
     use kapitsa_core::{rigid_body::RigidBody, transform::Transform, world::PhysicsWorld};
     use kapitsa_math::Vec3;
@@ -216,5 +258,49 @@ mod tests {
         assert!(!snapshot.indices.contains_key(&stale));
         assert!(snapshot.body(stale).is_none());
         assert!(snapshot.body(replacement).is_some());
+    }
+
+    #[test]
+    fn arc_recycling_skips_readers_and_reuses_released_capacity() {
+        let mut world = PhysicsWorld::new();
+        let ids = add_bodies(&mut world, 100);
+        let original = PhysicsSnapshot::from_world(&world, 3, Duration::from_millis(30));
+        let original_velocity = original
+            .body(ids[0])
+            .expect("body in snapshot")
+            .linear_velocity();
+        let retained = Arc::new(original);
+        let weak = Arc::downgrade(&retained);
+        let reader = Arc::clone(&retained);
+        let mut reusable = None;
+
+        assert!(!PhysicsSnapshot::recycle(retained, &mut reusable));
+        assert!(reusable.is_none());
+        assert_eq!(reader.step(), 3);
+        assert_eq!(
+            reader.body(ids[0]).map(|state| state.linear_velocity()),
+            Some(original_velocity)
+        );
+
+        let fresh = PhysicsSnapshot::from_world(&world, 4, Duration::from_millis(40));
+        let expected_capacity = fresh.buffer_capacities();
+        assert!(PhysicsSnapshot::recycle(Arc::new(fresh), &mut reusable));
+        let (mut recovered, reused) = PhysicsSnapshot::take_reusable(&mut reusable);
+        assert!(reused);
+        assert_eq!(recovered.buffer_capacities(), expected_capacity);
+
+        recovered.rebuild(&world, 5, Duration::from_millis(50));
+        assert_eq!(recovered.buffer_capacities(), expected_capacity);
+        assert_eq!(
+            recovered.estimated_storage_bytes(),
+            reader.estimated_storage_bytes()
+        );
+        assert_eq!(reader.step(), 3);
+        assert_eq!(
+            reader.body(ids[0]).map(|state| state.linear_velocity()),
+            Some(original_velocity)
+        );
+        drop(reader);
+        assert!(weak.upgrade().is_none());
     }
 }

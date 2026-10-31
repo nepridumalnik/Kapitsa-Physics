@@ -251,6 +251,7 @@ async fn run_simulation(
 ) -> Result<(), SimulationError> {
     let mut previous = Instant::now();
     let mut accumulator = Duration::ZERO;
+    let mut reusable_snapshot = None;
 
     loop {
         let delay = controller.step_duration().saturating_sub(accumulator);
@@ -277,6 +278,7 @@ async fn run_simulation(
             metrics,
             snapshots,
             simulation_time,
+            &mut reusable_snapshot,
             &mut accumulator,
             &mut previous,
         )
@@ -301,6 +303,7 @@ pub(crate) async fn run_catch_up_batch(
     metrics: &watch::Sender<SimulationMetrics>,
     snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
     simulation_time: &mut Duration,
+    reusable_snapshot: &mut Option<PhysicsSnapshot>,
     accumulator: &mut Duration,
     previous: &mut Instant,
 ) -> Result<(), SimulationError> {
@@ -318,12 +321,14 @@ pub(crate) async fn run_catch_up_batch(
             .await
             .map_err(SimulationError::Scheduler)?;
         *simulation_time = next_simulation_time;
-        let snapshot = PhysicsSnapshot::from_world(
+        let (mut snapshot, _) = PhysicsSnapshot::take_reusable(reusable_snapshot);
+        snapshot.rebuild(
             controller.world()?,
             controller.metrics().total_steps,
             *simulation_time,
         );
-        snapshots.send_replace(Arc::new(snapshot));
+        let previous_snapshot = snapshots.send_replace(Arc::new(snapshot));
+        PhysicsSnapshot::recycle(previous_snapshot, reusable_snapshot);
         *accumulator -= step_duration;
         let completed_at = Instant::now();
         add_elapsed(accumulator, completed_at.duration_since(*previous))?;
@@ -439,6 +444,7 @@ mod tests {
         let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
         let (snapshot_tx, _) = snapshot_channel(&controller);
         let mut simulation_time = Duration::ZERO;
+        let mut reusable_snapshot = None;
         let mut accumulator = Duration::from_secs(1);
         let mut previous = tokio::time::Instant::now();
         run_catch_up_batch(
@@ -448,6 +454,7 @@ mod tests {
             &metrics_tx,
             &snapshot_tx,
             &mut simulation_time,
+            &mut reusable_snapshot,
             &mut accumulator,
             &mut previous,
         )
@@ -464,6 +471,7 @@ mod tests {
             &metrics_tx,
             &snapshot_tx,
             &mut simulation_time,
+            &mut reusable_snapshot,
             &mut accumulator,
             &mut previous,
         )
@@ -490,7 +498,9 @@ mod tests {
         let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(1);
         let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
         let (snapshot_tx, snapshot_rx) = snapshot_channel(&controller);
+        let initial_snapshot = Arc::clone(&snapshot_rx.borrow());
         let mut simulation_time = Duration::ZERO;
+        let mut reusable_snapshot = None;
         let (reply, response) = tokio::sync::oneshot::channel();
         command_tx
             .send(CommandRequest {
@@ -512,6 +522,7 @@ mod tests {
                 &metrics_tx,
                 &snapshot_tx,
                 &mut simulation_time,
+                &mut reusable_snapshot,
                 &mut accumulator,
                 &mut previous,
             )
@@ -524,6 +535,7 @@ mod tests {
         ));
         assert_eq!(controller.world().expect("world restored").body_count(), 2);
         assert_eq!(snapshot_rx.borrow().step(), 0);
+        assert!(Arc::ptr_eq(&initial_snapshot, &snapshot_rx.borrow()));
         stop_tx.send_replace(true);
     }
 
@@ -536,6 +548,7 @@ mod tests {
         let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
         let (snapshot_tx, snapshot_rx) = snapshot_channel(&controller);
         let mut simulation_time = Duration::MAX;
+        let mut reusable_snapshot = None;
         let mut accumulator = quantum;
         let mut previous = tokio::time::Instant::now();
 
@@ -547,6 +560,7 @@ mod tests {
                 &metrics_tx,
                 &snapshot_tx,
                 &mut simulation_time,
+                &mut reusable_snapshot,
                 &mut accumulator,
                 &mut previous,
             )
