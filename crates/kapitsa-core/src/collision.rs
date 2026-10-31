@@ -7,6 +7,8 @@ mod error;
 mod event;
 #[allow(dead_code)]
 mod gjk;
+#[allow(dead_code)]
+mod manifold;
 pub(crate) mod spatial_index;
 mod step;
 #[allow(dead_code)]
