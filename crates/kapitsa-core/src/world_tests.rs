@@ -1,9 +1,11 @@
 use kapitsa_math::{Affine3, Mat3, Vec3};
 
-use super::{BodyId, ColliderId, PhysicsWorld, StepError, WorldError, allocate_world_id};
+use super::{
+    BodyId, ColliderId, PhysicsWorld, StepError, WorldError, allocate_world_id, upsert_interaction,
+};
 use crate::{
     collider::{Collider, CollisionFilter},
-    collision::CollisionError,
+    collision::{CollisionError, CollisionInteraction, CollisionPair, ContactInfo},
     containers::{DensePool, DensePoolError},
     mass::MassProperties,
     material::PhysicsMaterial,
@@ -21,6 +23,114 @@ fn dynamic_body() -> RigidBody {
 fn collider(radius: f64) -> Collider {
     let sphere = Sphere::new(radius).expect("valid sphere");
     Collider::new(Shape::Sphere(sphere), Transform::identity())
+}
+
+#[test]
+fn interaction_index_preserves_duplicate_merge_rules_and_resets_with_step_scratch() {
+    let mut world = PhysicsWorld::new();
+    let body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let colliders = (0..4)
+        .map(|_| world.add_collider(body, collider(0.5)).unwrap())
+        .collect::<Vec<_>>();
+    let solid_pair = CollisionPair::new(colliders[0], colliders[1]).unwrap();
+    let sensor_pair = CollisionPair::new(colliders[2], colliders[3]).unwrap();
+    let mut interactions = Vec::new();
+    let mut indices = None;
+    let first_contact = ContactInfo {
+        point: Vec3::X,
+        normal: Vec3::X,
+        penetration: 0.1,
+        normal_impulse: 0.0,
+    };
+    let second_contact = ContactInfo {
+        point: Vec3::Y,
+        normal: Vec3::Y,
+        penetration: 0.2,
+        normal_impulse: 1.0,
+    };
+
+    upsert_interaction(
+        &mut interactions,
+        &mut indices,
+        CollisionInteraction {
+            pair: solid_pair,
+            sensor: false,
+            transient: false,
+            contact: Some(first_contact),
+            impact: false,
+        },
+    )
+    .unwrap();
+    upsert_interaction(
+        &mut interactions,
+        &mut indices,
+        CollisionInteraction {
+            pair: solid_pair,
+            sensor: false,
+            transient: false,
+            contact: Some(second_contact),
+            impact: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(interactions.len(), 1);
+    assert_eq!(
+        indices.as_ref().and_then(|map| map.get(&solid_pair)),
+        Some(&0)
+    );
+    assert_eq!(interactions[0].contact, Some(second_contact));
+    assert!(interactions[0].impact);
+
+    for transient in [true, false] {
+        upsert_interaction(
+            &mut interactions,
+            &mut indices,
+            CollisionInteraction {
+                pair: sensor_pair,
+                sensor: true,
+                transient,
+                contact: None,
+                impact: false,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(interactions.len(), 2);
+    assert_eq!(
+        indices.as_ref().and_then(|map| map.get(&sensor_pair)),
+        Some(&1)
+    );
+    assert!(!interactions[1].transient);
+
+    assert_eq!(
+        upsert_interaction(
+            &mut interactions,
+            &mut indices,
+            CollisionInteraction {
+                pair: solid_pair,
+                sensor: true,
+                transient: false,
+                contact: None,
+                impact: false,
+            },
+        ),
+        Err(CollisionError::InvalidContact)
+    );
+    assert_eq!(interactions.len(), 2);
+
+    let context = &mut world.collision_system.context;
+    context.interactions = interactions;
+    context.interaction_indices = indices;
+    context.clear();
+    assert!(context.interactions.is_empty());
+    assert!(
+        context
+            .interaction_indices
+            .as_ref()
+            .is_none_or(|indices| indices.is_empty())
+    );
 }
 
 #[test]

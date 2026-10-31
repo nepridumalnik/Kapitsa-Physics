@@ -22,3 +22,8 @@ required-features = ["bench-internals"]
 name = "collision_storage"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "collision_interactions"
+harness = false
+required-features = ["bench-internals"]

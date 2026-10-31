@@ -1,5 +1,8 @@
 use kapitsa_math::{Affine3, Vec3};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 #[cfg(feature = "bench-internals")]
 use std::time::Instant;
@@ -827,6 +830,7 @@ impl PhysicsWorld {
                 if sensor {
                     upsert_interaction(
                         &mut self.collision_system.context.interactions,
+                        &mut self.collision_system.context.interaction_indices,
                         CollisionInteraction {
                             pair,
                             sensor: true,
@@ -987,6 +991,7 @@ impl PhysicsWorld {
                 .ok_or(CollisionError::ArithmeticOverflow)?;
             upsert_interaction(
                 &mut self.collision_system.context.interactions,
+                &mut self.collision_system.context.interaction_indices,
                 CollisionInteraction {
                     pair,
                     sensor: false,
@@ -1353,6 +1358,7 @@ impl PhysicsWorld {
                 if sensor {
                     upsert_interaction(
                         &mut self.collision_system.context.interactions,
+                        &mut self.collision_system.context.interaction_indices,
                         CollisionInteraction {
                             pair,
                             sensor: true,
@@ -1501,6 +1507,7 @@ impl PhysicsWorld {
             }
             upsert_interaction(
                 &mut self.collision_system.context.interactions,
+                &mut self.collision_system.context.interaction_indices,
                 CollisionInteraction {
                     pair: manifold.pair,
                     sensor: false,
@@ -2000,26 +2007,41 @@ fn body_point_velocity(
 
 fn upsert_interaction(
     interactions: &mut Vec<CollisionInteraction>,
+    indices: &mut Option<HashMap<CollisionPair, usize>>,
     interaction: CollisionInteraction,
 ) -> Result<(), CollisionError> {
-    if let Some(existing) = interactions
-        .iter_mut()
-        .find(|existing| existing.pair == interaction.pair)
-    {
-        if existing.sensor != interaction.sensor {
-            return Err(CollisionError::InvalidContact);
-        }
-        existing.transient &= interaction.transient;
-        if interaction.contact.is_some() {
-            existing.contact = interaction.contact;
-        }
-        existing.impact |= interaction.impact;
+    let indices = indices.get_or_insert_with(HashMap::new);
+    if let Some(&index) = indices.get(&interaction.pair) {
+        let existing = interactions
+            .get_mut(index)
+            .ok_or(CollisionError::InvalidContact)?;
+        merge_interaction(existing, interaction)?;
         return Ok(());
     }
     interactions
         .try_reserve(1)
         .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    indices
+        .try_reserve(1)
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    let index = interactions.len();
     interactions.push(interaction);
+    indices.insert(interaction.pair, index);
+    Ok(())
+}
+
+fn merge_interaction(
+    existing: &mut CollisionInteraction,
+    incoming: CollisionInteraction,
+) -> Result<(), CollisionError> {
+    if existing.sensor != incoming.sensor {
+        return Err(CollisionError::InvalidContact);
+    }
+    existing.transient &= incoming.transient;
+    if incoming.contact.is_some() {
+        existing.contact = incoming.contact;
+    }
+    existing.impact |= incoming.impact;
     Ok(())
 }
 

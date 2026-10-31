@@ -123,6 +123,8 @@ Worker scheduling cost more for the small scene. At 4,096 bodies, two and four w
 
 `Retained scratch` estimates capacities of collision-owned vectors and hash tables after the measured step. `High-water` is the maximum of the five post-step estimates. The estimate excludes `PhysicsWorld` bodies and collider geometry, allocator metadata and fragmentation, runtime/task stacks, and process-wide allocations. It is not process RSS or a peak allocation measurement.
 
+The interaction-index and table estimates use `capacity × size_of::<(key, value)>()` for hash-table entries. They exclude hash-table control bytes and allocator overhead.
+
 ## Workload notes
 
 - The 20,000-body localized-contact scene has 128 overlapping sphere pairs and the remaining spheres far away. It yields 128 broadphase candidates and contacts.
@@ -131,3 +133,33 @@ Worker scheduling cost more for the small scene. At 4,096 bodies, two and four w
 - Triangle mesh, heightfield, and level-set scenes move spheres into their surface during the measured step.
 - The CCD workload sends 64 continuous spheres at a thin static wall and resolves 64 impacts.
 - No collision thresholds or algorithms were tuned to reach these values.
+
+## Indexed interactions, stage 9
+
+This release microbenchmark compares the previous linear `Vec::iter_mut().find`
+lookup with the pair-indexed `HashMap`. Each workload inserts M persistent
+sensor interactions, then feeds the same M pairs again as transient CCD sensor
+interactions. The duplicate pass exercises the existing persistent-over-
+transient merge rule. Both containers reserve M entries before timing, matching
+the steady-state scratch capacity retained across physics steps. Five samples
+were measured on 2026-11-01 with the release profile; setup and reservation are
+outside the timed region.
+
+| Unique pairs M | Linear min / median / max | Indexed min / median / max | Median speedup | Linear retained estimate | Indexed retained estimate |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 0.0054 / 0.0057 / 0.0065 ms | 0.0094 / 0.0096 / 0.0098 ms | 0.6× | 11,200 B | 15,680 B |
+| 1,000 | 0.4814 / 0.4816 / 0.4882 ms | 0.0745 / 0.0746 / 0.0798 ms | 6.5× | 112,000 B | 183,680 B |
+| 5,000 | 12.3071 / 12.3588 / 12.5609 ms | 0.3932 / 0.3990 / 0.4297 ms | 31.0× | 560,000 B | 846,720 B |
+| 20,000 | 302.9426 / 304.2486 / 307.7812 ms | 3.2054 / 3.2247 / 3.2568 ms | 94.3× | 2,240,000 B | 3,386,880 B |
+
+At M=100 the indexed path is about 4 microseconds slower and retains about
+4.4 KiB more entry payload. This absolute cost is small, so the implementation
+does not add a size threshold or a second lookup path. At 1,000 pairs and
+above, the measured lookup savings grow quickly; the indexed path is used for
+all sizes.
+
+Run this focused comparison with:
+
+```powershell
+cargo bench -p kapitsa-core --features bench-internals --bench collision_interactions
+```

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     aabb::Aabb,
     rigid_body::{BodyState, BodyType},
@@ -5,7 +7,7 @@ use crate::{
 };
 
 use super::{
-    CollisionEvent, CollisionInteraction, CollisionProxy,
+    CollisionEvent, CollisionInteraction, CollisionPair, CollisionProxy,
     manifold::ContactManifold,
     solver::{SolverBody, SolverManifold},
 };
@@ -28,6 +30,8 @@ pub(crate) struct StepContext {
     pub(crate) ccd_processed_time: f64,
     pub(crate) solver_manifolds: Vec<SolverManifold>,
     pub(crate) interactions: Vec<CollisionInteraction>,
+    /// Created on first use so the owning PhysicsWorld can remain const-constructible.
+    pub(crate) interaction_indices: Option<HashMap<CollisionPair, usize>>,
     pub(crate) events: Vec<CollisionEvent>,
 }
 
@@ -50,6 +54,7 @@ impl StepContext {
             ccd_processed_time: 0.0,
             solver_manifolds: Vec::new(),
             interactions: Vec::new(),
+            interaction_indices: None,
             events: Vec::new(),
         }
     }
@@ -71,6 +76,9 @@ impl StepContext {
         self.ccd_processed_time = 0.0;
         self.solver_manifolds.clear();
         self.interactions.clear();
+        if let Some(indices) = &mut self.interaction_indices {
+            indices.clear();
+        }
         self.events.clear();
     }
 
@@ -94,6 +102,9 @@ impl StepContext {
             self.ccd_processed_pairs.capacity() * size_of::<super::CollisionPair>(),
             self.solver_manifolds.capacity() * size_of::<SolverManifold>(),
             self.interactions.capacity() * size_of::<CollisionInteraction>(),
+            self.interaction_indices.as_ref().map_or(0, |indices| {
+                indices.capacity() * size_of::<(CollisionPair, usize)>()
+            }),
             self.events.capacity() * size_of::<CollisionEvent>(),
         ]
         .into_iter()
