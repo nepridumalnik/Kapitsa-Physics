@@ -61,6 +61,7 @@ impl PhysicsSimulation {
             return Err(SimulationError::TaskRequiresStop);
         };
         let (stop_tx, stop_rx) = watch::channel(false);
+        controller.reset_actual_frequency();
         controller.set_simulation_state(SimulationState::Running);
         controller.set_simulation_time_debt(Duration::ZERO);
         self.metrics_tx.send_replace(controller.metrics());
@@ -69,6 +70,7 @@ impl PhysicsSimulation {
         self.stop = Some(stop_tx);
         self.task = Some(runtime.spawn(async move {
             let result = run_simulation(&mut controller, stop_rx, &metrics_tx).await;
+            controller.reset_actual_frequency();
             controller.set_simulation_state(if result.is_ok() {
                 SimulationState::Stopped
             } else {
@@ -344,6 +346,7 @@ mod tests {
         assert!(simulation.metrics().total_steps > 0);
         simulation.stop().await.expect("stop after active step");
         assert_eq!(simulation.state(), SimulationState::Stopped);
+        assert_eq!(simulation.metrics().actual_hz, 0.0);
         let steps_when_stopped = simulation.metrics().total_steps;
         assert!(steps_when_stopped > 0);
         assert!(simulation.world().is_ok());
@@ -365,6 +368,7 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(2)).await;
         simulation.start().expect("restart");
+        assert_eq!(simulation.metrics().actual_hz, 0.0);
         tokio::time::sleep(Duration::from_millis(5)).await;
         assert_eq!(simulation.metrics().total_steps, steps_when_stopped);
         tokio::time::sleep(Duration::from_millis(100)).await;

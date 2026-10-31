@@ -232,6 +232,10 @@ impl PhysicsController {
         self.metrics.set_state(state);
     }
 
+    pub(crate) fn reset_actual_frequency(&mut self) {
+        self.metrics.reset_actual_frequency();
+    }
+
     pub(crate) fn set_simulation_time_debt(&mut self, debt: Duration) {
         self.metrics.set_simulation_time_debt(debt);
     }

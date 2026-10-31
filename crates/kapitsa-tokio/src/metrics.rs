@@ -203,6 +203,11 @@ impl MetricsCollector {
         self.snapshot.clone()
     }
 
+    pub(crate) fn reset_actual_frequency(&mut self) {
+        self.completion_times.clear();
+        self.snapshot.actual_hz = 0.0;
+    }
+
     pub(crate) fn record_step(
         &mut self,
         measurement: StepMeasurement,
@@ -355,5 +360,23 @@ mod tests {
         assert_eq!(snapshot.deadline_misses, 1);
         assert_eq!(snapshot.overload_integral, 1.0);
         assert_eq!(snapshot.simulation_time_debt, Duration::ZERO);
+
+        metrics.reset_actual_frequency();
+        assert_eq!(metrics.snapshot().actual_hz, 0.0);
+        let measurement = StepMeasurement {
+            step_duration: Duration::from_millis(20),
+            task_wait_duration: Duration::ZERO,
+            step_budget: Duration::from_millis(12),
+            deadline: Duration::from_millis(17),
+        };
+        let restarted = start + Duration::from_secs(60);
+        metrics.record_step(measurement, status, restarted);
+        assert_eq!(metrics.snapshot().actual_hz, 0.0);
+        metrics.record_step(measurement, status, restarted + Duration::from_millis(20));
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.actual_hz, 50.0);
+        assert_eq!(snapshot.total_steps, 4);
+        assert_eq!(snapshot.budget_overruns, 4);
+        assert_eq!(snapshot.deadline_misses, 3);
     }
 }
