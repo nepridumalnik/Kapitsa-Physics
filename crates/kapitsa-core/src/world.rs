@@ -299,6 +299,14 @@ impl PhysicsWorld {
             .get(body.dense)
             .ok_or(WorldError::InvalidBodyId)?
             .first_collider;
+        if self.bodies.get(body.dense).is_some_and(|entry| {
+            entry.body.physics().body_type() == crate::rigid_body::BodyType::Dynamic
+                && !collider.shape().is_convex()
+        }) {
+            return Err(WorldError::Collision(
+                CollisionError::UnsupportedDynamicGeometry,
+            ));
+        }
         if first.is_some_and(|id| self.colliders.get(id.dense).is_none()) {
             return Err(WorldError::InvalidColliderId);
         }

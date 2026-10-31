@@ -10,6 +10,13 @@ pub use integrator::IntegrationError;
 pub use physics::{BodyPhysics, BodyType};
 pub use state::BodyState;
 
+/// Continuous collision detection policy for a rigid body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CcdMode {
+    Discrete,
+    Continuous,
+}
+
 pub(crate) use integrator::predict;
 
 use kapitsa_math::{CholeskyError, Vec3};
@@ -25,6 +32,7 @@ pub struct RigidBody {
     state: BodyState,
     physics: BodyPhysics,
     forces: BodyForces,
+    ccd_mode: CcdMode,
 }
 
 impl RigidBody {
@@ -58,6 +66,7 @@ impl RigidBody {
                 force: Vec3::ZERO,
                 torque: Vec3::ZERO,
             },
+            ccd_mode: CcdMode::Discrete,
         }
     }
 
@@ -71,6 +80,14 @@ impl RigidBody {
 
     pub fn forces(&self) -> &BodyForces {
         &self.forces
+    }
+
+    pub fn ccd_mode(&self) -> CcdMode {
+        self.ccd_mode
+    }
+
+    pub fn set_ccd_mode(&mut self, mode: CcdMode) {
+        self.ccd_mode = mode;
     }
 
     /// Replaces the world transform while preserving velocities.

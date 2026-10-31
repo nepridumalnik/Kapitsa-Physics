@@ -59,6 +59,19 @@ pub enum Shape {
 }
 
 impl Shape {
+    pub(crate) fn is_convex(&self) -> bool {
+        matches!(
+            self,
+            Self::Sphere(_)
+                | Self::Cuboid(_)
+                | Self::Capsule(_)
+                | Self::Cylinder(_)
+                | Self::TaperedCapsule(_)
+                | Self::TaperedCylinder(_)
+                | Self::Convex(_)
+        )
+    }
+
     /// Computes finite local-space bounds when they are available.
     ///
     /// `Ok(None)` means the shape has no finite AABB. `Err` reports a bounds

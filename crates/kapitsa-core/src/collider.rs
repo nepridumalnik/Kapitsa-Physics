@@ -5,12 +5,20 @@ mod filter;
 pub use error::ColliderError;
 pub use filter::CollisionFilter;
 
+/// Whether a collider responds physically or only reports intersections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollisionMode {
+    Solid,
+    Sensor,
+}
+
 /// Collision geometry positioned relative to its owner.
 pub struct Collider {
     shape: Shape,
     local_transform: Transform,
     filter: CollisionFilter,
     material: Option<MaterialId>,
+    mode: CollisionMode,
 }
 
 impl Collider {
@@ -20,6 +28,7 @@ impl Collider {
             local_transform,
             filter: CollisionFilter::default(),
             material: None,
+            mode: CollisionMode::Solid,
         }
     }
 
@@ -49,6 +58,14 @@ impl Collider {
     /// Assigns a material ID without checking that it exists in any material storage.
     pub fn set_material(&mut self, material: Option<MaterialId>) {
         self.material = material;
+    }
+
+    pub fn mode(&self) -> CollisionMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: CollisionMode) {
+        self.mode = mode;
     }
 
     pub fn world_bounds(

@@ -1,6 +1,6 @@
 use kapitsa_math::{Mat3, Quat, Vec3};
 
-use super::{BodyType, MassProperties, RigidBody};
+use super::{BodyType, CcdMode, MassProperties, RigidBody};
 use crate::transform::Transform;
 
 fn transform() -> Transform {
@@ -165,6 +165,14 @@ fn static_bodies_reject_velocity_changes() {
     );
     assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
     assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
+}
+
+#[test]
+fn ccd_mode_defaults_to_discrete_and_can_be_changed() {
+    let mut body = RigidBody::new_static(transform());
+    assert_eq!(body.ccd_mode(), CcdMode::Discrete);
+    body.set_ccd_mode(CcdMode::Continuous);
+    assert_eq!(body.ccd_mode(), CcdMode::Continuous);
 }
 
 #[test]

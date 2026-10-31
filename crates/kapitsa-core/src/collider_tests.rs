@@ -4,7 +4,7 @@ use kapitsa_math::{Affine3, Quat, Vec3};
 
 use crate::{
     aabb::{Aabb, AabbError},
-    collider::{Collider, ColliderError, CollisionFilter},
+    collider::{Collider, ColliderError, CollisionFilter, CollisionMode},
     material::{MaterialStorage, PhysicsMaterial},
     shape::{
         BoneInfluence, BoundsError, Cuboid, Plane, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh,
@@ -145,6 +145,14 @@ fn collider_filter_can_be_read_and_updated() {
     collider.set_filter(filter);
 
     assert_eq!(collider.filter(), filter);
+}
+
+#[test]
+fn collision_mode_defaults_to_solid_and_can_be_changed_to_sensor() {
+    let mut collider = Collider::new(sphere(1.0), Transform::identity());
+    assert_eq!(collider.mode(), CollisionMode::Solid);
+    collider.set_mode(CollisionMode::Sensor);
+    assert_eq!(collider.mode(), CollisionMode::Sensor);
 }
 
 #[test]

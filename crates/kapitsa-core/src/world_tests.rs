@@ -126,6 +126,34 @@ fn material_ids_are_scoped_to_world_storage_and_in_use_materials_are_retained() 
 }
 
 #[test]
+fn dynamic_bodies_reject_surface_geometry_but_allow_convex_shapes() {
+    let mut world = PhysicsWorld::new();
+    let dynamic = world.add_body(dynamic_body()).expect("dynamic body");
+    let triangle = Shape::Triangle(
+        crate::shape::Triangle::new(Vec3::ZERO, Vec3::X, Vec3::Y).expect("triangle"),
+    );
+    assert_eq!(
+        world.add_collider(dynamic, Collider::new(triangle, Transform::identity())),
+        Err(WorldError::Collision(
+            crate::collision::CollisionError::UnsupportedDynamicGeometry
+        ))
+    );
+    assert!(world.add_collider(dynamic, collider(1.0)).is_ok());
+
+    let static_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("static body");
+    let triangle = Shape::Triangle(
+        crate::shape::Triangle::new(Vec3::ZERO, Vec3::X, Vec3::Y).expect("triangle"),
+    );
+    assert!(
+        world
+            .add_collider(static_body, Collider::new(triangle, Transform::identity()))
+            .is_ok()
+    );
+}
+
+#[test]
 fn world_id_survives_moves_and_removing_all_bodies() -> Result<(), WorldError> {
     fn move_world(world: PhysicsWorld) -> PhysicsWorld {
         world
