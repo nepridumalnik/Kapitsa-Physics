@@ -3,21 +3,45 @@ use std::{
     time::{Duration, Instant},
 };
 
-use kapitsa_core::world::{PhysicsWorld, StepError};
+use kapitsa_core::world::{BodyStep, PhysicsWorld, StepError};
 use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::{AdvanceStats, SchedulerConfig, SchedulerError, SchedulerMetrics, StepMeasurement};
 
-type BlockingOutput = (PhysicsWorld, Result<(), StepError>, Duration);
+type PrepareOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
+type CommitOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
+
+struct WorkerOutput {
+    shard: Vec<BodyStep>,
+    error: Option<StepError>,
+}
+
+enum StepWork {
+    Preparing {
+        task: JoinHandle<PrepareOutput>,
+    },
+    Integrating {
+        tasks: Vec<Option<JoinHandle<WorkerOutput>>>,
+        results: Vec<Option<Result<WorkerOutput, String>>>,
+        next_task: usize,
+    },
+    Committing {
+        task: JoinHandle<CommitOutput>,
+    },
+}
+
+struct InFlightStep {
+    world: Option<PhysicsWorld>,
+    work: StepWork,
+    started: Instant,
+    wait_started: Instant,
+    step_duration: Duration,
+    step_budget: Duration,
+}
 
 enum WorldState {
     Available(PhysicsWorld),
-    InFlight {
-        task: JoinHandle<BlockingOutput>,
-        wait_started: Instant,
-        step_duration: Duration,
-        step_budget: Duration,
-    },
+    InFlight(InFlightStep),
     Lost,
 }
 
@@ -28,6 +52,7 @@ pub struct PhysicsController {
     accumulator: Duration,
     current_hz: u32,
     active_workers: usize,
+    worker_buffers: Vec<Vec<BodyStep>>,
     metrics: SchedulerMetrics,
 }
 
@@ -42,6 +67,7 @@ impl PhysicsController {
             accumulator: Duration::ZERO,
             current_hz,
             active_workers,
+            worker_buffers: vec![Vec::new()],
             metrics: SchedulerMetrics::new(current_hz, active_workers),
         })
     }
@@ -50,7 +76,7 @@ impl PhysicsController {
     pub fn world(&self) -> Result<&PhysicsWorld, SchedulerError> {
         match &self.world {
             WorldState::Available(world) => Ok(world),
-            WorldState::InFlight { .. } => Err(SchedulerError::WorldUnavailable),
+            WorldState::InFlight(_) => Err(SchedulerError::WorldUnavailable),
             WorldState::Lost => Err(SchedulerError::WorldLost),
         }
     }
@@ -59,7 +85,7 @@ impl PhysicsController {
     pub fn world_mut(&mut self) -> Result<&mut PhysicsWorld, SchedulerError> {
         match &mut self.world {
             WorldState::Available(world) => Ok(world),
-            WorldState::InFlight { .. } => Err(SchedulerError::WorldUnavailable),
+            WorldState::InFlight(_) => Err(SchedulerError::WorldUnavailable),
             WorldState::Lost => Err(SchedulerError::WorldLost),
         }
     }
@@ -78,6 +104,24 @@ impl PhysicsController {
 
     pub fn active_workers(&self) -> usize {
         self.active_workers
+    }
+
+    /// Selects a bounded worker count for non-adaptive scheduling or tests.
+    pub fn set_active_workers(&mut self, workers: usize) -> Result<(), SchedulerError> {
+        if workers == 0 || workers > self.config.max_workers {
+            return Err(SchedulerError::InvalidConfig(
+                "active_workers must be in 1..=max_workers",
+            ));
+        }
+        match self.world {
+            WorldState::Available(_) => {}
+            WorldState::InFlight(_) => return Err(SchedulerError::WorldUnavailable),
+            WorldState::Lost => return Err(SchedulerError::WorldLost),
+        }
+        self.active_workers = workers;
+        self.metrics
+            .update_scheduler_state(self.current_hz, self.active_workers, self.accumulator);
+        Ok(())
     }
 
     pub fn simulation_time_debt(&self) -> Duration {
@@ -99,7 +143,7 @@ impl PhysicsController {
         let mut step_duration_total = Duration::ZERO;
         let mut task_wait_total = Duration::ZERO;
 
-        if matches!(self.world, WorldState::InFlight { .. }) {
+        if matches!(self.world, WorldState::InFlight(_)) {
             let measurement = self.complete_pending_step().await?;
             self.add_measurement(
                 measurement,
@@ -141,9 +185,9 @@ impl PhysicsController {
     }
 
     fn start_step(&mut self, step_duration: Duration) -> Result<(), SchedulerError> {
-        let mut world = match mem::replace(&mut self.world, WorldState::Lost) {
+        let world = match mem::replace(&mut self.world, WorldState::Lost) {
             WorldState::Available(world) => world,
-            state @ WorldState::InFlight { .. } => {
+            state @ WorldState::InFlight(_) => {
                 self.world = state;
                 return Err(SchedulerError::WorldUnavailable);
             }
@@ -153,65 +197,274 @@ impl PhysicsController {
             }
         };
 
+        let worker_count = self.active_workers.min(world.body_count()).max(1);
+        self.worker_buffers.resize_with(worker_count, Vec::new);
+        self.worker_buffers.truncate(worker_count);
+        let buffers = mem::take(&mut self.worker_buffers);
+        let started = Instant::now();
         let step_budget = step_duration.mul_f64(self.config.target_utilization);
-        let wait_started = Instant::now();
         let task = tokio::task::spawn_blocking(move || {
-            let step_started = Instant::now();
-            let result = world.step(step_duration.as_secs_f64());
-            let worker_duration = step_started.elapsed();
-            (world, result, worker_duration)
+            let mut buffers = buffers;
+            let result = world.fill_step_shards(&mut buffers);
+            (world, buffers, result)
         });
-        self.world = WorldState::InFlight {
-            task,
-            wait_started,
+        self.world = WorldState::InFlight(InFlightStep {
+            world: None,
+            work: StepWork::Preparing { task },
+            started,
+            wait_started: started,
             step_duration,
             step_budget,
-        };
+        });
         Ok(())
     }
 
     async fn complete_pending_step(&mut self) -> Result<StepMeasurement, SchedulerError> {
-        let completion = match &mut self.world {
-            WorldState::InFlight { task, .. } => task.await,
-            WorldState::Available(_) => return Err(SchedulerError::WorldUnavailable),
-            WorldState::Lost => return Err(SchedulerError::WorldLost),
-        };
-        let (step_duration, step_budget, task_wait_duration) = match &self.world {
-            WorldState::InFlight {
-                wait_started,
-                step_duration,
-                step_budget,
-                ..
-            } => (*step_duration, *step_budget, wait_started.elapsed()),
-            WorldState::Available(_) => return Err(SchedulerError::WorldUnavailable),
-            WorldState::Lost => return Err(SchedulerError::WorldLost),
-        };
+        loop {
+            let phase = match &self.world {
+                WorldState::Available(_) => return Err(SchedulerError::WorldUnavailable),
+                WorldState::InFlight(in_flight) => match in_flight.work {
+                    StepWork::Preparing { .. } => 0,
+                    StepWork::Integrating { .. } => 1,
+                    StepWork::Committing { .. } => 2,
+                },
+                WorldState::Lost => return Err(SchedulerError::WorldLost),
+            };
 
-        match completion {
-            Ok((world, Ok(()), worker_duration)) => {
-                self.world = WorldState::Available(world);
-                self.accumulator = self
-                    .accumulator
-                    .checked_sub(step_duration)
-                    .ok_or(SchedulerError::SimulationTimeOverflow)?;
-                self.update_metrics_state();
-                Ok(StepMeasurement {
-                    step_duration: worker_duration,
-                    task_wait_duration,
-                    step_budget,
-                })
-            }
-            Ok((world, Err(error), _)) => {
-                self.world = WorldState::Available(world);
-                self.update_metrics_state();
-                Err(SchedulerError::from(error))
-            }
-            Err(error) => {
-                self.world = WorldState::Lost;
-                self.update_metrics_state();
-                Err(SchedulerError::BlockingTaskFailed(error.to_string()))
+            match phase {
+                0 => {
+                    let completion = match &mut self.world {
+                        WorldState::InFlight(InFlightStep {
+                            work: StepWork::Preparing { task },
+                            ..
+                        }) => task.await,
+                        WorldState::Available(_) => {
+                            return Err(SchedulerError::WorldUnavailable);
+                        }
+                        WorldState::InFlight(_) => continue,
+                        WorldState::Lost => return Err(SchedulerError::WorldLost),
+                    };
+                    let in_flight = self.take_in_flight()?;
+                    let StepWork::Preparing { .. } = in_flight.work else {
+                        self.world = WorldState::Lost;
+                        return Err(SchedulerError::WorldLost);
+                    };
+                    match completion {
+                        Ok((world, buffers, Ok(()))) => {
+                            let tasks = buffers
+                                .into_iter()
+                                .map(|mut shard| {
+                                    let task = tokio::task::spawn_blocking(move || {
+                                        let mut error = None;
+                                        for body in &mut shard {
+                                            if let Err(step_error) = body
+                                                .integrate(in_flight.step_duration.as_secs_f64())
+                                            {
+                                                error = Some(step_error);
+                                                break;
+                                            }
+                                        }
+                                        WorkerOutput { shard, error }
+                                    });
+                                    Some(task)
+                                })
+                                .collect::<Vec<_>>();
+                            let result_count = tasks.len();
+                            self.world = WorldState::InFlight(InFlightStep {
+                                world: Some(world),
+                                work: StepWork::Integrating {
+                                    tasks,
+                                    results: std::iter::repeat_with(|| None)
+                                        .take(result_count)
+                                        .collect(),
+                                    next_task: 0,
+                                },
+                                started: in_flight.started,
+                                wait_started: in_flight.wait_started,
+                                step_duration: in_flight.step_duration,
+                                step_budget: in_flight.step_budget,
+                            });
+                        }
+                        Ok((world, buffers, Err(error))) => {
+                            self.restore_available(world, buffers);
+                            return Err(SchedulerError::from(error));
+                        }
+                        Err(error) => {
+                            self.world = WorldState::Lost;
+                            self.update_metrics_state();
+                            return Err(SchedulerError::BlockingTaskFailed(error.to_string()));
+                        }
+                    }
+                }
+                1 => {
+                    let task_index = match &self.world {
+                        WorldState::InFlight(InFlightStep {
+                            work:
+                                StepWork::Integrating {
+                                    tasks, next_task, ..
+                                },
+                            ..
+                        }) if *next_task < tasks.len() => Some(*next_task),
+                        WorldState::InFlight(_) => None,
+                        WorldState::Available(_) => {
+                            return Err(SchedulerError::WorldUnavailable);
+                        }
+                        WorldState::Lost => return Err(SchedulerError::WorldLost),
+                    };
+                    if let Some(task_index) = task_index {
+                        let completion = match &mut self.world {
+                            WorldState::InFlight(InFlightStep {
+                                work: StepWork::Integrating { tasks, .. },
+                                ..
+                            }) => match tasks.get_mut(task_index).and_then(Option::as_mut) {
+                                Some(task) => Some(task.await),
+                                None => None,
+                            },
+                            WorldState::Available(_) => {
+                                return Err(SchedulerError::WorldUnavailable);
+                            }
+                            WorldState::InFlight(_) => continue,
+                            WorldState::Lost => return Err(SchedulerError::WorldLost),
+                        };
+                        let Some(completion) = completion else {
+                            return Err(SchedulerError::BlockingTaskFailed(
+                                "worker task state was missing".to_owned(),
+                            ));
+                        };
+                        if let WorldState::InFlight(InFlightStep {
+                            work:
+                                StepWork::Integrating {
+                                    tasks,
+                                    results,
+                                    next_task,
+                                },
+                            ..
+                        }) = &mut self.world
+                        {
+                            tasks[task_index] = None;
+                            results[task_index] =
+                                Some(completion.map_err(|error| error.to_string()));
+                            *next_task = task_index + 1;
+                        }
+                    } else {
+                        self.start_commit_step()?;
+                    }
+                }
+                _ => {
+                    let completion = match &mut self.world {
+                        WorldState::InFlight(InFlightStep {
+                            work: StepWork::Committing { task },
+                            ..
+                        }) => task.await,
+                        WorldState::Available(_) => {
+                            return Err(SchedulerError::WorldUnavailable);
+                        }
+                        WorldState::InFlight(_) => continue,
+                        WorldState::Lost => return Err(SchedulerError::WorldLost),
+                    };
+                    let in_flight = self.take_in_flight()?;
+                    match completion {
+                        Ok((world, buffers, Ok(()))) => {
+                            let Some(accumulator) =
+                                self.accumulator.checked_sub(in_flight.step_duration)
+                            else {
+                                self.restore_available(world, buffers);
+                                return Err(SchedulerError::SimulationTimeOverflow);
+                            };
+                            self.accumulator = accumulator;
+                            self.restore_available(world, buffers);
+                            return Ok(StepMeasurement {
+                                step_duration: in_flight.started.elapsed(),
+                                task_wait_duration: in_flight.wait_started.elapsed(),
+                                step_budget: in_flight.step_budget,
+                            });
+                        }
+                        Ok((world, buffers, Err(error))) => {
+                            self.restore_available(world, buffers);
+                            return Err(SchedulerError::from(error));
+                        }
+                        Err(error) => {
+                            self.world = WorldState::Lost;
+                            self.update_metrics_state();
+                            return Err(SchedulerError::BlockingTaskFailed(error.to_string()));
+                        }
+                    }
+                }
             }
         }
+    }
+
+    fn start_commit_step(&mut self) -> Result<(), SchedulerError> {
+        let in_flight = self.take_in_flight()?;
+        let StepWork::Integrating { results, .. } = in_flight.work else {
+            self.world = WorldState::Lost;
+            return Err(SchedulerError::WorldLost);
+        };
+        let Some(mut world) = in_flight.world else {
+            self.world = WorldState::Lost;
+            return Err(SchedulerError::WorldLost);
+        };
+        let mut buffers = std::iter::repeat_with(Vec::new)
+            .take(results.len())
+            .collect::<Vec<_>>();
+        let mut error = None;
+        for (index, result) in results.into_iter().enumerate() {
+            match result {
+                Some(Ok(output)) => {
+                    buffers[index] = output.shard;
+                    if error.is_none() {
+                        error = output.error.map(SchedulerError::from);
+                    }
+                }
+                Some(Err(reason)) => {
+                    if error.is_none() {
+                        error = Some(SchedulerError::BlockingTaskFailed(reason));
+                    }
+                }
+                None => {
+                    if error.is_none() {
+                        error = Some(SchedulerError::BlockingTaskFailed(
+                            "worker result was missing".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(error) = error {
+            self.restore_available(world, buffers);
+            return Err(error);
+        }
+
+        let task = tokio::task::spawn_blocking(move || {
+            let result = world.commit_step_shards(&buffers);
+            (world, buffers, result)
+        });
+        self.world = WorldState::InFlight(InFlightStep {
+            world: None,
+            work: StepWork::Committing { task },
+            started: in_flight.started,
+            wait_started: in_flight.wait_started,
+            step_duration: in_flight.step_duration,
+            step_budget: in_flight.step_budget,
+        });
+        Ok(())
+    }
+
+    fn take_in_flight(&mut self) -> Result<InFlightStep, SchedulerError> {
+        match mem::replace(&mut self.world, WorldState::Lost) {
+            WorldState::InFlight(in_flight) => Ok(in_flight),
+            state @ WorldState::Available(_) => {
+                self.world = state;
+                Err(SchedulerError::WorldUnavailable)
+            }
+            WorldState::Lost => Err(SchedulerError::WorldLost),
+        }
+    }
+
+    fn restore_available(&mut self, world: PhysicsWorld, buffers: Vec<Vec<BodyStep>>) {
+        self.world = WorldState::Available(world);
+        self.worker_buffers = buffers;
+        self.update_metrics_state();
     }
 
     fn add_measurement(
@@ -263,8 +516,30 @@ mod tests {
     fn config(max_catch_up_steps: usize) -> SchedulerConfig {
         SchedulerConfig {
             max_catch_up_steps,
+            max_workers: 4,
             ..SchedulerConfig::default()
         }
+    }
+
+    fn dynamic_world(body_count: usize) -> PhysicsWorld {
+        let mut world = PhysicsWorld::new();
+        let mass =
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
+        for index in 0..body_count {
+            let mut body =
+                RigidBody::new_dynamic(Transform::identity(), mass).expect("valid dynamic body");
+            let scale = index as f64 + 1.0;
+            body.set_linear_velocity(Vec3::new(scale, -scale, 0.5 * scale))
+                .expect("finite velocity");
+            body.set_angular_velocity(Vec3::new(0.1 * scale, 0.2, -0.3))
+                .expect("finite velocity");
+            body.apply_force(Vec3::new(0.25, -0.5 * scale, 0.75))
+                .expect("finite force");
+            body.apply_torque(Vec3::new(-0.1 * scale, 0.2, 0.05))
+                .expect("finite torque");
+            world.add_body(body).expect("body insertion");
+        }
+        world
     }
 
     #[test]
@@ -389,5 +664,76 @@ mod tests {
                 .body(id)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn parallel_worker_counts_match_sequential_integration() {
+        let runtime = runtime();
+        let config = config(1);
+        let quantum = config.step_duration(config.target_hz);
+        let mut sequential = dynamic_world(17);
+        sequential
+            .step(quantum.as_secs_f64())
+            .expect("sequential step");
+
+        for workers in [1, 2, 4] {
+            let mut controller =
+                PhysicsController::new(dynamic_world(17), config.clone()).expect("controller");
+            controller
+                .set_active_workers(workers)
+                .expect("worker count within limit");
+            let stats = runtime
+                .block_on(controller.advance(quantum))
+                .expect("parallel step");
+
+            assert_eq!(stats.steps_completed, 1);
+            assert_eq!(stats.active_workers, workers);
+            let parallel = controller.world().expect("world available");
+            for ((parallel_id, parallel_body), (sequential_id, sequential_body)) in
+                parallel.bodies().zip(sequential.bodies())
+            {
+                assert_eq!(parallel_id, sequential_id);
+                assert_eq!(parallel_body, sequential_body);
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_integration_failure_waits_for_workers_and_preserves_world() {
+        let runtime = runtime();
+        let config = config(1);
+        let quantum = config.step_duration(config.target_hz);
+        let mut world = dynamic_world(5);
+        let failing_id = world.bodies().nth(2).expect("third body").0;
+        let failing = world.body_mut(failing_id).expect("body exists");
+        failing
+            .set_mass(
+                MassProperties::new(f64::from_bits(1), Vec3::ZERO, Mat3::IDENTITY)
+                    .expect("valid tiny mass"),
+            )
+            .expect("dynamic mass replacement");
+        failing
+            .apply_force(Vec3::X * f64::MAX)
+            .expect("finite force");
+        let originals = world
+            .bodies()
+            .map(|(id, body)| (id, *body))
+            .collect::<Vec<_>>();
+        let mut controller = PhysicsController::new(world, config).expect("controller");
+        controller
+            .set_active_workers(4)
+            .expect("worker count within limit");
+
+        assert!(matches!(
+            runtime.block_on(controller.advance(quantum)),
+            Err(SchedulerError::PhysicsStep(_))
+        ));
+        assert!(controller
+            .world()
+            .expect("world restored")
+            .bodies()
+            .zip(originals)
+            .all(|((id, body), (original_id, original))| id == original_id && body == &original));
+        assert_eq!(controller.simulation_time_debt(), quantum);
     }
 }

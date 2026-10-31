@@ -510,6 +510,58 @@ fn repeated_steps_are_deterministic_and_reuse_the_scratch_buffer() -> Result<(),
 }
 
 #[test]
+fn step_shards_are_balanced_and_commit_the_same_states() -> Result<(), Box<dyn std::error::Error>> {
+    let mut parallel_world = PhysicsWorld::new();
+    let mut sequential_world = PhysicsWorld::new();
+    for index in 0..7 {
+        let mut body = RigidBody::new_kinematic(Transform::identity());
+        body.set_linear_velocity(Vec3::new(f64::from(index), 1.0, -1.0))?;
+        parallel_world.add_body(body)?;
+        sequential_world.add_body(body)?;
+    }
+
+    let mut shards = vec![Vec::new(); 3];
+    parallel_world.fill_step_shards(&mut shards)?;
+    assert_eq!(
+        shards.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![3, 2, 2]
+    );
+    for step in shards.iter_mut().flatten() {
+        step.integrate(0.125)?;
+    }
+    parallel_world.commit_step_shards(&shards)?;
+    sequential_world.step(0.125)?;
+
+    for ((parallel_id, parallel), (sequential_id, sequential)) in
+        parallel_world.bodies().zip(sequential_world.bodies())
+    {
+        assert_eq!(parallel_id, sequential_id);
+        assert_eq!(parallel, sequential);
+    }
+    Ok(())
+}
+
+#[test]
+fn incomplete_step_shards_do_not_change_the_world() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let first_id = world.add_body(dynamic_body())?;
+    let second_id = world.add_body(dynamic_body())?;
+    let original_first = *world.body(first_id).ok_or(WorldError::InvalidBodyId)?;
+    let original_second = *world.body(second_id).ok_or(WorldError::InvalidBodyId)?;
+    let mut shards = vec![Vec::new()];
+    world.fill_step_shards(&mut shards)?;
+    shards[0][0].integrate(0.1)?;
+
+    assert_eq!(
+        world.commit_step_shards(&shards),
+        Err(StepError::InvalidStepResults)
+    );
+    assert_eq!(world.body(first_id), Some(&original_first));
+    assert_eq!(world.body(second_id), Some(&original_second));
+    Ok(())
+}
+
+#[test]
 fn step_errors_expose_the_integration_cause() -> Result<(), WorldError> {
     let mut world = PhysicsWorld::new();
     let mut body = dynamic_body();

@@ -29,6 +29,33 @@ pub struct PhysicsWorld {
     step_scratch: Vec<(BodyId, BodyState)>,
 }
 
+/// Opaque copied body data used to predict and atomically commit a world step.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct BodyStep {
+    body_id: BodyId,
+    source: RigidBody,
+    predicted: Option<BodyState>,
+}
+
+impl BodyStep {
+    pub fn body_id(&self) -> BodyId {
+        self.body_id
+    }
+
+    pub fn integrate(&mut self, dt: f64) -> Result<(), StepError> {
+        self.predicted = None;
+        self.predicted =
+            Some(
+                predict(&self.source, dt).map_err(|cause| StepError::BodyIntegration {
+                    body_id: self.body_id,
+                    cause,
+                })?,
+            );
+        Ok(())
+    }
+}
+
 impl PhysicsWorld {
     pub const fn new() -> Self {
         Self {
@@ -87,6 +114,63 @@ impl PhysicsWorld {
             entry.body.commit_integrated_state(state);
         }
         self.step_scratch.clear();
+        Ok(())
+    }
+
+    /// Fills balanced, ordered body snapshots into reusable shard buffers.
+    #[doc(hidden)]
+    pub fn fill_step_shards(&self, shards: &mut [Vec<BodyStep>]) -> Result<(), StepError> {
+        if shards.is_empty() {
+            return Err(StepError::InvalidStepResults);
+        }
+        for shard in shards.iter_mut() {
+            shard.clear();
+        }
+
+        let base_size = self.body_count() / shards.len();
+        let remainder = self.body_count() % shards.len();
+        let mut shard_index = 0;
+        let mut shard_remaining = base_size + usize::from(remainder > 0);
+
+        for (dense_id, entry) in self.bodies.iter() {
+            while shard_remaining == 0 {
+                shard_index += 1;
+                shard_remaining = base_size + usize::from(shard_index < remainder);
+            }
+            shards[shard_index].push(BodyStep {
+                body_id: BodyId(dense_id),
+                source: entry.body,
+                predicted: None,
+            });
+            shard_remaining -= 1;
+        }
+        Ok(())
+    }
+
+    /// Validates all shard results before committing any body state.
+    #[doc(hidden)]
+    pub fn commit_step_shards(&mut self, shards: &[Vec<BodyStep>]) -> Result<(), StepError> {
+        let mut steps = shards.iter().flatten();
+        for (dense_id, entry) in self.bodies.iter() {
+            let Some(step) = steps.next() else {
+                return Err(StepError::InvalidStepResults);
+            };
+            if step.body_id != BodyId(dense_id)
+                || step.source != entry.body
+                || step.predicted.is_none()
+            {
+                return Err(StepError::InvalidStepResults);
+            }
+        }
+        if steps.next().is_some() {
+            return Err(StepError::InvalidStepResults);
+        }
+
+        for ((_, entry), step) in self.bodies.iter_mut().zip(shards.iter().flatten()) {
+            if let Some(state) = step.predicted {
+                entry.body.commit_integrated_state(state);
+            }
+        }
         Ok(())
     }
 
