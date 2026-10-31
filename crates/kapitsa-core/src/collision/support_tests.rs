@@ -1,6 +1,8 @@
 use crate::{
     collision::{CollisionError, support::support_world},
-    shape::{Capsule, Convex, Cuboid, Cylinder, Shape, Sphere, TaperedCapsule, TaperedCylinder},
+    shape::{
+        Capsule, Convex, Cuboid, Cylinder, Shape, Sphere, TaperedCapsule, TaperedCylinder, Triangle,
+    },
     transform::Transform,
 };
 use kapitsa_math::{Quat, Vec3};
@@ -70,6 +72,22 @@ fn support_mapping_applies_rotation_and_translation() {
     let transform = Transform::new(Vec3::new(3.0, 4.0, 5.0), rotation).expect("transform");
     let (point, _) = support_world(&shape, &transform, Vec3::Y).expect("support");
     assert!((point.y - 5.0).abs() < 1.0e-12);
+}
+
+#[test]
+fn triangle_support_mapping_selects_the_farthest_vertex() {
+    let shape = Shape::Triangle(
+        Triangle::new(
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        )
+        .expect("triangle"),
+    );
+    let (point, feature) =
+        support_world(&shape, &Transform::identity(), Vec3::X).expect("support point");
+    assert_eq!(point, Vec3::new(2.0, 0.0, 0.0));
+    assert_eq!(feature, 1);
 }
 
 #[test]

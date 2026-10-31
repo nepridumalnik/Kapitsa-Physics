@@ -9,6 +9,8 @@ mod event;
 mod gjk;
 #[allow(dead_code)]
 mod manifold;
+#[allow(dead_code)]
+mod narrow_phase;
 pub(crate) mod spatial_index;
 mod step;
 #[allow(dead_code)]

@@ -194,8 +194,29 @@ fn support_local(shape: &Shape, direction: Vec3) -> Result<LocalSupport, Collisi
                 feature: u64::try_from(feature).map_err(|_| CollisionError::ArithmeticOverflow)?,
             }
         }
+        Shape::Triangle(shape) => {
+            let vertices = shape.vertices();
+            let mut feature = 0;
+            let mut point = vertices[0];
+            let mut best_score = direction
+                .checked_dot(point)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            for (index, candidate) in vertices.into_iter().enumerate().skip(1) {
+                let score = direction
+                    .checked_dot(candidate)
+                    .ok_or(CollisionError::ArithmeticOverflow)?;
+                if score > best_score {
+                    feature = index;
+                    point = candidate;
+                    best_score = score;
+                }
+            }
+            LocalSupport {
+                point,
+                feature: u64::try_from(feature).map_err(|_| CollisionError::ArithmeticOverflow)?,
+            }
+        }
         Shape::Plane(_)
-        | Shape::Triangle(_)
         | Shape::TriangleMesh(_)
         | Shape::HeightField(_)
         | Shape::LevelSet(_)
