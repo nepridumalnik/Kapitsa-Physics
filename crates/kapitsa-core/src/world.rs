@@ -141,6 +141,7 @@ impl PhysicsWorld {
             .ok_or(WorldError::InvalidColliderId)?;
         entry.collider.set_material(material);
         self.collision_system.mark_spatial_dirty();
+        self.collision_system.invalidate_collider_contacts(id);
         Ok(())
     }
 
@@ -470,6 +471,7 @@ impl PhysicsWorld {
             .ok_or(CollisionError::InvalidSkinPose)?;
         entry.collider.set_skin_pose(matrices)?;
         self.collision_system.mark_spatial_dirty();
+        self.collision_system.invalidate_collider_contacts(id);
         Ok(())
     }
 
@@ -483,6 +485,9 @@ impl PhysicsWorld {
     pub fn collider_mut(&mut self, id: ColliderId) -> Option<&mut Collider> {
         if id.world != self.world_id {
             return None;
+        }
+        if self.colliders.get(id.dense).is_some() {
+            self.collision_system.invalidate_collider_contacts(id);
         }
         self.collision_system.mark_spatial_dirty();
         self.colliders
@@ -535,6 +540,7 @@ impl PhysicsWorld {
             entry.prev = prev;
         }
         self.collision_system.mark_spatial_dirty();
+        self.collision_system.invalidate_collider_contacts(id);
         Some(removed.collider)
     }
 

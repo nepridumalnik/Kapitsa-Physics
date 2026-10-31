@@ -1,6 +1,6 @@
 use super::{
     CollisionConfig, CollisionError, CollisionEvent, StepContext, broad_phase::BroadPhase,
-    spatial_index::SpatialIndex,
+    cache::ContactCache, spatial_index::SpatialIndex,
 };
 use crate::{rigid_body::BodyState, world::BodyId};
 
@@ -11,6 +11,7 @@ pub(crate) struct CollisionSystem {
     events: Vec<CollisionEvent>,
     spatial_index: Option<SpatialIndex>,
     broad_phase: BroadPhase,
+    contact_cache: Option<ContactCache>,
 }
 
 impl CollisionSystem {
@@ -21,6 +22,7 @@ impl CollisionSystem {
             events: Vec::new(),
             spatial_index: None,
             broad_phase: BroadPhase::new(),
+            contact_cache: None,
         }
     }
 
@@ -31,6 +33,9 @@ impl CollisionSystem {
     pub(crate) fn set_config(&mut self, config: CollisionConfig) -> Result<(), CollisionError> {
         config.validate()?;
         self.config = config;
+        if let Some(cache) = self.contact_cache.as_mut() {
+            cache.clear();
+        }
         Ok(())
     }
 
@@ -74,6 +79,12 @@ impl CollisionSystem {
     pub(crate) fn mark_spatial_dirty(&mut self) {
         if let Some(index) = self.spatial_index.as_mut() {
             index.mark_dirty();
+        }
+    }
+
+    pub(crate) fn invalidate_collider_contacts(&mut self, collider: crate::world::ColliderId) {
+        if let Some(cache) = self.contact_cache.as_mut() {
+            cache.invalidate_collider(collider);
         }
     }
 

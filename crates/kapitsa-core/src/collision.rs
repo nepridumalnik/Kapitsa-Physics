@@ -1,4 +1,6 @@
 mod broad_phase;
+#[allow(dead_code)]
+mod cache;
 mod config;
 mod contact;
 #[allow(dead_code)]
