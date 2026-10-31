@@ -16,6 +16,6 @@ Measured with `cargo bench -p kapitsa-tokio --bench parallel_step` on 2026-10-31
 
 The one-worker path is slower because snapshotting, task dispatch, and commit
 cost more than they save for this workload. Parallel speedup appears at two
-workers and reaches 2.13x at four. Results are specific to this CPU, Tokio
+workers and reaches 2.37x at four. Results are specific to this CPU, Tokio
 runtime, and workload; small worlds should use one worker to avoid dispatch
 overhead.
