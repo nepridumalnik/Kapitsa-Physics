@@ -250,3 +250,154 @@ fn nonzero_velocity_wakes_but_zero_velocity_does_not() {
     body.set_angular_velocity(Vec3::Z).expect("finite velocity");
     assert!(!body.state().is_sleeping());
 }
+
+#[test]
+fn forces_and_torques_accumulate_and_can_be_cleared() {
+    let mut body = RigidBody::new_dynamic(transform(), mass());
+    body.apply_force(Vec3::X)
+        .expect("dynamic body accepts force");
+    body.apply_force(Vec3::Y)
+        .expect("dynamic body accepts force");
+    body.apply_torque(Vec3::Z)
+        .expect("dynamic body accepts torque");
+    body.apply_torque(Vec3::Z)
+        .expect("dynamic body accepts torque");
+
+    assert_eq!(body.forces().force(), Vec3::X + Vec3::Y);
+    assert_eq!(body.forces().torque(), 2.0 * Vec3::Z);
+    assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
+    assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
+
+    body.clear_forces();
+    assert_eq!(body.forces().force(), Vec3::ZERO);
+    assert_eq!(body.forces().torque(), Vec3::ZERO);
+}
+
+#[test]
+fn force_at_center_of_mass_adds_no_torque() {
+    let mut body = RigidBody::new_dynamic(transform(), mass());
+    let center = body
+        .world_center_of_mass()
+        .expect("valid center of mass")
+        .expect("dynamic body has mass");
+
+    body.apply_force_at_point(Vec3::new(0.0, 2.0, 0.0), center)
+        .expect("dynamic body accepts force");
+
+    assert_eq!(body.forces().force(), Vec3::new(0.0, 2.0, 0.0));
+    assert_eq!(body.forces().torque(), Vec3::ZERO);
+}
+
+#[test]
+fn force_with_lever_arm_adds_torque_in_the_expected_direction() {
+    let centered_mass =
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
+    let mut body = RigidBody::new_dynamic(Transform::identity(), centered_mass);
+
+    body.apply_force_at_point(Vec3::Y, Vec3::X)
+        .expect("dynamic body accepts force");
+
+    assert_eq!(body.forces().force(), Vec3::Y);
+    assert_eq!(body.forces().torque(), Vec3::Z);
+}
+
+#[test]
+fn force_and_torque_operations_require_dynamic_body() {
+    for mut body in [
+        RigidBody::new_static(transform()),
+        RigidBody::new_kinematic(transform()),
+    ] {
+        assert_eq!(
+            body.apply_force(Vec3::X),
+            Err(super::BodyError::BodyMustBeDynamic)
+        );
+        assert_eq!(
+            body.apply_force_at_point(Vec3::X, Vec3::Y),
+            Err(super::BodyError::BodyMustBeDynamic)
+        );
+        assert_eq!(
+            body.apply_torque(Vec3::Z),
+            Err(super::BodyError::BodyMustBeDynamic)
+        );
+        assert_eq!(body.forces().force(), Vec3::ZERO);
+        assert_eq!(body.forces().torque(), Vec3::ZERO);
+    }
+}
+
+#[test]
+fn invalid_force_inputs_do_not_change_accumulators_or_sleep_state() {
+    let mut body = RigidBody::new_dynamic(transform(), mass());
+    body.apply_force(Vec3::X).expect("valid force");
+
+    assert_eq!(
+        body.apply_force(Vec3::new(f32::NAN, 0.0, 0.0)),
+        Err(super::BodyError::NonFiniteValue)
+    );
+    assert_eq!(
+        body.apply_force_at_point(Vec3::Y, Vec3::new(f32::INFINITY, 0.0, 0.0)),
+        Err(super::BodyError::NonFiniteValue)
+    );
+    assert_eq!(
+        body.apply_torque(Vec3::new(0.0, 0.0, f32::NEG_INFINITY)),
+        Err(super::BodyError::NonFiniteValue)
+    );
+    assert_eq!(body.forces().force(), Vec3::X);
+    assert_eq!(body.forces().torque(), Vec3::ZERO);
+
+    body.sleep().expect("dynamic body can sleep");
+    assert_eq!(
+        body.apply_torque(Vec3::new(0.0, 0.0, f32::NEG_INFINITY)),
+        Err(super::BodyError::NonFiniteValue)
+    );
+    assert_eq!(body.forces().force(), Vec3::ZERO);
+    assert_eq!(body.forces().torque(), Vec3::ZERO);
+    assert!(body.state().is_sleeping());
+}
+
+#[test]
+fn force_accumulation_overflow_is_atomic() {
+    let mut body = RigidBody::new_dynamic(transform(), mass());
+    let large_force = Vec3::splat(f32::MAX * 0.75);
+    body.apply_force(large_force)
+        .expect("force is representable");
+
+    assert_eq!(
+        body.apply_force(large_force),
+        Err(super::BodyError::ArithmeticOverflow)
+    );
+    assert_eq!(body.forces().force(), large_force);
+
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass());
+    assert_eq!(
+        body.apply_force_at_point(Vec3::X * f32::MAX, Vec3::new(0.0, -f32::MAX, 0.0)),
+        Err(super::BodyError::ArithmeticOverflow)
+    );
+    assert_eq!(body.forces().force(), Vec3::ZERO);
+    assert_eq!(body.forces().torque(), Vec3::ZERO);
+}
+
+#[test]
+fn nonzero_force_wakes_and_zero_force_does_not() {
+    let mut body = RigidBody::new_dynamic(transform(), mass());
+    body.sleep().expect("dynamic body can sleep");
+    body.apply_force(Vec3::ZERO).expect("zero force is valid");
+    assert!(body.state().is_sleeping());
+
+    body.apply_torque(Vec3::Z)
+        .expect("dynamic body accepts torque");
+    assert!(!body.state().is_sleeping());
+}
+
+#[test]
+fn changing_mass_clears_accumulated_forces_and_torques() {
+    let mut body = RigidBody::new_dynamic(transform(), mass());
+    body.apply_force(Vec3::X).expect("valid force");
+    body.apply_torque(Vec3::Y).expect("valid torque");
+    let replacement =
+        MassProperties::new(3.0, Vec3::ZERO, Mat3::IDENTITY * 2.0).expect("valid mass properties");
+
+    body.set_mass(replacement).expect("dynamic body has mass");
+
+    assert_eq!(body.forces().force(), Vec3::ZERO);
+    assert_eq!(body.forces().torque(), Vec3::ZERO);
+}

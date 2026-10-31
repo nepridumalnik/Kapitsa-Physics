@@ -72,7 +72,9 @@ impl RigidBody {
     /// A changed transform wakes a sleeping dynamic body. The update is rejected
     /// if its world-space center of mass cannot be represented as `f32`.
     pub fn set_transform(&mut self, transform: Transform) -> Result<(), BodyError> {
-        world_center_of_mass_for(transform, self.physics.mass)?;
+        world_center_of_mass_for(transform, self.physics.mass)?
+            .map(checked_vec3)
+            .transpose()?;
 
         if transform != self.state.transform {
             self.state.transform = transform;
@@ -130,7 +132,9 @@ impl RigidBody {
 
     /// Returns the center of mass in world space, or `None` for bodies without mass.
     pub fn world_center_of_mass(&self) -> Result<Option<Vec3>, BodyError> {
-        world_center_of_mass_for(self.state.transform, self.physics.mass)
+        world_center_of_mass_for(self.state.transform, self.physics.mass)?
+            .map(checked_vec3)
+            .transpose()
     }
 
     /// Puts a dynamic body to sleep, clearing its velocities and accumulated forces.
@@ -161,12 +165,77 @@ impl RigidBody {
             Ok(())
         }
     }
+
+    /// Accumulates a world-space force without changing velocity immediately.
+    pub fn apply_force(&mut self, force: Vec3) -> Result<(), BodyError> {
+        self.ensure_dynamic()?;
+        if !force.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+
+        let next_force = add_checked(self.forces.force, to_dvec3(force))?;
+        self.forces.force = next_force;
+        if force != Vec3::ZERO {
+            self.state.sleeping = false;
+        }
+        Ok(())
+    }
+
+    /// Accumulates a world-space force and its torque about the world center of mass.
+    pub fn apply_force_at_point(&mut self, force: Vec3, point: Vec3) -> Result<(), BodyError> {
+        self.ensure_dynamic()?;
+        if !force.is_finite() || !point.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+
+        let center = world_center_of_mass_for(self.state.transform, self.physics.mass)?
+            .ok_or(BodyError::BodyMustBeDynamic)?;
+        let torque_delta = (to_dvec3(point) - center).cross(to_dvec3(force));
+        let next_force = add_checked(self.forces.force, to_dvec3(force))?;
+        let next_torque = add_checked(self.forces.torque, torque_delta)?;
+
+        self.forces.force = next_force;
+        self.forces.torque = next_torque;
+        if force != Vec3::ZERO {
+            self.state.sleeping = false;
+        }
+        Ok(())
+    }
+
+    /// Accumulates a world-space torque about the center of mass.
+    pub fn apply_torque(&mut self, torque: Vec3) -> Result<(), BodyError> {
+        self.ensure_dynamic()?;
+        if !torque.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+
+        let next_torque = add_checked(self.forces.torque, to_dvec3(torque))?;
+        self.forces.torque = next_torque;
+        if torque != Vec3::ZERO {
+            self.state.sleeping = false;
+        }
+        Ok(())
+    }
+
+    /// Clears accumulated forces and torques without changing motion or sleep state.
+    pub fn clear_forces(&mut self) {
+        self.forces.force = Vec3::ZERO;
+        self.forces.torque = Vec3::ZERO;
+    }
+
+    fn ensure_dynamic(&self) -> Result<(), BodyError> {
+        if self.physics.body_type == BodyType::Dynamic {
+            Ok(())
+        } else {
+            Err(BodyError::BodyMustBeDynamic)
+        }
+    }
 }
 
 fn world_center_of_mass_for(
     transform: Transform,
     mass: Option<MassProperties>,
-) -> Result<Option<Vec3>, BodyError> {
+) -> Result<Option<DVec3>, BodyError> {
     let Some(mass) = mass else {
         return Ok(None);
     };
@@ -196,11 +265,27 @@ fn world_center_of_mass_for(
         return Err(BodyError::ArithmeticOverflow);
     }
 
-    Ok(Some(Vec3::new(
-        center.x as f32,
-        center.y as f32,
-        center.z as f32,
-    )))
+    Ok(Some(center))
+}
+
+fn to_dvec3(value: Vec3) -> DVec3 {
+    DVec3::new(f64::from(value.x), f64::from(value.y), f64::from(value.z))
+}
+
+fn checked_vec3(value: DVec3) -> Result<Vec3, BodyError> {
+    if !value.is_finite()
+        || value.x.abs() > f64::from(f32::MAX)
+        || value.y.abs() > f64::from(f32::MAX)
+        || value.z.abs() > f64::from(f32::MAX)
+    {
+        return Err(BodyError::ArithmeticOverflow);
+    }
+
+    Ok(Vec3::new(value.x as f32, value.y as f32, value.z as f32))
+}
+
+fn add_checked(current: Vec3, delta: DVec3) -> Result<Vec3, BodyError> {
+    checked_vec3(to_dvec3(current) + delta)
 }
 
 #[cfg(test)]
