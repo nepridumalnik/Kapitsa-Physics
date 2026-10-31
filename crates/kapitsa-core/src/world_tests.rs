@@ -1,11 +1,11 @@
 use kapitsa_math::{Mat3, Vec3};
 
-use super::{BodyId, ColliderId, PhysicsWorld, WorldError};
+use super::{BodyId, ColliderId, PhysicsWorld, StepError, WorldError};
 use crate::{
     collider::{Collider, CollisionFilter},
     containers::{DensePool, DensePoolError},
     mass::MassProperties,
-    rigid_body::{BodyType, RigidBody},
+    rigid_body::{BodyType, IntegrationError, RigidBody},
     shape::{Shape, Sphere},
     transform::Transform,
 };
@@ -364,5 +364,160 @@ fn deleting_body_and_reusing_slots_does_not_revive_old_ids() -> Result<(), World
             .count(),
         1
     );
+    Ok(())
+}
+
+#[test]
+fn step_advances_each_body_type_and_clears_accumulated_forces() -> Result<(), WorldError> {
+    let mut world = PhysicsWorld::new();
+    let static_id = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let mut kinematic = RigidBody::new_kinematic(Transform::identity());
+    kinematic
+        .set_linear_velocity(Vec3::X)
+        .expect("finite velocity");
+    let kinematic_id = world.add_body(kinematic)?;
+
+    let mut moving = dynamic_body();
+    moving.apply_force(Vec3::X * 2.0).expect("finite force");
+    let moving_id = world.add_body(moving)?;
+
+    let mut sleeping = dynamic_body();
+    sleeping
+        .set_linear_velocity(Vec3::Y)
+        .expect("finite velocity");
+    sleeping.sleep().expect("dynamic body can sleep");
+    let sleeping_id = world.add_body(sleeping)?;
+    let sleeping_state = *world
+        .body(sleeping_id)
+        .ok_or(WorldError::InvalidBodyId)?
+        .state();
+
+    world.step(0.5).expect("valid physics step");
+
+    assert_eq!(
+        world
+            .body(static_id)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .transform(),
+        Transform::identity()
+    );
+    let kinematic = world.body(kinematic_id).ok_or(WorldError::InvalidBodyId)?;
+    assert_eq!(kinematic.state().transform().translation(), Vec3::X * 0.5);
+    assert_eq!(kinematic.state().linear_velocity(), Vec3::X);
+
+    let moving = world.body(moving_id).ok_or(WorldError::InvalidBodyId)?;
+    assert_eq!(moving.state().linear_velocity(), Vec3::X);
+    assert_eq!(moving.state().transform().translation(), Vec3::X * 0.5);
+    assert_eq!(moving.forces().force(), Vec3::ZERO);
+    assert_eq!(moving.forces().torque(), Vec3::ZERO);
+    assert_eq!(
+        world.body(sleeping_id).map(RigidBody::state),
+        Some(&sleeping_state)
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_timestep_preserves_all_body_state_and_forces() -> Result<(), WorldError> {
+    let mut world = PhysicsWorld::new();
+    let mut body = dynamic_body();
+    body.set_linear_velocity(Vec3::X).expect("finite velocity");
+    body.apply_force(Vec3::Y).expect("finite force");
+    let id = world.add_body(body)?;
+    let original = *world.body(id).ok_or(WorldError::InvalidBodyId)?;
+
+    for dt in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+        assert_eq!(world.step(dt), Err(StepError::InvalidDeltaTime));
+        assert_eq!(world.body(id), Some(&original));
+    }
+    Ok(())
+}
+
+#[test]
+fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), WorldError> {
+    let mut world = PhysicsWorld::new();
+    let mut first = dynamic_body();
+    first.set_linear_velocity(Vec3::Y).expect("finite velocity");
+    first.apply_force(Vec3::X).expect("finite force");
+    let first_id = world.add_body(first)?;
+
+    let mut failing = dynamic_body();
+    failing
+        .apply_force(Vec3::X * f64::MAX)
+        .expect("finite force");
+    let failing_id = world.add_body(failing)?;
+    let first_original = *world.body(first_id).ok_or(WorldError::InvalidBodyId)?;
+    let failing_original = *world.body(failing_id).ok_or(WorldError::InvalidBodyId)?;
+
+    assert_eq!(
+        world.step(2.0),
+        Err(StepError::BodyIntegration {
+            body_id: failing_id,
+            cause: IntegrationError::ArithmeticOverflow,
+        })
+    );
+    assert_eq!(world.body(first_id), Some(&first_original));
+    assert_eq!(world.body(failing_id), Some(&failing_original));
+    assert!(world.step_scratch.is_empty());
+
+    world
+        .body_mut(failing_id)
+        .ok_or(WorldError::InvalidBodyId)?
+        .clear_forces();
+    world
+        .step(0.5)
+        .expect("retry succeeds after clearing invalid force");
+    assert_eq!(
+        world
+            .body(first_id)
+            .ok_or(WorldError::InvalidBodyId)?
+            .forces()
+            .force(),
+        Vec3::ZERO
+    );
+    Ok(())
+}
+
+#[test]
+fn repeated_steps_are_deterministic_and_reuse_the_scratch_buffer() -> Result<(), WorldError> {
+    fn make_world() -> Result<(PhysicsWorld, BodyId), WorldError> {
+        let mut world = PhysicsWorld::new();
+        let mut body = dynamic_body();
+        body.set_linear_velocity(Vec3::new(1.0, -2.0, 0.5))
+            .expect("finite velocity");
+        body.set_angular_velocity(Vec3::new(0.25, -0.5, 0.75))
+            .expect("finite velocity");
+        body.apply_force(Vec3::new(2.0, 3.0, -1.0))
+            .expect("finite force");
+        body.apply_torque(Vec3::new(-0.5, 1.0, 2.0))
+            .expect("finite torque");
+        let id = world.add_body(body)?;
+        Ok((world, id))
+    }
+
+    let (mut first, first_id) = make_world()?;
+    let (mut second, second_id) = make_world()?;
+    for _ in 0..8 {
+        first.step(1.0 / 120.0).expect("valid step");
+        second.step(1.0 / 120.0).expect("valid step");
+        assert_eq!(first.body(first_id), second.body(second_id));
+    }
+    let capacity = first.step_scratch.capacity();
+    first.step(1.0 / 120.0).expect("valid step");
+    assert_eq!(first.step_scratch.capacity(), capacity);
+    Ok(())
+}
+
+#[test]
+fn step_errors_expose_the_integration_cause() -> Result<(), WorldError> {
+    let mut world = PhysicsWorld::new();
+    let mut body = dynamic_body();
+    body.apply_force(Vec3::X * f64::MAX).expect("finite force");
+    world.add_body(body)?;
+
+    let error = world.step(2.0).expect_err("integration overflows");
+    assert!(error.to_string().contains("integration failed"));
+    assert!(std::error::Error::source(&error).is_some());
     Ok(())
 }

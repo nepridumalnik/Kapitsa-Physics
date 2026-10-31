@@ -6,8 +6,11 @@ mod state;
 
 pub use error::BodyError;
 pub use forces::BodyForces;
+pub use integrator::IntegrationError;
 pub use physics::{BodyPhysics, BodyType};
 pub use state::BodyState;
+
+pub(crate) use integrator::predict;
 
 use kapitsa_math::{CholeskyError, Vec3};
 
@@ -226,6 +229,11 @@ impl RigidBody {
     pub fn clear_forces(&mut self) {
         self.forces.force = Vec3::ZERO;
         self.forces.torque = Vec3::ZERO;
+    }
+
+    pub(crate) fn commit_integrated_state(&mut self, state: BodyState) {
+        self.state = state;
+        self.clear_forces();
     }
 
     fn ensure_dynamic(&self) -> Result<(), BodyError> {

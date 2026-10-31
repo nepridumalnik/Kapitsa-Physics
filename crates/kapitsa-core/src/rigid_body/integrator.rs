@@ -7,7 +7,7 @@ use crate::transform::Transform;
 
 /// Failure returned when a rigid-body state cannot be predicted for one timestep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntegrationError {
+pub enum IntegrationError {
     InvalidDeltaTime,
     MissingMassProperties,
     InvalidInertiaTensor,
@@ -29,7 +29,6 @@ impl fmt::Display for IntegrationError {
 impl std::error::Error for IntegrationError {}
 
 /// Predicts a body's state without mutating the source body.
-#[allow(dead_code)] // PhysicsWorld::step consumes this in the next implementation stage.
 pub(crate) fn predict(body: &RigidBody, dt: f64) -> Result<BodyState, IntegrationError> {
     if !dt.is_finite() || dt <= 0.0 {
         return Err(IntegrationError::InvalidDeltaTime);

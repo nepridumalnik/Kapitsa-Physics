@@ -1,10 +1,14 @@
 mod error;
 mod id;
 
-pub use error::WorldError;
+pub use error::{StepError, WorldError};
 pub use id::{BodyId, ColliderId};
 
-use crate::{collider::Collider, containers::DensePool, rigid_body::RigidBody};
+use crate::{
+    collider::Collider,
+    containers::DensePool,
+    rigid_body::{BodyState, RigidBody, predict},
+};
 
 struct BodyEntry {
     body: RigidBody,
@@ -22,6 +26,7 @@ struct ColliderEntry {
 pub struct PhysicsWorld {
     bodies: DensePool<BodyEntry>,
     colliders: DensePool<ColliderEntry>,
+    step_scratch: Vec<(BodyId, BodyState)>,
 }
 
 impl PhysicsWorld {
@@ -29,6 +34,7 @@ impl PhysicsWorld {
         Self {
             bodies: DensePool::new(),
             colliders: DensePool::new(),
+            step_scratch: Vec::new(),
         }
     }
 
@@ -52,6 +58,36 @@ impl PhysicsWorld {
 
     pub fn body_count(&self) -> usize {
         self.bodies.len()
+    }
+
+    /// Advances every body by one fixed timestep, atomically committing the results.
+    pub fn step(&mut self, dt: f64) -> Result<(), StepError> {
+        self.step_scratch.clear();
+        if !dt.is_finite() || dt <= 0.0 {
+            return Err(StepError::InvalidDeltaTime);
+        }
+
+        for (dense_id, entry) in self.bodies.iter() {
+            let body_id = BodyId(dense_id);
+            match predict(&entry.body, dt) {
+                Ok(state) => self.step_scratch.push((body_id, state)),
+                Err(cause) => {
+                    self.step_scratch.clear();
+                    return Err(StepError::BodyIntegration { body_id, cause });
+                }
+            }
+        }
+
+        for ((dense_id, entry), (body_id, state)) in self
+            .bodies
+            .iter_mut()
+            .zip(self.step_scratch.iter().copied())
+        {
+            debug_assert_eq!(BodyId(dense_id), body_id);
+            entry.body.commit_integrated_state(state);
+        }
+        self.step_scratch.clear();
+        Ok(())
     }
 
     pub fn add_collider(

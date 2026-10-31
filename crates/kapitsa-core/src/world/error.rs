@@ -1,6 +1,39 @@
 use std::fmt;
 
 use crate::containers::DensePoolError;
+use crate::rigid_body::IntegrationError;
+
+use super::BodyId;
+
+/// Failure returned when a world timestep cannot be completed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepError {
+    InvalidDeltaTime,
+    BodyIntegration {
+        body_id: BodyId,
+        cause: IntegrationError,
+    },
+}
+
+impl fmt::Display for StepError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDeltaTime => formatter.write_str("timestep must be positive and finite"),
+            Self::BodyIntegration { body_id, cause } => {
+                write!(formatter, "integration failed for {body_id:?}: {cause}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StepError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidDeltaTime => None,
+            Self::BodyIntegration { cause, .. } => Some(cause),
+        }
+    }
+}
 
 /// Reason an object could not be added or a world ID could not be resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
