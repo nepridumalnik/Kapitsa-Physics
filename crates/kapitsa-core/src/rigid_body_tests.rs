@@ -401,3 +401,188 @@ fn changing_mass_clears_accumulated_forces_and_torques() {
     assert_eq!(body.forces().force(), Vec3::ZERO);
     assert_eq!(body.forces().torque(), Vec3::ZERO);
 }
+
+#[test]
+fn linear_impulse_changes_velocity_by_impulse_over_mass() {
+    let mut light = RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties"),
+    );
+    let mut heavy = RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(4.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties"),
+    );
+
+    light
+        .apply_impulse(Vec3::X)
+        .expect("dynamic body accepts impulse");
+    heavy
+        .apply_impulse(Vec3::X)
+        .expect("dynamic body accepts impulse");
+
+    assert_eq!(light.state().linear_velocity(), Vec3::X);
+    assert_eq!(heavy.state().linear_velocity(), Vec3::X * 0.25);
+    assert_eq!(light.state().angular_velocity(), Vec3::ZERO);
+}
+
+#[test]
+fn impulse_at_center_of_mass_does_not_change_angular_velocity() {
+    let mut body = RigidBody::new_dynamic(transform(), mass());
+    let center = body
+        .world_center_of_mass()
+        .expect("valid center of mass")
+        .expect("dynamic body has mass");
+
+    body.apply_impulse_at_point(Vec3::new(2.0, 0.0, 0.0), center)
+        .expect("dynamic body accepts impulse");
+
+    assert_eq!(body.state().linear_velocity(), Vec3::X);
+    assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
+}
+
+#[test]
+fn impulse_with_lever_arm_changes_linear_and_angular_velocity() {
+    let properties =
+        MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
+    let mut body = RigidBody::new_dynamic(Transform::identity(), properties);
+
+    body.apply_impulse_at_point(Vec3::Z, Vec3::Y)
+        .expect("dynamic body accepts impulse");
+
+    assert_eq!(body.state().linear_velocity(), Vec3::Z * 0.5);
+    assert_eq!(body.state().angular_velocity(), Vec3::X);
+}
+
+#[test]
+fn rotated_inertia_tensor_rotates_the_angular_response() {
+    let inertia = Mat3::from_diagonal(Vec3::new(2.0, 4.0, 5.0));
+    let properties = MassProperties::new(1.0, Vec3::ZERO, inertia).expect("valid mass properties");
+    let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    let mut body = RigidBody::new_dynamic(transform_at(Vec3::ZERO, rotation), properties);
+
+    body.apply_impulse_at_point(Vec3::Z, Vec3::Y)
+        .expect("dynamic body accepts impulse");
+
+    assert!((body.state().angular_velocity().x - 0.25).abs() < 1.0e-6);
+    assert!(body.state().angular_velocity().y.abs() < 1.0e-6);
+    assert!(body.state().angular_velocity().z.abs() < 1.0e-6);
+}
+
+#[test]
+fn off_diagonal_inertia_is_used_for_angular_impulses() {
+    let inertia = Mat3::from_cols(
+        Vec3::new(2.0, 0.5, 0.0),
+        Vec3::new(0.5, 3.0, 0.0),
+        Vec3::new(0.0, 0.0, 4.0),
+    );
+    let properties = MassProperties::new(1.0, Vec3::ZERO, inertia).expect("valid mass properties");
+    let mut body = RigidBody::new_dynamic(Transform::identity(), properties);
+
+    body.apply_impulse_at_point(Vec3::Z, Vec3::Y)
+        .expect("dynamic body accepts impulse");
+
+    let angular_velocity = body.state().angular_velocity();
+    assert!((angular_velocity.x - 12.0 / 23.0).abs() < 1.0e-6);
+    assert!((angular_velocity.y + 2.0 / 23.0).abs() < 1.0e-6);
+    assert!(angular_velocity.z.abs() < 1.0e-6);
+}
+
+#[test]
+fn impulses_wake_dynamic_bodies_only_when_nonzero() {
+    let mut body = RigidBody::new_dynamic(transform(), mass());
+    body.sleep().expect("dynamic body can sleep");
+    body.apply_impulse(Vec3::ZERO)
+        .expect("zero impulse is valid");
+    body.apply_impulse_at_point(Vec3::ZERO, Vec3::X)
+        .expect("zero impulse is valid");
+    assert!(body.state().is_sleeping());
+
+    body.apply_impulse(Vec3::X)
+        .expect("dynamic body accepts impulse");
+    assert!(!body.state().is_sleeping());
+}
+
+#[test]
+fn impulses_require_a_dynamic_body() {
+    for mut body in [
+        RigidBody::new_static(transform()),
+        RigidBody::new_kinematic(transform()),
+    ] {
+        assert_eq!(
+            body.apply_impulse(Vec3::X),
+            Err(super::BodyError::BodyMustBeDynamic)
+        );
+        assert_eq!(
+            body.apply_impulse_at_point(Vec3::X, Vec3::Y),
+            Err(super::BodyError::BodyMustBeDynamic)
+        );
+        assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
+        assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
+    }
+}
+
+#[test]
+fn invalid_impulses_do_not_change_body_state() {
+    let mut body = RigidBody::new_dynamic(transform(), mass());
+    body.set_linear_velocity(Vec3::Y).expect("finite velocity");
+    body.sleep().expect("dynamic body can sleep");
+
+    assert_eq!(
+        body.apply_impulse(Vec3::new(f32::NAN, 0.0, 0.0)),
+        Err(super::BodyError::NonFiniteValue)
+    );
+    assert_eq!(
+        body.apply_impulse_at_point(Vec3::X, Vec3::new(0.0, f32::INFINITY, 0.0)),
+        Err(super::BodyError::NonFiniteValue)
+    );
+    assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
+    assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
+    assert!(body.state().is_sleeping());
+}
+
+#[test]
+fn impulse_overflow_does_not_partially_update_velocity_or_sleep_state() {
+    let tiny_mass = MassProperties::new(f32::from_bits(1), Vec3::ZERO, Mat3::IDENTITY)
+        .expect("valid mass properties");
+    let mut body = RigidBody::new_dynamic(Transform::identity(), tiny_mass);
+    body.sleep().expect("dynamic body can sleep");
+
+    assert_eq!(
+        body.apply_impulse(Vec3::X * f32::MAX),
+        Err(super::BodyError::ArithmeticOverflow)
+    );
+    assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
+    assert!(body.state().is_sleeping());
+
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass());
+    body.sleep().expect("dynamic body can sleep");
+    assert_eq!(
+        body.apply_impulse_at_point(Vec3::X * f32::MAX, Vec3::new(0.0, -f32::MAX, 0.0)),
+        Err(super::BodyError::ArithmeticOverflow)
+    );
+    assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
+    assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
+    assert!(body.state().is_sleeping());
+}
+
+#[test]
+fn mass_update_overflow_preserves_existing_properties_and_state() {
+    let existing =
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
+    let replacement = MassProperties::new(2.0, Vec3::new(f32::MAX, 0.0, 0.0), Mat3::IDENTITY)
+        .expect("valid mass properties");
+    let pose = transform_at(Vec3::X * f32::MAX, Quat::IDENTITY);
+    let mut body = RigidBody::new_dynamic(pose, existing);
+    body.set_linear_velocity(Vec3::X).expect("finite velocity");
+    body.apply_force(Vec3::Y).expect("valid force");
+    body.sleep().expect("dynamic body can sleep");
+
+    assert_eq!(
+        body.set_mass(replacement),
+        Err(super::BodyError::ArithmeticOverflow)
+    );
+    assert_eq!(body.physics().mass(), Some(existing));
+    assert_eq!(body.state().transform(), pose);
+    assert!(body.state().is_sleeping());
+    assert_eq!(body.forces().force(), Vec3::ZERO);
+}

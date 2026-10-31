@@ -115,12 +115,15 @@ impl RigidBody {
 
     /// Replaces dynamic mass properties without changing position or velocity.
     ///
-    /// A changed mass or center of mass wakes the body and clears accumulated
-    /// forces and torques, whose torque reference may otherwise be stale.
+    /// Changed mass properties wake the body and clear accumulated forces and
+    /// torques, whose torque reference may otherwise be stale.
     pub fn set_mass(&mut self, mass: MassProperties) -> Result<(), BodyError> {
         if self.physics.body_type != BodyType::Dynamic {
             return Err(BodyError::BodyMustBeDynamic);
         }
+        world_center_of_mass_for(self.state.transform, Some(mass))?
+            .map(checked_vec3)
+            .transpose()?;
         if self.physics.mass != Some(mass) {
             self.physics.mass = Some(mass);
             self.state.sleeping = false;
@@ -166,7 +169,7 @@ impl RigidBody {
         }
     }
 
-    /// Accumulates a world-space force without changing velocity immediately.
+    /// Accumulates a world-space force in newtons without changing velocity immediately.
     pub fn apply_force(&mut self, force: Vec3) -> Result<(), BodyError> {
         self.ensure_dynamic()?;
         if !force.is_finite() {
@@ -181,7 +184,9 @@ impl RigidBody {
         Ok(())
     }
 
-    /// Accumulates a world-space force and its torque about the world center of mass.
+    /// Accumulates force in newtons and torque about the center of mass in N·m.
+    ///
+    /// `point` is expressed in world-space meters.
     pub fn apply_force_at_point(&mut self, force: Vec3, point: Vec3) -> Result<(), BodyError> {
         self.ensure_dynamic()?;
         if !force.is_finite() || !point.is_finite() {
@@ -202,7 +207,7 @@ impl RigidBody {
         Ok(())
     }
 
-    /// Accumulates a world-space torque about the center of mass.
+    /// Accumulates a world-space torque about the center of mass, in N·m.
     pub fn apply_torque(&mut self, torque: Vec3) -> Result<(), BodyError> {
         self.ensure_dynamic()?;
         if !torque.is_finite() {
@@ -230,6 +235,54 @@ impl RigidBody {
             Err(BodyError::BodyMustBeDynamic)
         }
     }
+
+    /// Applies a world-space impulse immediately to the center of mass, in kg·m/s.
+    pub fn apply_impulse(&mut self, impulse: Vec3) -> Result<(), BodyError> {
+        self.ensure_dynamic()?;
+        if !impulse.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+        if impulse == Vec3::ZERO {
+            return Ok(());
+        }
+
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
+        let delta_velocity = to_dvec3(impulse) / f64::from(mass.mass());
+        let next_velocity = add_checked(self.state.linear_velocity, delta_velocity)?;
+
+        self.state.linear_velocity = next_velocity;
+        self.state.sleeping = false;
+        Ok(())
+    }
+
+    /// Applies a world-space impulse in kg·m/s at a world-space point in meters.
+    pub fn apply_impulse_at_point(&mut self, impulse: Vec3, point: Vec3) -> Result<(), BodyError> {
+        self.ensure_dynamic()?;
+        if !impulse.is_finite() || !point.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+        if impulse == Vec3::ZERO {
+            return Ok(());
+        }
+
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
+        let center = world_center_of_mass_for(self.state.transform, Some(mass))?
+            .ok_or(BodyError::BodyMustBeDynamic)?;
+        let angular_impulse = (to_dvec3(point) - center).cross(to_dvec3(impulse));
+        let rotation = rotation_quat(self.state.transform);
+        let local_angular_impulse = rotation.conjugate().mul_vec3(angular_impulse);
+        let local_delta_angular_velocity = solve_inertia(mass.inertia(), local_angular_impulse)?;
+        let delta_angular_velocity = rotation.mul_vec3(local_delta_angular_velocity);
+        let delta_linear_velocity = to_dvec3(impulse) / f64::from(mass.mass());
+        let next_linear_velocity = add_checked(self.state.linear_velocity, delta_linear_velocity)?;
+        let next_angular_velocity =
+            add_checked(self.state.angular_velocity, delta_angular_velocity)?;
+
+        self.state.linear_velocity = next_linear_velocity;
+        self.state.angular_velocity = next_angular_velocity;
+        self.state.sleeping = false;
+        Ok(())
+    }
 }
 
 fn world_center_of_mass_for(
@@ -240,23 +293,9 @@ fn world_center_of_mass_for(
         return Ok(None);
     };
 
-    let rotation = transform.rotation();
-    let rotation = DQuat::from_xyzw(
-        f64::from(rotation.x),
-        f64::from(rotation.y),
-        f64::from(rotation.z),
-        f64::from(rotation.w),
-    )
-    .normalize();
-    let center = rotation.mul_vec3(DVec3::new(
-        f64::from(mass.center_of_mass().x),
-        f64::from(mass.center_of_mass().y),
-        f64::from(mass.center_of_mass().z),
-    )) + DVec3::new(
-        f64::from(transform.translation().x),
-        f64::from(transform.translation().y),
-        f64::from(transform.translation().z),
-    );
+    let rotation = rotation_quat(transform);
+    let center =
+        rotation.mul_vec3(to_dvec3(mass.center_of_mass())) + to_dvec3(transform.translation());
     if !center.is_finite()
         || center.x.abs() > f64::from(f32::MAX)
         || center.y.abs() > f64::from(f32::MAX)
@@ -266,6 +305,81 @@ fn world_center_of_mass_for(
     }
 
     Ok(Some(center))
+}
+
+fn rotation_quat(transform: Transform) -> DQuat {
+    let rotation = transform.rotation();
+    DQuat::from_xyzw(
+        f64::from(rotation.x),
+        f64::from(rotation.y),
+        f64::from(rotation.z),
+        f64::from(rotation.w),
+    )
+    .normalize()
+}
+
+fn solve_inertia(inertia: glam::Mat3, right_hand_side: DVec3) -> Result<DVec3, BodyError> {
+    let columns = inertia.to_cols_array();
+    let matrix = [
+        [
+            f64::from(columns[0]),
+            f64::from(columns[3]),
+            f64::from(columns[6]),
+        ],
+        [
+            f64::from(columns[1]),
+            f64::from(columns[4]),
+            f64::from(columns[7]),
+        ],
+        [
+            f64::from(columns[2]),
+            f64::from(columns[5]),
+            f64::from(columns[8]),
+        ],
+    ];
+    let scale = matrix
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+    if !scale.is_finite() || scale <= 0.0 || !right_hand_side.is_finite() {
+        return Err(BodyError::InvalidInertiaTensor);
+    }
+
+    let normalized = matrix.map(|row| row.map(|value| value / scale));
+    let first_pivot = normalized[0][0];
+    if first_pivot <= 0.0 {
+        return Err(BodyError::InvalidInertiaTensor);
+    }
+    let l00 = first_pivot.sqrt();
+    let l10 = normalized[1][0] / l00;
+    let l20 = normalized[2][0] / l00;
+    let second_pivot = normalized[1][1] - l10 * l10;
+    if !second_pivot.is_finite() || second_pivot <= 0.0 {
+        return Err(BodyError::InvalidInertiaTensor);
+    }
+    let l11 = second_pivot.sqrt();
+    let l21 = (normalized[2][1] - l20 * l10) / l11;
+    let third_pivot = normalized[2][2] - l20 * l20 - l21 * l21;
+    if !third_pivot.is_finite() || third_pivot <= 0.0 {
+        return Err(BodyError::InvalidInertiaTensor);
+    }
+    let l22 = third_pivot.sqrt();
+
+    let rhs = right_hand_side / scale;
+    if !rhs.is_finite() {
+        return Err(BodyError::ArithmeticOverflow);
+    }
+    let y0 = rhs.x / l00;
+    let y1 = (rhs.y - l10 * y0) / l11;
+    let y2 = (rhs.z - l20 * y0 - l21 * y1) / l22;
+    let x2 = y2 / l22;
+    let x1 = (y1 - l21 * x2) / l11;
+    let x0 = (y0 - l10 * x1 - l20 * x2) / l00;
+    let solution = DVec3::new(x0, x1, x2);
+    if !solution.is_finite() {
+        return Err(BodyError::ArithmeticOverflow);
+    }
+    Ok(solution)
 }
 
 fn to_dvec3(value: Vec3) -> DVec3 {
