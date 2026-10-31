@@ -1,5 +1,6 @@
 pub mod aabb;
 pub mod collider;
+pub mod collision;
 pub mod containers;
 pub mod mass;
 pub mod material;

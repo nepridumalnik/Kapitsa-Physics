@@ -3,7 +3,7 @@ use crate::containers::DenseId;
 /// Identifies a rigid body in the [`super::PhysicsWorld`] that created it.
 ///
 /// The opaque owner identifier prevents IDs from resolving in another world.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BodyId {
     pub(super) world: u64,
     pub(super) dense: DenseId,
@@ -24,7 +24,7 @@ impl BodyId {
 /// Identifies a collider in the [`super::PhysicsWorld`] that created it.
 ///
 /// The opaque owner identifier prevents IDs from resolving in another world.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ColliderId {
     pub(super) world: u64,
     pub(super) dense: DenseId,

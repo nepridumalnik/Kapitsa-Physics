@@ -3,7 +3,7 @@ use std::fmt;
 /// Identifies an element in a [`DensePool`].
 ///
 /// An ID is valid only in the pool that created it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DenseId {
     index: u32,
     generation: u32,

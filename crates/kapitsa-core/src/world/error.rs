@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::collision::CollisionError;
 use crate::containers::DensePoolError;
 use crate::rigid_body::IntegrationError;
 
@@ -10,6 +11,7 @@ use super::BodyId;
 pub enum StepError {
     InvalidDeltaTime,
     InvalidStepResults,
+    Collision(CollisionError),
     BodyIntegration {
         body_id: BodyId,
         cause: IntegrationError,
@@ -23,6 +25,7 @@ impl fmt::Display for StepError {
             Self::InvalidStepResults => {
                 formatter.write_str("predicted body states do not match the world")
             }
+            Self::Collision(error) => write!(formatter, "collision step failed: {error}"),
             Self::BodyIntegration { body_id, cause } => {
                 write!(formatter, "integration failed for {body_id:?}: {cause}")
             }
@@ -33,6 +36,7 @@ impl fmt::Display for StepError {
 impl std::error::Error for StepError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Collision(error) => Some(error),
             Self::InvalidDeltaTime | Self::InvalidStepResults => None,
             Self::BodyIntegration { cause, .. } => Some(cause),
         }

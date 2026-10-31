@@ -18,6 +18,7 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 
 use crate::{
     collider::Collider,
+    collision::{CollisionConfig, CollisionError, CollisionEvent},
     containers::DensePool,
     rigid_body::{BodyState, RigidBody, predict},
 };
@@ -40,6 +41,8 @@ pub struct PhysicsWorld {
     bodies: DensePool<BodyEntry>,
     colliders: DensePool<ColliderEntry>,
     step_scratch: Vec<(BodyId, BodyState)>,
+    collision_config: CollisionConfig,
+    collision_events: Vec<CollisionEvent>,
 }
 
 /// Opaque copied body data used to predict and atomically commit a world step.
@@ -76,7 +79,23 @@ impl PhysicsWorld {
             bodies: DensePool::new(),
             colliders: DensePool::new(),
             step_scratch: Vec::new(),
+            collision_config: CollisionConfig::default_const(),
+            collision_events: Vec::new(),
         }
+    }
+
+    pub fn collision_config(&self) -> CollisionConfig {
+        self.collision_config
+    }
+
+    pub fn set_collision_config(&mut self, config: CollisionConfig) -> Result<(), CollisionError> {
+        config.validate()?;
+        self.collision_config = config;
+        Ok(())
+    }
+
+    pub fn collision_events(&self) -> &[CollisionEvent] {
+        &self.collision_events
     }
 
     pub fn add_body(&mut self, body: RigidBody) -> Result<BodyId, WorldError> {
