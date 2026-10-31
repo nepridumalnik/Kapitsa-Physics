@@ -1,6 +1,8 @@
 use crate::aabb::Aabb;
 use glam::Vec3;
 
+use super::ShapeError;
+
 /// Triangulated surface in local coordinates; may be open or nonconvex.
 pub struct TriangleMesh {
     vertices: Vec<Vec3>,
@@ -8,31 +10,34 @@ pub struct TriangleMesh {
 }
 
 impl TriangleMesh {
-    pub fn new(vertices: Vec<Vec3>, triangles: Vec<[usize; 3]>) -> Option<Self> {
-        if vertices.len() < 3
-            || triangles.is_empty()
-            || !vertices.iter().all(|vertex| vertex.is_finite())
-        {
-            return None;
+    pub fn new(vertices: Vec<Vec3>, triangles: Vec<[usize; 3]>) -> Result<Self, ShapeError> {
+        if vertices.len() < 3 || triangles.is_empty() {
+            return Err(ShapeError::InvalidTopology);
+        }
+        if !vertices.iter().all(|vertex| vertex.is_finite()) {
+            return Err(ShapeError::NonFiniteParameter);
         }
 
         for &[a, b, c] in &triangles {
             if a >= vertices.len() || b >= vertices.len() || c >= vertices.len() {
-                return None;
+                return Err(ShapeError::InvalidTopology);
             }
             if a == b || b == c || c == a {
-                return None;
+                return Err(ShapeError::InvalidTopology);
             }
 
             let area_squared = (vertices[b] - vertices[a])
                 .cross(vertices[c] - vertices[a])
                 .length_squared();
-            if !area_squared.is_finite() || area_squared <= 0.0 {
-                return None;
+            if !area_squared.is_finite() {
+                return Err(ShapeError::ArithmeticOverflow);
+            }
+            if area_squared <= 0.0 {
+                return Err(ShapeError::DegenerateGeometry);
             }
         }
 
-        Some(Self {
+        Ok(Self {
             vertices,
             triangles,
         })

@@ -1,6 +1,8 @@
 use crate::aabb::Aabb;
 use glam::Vec3;
 
+use super::ShapeError;
+
 /// Row-major 3D signed-distance samples with X as the fastest-changing index.
 pub struct LevelSet {
     origin: Vec3,
@@ -15,18 +17,26 @@ impl LevelSet {
         dimensions: [usize; 3],
         grid_spacing: Vec3,
         signed_distances: Vec<f32>,
-    ) -> Option<Self> {
+    ) -> Result<Self, ShapeError> {
         let count = dimensions[0]
-            .checked_mul(dimensions[1])?
-            .checked_mul(dimensions[2])?;
-        if dimensions.iter().any(|&dimension| dimension < 2)
-            || count != signed_distances.len()
-            || !origin.is_finite()
-            || !grid_spacing.is_finite()
-            || grid_spacing.min_element() <= 0.0
-            || !signed_distances.iter().all(|distance| distance.is_finite())
-        {
-            return None;
+            .checked_mul(dimensions[1])
+            .ok_or(ShapeError::ArithmeticOverflow)?
+            .checked_mul(dimensions[2])
+            .ok_or(ShapeError::ArithmeticOverflow)?;
+        if dimensions.iter().any(|&dimension| dimension < 2) {
+            return Err(ShapeError::InvalidGridDimensions);
+        }
+        if count != signed_distances.len() {
+            return Err(ShapeError::DataLengthMismatch);
+        }
+        if !origin.is_finite() || !grid_spacing.is_finite() {
+            return Err(ShapeError::NonFiniteParameter);
+        }
+        if grid_spacing.min_element() <= 0.0 {
+            return Err(ShapeError::InvalidDimension);
+        }
+        if !signed_distances.iter().all(|distance| distance.is_finite()) {
+            return Err(ShapeError::NonFiniteParameter);
         }
 
         let span = Vec3::new(
@@ -35,10 +45,10 @@ impl LevelSet {
             (dimensions[2] - 1) as f32,
         );
         if !(origin + grid_spacing * span).is_finite() {
-            return None;
+            return Err(ShapeError::ArithmeticOverflow);
         }
 
-        Some(Self {
+        Ok(Self {
             origin,
             dimensions,
             grid_spacing,

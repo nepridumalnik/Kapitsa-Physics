@@ -188,24 +188,45 @@ fn triangle_rejects_invalid_vertices(
 #[rstest]
 fn triangle_mesh_accepts_open_surface() {
     let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]);
-    assert!(mesh.is_some());
+    assert!(mesh.is_ok());
 }
 
 #[rstest]
-#[case::out_of_bounds(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 3]])]
-#[case::repeated_index(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 1]])]
-#[case::degenerate_triangle(vec![Vec3::ZERO, Vec3::X, Vec3::X * 2.0], vec![[0, 1, 2]])]
+#[case::out_of_bounds(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 3]], ShapeError::InvalidTopology)]
+#[case::repeated_index(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 1]], ShapeError::InvalidTopology)]
+#[case::degenerate_triangle(vec![Vec3::ZERO, Vec3::X, Vec3::X * 2.0], vec![[0, 1, 2]], ShapeError::DegenerateGeometry)]
 fn triangle_mesh_rejects_invalid_triangles(
     #[case] vertices: Vec<Vec3>,
     #[case] triangles: Vec<[usize; 3]>,
+    #[case] error: ShapeError,
 ) {
-    assert!(TriangleMesh::new(vertices, triangles).is_none());
+    assert_eq!(TriangleMesh::new(vertices, triangles).err(), Some(error));
+}
+
+#[test]
+fn triangle_mesh_distinguishes_non_finite_vertices_and_area_overflow() {
+    assert_eq!(
+        TriangleMesh::new(
+            vec![Vec3::ZERO, Vec3::X, Vec3::splat(f32::NAN)],
+            vec![[0, 1, 2]],
+        )
+        .err(),
+        Some(ShapeError::NonFiniteParameter)
+    );
+    assert_eq!(
+        TriangleMesh::new(
+            vec![Vec3::ZERO, Vec3::X * f32::MAX, Vec3::Y * f32::MAX],
+            vec![[0, 1, 2]],
+        )
+        .err(),
+        Some(ShapeError::ArithmeticOverflow)
+    );
 }
 
 #[rstest]
 fn convex_accepts_outward_tetrahedron(tetrahedron: (Vec<Vec3>, Vec<[usize; 3]>)) {
     let (vertices, faces) = tetrahedron;
-    assert!(Convex::new(vertices, faces).is_some());
+    assert!(Convex::new(vertices, faces).is_ok());
 }
 
 #[rstest]
@@ -214,7 +235,10 @@ fn convex_rejects_inward_tetrahedron(tetrahedron: (Vec<Vec3>, Vec<[usize; 3]>)) 
     for face in &mut faces {
         face.swap(1, 2);
     }
-    assert!(Convex::new(vertices, faces).is_none());
+    assert_eq!(
+        Convex::new(vertices, faces).err(),
+        Some(ShapeError::InvalidTopology)
+    );
 }
 
 #[rstest]
@@ -222,47 +246,111 @@ fn convex_rejects_open_or_mixed_winding(tetrahedron: (Vec<Vec3>, Vec<[usize; 3]>
     let (vertices, faces) = tetrahedron;
     let mut open_faces = faces.clone();
     open_faces.pop();
-    assert!(Convex::new(vertices.clone(), open_faces).is_none());
+    assert_eq!(
+        Convex::new(vertices.clone(), open_faces).err(),
+        Some(ShapeError::InvalidTopology)
+    );
 
     let mut mixed_faces = faces;
     mixed_faces[0].swap(1, 2);
-    assert!(Convex::new(vertices, mixed_faces).is_none());
+    assert_eq!(
+        Convex::new(vertices, mixed_faces).err(),
+        Some(ShapeError::InvalidTopology)
+    );
+}
+
+#[rstest]
+fn convex_rejects_non_finite_vertices(tetrahedron: (Vec<Vec3>, Vec<[usize; 3]>)) {
+    let (mut vertices, faces) = tetrahedron;
+    vertices[0].x = f32::NAN;
+
+    assert_eq!(
+        Convex::new(vertices, faces).err(),
+        Some(ShapeError::NonFiniteParameter)
+    );
 }
 
 #[rstest]
 fn height_field_accepts_valid_grid() {
-    assert!(HeightField::from_vec(2, 2, Vec2::ONE, vec![0.0; 4]).is_some());
+    assert!(HeightField::from_vec(2, 2, Vec2::ONE, vec![0.0; 4]).is_ok());
 }
 
 #[rstest]
-#[case::count_mismatch(2, 2, Vec2::ONE, vec![0.0; 3])]
-#[case::zero_spacing(2, 2, Vec2::ZERO, vec![0.0; 4])]
-#[case::dimension_overflow(usize::MAX, 2, Vec2::ONE, vec![])]
+#[case::count_mismatch(2, 2, Vec2::ONE, vec![0.0; 3], ShapeError::DataLengthMismatch)]
+#[case::zero_spacing(2, 2, Vec2::ZERO, vec![0.0; 4], ShapeError::InvalidDimension)]
+#[case::dimension_overflow(usize::MAX, 2, Vec2::ONE, vec![], ShapeError::ArithmeticOverflow)]
+#[case::too_few_rows(1, 2, Vec2::ONE, vec![0.0; 2], ShapeError::InvalidGridDimensions)]
 fn height_field_rejects_invalid_grid(
     #[case] rows: usize,
     #[case] columns: usize,
     #[case] grid_spacing: Vec2,
     #[case] heights: Vec<f32>,
+    #[case] error: ShapeError,
 ) {
-    assert!(HeightField::from_vec(rows, columns, grid_spacing, heights).is_none());
+    assert_eq!(
+        HeightField::from_vec(rows, columns, grid_spacing, heights).err(),
+        Some(error)
+    );
+}
+
+#[test]
+fn height_field_distinguishes_non_finite_data_and_span_overflow() {
+    assert_eq!(
+        HeightField::from_vec(2, 2, Vec2::new(f32::NAN, 1.0), vec![0.0; 4]).err(),
+        Some(ShapeError::NonFiniteParameter)
+    );
+    assert_eq!(
+        HeightField::from_vec(2, 2, Vec2::ONE, vec![f32::INFINITY; 4]).err(),
+        Some(ShapeError::NonFiniteParameter)
+    );
+    assert_eq!(
+        HeightField::from_vec(3, 2, Vec2::splat(f32::MAX), vec![0.0; 6]).err(),
+        Some(ShapeError::ArithmeticOverflow)
+    );
 }
 
 #[rstest]
 fn level_set_accepts_valid_grid() {
-    assert!(LevelSet::from_vec(Vec3::ZERO, [2, 2, 2], Vec3::ONE, vec![0.0; 8]).is_some());
+    assert!(LevelSet::from_vec(Vec3::ZERO, [2, 2, 2], Vec3::ONE, vec![0.0; 8]).is_ok());
 }
 
 #[rstest]
-#[case::count_mismatch([2, 2, 2], Vec3::ONE, vec![0.0; 7])]
-#[case::zero_dimension([0, 2, 2], Vec3::ONE, vec![])]
-#[case::dimension_overflow([usize::MAX, 2, 2], Vec3::ONE, vec![])]
-#[case::zero_spacing([2, 2, 2], Vec3::ZERO, vec![0.0; 8])]
+#[case::count_mismatch([2, 2, 2], Vec3::ONE, vec![0.0; 7], ShapeError::DataLengthMismatch)]
+#[case::zero_dimension([0, 2, 2], Vec3::ONE, vec![], ShapeError::InvalidGridDimensions)]
+#[case::dimension_overflow([usize::MAX, 2, 2], Vec3::ONE, vec![], ShapeError::ArithmeticOverflow)]
+#[case::zero_spacing([2, 2, 2], Vec3::ZERO, vec![0.0; 8], ShapeError::InvalidDimension)]
 fn level_set_rejects_invalid_grid(
     #[case] dimensions: [usize; 3],
     #[case] grid_spacing: Vec3,
     #[case] signed_distances: Vec<f32>,
+    #[case] error: ShapeError,
 ) {
-    assert!(LevelSet::from_vec(Vec3::ZERO, dimensions, grid_spacing, signed_distances).is_none());
+    assert_eq!(
+        LevelSet::from_vec(Vec3::ZERO, dimensions, grid_spacing, signed_distances).err(),
+        Some(error)
+    );
+}
+
+#[test]
+fn level_set_distinguishes_non_finite_data_and_coordinate_overflow() {
+    assert_eq!(
+        LevelSet::from_vec(Vec3::splat(f32::NAN), [2, 2, 2], Vec3::ONE, vec![0.0; 8]).err(),
+        Some(ShapeError::NonFiniteParameter)
+    );
+    assert_eq!(
+        LevelSet::from_vec(Vec3::ZERO, [2, 2, 2], Vec3::ONE, vec![f32::NAN; 8]).err(),
+        Some(ShapeError::NonFiniteParameter)
+    );
+    assert_eq!(
+        LevelSet::from_vec(
+            Vec3::splat(f32::MAX),
+            [2, 2, 2],
+            Vec3::splat(f32::MAX),
+            vec![0.0; 8],
+        )
+        .err(),
+        Some(ShapeError::ArithmeticOverflow)
+    );
 }
 
 #[rstest]
@@ -283,10 +371,130 @@ fn skinned_triangle_mesh_accepts_matching_vertex_influences(
 }
 
 #[rstest]
+fn skinned_triangle_mesh_rejects_invalid_bone_names(
+    triangle_mesh: TriangleMesh,
+    vertex_influences: Vec<Vec<BoneInfluence>>,
+) {
+    assert_eq!(
+        SkinnedTriangleMesh::new(
+            triangle_mesh,
+            vec![" ".into()],
+            vertex_influences,
+            Affine3A::IDENTITY,
+            vec![Affine3A::IDENTITY],
+        )
+        .err(),
+        Some(ShapeError::InvalidBoneNames)
+    );
+}
+
+#[rstest]
+fn skinned_triangle_mesh_rejects_mismatched_arrays(
+    triangle_mesh: TriangleMesh,
+    vertex_influences: Vec<Vec<BoneInfluence>>,
+) {
+    assert_eq!(
+        SkinnedTriangleMesh::new(
+            triangle_mesh,
+            vec!["root".into()],
+            vertex_influences.into_iter().take(2).collect(),
+            Affine3A::IDENTITY,
+            vec![Affine3A::IDENTITY],
+        )
+        .err(),
+        Some(ShapeError::DataLengthMismatch)
+    );
+}
+
+#[rstest]
+fn skinned_triangle_mesh_rejects_invalid_influence_indices(triangle_mesh: TriangleMesh) {
+    let influences = (0..3)
+        .map(|_| vec![BoneInfluence::new(1, 1.0).expect("valid influence weight")])
+        .collect();
+
+    assert_eq!(
+        SkinnedTriangleMesh::new(
+            triangle_mesh,
+            vec!["root".into()],
+            influences,
+            Affine3A::IDENTITY,
+            vec![Affine3A::IDENTITY],
+        )
+        .err(),
+        Some(ShapeError::InvalidInfluenceIndex)
+    );
+}
+
+#[rstest]
+fn skinned_triangle_mesh_rejects_duplicate_influence_indices(triangle_mesh: TriangleMesh) {
+    let influences = (0..3)
+        .map(|_| {
+            vec![
+                BoneInfluence::new(0, 0.5).expect("valid influence weight"),
+                BoneInfluence::new(0, 0.5).expect("valid influence weight"),
+            ]
+        })
+        .collect();
+
+    assert_eq!(
+        SkinnedTriangleMesh::new(
+            triangle_mesh,
+            vec!["root".into()],
+            influences,
+            Affine3A::IDENTITY,
+            vec![Affine3A::IDENTITY],
+        )
+        .err(),
+        Some(ShapeError::InvalidInfluenceIndex)
+    );
+}
+
+#[rstest]
+fn skinned_triangle_mesh_rejects_invalid_weight_totals(triangle_mesh: TriangleMesh) {
+    let influences = (0..3)
+        .map(|_| vec![BoneInfluence::new(0, 0.5).expect("valid influence weight")])
+        .collect();
+
+    assert_eq!(
+        SkinnedTriangleMesh::new(
+            triangle_mesh,
+            vec!["root".into()],
+            influences,
+            Affine3A::IDENTITY,
+            vec![Affine3A::IDENTITY],
+        )
+        .err(),
+        Some(ShapeError::InvalidWeight)
+    );
+}
+
+#[rstest]
+fn skinned_triangle_mesh_rejects_non_finite_transforms(
+    triangle_mesh: TriangleMesh,
+    vertex_influences: Vec<Vec<BoneInfluence>>,
+) {
+    assert_eq!(
+        SkinnedTriangleMesh::new(
+            triangle_mesh,
+            vec!["root".into()],
+            vertex_influences,
+            Affine3A::from_translation(Vec3::splat(f32::NAN)),
+            vec![Affine3A::IDENTITY],
+        )
+        .err(),
+        Some(ShapeError::NonFiniteTransform)
+    );
+}
+
+#[rstest]
 #[case::negative_weight(-1.0)]
 #[case::weight_above_one(1.5)]
+#[case::non_finite(f32::NAN)]
 fn bone_influence_rejects_invalid_weight(#[case] weight: f32) {
-    assert!(BoneInfluence::new(0, weight).is_none());
+    assert_eq!(
+        BoneInfluence::new(0, weight).err(),
+        Some(ShapeError::InvalidWeight)
+    );
 }
 
 #[rstest]
