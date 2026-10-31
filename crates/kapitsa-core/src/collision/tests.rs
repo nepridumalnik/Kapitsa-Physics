@@ -700,6 +700,52 @@ fn continuous_sphere_hits_a_thin_cuboid() {
 }
 
 #[test]
+fn continuous_pure_rotation_detects_a_full_turn_between_equal_endpoint_poses() {
+    let mut world = PhysicsWorld::new();
+    let target_body = world
+        .add_body(RigidBody::new_static(
+            Transform::new(Vec3::new(0.0, 1.5, 0.0), Quat::IDENTITY).unwrap(),
+        ))
+        .unwrap();
+    let target = Collider::new(
+        Shape::Cuboid(Cuboid::new(4.0, 0.1, 4.0).unwrap()),
+        Transform::identity(),
+    );
+    let target = world.add_collider(target_body, target).unwrap();
+
+    let mut rod = dynamic_body(Vec3::ZERO, Vec3::ZERO);
+    rod.set_angular_velocity(Vec3::Z * std::f64::consts::TAU)
+        .unwrap();
+    rod.set_ccd_mode(CcdMode::Continuous);
+    let rod_body = world.add_body(rod).unwrap();
+    let rod_collider = world
+        .add_collider(
+            rod_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(4.0, 0.2, 0.2).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(1.0).unwrap();
+
+    let pair = CollisionPair::new(target, rod_collider).unwrap();
+    assert!(world.collision_events().iter().any(|event| {
+        event.kind == CollisionEventKind::Impact && event.pair == pair && !event.sensor
+    }));
+    assert!(
+        world
+            .body(rod_body)
+            .unwrap()
+            .state()
+            .angular_velocity()
+            .length()
+            < std::f64::consts::TAU
+    );
+}
+
+#[test]
 fn continuous_capsule_does_not_tunnel_through_a_plane() {
     let mut world = PhysicsWorld::new();
     let plane = add_plane(&mut world, CollisionMode::Solid);

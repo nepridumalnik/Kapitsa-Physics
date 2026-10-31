@@ -55,6 +55,21 @@ Windows Performance Recorder and `xperf` are installed, and the Heap profile is 
 
 After rebuilding CCD candidates after each resolved impact, the 64-body wall case measured 140.571 / 142.769 / 149.024 ms per step; its median CCD phase was 142.557 ms. The pinned baseline above was 279.832 / 284.261 / 292.727 ms per step with a 284.076 ms CCD phase. Median full-step time fell by 49.8%; the ranges do not overlap. The updated final candidate set contained 155 pairs versus 64 in the baseline. This is an intermediate stage measurement, before the remaining refactors.
 
+### Integrator-aligned CCD trajectories, stage 3
+
+CCD samples now use the rigid-body integrator from each body's active segment start, including multi-turn angular motion. Path bounds include center-of-mass and collider offsets, and convex pairs use relative translation when both collider origins move linearly. The existing endpoint-based query sweep API keeps its endpoint interpolation behavior.
+
+Release run on 2026-11-01 on the same machine and five-sample harness:
+
+| Scenario | Step min / median / max |
+|---|---:|
+| 20,000 separated Dynamic spheres | 26.946 / 27.696 / 28.994 ms |
+| 20,000 bodies, 128 localized contacts | 30.156 / 30.225 / 31.645 ms |
+| 64 fast CCD bodies vs. wall | 128.527 / 130.633 / 134.667 ms |
+| 20,000 static colliders + 1,000 raycasts | 12,494 / 12,602 / 12,791 ms |
+
+The CCD workload resolved 64 impacts and retained 155 final candidates. Its stage 3 median step time was 8.5% below the stage 2 median and 54.0% below the pinned baseline median; the stage 2 and stage 3 ranges do not overlap. The separated-body and query medians also improved relative to baseline, but those changes are directional measurements because the separated-body ranges overlap and query timings are load-sensitive. Other collision workload ranges overlap the baseline. Timings include the benchmark instrumentation; no allocator profile was available.
+
 Release measurements taken on 2026-10-31 with `rustc 1.98.0` (`x86_64-pc-windows-msvc`) on an AMD Ryzen 9 7900X3D. Each row is the median of five independently constructed worlds; world construction is outside the timed region. Timings are local measurements, not performance targets.
 
 Run the core phase benchmark with:

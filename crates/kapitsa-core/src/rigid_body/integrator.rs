@@ -14,6 +14,12 @@ pub enum IntegrationError {
     ArithmeticOverflow,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TrajectoryBounds {
+    pub(crate) translation: f64,
+    pub(crate) rotation: f64,
+}
+
 impl fmt::Display for IntegrationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
@@ -30,23 +36,94 @@ impl std::error::Error for IntegrationError {}
 
 /// Predicts a body's state without mutating the source body.
 pub(crate) fn predict(body: &RigidBody, dt: f64) -> Result<BodyState, IntegrationError> {
+    predict_from_state(body, *body.state(), dt)
+}
+
+/// Predicts from an explicit segment-start state using the body's current forces and properties.
+pub(crate) fn predict_from_state(
+    body: &RigidBody,
+    state: BodyState,
+    dt: f64,
+) -> Result<BodyState, IntegrationError> {
     if !dt.is_finite() || dt <= 0.0 {
         return Err(IntegrationError::InvalidDeltaTime);
     }
 
-    if body.state().is_sleeping() {
-        return Ok(*body.state());
+    if state.is_sleeping() {
+        return Ok(state);
     }
 
     match body.physics().body_type() {
-        BodyType::Static => Ok(*body.state()),
-        BodyType::Kinematic => predict_kinematic(body, dt),
-        BodyType::Dynamic => predict_dynamic(body, dt),
+        BodyType::Static => Ok(state),
+        BodyType::Kinematic => predict_kinematic(body, state, dt),
+        BodyType::Dynamic => predict_dynamic(body, state, dt),
     }
 }
 
-fn predict_kinematic(body: &RigidBody, dt: f64) -> Result<BodyState, IntegrationError> {
-    let state = *body.state();
+/// Returns conservative path-length bounds for the integrator's continuous sample trajectory.
+pub(crate) fn trajectory_bounds(
+    body: &RigidBody,
+    start: BodyState,
+    end: BodyState,
+    dt: f64,
+) -> Result<TrajectoryBounds, IntegrationError> {
+    if !dt.is_finite() || dt <= 0.0 {
+        return Err(IntegrationError::InvalidDeltaTime);
+    }
+    if start.is_sleeping() || body.physics().body_type() == BodyType::Static {
+        return Ok(TrajectoryBounds {
+            translation: 0.0,
+            rotation: 0.0,
+        });
+    }
+
+    let linear_delta = end
+        .linear_velocity()
+        .checked_sub(start.linear_velocity())
+        .and_then(Vec3::checked_length)
+        .ok_or(IntegrationError::ArithmeticOverflow)?;
+    let angular_delta = end
+        .angular_velocity()
+        .checked_sub(start.angular_velocity())
+        .and_then(Vec3::checked_length)
+        .ok_or(IntegrationError::ArithmeticOverflow)?;
+    let linear_speed_bound = start
+        .linear_velocity()
+        .checked_length()
+        .ok_or(IntegrationError::ArithmeticOverflow)?
+        + 2.0 * linear_delta;
+    let angular_speed_bound = start
+        .angular_velocity()
+        .checked_length()
+        .ok_or(IntegrationError::ArithmeticOverflow)?
+        + 2.0 * angular_delta;
+    let rotation = angular_speed_bound * dt;
+    let center_of_mass_radius = if let Some(mass) = body.physics().mass() {
+        mass.center_of_mass()
+            .checked_length()
+            .ok_or(IntegrationError::ArithmeticOverflow)?
+    } else {
+        0.0
+    };
+    let translation = linear_speed_bound * dt + center_of_mass_radius * rotation;
+    if !linear_speed_bound.is_finite()
+        || !angular_speed_bound.is_finite()
+        || !rotation.is_finite()
+        || !translation.is_finite()
+    {
+        return Err(IntegrationError::ArithmeticOverflow);
+    }
+    Ok(TrajectoryBounds {
+        translation,
+        rotation,
+    })
+}
+
+fn predict_kinematic(
+    body: &RigidBody,
+    state: BodyState,
+    dt: f64,
+) -> Result<BodyState, IntegrationError> {
     let rotation = state
         .transform
         .rotation()
@@ -80,8 +157,11 @@ fn predict_kinematic(body: &RigidBody, dt: f64) -> Result<BodyState, Integration
     Ok(BodyState { transform, ..state })
 }
 
-fn predict_dynamic(body: &RigidBody, dt: f64) -> Result<BodyState, IntegrationError> {
-    let state = *body.state();
+fn predict_dynamic(
+    body: &RigidBody,
+    state: BodyState,
+    dt: f64,
+) -> Result<BodyState, IntegrationError> {
     let physics = body.physics();
     let mass = physics
         .mass()

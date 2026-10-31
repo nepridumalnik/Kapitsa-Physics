@@ -3,7 +3,7 @@ use super::{
     StepContext,
     broad_phase::BroadPhase,
     cache::ContactCache,
-    ccd::CcdHit,
+    ccd::{CcdHit, CcdMotion},
     island::IslandLayout,
     manifold::ContactManifold,
     mesh::TriangleBvh,
@@ -275,20 +275,17 @@ impl CollisionSystem {
     pub(crate) fn time_of_impact(
         &mut self,
         shape_a: &Shape,
-        start_a: Transform,
-        end_a: Transform,
+        motion_a: &CcdMotion<'_>,
         bvh_a: Option<&TriangleBvh>,
         vertices_a: Option<&[kapitsa_math::Vec3]>,
         shape_b: &Shape,
-        start_b: Transform,
-        end_b: Transform,
+        motion_b: &CcdMotion<'_>,
         bvh_b: Option<&TriangleBvh>,
         vertices_b: Option<&[kapitsa_math::Vec3]>,
         sensor: bool,
     ) -> Result<Option<CcdHit>, CollisionError> {
         self.narrow_phase.time_of_impact(
-            shape_a, start_a, end_a, bvh_a, vertices_a, shape_b, start_b, end_b, bvh_b, vertices_b,
-            sensor,
+            shape_a, motion_a, bvh_a, vertices_a, shape_b, motion_b, bvh_b, vertices_b, sensor,
         )
     }
 

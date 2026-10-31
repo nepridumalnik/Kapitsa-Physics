@@ -17,7 +17,7 @@ pub enum CcdMode {
     Continuous,
 }
 
-pub(crate) use integrator::predict;
+pub(crate) use integrator::{predict, predict_from_state, trajectory_bounds};
 
 use kapitsa_math::{CholeskyError, Quat, Vec3};
 

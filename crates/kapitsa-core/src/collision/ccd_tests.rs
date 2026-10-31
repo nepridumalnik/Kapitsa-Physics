@@ -1,11 +1,14 @@
 use crate::{
     collision::{
         ccd::{
-            convex_toi, height_field_toi, level_set_toi, plane_toi, swept_bounds, triangle_mesh_toi,
+            CcdMotion, convex_toi, height_field_toi, level_set_toi, plane_toi, plane_toi_motion,
+            swept_bounds, triangle_mesh_toi,
         },
         height_field::HeightFieldTriangle,
         mesh::{MeshQueryWorkspace, TriangleBvh},
     },
+    mass::MassProperties,
+    rigid_body::{RigidBody, predict, predict_from_state, trajectory_bounds},
     shape::{Cuboid, HeightField, LevelSet, Plane, Shape, Sphere, TriangleMesh},
     transform::Transform,
 };
@@ -51,6 +54,21 @@ fn convex_toi_finds_fast_sphere_impact_against_a_thin_cuboid() {
     .expect("TOI")
     .expect("impact");
     assert!(hit.toi > 0.0 && hit.toi < 1.0);
+}
+
+#[test]
+fn convex_toi_uses_relative_motion_for_a_near_miss_after_shared_translation() {
+    let cuboid = Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0).expect("cuboid"));
+    let start_a = Transform::identity();
+    let end_a = transform(Vec3::new(100.0, 0.0, 0.0), Quat::IDENTITY);
+    let start_b = transform(Vec3::new(0.0, 1.1, 0.0), Quat::IDENTITY);
+    let end_b = transform(Vec3::new(100.0, 1.01, 0.0), Quat::IDENTITY);
+
+    assert!(
+        convex_toi(&cuboid, start_a, end_a, &cuboid, start_b, end_b)
+            .expect("relative TOI")
+            .is_none()
+    );
 }
 
 #[test]
@@ -222,4 +240,78 @@ fn swept_bounds_cover_all_intermediate_rotations() {
         .expect("finite bounds");
     assert!(bounds.contains(Vec3::new(1.5, 1.5, 0.0)));
     assert!(bounds.contains(Vec3::new(3.0, 2.0, 0.0)));
+}
+
+#[test]
+fn rotational_ccd_follows_integrator_samples_across_multiple_turns() {
+    let rod = Shape::Cuboid(Cuboid::new(4.0, 0.2, 0.2).expect("cuboid"));
+    let plane = Plane::from_vec(Vec3::Y, 0.0).expect("plane");
+    let target = transform(Vec3::new(0.0, 1.5, 0.0), Quat::IDENTITY);
+    let target_motion = CcdMotion::linear(target, target).expect("stationary target");
+    let mut full_turn_toi = None;
+
+    for angle in [
+        std::f64::consts::FRAC_PI_2,
+        3.0 * std::f64::consts::FRAC_PI_2,
+        std::f64::consts::TAU,
+        2.0 * std::f64::consts::TAU,
+    ] {
+        let mass = MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)
+            .expect("mass properties");
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass).expect("body");
+        body.set_angular_velocity(Vec3::Z * (angle - 1.0))
+            .expect("finite angular velocity");
+        body.apply_torque(Vec3::Z).expect("finite torque");
+        let start_state = *body.state();
+        let end_state = predict(&body, 1.0).expect("integrator endpoint");
+        let bounds =
+            trajectory_bounds(&body, start_state, end_state, 1.0).expect("trajectory bounds");
+        let sample = |amount: f64| {
+            if amount == 0.0 {
+                return Ok(start_state.transform());
+            }
+            predict_from_state(&body, start_state, amount)
+                .map(|state| state.transform())
+                .map_err(|_| crate::collision::CollisionError::ArithmeticOverflow)
+        };
+        let motion = CcdMotion::trajectory(
+            start_state.transform(),
+            end_state.transform(),
+            bounds.translation,
+            true,
+            bounds.rotation,
+            &sample,
+        )
+        .expect("trajectory motion");
+        let hit = plane_toi_motion(&rod, &motion, &plane, &target_motion, true, false)
+            .unwrap_or_else(|error| panic!("rotational TOI failed at angle {angle}: {error:?}"))
+            .expect("rotation crosses target");
+
+        const SAMPLE_COUNT: usize = 20_000;
+        let sample_toi = (1..=SAMPLE_COUNT)
+            .find_map(|index| {
+                let amount = index as f64 / SAMPLE_COUNT as f64;
+                let transform = sample(amount).expect("integrator sample");
+                let gap =
+                    super::plane_gap(&rod, transform, &plane, target, true).expect("plane sample");
+                (gap.separation <= 1.0e-8).then_some(amount)
+            })
+            .expect("sampled collision");
+        assert!((hit.toi - sample_toi).abs() <= 2.0 / SAMPLE_COUNT as f64);
+        assert_eq!(
+            motion.at(hit.toi).expect("trajectory sample"),
+            sample(hit.toi).unwrap()
+        );
+
+        if angle == std::f64::consts::TAU {
+            full_turn_toi = Some(hit.toi);
+        } else if angle == 2.0 * std::f64::consts::TAU {
+            assert!(hit.toi < full_turn_toi.expect("one-turn TOI") * 0.5);
+            let endpoint_dot = end_state.transform().rotation().x * Quat::IDENTITY.x
+                + end_state.transform().rotation().y * Quat::IDENTITY.y
+                + end_state.transform().rotation().z * Quat::IDENTITY.z
+                + end_state.transform().rotation().w * Quat::IDENTITY.w;
+            assert!(endpoint_dot.abs() > 1.0 - 1.0e-12);
+        }
+    }
 }

@@ -24,6 +24,66 @@ pub(crate) struct CcdHit {
     pub(crate) point_b: Vec3,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CcdMotion<'a> {
+    start: Transform,
+    end: Transform,
+    translation_bound: f64,
+    linear_translation: bool,
+    rotation_bound: f64,
+    sample: Option<&'a dyn Fn(f64) -> Result<Transform, CollisionError>>,
+}
+
+impl CcdMotion<'_> {
+    pub(crate) fn linear(start: Transform, end: Transform) -> Result<Self, CollisionError> {
+        Ok(Self {
+            start,
+            end,
+            translation_bound: translation_delta(start, end)?.length(),
+            linear_translation: true,
+            rotation_bound: rotation_angle(start.rotation(), end.rotation())?,
+            sample: None,
+        })
+    }
+
+    pub(crate) fn trajectory<'a>(
+        start: Transform,
+        end: Transform,
+        translation_bound: f64,
+        linear_translation: bool,
+        rotation_bound: f64,
+        sample: &'a dyn Fn(f64) -> Result<Transform, CollisionError>,
+    ) -> Result<CcdMotion<'a>, CollisionError> {
+        if !translation_bound.is_finite()
+            || translation_bound < 0.0
+            || !rotation_bound.is_finite()
+            || rotation_bound < 0.0
+        {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        Ok(CcdMotion {
+            start,
+            end,
+            translation_bound,
+            linear_translation,
+            rotation_bound,
+            sample: Some(sample),
+        })
+    }
+
+    fn at(&self, amount: f64) -> Result<Transform, CollisionError> {
+        if let Some(sample) = self.sample {
+            sample(amount)
+        } else {
+            interpolate(self.start, self.end, amount)
+        }
+    }
+
+    fn is_linear(&self) -> bool {
+        self.sample.is_none()
+    }
+}
+
 /// Finds the first contact between two shapes following their start-to-end poses.
 pub(crate) fn convex_toi(
     shape_a: &Shape,
@@ -33,33 +93,53 @@ pub(crate) fn convex_toi(
     start_b: Transform,
     end_b: Transform,
 ) -> Result<Option<CcdHit>, CollisionError> {
+    let motion_a = CcdMotion::linear(start_a, end_a)?;
+    let motion_b = CcdMotion::linear(start_b, end_b)?;
+    convex_toi_motion(shape_a, &motion_a, shape_b, &motion_b)
+}
+
+pub(crate) fn convex_toi_motion(
+    shape_a: &Shape,
+    motion_a: &CcdMotion<'_>,
+    shape_b: &Shape,
+    motion_b: &CcdMotion<'_>,
+) -> Result<Option<CcdHit>, CollisionError> {
     if !shape_a.is_convex() || !(shape_b.is_convex() || matches!(shape_b, Shape::Triangle(_))) {
         return Err(CollisionError::UnsupportedGeometryPair);
     }
-    if let (Shape::Sphere(sphere_a), Shape::Sphere(sphere_b)) = (shape_a, shape_b) {
+    if motion_a.linear_translation
+        && motion_b.linear_translation
+        && let (Shape::Sphere(sphere_a), Shape::Sphere(sphere_b)) = (shape_a, shape_b)
+    {
         return sphere_sphere_toi(
             sphere_a.radius(),
-            start_a,
-            end_a,
+            motion_a.start,
+            motion_a.end,
             sphere_b.radius(),
-            start_b,
-            end_b,
+            motion_b.start,
+            motion_b.end,
         );
     }
-    let radius_a = shape_radius(shape_a)?;
-    let radius_b = shape_radius(shape_b)?;
-    let motion_bound = translation_delta(start_a, end_a)?.length()
-        + translation_delta(start_b, end_b)?.length()
-        + rotation_angle(start_a.rotation(), end_a.rotation())? * radius_a
-        + rotation_angle(start_b.rotation(), end_b.rotation())? * radius_b;
+    let radius_a = rotation_radius(shape_a)?;
+    let radius_b = rotation_radius(shape_b)?;
+    let translation_bound = if motion_a.linear_translation && motion_b.linear_translation {
+        translation_delta(motion_b.start, motion_b.end)?
+            .checked_sub(translation_delta(motion_a.start, motion_a.end)?)
+            .ok_or(CollisionError::ArithmeticOverflow)?
+            .length()
+    } else {
+        motion_a.translation_bound + motion_b.translation_bound
+    };
+    let motion_bound =
+        translation_bound + motion_a.rotation_bound * radius_a + motion_b.rotation_bound * radius_b;
     if !motion_bound.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
 
     let mut toi = 0.0;
     for _ in 0..MAX_CCD_ITERATIONS {
-        let transform_a = interpolate(start_a, end_a, toi)?;
-        let transform_b = interpolate(start_b, end_b, toi)?;
+        let transform_a = motion_a.at(toi)?;
+        let transform_b = motion_b.at(toi)?;
         let distance = match gjk::distance(shape_a, &transform_a, shape_b, &transform_b) {
             Ok(distance) => distance,
             Err(CollisionError::NonConvergent) => {
@@ -208,38 +288,63 @@ pub(crate) fn plane_toi(
     two_sided: bool,
     plane_is_a: bool,
 ) -> Result<Option<CcdHit>, CollisionError> {
+    let convex_motion = CcdMotion::linear(start_convex, end_convex)?;
+    let plane_motion = CcdMotion::linear(start_plane, end_plane)?;
+    plane_toi_motion(
+        convex,
+        &convex_motion,
+        plane,
+        &plane_motion,
+        two_sided,
+        plane_is_a,
+    )
+}
+
+pub(crate) fn plane_toi_motion(
+    convex: &Shape,
+    convex_motion: &CcdMotion<'_>,
+    plane: &Plane,
+    plane_motion: &CcdMotion<'_>,
+    two_sided: bool,
+    plane_is_a: bool,
+) -> Result<Option<CcdHit>, CollisionError> {
     if !convex.is_convex() {
         return Err(CollisionError::UnsupportedGeometryPair);
     }
     let radius = shape_radius(convex)?;
-    let convex_translation = translation_delta(start_convex, end_convex)?;
-    let plane_translation = translation_delta(start_plane, end_plane)?;
-    let relative_center = start_convex
+    let relative_center = convex_motion
+        .start
         .translation()
-        .checked_sub(start_plane.translation())
+        .checked_sub(plane_motion.start.translation())
         .and_then(Vec3::checked_length)
         .ok_or(CollisionError::ArithmeticOverflow)?;
     let plane_pivot_radius = relative_center
         + radius
         + plane.distance().abs()
-        + convex_translation.length()
-        + plane_translation.length();
-    let motion_bound = convex_translation.length()
-        + plane_translation.length()
-        + rotation_angle(start_convex.rotation(), end_convex.rotation())? * radius
-        + rotation_angle(start_plane.rotation(), end_plane.rotation())? * plane_pivot_radius;
+        + convex_motion.translation_bound
+        + plane_motion.translation_bound;
+    let motion_bound = convex_motion.translation_bound
+        + plane_motion.translation_bound
+        + convex_motion.rotation_bound * radius
+        + plane_motion.rotation_bound * plane_pivot_radius;
     if !motion_bound.is_finite() || !plane_pivot_radius.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
 
-    let initial = plane_gap(convex, start_convex, plane, start_plane, two_sided)?;
+    let initial = plane_gap(
+        convex,
+        convex_motion.start,
+        plane,
+        plane_motion.start,
+        two_sided,
+    )?;
     if !two_sided && initial.center_side < 0.0 {
         return Ok(None);
     }
     let mut toi = 0.0;
     for _ in 0..MAX_CCD_ITERATIONS {
-        let convex_transform = interpolate(start_convex, end_convex, toi)?;
-        let plane_transform = interpolate(start_plane, end_plane, toi)?;
+        let convex_transform = convex_motion.at(toi)?;
+        let plane_transform = plane_motion.at(toi)?;
         let gap = plane_gap(convex, convex_transform, plane, plane_transform, two_sided)?;
         if gap.separation <= tolerance(gap.separation) {
             let (normal, point_a, point_b) = if plane_is_a {
@@ -288,12 +393,36 @@ pub(crate) fn triangle_mesh_toi(
     workspace: &mut MeshQueryWorkspace,
     candidates: &mut Vec<usize>,
 ) -> Result<Option<CcdHit>, CollisionError> {
+    let convex_motion = CcdMotion::linear(start_convex, end_convex)?;
+    let mesh_motion = CcdMotion::linear(start_mesh, end_mesh)?;
+    triangle_mesh_toi_motion(
+        convex,
+        &convex_motion,
+        mesh,
+        deformed_vertices,
+        bvh,
+        &mesh_motion,
+        workspace,
+        candidates,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn triangle_mesh_toi_motion(
+    convex: &Shape,
+    convex_motion: &CcdMotion<'_>,
+    mesh: &TriangleMesh,
+    deformed_vertices: Option<&[Vec3]>,
+    bvh: &TriangleBvh,
+    mesh_motion: &CcdMotion<'_>,
+    workspace: &mut MeshQueryWorkspace,
+    candidates: &mut Vec<usize>,
+) -> Result<Option<CcdHit>, CollisionError> {
     let vertices = deformed_vertices.unwrap_or_else(|| mesh.vertices());
     if vertices.len() != mesh.vertices().len() || bvh.triangle_count() != mesh.triangles().len() {
         return Err(CollisionError::GeometryBounds);
     }
-    let query_bounds =
-        relative_swept_bounds(convex, start_convex, end_convex, start_mesh, end_mesh)?;
+    let query_bounds = relative_swept_bounds(convex, convex_motion, mesh_motion)?;
     bvh.query(query_bounds, workspace, candidates)?;
     let mut best = None;
     for triangle_id in candidates.iter().copied() {
@@ -307,15 +436,7 @@ pub(crate) fn triangle_mesh_toi(
             *vertices.get(c).ok_or(CollisionError::GeometryBounds)?,
         ])
         .map_err(|_| CollisionError::InvalidContact)?;
-        consider_triangle_toi(
-            &mut best,
-            convex,
-            start_convex,
-            end_convex,
-            triangle,
-            start_mesh,
-            end_mesh,
-        )?;
+        consider_triangle_toi(&mut best, convex, convex_motion, triangle, mesh_motion)?;
     }
     Ok(best)
 }
@@ -330,22 +451,25 @@ pub(crate) fn height_field_toi(
     end_field: Transform,
     candidates: &mut Vec<HeightFieldTriangle>,
 ) -> Result<Option<CcdHit>, CollisionError> {
-    let query_bounds =
-        relative_swept_bounds(convex, start_convex, end_convex, start_field, end_field)?;
+    let convex_motion = CcdMotion::linear(start_convex, end_convex)?;
+    let field_motion = CcdMotion::linear(start_field, end_field)?;
+    height_field_toi_motion(convex, &convex_motion, field, &field_motion, candidates)
+}
+
+pub(crate) fn height_field_toi_motion(
+    convex: &Shape,
+    convex_motion: &CcdMotion<'_>,
+    field: &HeightField,
+    field_motion: &CcdMotion<'_>,
+    candidates: &mut Vec<HeightFieldTriangle>,
+) -> Result<Option<CcdHit>, CollisionError> {
+    let query_bounds = relative_swept_bounds(convex, convex_motion, field_motion)?;
     height_field::query_triangles(field, query_bounds, candidates)?;
     let mut best = None;
     for candidate in candidates.iter().copied() {
         let triangle = Triangle::from_vertices(candidate.vertices)
             .map_err(|_| CollisionError::InvalidContact)?;
-        consider_triangle_toi(
-            &mut best,
-            convex,
-            start_convex,
-            end_convex,
-            triangle,
-            start_field,
-            end_field,
-        )?;
+        consider_triangle_toi(&mut best, convex, convex_motion, triangle, field_motion)?;
     }
     Ok(best)
 }
@@ -360,8 +484,19 @@ pub(crate) fn level_set_toi(
     end_field: Transform,
     candidates: &mut Vec<LevelSetCell>,
 ) -> Result<Option<CcdHit>, CollisionError> {
-    let query_bounds =
-        relative_swept_bounds(convex, start_convex, end_convex, start_field, end_field)?;
+    let convex_motion = CcdMotion::linear(start_convex, end_convex)?;
+    let field_motion = CcdMotion::linear(start_field, end_field)?;
+    level_set_toi_motion(convex, &convex_motion, field, &field_motion, candidates)
+}
+
+pub(crate) fn level_set_toi_motion(
+    convex: &Shape,
+    convex_motion: &CcdMotion<'_>,
+    field: &LevelSet,
+    field_motion: &CcdMotion<'_>,
+    candidates: &mut Vec<LevelSetCell>,
+) -> Result<Option<CcdHit>, CollisionError> {
+    let query_bounds = relative_swept_bounds(convex, convex_motion, field_motion)?;
     level_set::query_surface_cells(field, query_bounds, candidates)?;
     if candidates.is_empty() {
         return Ok(None);
@@ -371,18 +506,18 @@ pub(crate) fn level_set_toi(
         .local_bounds()
         .map_err(|_| CollisionError::GeometryBounds)?;
     let field_radius = bounds_radius(field_bounds)?;
-    let motion_bound = translation_delta(start_convex, end_convex)?.length()
-        + translation_delta(start_field, end_field)?.length()
-        + rotation_angle(start_convex.rotation(), end_convex.rotation())? * convex_radius
-        + rotation_angle(start_field.rotation(), end_field.rotation())? * field_radius;
+    let motion_bound = convex_motion.translation_bound
+        + field_motion.translation_bound
+        + convex_motion.rotation_bound * convex_radius
+        + field_motion.rotation_bound * field_radius;
     if !motion_bound.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
 
     let mut toi = 0.0;
     for _ in 0..MAX_CCD_ITERATIONS {
-        let convex_transform = interpolate(start_convex, end_convex, toi)?;
-        let field_transform = interpolate(start_field, end_field, toi)?;
+        let convex_transform = convex_motion.at(toi)?;
+        let field_transform = field_motion.at(toi)?;
         let mut closest = None;
         for cell in candidates.iter().copied() {
             let candidate = level_cell_gap(convex, convex_transform, field, field_transform, cell)?;
@@ -555,21 +690,13 @@ fn point_aabb_distance(point: Vec3, bounds: Aabb) -> Result<f64, CollisionError>
 fn consider_triangle_toi(
     best: &mut Option<CcdHit>,
     convex: &Shape,
-    start_convex: Transform,
-    end_convex: Transform,
+    convex_motion: &CcdMotion<'_>,
     triangle: Triangle,
-    start_triangle: Transform,
-    end_triangle: Transform,
+    triangle_motion: &CcdMotion<'_>,
 ) -> Result<(), CollisionError> {
     let triangle = Shape::Triangle(triangle);
-    if let Some(hit) = convex_toi(
-        convex,
-        start_convex,
-        end_convex,
-        &triangle,
-        start_triangle,
-        end_triangle,
-    )? && best.is_none_or(|current| hit.toi < current.toi)
+    if let Some(hit) = convex_toi_motion(convex, convex_motion, &triangle, triangle_motion)?
+        && best.is_none_or(|current| hit.toi < current.toi)
     {
         *best = Some(hit);
     }
@@ -578,22 +705,21 @@ fn consider_triangle_toi(
 
 fn relative_swept_bounds(
     convex: &Shape,
-    start_convex: Transform,
-    end_convex: Transform,
-    start_target: Transform,
-    end_target: Transform,
+    convex_motion: &CcdMotion<'_>,
+    target_motion: &CcdMotion<'_>,
 ) -> Result<Aabb, CollisionError> {
-    let inverse = start_target
+    let inverse = target_motion
+        .start
         .inverse()
         .map_err(|_| CollisionError::ArithmeticOverflow)?;
-    let local_center = inverse.transform_point(start_convex.translation());
+    let local_center = inverse.transform_point(convex_motion.start.translation());
     let relative_length = local_center
         .checked_length()
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    let convex_delta = translation_delta(start_convex, end_convex)?.length();
-    let target_delta = translation_delta(start_target, end_target)?.length();
+    let convex_delta = convex_motion.translation_bound;
+    let target_delta = target_motion.translation_bound;
     let radius = shape_radius(convex)?;
-    let target_rotation = rotation_angle(start_target.rotation(), end_target.rotation())?;
+    let target_rotation = target_motion.rotation_bound;
     let expansion = radius
         + convex_delta
         + target_delta
@@ -656,6 +782,53 @@ pub(crate) fn swept_bounds(
     Aabb::new(min, max)
         .map(Some)
         .map_err(|_| CollisionError::GeometryBounds)
+}
+
+pub(crate) fn swept_bounds_motion(
+    shape: &Shape,
+    motion: &CcdMotion<'_>,
+) -> Result<Option<Aabb>, CollisionError> {
+    if motion.is_linear() {
+        return swept_bounds(shape, motion.start, motion.end);
+    }
+    let Some(bounds) = shape
+        .local_bounds()
+        .map_err(|_| CollisionError::GeometryBounds)?
+    else {
+        return Ok(None);
+    };
+    let radius = bounds_radius(bounds)?;
+    let segment_travel = numeric::round_up(motion.translation_bound / 16.0)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let extent =
+        numeric::round_up(radius + segment_travel).ok_or(CollisionError::ArithmeticOverflow)?;
+    let extent = Vec3::splat(extent);
+    let mut combined = None;
+    for segment in 0..16 {
+        let amount = f64::from(segment) / 16.0;
+        let center = motion.at(amount)?.translation();
+        let min = center
+            .checked_sub(extent)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let max = center
+            .checked_add(extent)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let bounds = Aabb::new(
+            Vec3::new(
+                numeric::round_down(min.x).ok_or(CollisionError::ArithmeticOverflow)?,
+                numeric::round_down(min.y).ok_or(CollisionError::ArithmeticOverflow)?,
+                numeric::round_down(min.z).ok_or(CollisionError::ArithmeticOverflow)?,
+            ),
+            Vec3::new(
+                numeric::round_up(max.x).ok_or(CollisionError::ArithmeticOverflow)?,
+                numeric::round_up(max.y).ok_or(CollisionError::ArithmeticOverflow)?,
+                numeric::round_up(max.z).ok_or(CollisionError::ArithmeticOverflow)?,
+            ),
+        )
+        .map_err(|_| CollisionError::GeometryBounds)?;
+        combined = Some(combined.map_or(bounds, |current: Aabb| current.union(&bounds)));
+    }
+    Ok(combined)
 }
 
 struct PlaneGap {
@@ -766,6 +939,14 @@ fn shape_radius(shape: &Shape) -> Result<f64, CollisionError> {
         .map_err(|_| CollisionError::GeometryBounds)?
         .ok_or(CollisionError::UnsupportedGeometryPair)?;
     bounds_radius(bounds)
+}
+
+fn rotation_radius(shape: &Shape) -> Result<f64, CollisionError> {
+    if matches!(shape, Shape::Sphere(_)) {
+        Ok(0.0)
+    } else {
+        shape_radius(shape)
+    }
 }
 
 fn bounds_radius(bounds: Aabb) -> Result<f64, CollisionError> {

@@ -23,14 +23,16 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 use crate::{
     collider::Collider,
     collision::{
-        CcdHit, CollisionConfig, CollisionError, CollisionEvent, CollisionInteraction,
+        CcdHit, CcdMotion, CollisionConfig, CollisionError, CollisionEvent, CollisionInteraction,
         CollisionPair, CollisionSystem, ContactInfo, ContactManifold, ContactPoint, OverlapHit,
         QueryError, QueryFilter, Ray, RayHit, ShapeHit, SolverBody, SolverManifold, SolverMaterial,
         overlaps_shape, raycast_shape, sweep_shape,
     },
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
-    rigid_body::{BodyState, BodyType, CcdMode, RigidBody, predict},
+    rigid_body::{
+        BodyState, BodyType, CcdMode, RigidBody, predict, predict_from_state, trajectory_bounds,
+    },
 };
 
 struct BodyEntry {
@@ -43,6 +45,105 @@ struct ColliderEntry {
     body: BodyId,
     prev: Option<ColliderId>,
     next: Option<ColliderId>,
+}
+
+#[derive(Clone, Copy)]
+struct ColliderTrajectory {
+    body: RigidBody,
+    base_state: BodyState,
+    base_time: f64,
+    sample_start_time: f64,
+    end_time: f64,
+    local_transform: crate::transform::Transform,
+}
+
+impl ColliderTrajectory {
+    fn transform_at(&self, amount: f64) -> Result<crate::transform::Transform, CollisionError> {
+        let sample_time =
+            self.sample_start_time + (self.end_time - self.sample_start_time) * amount;
+        let duration = sample_time - self.base_time;
+        let state = if duration == 0.0 {
+            self.base_state
+        } else {
+            predict_from_state(&self.body, self.base_state, duration)
+                .map_err(|_| CollisionError::ArithmeticOverflow)?
+        };
+        state
+            .transform()
+            .compose(&self.local_transform)
+            .map_err(|_| CollisionError::ArithmeticOverflow)
+    }
+
+    fn path_bounds(&self, end: BodyState) -> Result<(f64, f64, bool), CollisionError> {
+        let base_duration = self.end_time - self.base_time;
+        if base_duration <= 0.0 {
+            return Err(CollisionError::InvalidContact);
+        }
+        let bounds = trajectory_bounds(&self.body, self.base_state, end, base_duration)
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        let linear_origin = self.has_linear_collider_origin(end);
+        let segment_ratio = (self.end_time - self.sample_start_time) / base_duration;
+        if !segment_ratio.is_finite() || segment_ratio < 0.0 || segment_ratio > 1.0 {
+            return Err(CollisionError::InvalidContact);
+        }
+        let local_offset = self
+            .local_transform
+            .translation()
+            .checked_length()
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let rotation = bounds.rotation * segment_ratio;
+        let translation = (bounds.translation + local_offset * bounds.rotation) * segment_ratio;
+        if !translation.is_finite() || !rotation.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        Ok((translation, rotation, linear_origin))
+    }
+
+    fn has_linear_collider_origin(&self, end: BodyState) -> bool {
+        if self.base_state.is_sleeping() || self.body.physics().body_type() == BodyType::Static {
+            return true;
+        }
+        if self.base_state.linear_velocity() != end.linear_velocity() {
+            return false;
+        }
+        if self.base_state.angular_velocity() == Vec3::ZERO && end.angular_velocity() == Vec3::ZERO
+        {
+            return true;
+        }
+        let center_of_mass = self
+            .body
+            .physics()
+            .mass()
+            .map_or(Vec3::ZERO, |mass| mass.center_of_mass());
+        center_of_mass == Vec3::ZERO && self.local_transform.translation() == Vec3::ZERO
+    }
+}
+
+fn swept_bounds_for_trajectory(
+    shape: &crate::shape::Shape,
+    trajectory: &ColliderTrajectory,
+    end: BodyState,
+) -> Result<Option<crate::aabb::Aabb>, CollisionError> {
+    let start_transform = trajectory.transform_at(0.0)?;
+    let end_transform = end
+        .transform()
+        .compose(&trajectory.local_transform)
+        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+    if trajectory.has_linear_collider_origin(end) {
+        let motion = CcdMotion::linear(start_transform, end_transform)?;
+        return crate::collision::swept_bounds_motion(shape, &motion);
+    }
+    let (translation_bound, rotation_bound, _) = trajectory.path_bounds(end)?;
+    let sample = |amount| trajectory.transform_at(amount);
+    let motion = CcdMotion::trajectory(
+        start_transform,
+        end_transform,
+        translation_bound,
+        false,
+        rotation_bound,
+        &sample,
+    )?;
+    crate::collision::swept_bounds_motion(shape, &motion)
 }
 
 /// Owns rigid bodies and colliders and assigns IDs scoped to this world instance.
@@ -400,7 +501,7 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn stage_spatial_proxies(&mut self) -> Result<(), CollisionError> {
+    fn stage_spatial_proxies(&mut self, dt: f64) -> Result<(), CollisionError> {
         for ((body_dense, body_entry), (predicted_id, predicted_state)) in self.bodies.iter().zip(
             self.collision_system
                 .context
@@ -429,17 +530,19 @@ impl PhysicsWorld {
                     return Err(CollisionError::InvalidContact);
                 }
                 let bounds = if body_type != BodyType::Static {
-                    let start = body_entry
-                        .body
-                        .state()
-                        .transform()
-                        .compose(&collider_entry.collider.local_transform())
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
-                    let end = predicted_state
-                        .transform()
-                        .compose(&collider_entry.collider.local_transform())
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
-                    crate::collision::swept_bounds(collider_entry.collider.shape(), start, end)?
+                    let trajectory = ColliderTrajectory {
+                        body: body_entry.body,
+                        base_state: *body_entry.body.state(),
+                        base_time: 0.0,
+                        sample_start_time: 0.0,
+                        end_time: dt,
+                        local_transform: collider_entry.collider.local_transform(),
+                    };
+                    swept_bounds_for_trajectory(
+                        collider_entry.collider.shape(),
+                        &trajectory,
+                        predicted_state,
+                    )?
                 } else {
                     collider_entry
                         .collider
@@ -483,7 +586,7 @@ impl PhysicsWorld {
     fn prepare_collision_candidates(&mut self, dt: f64) -> Result<(), CollisionError> {
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
-        self.stage_spatial_proxies()?;
+        self.stage_spatial_proxies(dt)?;
         self.collision_system.synchronize_spatial_index()?;
         #[cfg(feature = "bench-internals")]
         self.collision_system
@@ -660,17 +763,56 @@ impl PhysicsWorld {
                     .transform()
                     .compose(&collider_b.collider.local_transform())
                     .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                let local_transform_a = collider_a.collider.local_transform();
+                let local_transform_b = collider_b.collider.local_transform();
+                let context = &self.collision_system.context;
+                let trajectory_a = ColliderTrajectory {
+                    body: body_a,
+                    base_state: context.ccd_states[prediction_a],
+                    base_time: context.ccd_elapsed[prediction_a],
+                    sample_start_time: elapsed,
+                    end_time: dt,
+                    local_transform: local_transform_a,
+                };
+                let trajectory_b = ColliderTrajectory {
+                    body: body_b,
+                    base_state: context.ccd_states[prediction_b],
+                    base_time: context.ccd_elapsed[prediction_b],
+                    sample_start_time: elapsed,
+                    end_time: dt,
+                    local_transform: local_transform_b,
+                };
+                let (translation_bound_a, rotation_bound_a, linear_translation_a) =
+                    trajectory_a.path_bounds(end_state_a)?;
+                let (translation_bound_b, rotation_bound_b, linear_translation_b) =
+                    trajectory_b.path_bounds(end_state_b)?;
+                let sample_a = |amount| trajectory_a.transform_at(amount);
+                let sample_b = |amount| trajectory_b.transform_at(amount);
+                let motion_a = CcdMotion::trajectory(
+                    start_transform_a,
+                    end_transform_a,
+                    translation_bound_a,
+                    linear_translation_a,
+                    rotation_bound_a,
+                    &sample_a,
+                )?;
+                let motion_b = CcdMotion::trajectory(
+                    start_transform_b,
+                    end_transform_b,
+                    translation_bound_b,
+                    linear_translation_b,
+                    rotation_bound_b,
+                    &sample_b,
+                )?;
                 let sensor = collider_a.collider.mode() == crate::collider::CollisionMode::Sensor
                     || collider_b.collider.mode() == crate::collider::CollisionMode::Sensor;
                 let Some(hit) = self.collision_system.time_of_impact(
                     collider_a.collider.shape(),
-                    start_transform_a,
-                    end_transform_a,
+                    &motion_a,
                     collider_a.collider.query_bvh(),
                     collider_a.collider.query_vertices(),
                     collider_b.collider.shape(),
-                    start_transform_b,
-                    end_transform_b,
+                    &motion_b,
                     collider_b.collider.query_bvh(),
                     collider_b.collider.query_vertices(),
                     sensor,
@@ -756,36 +898,8 @@ impl PhysicsWorld {
                         .ok_or(CollisionError::InvalidContact)?,
                 )
             };
-            let start_a = self.body_state_at_ccd(body_a_id, prediction_a, elapsed, dt)?;
-            let start_b = self.body_state_at_ccd(body_b_id, prediction_b, elapsed, dt)?;
-            let end_a = self.collision_system.context.predicted_states[prediction_a].1;
-            let end_b = self.collision_system.context.predicted_states[prediction_b].1;
-            let mut body_a_at_hit = body_a;
-            body_a_at_hit.set_state_preserving_forces(start_a);
-            let mut body_b_at_hit = body_b;
-            body_b_at_hit.set_state_preserving_forces(start_b);
-            let mut state_a = if hit.toi > 0.0 {
-                predict(&body_a_at_hit, remaining * hit.toi)
-                    .map_err(|_| CollisionError::ArithmeticOverflow)?
-            } else {
-                start_a
-            };
-            let mut state_b = if hit.toi > 0.0 {
-                predict(&body_b_at_hit, remaining * hit.toi)
-                    .map_err(|_| CollisionError::ArithmeticOverflow)?
-            } else {
-                start_b
-            };
-            state_a.set_transform(crate::collision::interpolate(
-                start_a.transform(),
-                end_a.transform(),
-                hit.toi,
-            )?);
-            state_b.set_transform(crate::collision::interpolate(
-                start_b.transform(),
-                end_b.transform(),
-                hit.toi,
-            )?);
+            let state_a = self.body_state_at_ccd(body_a_id, prediction_a, impact_elapsed, dt)?;
+            let state_b = self.body_state_at_ccd(body_b_id, prediction_b, impact_elapsed, dt)?;
             let body_transform_a = state_a.transform();
             let body_transform_b = state_b.transform();
             let separation = hit
@@ -937,6 +1051,9 @@ impl PhysicsWorld {
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
             self.collision_system.context.ccd_processed_pairs.push(pair);
             elapsed = impact_elapsed;
+            if remaining_after_impact <= f64::EPSILON * dt.max(1.0) {
+                return Ok(());
+            }
             self.refresh_ccd_candidates(elapsed, dt)?;
         }
     }
@@ -978,17 +1095,25 @@ impl PhysicsWorld {
                     .world_bounds(&end_state.transform())
                     .map_err(|_| CollisionError::GeometryBounds)?
             } else {
-                let start_state =
-                    self.body_state_at_ccd(proxy.body, prediction_index, elapsed, dt)?;
-                let start = start_state
-                    .transform()
-                    .compose(&collider_entry.collider.local_transform())
-                    .map_err(|_| CollisionError::ArithmeticOverflow)?;
-                let end = end_state
-                    .transform()
-                    .compose(&collider_entry.collider.local_transform())
-                    .map_err(|_| CollisionError::ArithmeticOverflow)?;
-                crate::collision::swept_bounds(collider_entry.collider.shape(), start, end)?
+                let body = self
+                    .bodies
+                    .get(proxy.body.dense)
+                    .filter(|_| proxy.body.world == self.world_id)
+                    .map(|entry| entry.body)
+                    .ok_or(CollisionError::InvalidContact)?;
+                let trajectory = ColliderTrajectory {
+                    body,
+                    base_state: self.collision_system.context.ccd_states[prediction_index],
+                    base_time: self.collision_system.context.ccd_elapsed[prediction_index],
+                    sample_start_time: elapsed,
+                    end_time: dt,
+                    local_transform: collider_entry.collider.local_transform(),
+                };
+                swept_bounds_for_trajectory(
+                    collider_entry.collider.shape(),
+                    &trajectory,
+                    end_state,
+                )?
             };
             self.collision_system
                 .context
@@ -1056,26 +1181,11 @@ impl PhysicsWorld {
             return Ok(state_start);
         }
         let duration = elapsed - start_time;
-        let segment_duration = dt - start_time;
-        if segment_duration <= 0.0 {
+        if dt - start_time <= 0.0 {
             return Err(CollisionError::InvalidContact);
         }
-        let end_state = self
-            .collision_system
-            .context
-            .predicted_states
-            .get(prediction_index)
-            .ok_or(CollisionError::InvalidContact)?
-            .1;
-        let mut body = body;
-        body.set_state_preserving_forces(state_start);
-        let mut state = predict(&body, duration).map_err(|_| CollisionError::ArithmeticOverflow)?;
-        state.set_transform(crate::collision::interpolate(
-            state_start.transform(),
-            end_state.transform(),
-            (duration / segment_duration).clamp(0.0, 1.0),
-        )?);
-        Ok(state)
+        predict_from_state(&body, state_start, duration)
+            .map_err(|_| CollisionError::ArithmeticOverflow)
     }
 
     fn prepare_prediction_indices(&mut self) -> Result<(), CollisionError> {

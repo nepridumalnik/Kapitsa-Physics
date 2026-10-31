@@ -10,7 +10,7 @@ use kapitsa_math::Vec3;
 
 use super::{
     CollisionError, CollisionPair,
-    ccd::CcdHit,
+    ccd::{CcdHit, CcdMotion},
     epa::EpaWorkspace,
     gjk,
     height_field::{self, HeightFieldTriangle},
@@ -244,30 +244,28 @@ impl NarrowPhase {
     pub(crate) fn time_of_impact(
         &mut self,
         shape_a: &Shape,
-        start_a: Transform,
-        end_a: Transform,
+        motion_a: &CcdMotion<'_>,
         bvh_a: Option<&TriangleBvh>,
         vertices_a: Option<&[Vec3]>,
         shape_b: &Shape,
-        start_b: Transform,
-        end_b: Transform,
+        motion_b: &CcdMotion<'_>,
         bvh_b: Option<&TriangleBvh>,
         vertices_b: Option<&[Vec3]>,
         sensor: bool,
     ) -> Result<Option<CcdHit>, CollisionError> {
         match (shape_a, shape_b) {
             (Shape::Plane(plane), convex) if convex.is_convex() => {
-                super::ccd::plane_toi(convex, start_b, end_b, plane, start_a, end_a, sensor, true)
+                super::ccd::plane_toi_motion(convex, motion_b, plane, motion_a, sensor, true)
             }
             (convex, Shape::Plane(plane)) if convex.is_convex() => {
-                super::ccd::plane_toi(convex, start_a, end_a, plane, start_b, end_b, sensor, false)
+                super::ccd::plane_toi_motion(convex, motion_a, plane, motion_b, sensor, false)
             }
             (Shape::Triangle(triangle), convex) if convex.is_convex() => {
                 let target = Shape::Triangle(
                     Triangle::from_vertices(triangle.vertices())
                         .map_err(|_| CollisionError::InvalidContact)?,
                 );
-                super::ccd::convex_toi(convex, start_b, end_b, &target, start_a, end_a)
+                super::ccd::convex_toi_motion(convex, motion_b, &target, motion_a)
                     .map(|hit| hit.map(reverse_hit))
             }
             (convex, Shape::Triangle(triangle)) if convex.is_convex() => {
@@ -275,110 +273,98 @@ impl NarrowPhase {
                     Triangle::from_vertices(triangle.vertices())
                         .map_err(|_| CollisionError::InvalidContact)?,
                 );
-                super::ccd::convex_toi(convex, start_a, end_a, &target, start_b, end_b)
+                super::ccd::convex_toi_motion(convex, motion_a, &target, motion_b)
             }
             (Shape::TriangleMesh(mesh), convex) if convex.is_convex() => {
-                super::ccd::triangle_mesh_toi(
+                super::ccd::triangle_mesh_toi_motion(
                     convex,
-                    start_b,
-                    end_b,
+                    motion_b,
                     mesh,
                     vertices_a,
                     bvh_a.ok_or(CollisionError::GeometryBounds)?,
-                    start_a,
-                    end_a,
+                    motion_a,
                     &mut self.mesh_workspace,
                     &mut self.mesh_candidates,
                 )
                 .map(|hit| hit.map(reverse_hit))
             }
             (convex, Shape::TriangleMesh(mesh)) if convex.is_convex() => {
-                super::ccd::triangle_mesh_toi(
+                super::ccd::triangle_mesh_toi_motion(
                     convex,
-                    start_a,
-                    end_a,
+                    motion_a,
                     mesh,
                     vertices_b,
                     bvh_b.ok_or(CollisionError::GeometryBounds)?,
-                    start_b,
-                    end_b,
+                    motion_b,
                     &mut self.mesh_workspace,
                     &mut self.mesh_candidates,
                 )
             }
             (Shape::SkinnedTriangleMesh(mesh), convex) if convex.is_convex() => {
-                super::ccd::triangle_mesh_toi(
+                super::ccd::triangle_mesh_toi_motion(
                     convex,
-                    start_b,
-                    end_b,
+                    motion_b,
                     mesh.mesh(),
                     vertices_a,
                     bvh_a.ok_or(CollisionError::GeometryBounds)?,
-                    start_a,
-                    end_a,
+                    motion_a,
                     &mut self.mesh_workspace,
                     &mut self.mesh_candidates,
                 )
                 .map(|hit| hit.map(reverse_hit))
             }
             (convex, Shape::SkinnedTriangleMesh(mesh)) if convex.is_convex() => {
-                super::ccd::triangle_mesh_toi(
+                super::ccd::triangle_mesh_toi_motion(
                     convex,
-                    start_a,
-                    end_a,
+                    motion_a,
                     mesh.mesh(),
                     vertices_b,
                     bvh_b.ok_or(CollisionError::GeometryBounds)?,
-                    start_b,
-                    end_b,
+                    motion_b,
                     &mut self.mesh_workspace,
                     &mut self.mesh_candidates,
                 )
             }
             (Shape::HeightField(field), convex) if convex.is_convex() => {
-                super::ccd::height_field_toi(
+                super::ccd::height_field_toi_motion(
                     convex,
-                    start_b,
-                    end_b,
+                    motion_b,
                     field,
-                    start_a,
-                    end_a,
+                    motion_a,
                     &mut self.height_field_candidates,
                 )
                 .map(|hit| hit.map(reverse_hit))
             }
             (convex, Shape::HeightField(field)) if convex.is_convex() => {
-                super::ccd::height_field_toi(
+                super::ccd::height_field_toi_motion(
                     convex,
-                    start_a,
-                    end_a,
+                    motion_a,
                     field,
-                    start_b,
-                    end_b,
+                    motion_b,
                     &mut self.height_field_candidates,
                 )
             }
-            (Shape::LevelSet(field), convex) if convex.is_convex() => super::ccd::level_set_toi(
-                convex,
-                start_b,
-                end_b,
-                field,
-                start_a,
-                end_a,
-                &mut self.level_set_candidates,
-            )
-            .map(|hit| hit.map(reverse_hit)),
-            (convex, Shape::LevelSet(field)) if convex.is_convex() => super::ccd::level_set_toi(
-                convex,
-                start_a,
-                end_a,
-                field,
-                start_b,
-                end_b,
-                &mut self.level_set_candidates,
-            ),
+            (Shape::LevelSet(field), convex) if convex.is_convex() => {
+                super::ccd::level_set_toi_motion(
+                    convex,
+                    motion_b,
+                    field,
+                    motion_a,
+                    &mut self.level_set_candidates,
+                )
+                .map(|hit| hit.map(reverse_hit))
+            }
+            (convex, Shape::LevelSet(field)) if convex.is_convex() => {
+                super::ccd::level_set_toi_motion(
+                    convex,
+                    motion_a,
+                    field,
+                    motion_b,
+                    &mut self.level_set_candidates,
+                )
+            }
             (a, b) if a.is_convex() && b.is_convex() => {
-                super::ccd::convex_toi(a, start_a, end_a, b, start_b, end_b)
+                super::ccd::convex_toi_motion(a, motion_a, b, motion_b)
             }
             _ => Err(CollisionError::UnsupportedGeometryPair),
         }

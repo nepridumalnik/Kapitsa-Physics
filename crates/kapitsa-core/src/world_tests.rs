@@ -768,6 +768,34 @@ fn repeated_steps_are_deterministic_and_reuse_the_scratch_buffer() -> Result<(),
 }
 
 #[test]
+fn ccd_swept_bounds_cover_offset_com_rotation_arcs() {
+    let mass = MassProperties::new(1.0, Vec3::X, Mat3::IDENTITY).expect("mass properties");
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass).expect("body");
+    body.set_angular_velocity(Vec3::Z * (3.0 * std::f64::consts::FRAC_PI_2))
+        .expect("angular velocity");
+    let start = *body.state();
+    let end = crate::rigid_body::predict(&body, 1.0).expect("integrator endpoint");
+    let trajectory = super::ColliderTrajectory {
+        body,
+        base_state: start,
+        base_time: 0.0,
+        sample_start_time: 0.0,
+        end_time: 1.0,
+        local_transform: Transform::identity(),
+    };
+    let shape = Shape::Sphere(Sphere::new(0.1).expect("sphere"));
+    let bounds = super::swept_bounds_for_trajectory(&shape, &trajectory, end)
+        .expect("trajectory bounds")
+        .expect("finite bounds");
+    let arc_sample = trajectory
+        .transform_at(1.0 / 3.0)
+        .expect("integrator trajectory sample");
+
+    assert!(bounds.contains(arc_sample.translation()));
+    assert!(bounds.contains(arc_sample.translation() + Vec3::Y * 0.1));
+}
+
+#[test]
 fn step_shards_are_balanced_and_commit_the_same_states() -> Result<(), Box<dyn std::error::Error>> {
     let mut parallel_world = PhysicsWorld::new();
     let mut sequential_world = PhysicsWorld::new();
