@@ -35,8 +35,10 @@ impl RigidBody {
     }
 
     /// Creates a stationary dynamic body with the supplied mass properties.
-    pub fn new_dynamic(transform: Transform, mass: MassProperties) -> Self {
-        Self::new(BodyType::Dynamic, transform, Some(mass))
+    pub fn new_dynamic(transform: Transform, mass: MassProperties) -> Result<Self, BodyError> {
+        let body = Self::new(BodyType::Dynamic, transform, Some(mass));
+        body.world_center_of_mass()?;
+        Ok(body)
     }
 
     fn new(body_type: BodyType, transform: Transform, mass: Option<MassProperties>) -> Self {
