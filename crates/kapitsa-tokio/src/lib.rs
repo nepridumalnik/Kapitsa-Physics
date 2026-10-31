@@ -1,6 +1,7 @@
 mod adaptive;
 mod controller;
 mod error;
+pub mod marshalling;
 mod metrics;
 mod scheduler;
 mod simulation;
