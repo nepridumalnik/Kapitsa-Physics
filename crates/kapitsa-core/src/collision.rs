@@ -1,10 +1,16 @@
 mod broad_phase;
 mod config;
 mod contact;
+#[allow(dead_code)]
+mod epa;
 mod error;
 mod event;
+#[allow(dead_code)]
+mod gjk;
 pub(crate) mod spatial_index;
 mod step;
+#[allow(dead_code)]
+mod support;
 mod system;
 
 pub use config::CollisionConfig;
