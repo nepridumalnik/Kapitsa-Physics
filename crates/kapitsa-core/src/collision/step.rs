@@ -16,6 +16,7 @@ use super::{
 pub(crate) struct StepContext {
     pub(crate) predicted_states: Vec<(BodyId, BodyState)>,
     pub(crate) body_indices: Vec<Option<(BodyId, usize)>>,
+    pub(crate) body_indices_ready: bool,
     pub(crate) solver_body_indices: Vec<Option<(BodyId, usize)>>,
     pub(crate) body_types: Vec<BodyType>,
     pub(crate) colliders: Vec<CollisionProxy>,
@@ -40,6 +41,7 @@ impl StepContext {
         Self {
             predicted_states: Vec::new(),
             body_indices: Vec::new(),
+            body_indices_ready: false,
             solver_body_indices: Vec::new(),
             body_types: Vec::new(),
             colliders: Vec::new(),
@@ -62,6 +64,7 @@ impl StepContext {
     pub(crate) fn clear(&mut self) {
         self.predicted_states.clear();
         self.body_indices.clear();
+        self.body_indices_ready = false;
         self.solver_body_indices.clear();
         self.body_types.clear();
         self.colliders.clear();

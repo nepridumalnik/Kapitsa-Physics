@@ -113,6 +113,11 @@ connected by contacts are grouped into deterministically ordered islands.
 Each manifold stores up to four active contacts in a fixed array and exposes
 only the counted slice. Its cached world-space contact positions support
 contact reduction and mesh/heightfield manifold merging.
+Surface/convex contacts route through one normalized surface dispatch; a shared
+builder restores canonical A-to-B point order and feature IDs while keeping
+anchors in each body's local coordinates. Sphere/sphere remains analytic.
+CCD and discrete candidate processing share the per-step prediction index;
+the separate solver-body index is prepared only when candidates need solving.
 
 Triangles are finite, zero-thickness, two-sided surfaces. Sphere contacts use
 the closest point on the finite triangle; other convex contacts use GJK distance

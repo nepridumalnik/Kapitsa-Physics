@@ -599,6 +599,29 @@ fn assert_symmetric_contact(pair: CollisionPair, left: &Geometry, right: &Geomet
         left.name,
         right.name
     );
+    assert_eq!(
+        forward.len(),
+        reverse.len(),
+        "{} vs {}",
+        left.name,
+        right.name
+    );
+    for point in forward.points() {
+        let world_a = left.transform.transform_point(point.local_a);
+        let world_b = right.transform.transform_point(point.local_b);
+        assert!(
+            reverse.points().iter().any(|reverse_point| {
+                let reverse_a = right.transform.transform_point(reverse_point.local_a);
+                let reverse_b = left.transform.transform_point(reverse_point.local_b);
+                (world_a - reverse_b).length() <= 1.0e-6
+                    && (world_b - reverse_a).length() <= 1.0e-6
+                    && (point.normal + reverse_point.normal).length() <= 1.0e-6
+            }),
+            "{} vs {}: reversed contacts changed body-local anchors",
+            left.name,
+            right.name
+        );
+    }
 }
 
 fn assert_known_penetration(pair: CollisionPair, left: &Geometry, right: &Geometry) {

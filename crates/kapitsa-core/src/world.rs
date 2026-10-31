@@ -30,8 +30,8 @@ use crate::{
         CcdHit, CcdMotion, CollisionConfig, CollisionError, CollisionEvent, CollisionInteraction,
         CollisionPair, CollisionSystem, ContactInfo, ContactManifold, ContactPoint, OverlapHit,
         QueryError, QueryFilter, QueryScratch, QueryTarget, Ray, RayHit, ShapeHit, SolverBody,
-        SolverManifold, SolverMaterial, overlaps_shape_with_scratch, raycast_shape_with_scratch,
-        spatial_index::SpatialIndex, sweep_shape_with_scratch,
+        SolverManifold, SolverMaterial, StepContext, overlaps_shape_with_scratch,
+        raycast_shape_with_scratch, spatial_index::SpatialIndex, sweep_shape_with_scratch,
     },
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
@@ -934,7 +934,7 @@ impl PhysicsWorld {
         }) {
             return Ok(());
         }
-        self.prepare_prediction_indices()?;
+        Self::rebuild_body_indices(&mut self.collision_system.context)?;
 
         let prediction_count = self.collision_system.context.predicted_states.len();
         {
@@ -1491,14 +1491,23 @@ impl PhysicsWorld {
             .map_err(|_| CollisionError::ArithmeticOverflow)
     }
 
-    fn prepare_prediction_indices(&mut self) -> Result<(), CollisionError> {
-        let mut required_slots = 0;
-        for (id, _) in &self.collision_system.context.predicted_states {
-            let slot = usize::try_from(id.index()).map_err(|_| CollisionError::GeometryBounds)?;
-            required_slots =
-                required_slots.max(slot.checked_add(1).ok_or(CollisionError::GeometryBounds)?);
+    fn required_body_index_slots(context: &StepContext) -> Result<usize, CollisionError> {
+        context
+            .predicted_states
+            .iter()
+            .try_fold(0_usize, |required, (body_id, _)| {
+                let slot =
+                    usize::try_from(body_id.index()).map_err(|_| CollisionError::GeometryBounds)?;
+                let end = slot.checked_add(1).ok_or(CollisionError::GeometryBounds)?;
+                Ok(required.max(end))
+            })
+    }
+
+    fn rebuild_body_indices(context: &mut StepContext) -> Result<(), CollisionError> {
+        if context.body_indices_ready {
+            return Ok(());
         }
-        let context = &mut self.collision_system.context;
+        let required_slots = Self::required_body_index_slots(context)?;
         if context.body_indices.len() < required_slots {
             context
                 .body_indices
@@ -1518,6 +1527,26 @@ impl PhysicsWorld {
                 .get_mut(slot)
                 .ok_or(CollisionError::InvalidContact)? = Some((body_id, index));
         }
+        context.body_indices_ready = true;
+        Ok(())
+    }
+
+    fn prepare_solver_body_indices(context: &mut StepContext) -> Result<(), CollisionError> {
+        let required_slots = Self::required_body_index_slots(context)?;
+        if context.solver_body_indices.len() < required_slots {
+            context
+                .solver_body_indices
+                .try_reserve(required_slots - context.solver_body_indices.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            context.solver_body_indices.resize(required_slots, None);
+        }
+        context
+            .solver_body_indices
+            .iter_mut()
+            .for_each(|slot| *slot = None);
+        context.body_types.clear();
+        context.solver_bodies.clear();
+        context.solver_body_predictions.clear();
         Ok(())
     }
 
@@ -1528,48 +1557,9 @@ impl PhysicsWorld {
             self.stage_collision_events()?;
             return Ok(());
         }
-        let mut required_slots = 0;
-        for (id, _) in &self.collision_system.context.predicted_states {
-            let slot = usize::try_from(id.index()).map_err(|_| CollisionError::GeometryBounds)?;
-            required_slots =
-                required_slots.max(slot.checked_add(1).ok_or(CollisionError::GeometryBounds)?);
-        }
-        {
-            let context = &mut self.collision_system.context;
-            if context.body_indices.len() < required_slots {
-                context
-                    .body_indices
-                    .try_reserve(required_slots - context.body_indices.len())
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-                context.body_indices.resize(required_slots, None);
-            }
-            if context.solver_body_indices.len() < required_slots {
-                context
-                    .solver_body_indices
-                    .try_reserve(required_slots - context.solver_body_indices.len())
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-                context.solver_body_indices.resize(required_slots, None);
-            }
-            context
-                .body_indices
-                .iter_mut()
-                .for_each(|slot| *slot = None);
-            context
-                .solver_body_indices
-                .iter_mut()
-                .for_each(|slot| *slot = None);
-            context.body_types.clear();
-            context.solver_bodies.clear();
-            context.solver_body_predictions.clear();
-            for (index, (body_id, _)) in context.predicted_states.iter().copied().enumerate() {
-                let slot =
-                    usize::try_from(body_id.index()).map_err(|_| CollisionError::GeometryBounds)?;
-                *context
-                    .body_indices
-                    .get_mut(slot)
-                    .ok_or(CollisionError::InvalidContact)? = Some((body_id, index));
-            }
-        }
+        let context = &mut self.collision_system.context;
+        Self::rebuild_body_indices(context)?;
+        Self::prepare_solver_body_indices(context)?;
 
         self.collision_system.context.manifolds.clear();
         self.collision_system

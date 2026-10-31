@@ -200,6 +200,7 @@ impl CollisionSystem {
     }
 
     pub(crate) fn stage_prediction(&mut self, body_id: BodyId, state: BodyState) {
+        self.context.body_indices_ready = false;
         self.context.predicted_states.push((body_id, state));
     }
 

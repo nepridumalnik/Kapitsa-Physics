@@ -28,6 +28,76 @@ pub(crate) struct NarrowPhase {
     level_set_candidates: Vec<super::level_set::LevelSetCell>,
 }
 
+struct SurfacePair<'a> {
+    surface: &'a Shape,
+    convex: &'a Shape,
+    surface_transform: &'a Transform,
+    convex_transform: &'a Transform,
+    surface_bvh: Option<&'a TriangleBvh>,
+    surface_vertices: Option<&'a [Vec3]>,
+    body_a: &'a Transform,
+    body_b: &'a Transform,
+    surface_is_a: bool,
+}
+
+impl<'a> SurfacePair<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        shape_a: &'a Shape,
+        collider_a: &'a Transform,
+        bvh_a: Option<&'a TriangleBvh>,
+        vertices_a: Option<&'a [Vec3]>,
+        shape_b: &'a Shape,
+        collider_b: &'a Transform,
+        bvh_b: Option<&'a TriangleBvh>,
+        vertices_b: Option<&'a [Vec3]>,
+        body_a: &'a Transform,
+        body_b: &'a Transform,
+    ) -> Option<Self> {
+        let a_is_surface = is_surface(shape_a);
+        let b_is_surface = is_surface(shape_b);
+        if a_is_surface && shape_b.is_convex() {
+            Some(Self {
+                surface: shape_a,
+                convex: shape_b,
+                surface_transform: collider_a,
+                convex_transform: collider_b,
+                surface_bvh: bvh_a,
+                surface_vertices: vertices_a,
+                body_a,
+                body_b,
+                surface_is_a: true,
+            })
+        } else if b_is_surface && shape_a.is_convex() {
+            Some(Self {
+                surface: shape_b,
+                convex: shape_a,
+                surface_transform: collider_b,
+                convex_transform: collider_a,
+                surface_bvh: bvh_b,
+                surface_vertices: vertices_b,
+                body_a,
+                body_b,
+                surface_is_a: false,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+fn is_surface(shape: &Shape) -> bool {
+    matches!(
+        shape,
+        Shape::Plane(_)
+            | Shape::Triangle(_)
+            | Shape::TriangleMesh(_)
+            | Shape::SkinnedTriangleMesh(_)
+            | Shape::HeightField(_)
+            | Shape::LevelSet(_)
+    )
+}
+
 impl NarrowPhase {
     pub(crate) const fn new() -> Self {
         Self {
@@ -103,139 +173,104 @@ impl NarrowPhase {
             CollisionMode::Solid
         };
 
+        if let Some(surface_pair) = SurfacePair::new(
+            shape_a, collider_a, bvh_a, vertices_a, shape_b, collider_b, bvh_b, vertices_b, body_a,
+            body_b,
+        ) {
+            return self.detect_surface_pair(pair, surface_pair, pair_mode, contact_offset);
+        }
+
         match (shape_a, shape_b) {
-            (Shape::Plane(plane), convex) if convex.is_convex() => self.plane_convex(
-                pair,
-                plane,
-                collider_a,
-                body_a,
-                convex,
-                collider_b,
-                body_b,
-                pair_mode,
-                contact_offset,
-                true,
-            ),
-            (convex, Shape::Plane(plane)) if convex.is_convex() => self.plane_convex(
-                pair,
-                plane,
-                collider_b,
-                body_b,
-                convex,
-                collider_a,
-                body_a,
-                pair_mode,
-                contact_offset,
-                false,
-            ),
-            (Shape::TriangleMesh(mesh), convex) if convex.is_convex() => self.mesh_convex(
-                pair,
-                mesh,
-                vertices_a.unwrap_or_else(|| mesh.vertices()),
-                bvh_a.ok_or(CollisionError::GeometryBounds)?,
-                collider_a,
-                convex,
-                collider_b,
-                body_a,
-                body_b,
-                true,
-                contact_offset,
-            ),
-            (convex, Shape::TriangleMesh(mesh)) if convex.is_convex() => self.mesh_convex(
-                pair,
-                mesh,
-                vertices_b.unwrap_or_else(|| mesh.vertices()),
-                bvh_b.ok_or(CollisionError::GeometryBounds)?,
-                collider_b,
-                convex,
-                collider_a,
-                body_a,
-                body_b,
-                false,
-                contact_offset,
-            ),
-            (Shape::SkinnedTriangleMesh(mesh), convex) if convex.is_convex() => self.mesh_convex(
-                pair,
-                mesh.mesh(),
-                vertices_a.unwrap_or_else(|| mesh.mesh().vertices()),
-                bvh_a.ok_or(CollisionError::GeometryBounds)?,
-                collider_a,
-                convex,
-                collider_b,
-                body_a,
-                body_b,
-                true,
-                contact_offset,
-            ),
-            (convex, Shape::SkinnedTriangleMesh(mesh)) if convex.is_convex() => self.mesh_convex(
-                pair,
-                mesh.mesh(),
-                vertices_b.unwrap_or_else(|| mesh.mesh().vertices()),
-                bvh_b.ok_or(CollisionError::GeometryBounds)?,
-                collider_b,
-                convex,
-                collider_a,
-                body_a,
-                body_b,
-                false,
-                contact_offset,
-            ),
-            (Shape::HeightField(field), convex) if convex.is_convex() => self.height_field_convex(
-                pair,
-                field,
-                collider_a,
-                convex,
-                collider_b,
-                body_a,
-                body_b,
-                true,
-                contact_offset,
-            ),
-            (convex, Shape::HeightField(field)) if convex.is_convex() => self.height_field_convex(
-                pair,
-                field,
-                collider_b,
-                convex,
-                collider_a,
-                body_a,
-                body_b,
-                false,
-                contact_offset,
-            ),
-            (Shape::LevelSet(field), convex) if convex.is_convex() => self.level_set_convex(
-                pair, field, collider_a, convex, collider_b, body_a, body_b, true,
-            ),
-            (convex, Shape::LevelSet(field)) if convex.is_convex() => self.level_set_convex(
-                pair, field, collider_b, convex, collider_a, body_a, body_b, false,
-            ),
-            (Shape::Triangle(triangle), convex) if convex.is_convex() => self.triangle_convex(
-                pair,
-                triangle,
-                collider_a,
-                convex,
-                collider_b,
-                body_a,
-                body_b,
-                true,
-                contact_offset,
-            ),
-            (convex, Shape::Triangle(triangle)) if convex.is_convex() => self.triangle_convex(
-                pair,
-                triangle,
-                collider_b,
-                convex,
-                collider_a,
-                body_a,
-                body_b,
-                false,
-                contact_offset,
-            ),
             (Shape::Sphere(sphere_a), Shape::Sphere(sphere_b)) => sphere_sphere(
                 pair, sphere_a, collider_a, body_a, sphere_b, collider_b, body_b,
             ),
             (a, b) if a.is_convex() && b.is_convex() => {
                 self.convex_convex(pair, a, collider_a, body_a, b, collider_b, body_b)
             }
+            _ => Err(CollisionError::UnsupportedGeometryPair),
+        }
+    }
+
+    fn detect_surface_pair(
+        &mut self,
+        pair: CollisionPair,
+        routing: SurfacePair<'_>,
+        mode: CollisionMode,
+        contact_offset: f64,
+    ) -> Result<Option<ContactManifold>, CollisionError> {
+        match routing.surface {
+            Shape::Plane(plane) => self.plane_convex(
+                pair,
+                plane,
+                routing.surface_transform,
+                routing.convex,
+                routing.convex_transform,
+                routing.body_a,
+                routing.body_b,
+                mode,
+                contact_offset,
+                routing.surface_is_a,
+            ),
+            Shape::Triangle(triangle) => self.triangle_convex(
+                pair,
+                triangle,
+                routing.surface_transform,
+                routing.convex,
+                routing.convex_transform,
+                routing.body_a,
+                routing.body_b,
+                routing.surface_is_a,
+                contact_offset,
+            ),
+            Shape::TriangleMesh(mesh) => self.mesh_convex(
+                pair,
+                mesh,
+                routing.surface_vertices.unwrap_or_else(|| mesh.vertices()),
+                routing.surface_bvh.ok_or(CollisionError::GeometryBounds)?,
+                routing.surface_transform,
+                routing.convex,
+                routing.convex_transform,
+                routing.body_a,
+                routing.body_b,
+                routing.surface_is_a,
+                contact_offset,
+            ),
+            Shape::SkinnedTriangleMesh(mesh) => self.mesh_convex(
+                pair,
+                mesh.mesh(),
+                routing
+                    .surface_vertices
+                    .unwrap_or_else(|| mesh.mesh().vertices()),
+                routing.surface_bvh.ok_or(CollisionError::GeometryBounds)?,
+                routing.surface_transform,
+                routing.convex,
+                routing.convex_transform,
+                routing.body_a,
+                routing.body_b,
+                routing.surface_is_a,
+                contact_offset,
+            ),
+            Shape::HeightField(field) => self.height_field_convex(
+                pair,
+                field,
+                routing.surface_transform,
+                routing.convex,
+                routing.convex_transform,
+                routing.body_a,
+                routing.body_b,
+                routing.surface_is_a,
+                contact_offset,
+            ),
+            Shape::LevelSet(field) => self.level_set_convex(
+                pair,
+                field,
+                routing.surface_transform,
+                routing.convex,
+                routing.convex_transform,
+                routing.body_a,
+                routing.body_b,
+                routing.surface_is_a,
+            ),
             _ => Err(CollisionError::UnsupportedGeometryPair),
         }
     }
@@ -376,13 +411,13 @@ impl NarrowPhase {
         pair: CollisionPair,
         plane: &Plane,
         plane_transform: &Transform,
-        plane_body: &Transform,
         convex: &Shape,
         convex_transform: &Transform,
-        convex_body: &Transform,
+        body_a: &Transform,
+        body_b: &Transform,
         mode: CollisionMode,
         contact_offset: f64,
-        plane_is_a: bool,
+        surface_is_a: bool,
     ) -> Result<Option<ContactManifold>, CollisionError> {
         let local_normal = plane.normal();
         let plane_normal = plane_transform
@@ -427,35 +462,17 @@ impl NarrowPhase {
             )
             .ok_or(CollisionError::ArithmeticOverflow)?;
         let penetration = (-separation).max(0.0);
-        let (point_a, point_b, normal, body_transform_a, body_transform_b, feature_id) =
-            if plane_is_a {
-                (
-                    plane_contact,
-                    convex_point,
-                    normal_plane_to_convex,
-                    plane_body,
-                    convex_body,
-                    combine_feature_ids(0, feature),
-                )
-            } else {
-                (
-                    convex_point,
-                    plane_contact,
-                    -normal_plane_to_convex,
-                    convex_body,
-                    plane_body,
-                    combine_feature_ids(feature, 0),
-                )
-            };
-        make_manifold(
+        make_surface_manifold(
             pair,
-            body_transform_a,
-            body_transform_b,
-            point_a,
-            point_b,
-            normal,
+            surface_is_a,
+            body_a,
+            body_b,
+            plane_contact,
+            convex_point,
+            normal_plane_to_convex,
             penetration,
-            feature_id,
+            0,
+            feature,
         )
         .map(Some)
     }
@@ -587,35 +604,17 @@ impl NarrowPhase {
                 )
             }
         };
-        let (point_a, point_b, normal, body_transform_a, body_transform_b, feature_id) =
-            if triangle_is_a {
-                (
-                    triangle_point,
-                    convex_point,
-                    normal_triangle_to_convex,
-                    body_a,
-                    body_b,
-                    combine_feature_ids(triangle_feature, convex_feature),
-                )
-            } else {
-                (
-                    convex_point,
-                    triangle_point,
-                    -normal_triangle_to_convex,
-                    body_a,
-                    body_b,
-                    combine_feature_ids(convex_feature, triangle_feature),
-                )
-            };
-        make_manifold(
+        make_surface_manifold(
             pair,
-            body_transform_a,
-            body_transform_b,
-            point_a,
-            point_b,
-            normal,
+            triangle_is_a,
+            body_a,
+            body_b,
+            triangle_point,
+            convex_point,
+            normal_triangle_to_convex,
             penetration,
-            feature_id,
+            triangle_feature,
+            convex_feature,
         )
         .map(Some)
     }
@@ -690,7 +689,7 @@ impl NarrowPhase {
         convex_transform: &Transform,
         body_a: &Transform,
         body_b: &Transform,
-        field_is_a: bool,
+        surface_is_a: bool,
         contact_offset: f64,
     ) -> Result<Option<ContactManifold>, CollisionError> {
         let bounds = expanded_convex_bounds(convex, convex_transform, contact_offset)?;
@@ -713,7 +712,7 @@ impl NarrowPhase {
                 convex_transform,
                 body_a,
                 body_b,
-                field_is_a,
+                surface_is_a,
                 contact_offset,
             )?
             else {
@@ -734,7 +733,7 @@ impl NarrowPhase {
         convex_transform: &Transform,
         body_a: &Transform,
         body_b: &Transform,
-        field_is_a: bool,
+        surface_is_a: bool,
     ) -> Result<Option<ContactManifold>, CollisionError> {
         let Some(hit) = super::ccd::level_set_toi(
             convex,
@@ -751,23 +750,23 @@ impl NarrowPhase {
         if !gjk::distance_to_point(convex, convex_transform, hit.point_b)?.intersects {
             return Err(CollisionError::NonConvergent);
         }
-        let (point_a, point_b, normal) = if field_is_a {
-            (hit.point_b, hit.point_a, -hit.normal)
-        } else {
-            (hit.point_a, hit.point_b, hit.normal)
-        };
-        let separation = point_b
-            .checked_sub(point_a)
-            .and_then(|delta| delta.checked_dot(normal))
+        let surface_point = hit.point_b;
+        let convex_point = hit.point_a;
+        let surface_to_convex = -hit.normal;
+        let separation = convex_point
+            .checked_sub(surface_point)
+            .and_then(|delta| delta.checked_dot(surface_to_convex))
             .ok_or(CollisionError::ArithmeticOverflow)?;
-        make_manifold(
+        make_surface_manifold(
             pair,
+            surface_is_a,
             body_a,
             body_b,
-            point_a,
-            point_b,
-            normal,
+            surface_point,
+            convex_point,
+            surface_to_convex,
             (-separation).max(0.0),
+            0,
             0,
         )
         .map(Some)
@@ -966,6 +965,46 @@ fn make_manifold(
     let mut manifold = ContactManifold::new(pair);
     manifold.insert(contact, position)?;
     Ok(manifold)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_surface_manifold(
+    pair: CollisionPair,
+    surface_is_a: bool,
+    body_a: &Transform,
+    body_b: &Transform,
+    surface_point: Vec3,
+    convex_point: Vec3,
+    surface_to_convex: Vec3,
+    penetration: f64,
+    surface_feature: u64,
+    convex_feature: u64,
+) -> Result<ContactManifold, CollisionError> {
+    let (point_a, point_b, normal, feature_id) = if surface_is_a {
+        (
+            surface_point,
+            convex_point,
+            surface_to_convex,
+            combine_feature_ids(surface_feature, convex_feature),
+        )
+    } else {
+        (
+            convex_point,
+            surface_point,
+            -surface_to_convex,
+            combine_feature_ids(convex_feature, surface_feature),
+        )
+    };
+    make_manifold(
+        pair,
+        body_a,
+        body_b,
+        point_a,
+        point_b,
+        normal,
+        penetration,
+        feature_id,
+    )
 }
 
 fn reverse_manifold(
