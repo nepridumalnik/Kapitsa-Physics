@@ -139,7 +139,6 @@ impl Aabb {
         let source_magnitude = center.abs() + half_extents;
         if source_magnitude != DVec3::ZERO && (vector_part != DVec3::ZERO || quat.w.abs() != 1.0) {
             // Bound f32 rounding in the absolute quaternion terms, before cancellation.
-            let source_magnitude = center.abs() + half_extents;
             let absolute_vector_part = vector_part.abs();
             let dot_scale = source_magnitude.dot(absolute_vector_part);
             let term_one_scale = source_magnitude * (scalar_squared - vector_length_squared).abs();
