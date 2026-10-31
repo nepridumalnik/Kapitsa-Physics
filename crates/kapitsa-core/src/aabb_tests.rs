@@ -20,10 +20,10 @@ fn stores_bounds() {
 #[test]
 fn accepts_degenerate_bounds() {
     let point = bounds(Vec3::ONE, Vec3::ONE);
-    assert_eq!(point.size(), Vec3::ZERO);
+    assert_eq!(point.size().unwrap(), Vec3::ZERO);
 
     let plane = bounds(Vec3::ZERO, Vec3::new(2.0, 0.0, 4.0));
-    assert_eq!(plane.size(), Vec3::new(2.0, 0.0, 4.0));
+    assert_eq!(plane.size().unwrap(), Vec3::new(2.0, 0.0, 4.0));
 }
 
 #[rstest]
@@ -50,7 +50,7 @@ fn computes_center_and_size() {
     let aabb = bounds(Vec3::new(-4.0, -2.0, -6.0), Vec3::new(2.0, 6.0, 10.0));
 
     assert_eq!(aabb.center(), Vec3::new(-1.0, 2.0, 2.0));
-    assert_eq!(aabb.size(), Vec3::new(6.0, 8.0, 16.0));
+    assert_eq!(aabb.size().unwrap(), Vec3::new(6.0, 8.0, 16.0));
 }
 
 #[test]
@@ -133,4 +133,10 @@ fn union_with_contained_bounds_preserves_outer_bounds() {
     assert_eq!(outer.union(&inner), outer);
     assert_eq!(inner.union(&outer), outer);
     assert_eq!(outer.union(&outer), outer);
+}
+
+#[test]
+fn size_rejects_overflow() {
+    let aabb = Aabb::new(Vec3::splat(-f32::MAX), Vec3::splat(f32::MAX)).expect("valid AABB");
+    assert_eq!(aabb.size(), Err(AabbError::SizeOverflow));
 }

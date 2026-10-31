@@ -5,6 +5,7 @@ use std::fmt;
 pub enum AabbError {
     NonFiniteBounds,
     InvertedBounds,
+    SizeOverflow,
 }
 
 impl fmt::Display for AabbError {
@@ -12,6 +13,7 @@ impl fmt::Display for AabbError {
         match self {
             Self::NonFiniteBounds => formatter.write_str("AABB bounds must be finite"),
             Self::InvertedBounds => formatter.write_str("AABB minimum must not exceed maximum"),
+            Self::SizeOverflow => formatter.write_str("AABB size exceeds the finite range"),
         }
     }
 }

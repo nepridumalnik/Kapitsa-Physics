@@ -34,8 +34,11 @@ impl Aabb {
         self.min * 0.5 + self.max * 0.5
     }
 
-    pub fn size(&self) -> Vec3 {
-        self.max - self.min
+    pub fn size(&self) -> Result<Vec3, AabbError> {
+        match self.max - self.min {
+            size if size.is_finite() => Ok(size),
+            _ => Err(AabbError::SizeOverflow),
+        }
     }
 
     pub fn contains(&self, point: Vec3) -> bool {

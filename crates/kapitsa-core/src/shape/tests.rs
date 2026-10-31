@@ -865,7 +865,7 @@ fn shape_local_bounds_returns_none_for_plane() {
 }
 
 #[rstest]
-fn shape_local_bounds_returns_none_for_skinned_mesh(
+fn shape_local_bounds_reports_unimplemented_skinned_mesh_bounds(
     triangle_mesh: TriangleMesh,
     vertex_influences: Vec<Vec<BoneInfluence>>,
 ) {
