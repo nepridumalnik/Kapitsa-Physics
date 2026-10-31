@@ -1,6 +1,8 @@
 pub mod error;
+mod storage;
 
 pub use error::PhysicsMaterialError;
+pub use storage::{MaterialId, MaterialStorage};
 
 /// Surface friction, restitution, and density properties for a physics material.
 #[derive(Clone, Copy, Debug, PartialEq)]
