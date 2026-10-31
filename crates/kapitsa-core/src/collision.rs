@@ -1,3 +1,4 @@
+mod broad_phase;
 mod config;
 mod contact;
 mod error;
@@ -11,6 +12,7 @@ pub use contact::CollisionPair;
 pub use error::{CollisionError, QueryError};
 pub use event::{CollisionEvent, CollisionEventKind, ContactInfo};
 
+pub(crate) use broad_phase::CollisionProxy;
 pub(crate) use step::StepContext;
 pub(crate) use system::CollisionSystem;
 

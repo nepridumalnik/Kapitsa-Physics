@@ -205,6 +205,7 @@ impl PhysicsWorld {
         if let Err(error) = self
             .stage_spatial_proxies()
             .and_then(|()| self.collision_system.synchronize_spatial_index())
+            .and_then(|()| self.collision_system.generate_candidates())
         {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
@@ -245,6 +246,7 @@ impl PhysicsWorld {
             if predicted_id != body_id {
                 return Err(CollisionError::InvalidContact);
             }
+            let body_type = body_entry.body.physics().body_type();
             let mut next = body_entry.first_collider;
             while let Some(collider_id) = next {
                 if collider_id.world != self.world_id {
@@ -261,6 +263,23 @@ impl PhysicsWorld {
                     .collider
                     .world_bounds(&predicted_state.transform())
                     .map_err(|_| CollisionError::GeometryBounds)?;
+                self.collision_system
+                    .context
+                    .colliders
+                    .try_reserve(1)
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                self.collision_system
+                    .context
+                    .colliders
+                    .push(crate::collision::CollisionProxy {
+                        collider: collider_id,
+                        body: body_id,
+                        bounds,
+                        body_type,
+                        mode: collider_entry.collider.mode(),
+                        filter: collider_entry.collider.filter(),
+                        convex: collider_entry.collider.shape().is_convex(),
+                    });
                 if let Some(bounds) = bounds {
                     self.collision_system
                         .context
@@ -369,6 +388,7 @@ impl PhysicsWorld {
         if let Err(error) = self
             .stage_spatial_proxies()
             .and_then(|()| self.collision_system.synchronize_spatial_index())
+            .and_then(|()| self.collision_system.generate_candidates())
         {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));

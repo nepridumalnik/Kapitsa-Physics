@@ -1,5 +1,6 @@
 use super::{
-    CollisionConfig, CollisionError, CollisionEvent, StepContext, spatial_index::SpatialIndex,
+    CollisionConfig, CollisionError, CollisionEvent, StepContext, broad_phase::BroadPhase,
+    spatial_index::SpatialIndex,
 };
 use crate::{rigid_body::BodyState, world::BodyId};
 
@@ -9,6 +10,7 @@ pub(crate) struct CollisionSystem {
     pub(crate) context: StepContext,
     events: Vec<CollisionEvent>,
     spatial_index: Option<SpatialIndex>,
+    broad_phase: BroadPhase,
 }
 
 impl CollisionSystem {
@@ -18,6 +20,7 @@ impl CollisionSystem {
             context: StepContext::new(),
             events: Vec::new(),
             spatial_index: None,
+            broad_phase: BroadPhase::new(),
         }
     }
 
@@ -55,6 +58,17 @@ impl CollisionSystem {
                 Err(error)
             }
         }
+    }
+
+    pub(crate) fn generate_candidates(&mut self) -> Result<(), CollisionError> {
+        let result = self
+            .broad_phase
+            .generate(self.spatial_index.as_mut(), &self.context.colliders);
+        if let Err(error) = result {
+            self.mark_spatial_dirty();
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(crate) fn mark_spatial_dirty(&mut self) {

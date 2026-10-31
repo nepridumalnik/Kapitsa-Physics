@@ -138,7 +138,6 @@ impl SpatialIndex {
         Ok(true)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn query(
         &mut self,
         bounds: Aabb,
