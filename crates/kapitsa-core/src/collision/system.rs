@@ -302,6 +302,8 @@ impl CollisionSystem {
         self.record_island_build(island_started.elapsed(), island_count);
         #[cfg(feature = "bench-internals")]
         let solver_started = std::time::Instant::now();
+        #[cfg(feature = "bench-internals")]
+        let prepare_started = std::time::Instant::now();
         if self.solver_islands.len() < island_count {
             self.solver_islands
                 .try_reserve(island_count - self.solver_islands.len())
@@ -381,7 +383,13 @@ impl CollisionSystem {
                 island.manifolds.push(manifold);
             }
         }
+        #[cfg(feature = "bench-internals")]
+        {
+            self.benchmark_metrics.solver_prepare = prepare_started.elapsed();
+        }
         let config = self.config;
+        #[cfg(feature = "bench-internals")]
+        let iterations_started = std::time::Instant::now();
         if worker_count <= 1 || island_count <= 1 {
             for island in self.solver_islands.iter_mut().take(island_count) {
                 island
@@ -415,8 +423,13 @@ impl CollisionSystem {
             })?;
         }
         #[cfg(feature = "bench-internals")]
-        self.record_solver(solver_started.elapsed());
+        {
+            self.benchmark_metrics.solver_iterations = iterations_started.elapsed();
+            self.record_solver(solver_started.elapsed());
+        }
 
+        #[cfg(feature = "bench-internals")]
+        let writeback_started = std::time::Instant::now();
         let context = &mut self.context;
         for island in self.solver_islands.iter().take(island_count) {
             for (local_index, global_index) in island.body_indices.iter().copied().enumerate() {
@@ -472,6 +485,10 @@ impl CollisionSystem {
                 .get_or_insert_with(ContactCache::new)
                 .stage(&self.context.manifolds)?;
             self.cache_staged = true;
+        }
+        #[cfg(feature = "bench-internals")]
+        {
+            self.benchmark_metrics.solver_writeback = writeback_started.elapsed();
         }
         Ok(())
     }

@@ -58,6 +58,12 @@ pub struct CollisionStepMetrics {
     pub island_build: Duration,
     /// Time spent preparing and solving contact constraints.
     pub solver: Duration,
+    /// Time spent grouping bodies and manifolds into solver islands.
+    pub solver_prepare: Duration,
+    /// Time spent running contact solver iterations after island preparation.
+    pub solver_iterations: Duration,
+    /// Time spent writing solved states and manifolds back to staged data.
+    pub solver_writeback: Duration,
     /// Time spent constructing collision lifecycle events.
     pub events: Duration,
     /// Time spent committing body states and staged collision data.
@@ -94,6 +100,9 @@ impl CollisionStepMetrics {
         narrow_phase: Duration::ZERO,
         island_build: Duration::ZERO,
         solver: Duration::ZERO,
+        solver_prepare: Duration::ZERO,
+        solver_iterations: Duration::ZERO,
+        solver_writeback: Duration::ZERO,
         events: Duration::ZERO,
         commit: Duration::ZERO,
         candidate_count: 0,

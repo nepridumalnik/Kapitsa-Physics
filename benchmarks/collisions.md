@@ -254,3 +254,74 @@ one-bone ranges do not overlap at any tested size. Updating 64 bones costs
 somewhat more at 10,000 vertices, while both modes still recompute every
 skinned vertex. The 100,172-vertex all-bones run had a wide range and is
 load-sensitive.
+
+## Solver island layout comparison, stage 13
+
+The full-step samples use the current copied-per-island `SolverIsland` path.
+Each sample builds a new world, advances it for three untimed steady-state
+steps, then times one step. One separate world is used as a process warm-up;
+each row below is five release samples on 2026-11-01. The added phase metrics
+separate island preparation, solver iterations, and staged write-back. Buffer
+growth is reported as logical retained-capacity growth, not allocator calls.
+
+| Workload | Full step min / median / max | Prepare / iterations / write-back median | Logical body / manifold copies | Capacity growth / retained scratch |
+|---|---:|---:|---:|---:|
+| 1 island, 1,000 Dynamic | 20.205 / 20.293 / 20.400 ms | 0.055 / 14.428 / 0.192 ms | 1,000 / 2,997 | 0 / 4,986,160 B |
+| 500 islands, 2 Dynamic each | 7.200 / 7.247 / 7.473 ms | 0.038 / 5.555 / 0.082 ms | 1,000 / 1,500 | 0 / 4,803,368 B |
+| 500 Dynamic, one shared Static plane | 4.252 / 4.256 / 4.287 ms | 0.033 / 3.050 / 0.059 ms | 1,000 / 1,500 | 0 / 4,258,013 B |
+| 1,000 Dynamic, 4,000 contacts | 39.671 / 39.956 / 40.098 ms | 0.430 / 27.860 / 1.005 ms | 5,000 / 12,000 | 0 / 22,995,912 B |
+| 20,000 Dynamic, 128 contact pairs | 20.864 / 21.148 / 21.315 ms | 0.032 / 1.444 / 0.023 ms | 256 / 384 | 0 / 19,130,048 B |
+
+The shared-plane case has 500 islands; its one Static body is copied into each
+island as a read-only solver body. Dynamic bodies remain in one island each.
+The 20,000-body sparse case creates only 128 contact islands; most retained
+scratch belongs to the world step and spatial index rather than island arrays.
+
+The layout-only `layouts` benchmark implements the current per-island grouping
+and a packed-range candidate. Both produce identical sorted body indices,
+manifold indices, and local manifold body indices in all six generated
+workloads. It measures preparation and remapping only; shared `SolverWorkspace`
+contact iterations and full-world commit are not part of this prototype
+comparison. Each entry is the median of five samples, each timing 250 warmed
+preparations. Retained bytes cover only the two layout structures, not world
+scratch or allocator metadata.
+
+| Workload | Copied layout | Packed layout | Logical body / manifold copies (both) | Retained bytes: copied / packed |
+|---|---:|---:|---:|---:|
+| 1 island, 1,000 Dynamic | 0.0137 ms | 0.0041 ms | 1,000 / 999 | 41,248 / 48,216 |
+| 500 islands, 2 Dynamic each | 0.0034 ms | 0.0078 ms | 1,000 / 500 | 100,000 / 60,000 |
+| 500 Dynamic, shared Static | 0.0036 ms | 0.0072 ms | 1,000 / 500 | 100,000 / 56,008 |
+| 1,000 Dynamic, 4,000 contacts | 0.0291 ms | 0.0302 ms | 5,000 / 4,000 | 232,000 / 264,000 |
+| 4,096 Dynamic, 2,048 islands | 0.0141 ms | 0.0316 ms | 4,096 / 2,048 | 409,600 / 245,760 |
+| 20,000 bodies, 128 contacts | 0.0008 ms | 0.0018 ms | 256 / 128 | 25,600 / 173,312 |
+
+Packed storage helps the single large island's layout preparation by about 10
+microseconds, but is slower for four of the other five cases and has no
+measurable preparation win for 4,000 contacts. It keeps the same logical body
+and manifold copy counts. The sparse 20,000-body layout uses a body-to-local
+map and retains about 6.8 times the copied layout's capacity. Since the packed
+prototype did not establish an end-to-end step improvement and several
+workloads regressed at the preparation phase, the production `SolverIsland`
+layout was retained.
+
+The 4,096-Dynamic / 2,048-island workload also uses the normal sharded step
+entry point to measure 1, 2, and 4 workers. Each sample has three untimed steps
+on that world before the measured one; retained capacity had zero logical
+growth on all measured steps.
+
+| Workers | Full step min / median / max | Prepare / iterations / write-back median | Logical copies | Retained scratch |
+|---:|---:|---:|---:|---:|
+| 1 | 33.897 / 33.997 / 35.400 ms | 0.371 / 23.011 / 0.479 ms | 4,096 bodies / 6,144 manifolds | 19,583,168 B |
+| 2 | 22.713 / 23.122 / 24.965 ms | 0.399 / 12.028 / 0.534 ms | 4,096 bodies / 6,144 manifolds | 19,583,168 B |
+| 4 | 16.915 / 17.030 / 17.785 ms | 0.413 / 6.388 / 0.499 ms | 4,096 bodies / 6,144 manifolds | 19,583,168 B |
+
+Median full-step speedup was 1.47x at two workers and 2.00x at four workers
+relative to one worker. This measures the current copied layout; it is not a
+packed-layout parallel speedup comparison.
+
+Run the focused groups with:
+
+```powershell
+cargo bench -p kapitsa-core --features bench-internals --bench collision_storage -- layouts
+cargo bench -p kapitsa-core --features bench-internals --bench collision_storage -- workers_4096
+```
