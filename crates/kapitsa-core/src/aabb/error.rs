@@ -6,6 +6,7 @@ pub enum AabbError {
     NonFiniteBounds,
     InvertedBounds,
     SizeOverflow,
+    TransformOverflow,
 }
 
 impl fmt::Display for AabbError {
@@ -14,6 +15,9 @@ impl fmt::Display for AabbError {
             Self::NonFiniteBounds => formatter.write_str("AABB bounds must be finite"),
             Self::InvertedBounds => formatter.write_str("AABB minimum must not exceed maximum"),
             Self::SizeOverflow => formatter.write_str("AABB size exceeds the finite range"),
+            Self::TransformOverflow => {
+                formatter.write_str("transformed AABB exceeds the finite range")
+            }
         }
     }
 }

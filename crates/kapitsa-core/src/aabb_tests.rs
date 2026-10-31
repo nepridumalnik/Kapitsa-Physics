@@ -1,10 +1,20 @@
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use rstest::rstest;
 
 use super::{Aabb, AabbError};
+use crate::transform::Transform;
 
 fn bounds(min: Vec3, max: Vec3) -> Aabb {
     Aabb::new(min, max).expect("valid AABB")
+}
+
+fn assert_vec3_close(actual: Vec3, expected: Vec3) {
+    const EPSILON: f32 = 2.0e-5;
+
+    assert!(
+        (actual - expected).abs().max_element() <= EPSILON,
+        "expected {expected:?}, got {actual:?}"
+    );
 }
 
 #[test]
@@ -58,6 +68,103 @@ fn computes_center_without_intermediate_overflow() {
     let aabb = bounds(Vec3::splat(-f32::MAX), Vec3::splat(f32::MAX));
 
     assert_eq!(aabb.center(), Vec3::ZERO);
+}
+
+#[test]
+fn identity_transform_preserves_bounds() {
+    let aabb = bounds(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(4.0, 5.0, 6.0));
+
+    assert_eq!(aabb.transformed(&Transform::identity()), Ok(aabb));
+}
+
+#[test]
+fn translation_moves_bounds() {
+    let aabb = bounds(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(4.0, 5.0, 6.0));
+    let transform =
+        Transform::new(Vec3::new(3.0, -2.0, 5.0), Quat::IDENTITY).expect("valid translation");
+
+    let transformed = aabb.transformed(&transform).expect("finite bounds");
+    assert_eq!(transformed.min(), Vec3::new(2.0, -4.0, 2.0));
+    assert_eq!(transformed.max(), Vec3::new(7.0, 3.0, 11.0));
+}
+
+#[test]
+fn quarter_turn_around_z_swaps_x_and_y_extents() {
+    let aabb = bounds(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0));
+    let transform = Transform::new(
+        Vec3::ZERO,
+        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+    )
+    .expect("valid rotation");
+
+    let transformed = aabb.transformed(&transform).expect("finite bounds");
+    assert_vec3_close(transformed.min(), Vec3::new(-2.0, -1.0, -3.0));
+    assert_vec3_close(transformed.max(), Vec3::new(2.0, 1.0, 3.0));
+}
+
+#[test]
+fn rotation_and_translation_are_both_applied() {
+    let aabb = bounds(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0));
+    let transform = Transform::new(
+        Vec3::new(10.0, -4.0, 2.0),
+        Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+    )
+    .expect("valid transform");
+
+    let transformed = aabb.transformed(&transform).expect("finite bounds");
+    assert_vec3_close(transformed.min(), Vec3::new(8.0, -5.0, -1.0));
+    assert_vec3_close(transformed.max(), Vec3::new(12.0, -3.0, 5.0));
+}
+
+#[test]
+fn arbitrary_rotation_bounds_all_transformed_corners() {
+    let aabb = bounds(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(4.0, 5.0, 6.0));
+    let rotation =
+        Quat::from_rotation_x(0.37) * Quat::from_rotation_y(-0.81) * Quat::from_rotation_z(0.42);
+    let transform = Transform::new(Vec3::new(2.0, -3.0, 1.5), rotation).expect("valid transform");
+    let transformed = aabb.transformed(&transform).expect("finite bounds");
+
+    for x in [aabb.min().x, aabb.max().x] {
+        for y in [aabb.min().y, aabb.max().y] {
+            for z in [aabb.min().z, aabb.max().z] {
+                let corner = transform.transform_point(Vec3::new(x, y, z));
+                assert!(corner.cmpge(transformed.min()).all());
+                assert!(corner.cmple(transformed.max()).all());
+            }
+        }
+    }
+}
+
+#[test]
+fn degenerate_bounds_transform_as_a_point() {
+    let point = Vec3::new(1.0, 2.0, -3.0);
+    let aabb = bounds(point, point);
+    let transform =
+        Transform::new(Vec3::new(4.0, -2.0, 7.0), Quat::IDENTITY).expect("valid translation");
+
+    let transformed = aabb.transformed(&transform).expect("finite bounds");
+    assert_eq!(transformed.min(), point + transform.translation());
+    assert_eq!(transformed.max(), point + transform.translation());
+}
+
+#[test]
+fn transformed_bounds_report_coordinate_overflow() {
+    let aabb = bounds(Vec3::splat(f32::MAX), Vec3::splat(f32::MAX));
+    let transform =
+        Transform::new(Vec3::splat(f32::MAX), Quat::IDENTITY).expect("valid translation");
+
+    assert_eq!(
+        aabb.transformed(&transform),
+        Err(AabbError::TransformOverflow)
+    );
+}
+
+#[test]
+fn identity_transform_handles_bounds_whose_size_overflows() {
+    let aabb = bounds(Vec3::splat(-f32::MAX), Vec3::splat(f32::MAX));
+
+    assert_eq!(aabb.size(), Err(AabbError::SizeOverflow));
+    assert_eq!(aabb.transformed(&Transform::identity()), Ok(aabb));
 }
 
 #[rstest]
