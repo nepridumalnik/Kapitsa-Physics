@@ -22,32 +22,32 @@ Times are milliseconds per one `PhysicsWorld::step`. `Index` includes proxy cons
 
 | Scenario | Step | Index | Broad | Narrow | CCD | Island ms | Solver | Events | Commit | Candidates | Contacts | CCD impacts | Island count | Retained scratch |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 256 separated dynamic spheres | 0.227 | 0.134 | 0.033 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.001 | 0 | 0 | 0 | 0 | 168 KiB |
-| 4,096 separated dynamic spheres | 4.759 | 2.386 | 1.245 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.021 | 0 | 0 | 0 | 0 | 2,688 KiB |
-| 20,000 separated dynamic spheres | 27.293 | 13.015 | 8.557 | 0.000 | 0.000 | 0.001 | 0.000 | 0.000 | 0.258 | 0 | 0 | 0 | 0 | 16,420 KiB |
-| 20,000 bodies, 128 localized plane contacts | 37.566 | 12.964 | 9.394 | 4.613 | 0.197 | 0.002 | 0.839 | 0.010 | 0.211 | 20,000 | 128 | 0 | 128 | 34,343 KiB |
-| 1,000 overlapping cuboids, one island | 17.538 | 0.400 | 0.191 | 3.020 | 0.002 | 0.014 | 12.449 | 0.054 | 0.011 | 999 | 999 | 0 | 1 | 4,034 KiB |
-| 20,000 static + 100 separated dynamic spheres | 23.550 | 12.399 | 9.295 | 0.000 | 0.000 | 0.001 | 0.000 | 0.000 | 0.229 | 0 | 0 | 0 | 0 | 16,446 KiB |
-| Large triangle mesh + 100 movers | 1.507 | 0.060 | 0.028 | 0.490 | 0.000 | 0.001 | 0.762 | 0.018 | 0.001 | 100 | 100 | 0 | 100 | 759 KiB |
-| Heightfield + 512 movers | 6.338 | 0.268 | 0.173 | 0.927 | 0.001 | 0.007 | 4.195 | 0.098 | 0.004 | 512 | 512 | 0 | 512 | 4,151 KiB |
-| Level set + 256 movers | 3.305 | 0.139 | 0.078 | 0.760 | 0.000 | 0.004 | 1.929 | 0.045 | 0.002 | 256 | 256 | 0 | 256 | 2,076 KiB |
-| 64 fast CCD bodies vs. thin wall | 259.986 | 0.034 | 0.019 | 0.061 | 259.802 | 0.001 | 0.000 | 0.023 | 0.001 | 64 | 0 | 64 | 0 | 145 KiB |
+| 256 separated dynamic spheres | 0.229 | 0.121 | 0.038 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.001 | 0 | 0 | 0 | 0 | 168 KiB |
+| 4,096 separated dynamic spheres | 4.780 | 2.355 | 1.377 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.036 | 0 | 0 | 0 | 0 | 2,688 KiB |
+| 20,000 separated dynamic spheres | 27.327 | 12.710 | 8.741 | 0.000 | 0.000 | 0.001 | 0.000 | 0.000 | 0.227 | 0 | 0 | 0 | 0 | 16,420 KiB |
+| 20,000 bodies, 128 localized sphere pairs | 30.513 | 12.938 | 9.509 | 0.032 | 0.192 | 0.004 | 1.658 | 0.011 | 0.228 | 128 | 128 | 0 | 128 | 18,580 KiB |
+| 1,000 overlapping cuboids, one island | 17.839 | 0.441 | 0.196 | 3.134 | 0.002 | 0.020 | 12.672 | 0.053 | 0.011 | 999 | 999 | 0 | 1 | 4,034 KiB |
+| 20,000 static + 100 separated dynamic spheres | 23.030 | 11.910 | 9.396 | 0.000 | 0.000 | 0.001 | 0.000 | 0.000 | 0.234 | 0 | 0 | 0 | 0 | 16,446 KiB |
+| Large triangle mesh + 100 movers | 1.492 | 0.057 | 0.033 | 0.499 | 0.000 | 0.002 | 0.783 | 0.021 | 0.001 | 100 | 100 | 0 | 100 | 759 KiB |
+| Heightfield + 512 movers | 6.364 | 0.234 | 0.172 | 0.941 | 0.001 | 0.005 | 4.210 | 0.103 | 0.005 | 512 | 512 | 0 | 512 | 4,151 KiB |
+| Level set + 256 movers | 3.346 | 0.121 | 0.076 | 0.750 | 0.000 | 0.002 | 1.986 | 0.047 | 0.002 | 256 | 256 | 0 | 256 | 2,076 KiB |
+| 64 fast CCD bodies vs. thin wall | 259.819 | 0.042 | 0.017 | 0.062 | 259.615 | 0.001 | 0.000 | 0.016 | 0.000 | 64 | 0 | 64 | 0 | 145 KiB |
 
-The 20,000 separated-body case emitted zero candidate pairs. Its index and broadphase times were 13.015 ms and 8.557 ms. Against the 4,096-body case, the body count grew 4.88x and those phases grew 5.45x and 6.87x respectively. This sample gives no sign of an all-pairs candidate scan; it does not establish scaling for every distribution.
+The 20,000 separated-body case emitted zero candidate pairs. Its index and broadphase times were 12.710 ms and 8.741 ms. Against the 4,096-body case, the body count grew 4.88x and those phases grew 5.40x and 6.35x respectively. This sample gives no sign of an all-pairs candidate scan; it does not establish scaling for every distribution.
 
-Spatial-query load used 20,000 static spheres and 100 raycasts per sample. The median was 1,254.974 ms for 100 rays (12,549.743 us per query). This is a notably expensive workload and should be treated as a follow-up optimization target if query-heavy scenes matter.
+Spatial-query load used 20,000 static spheres and 100 raycasts per sample. The median was 1,296.339 ms for 100 rays (12,963.394 us per query). This is a notably expensive workload and should be treated as a follow-up optimization target if query-heavy scenes matter.
 
 ## Tokio worker comparison
 
-Each entry is the median elapsed time for eight collision steps. The worlds contain up to 128 isolated sphere-plane contacts, with remaining dynamic spheres separated above the plane. Controller setup is outside the timed region.
+Each entry is the median elapsed time for eight collision steps. The worlds contain 16 or 128 overlapping dynamic sphere pairs with remaining spheres separated well away. Controller setup is outside the timed region.
 
 | Bodies | `PhysicsWorld::step` | Controller x1 | Controller x2 | Controller x4 |
 |---:|---:|---:|---:|---:|
-| 256 | 3.81 ms | 4.04 ms (0.94x) | 4.79 ms (0.80x) | 5.16 ms (0.74x) |
-| 4,096 | 54.13 ms | 53.89 ms (1.00x) | 53.22 ms (1.02x) | 55.39 ms (0.98x) |
-| 20,000 | 287.58 ms | 265.41 ms (1.08x) | 281.81 ms (1.02x) | 281.84 ms (1.02x) |
+| 256 | 2.92 ms | 3.46 ms (0.85x) | 4.19 ms (0.70x) | 4.18 ms (0.70x) |
+| 4,096 | 42.28 ms | 42.94 ms (0.98x) | 36.97 ms (1.14x) | 37.96 ms (1.11x) |
+| 20,000 | 184.05 ms | 184.28 ms (1.00x) | 184.55 ms (1.00x) | 172.90 ms (1.06x) |
 
-Worker scheduling cost more for the small scene. At 4,096 and 20,000 bodies, this collision workload was near parity across worker counts; contact processing remains part of the step and the benchmark does not claim a parallel speedup for every collision distribution.
+Worker scheduling cost more for the small scene. At 4,096 bodies, two and four workers improved this collision workload by 14% and 11%; at 20,000 bodies, four workers improved it by 6%. These results apply to this workload and machine, not every collision distribution.
 
 ## Memory estimate limits
 
@@ -55,7 +55,7 @@ Worker scheduling cost more for the small scene. At 4,096 and 20,000 bodies, thi
 
 ## Workload notes
 
-- The 20,000-body localized-contact scene has one infinite plane, 128 spheres touching it, and the remaining spheres elevated. The plane yields 20,000 broadphase candidates, of which 128 create contacts.
+- The 20,000-body localized-contact scene has 128 overlapping sphere pairs and the remaining spheres far away. It yields 128 broadphase candidates and contacts.
 - The 1,000-body island is a chain of overlapping cuboids; it creates 999 candidates and one connected solver island.
 - The 20,000-static/100-dynamic scene keeps the dynamic bodies separated to isolate mixed body-count indexing and broadphase cost.
 - Triangle mesh, heightfield, and level-set scenes move spheres into their surface during the measured step.

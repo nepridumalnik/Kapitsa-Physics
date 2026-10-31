@@ -1,7 +1,7 @@
 use crate::{
     aabb::Aabb,
     collider::CollisionMode,
-    shape::{HeightField, LevelSet, Plane, Shape, Triangle, TriangleMesh},
+    shape::{HeightField, LevelSet, Plane, Shape, Sphere, Triangle, TriangleMesh},
     transform::Transform,
 };
 use kapitsa_math::Vec3;
@@ -227,6 +227,9 @@ impl NarrowPhase {
                 body_b,
                 false,
                 contact_offset,
+            ),
+            (Shape::Sphere(sphere_a), Shape::Sphere(sphere_b)) => sphere_sphere(
+                pair, sphere_a, collider_a, body_a, sphere_b, collider_b, body_b,
             ),
             (a, b) if a.is_convex() && b.is_convex() => {
                 self.convex_convex(pair, a, collider_a, body_a, b, collider_b, body_b)
@@ -886,6 +889,62 @@ fn make_manifold(
     let mut manifold = ContactManifold::new(pair);
     manifold.insert(contact, position)?;
     Ok(manifold)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sphere_sphere(
+    pair: CollisionPair,
+    sphere_a: &Sphere,
+    collider_a: &Transform,
+    body_a: &Transform,
+    sphere_b: &Sphere,
+    collider_b: &Transform,
+    body_b: &Transform,
+) -> Result<Option<ContactManifold>, CollisionError> {
+    let center_delta = collider_b
+        .translation()
+        .checked_sub(collider_a.translation())
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let distance = center_delta
+        .checked_length()
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let radius_sum = sphere_a.radius() + sphere_b.radius();
+    if !radius_sum.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    if distance > radius_sum {
+        return Ok(None);
+    }
+
+    let normal = center_delta.try_normalize().unwrap_or(Vec3::X);
+    let point_a = collider_a
+        .translation()
+        .checked_add(
+            normal
+                .checked_mul_scalar(sphere_a.radius())
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let point_b = collider_b
+        .translation()
+        .checked_sub(
+            normal
+                .checked_mul_scalar(sphere_b.radius())
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+
+    make_manifold(
+        pair,
+        body_a,
+        body_b,
+        point_a,
+        point_b,
+        normal,
+        (radius_sum - distance).max(0.0),
+        0,
+    )
+    .map(Some)
 }
 
 fn closest_point_on_triangle(point: Vec3, vertices: [Vec3; 3]) -> Result<Vec3, CollisionError> {

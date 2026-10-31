@@ -9,7 +9,7 @@ use kapitsa_core::{
     collision::{CollisionStepMetrics, QueryFilter, Ray},
     mass::MassProperties,
     rigid_body::{CcdMode, RigidBody},
-    shape::{Cuboid, HeightField, LevelSet, Plane, Shape, Sphere, TriangleMesh},
+    shape::{Cuboid, HeightField, LevelSet, Shape, Sphere, TriangleMesh},
     transform::Transform,
     world::PhysicsWorld,
 };
@@ -65,22 +65,21 @@ fn separated_spheres_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
 fn contact_pairs(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     let mut world = PhysicsWorld::new();
     let mass = mass()?;
-    let floor = world.add_body(RigidBody::new_static(Transform::identity()))?;
-    world.add_collider(
-        floor,
-        Collider::new(
-            Shape::Plane(Plane::new(0.0, 1.0, 0.0, 0.0)?),
-            Transform::identity(),
-        ),
-    )?;
-    let contact_count = count.min(128);
-    for index in 0..contact_count {
-        let x = (index % 32) as f64 * 2.0;
-        let z = (index / 32) as f64 * 2.0;
-        add_sphere(&mut world, Vec3::new(x, 0.5, z), Vec3::ZERO, mass, false)?;
+    let pair_count = (count / 2).min(128);
+    for pair in 0..pair_count {
+        let x = (pair % 32) as f64 * 3.0;
+        let z = (pair / 32) as f64 * 3.0;
+        add_sphere(&mut world, Vec3::new(x, 0.0, z), Vec3::ZERO, mass, false)?;
+        add_sphere(
+            &mut world,
+            Vec3::new(x + 0.9, 0.0, z),
+            Vec3::ZERO,
+            mass,
+            false,
+        )?;
     }
-    for index in contact_count..count {
-        let index = index - contact_count;
+    for index in pair_count * 2..count {
+        let index = index - pair_count * 2;
         let x = (index % 200) as f64 * 2.0;
         let z = (index / 200) as f64 * 2.0;
         add_sphere(&mut world, Vec3::new(x, 10.0, z), Vec3::ZERO, mass, false)?;

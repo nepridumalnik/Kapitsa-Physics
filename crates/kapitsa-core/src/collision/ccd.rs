@@ -36,6 +36,16 @@ pub(crate) fn convex_toi(
     if !shape_a.is_convex() || !(shape_b.is_convex() || matches!(shape_b, Shape::Triangle(_))) {
         return Err(CollisionError::UnsupportedGeometryPair);
     }
+    if let (Shape::Sphere(sphere_a), Shape::Sphere(sphere_b)) = (shape_a, shape_b) {
+        return sphere_sphere_toi(
+            sphere_a.radius(),
+            start_a,
+            end_a,
+            sphere_b.radius(),
+            start_b,
+            end_b,
+        );
+    }
     let radius_a = shape_radius(shape_a)?;
     let radius_b = shape_radius(shape_b)?;
     let motion_bound = translation_delta(start_a, end_a)?.length()
@@ -88,6 +98,102 @@ pub(crate) fn convex_toi(
         toi = next_toi.min(1.0);
     }
     Err(CollisionError::NonConvergent)
+}
+
+fn sphere_sphere_toi(
+    radius_a: f64,
+    start_a: Transform,
+    end_a: Transform,
+    radius_b: f64,
+    start_b: Transform,
+    end_b: Transform,
+) -> Result<Option<CcdHit>, CollisionError> {
+    let relative_start = start_b
+        .translation()
+        .checked_sub(start_a.translation())
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let motion_a = translation_delta(start_a, end_a)?;
+    let motion_b = translation_delta(start_b, end_b)?;
+    let relative_motion = motion_b
+        .checked_sub(motion_a)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let radius = radius_a + radius_b;
+    let a = relative_motion
+        .checked_dot(relative_motion)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let b = 2.0
+        * relative_start
+            .checked_dot(relative_motion)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+    let c = relative_start
+        .checked_dot(relative_start)
+        .ok_or(CollisionError::ArithmeticOverflow)?
+        - radius * radius;
+    if !radius.is_finite() || !a.is_finite() || !b.is_finite() || !c.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+
+    let toi = if c <= 0.0 {
+        0.0
+    } else {
+        if a <= f64::MIN_POSITIVE {
+            return Ok(None);
+        }
+        let discriminant = b * b - 4.0 * a * c;
+        if !discriminant.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        let tolerance = (b * b).max((4.0 * a * c).abs()).max(1.0) * f64::EPSILON * 128.0;
+        if discriminant < -tolerance {
+            return Ok(None);
+        }
+        let toi = (-b - discriminant.max(0.0).sqrt()) / (2.0 * a);
+        if !toi.is_finite() || !(0.0..=1.0).contains(&toi) {
+            return Ok(None);
+        }
+        toi
+    };
+
+    let center_a = start_a
+        .translation()
+        .checked_add(
+            motion_a
+                .checked_mul_scalar(toi)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let center_b = start_b
+        .translation()
+        .checked_add(
+            motion_b
+                .checked_mul_scalar(toi)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let normal = center_b
+        .checked_sub(center_a)
+        .and_then(Vec3::try_normalize)
+        .unwrap_or(Vec3::X);
+    let point_a = center_a
+        .checked_add(
+            normal
+                .checked_mul_scalar(radius_a)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let point_b = center_b
+        .checked_sub(
+            normal
+                .checked_mul_scalar(radius_b)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    Ok(Some(CcdHit {
+        toi,
+        normal,
+        point_a,
+        point_b,
+    }))
 }
 
 /// Finds a convex shape's first contact with a moving plane.

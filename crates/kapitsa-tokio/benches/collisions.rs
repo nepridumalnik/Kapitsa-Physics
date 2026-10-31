@@ -8,7 +8,7 @@ use kapitsa_core::{
     collider::Collider,
     mass::MassProperties,
     rigid_body::RigidBody,
-    shape::{Plane, Shape, Sphere},
+    shape::{Shape, Sphere},
     transform::Transform,
     world::PhysicsWorld,
 };
@@ -61,27 +61,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn collision_world(body_count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     let mut world = PhysicsWorld::new();
-    let plane = world.add_body(RigidBody::new_static(Transform::identity()))?;
-    world.add_collider(
-        plane,
-        Collider::new(
-            Shape::Plane(Plane::new(0.0, 1.0, 0.0, 0.0)?),
-            Transform::identity(),
-        ),
-    )?;
-
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
-    let contact_count = (body_count / 8).min(128);
+    let pair_count = (body_count / 16).min(128);
     for index in 0..body_count {
-        let (position, velocity) = if index < contact_count {
-            let x = (index % 32) as f64 * 2.0;
-            let z = (index / 32) as f64 * 2.0;
-            (Vec3::new(x, 0.5, z), Vec3::ZERO)
+        let (position, velocity) = if index < pair_count * 2 {
+            let pair = index / 2;
+            let offset = if index % 2 == 0 { 0.0 } else { 0.9 };
+            (Vec3::new(pair as f64 * 3.0 + offset, 0.0, 0.0), Vec3::ZERO)
         } else {
-            let index = index - contact_count;
+            let index = index - pair_count * 2;
             let x = (index % 200) as f64 * 2.0;
             let z = (index / 200) as f64 * 2.0;
-            (Vec3::new(x, 5.0, z), Vec3::new(0.0, -0.1, 0.0))
+            (Vec3::new(x, 10.0, z), Vec3::ZERO)
         };
         let mut body = RigidBody::new_dynamic(Transform::new(position, Quat::IDENTITY)?, mass)?;
         body.set_linear_velocity(velocity)?;

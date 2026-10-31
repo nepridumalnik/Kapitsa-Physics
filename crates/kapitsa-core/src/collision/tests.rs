@@ -204,6 +204,76 @@ fn world_step_resolves_solid_contacts_and_publishes_lifecycle_events() {
 }
 
 #[test]
+fn world_step_resolves_overlapping_dynamic_spheres() {
+    let mut world = PhysicsWorld::new();
+    let make_collider = || {
+        Collider::new(
+            Shape::Sphere(Sphere::new(0.5).unwrap()),
+            Transform::identity(),
+        )
+    };
+    let left = world
+        .add_body(dynamic_body(
+            Vec3::new(-0.45, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        ))
+        .unwrap();
+    let left_collider = world.add_collider(left, make_collider()).unwrap();
+    let right = world
+        .add_body(dynamic_body(
+            Vec3::new(0.45, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+        ))
+        .unwrap();
+    let right_collider = world.add_collider(right, make_collider()).unwrap();
+
+    world.step(1.0 / 60.0).unwrap();
+
+    let pair = CollisionPair::new(left_collider, right_collider).unwrap();
+    assert!(world.collision_events().iter().any(|event| {
+        event.kind == CollisionEventKind::Impact
+            && event.pair == pair
+            && event
+                .contact
+                .is_some_and(|contact| contact.normal_impulse > 0.0)
+    }));
+    assert!(world.body(left).unwrap().state().linear_velocity().x < 1.0);
+    assert!(world.body(right).unwrap().state().linear_velocity().x > -1.0);
+}
+
+#[test]
+fn continuous_dynamic_spheres_resolve_relative_toi() {
+    let mut world = PhysicsWorld::new();
+    let make_collider = || {
+        Collider::new(
+            Shape::Sphere(Sphere::new(0.5).unwrap()),
+            Transform::identity(),
+        )
+    };
+    let mut left_body = dynamic_body(Vec3::new(-5.0, 0.0, 0.0), Vec3::new(1000.0, 0.0, 0.0));
+    left_body.set_ccd_mode(CcdMode::Continuous);
+    let left = world.add_body(left_body).unwrap();
+    let left_collider = world.add_collider(left, make_collider()).unwrap();
+    let mut right_body = dynamic_body(Vec3::new(5.0, 0.0, 0.0), Vec3::new(-1000.0, 0.0, 0.0));
+    right_body.set_ccd_mode(CcdMode::Continuous);
+    let right = world.add_body(right_body).unwrap();
+    let right_collider = world.add_collider(right, make_collider()).unwrap();
+
+    world.step(0.01).unwrap();
+
+    assert!(world.body(left).unwrap().state().linear_velocity().x < 0.0);
+    assert!(world.body(right).unwrap().state().linear_velocity().x > 0.0);
+    let pair = CollisionPair::new(left_collider, right_collider).unwrap();
+    assert!(world.collision_events().iter().any(|event| {
+        event.kind == CollisionEventKind::Impact
+            && event.pair == pair
+            && event
+                .contact
+                .is_some_and(|contact| contact.normal_impulse > 0.0)
+    }));
+}
+
+#[test]
 fn world_step_reports_sensor_overlap_without_changing_motion() {
     let mut world = PhysicsWorld::new();
     let plane = add_plane(&mut world, CollisionMode::Sensor);
