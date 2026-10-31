@@ -247,10 +247,10 @@ impl PhysicsWorld {
             }
             if let Some(index) = &self.query_index {
                 let mut stack = std::mem::take(&mut scratch.ray_stack);
-                let max_distance = closest.map_or(ray.max_distance, |hit: RayHit| hit.distance);
+                let max_distance = closest.map_or(ray.max_distance(), |hit: RayHit| hit.distance);
                 let result = index.query_ray(
-                    ray.origin,
-                    ray.direction,
+                    ray.origin(),
+                    ray.direction(),
                     max_distance,
                     &mut stack,
                     |collider| {
@@ -496,8 +496,8 @@ impl PhysicsWorld {
             .transform()
             .compose(&entry.collider.local_transform())
             .map_err(|_| QueryError::ArithmeticOverflow)?;
-        let mut limited_ray = ray;
-        limited_ray.max_distance = closest.map_or(ray.max_distance, |hit| hit.distance);
+        let limited_ray =
+            ray.with_max_distance(closest.map_or(ray.max_distance(), |hit| hit.distance));
         let Some((position, normal, distance)) = raycast_shape_with_scratch(
             entry.collider.shape(),
             transform,
@@ -674,6 +674,26 @@ impl PhysicsWorld {
         entry.collider.set_material(material);
         self.collision_system.mark_spatial_dirty();
         self.collision_system.invalidate_collider_contacts(id);
+        Ok(())
+    }
+
+    /// Sets whether an attached collider responds physically or only reports intersections.
+    pub fn set_collider_mode(
+        &mut self,
+        id: ColliderId,
+        mode: crate::collider::CollisionMode,
+    ) -> Result<(), WorldError> {
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidColliderId);
+        }
+        let entry = self
+            .colliders
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidColliderId)?;
+        if entry.collider.mode() != mode {
+            entry.collider.set_mode(mode);
+            self.collision_system.invalidate_collider_contacts(id);
+        }
         Ok(())
     }
 
@@ -2038,6 +2058,12 @@ impl PhysicsWorld {
     ) -> Result<ColliderId, WorldError> {
         if body.world != self.world_id {
             return Err(WorldError::InvalidBodyId);
+        }
+        if collider
+            .material()
+            .is_some_and(|material| !self.materials.contains(material))
+        {
+            return Err(WorldError::InvalidMaterialId);
         }
         let first = self
             .bodies

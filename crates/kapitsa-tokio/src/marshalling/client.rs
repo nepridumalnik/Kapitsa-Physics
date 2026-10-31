@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
 use kapitsa_core::{
-    collider::{Collider, CollisionFilter},
-    collision::{OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
+    collider::{Collider, CollisionFilter, CollisionMode},
+    collision::{CollisionConfig, OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
     mass::MassProperties,
     material::MaterialId,
-    rigid_body::RigidBody,
+    rigid_body::{CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
     world::{BodyId, ColliderId},
 };
-use kapitsa_math::Vec3;
+use kapitsa_math::{Affine3, Vec3};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
@@ -149,6 +149,22 @@ impl PhysicsClient {
         expect_done(self.submit(PhysicsCommand::SetMass { id, mass }).await?)
     }
 
+    /// Replaces the world's collision configuration after validation.
+    pub async fn set_collision_config(
+        &self,
+        config: CollisionConfig,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetCollisionConfig { config })
+                .await?,
+        )
+    }
+
+    /// Sets continuous collision detection for a body.
+    pub async fn set_ccd_mode(&self, id: BodyId, mode: CcdMode) -> Result<(), PhysicsClientError> {
+        expect_done(self.submit(PhysicsCommand::SetCcdMode { id, mode }).await?)
+    }
+
     /// Puts a dynamic body to sleep.
     pub async fn sleep(&self, id: BodyId) -> Result<(), PhysicsClientError> {
         expect_done(self.submit(PhysicsCommand::Sleep { id }).await?)
@@ -222,6 +238,30 @@ impl PhysicsClient {
     ) -> Result<(), PhysicsClientError> {
         expect_done(
             self.submit(PhysicsCommand::SetColliderFilter { id, filter })
+                .await?,
+        )
+    }
+
+    /// Sets whether an attached collider responds physically or only reports intersections.
+    pub async fn set_collider_mode(
+        &self,
+        id: ColliderId,
+        mode: CollisionMode,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetColliderMode { id, mode })
+                .await?,
+        )
+    }
+
+    /// Updates the bone pose of an attached skinned mesh collider.
+    pub async fn set_skin_pose(
+        &self,
+        id: ColliderId,
+        matrices: Vec<Affine3>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetSkinPose { id, matrices })
                 .await?,
         )
     }
@@ -358,14 +398,15 @@ mod tests {
     };
 
     use kapitsa_core::{
-        collider::Collider,
-        collision::{QueryFilter, Ray},
-        rigid_body::RigidBody,
-        shape::{Shape, Sphere},
+        collider::{Collider, CollisionMode},
+        collision::{CollisionConfig, QueryFilter, Ray},
+        material::PhysicsMaterial,
+        rigid_body::{CcdMode, RigidBody},
+        shape::{BoneInfluence, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh},
         transform::Transform,
         world::PhysicsWorld,
     };
-    use kapitsa_math::Vec3;
+    use kapitsa_math::{Affine3, Vec3};
     use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
     use super::PhysicsClient;
@@ -451,6 +492,94 @@ mod tests {
             .expect("body ID");
         assert_eq!(server.await.expect("server task"), 1);
         assert_eq!(id.index(), 0);
+    }
+
+    #[tokio::test]
+    async fn typed_collision_configuration_helpers_use_the_shared_command_queue() {
+        let ClientHarness {
+            client,
+            mut receiver,
+            ..
+        } = running_client(1);
+        let mut world = PhysicsWorld::new();
+        let body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("body");
+        let mesh =
+            TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).expect("mesh");
+        let influences = (0..3)
+            .map(|_| vec![BoneInfluence::new(0, 1.0).expect("influence")])
+            .collect();
+        let skinned_mesh = SkinnedTriangleMesh::new(
+            mesh,
+            vec![String::from("root")],
+            influences,
+            Affine3::IDENTITY,
+            vec![Affine3::IDENTITY],
+        )
+        .expect("skinned mesh");
+        let collider = world
+            .add_collider(
+                body,
+                Collider::new(
+                    Shape::SkinnedTriangleMesh(skinned_mesh),
+                    Transform::identity(),
+                ),
+            )
+            .expect("collider");
+        let material = world
+            .add_material(PhysicsMaterial::default())
+            .expect("material");
+        let config = CollisionConfig {
+            contact_offset: 0.02,
+            ..CollisionConfig::default()
+        };
+
+        let server = tokio::spawn(async move {
+            for _ in 0..5 {
+                let request = receiver.recv().await.expect("configuration request");
+                let result = apply_command(&mut world, request.command);
+                request.reply.send(result).expect("client awaits response");
+            }
+            world
+        });
+
+        client
+            .set_collision_config(config)
+            .await
+            .expect("collision config");
+        client
+            .set_ccd_mode(body, CcdMode::Continuous)
+            .await
+            .expect("CCD mode");
+        client
+            .set_collider_mode(collider, CollisionMode::Sensor)
+            .await
+            .expect("collider mode");
+        client
+            .set_skin_pose(collider, vec![Affine3::from_translation(Vec3::X)])
+            .await
+            .expect("skin pose");
+        client
+            .set_collider_material(collider, Some(material))
+            .await
+            .expect("collider material");
+
+        let world = server.await.expect("server task");
+        assert_eq!(world.collision_config(), config);
+        assert_eq!(
+            world.body(body).expect("body").ccd_mode(),
+            CcdMode::Continuous
+        );
+        let collider_ref = world.collider(collider).expect("collider");
+        assert_eq!(collider_ref.mode(), CollisionMode::Sensor);
+        assert_eq!(collider_ref.material(), Some(material));
+        assert_eq!(
+            collider_ref
+                .world_bounds(&Transform::identity())
+                .expect("deformed bounds"),
+            Some(kapitsa_core::aabb::Aabb::new(Vec3::X, Vec3::X * 2.0 + Vec3::Y).expect("bounds"))
+        );
     }
 
     #[tokio::test]

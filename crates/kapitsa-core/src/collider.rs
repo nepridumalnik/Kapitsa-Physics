@@ -72,17 +72,19 @@ impl Collider {
 
     /// Returns the assigned material ID.
     ///
-    /// `PhysicsWorld` validates the ID before stepping. Prefer
+    /// `PhysicsWorld` validates the ID on insertion and before stepping. Prefer
     /// [`PhysicsWorld::set_collider_material`](crate::world::PhysicsWorld::set_collider_material)
     /// when assigning a material to a collider in a world.
     pub fn material(&self) -> Option<MaterialId> {
         self.material
     }
 
-    /// Stores a material ID without checking that it exists in a world.
+    /// Assigns a material while preparing a collider that is not yet attached to a world.
     ///
-    /// Prefer [`PhysicsWorld::set_collider_material`](crate::world::PhysicsWorld::set_collider_material)
-    /// for validated assignments.
+    /// [`PhysicsWorld::add_collider`](crate::world::PhysicsWorld::add_collider) validates this
+    /// assignment. For an attached collider, use
+    /// [`PhysicsWorld::set_collider_material`](crate::world::PhysicsWorld::set_collider_material)
+    /// so the material is checked against its world and contact caches are invalidated.
     pub fn set_material(&mut self, material: Option<MaterialId>) {
         self.material = material;
     }

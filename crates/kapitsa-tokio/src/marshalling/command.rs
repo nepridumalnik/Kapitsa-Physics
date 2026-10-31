@@ -1,14 +1,14 @@
 use kapitsa_core::{
-    collider::{Collider, CollisionFilter},
-    collision::{OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
+    collider::{Collider, CollisionFilter, CollisionMode},
+    collision::{CollisionConfig, OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
     mass::MassProperties,
     material::MaterialId,
-    rigid_body::RigidBody,
+    rigid_body::{CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
     world::{BodyId, ColliderId, PhysicsWorld, WorldError},
 };
-use kapitsa_math::Vec3;
+use kapitsa_math::{Affine3, Vec3};
 use tokio::sync::oneshot;
 
 use crate::PhysicsClientError;
@@ -31,6 +31,10 @@ pub enum PhysicsCommand {
     SetAngularVelocity { id: BodyId, velocity: Vec3 },
     /// Replaces the body's dynamic mass properties.
     SetMass { id: BodyId, mass: MassProperties },
+    /// Replaces the world's validated collision configuration.
+    SetCollisionConfig { config: CollisionConfig },
+    /// Sets continuous collision detection for a body.
+    SetCcdMode { id: BodyId, mode: CcdMode },
     /// Sleeps a dynamic body and clears its motion and forces.
     Sleep { id: BodyId },
     /// Wakes a dynamic body.
@@ -59,6 +63,13 @@ pub enum PhysicsCommand {
     SetColliderFilter {
         id: ColliderId,
         filter: CollisionFilter,
+    },
+    /// Sets whether an attached collider responds physically or only reports intersections.
+    SetColliderMode { id: ColliderId, mode: CollisionMode },
+    /// Updates a skinned mesh collider's bone pose.
+    SetSkinPose {
+        id: ColliderId,
+        matrices: Vec<Affine3>,
     },
     /// Assigns a material ID after resolving it in the world material store.
     SetColliderMaterial {
@@ -151,6 +162,19 @@ pub(crate) fn apply_command(
                 .set_mass(mass)?;
             PhysicsCommandResult::Done
         }
+        PhysicsCommand::SetCollisionConfig { config } => {
+            world
+                .set_collision_config(config)
+                .map_err(WorldError::Collision)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetCcdMode { id, mode } => {
+            world
+                .body_mut(id)
+                .ok_or(WorldError::InvalidBodyId)?
+                .set_ccd_mode(mode);
+            PhysicsCommandResult::Done
+        }
         PhysicsCommand::Sleep { id } => {
             world
                 .body_mut(id)
@@ -214,6 +238,16 @@ pub(crate) fn apply_command(
                 .set_filter(filter);
             PhysicsCommandResult::Done
         }
+        PhysicsCommand::SetColliderMode { id, mode } => {
+            world.set_collider_mode(id, mode)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetSkinPose { id, matrices } => {
+            world
+                .set_skin_pose(id, &matrices)
+                .map_err(WorldError::Collision)?;
+            PhysicsCommandResult::Done
+        }
         PhysicsCommand::SetColliderMaterial { id, material } => {
             world.set_collider_material(id, material)?;
             PhysicsCommandResult::Done
@@ -243,7 +277,7 @@ pub(crate) fn apply_command(
 #[cfg(test)]
 mod tests {
     use kapitsa_core::{
-        collider::{Collider, CollisionFilter},
+        collider::{Collider, CollisionFilter, CollisionMode},
         collision::{QueryError, QueryFilter, Ray},
         mass::MassProperties,
         material::{MaterialStorage, PhysicsMaterial},
@@ -471,6 +505,17 @@ mod tests {
             world.collider(collider_id).expect("collider").filter(),
             filter
         );
+        assert_done(apply_command(
+            &mut world,
+            PhysicsCommand::SetColliderMode {
+                id: collider_id,
+                mode: CollisionMode::Sensor,
+            },
+        ));
+        assert_eq!(
+            world.collider(collider_id).expect("collider").mode(),
+            CollisionMode::Sensor
+        );
         apply_command(
             &mut world,
             PhysicsCommand::SetColliderMaterial {
@@ -573,22 +618,10 @@ mod tests {
     }
 
     #[test]
-    fn invalid_spatial_queries_keep_the_query_error_variant() {
-        let mut world = PhysicsWorld::new();
-        let result = apply_command(
-            &mut world,
-            PhysicsCommand::Raycast {
-                ray: Ray {
-                    origin: Vec3::ZERO,
-                    direction: Vec3::ZERO,
-                    max_distance: 1.0,
-                },
-                filter: QueryFilter::default(),
-            },
+    fn invalid_ray_is_rejected_before_it_can_be_submitted() {
+        assert_eq!(
+            Ray::new(Vec3::ZERO, Vec3::ZERO, 1.0),
+            Err(QueryError::InvalidInput)
         );
-        assert!(matches!(
-            result,
-            Err(PhysicsClientError::Query(QueryError::InvalidInput))
-        ));
     }
 }

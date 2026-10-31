@@ -587,6 +587,37 @@ fn material_ids_are_scoped_to_world_storage_and_in_use_materials_are_retained() 
 }
 
 #[test]
+fn add_collider_rejects_a_material_from_another_world_before_insertion() {
+    let mut world = PhysicsWorld::new();
+    let mut other_world = PhysicsWorld::new();
+    let body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("body");
+    let foreign_material = other_world
+        .add_material(PhysicsMaterial::default())
+        .expect("foreign material");
+    let mut prepared = collider(1.0);
+    prepared.set_material(Some(foreign_material));
+
+    assert_eq!(
+        world.add_collider(body, prepared),
+        Err(WorldError::InvalidMaterialId)
+    );
+    assert_eq!(world.collider_count(), 0);
+
+    let material = world
+        .add_material(PhysicsMaterial::default())
+        .expect("world material");
+    let mut prepared = collider(1.0);
+    prepared.set_material(Some(material));
+    let id = world.add_collider(body, prepared).expect("valid material");
+    assert_eq!(
+        world.collider(id).expect("inserted collider").material(),
+        Some(material)
+    );
+}
+
+#[test]
 fn dynamic_bodies_reject_surface_geometry_but_allow_convex_shapes() {
     let mut world = PhysicsWorld::new();
     let dynamic = world.add_body(dynamic_body()).expect("dynamic body");

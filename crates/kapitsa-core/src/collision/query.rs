@@ -18,9 +18,9 @@ use super::{
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ray {
-    pub origin: Vec3,
-    pub direction: Vec3,
-    pub max_distance: f64,
+    origin: Vec3,
+    direction: Vec3,
+    max_distance: f64,
 }
 
 impl Ray {
@@ -34,6 +34,25 @@ impl Ray {
             direction,
             max_distance,
         })
+    }
+
+    pub fn origin(self) -> Vec3 {
+        self.origin
+    }
+
+    pub fn direction(self) -> Vec3 {
+        self.direction
+    }
+
+    pub fn max_distance(self) -> f64 {
+        self.max_distance
+    }
+
+    pub(crate) fn with_max_distance(self, max_distance: f64) -> Self {
+        Self {
+            max_distance,
+            ..self
+        }
     }
 
     pub(crate) fn validate(self) -> Result<(), QueryError> {
@@ -152,17 +171,17 @@ pub(crate) fn raycast_shape_with_scratch(
     let inverse = transform
         .inverse()
         .map_err(|_| QueryError::ArithmeticOverflow)?;
-    let local_origin = inverse.transform_point(ray.origin);
-    let local_direction = inverse.transform_vector(ray.direction);
+    let local_origin = inverse.transform_point(ray.origin());
+    let local_direction = inverse.transform_vector(ray.direction());
     if !local_origin.is_finite() || !local_direction.is_finite() {
         return Err(QueryError::ArithmeticOverflow);
     }
     let (local_normal, distance) = match shape {
-        Shape::Plane(plane) => ray_plane(plane, local_origin, local_direction, ray.max_distance)?,
+        Shape::Plane(plane) => ray_plane(plane, local_origin, local_direction, ray.max_distance())?,
         Shape::Triangle(triangle) => ray_triangle(
             local_origin,
             local_direction,
-            ray.max_distance,
+            ray.max_distance(),
             triangle.vertices(),
         )?,
         Shape::TriangleMesh(mesh) => ray_mesh(
@@ -171,18 +190,18 @@ pub(crate) fn raycast_shape_with_scratch(
             bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
             local_origin,
             local_direction,
-            ray.max_distance,
+            ray.max_distance(),
             scratch,
         )?,
         Shape::HeightField(field) => ray_height_field(
             field,
             local_origin,
             local_direction,
-            ray.max_distance,
+            ray.max_distance(),
             &mut scratch.height_cells,
         )?,
         Shape::LevelSet(field) => {
-            ray_level_set(field, local_origin, local_direction, ray.max_distance)?
+            ray_level_set(field, local_origin, local_direction, ray.max_distance())?
         }
         Shape::SkinnedTriangleMesh(skinned) => ray_mesh(
             skinned.mesh(),
@@ -190,7 +209,7 @@ pub(crate) fn raycast_shape_with_scratch(
             bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
             local_origin,
             local_direction,
-            ray.max_distance,
+            ray.max_distance(),
             scratch,
         )?,
         Shape::Sphere(_)
@@ -208,7 +227,7 @@ pub(crate) fn raycast_shape_with_scratch(
         .transform_vector(local_normal)
         .try_normalize()
         .ok_or(QueryError::ArithmeticOverflow)?;
-    let position = ray.origin + ray.direction * distance;
+    let position = ray.origin() + ray.direction() * distance;
     if !position.is_finite() {
         return Err(QueryError::ArithmeticOverflow);
     }
@@ -698,19 +717,19 @@ fn raycast_convex(
     let mut distance = 0.0;
     let mut previous_normal = None;
     for _ in 0..128 {
-        let point = ray.origin + ray.direction * distance;
+        let point = ray.origin() + ray.direction() * distance;
         let result = gjk::distance_to_point(shape, &transform, point).map_err(query_collision)?;
         if result.intersects {
-            let normal = previous_normal.unwrap_or(-ray.direction);
+            let normal = previous_normal.unwrap_or(-ray.direction());
             let position = if distance == 0.0 {
-                ray.origin
+                ray.origin()
             } else {
                 result.point_a
             };
             return Ok(Some((position, normal, distance)));
         }
         let closing_speed = -ray
-            .direction
+            .direction()
             .checked_dot(result.normal)
             .ok_or(QueryError::ArithmeticOverflow)?;
         if closing_speed <= f64::EPSILON {
@@ -725,7 +744,7 @@ fn raycast_convex(
         }
         previous_normal = Some(result.normal);
         distance += advance;
-        if distance > ray.max_distance {
+        if distance > ray.max_distance() {
             return Ok(None);
         }
     }

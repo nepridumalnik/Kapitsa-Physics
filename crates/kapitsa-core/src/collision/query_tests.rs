@@ -31,7 +31,9 @@ fn add_static_shape(
 #[test]
 fn ray_constructor_normalizes_direction_and_rejects_bad_inputs() {
     let ray = Ray::new(Vec3::ZERO, Vec3::new(3.0, 0.0, 0.0), 5.0).expect("ray");
-    assert_eq!(ray.direction, Vec3::X);
+    assert_eq!(ray.direction(), Vec3::X);
+    assert_eq!(ray.origin(), Vec3::ZERO);
+    assert_eq!(ray.max_distance(), 5.0);
     assert_eq!(
         Ray::new(Vec3::ZERO, Vec3::ZERO, 1.0),
         Err(crate::collision::QueryError::InvalidInput)
