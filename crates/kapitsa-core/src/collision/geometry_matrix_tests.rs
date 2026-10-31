@@ -40,6 +40,7 @@ fn all_28_convex_shape_pairs_generate_symmetric_contacts() {
                 bvh: None,
             };
             assert_symmetric_contact(pair, &left, &right);
+            assert_known_penetration(pair, &left, &right);
             tested += 1;
         }
     }
@@ -67,6 +68,159 @@ fn all_42_convex_surface_shape_pairs_generate_symmetric_contacts() {
     assert_eq!(tested, 42);
 }
 
+#[test]
+fn all_28_convex_shape_pairs_reject_separated_shapes_symmetrically() {
+    let pair = pair();
+    let shapes = convex_shapes();
+    for left_index in 0..shapes.len() {
+        for right_index in left_index..shapes.len() {
+            let (left_name, left_shape) = &shapes[left_index];
+            let (right_name, right_shape) = &shapes[right_index];
+            let left = Geometry {
+                name: left_name,
+                shape: make_convex(left_shape),
+                transform: at(-10.0, 0.0, 0.0),
+                bvh: None,
+            };
+            let right = Geometry {
+                name: right_name,
+                shape: make_convex(right_shape),
+                transform: at(10.0, 0.0, 0.0),
+                bvh: None,
+            };
+            assert_no_contact(pair, &left, &right);
+        }
+    }
+}
+
+#[test]
+fn all_28_convex_pairs_remain_symmetric_when_rotated_and_deeply_overlapping() {
+    let pair = pair();
+    let shapes = convex_shapes();
+    let rotation_a = Quat::from_axis_angle(Vec3::Z, 0.37).expect("rotation A");
+    let rotation_b = Quat::from_axis_angle(Vec3::X, -0.53).expect("rotation B");
+    for left_index in 0..shapes.len() {
+        for right_index in left_index..shapes.len() {
+            let (left_name, left_shape) = &shapes[left_index];
+            let (right_name, right_shape) = &shapes[right_index];
+            let left_shape = make_convex(left_shape);
+            let right_shape = make_convex(right_shape);
+            let left = Geometry {
+                name: left_name,
+                shape: make_convex(&left_shape),
+                transform: Transform::new(Vec3::new(-0.15, 0.0, 0.0), rotation_a)
+                    .expect("rotated transform A"),
+                bvh: None,
+            };
+            let right = Geometry {
+                name: right_name,
+                shape: make_convex(&right_shape),
+                transform: Transform::new(Vec3::new(0.15, 0.0, 0.0), rotation_b)
+                    .expect("rotated transform B"),
+                bvh: None,
+            };
+            assert_symmetric_contact(pair, &left, &right);
+
+            let overlap_left = Geometry {
+                transform: Transform::new(Vec3::new(-0.02, 0.0, 0.0), rotation_a)
+                    .expect("overlap transform A"),
+                ..left
+            };
+            let overlap_right = Geometry {
+                transform: Transform::new(Vec3::new(0.02, 0.0, 0.0), rotation_b)
+                    .expect("overlap transform B"),
+                ..right
+            };
+            assert_symmetric_contact(pair, &overlap_left, &overlap_right);
+        }
+    }
+}
+
+#[test]
+fn small_sphere_fully_embedded_in_rotated_cuboid_has_symmetric_contact() {
+    let pair = pair();
+    let rotation_a =
+        Quat::from_axis_angle(Vec3::new(0.3, 1.0, -0.2), 0.6).expect("cuboid rotation");
+    let rotation_b = Quat::from_axis_angle(Vec3::Z, -0.4).expect("sphere rotation");
+    let cuboid = Geometry {
+        name: "large cuboid",
+        shape: Shape::Cuboid(Cuboid::new(4.0, 3.0, 2.0).expect("cuboid")),
+        transform: Transform::new(Vec3::ZERO, rotation_a).expect("cuboid transform"),
+        bvh: None,
+    };
+    let sphere = Geometry {
+        name: "embedded sphere",
+        shape: Shape::Sphere(Sphere::new(0.2).expect("sphere")),
+        transform: Transform::new(Vec3::new(0.1, -0.1, 0.05), rotation_b)
+            .expect("sphere transform"),
+        bvh: None,
+    };
+    assert_symmetric_contact(pair, &cuboid, &sphere);
+}
+
+#[test]
+fn all_42_convex_surface_pairs_remain_symmetric_when_both_are_rotated() {
+    let pair = pair();
+    let convexes = convex_shapes();
+    let rotation =
+        Quat::from_axis_angle(Vec3::new(1.0, 0.5, -0.25), 0.41).expect("surface rotation");
+    for (convex_name, convex_shape) in &convexes {
+        for mut surface in surface_shapes() {
+            let surface_transform =
+                Transform::new(Vec3::ZERO, rotation).expect("rotated surface transform");
+            let local_contact = Transform::new(Vec3::new(1.0, 1.0, 0.25), rotation)
+                .expect("rotated convex transform");
+            let convex_transform = surface_transform
+                .compose(&local_contact)
+                .expect("composed convex transform");
+            surface.transform = surface_transform;
+            let convex = Geometry {
+                name: convex_name,
+                shape: make_convex(convex_shape),
+                transform: convex_transform,
+                bvh: None,
+            };
+            assert_symmetric_contact(pair, &surface, &convex);
+        }
+    }
+}
+
+#[test]
+fn all_42_convex_surface_pairs_reject_separated_shapes() {
+    let pair = pair();
+    for (convex_name, convex_shape) in convex_shapes() {
+        for surface in surface_shapes() {
+            let convex_position = if surface.name == "plane" {
+                Vec3::new(0.0, 0.0, 10.0)
+            } else {
+                Vec3::new(100.0, 0.0, 0.0)
+            };
+            let convex = Geometry {
+                name: convex_name,
+                shape: make_convex(&convex_shape),
+                transform: Transform::new(convex_position, Quat::IDENTITY)
+                    .expect("separated transform"),
+                bvh: None,
+            };
+            assert_no_contact(pair, &surface, &convex);
+        }
+    }
+}
+
+fn assert_no_contact(pair: CollisionPair, left: &Geometry, right: &Geometry) {
+    for (first, second) in [(left, right), (right, left)] {
+        let mut narrow_phase = NarrowPhase::new();
+        let result = detect(&mut narrow_phase, pair, first, second)
+            .unwrap_or_else(|error| panic!("{} vs {}: {error}", first.name, second.name));
+        assert!(
+            result.is_none(),
+            "{} vs {} unexpectedly contacted while separated",
+            first.name,
+            second.name
+        );
+    }
+}
+
 fn assert_symmetric_contact(pair: CollisionPair, left: &Geometry, right: &Geometry) {
     let mut forward_narrow_phase = NarrowPhase::new();
     let forward = detect(&mut forward_narrow_phase, pair, left, right)
@@ -78,22 +232,29 @@ fn assert_symmetric_contact(pair: CollisionPair, left: &Geometry, right: &Geomet
         .unwrap_or_else(|| panic!("{} vs {} reversed: expected contact", left.name, right.name));
     let normal_forward = forward.points().next().expect("contact point").normal;
     let normal_reverse = reverse.points().next().expect("contact point").normal;
-    let expected_penetration = match (left.name, right.name) {
-        ("sphere", "capsule") | ("sphere", "cylinder") => Some(0.5),
-        ("capsule", "capsule") => Some(0.4),
-        _ => None,
-    };
-    if let Some(expected) = expected_penetration {
-        let contact = forward.points().next().expect("contact point");
-        assert!((contact.penetration - expected).abs() <= 1.0e-5);
-        assert!((normal_forward - Vec3::X).length() <= 1.0e-5);
-    }
     assert!(
         (normal_forward + normal_reverse).length() <= 1.0e-6,
         "{} vs {}: normals did not reverse ({normal_forward:?}, {normal_reverse:?})",
         left.name,
         right.name
     );
+}
+
+fn assert_known_penetration(pair: CollisionPair, left: &Geometry, right: &Geometry) {
+    let expected = match (left.name, right.name) {
+        ("sphere", "capsule") | ("sphere", "cylinder") => Some(0.5),
+        ("capsule", "capsule") => Some(0.4),
+        _ => None,
+    };
+    if let Some(expected) = expected {
+        let mut narrow_phase = NarrowPhase::new();
+        let manifold = detect(&mut narrow_phase, pair, left, right)
+            .expect("known geometry should be valid")
+            .expect("known geometry should contact");
+        let contact = manifold.points().next().expect("contact point");
+        assert!((contact.penetration - expected).abs() <= 1.0e-5);
+        assert!((contact.normal - Vec3::X).length() <= 1.0e-5);
+    }
 }
 
 fn detect(
