@@ -6,3 +6,4 @@ pub mod material;
 pub mod rigid_body;
 pub mod shape;
 pub mod transform;
+pub mod world;
