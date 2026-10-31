@@ -5,6 +5,7 @@ use kapitsa_math::{Affine3, Quat, Vec3};
 use crate::{
     aabb::{Aabb, AabbError},
     collider::{Collider, ColliderError, CollisionFilter, CollisionMode},
+    collision::mesh::MeshQueryWorkspace,
     material::{MaterialStorage, PhysicsMaterial},
     shape::{
         BoneInfluence, BoundsError, Cuboid, Plane, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh,
@@ -352,9 +353,31 @@ fn skinned_pose_updates_bounds_and_keeps_the_last_valid_pose_on_error() {
         Shape::SkinnedTriangleMesh(skinned_mesh),
         Transform::identity(),
     );
+    collider.prepare_query_geometry().unwrap();
+    assert!(collider.mesh_bvh.is_some());
+    let overflowing_pose = Affine3::new(
+        kapitsa_math::Mat3::from_diagonal(Vec3::splat(f64::MAX)),
+        Vec3::splat(f64::MAX),
+    );
+    assert_eq!(
+        collider.set_skin_pose(&[overflowing_pose]),
+        Err(crate::collision::CollisionError::ArithmeticOverflow)
+    );
+    assert!(collider.mesh_bvh.is_some());
+    assert!(collider.skin_pose.is_none());
     let moved = Affine3::from_translation(Vec3::new(4.0, 2.0, -1.0));
     collider.set_skin_pose(&[moved]).unwrap();
+    assert!(collider.mesh_bvh.is_none());
     let expected = Aabb::new(Vec3::new(4.0, 2.0, -1.0), Vec3::new(5.0, 3.0, -1.0)).unwrap();
+    let committed_vertices = collider.query_vertices().unwrap().to_vec();
+    let mut workspace = MeshQueryWorkspace::default();
+    let mut triangle_ids = Vec::new();
+    collider
+        .query_bvh()
+        .unwrap()
+        .query(expected, &mut workspace, &mut triangle_ids)
+        .unwrap();
+    assert_eq!(triangle_ids, vec![0]);
     assert_eq!(collider.local_bounds(), Ok(Some(expected)));
     assert_eq!(
         collider.world_bounds(&Transform::identity()),
@@ -385,6 +408,16 @@ fn skinned_pose_updates_bounds_and_keeps_the_last_valid_pose_on_error() {
         collider.world_bounds(&Transform::identity()),
         Ok(Some(expected))
     );
+    assert_eq!(
+        collider.query_vertices(),
+        Some(committed_vertices.as_slice())
+    );
+    collider
+        .query_bvh()
+        .unwrap()
+        .query(expected, &mut workspace, &mut triangle_ids)
+        .unwrap();
+    assert_eq!(triangle_ids, vec![0]);
 }
 
 #[test]

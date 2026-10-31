@@ -136,3 +136,43 @@ fn refitting_bvh_moves_triangle_bounds_and_rejects_invalid_pose_without_mutation
     .unwrap();
     assert_eq!(output, vec![0, 1]);
 }
+
+#[test]
+fn prepared_refit_leaves_committed_bvh_unchanged_until_commit() {
+    let mesh = grid_mesh(1);
+    let bvh = TriangleBvh::build(&mesh).unwrap();
+    let moved = mesh
+        .vertices()
+        .iter()
+        .map(|vertex| *vertex + Vec3::new(10.0, 0.0, 0.0))
+        .collect::<Vec<_>>();
+    let mut scratch = super::BvhRefitScratch::default();
+    bvh.prepare_refit(&mesh, &moved, &mut scratch).unwrap();
+
+    let mut workspace = MeshQueryWorkspace::default();
+    let mut output = Vec::new();
+    bvh.query(
+        Aabb::new(Vec3::ZERO, Vec3::ONE).unwrap(),
+        &mut workspace,
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(output, vec![0, 1]);
+    bvh.query(
+        Aabb::new(Vec3::new(10.0, 0.0, 0.0), Vec3::new(11.0, 1.0, 0.0)).unwrap(),
+        &mut workspace,
+        &mut output,
+    )
+    .unwrap();
+    assert!(output.is_empty());
+
+    let mut bvh = bvh;
+    bvh.commit_refit(&mut scratch);
+    bvh.query(
+        Aabb::new(Vec3::new(10.0, 0.0, 0.0), Vec3::new(11.0, 1.0, 0.0)).unwrap(),
+        &mut workspace,
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(output, vec![0, 1]);
+}

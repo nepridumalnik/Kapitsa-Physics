@@ -1,8 +1,11 @@
 use crate::{
     aabb::Aabb,
-    collision::{CollisionError, mesh::TriangleBvh},
+    collision::{
+        CollisionError,
+        mesh::{BvhRefitScratch, TriangleBvh},
+    },
     material::MaterialId,
-    shape::{BoundsError, Shape},
+    shape::{BoundsError, Shape, SkinnedTriangleMesh},
     transform::Transform,
 };
 use kapitsa_math::{Affine3, Vec3};
@@ -32,8 +35,10 @@ pub struct Collider {
 
 struct SkinPose {
     vertices: Vec<Vec3>,
+    staging_vertices: Vec<Vec3>,
     bounds: Aabb,
-    bvh: TriangleBvh,
+    bvh: Box<TriangleBvh>,
+    refit_scratch: BvhRefitScratch,
 }
 
 impl Collider {
@@ -130,53 +135,55 @@ impl Collider {
             return Err(CollisionError::InvalidSkinPose);
         }
 
-        let reference_vertices = skinned_mesh.mesh().vertices();
-        let influences = skinned_mesh.vertex_influences();
-        if reference_vertices.len() != influences.len() {
-            return Err(CollisionError::InvalidSkinPose);
+        if let Some(pose) = &mut self.skin_pose {
+            fill_deformed_vertices(skinned_mesh, matrices, &mut pose.staging_vertices)?;
+            let bounds = points_bounds(&pose.staging_vertices)
+                .map_err(|_| CollisionError::InvalidSkinPose)?;
+            pose.bvh.prepare_refit(
+                skinned_mesh.mesh(),
+                &pose.staging_vertices,
+                &mut pose.refit_scratch,
+            )?;
+            pose.bvh.commit_refit(&mut pose.refit_scratch);
+            std::mem::swap(&mut pose.vertices, &mut pose.staging_vertices);
+            pose.bounds = bounds;
+            return Ok(());
         }
+
+        let vertex_count = skinned_mesh.mesh().vertices().len();
         let mut vertices = Vec::new();
         vertices
-            .try_reserve_exact(reference_vertices.len())
+            .try_reserve_exact(vertex_count)
             .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-        for (reference, influences) in reference_vertices.iter().zip(influences) {
-            let mut deformed = Vec3::ZERO;
-            for influence in influences {
-                let matrix = matrices
-                    .get(influence.bone_index())
-                    .ok_or(CollisionError::InvalidSkinPose)?;
-                let transformed = matrix
-                    .linear()
-                    .checked_mul_vector(*reference)
-                    .and_then(|point| point.checked_add(matrix.translation()))
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
-                let weighted = transformed
-                    .checked_mul_scalar(influence.weight())
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
-                deformed = deformed
-                    .checked_add(weighted)
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
-            }
-            if !deformed.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
-            }
-            vertices.push(deformed);
-        }
-        let bounds = points_bounds(&vertices).map_err(|_| CollisionError::InvalidSkinPose)?;
-
-        if let Some(pose) = &mut self.skin_pose {
-            pose.bvh.refit_vertices(skinned_mesh.mesh(), &vertices)?;
-            pose.vertices = vertices;
-            pose.bounds = bounds;
+        let mut staging_vertices = Vec::new();
+        staging_vertices
+            .try_reserve_exact(vertex_count)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        fill_deformed_vertices(skinned_mesh, matrices, &mut staging_vertices)?;
+        let bounds =
+            points_bounds(&staging_vertices).map_err(|_| CollisionError::InvalidSkinPose)?;
+        let mut refit_scratch = BvhRefitScratch::default();
+        let bvh = if let Some(bvh) = self.mesh_bvh.as_deref() {
+            bvh.prepare_refit(skinned_mesh.mesh(), &staging_vertices, &mut refit_scratch)?;
+            let Some(mut bvh) = self.mesh_bvh.take() else {
+                return Err(CollisionError::InvalidContact);
+            };
+            bvh.commit_refit(&mut refit_scratch);
+            bvh
         } else {
-            let mut bvh = TriangleBvh::build(skinned_mesh.mesh())?;
-            bvh.refit_vertices(skinned_mesh.mesh(), &vertices)?;
-            self.skin_pose = Some(SkinPose {
-                vertices,
-                bounds,
-                bvh,
-            });
-        }
+            let mut bvh = Box::new(TriangleBvh::build(skinned_mesh.mesh())?);
+            bvh.prepare_refit(skinned_mesh.mesh(), &staging_vertices, &mut refit_scratch)?;
+            bvh.commit_refit(&mut refit_scratch);
+            bvh
+        };
+        std::mem::swap(&mut vertices, &mut staging_vertices);
+        self.skin_pose = Some(SkinPose {
+            vertices,
+            staging_vertices,
+            bounds,
+            bvh,
+            refit_scratch,
+        });
         Ok(())
     }
 
@@ -197,12 +204,24 @@ impl Collider {
     pub(crate) fn query_bvh(&self) -> Option<&TriangleBvh> {
         self.skin_pose
             .as_ref()
-            .map(|pose| &pose.bvh)
+            .map(|pose| pose.bvh.as_ref())
             .or(self.mesh_bvh.as_deref())
     }
 
     pub(crate) fn query_vertices(&self) -> Option<&[Vec3]> {
         self.skin_pose.as_ref().map(|pose| pose.vertices.as_slice())
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn skin_pose_retained_capacity_bytes(&self) -> usize {
+        self.skin_pose.as_ref().map_or(0, |pose| {
+            std::mem::size_of::<SkinPose>()
+                + pose.vertices.capacity() * std::mem::size_of::<Vec3>()
+                + pose.staging_vertices.capacity() * std::mem::size_of::<Vec3>()
+                + pose.bvh.retained_capacity_bytes()
+                + pose.refit_scratch.retained_capacity_bytes()
+        })
     }
 
     #[allow(dead_code)]
@@ -212,8 +231,48 @@ impl Collider {
 
     #[allow(dead_code)]
     pub(crate) fn skinned_bvh(&self) -> Option<&TriangleBvh> {
-        self.skin_pose.as_ref().map(|pose| &pose.bvh)
+        self.skin_pose.as_ref().map(|pose| pose.bvh.as_ref())
     }
+}
+
+fn fill_deformed_vertices(
+    skinned_mesh: &SkinnedTriangleMesh,
+    matrices: &[Affine3],
+    output: &mut Vec<Vec3>,
+) -> Result<(), CollisionError> {
+    let reference_vertices = skinned_mesh.mesh().vertices();
+    let influences = skinned_mesh.vertex_influences();
+    if reference_vertices.len() != influences.len() {
+        return Err(CollisionError::InvalidSkinPose);
+    }
+    output.clear();
+    output
+        .try_reserve_exact(reference_vertices.len())
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    for (reference, influences) in reference_vertices.iter().zip(influences) {
+        let mut deformed = Vec3::ZERO;
+        for influence in influences {
+            let matrix = matrices
+                .get(influence.bone_index())
+                .ok_or(CollisionError::InvalidSkinPose)?;
+            let transformed = matrix
+                .linear()
+                .checked_mul_vector(*reference)
+                .and_then(|point| point.checked_add(matrix.translation()))
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let weighted = transformed
+                .checked_mul_scalar(influence.weight())
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            deformed = deformed
+                .checked_add(weighted)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+        }
+        if !deformed.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        output.push(deformed);
+    }
+    Ok(())
 }
 
 fn points_bounds(points: &[Vec3]) -> Result<Aabb, BoundsError> {

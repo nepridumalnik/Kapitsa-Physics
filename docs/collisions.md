@@ -105,10 +105,11 @@ center direction provide a contact estimate. Convex pairs are processed in a
 stable geometry order so reversing A and B reverses the contact normal. Other
 contacts use plane contact generation, triangle contacts, mesh BVH traversal,
 heightfield cell traversal, and interpolated level-set sampling. Skinned meshes
-use the current deformed pose and a refitted BVH. Contacts are reduced into
-persistent manifolds with feature IDs; contact impulses are cached for warm
-starting. Dynamic bodies connected by contacts are grouped into deterministically
-ordered islands.
+use the current deformed pose and a refitted BVH. Pose updates prepare new
+vertices and BVH bounds in staging buffers; on error, the last committed pose
+and bounds remain active. Contacts are reduced into persistent manifolds with
+feature IDs; contact impulses are cached for warm starting. Dynamic bodies
+connected by contacts are grouped into deterministically ordered islands.
 
 Triangles are finite, zero-thickness, two-sided surfaces. Sphere contacts use
 the closest point on the finite triangle; other convex contacts use GJK distance

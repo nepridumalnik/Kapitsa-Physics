@@ -49,7 +49,28 @@ impl MeshQueryWorkspace {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct BvhRefitScratch {
+    triangle_bounds: Vec<Aabb>,
+    node_bounds: Vec<Aabb>,
+}
+
+impl BvhRefitScratch {
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        self.triangle_bounds.capacity() * std::mem::size_of::<Aabb>()
+            + self.node_bounds.capacity() * std::mem::size_of::<Aabb>()
+    }
+}
+
 impl TriangleBvh {
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        self.nodes.capacity() * std::mem::size_of::<Node>()
+            + self.triangles.capacity() * std::mem::size_of::<usize>()
+            + self.triangle_bounds.capacity() * std::mem::size_of::<Aabb>()
+    }
+
     pub(crate) fn build(mesh: &TriangleMesh) -> Result<Self, CollisionError> {
         let triangle_count = mesh.triangles().len();
         let node_capacity = triangle_count
@@ -110,6 +131,18 @@ impl TriangleBvh {
         mesh: &TriangleMesh,
         vertices: &[Vec3],
     ) -> Result<(), CollisionError> {
+        let mut scratch = BvhRefitScratch::default();
+        self.prepare_refit(mesh, vertices, &mut scratch)?;
+        self.commit_refit(&mut scratch);
+        Ok(())
+    }
+
+    pub(crate) fn prepare_refit(
+        &self,
+        mesh: &TriangleMesh,
+        vertices: &[Vec3],
+        scratch: &mut BvhRefitScratch,
+    ) -> Result<(), CollisionError> {
         if vertices.len() != mesh.vertices().len()
             || mesh.triangles().len() != self.triangle_count
             || !vertices.iter().all(|vertex| vertex.is_finite())
@@ -117,22 +150,26 @@ impl TriangleBvh {
             return Err(CollisionError::InvalidSkinPose);
         }
 
-        let mut next_triangle_bounds = Vec::new();
-        next_triangle_bounds
+        scratch.triangle_bounds.clear();
+        scratch
+            .triangle_bounds
             .try_reserve_exact(self.triangle_count)
             .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
         for [a, b, c] in mesh.triangles().iter().copied() {
             let a = *vertices.get(a).ok_or(CollisionError::GeometryBounds)?;
             let b = *vertices.get(b).ok_or(CollisionError::GeometryBounds)?;
             let c = *vertices.get(c).ok_or(CollisionError::GeometryBounds)?;
-            next_triangle_bounds.push(triangle_bounds([a, b, c])?);
+            scratch.triangle_bounds.push(triangle_bounds([a, b, c])?);
         }
 
-        let mut next_node_bounds: Vec<Option<Aabb>> = Vec::new();
-        next_node_bounds
+        scratch.node_bounds.clear();
+        scratch
+            .node_bounds
             .try_reserve_exact(self.nodes.len())
             .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-        next_node_bounds.resize(self.nodes.len(), None);
+        scratch
+            .node_bounds
+            .extend(self.nodes.iter().map(|node| node.bounds));
         for (index, node) in self.nodes.iter().copied().enumerate().rev() {
             let bounds = match node.kind {
                 NodeKind::Leaf { start, count } => {
@@ -145,43 +182,47 @@ impl TriangleBvh {
                         .ok_or(CollisionError::GeometryBounds)?;
                     let mut ids = triangle_ids.iter().copied();
                     let first = ids.next().ok_or(CollisionError::GeometryBounds)?;
-                    let first_bounds = *next_triangle_bounds
+                    let first_bounds = *scratch
+                        .triangle_bounds
                         .get(first)
                         .ok_or(CollisionError::GeometryBounds)?;
                     ids.try_fold(first_bounds, |bounds, triangle| {
-                        next_triangle_bounds
+                        scratch
+                            .triangle_bounds
                             .get(triangle)
                             .map(|triangle_bounds| bounds.union(triangle_bounds))
                             .ok_or(CollisionError::GeometryBounds)
                     })?
                 }
                 NodeKind::Branch { left, right } => {
-                    let left = next_node_bounds
+                    let left = scratch
+                        .node_bounds
                         .get(left)
-                        .and_then(|bounds| *bounds)
                         .ok_or(CollisionError::GeometryBounds)?;
-                    let right = next_node_bounds
+                    let right = scratch
+                        .node_bounds
                         .get(right)
-                        .and_then(|bounds| *bounds)
                         .ok_or(CollisionError::GeometryBounds)?;
-                    left.union(&right)
+                    left.union(right)
                 }
             };
-            *next_node_bounds
+            *scratch
+                .node_bounds
                 .get_mut(index)
-                .ok_or(CollisionError::GeometryBounds)? = Some(bounds);
-        }
-        if next_node_bounds.iter().any(Option::is_none) {
-            return Err(CollisionError::GeometryBounds);
-        }
-
-        self.triangle_bounds = next_triangle_bounds;
-        for (node, bounds) in self.nodes.iter_mut().zip(next_node_bounds) {
-            if let Some(bounds) = bounds {
-                node.bounds = bounds;
-            }
+                .ok_or(CollisionError::GeometryBounds)? = bounds;
         }
         Ok(())
+    }
+
+    pub(crate) fn commit_refit(&mut self, scratch: &mut BvhRefitScratch) {
+        std::mem::swap(&mut self.triangle_bounds, &mut scratch.triangle_bounds);
+        for (node, bounds) in self
+            .nodes
+            .iter_mut()
+            .zip(scratch.node_bounds.iter().copied())
+        {
+            node.bounds = bounds;
+        }
     }
 
     pub(crate) fn query(

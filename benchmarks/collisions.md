@@ -223,3 +223,34 @@ internal and shares mesh, heightfield, level-set, and collider traversal
 buffers across candidate colliders within each `PhysicsWorld` query call. No
 external allocation trace was collected; the earlier Windows heap profiler
 attempt was denied by the environment.
+
+## Transactional skinned-mesh refit, stage 12
+
+Each update deforms vertices into a staging vector, prepares triangle and node
+bounds in reusable scratch arrays, and only then swaps the committed vertices
+and triangle bounds and copies staged node bounds into the existing BVH. The
+prebuilt mesh BVH is moved into the skin pose on its first update, so the
+collider retains one BVH topology rather than a base tree plus a skinned copy.
+The benchmark world, mesh, pose, and bone matrices are prepared outside the
+timed 1,000-update loop. The mesh has 64 bones, with one influence per vertex
+distributed round-robin; the two modes change only bone 0 or all 64 bones.
+
+| Vertices | Changed bones | Min / median / max | Retained capacity before / after loop |
+|---:|---|---:|---:|
+| 1,024 | 1 | 37.118 / 37.168 / 37.793 ms | 575,064 / 575,064 B |
+| 1,024 | 64 | 37.176 / 37.210 / 37.820 ms | 575,064 / 575,064 B |
+| 10,000 | 1 | 422.469 / 422.883 / 424.618 ms | 6,043,544 / 6,043,544 B |
+| 10,000 | 64 | 444.014 / 445.759 / 449.529 ms | 6,043,544 / 6,043,544 B |
+| 100,172 | 1 | 4,385.139 / 4,396.816 / 4,993.160 ms | 60,471,656 / 60,471,656 B |
+| 100,172 | 64 | 4,361.058 / 5,585.949 / 5,668.439 ms | 60,471,656 / 60,471,656 B |
+
+No retained-capacity growth occurred during these measured loops. The estimate
+includes both vertex buffers, the single BVH, refit scratch arrays, and the
+pose structure; it excludes allocator overhead and fragmentation. It is
+not an allocation count, and no external heap trace was available. Compared
+with the earlier 1-bone baseline medians of 41.041, 550.005, and 8,227.822 ms,
+the new 1-bone medians were 9.4%, 23.1%, and 46.6% lower. The old and new
+one-bone ranges do not overlap at any tested size. Updating 64 bones costs
+somewhat more at 10,000 vertices, while both modes still recompute every
+skinned vertex. The 100,172-vertex all-bones run had a wide range and is
+load-sensitive.

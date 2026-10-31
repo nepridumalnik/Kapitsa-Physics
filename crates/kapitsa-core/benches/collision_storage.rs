@@ -352,52 +352,81 @@ fn run_world_sweeps(
 }
 
 fn report_skin_updates(tag: &str, vertex_count: usize) -> Result<(), Box<dyn Error>> {
-    let mut samples = Vec::with_capacity(SAMPLES);
-    for _ in 0..WARMUPS {
-        let (mut world, collider) = skin_scene(vertex_count)?;
-        update_skin_pose(&mut world, collider)?;
+    const BONE_COUNT: usize = 64;
+    for all_bones in [false, true] {
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..WARMUPS {
+            let (mut world, collider) = skin_scene(vertex_count, BONE_COUNT)?;
+            let mut matrices = vec![Affine3::IDENTITY; BONE_COUNT];
+            update_skin_pose(&mut world, collider, &mut matrices, all_bones)?;
+        }
+        for _ in 0..SAMPLES {
+            let (mut world, collider) = skin_scene(vertex_count, BONE_COUNT)?;
+            let mut matrices = vec![Affine3::IDENTITY; BONE_COUNT];
+            let before = world
+                .collider(collider)
+                .map_or(0, Collider::skin_pose_retained_capacity_bytes);
+            let started = Instant::now();
+            update_skin_pose(&mut world, collider, &mut matrices, all_bones)?;
+            let elapsed = started.elapsed();
+            let after = world
+                .collider(collider)
+                .map_or(0, Collider::skin_pose_retained_capacity_bytes);
+            samples.push((elapsed, before, after));
+        }
+        samples.sort_unstable_by_key(|sample| sample.0);
+        let (min, _, _) = samples.first().ok_or("missing benchmark sample")?;
+        let (median, before, after) = samples.get(SAMPLES / 2).ok_or("missing benchmark sample")?;
+        let (max, _, _) = samples.last().ok_or("missing benchmark sample")?;
+        println!(
+            "{tag:10} {:10} 1,000 updates={:.3}/{:.3}/{:.3} ms min/median/max | vertices={vertex_count} retained={} -> {} B growth={} B",
+            if all_bones { "all bones" } else { "one bone" },
+            millis(*min),
+            millis(*median),
+            millis(*max),
+            before,
+            after,
+            after.saturating_sub(*before),
+        );
     }
-    for _ in 0..SAMPLES {
-        let (mut world, collider) = skin_scene(vertex_count)?;
-        let started = Instant::now();
-        update_skin_pose(&mut world, collider)?;
-        samples.push(started.elapsed());
-    }
-    samples.sort_unstable();
-    println!(
-        "{tag:32} 1,000 SkinPose updates={:.3}/{:.3}/{:.3} ms min/median/max | vertices={vertex_count}",
-        millis(*samples.first().ok_or("missing benchmark sample")?),
-        millis(samples[SAMPLES / 2]),
-        millis(*samples.last().ok_or("missing benchmark sample")?),
-    );
     Ok(())
 }
 
-fn update_skin_pose(world: &mut PhysicsWorld, collider: ColliderId) -> Result<(), Box<dyn Error>> {
+fn update_skin_pose(
+    world: &mut PhysicsWorld,
+    collider: ColliderId,
+    matrices: &mut [Affine3],
+    all_bones: bool,
+) -> Result<(), Box<dyn Error>> {
+    let changed_bones = if all_bones { matrices.len() } else { 1 };
     for update in 0..1_000 {
         let offset = if update % 2 == 0 { 0.001 } else { -0.001 };
-        black_box(world.set_skin_pose(
-            collider,
-            &[Affine3::from_translation(Vec3::new(offset, 0.0, 0.0))],
-        )?);
+        for (bone, matrix) in matrices.iter_mut().take(changed_bones).enumerate() {
+            let bone_scale = if all_bones { (bone + 1) as f64 } else { 1.0 };
+            *matrix = Affine3::from_translation(Vec3::new(offset * bone_scale, 0.0, 0.0));
+        }
+        black_box(world.set_skin_pose(collider, matrices)?);
     }
     Ok(())
 }
 
-fn skin_scene(vertex_count: usize) -> Result<(PhysicsWorld, ColliderId), Box<dyn Error>> {
+fn skin_scene(
+    vertex_count: usize,
+    bone_count: usize,
+) -> Result<(PhysicsWorld, ColliderId), Box<dyn Error>> {
     let width = (vertex_count as f64).sqrt() as usize;
     let height = vertex_count.div_ceil(width);
     let mesh = grid_mesh(width, height)?;
     let mut influences = Vec::with_capacity(mesh.vertices().len());
-    for _ in 0..mesh.vertices().len() {
-        influences.push(vec![BoneInfluence::new(0, 1.0)?]);
+    for vertex in 0..mesh.vertices().len() {
+        influences.push(vec![BoneInfluence::new(vertex % bone_count, 1.0)?]);
     }
     let skinned = SkinnedTriangleMesh::new(
         mesh,
-        vec!["root".to_owned()],
+        (0..bone_count).map(|bone| format!("bone-{bone}")).collect(),
         influences,
         Affine3::IDENTITY,
-        vec![Affine3::IDENTITY],
+        vec![Affine3::IDENTITY; bone_count],
     )?;
     let mut world = PhysicsWorld::new();
     let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
@@ -405,7 +434,7 @@ fn skin_scene(vertex_count: usize) -> Result<(PhysicsWorld, ColliderId), Box<dyn
         body,
         Collider::new(Shape::SkinnedTriangleMesh(skinned), Transform::identity()),
     )?;
-    world.set_skin_pose(collider, &[Affine3::IDENTITY])?;
+    world.set_skin_pose(collider, &vec![Affine3::IDENTITY; bone_count])?;
     Ok((world, collider))
 }
 
