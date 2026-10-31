@@ -22,7 +22,6 @@ pub struct PhysicsClient {
 }
 
 impl PhysicsClient {
-    #[allow(dead_code)]
     pub(crate) fn new(
         command_tx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
         snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,

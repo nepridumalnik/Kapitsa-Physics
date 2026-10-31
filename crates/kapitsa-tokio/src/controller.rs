@@ -786,11 +786,13 @@ mod tests {
             PhysicsController::new(moving_kinematic_world(), config).expect("controller");
         let first_quantum = controller.step_duration();
         let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (_command_tx, mut command_rx) = tokio::sync::mpsc::channel(1024);
         let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
         let mut accumulator = Duration::from_secs(1);
         let mut previous = tokio::time::Instant::now();
         crate::simulation::run_catch_up_batch(
             &mut controller,
+            &mut command_rx,
             &stop_rx,
             &metrics_tx,
             &mut accumulator,
@@ -802,6 +804,7 @@ mod tests {
         let second_quantum = controller.step_duration();
         crate::simulation::run_catch_up_batch(
             &mut controller,
+            &mut command_rx,
             &stop_rx,
             &metrics_tx,
             &mut accumulator,

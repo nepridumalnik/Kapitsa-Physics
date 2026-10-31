@@ -1,11 +1,20 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use kapitsa_core::world::PhysicsWorld;
-use tokio::{runtime::Handle, sync::watch, task::JoinHandle, time::Instant};
+use tokio::{
+    runtime::Handle,
+    sync::{mpsc, watch},
+    task::JoinHandle,
+    time::Instant,
+};
 
 use crate::{
     PhysicsController, SchedulerConfig, SimulationError, SimulationMetrics, SimulationState,
+    marshalling::{CommandRequest, PhysicsClient, PhysicsSnapshot, apply_command},
 };
+
+const COMMAND_QUEUE_CAPACITY: usize = 1024;
+const MAX_COMMANDS_PER_STEP: usize = 1024;
 
 struct SimulationTaskOutput {
     controller: PhysicsController,
@@ -17,30 +26,45 @@ pub struct PhysicsSimulation {
     controller: Option<PhysicsController>,
     task: Option<JoinHandle<SimulationTaskOutput>>,
     stop: Option<watch::Sender<bool>>,
+    command_tx: watch::Sender<Option<mpsc::Sender<CommandRequest>>>,
+    command_rx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
+    snapshot_tx: watch::Sender<Arc<PhysicsSnapshot>>,
+    snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
     metrics_tx: watch::Sender<SimulationMetrics>,
     metrics_rx: watch::Receiver<SimulationMetrics>,
 }
 
 impl PhysicsSimulation {
     pub fn new(world: PhysicsWorld) -> Self {
-        Self::from_controller(PhysicsController::with_default_config(world))
+        let snapshot = Arc::new(PhysicsSnapshot::from_world(&world, 0, Duration::ZERO));
+        Self::from_controller(PhysicsController::with_default_config(world), snapshot)
     }
 
     pub fn with_config(
         world: PhysicsWorld,
         config: SchedulerConfig,
     ) -> Result<Self, SimulationError> {
-        Ok(Self::from_controller(PhysicsController::new(
-            world, config,
-        )?))
+        let controller = PhysicsController::new(world, config)?;
+        let snapshot = Arc::new(PhysicsSnapshot::from_world(
+            controller.world()?,
+            controller.metrics().total_steps,
+            Duration::ZERO,
+        ));
+        Ok(Self::from_controller(controller, snapshot))
     }
 
-    fn from_controller(controller: PhysicsController) -> Self {
+    fn from_controller(controller: PhysicsController, snapshot: Arc<PhysicsSnapshot>) -> Self {
         let (metrics_tx, metrics_rx) = watch::channel(controller.metrics());
+        let (command_tx, command_rx) = watch::channel(None);
+        let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
         Self {
             controller: Some(controller),
             task: None,
             stop: None,
+            command_tx,
+            command_rx,
+            snapshot_tx,
+            snapshot_rx,
             metrics_tx,
             metrics_rx,
         }
@@ -57,19 +81,33 @@ impl PhysicsSimulation {
         }
         let runtime = Handle::try_current().map_err(|_| SimulationError::MissingRuntime)?;
 
+        if let Some(controller) = &self.controller {
+            let snapshot = Arc::new(PhysicsSnapshot::from_world(
+                controller.world()?,
+                controller.metrics().total_steps,
+                Duration::ZERO,
+            ));
+            self.snapshot_tx.send_replace(snapshot);
+        }
+
         let Some(mut controller) = self.controller.take() else {
             return Err(SimulationError::TaskRequiresStop);
         };
         let (stop_tx, stop_rx) = watch::channel(false);
+        let (command_sender, command_receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
+        self.command_tx.send_replace(Some(command_sender));
         controller.reset_actual_frequency();
         controller.set_simulation_state(SimulationState::Running);
         controller.set_simulation_time_debt(Duration::ZERO);
         self.metrics_tx.send_replace(controller.metrics());
 
         let metrics_tx = self.metrics_tx.clone();
+        let command_state_tx = self.command_tx.clone();
         self.stop = Some(stop_tx);
         self.task = Some(runtime.spawn(async move {
-            let result = run_simulation(&mut controller, stop_rx, &metrics_tx).await;
+            let result =
+                run_simulation(&mut controller, command_receiver, stop_rx, &metrics_tx).await;
+            command_state_tx.send_replace(None);
             controller.reset_actual_frequency();
             controller.set_simulation_state(if result.is_ok() {
                 SimulationState::Stopped
@@ -87,6 +125,7 @@ impl PhysicsSimulation {
         let Some(task) = &mut self.task else {
             return Ok(());
         };
+        self.command_tx.send_replace(None);
         if let Some(stop) = &self.stop {
             stop.send_replace(true);
         }
@@ -117,6 +156,11 @@ impl PhysicsSimulation {
         self.metrics_rx.borrow().clone()
     }
 
+    /// Returns a cloneable client for the command and snapshot channels.
+    pub fn client(&self) -> PhysicsClient {
+        PhysicsClient::new(self.command_rx.clone(), self.snapshot_rx.clone())
+    }
+
     /// Borrows the world while the simulation is stopped.
     pub fn world(&self) -> Result<&PhysicsWorld, SimulationError> {
         self.controller
@@ -138,6 +182,7 @@ impl PhysicsSimulation {
 
 impl Drop for PhysicsSimulation {
     fn drop(&mut self) {
+        self.command_tx.send_replace(None);
         if let Some(stop) = &self.stop {
             stop.send_replace(true);
         }
@@ -150,6 +195,7 @@ fn stopping(stop: &watch::Receiver<bool>) -> bool {
 
 async fn run_simulation(
     controller: &mut PhysicsController,
+    mut commands: mpsc::Receiver<CommandRequest>,
     mut stop: watch::Receiver<bool>,
     metrics: &watch::Sender<SimulationMetrics>,
 ) -> Result<(), SimulationError> {
@@ -174,7 +220,15 @@ async fn run_simulation(
         add_elapsed(&mut accumulator, now.duration_since(previous))?;
         previous = now;
 
-        run_catch_up_batch(controller, &stop, metrics, &mut accumulator, &mut previous).await?;
+        run_catch_up_batch(
+            controller,
+            &mut commands,
+            &stop,
+            metrics,
+            &mut accumulator,
+            &mut previous,
+        )
+        .await?;
 
         if stopping(&stop) {
             break;
@@ -189,6 +243,7 @@ async fn run_simulation(
 
 pub(crate) async fn run_catch_up_batch(
     controller: &mut PhysicsController,
+    commands: &mut mpsc::Receiver<CommandRequest>,
     stop: &watch::Receiver<bool>,
     metrics: &watch::Sender<SimulationMetrics>,
     accumulator: &mut Duration,
@@ -199,6 +254,7 @@ pub(crate) async fn run_catch_up_batch(
         if *accumulator < step_duration || stopping(stop) {
             break;
         }
+        apply_queued_commands(controller, commands)?;
         controller
             .step()
             .await
@@ -209,6 +265,24 @@ pub(crate) async fn run_catch_up_batch(
         *previous = completed_at;
         controller.set_simulation_time_debt(accumulator.saturating_sub(controller.step_duration()));
         metrics.send_replace(controller.metrics());
+    }
+    Ok(())
+}
+
+fn apply_queued_commands(
+    controller: &mut PhysicsController,
+    commands: &mut mpsc::Receiver<CommandRequest>,
+) -> Result<(), SimulationError> {
+    let world = controller.world_mut()?;
+    for _ in 0..MAX_COMMANDS_PER_STEP {
+        let request = match commands.try_recv() {
+            Ok(request) => request,
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                break;
+            }
+        };
+        let result = apply_command(world, request.command);
+        let _ = request.reply.send(result);
     }
     Ok(())
 }
@@ -280,11 +354,13 @@ mod tests {
             PhysicsController::new(PhysicsWorld::new(), config).expect("controller");
         let quantum = controller.step_duration();
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (_command_tx, mut command_rx) = tokio::sync::mpsc::channel(1024);
         let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
         let mut accumulator = Duration::from_secs(1);
         let mut previous = tokio::time::Instant::now();
         run_catch_up_batch(
             &mut controller,
+            &mut command_rx,
             &stop_rx,
             &metrics_tx,
             &mut accumulator,
@@ -298,6 +374,7 @@ mod tests {
         stop_tx.send_replace(true);
         run_catch_up_batch(
             &mut controller,
+            &mut command_rx,
             &stop_rx,
             &metrics_tx,
             &mut accumulator,
@@ -306,6 +383,56 @@ mod tests {
         .await
         .expect("stopped batch");
         assert_eq!(controller.metrics().total_steps, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn command_is_applied_before_step_and_survives_step_error() {
+        use crate::marshalling::{CommandRequest, PhysicsCommand, PhysicsCommandResult};
+
+        let mut world = PhysicsWorld::new();
+        let tiny_mass = MassProperties::new(f64::from_bits(1), Vec3::ZERO, Mat3::IDENTITY)
+            .expect("valid mass properties");
+        let mut failing =
+            RigidBody::new_dynamic(Transform::identity(), tiny_mass).expect("dynamic body");
+        failing
+            .apply_force(Vec3::X * f64::MAX)
+            .expect("finite force");
+        world.add_body(failing).expect("add failing body");
+        let mut controller = PhysicsController::with_default_config(world);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(1);
+        let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
+        let (reply, response) = tokio::sync::oneshot::channel();
+        command_tx
+            .send(CommandRequest {
+                command: PhysicsCommand::AddBody {
+                    body: RigidBody::new_static(Transform::identity()),
+                },
+                reply,
+            })
+            .await
+            .expect("enqueue command");
+        let mut accumulator = Duration::from_secs(1);
+        let mut previous = tokio::time::Instant::now();
+
+        assert!(matches!(
+            run_catch_up_batch(
+                &mut controller,
+                &mut command_rx,
+                &stop_rx,
+                &metrics_tx,
+                &mut accumulator,
+                &mut previous,
+            )
+            .await,
+            Err(SimulationError::Scheduler(SchedulerError::PhysicsStep(_)))
+        ));
+        assert!(matches!(
+            response.await.expect("command response"),
+            Ok(PhysicsCommandResult::Body(_))
+        ));
+        assert_eq!(controller.world().expect("world restored").body_count(), 2);
+        stop_tx.send_replace(true);
     }
 
     #[tokio::test(start_paused = true)]
@@ -466,8 +593,9 @@ mod tests {
         let mut controller = PhysicsController::with_default_config(PhysicsWorld::new());
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
+        let (_command_tx, command_rx) = tokio::sync::mpsc::channel(1024);
         drop(stop_tx);
-        run_simulation(&mut controller, stop_rx, &metrics_tx)
+        run_simulation(&mut controller, command_rx, stop_rx, &metrics_tx)
             .await
             .expect("closed channel stops loop");
         assert_eq!(controller.metrics().total_steps, 0);

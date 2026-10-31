@@ -20,7 +20,6 @@ pub struct PhysicsSnapshot {
 }
 
 impl PhysicsSnapshot {
-    #[allow(dead_code)]
     pub(crate) fn from_world(world: &PhysicsWorld, step: u64, simulation_time: Duration) -> Self {
         let mut bodies = Vec::new();
         for (id, body) in world.bodies() {

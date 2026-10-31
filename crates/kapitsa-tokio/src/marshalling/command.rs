@@ -89,13 +89,11 @@ pub enum PhysicsCommandResult {
     Collider(ColliderId),
 }
 
-#[allow(dead_code)]
 pub(crate) struct CommandRequest {
     pub command: PhysicsCommand,
     pub reply: oneshot::Sender<Result<PhysicsCommandResult, PhysicsClientError>>,
 }
 
-#[allow(dead_code)]
 pub(crate) fn apply_command(
     world: &mut PhysicsWorld,
     command: PhysicsCommand,
