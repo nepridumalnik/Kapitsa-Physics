@@ -181,11 +181,16 @@ the step broadphase index; see the measured query workload in
 
 ## Events and errors
 
-Events are sorted by event kind and canonical collider pair. A newly active
-pair emits `Begin`; an ongoing pair emits `Persist`; a separated pair emits
-`End`. A solid contact with a positive new impulse can also emit `Impact`.
-Sensors carry no contact data and do not emit `Impact`. Event changes are
-staged with contacts and become visible only after a successful commit.
+Events are ordered deterministically by canonical collider pair, with each
+pair's lifecycle events kept in order. A newly active pair emits `Begin`; an
+ongoing pair emits `Persist`; a separated pair emits `End`. If an overlapping
+collider pair changes between solid and sensor mode, the step emits `End` for
+the old mode followed by `Begin` for the new mode. A solid contact with a
+positive new impulse can also emit `Impact`. Sensors carry no contact data and
+do not emit `Impact`. A continuous sensor crossing that has already exited by
+the end of the step emits `Begin` and `End` in the same step and is not kept
+active. Event changes are staged with contacts and become visible only after a
+successful commit.
 
 Step failures are returned as `StepError`, including `StepError::Collision`
 with a `CollisionError` such as `InvalidMaterial`, `UnsupportedGeometryPair`,

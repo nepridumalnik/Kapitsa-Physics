@@ -405,6 +405,85 @@ fn world_step_reports_sensor_overlap_without_changing_motion() {
 }
 
 #[test]
+fn collision_mode_changes_restart_the_pair_lifecycle_and_failed_steps_preserve_events() {
+    let mut world = PhysicsWorld::new();
+    let plane = add_plane(&mut world, CollisionMode::Solid);
+    let ball = world
+        .add_body(dynamic_body(Vec3::new(0.0, 0.4, 0.0), Vec3::ZERO))
+        .unwrap();
+    let sphere = world
+        .add_collider(
+            ball,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    let pair = CollisionPair::new(plane, sphere).unwrap();
+
+    world.step(1.0 / 60.0).unwrap();
+    assert_eq!(world.collision_events().len(), 1);
+    assert_eq!(world.collision_events()[0].kind, CollisionEventKind::Begin);
+    assert!(!world.collision_events()[0].sensor);
+    let committed_events = world.collision_events().to_vec();
+
+    assert_eq!(
+        world.step(0.0),
+        Err(crate::world::StepError::InvalidDeltaTime)
+    );
+    assert_eq!(world.collision_events(), committed_events);
+
+    world.step(1.0 / 60.0).unwrap();
+    assert_eq!(world.collision_events().len(), 1);
+    assert_eq!(
+        world.collision_events()[0].kind,
+        CollisionEventKind::Persist
+    );
+    assert!(!world.collision_events()[0].sensor);
+
+    world
+        .collider_mut(plane)
+        .unwrap()
+        .set_mode(CollisionMode::Sensor);
+    let body = world.body_mut(ball).unwrap();
+    body.set_transform(Transform::new(Vec3::new(0.0, 0.4, 0.0), Quat::IDENTITY).unwrap())
+        .unwrap();
+    body.set_linear_velocity(Vec3::ZERO).unwrap();
+    world.step(1.0 / 60.0).unwrap();
+    let events = world
+        .collision_events()
+        .iter()
+        .filter(|event| event.pair == pair)
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, CollisionEventKind::End);
+    assert!(!events[0].sensor);
+    assert_eq!(events[1].kind, CollisionEventKind::Begin);
+    assert!(events[1].sensor);
+
+    world
+        .collider_mut(plane)
+        .unwrap()
+        .set_mode(CollisionMode::Solid);
+    let body = world.body_mut(ball).unwrap();
+    body.set_transform(Transform::new(Vec3::new(0.0, 0.4, 0.0), Quat::IDENTITY).unwrap())
+        .unwrap();
+    body.set_linear_velocity(Vec3::ZERO).unwrap();
+    world.step(1.0 / 60.0).unwrap();
+    let events = world
+        .collision_events()
+        .iter()
+        .filter(|event| event.pair == pair)
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, CollisionEventKind::End);
+    assert!(events[0].sensor);
+    assert_eq!(events[1].kind, CollisionEventKind::Begin);
+    assert!(!events[1].sensor);
+}
+
+#[test]
 fn world_step_resolves_contacts_against_triangle_mesh() {
     let mut world = PhysicsWorld::new();
     let mesh_body = world
@@ -869,18 +948,33 @@ fn continuous_sensor_reports_a_transient_crossing_without_response() {
         -1000.0
     );
     let pair = CollisionPair::new(plane, sphere).unwrap();
-    assert!(world.collision_events().iter().any(|event| {
-        event.kind == CollisionEventKind::Begin
-            && event.pair == pair
-            && event.sensor
-            && event.contact.is_none()
-    }));
+    let pair_events = world
+        .collision_events()
+        .iter()
+        .filter(|event| event.pair == pair)
+        .collect::<Vec<_>>();
+    assert_eq!(pair_events.len(), 2);
+    assert_eq!(pair_events[0].kind, CollisionEventKind::Begin);
+    assert_eq!(pair_events[1].kind, CollisionEventKind::End);
+    assert!(
+        pair_events
+            .iter()
+            .all(|event| event.sensor && event.contact.is_none())
+    );
     assert!(
         !world
             .collision_events()
             .iter()
             .any(|event| event.kind == CollisionEventKind::Impact && event.pair == pair)
     );
+
+    world
+        .body_mut(ball)
+        .unwrap()
+        .set_linear_velocity(Vec3::ZERO)
+        .unwrap();
+    world.step(0.01).unwrap();
+    assert!(world.collision_events().is_empty());
 }
 
 #[test]

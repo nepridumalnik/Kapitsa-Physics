@@ -830,6 +830,7 @@ impl PhysicsWorld {
                         CollisionInteraction {
                             pair,
                             sensor: true,
+                            transient: true,
                             contact: None,
                             impact: false,
                         },
@@ -989,6 +990,7 @@ impl PhysicsWorld {
                 CollisionInteraction {
                     pair,
                     sensor: false,
+                    transient: false,
                     contact: Some(ContactInfo {
                         point,
                         normal: solved_point.normal,
@@ -1354,6 +1356,7 @@ impl PhysicsWorld {
                         CollisionInteraction {
                             pair,
                             sensor: true,
+                            transient: false,
                             contact: None,
                             impact: false,
                         },
@@ -1501,6 +1504,7 @@ impl PhysicsWorld {
                 CollisionInteraction {
                     pair: manifold.pair,
                     sensor: false,
+                    transient: false,
                     contact: Some(ContactInfo {
                         point,
                         normal: deepest.normal,
@@ -2005,6 +2009,7 @@ fn upsert_interaction(
         if existing.sensor != interaction.sensor {
             return Err(CollisionError::InvalidContact);
         }
+        existing.transient &= interaction.transient;
         if interaction.contact.is_some() {
             existing.contact = interaction.contact;
         }

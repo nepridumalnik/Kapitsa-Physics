@@ -53,13 +53,24 @@ fn interaction(
     CollisionInteraction {
         pair,
         sensor,
+        transient: false,
         contact,
         impact,
     }
 }
 
+fn transient_sensor(pair: CollisionPair) -> CollisionInteraction {
+    CollisionInteraction {
+        pair,
+        sensor: true,
+        transient: true,
+        contact: None,
+        impact: false,
+    }
+}
+
 #[test]
-fn lifecycle_emits_sorted_begin_persist_end_and_impacts() {
+fn lifecycle_emits_deterministic_pair_ordered_begin_persist_end_and_impacts() {
     let [solid_pair, sensor_pair] = pairs();
     let mut lifecycle = CollisionLifecycle::new();
     let mut current = [
@@ -75,12 +86,12 @@ fn lifecycle_emits_sorted_begin_persist_end_and_impacts() {
             .collect::<Vec<_>>(),
         vec![
             (CollisionEventKind::Begin, solid_pair),
-            (CollisionEventKind::Begin, sensor_pair),
             (CollisionEventKind::Impact, solid_pair),
+            (CollisionEventKind::Begin, sensor_pair),
         ]
     );
-    assert_eq!(events[1].contact, None);
-    assert!(events[1].sensor);
+    assert_eq!(events[2].contact, None);
+    assert!(events[2].sensor);
     lifecycle.commit();
 
     let mut current = [interaction(solid_pair, false, Some(contact(0.0)), false)];
@@ -99,6 +110,72 @@ fn lifecycle_emits_sorted_begin_persist_end_and_impacts() {
     assert_eq!(events[0].kind, CollisionEventKind::End);
     assert_eq!(events[0].pair, solid_pair);
     assert_eq!(events[0].contact, None);
+}
+
+#[test]
+fn lifecycle_emits_end_then_begin_when_sensor_mode_changes() {
+    let [pair, _] = pairs();
+    let mut lifecycle = CollisionLifecycle::new();
+    let mut events = Vec::new();
+    let mut current = [interaction(pair, false, Some(contact(0.0)), false)];
+    lifecycle.stage(&mut current, &mut events).unwrap();
+    lifecycle.commit();
+
+    let mut current = [interaction(pair, true, None, false)];
+    lifecycle.stage(&mut current, &mut events).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, CollisionEventKind::End);
+    assert!(!events[0].sensor);
+    assert_eq!(events[1].kind, CollisionEventKind::Begin);
+    assert!(events[1].sensor);
+    lifecycle.commit();
+
+    let mut current = [interaction(pair, false, Some(contact(0.0)), false)];
+    lifecycle.stage(&mut current, &mut events).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, CollisionEventKind::End);
+    assert!(events[0].sensor);
+    assert_eq!(events[1].kind, CollisionEventKind::Begin);
+    assert!(!events[1].sensor);
+}
+
+#[test]
+fn transient_sensor_crossings_begin_and_end_without_becoming_active() {
+    let [pair, _] = pairs();
+    let mut lifecycle = CollisionLifecycle::new();
+    let mut events = Vec::new();
+    let mut current = [transient_sensor(pair)];
+    lifecycle.stage(&mut current, &mut events).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, CollisionEventKind::Begin);
+    assert_eq!(events[1].kind, CollisionEventKind::End);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.sensor && event.contact.is_none())
+    );
+    lifecycle.commit();
+
+    lifecycle.stage(&mut [], &mut events).unwrap();
+    assert!(events.is_empty());
+}
+
+#[test]
+fn transient_sensor_exit_ends_an_existing_pair_without_reentering() {
+    let [pair, _] = pairs();
+    let mut lifecycle = CollisionLifecycle::new();
+    let mut events = Vec::new();
+    let mut current = [interaction(pair, true, None, false)];
+    lifecycle.stage(&mut current, &mut events).unwrap();
+    lifecycle.commit();
+
+    let mut current = [transient_sensor(pair)];
+    lifecycle.stage(&mut current, &mut events).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, CollisionEventKind::End);
+    lifecycle.commit();
+    lifecycle.stage(&mut [], &mut events).unwrap();
+    assert!(events.is_empty());
 }
 
 #[test]
@@ -134,6 +211,17 @@ fn lifecycle_rejects_duplicate_pairs_and_sensor_impacts() {
     let mut sensor_impact = [interaction(pair, true, Some(contact(1.0)), true)];
     assert_eq!(
         lifecycle.stage(&mut sensor_impact, &mut events),
+        Err(crate::collision::CollisionError::InvalidContact)
+    );
+    let mut transient_solid = [CollisionInteraction {
+        pair,
+        sensor: false,
+        transient: true,
+        contact: None,
+        impact: false,
+    }];
+    assert_eq!(
+        lifecycle.stage(&mut transient_solid, &mut events),
         Err(crate::collision::CollisionError::InvalidContact)
     );
 }

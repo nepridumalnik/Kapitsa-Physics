@@ -34,6 +34,7 @@ pub struct CollisionEvent {
 pub(crate) struct CollisionInteraction {
     pub(crate) pair: CollisionPair,
     pub(crate) sensor: bool,
+    pub(crate) transient: bool,
     pub(crate) contact: Option<ContactInfo>,
     pub(crate) impact: bool,
 }
@@ -73,6 +74,9 @@ impl CollisionLifecycle {
             return Err(CollisionError::InvalidContact);
         }
         for interaction in interactions.iter().copied() {
+            if interaction.transient && (!interaction.sensor || interaction.impact) {
+                return Err(CollisionError::InvalidContact);
+            }
             if interaction.impact
                 && (interaction.sensor
                     || interaction
@@ -117,41 +121,76 @@ impl CollisionLifecycle {
             let current = interactions.get(new_index).copied();
             match (old, current) {
                 (Some(old), Some(current)) if old.pair == current.pair => {
-                    self.push_current(current, CollisionEventKind::Persist, events);
+                    if old.sensor != current.sensor {
+                        Self::push_end(old, events);
+                        if current.transient {
+                            Self::push_transient(current, events);
+                        } else {
+                            self.push_current(current, CollisionEventKind::Begin, events);
+                        }
+                    } else if current.transient {
+                        Self::push_end(old, events);
+                    } else {
+                        self.push_current(current, CollisionEventKind::Persist, events);
+                    }
                     old_index += 1;
                     new_index += 1;
                 }
                 (Some(old), Some(current)) if old.pair < current.pair => {
-                    events.push(CollisionEvent {
-                        kind: CollisionEventKind::End,
-                        pair: old.pair,
-                        sensor: old.sensor,
-                        contact: None,
-                    });
+                    Self::push_end(old, events);
                     old_index += 1;
                 }
                 (Some(_), Some(current)) => {
-                    self.push_current(current, CollisionEventKind::Begin, events);
+                    if current.transient {
+                        Self::push_transient(current, events);
+                    } else {
+                        self.push_current(current, CollisionEventKind::Begin, events);
+                    }
                     new_index += 1;
                 }
                 (Some(old), None) => {
-                    events.push(CollisionEvent {
-                        kind: CollisionEventKind::End,
-                        pair: old.pair,
-                        sensor: old.sensor,
-                        contact: None,
-                    });
+                    Self::push_end(old, events);
                     old_index += 1;
                 }
                 (None, Some(current)) => {
-                    self.push_current(current, CollisionEventKind::Begin, events);
+                    if current.transient {
+                        Self::push_transient(current, events);
+                    } else {
+                        self.push_current(current, CollisionEventKind::Begin, events);
+                    }
                     new_index += 1;
                 }
                 (None, None) => break,
             }
         }
-        events.sort_by(|left, right| left.kind.cmp(&right.kind).then(left.pair.cmp(&right.pair)));
+        // The merge emits events in pair order. Events for one pair retain their
+        // lifecycle order, including End before Begin on mode transitions.
         Ok(())
+    }
+
+    fn push_end(old: ActivePair, events: &mut Vec<CollisionEvent>) {
+        events.push(CollisionEvent {
+            kind: CollisionEventKind::End,
+            pair: old.pair,
+            sensor: old.sensor,
+            contact: None,
+        });
+    }
+
+    fn push_transient(current: CollisionInteraction, events: &mut Vec<CollisionEvent>) {
+        events.push(CollisionEvent {
+            kind: CollisionEventKind::Begin,
+            pair: current.pair,
+            sensor: true,
+            contact: None,
+        });
+        Self::push_end(
+            ActivePair {
+                pair: current.pair,
+                sensor: true,
+            },
+            events,
+        );
     }
 
     fn push_current(

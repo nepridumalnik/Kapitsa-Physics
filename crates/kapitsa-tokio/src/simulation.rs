@@ -426,8 +426,8 @@ mod tests {
     };
 
     use kapitsa_core::{
-        collider::Collider,
-        collision::CollisionEventKind,
+        collider::{Collider, CollisionMode},
+        collision::{CollisionEventKind, CollisionPair},
         mass::MassProperties,
         rigid_body::RigidBody,
         shape::{Plane, Shape, Sphere},
@@ -657,12 +657,58 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn collision_subscription_reports_stop_and_resumes_after_restart() {
-        let mut simulation = PhysicsSimulation::new(PhysicsWorld::new());
+        let mut world = PhysicsWorld::new();
+        let plane_body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("plane body");
+        let mut plane_collider = Collider::new(
+            Shape::Plane(Plane::from_vec(Vec3::Y, 0.0).expect("plane")),
+            Transform::identity(),
+        );
+        plane_collider.set_mode(CollisionMode::Sensor);
+        let plane = world
+            .add_collider(plane_body, plane_collider)
+            .expect("plane collider");
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass properties");
+        let ball_body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(0.0, 0.4, 0.0), kapitsa_math::Quat::IDENTITY)
+                .expect("transform"),
+            mass,
+        )
+        .expect("dynamic body");
+        let ball = world.add_body(ball_body).expect("ball body");
+        let sphere = world
+            .add_collider(
+                ball,
+                Collider::new(
+                    Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                    Transform::identity(),
+                ),
+            )
+            .expect("sphere collider");
+        let pair = CollisionPair::new(plane, sphere).expect("collision pair");
+
+        let mut simulation = PhysicsSimulation::new(world);
         let client = simulation.client();
         let mut events = client.subscribe_collision_events();
         simulation.start().expect("start");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let first = events.next_batch().await.expect("first batch");
+        let first = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let batch = events.next_batch().await.expect("first event batch");
+                if batch.events().iter().any(|event| event.pair == pair) {
+                    break batch;
+                }
+            }
+        })
+        .await
+        .expect("initial sensor event arrives");
+        let first_pair_events = first
+            .events()
+            .iter()
+            .filter(|event| event.pair == pair)
+            .map(|event| event.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(first_pair_events, [CollisionEventKind::Begin]);
         simulation.stop().await.expect("stop");
 
         loop {
@@ -674,9 +720,27 @@ mod tests {
         }
 
         simulation.start().expect("restart");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let resumed = events.next_batch().await.expect("resumed batch");
-        assert!(resumed.step() > first.step());
+        for _ in 0..3 {
+            let resumed = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let batch = events.next_batch().await.expect("resumed event batch");
+                    if batch.events().iter().any(|event| event.pair == pair) {
+                        break batch;
+                    }
+                }
+            })
+            .await
+            .expect("persistent sensor event resumes");
+            assert!(resumed.step() > first.step());
+            let pair_events = resumed
+                .events()
+                .iter()
+                .filter(|event| event.pair == pair)
+                .collect::<Vec<_>>();
+            assert_eq!(pair_events.len(), 1);
+            assert_eq!(pair_events[0].kind, CollisionEventKind::Persist);
+            assert!(pair_events[0].sensor);
+        }
         simulation.stop().await.expect("final stop");
     }
 
