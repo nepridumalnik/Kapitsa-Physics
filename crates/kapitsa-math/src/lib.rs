@@ -1,4 +1,5 @@
 mod matrix;
+pub mod numeric;
 mod quaternion;
 mod vector;
 

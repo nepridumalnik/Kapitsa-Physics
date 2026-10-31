@@ -82,6 +82,36 @@ impl Vec3 {
     pub fn max(self, rhs: Self) -> Self {
         Self::new(self.x.max(rhs.x), self.y.max(rhs.y), self.z.max(rhs.z))
     }
+
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        let result = self + rhs;
+        result.is_finite().then_some(result)
+    }
+
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        let result = self - rhs;
+        result.is_finite().then_some(result)
+    }
+
+    pub fn checked_mul_scalar(self, scalar: f64) -> Option<Self> {
+        let result = self * scalar;
+        (scalar.is_finite() && result.is_finite()).then_some(result)
+    }
+
+    pub fn checked_dot(self, rhs: Self) -> Option<f64> {
+        let result = self.dot(rhs);
+        (self.is_finite() && rhs.is_finite() && result.is_finite()).then_some(result)
+    }
+
+    pub fn checked_cross(self, rhs: Self) -> Option<Self> {
+        let result = self.cross(rhs);
+        (self.is_finite() && rhs.is_finite() && result.is_finite()).then_some(result)
+    }
+
+    pub fn checked_length(self) -> Option<f64> {
+        let result = self.length();
+        result.is_finite().then_some(result)
+    }
 }
 
 impl Add for Vec3 {
@@ -278,5 +308,19 @@ mod tests {
             vector.try_normalize(),
             Some(Vec3::new(3.0 / 13.0, 4.0 / 13.0, 12.0 / 13.0))
         );
+    }
+
+    #[test]
+    fn checked_operations_reject_non_finite_results() {
+        assert_eq!(
+            Vec3::new(f64::MAX, 0.0, 0.0).checked_add(Vec3::new(f64::MAX, 0.0, 0.0)),
+            None
+        );
+        assert_eq!(Vec3::new(f64::MAX, 0.0, 0.0).checked_mul_scalar(2.0), None);
+        assert_eq!(
+            Vec3::new(f64::MAX, 0.0, 0.0).checked_dot(Vec3::new(2.0, 0.0, 0.0)),
+            None
+        );
+        assert_eq!(Vec3::new(f64::NAN, 0.0, 0.0).checked_length(), None);
     }
 }

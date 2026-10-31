@@ -89,6 +89,16 @@ impl Mat3 {
         self.columns[0].is_finite() && self.columns[1].is_finite() && self.columns[2].is_finite()
     }
 
+    pub fn checked_mul_vector(self, rhs: Vec3) -> Option<Vec3> {
+        let result = self * rhs;
+        (self.is_finite() && rhs.is_finite() && result.is_finite()).then_some(result)
+    }
+
+    pub fn checked_mul_matrix(self, rhs: Self) -> Option<Self> {
+        let result = self * rhs;
+        (self.is_finite() && rhs.is_finite() && result.is_finite()).then_some(result)
+    }
+
     /// Solves `self * x = rhs` using Cholesky factorization.
     ///
     /// The matrix must be finite, symmetric to a relative tolerance of 32
@@ -359,5 +369,12 @@ mod tests {
                 .solve_spd(Vec3::ONE),
             Err(CholeskyError::NotPositiveDefinite)
         );
+    }
+
+    #[test]
+    fn checked_products_reject_overflow() {
+        let matrix = Mat3::from_cols(Vec3::splat(f64::MAX), Vec3::ZERO, Vec3::ZERO);
+        assert_eq!(matrix.checked_mul_vector(Vec3::new(2.0, 0.0, 0.0)), None);
+        assert_eq!(matrix.checked_mul_matrix(matrix), None);
     }
 }
