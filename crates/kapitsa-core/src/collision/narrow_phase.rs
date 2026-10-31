@@ -753,20 +753,12 @@ impl NarrowPhase {
         if !result.intersects {
             return Ok(None);
         }
-        // Use a directional support contact if GJK's simplex or EPA degenerates.
+        // Use a support contact when GJK confirms overlap without a tetrahedron.
         let contact = if result.simplex.count == 4 {
-            match self
-                .epa
-                .solve(&result.simplex, shape_a, collider_a, shape_b, collider_b)
-            {
-                Ok(contact) => contact,
-                Err(CollisionError::NonConvergent) => {
-                    convex_support_contact(shape_a, collider_a, shape_b, collider_b)?
-                }
-                Err(error) => return Err(error),
-            }
+            self.epa
+                .solve(&result.simplex, shape_a, collider_a, shape_b, collider_b)?
         } else {
-            convex_support_contact(shape_a, collider_a, shape_b, collider_b)?
+            support_contact_for_degenerate_simplex(shape_a, collider_a, shape_b, collider_b)?
         };
         make_manifold(
             pair,
@@ -1009,7 +1001,7 @@ fn convex_shape_rank(shape: &Shape) -> u8 {
     }
 }
 
-fn convex_support_contact(
+fn support_contact_for_degenerate_simplex(
     shape_a: &Shape,
     transform_a: &Transform,
     shape_b: &Shape,

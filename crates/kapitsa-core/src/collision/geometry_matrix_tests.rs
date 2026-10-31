@@ -78,6 +78,16 @@ fn assert_symmetric_contact(pair: CollisionPair, left: &Geometry, right: &Geomet
         .unwrap_or_else(|| panic!("{} vs {} reversed: expected contact", left.name, right.name));
     let normal_forward = forward.points().next().expect("contact point").normal;
     let normal_reverse = reverse.points().next().expect("contact point").normal;
+    let expected_penetration = match (left.name, right.name) {
+        ("sphere", "capsule") | ("sphere", "cylinder") => Some(0.5),
+        ("capsule", "capsule") => Some(0.4),
+        _ => None,
+    };
+    if let Some(expected) = expected_penetration {
+        let contact = forward.points().next().expect("contact point");
+        assert!((contact.penetration - expected).abs() <= 1.0e-5);
+        assert!((normal_forward - Vec3::X).length() <= 1.0e-5);
+    }
     assert!(
         (normal_forward + normal_reverse).length() <= 1.0e-6,
         "{} vs {}: normals did not reverse ({normal_forward:?}, {normal_reverse:?})",

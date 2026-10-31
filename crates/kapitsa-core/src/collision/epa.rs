@@ -109,7 +109,7 @@ impl EpaWorkspace {
                 }
             }
             if self.visible.is_empty() {
-                return Err(CollisionError::NonConvergent);
+                return self.contact(face);
             }
             for position in 0..self.visible.len() {
                 let index = self
@@ -127,7 +127,7 @@ impl EpaWorkspace {
                 self.add_horizon_edge(face.vertices[2], face.vertices[0])?;
             }
             if self.horizon.is_empty() {
-                return Err(CollisionError::NonConvergent);
+                return self.contact(face);
             }
             self.faces
                 .try_reserve(self.horizon.len())
@@ -143,7 +143,8 @@ impl EpaWorkspace {
                 self.faces.push(self.make_face([from, to, new_index])?);
             }
         }
-        Err(CollisionError::NonConvergent)
+        let (_, face) = self.closest_face()?;
+        self.contact(face)
     }
 
     fn vertex(&self, index: usize) -> Result<SupportPoint, CollisionError> {
