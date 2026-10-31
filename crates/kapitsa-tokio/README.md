@@ -44,6 +44,67 @@ new run. Cumulative counters survive restarts. `simulation_time_debt` is the
 accumulated time exceeding the next step interval after a completed step; a
 normal remainder below one interval is retained internally but reported as zero.
 
+## Physics client and snapshots
+
+`PhysicsSimulation::client()` returns a cloneable, `Send + Sync` `PhysicsClient`
+that can be kept before, during, and after a run. During a run, the simulation
+task remains the only writer to `PhysicsWorld`. Client commands travel through
+a bounded queue and are applied FIFO at the next scheduled step boundary,
+before integration. They do not trigger an off-schedule step. At most 1,024
+commands are applied per step; a full queue makes senders wait for capacity.
+
+Each command completes after its world operation has been applied. Add
+operations return the new world-scoped ID; other successful operations return
+unit. `PhysicsClientError::World` and `PhysicsClientError::Body` preserve
+operation failures such as stale IDs or invalid body operations. Assigning a
+collider material keeps the core API's existing behavior and does not validate
+that the material exists.
+
+`snapshot()` clones an `Arc` to the latest immutable `PhysicsSnapshot` without
+waiting. `next_snapshot().await` waits for a later publication, and a slow
+reader may skip intermediate snapshots. Snapshots contain copied `BodyState`
+values, not references to the world; old `Arc`s remain valid. A snapshot can
+lag a command that just completed because publication happens only after the
+next successful physics step. Initial snapshots describe the current world
+and step count, including edits made through `world_mut()` while stopped.
+
+```rust
+use kapitsa_core::{
+    rigid_body::RigidBody,
+    world::PhysicsWorld,
+};
+use kapitsa_math::Vec3;
+use kapitsa_tokio::PhysicsSimulation;
+
+async fn run(
+    world: PhysicsWorld,
+    rocket: RigidBody,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut simulation = PhysicsSimulation::new(world);
+    let physics = simulation.client();
+
+    simulation.start()?;
+    let rocket_id = physics.add_body(rocket).await?;
+    physics.apply_force(rocket_id, Vec3::new(0.0, 1000.0, 0.0)).await?;
+
+    let snapshot = physics.snapshot();
+    if let Some(body) = snapshot.body(rocket_id) {
+        println!("{:?}", body.transform());
+    }
+
+    simulation.stop().await?;
+    Ok(())
+}
+```
+
+Cancelling a command future before its bounded send succeeds prevents the
+command from entering the queue. Cancelling after enqueueing only stops waiting
+for its reply; the simulation still applies the command in FIFO order. Stopping
+unpublishes the current sender, waits for an active step, and drops any
+unapplied requests. Each restart creates a new queue, so requests from an older
+run cannot carry forward. Call `stop().await` to recover the world; dropping
+the simulation only requests a best-effort stop as described above.
+
 ## Manual stepping
 
 `PhysicsController` is the lower-level API when the application should decide

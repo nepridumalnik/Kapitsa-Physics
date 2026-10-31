@@ -8,10 +8,15 @@ use kapitsa_core::{
 /// Failure returned while submitting or applying a physics command.
 #[derive(Debug)]
 pub enum PhysicsClientError {
+    /// The simulation is stopped or is stopping.
     NotRunning,
+    /// A command or snapshot channel closed unexpectedly.
     ChannelClosed,
+    /// An operation failed while accessing the physics world.
     World(WorldError),
+    /// A rigid-body operation rejected its input or current body type.
     Body(BodyError),
+    /// A command handler returned a result variant inconsistent with the request.
     UnexpectedResult,
 }
 

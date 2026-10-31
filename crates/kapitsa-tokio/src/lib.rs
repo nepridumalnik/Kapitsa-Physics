@@ -9,6 +9,7 @@ mod simulation;
 pub use adaptive::{AdaptiveScheduler, AdaptiveStatus};
 pub use controller::PhysicsController;
 pub use error::{PhysicsClientError, SchedulerError, SimulationError};
+pub use marshalling::{PhysicsClient, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot};
 pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
 pub use scheduler::SchedulerConfig;
 pub use simulation::PhysicsSimulation;

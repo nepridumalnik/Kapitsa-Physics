@@ -32,6 +32,10 @@ impl PhysicsClient {
         }
     }
 
+    /// Queues a command and waits until it has been applied to the world.
+    ///
+    /// Cancelling before the bounded send completes prevents enqueueing. Once
+    /// enqueued, the command remains active even if this future is cancelled.
     pub async fn submit(
         &self,
         command: PhysicsCommand,
@@ -51,6 +55,7 @@ impl PhysicsClient {
             .map_err(|_| PhysicsClientError::ChannelClosed)?
     }
 
+    /// Adds a body and returns its world-scoped ID after insertion.
     pub async fn add_body(&self, body: RigidBody) -> Result<BodyId, PhysicsClientError> {
         match self.submit(PhysicsCommand::AddBody { body }).await? {
             PhysicsCommandResult::Body(id) => Ok(id),
@@ -60,10 +65,12 @@ impl PhysicsClient {
         }
     }
 
+    /// Removes a body and all colliders attached to it.
     pub async fn remove_body(&self, id: BodyId) -> Result<(), PhysicsClientError> {
         expect_done(self.submit(PhysicsCommand::RemoveBody { id }).await?)
     }
 
+    /// Attaches a collider to a body and returns the collider ID.
     pub async fn add_collider(
         &self,
         body: BodyId,
@@ -80,10 +87,12 @@ impl PhysicsClient {
         }
     }
 
+    /// Removes a collider from the world.
     pub async fn remove_collider(&self, id: ColliderId) -> Result<(), PhysicsClientError> {
         expect_done(self.submit(PhysicsCommand::RemoveCollider { id }).await?)
     }
 
+    /// Replaces a body's transform while preserving its velocities.
     pub async fn set_transform(
         &self,
         id: BodyId,
@@ -95,6 +104,7 @@ impl PhysicsClient {
         )
     }
 
+    /// Sets a body's world-space linear velocity.
     pub async fn set_linear_velocity(
         &self,
         id: BodyId,
@@ -106,6 +116,7 @@ impl PhysicsClient {
         )
     }
 
+    /// Sets a body's world-space angular velocity.
     pub async fn set_angular_velocity(
         &self,
         id: BodyId,
@@ -117,6 +128,7 @@ impl PhysicsClient {
         )
     }
 
+    /// Replaces a dynamic body's mass properties.
     pub async fn set_mass(
         &self,
         id: BodyId,
@@ -125,14 +137,17 @@ impl PhysicsClient {
         expect_done(self.submit(PhysicsCommand::SetMass { id, mass }).await?)
     }
 
+    /// Puts a dynamic body to sleep.
     pub async fn sleep(&self, id: BodyId) -> Result<(), PhysicsClientError> {
         expect_done(self.submit(PhysicsCommand::Sleep { id }).await?)
     }
 
+    /// Wakes a dynamic body.
     pub async fn wake_up(&self, id: BodyId) -> Result<(), PhysicsClientError> {
         expect_done(self.submit(PhysicsCommand::WakeUp { id }).await?)
     }
 
+    /// Accumulates a world-space force on a dynamic body.
     pub async fn apply_force(&self, id: BodyId, force: Vec3) -> Result<(), PhysicsClientError> {
         expect_done(
             self.submit(PhysicsCommand::ApplyForce { id, force })
@@ -140,6 +155,7 @@ impl PhysicsClient {
         )
     }
 
+    /// Accumulates a world-space force at a world-space point.
     pub async fn apply_force_at_point(
         &self,
         id: BodyId,
@@ -152,6 +168,7 @@ impl PhysicsClient {
         )
     }
 
+    /// Accumulates a world-space torque on a dynamic body.
     pub async fn apply_torque(&self, id: BodyId, torque: Vec3) -> Result<(), PhysicsClientError> {
         expect_done(
             self.submit(PhysicsCommand::ApplyTorque { id, torque })
@@ -159,6 +176,7 @@ impl PhysicsClient {
         )
     }
 
+    /// Applies a world-space impulse immediately to a dynamic body.
     pub async fn apply_impulse(&self, id: BodyId, impulse: Vec3) -> Result<(), PhysicsClientError> {
         expect_done(
             self.submit(PhysicsCommand::ApplyImpulse { id, impulse })
@@ -166,6 +184,7 @@ impl PhysicsClient {
         )
     }
 
+    /// Applies a world-space impulse at a world-space point immediately.
     pub async fn apply_impulse_at_point(
         &self,
         id: BodyId,
@@ -178,10 +197,12 @@ impl PhysicsClient {
         )
     }
 
+    /// Clears accumulated force and torque on a body.
     pub async fn clear_forces(&self, id: BodyId) -> Result<(), PhysicsClientError> {
         expect_done(self.submit(PhysicsCommand::ClearForces { id }).await?)
     }
 
+    /// Replaces a collider's collision filter.
     pub async fn set_collider_filter(
         &self,
         id: ColliderId,
@@ -193,6 +214,7 @@ impl PhysicsClient {
         )
     }
 
+    /// Assigns or clears a collider material ID without resolving it.
     pub async fn set_collider_material(
         &self,
         id: ColliderId,
@@ -204,10 +226,15 @@ impl PhysicsClient {
         )
     }
 
+    /// Returns an `Arc` to the latest published snapshot without waiting.
     pub fn snapshot(&self) -> Arc<PhysicsSnapshot> {
         Arc::clone(&self.snapshot_rx.borrow())
     }
 
+    /// Waits for a publication not yet observed by this client.
+    ///
+    /// Intermediate snapshots may be skipped. Returns [`PhysicsClientError::NotRunning`]
+    /// when the simulation stops before publishing another snapshot.
     pub async fn next_snapshot(&mut self) -> Result<Arc<PhysicsSnapshot>, PhysicsClientError> {
         loop {
             if self.command_tx.borrow().is_none() {

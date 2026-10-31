@@ -11,7 +11,10 @@ struct SnapshotEntry {
     state: BodyState,
 }
 
-/// Immutable body state published after a successful simulation step.
+/// Immutable body states published after a successful simulation step.
+///
+/// Body lookup uses slot index and generation, so a removed ID cannot resolve
+/// to a later body that reuses the same slot.
 pub struct PhysicsSnapshot {
     step: u64,
     simulation_time: Duration,
@@ -40,30 +43,36 @@ impl PhysicsSnapshot {
         }
     }
 
+    /// Returns the total number of successful steps represented by this snapshot.
     pub fn step(&self) -> u64 {
         self.step
     }
 
+    /// Returns accumulated simulated time represented by this snapshot.
     pub fn simulation_time(&self) -> Duration {
         self.simulation_time
     }
 
+    /// Looks up a body by its full generational ID in O(1) time.
     pub fn body(&self, id: BodyId) -> Option<&BodyState> {
         let index = usize::try_from(id.index()).ok()?;
         let entry = self.bodies.get(index)?.as_ref()?;
         (entry.id == id).then_some(&entry.state)
     }
 
+    /// Iterates over current bodies as `(ID, state)` pairs.
     pub fn bodies(&self) -> impl Iterator<Item = (BodyId, &BodyState)> + '_ {
         self.bodies
             .iter()
             .filter_map(|entry| entry.as_ref().map(|entry| (entry.id, &entry.state)))
     }
 
+    /// Returns the number of live bodies in this snapshot.
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Returns whether this snapshot contains no live bodies.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

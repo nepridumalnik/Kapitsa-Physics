@@ -173,7 +173,38 @@ impl PhysicsSimulation {
         self.metrics_rx.borrow().clone()
     }
 
-    /// Returns a cloneable client for the command and snapshot channels.
+    /// Returns a cloneable client for commands and immutable snapshots.
+    ///
+    /// The client is available while stopped as well; command submission then
+    /// returns [`crate::PhysicsClientError::NotRunning`].
+    ///
+    /// ```
+    /// use kapitsa_core::{rigid_body::RigidBody, world::PhysicsWorld};
+    /// use kapitsa_math::Vec3;
+    /// use kapitsa_tokio::PhysicsSimulation;
+    ///
+    /// async fn run(
+    ///     world: PhysicsWorld,
+    ///     rocket: RigidBody,
+    /// ) -> Result<(), Box<dyn std::error::Error>> {
+    ///     let mut simulation = PhysicsSimulation::new(world);
+    ///     let physics = simulation.client();
+    ///     simulation.start()?;
+    ///
+    ///     let rocket_id = physics.add_body(rocket).await?;
+    ///     physics
+    ///         .apply_force(rocket_id, Vec3::new(0.0, 1000.0, 0.0))
+    ///         .await?;
+    ///
+    ///     let snapshot = physics.snapshot();
+    ///     if let Some(body) = snapshot.body(rocket_id) {
+    ///         println!("{:?}", body.transform());
+    ///     }
+    ///
+    ///     simulation.stop().await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn client(&self) -> PhysicsClient {
         PhysicsClient::new(self.command_rx.clone(), self.snapshot_rx.clone())
     }

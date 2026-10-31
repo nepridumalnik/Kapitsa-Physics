@@ -11,81 +11,68 @@ use tokio::sync::oneshot;
 
 use crate::PhysicsClientError;
 
+/// An operation applied to the simulation world at a physics-step boundary.
 pub enum PhysicsCommand {
-    AddBody {
-        body: RigidBody,
-    },
-    RemoveBody {
-        id: BodyId,
-    },
-    AddCollider {
-        body: BodyId,
-        collider: Collider,
-    },
-    RemoveCollider {
-        id: ColliderId,
-    },
-    SetTransform {
-        id: BodyId,
-        transform: Transform,
-    },
-    SetLinearVelocity {
-        id: BodyId,
-        velocity: Vec3,
-    },
-    SetAngularVelocity {
-        id: BodyId,
-        velocity: Vec3,
-    },
-    SetMass {
-        id: BodyId,
-        mass: MassProperties,
-    },
-    Sleep {
-        id: BodyId,
-    },
-    WakeUp {
-        id: BodyId,
-    },
-    ApplyForce {
-        id: BodyId,
-        force: Vec3,
-    },
+    /// Inserts a rigid body and returns its new [`BodyId`].
+    AddBody { body: RigidBody },
+    /// Removes a body and its attached colliders.
+    RemoveBody { id: BodyId },
+    /// Attaches a collider to a body and returns its new [`ColliderId`].
+    AddCollider { body: BodyId, collider: Collider },
+    /// Removes a collider.
+    RemoveCollider { id: ColliderId },
+    /// Replaces a body's transform while preserving its velocities.
+    SetTransform { id: BodyId, transform: Transform },
+    /// Sets the world-space linear velocity.
+    SetLinearVelocity { id: BodyId, velocity: Vec3 },
+    /// Sets the world-space angular velocity.
+    SetAngularVelocity { id: BodyId, velocity: Vec3 },
+    /// Replaces the body's dynamic mass properties.
+    SetMass { id: BodyId, mass: MassProperties },
+    /// Sleeps a dynamic body and clears its motion and forces.
+    Sleep { id: BodyId },
+    /// Wakes a dynamic body.
+    WakeUp { id: BodyId },
+    /// Accumulates a world-space force.
+    ApplyForce { id: BodyId, force: Vec3 },
+    /// Accumulates a world-space force at a world-space point.
     ApplyForceAtPoint {
         id: BodyId,
         force: Vec3,
         point: Vec3,
     },
-    ApplyTorque {
-        id: BodyId,
-        torque: Vec3,
-    },
-    ApplyImpulse {
-        id: BodyId,
-        impulse: Vec3,
-    },
+    /// Accumulates a world-space torque.
+    ApplyTorque { id: BodyId, torque: Vec3 },
+    /// Applies a world-space impulse immediately.
+    ApplyImpulse { id: BodyId, impulse: Vec3 },
+    /// Applies a world-space impulse at a world-space point immediately.
     ApplyImpulseAtPoint {
         id: BodyId,
         impulse: Vec3,
         point: Vec3,
     },
-    ClearForces {
-        id: BodyId,
-    },
+    /// Clears accumulated force and torque.
+    ClearForces { id: BodyId },
+    /// Replaces a collider's collision filter.
     SetColliderFilter {
         id: ColliderId,
         filter: CollisionFilter,
     },
+    /// Assigns a material ID without resolving it in a material store.
     SetColliderMaterial {
         id: ColliderId,
         material: Option<MaterialId>,
     },
 }
 
+/// Successful result returned by a physics command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicsCommandResult {
+    /// The command completed without returning a newly allocated ID.
     Done,
+    /// A body was inserted.
     Body(BodyId),
+    /// A collider was inserted.
     Collider(ColliderId),
 }
 
