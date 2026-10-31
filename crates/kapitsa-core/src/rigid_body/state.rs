@@ -1,4 +1,4 @@
-use glam::Vec3;
+use kapitsa_math::Vec3;
 
 use crate::transform::Transform;
 

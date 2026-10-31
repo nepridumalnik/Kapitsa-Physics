@@ -1,5 +1,4 @@
-use glam::{DMat3, DVec3, Mat3, Vec3};
-use kapitsa_math::Vec3 as MathVec3;
+use kapitsa_math::{CholeskyError, Mat3, Vec3};
 
 use crate::{
     shape::{Cuboid, Shape, Sphere},
@@ -12,13 +11,13 @@ pub use error::MassError;
 /// Mass in kilograms, center of mass in body-local meters, and inertia in kg·m².
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MassProperties {
-    mass: f32,
+    mass: f64,
     center_of_mass: Vec3,
     inertia: Mat3,
 }
 
 impl MassProperties {
-    pub fn new(mass: f32, center_of_mass: Vec3, inertia: Mat3) -> Result<Self, MassError> {
+    pub fn new(mass: f64, center_of_mass: Vec3, inertia: Mat3) -> Result<Self, MassError> {
         if !mass.is_finite() {
             return Err(MassError::NonFiniteMass);
         }
@@ -30,11 +29,7 @@ impl MassProperties {
         }
 
         let inertia = symmetrize_inertia(inertia)?;
-        let matrix = inertia_rows(inertia);
-        if !is_positive_definite(&matrix) {
-            return Err(MassError::NonPositiveDefiniteInertia);
-        }
-        if !is_physically_realizable(&matrix) {
+        if !is_physically_realizable(inertia) {
             return Err(MassError::NonPhysicalInertia);
         }
 
@@ -45,7 +40,7 @@ impl MassProperties {
         })
     }
 
-    pub fn mass(&self) -> f32 {
+    pub fn mass(&self) -> f64 {
         self.mass
     }
 
@@ -57,7 +52,7 @@ impl MassProperties {
         self.inertia
     }
 
-    pub fn from_shape(shape: &Shape, density: f32) -> Result<Self, MassError> {
+    pub fn from_shape(shape: &Shape, density: f64) -> Result<Self, MassError> {
         if !density.is_finite() {
             return Err(MassError::NonFiniteDensity);
         }
@@ -66,51 +61,56 @@ impl MassProperties {
         }
 
         let (mass, diagonal) = match shape {
-            Shape::Sphere(sphere) => sphere_mass_properties(sphere, f64::from(density)),
-            Shape::Cuboid(cuboid) => cuboid_mass_properties(cuboid, f64::from(density)),
+            Shape::Sphere(sphere) => sphere_mass_properties(sphere, density),
+            Shape::Cuboid(cuboid) => cuboid_mass_properties(cuboid, density),
             _ => return Err(MassError::UnsupportedShape),
         };
+        if !mass.is_finite()
+            || mass <= 0.0
+            || diagonal
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(MassError::ArithmeticOverflow);
+        }
 
-        let mass = checked_positive_f32(mass)?;
-        let inertia = Mat3::from_diagonal(Vec3::new(
-            checked_positive_f32(diagonal[0])?,
-            checked_positive_f32(diagonal[1])?,
-            checked_positive_f32(diagonal[2])?,
-        ));
+        let inertia = Mat3::from_diagonal(Vec3::new(diagonal[0], diagonal[1], diagonal[2]));
         Self::new(mass, Vec3::ZERO, inertia)
     }
 
     /// Adds a part after transforming it into this body's local coordinate system.
     pub fn push(&mut self, part: &Self, transform: &Transform) -> Result<(), MassError> {
         let rotation = rotation_matrix(transform)?;
-        let part_center =
-            rotation * to_dvec3(part.center_of_mass) + to_math_dvec3(transform.translation());
-        let part_inertia = rotation * to_dmat3(part.inertia) * rotation.transpose();
-        let self_center = to_dvec3(self.center_of_mass);
-        let self_mass = f64::from(self.mass);
-        let part_mass = f64::from(part.mass);
-        let total_mass = self_mass + part_mass;
-        if !total_mass.is_finite() || total_mass <= 0.0 || !part_center.is_finite() {
+        let part_center = rotation
+            .checked_mul_vector(part.center_of_mass)
+            .and_then(|center| center.checked_add(transform.translation()))
+            .ok_or(MassError::ArithmeticOverflow)?;
+        let part_inertia = rotation
+            .checked_mul_matrix(part.inertia)
+            .and_then(|rotated| rotated.checked_mul_matrix(rotation.transpose()))
+            .ok_or(MassError::ArithmeticOverflow)?;
+        let total_mass = self.mass + part.mass;
+        if !total_mass.is_finite() || total_mass <= 0.0 {
             return Err(MassError::ArithmeticOverflow);
         }
 
-        let center = (self_center * self_mass + part_center * part_mass) / total_mass;
+        let center =
+            self.center_of_mass * (self.mass / total_mass) + part_center * (part.mass / total_mass);
         if !center.is_finite() {
             return Err(MassError::ArithmeticOverflow);
         }
 
-        let self_offset = self_center - center;
+        let self_offset = self.center_of_mass - center;
         let part_offset = part_center - center;
-        let inertia = to_dmat3(self.inertia)
-            + parallel_axis(self_mass, self_offset)
+        let inertia = self.inertia
+            + parallel_axis(self.mass, self_offset)
             + part_inertia
-            + parallel_axis(part_mass, part_offset);
-        let next = Self::new(
-            checked_positive_f32(total_mass)?,
-            to_vec3(center)?,
-            to_mat3(inertia)?,
-        )?;
+            + parallel_axis(part.mass, part_offset);
+        if !inertia.is_finite() {
+            return Err(MassError::ArithmeticOverflow);
+        }
 
+        let next = Self::new(total_mass, center, inertia)?;
         *self = next;
         Ok(())
     }
@@ -137,95 +137,46 @@ impl MassProperties {
 }
 
 fn symmetrize_inertia(inertia: Mat3) -> Result<Mat3, MassError> {
-    let mut matrix = inertia_rows(inertia);
-    if matrix.iter().flatten().any(|value| !value.is_finite()) {
+    if !inertia.is_finite() {
         return Err(MassError::NonFiniteInertia);
     }
 
-    let scale = matrix
-        .iter()
-        .flatten()
+    let mut rows = inertia_rows(inertia);
+    let scale = inertia
+        .to_cols_array()
+        .into_iter()
         .fold(0.0_f64, |scale, value| scale.max(value.abs()));
-    let tolerance = 8.0 * f64::from(f32::EPSILON) * scale;
+    let tolerance = 32.0 * f64::EPSILON * scale;
     for (row, column) in [(0, 1), (0, 2), (1, 2)] {
-        if (matrix[row][column] - matrix[column][row]).abs() > tolerance {
+        if (rows[row][column] - rows[column][row]).abs() > tolerance {
             return Err(MassError::NonSymmetricInertia);
         }
-        let average = (matrix[row][column] + matrix[column][row]) * 0.5;
-        matrix[row][column] = average;
-        matrix[column][row] = average;
+        let average = rows[row][column] * 0.5 + rows[column][row] * 0.5;
+        rows[row][column] = average;
+        rows[column][row] = average;
     }
 
-    Ok(Mat3::from_cols(
-        Vec3::new(
-            matrix[0][0] as f32,
-            matrix[1][0] as f32,
-            matrix[2][0] as f32,
-        ),
-        Vec3::new(
-            matrix[0][1] as f32,
-            matrix[1][1] as f32,
-            matrix[2][1] as f32,
-        ),
-        Vec3::new(
-            matrix[0][2] as f32,
-            matrix[1][2] as f32,
-            matrix[2][2] as f32,
-        ),
-    ))
-}
-
-fn inertia_rows(inertia: Mat3) -> [[f64; 3]; 3] {
-    let columns = inertia.to_cols_array();
-    [
-        [
-            f64::from(columns[0]),
-            f64::from(columns[3]),
-            f64::from(columns[6]),
-        ],
-        [
-            f64::from(columns[1]),
-            f64::from(columns[4]),
-            f64::from(columns[7]),
-        ],
-        [
-            f64::from(columns[2]),
-            f64::from(columns[5]),
-            f64::from(columns[8]),
-        ],
-    ]
-}
-
-fn is_positive_definite(matrix: &[[f64; 3]; 3]) -> bool {
-    let xx = matrix[0][0];
-    let xy = matrix[0][1];
-    let xz = matrix[0][2];
-    let yy = matrix[1][1];
-    let yz = matrix[1][2];
-    let zz = matrix[2][2];
-    if xx <= 0.0 {
-        return false;
+    let symmetric = Mat3::from_rows(rows);
+    match symmetric.solve_spd(Vec3::ZERO) {
+        Ok(_) => Ok(symmetric),
+        Err(CholeskyError::NotPositiveDefinite) => Err(MassError::NonPositiveDefiniteInertia),
+        Err(CholeskyError::NotSymmetric) => Err(MassError::NonSymmetricInertia),
+        Err(CholeskyError::NonFiniteInput | CholeskyError::ResultOutOfRange) => {
+            Err(MassError::ArithmeticOverflow)
+        }
     }
-
-    let second_pivot = yy - xy * xy / xx;
-    if !second_pivot.is_finite() || second_pivot <= 0.0 {
-        return false;
-    }
-
-    let third_pivot = zz - xz * xz / xx - (yz - xy * xz / xx).powi(2) / second_pivot;
-    third_pivot.is_finite() && third_pivot > 0.0
 }
 
-fn is_physically_realizable(inertia: &[[f64; 3]; 3]) -> bool {
-    let inertia_scale = inertia
-        .iter()
-        .flatten()
+fn is_physically_realizable(inertia: Mat3) -> bool {
+    let scale = inertia
+        .to_cols_array()
+        .into_iter()
         .fold(0.0_f64, |scale, value| scale.max(value.abs()));
-    if !inertia_scale.is_finite() || inertia_scale <= 0.0 {
+    if !scale.is_finite() || scale <= 0.0 {
         return false;
     }
 
-    let normalized = inertia.map(|row| row.map(|value| value / inertia_scale));
+    let normalized = inertia_rows(inertia).map(|row| row.map(|value| value / scale));
     let half_trace = (normalized[0][0] + normalized[1][1] + normalized[2][2]) * 0.5;
     let mut covariance = [
         [
@@ -257,7 +208,7 @@ fn is_physically_realizable(inertia: &[[f64; 3]; 3]) -> bool {
         }
     }
 
-    let epsilon = f64::from(f32::EPSILON);
+    let epsilon = f64::EPSILON;
     let diagonal_tolerance = 16.0 * epsilon;
     let second_order_tolerance = 32.0 * epsilon;
     let third_order_tolerance = 64.0 * epsilon;
@@ -300,101 +251,47 @@ fn cuboid_mass_properties(cuboid: &Cuboid, density: f64) -> (f64, [f64; 3]) {
     let y = size.y;
     let z = size.z;
     let mass = density * x * y * z;
-    let divisor = 12.0;
     let inertia = [
-        mass * (y.powi(2) + z.powi(2)) / divisor,
-        mass * (x.powi(2) + z.powi(2)) / divisor,
-        mass * (x.powi(2) + y.powi(2)) / divisor,
+        mass * (y.powi(2) + z.powi(2)) / 12.0,
+        mass * (x.powi(2) + z.powi(2)) / 12.0,
+        mass * (x.powi(2) + y.powi(2)) / 12.0,
     ];
     (mass, inertia)
 }
 
-fn checked_f32(value: f64) -> Result<f32, MassError> {
-    if !value.is_finite() || value.abs() > f64::from(f32::MAX) {
-        return Err(MassError::ArithmeticOverflow);
-    }
-
-    Ok(value as f32)
-}
-
-fn checked_positive_f32(value: f64) -> Result<f32, MassError> {
-    let converted = checked_f32(value)?;
-    if value <= 0.0 || converted <= 0.0 {
-        return Err(MassError::ArithmeticOverflow);
-    }
-    Ok(converted)
-}
-
-fn to_vec3(value: DVec3) -> Result<Vec3, MassError> {
-    Ok(Vec3::new(
-        checked_f32(value.x)?,
-        checked_f32(value.y)?,
-        checked_f32(value.z)?,
-    ))
-}
-
-fn to_mat3(value: DMat3) -> Result<Mat3, MassError> {
-    let columns = value.to_cols_array();
-    let mut converted = [0.0; 9];
-    for (output, component) in converted.iter_mut().zip(columns) {
-        *output = checked_f32(component)?;
-    }
-    Ok(Mat3::from_cols_array(&converted))
-}
-
-fn to_dvec3(value: Vec3) -> DVec3 {
-    DVec3::new(f64::from(value.x), f64::from(value.y), f64::from(value.z))
-}
-
-fn to_math_dvec3(value: MathVec3) -> DVec3 {
-    DVec3::new(value.x, value.y, value.z)
-}
-
-fn to_dmat3(value: Mat3) -> DMat3 {
-    let columns = value.to_cols_array();
-    DMat3::from_cols(
-        DVec3::new(
-            f64::from(columns[0]),
-            f64::from(columns[1]),
-            f64::from(columns[2]),
-        ),
-        DVec3::new(
-            f64::from(columns[3]),
-            f64::from(columns[4]),
-            f64::from(columns[5]),
-        ),
-        DVec3::new(
-            f64::from(columns[6]),
-            f64::from(columns[7]),
-            f64::from(columns[8]),
-        ),
-    )
-}
-
-fn rotation_matrix(transform: &Transform) -> Result<DMat3, MassError> {
-    let matrix = transform
+fn rotation_matrix(transform: &Transform) -> Result<Mat3, MassError> {
+    transform
         .rotation()
         .to_mat3()
-        .ok_or(MassError::ArithmeticOverflow)?;
-    let columns = matrix.to_cols_array();
-    Ok(DMat3::from_cols(
-        DVec3::new(columns[0], columns[1], columns[2]),
-        DVec3::new(columns[3], columns[4], columns[5]),
-        DVec3::new(columns[6], columns[7], columns[8]),
-    ))
+        .ok_or(MassError::ArithmeticOverflow)
 }
 
-fn parallel_axis(mass: f64, offset: DVec3) -> DMat3 {
+fn inertia_rows(inertia: Mat3) -> [[f64; 3]; 3] {
+    let columns = inertia.to_cols_array();
+    [
+        [columns[0], columns[3], columns[6]],
+        [columns[1], columns[4], columns[7]],
+        [columns[2], columns[5], columns[8]],
+    ]
+}
+
+fn parallel_axis(mass: f64, offset: Vec3) -> Mat3 {
     let distance_squared = offset.length_squared();
-    let outer_product = DMat3::from_cols(offset * offset.x, offset * offset.y, offset * offset.z);
-    (DMat3::IDENTITY * distance_squared - outer_product) * mass
+    let outer_product = Mat3::from_cols(offset * offset.x, offset * offset.y, offset * offset.z);
+    (Mat3::IDENTITY * distance_squared - outer_product) * mass
 }
 
 fn transformed(part: &MassProperties, transform: &Transform) -> Result<MassProperties, MassError> {
     let rotation = rotation_matrix(transform)?;
-    let center = rotation * to_dvec3(part.center_of_mass) + to_math_dvec3(transform.translation());
-    let inertia = rotation * to_dmat3(part.inertia) * rotation.transpose();
-    MassProperties::new(part.mass, to_vec3(center)?, to_mat3(inertia)?)
+    let center = rotation
+        .checked_mul_vector(part.center_of_mass)
+        .and_then(|center| center.checked_add(transform.translation()))
+        .ok_or(MassError::ArithmeticOverflow)?;
+    let inertia = rotation
+        .checked_mul_matrix(part.inertia)
+        .and_then(|rotated| rotated.checked_mul_matrix(rotation.transpose()))
+        .ok_or(MassError::ArithmeticOverflow)?;
+    MassProperties::new(part.mass, center, inertia)
 }
 
 #[cfg(test)]

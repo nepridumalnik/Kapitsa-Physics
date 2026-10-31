@@ -16,6 +16,14 @@ impl Mat3 {
         Self { columns: [x, y, z] }
     }
 
+    pub const fn from_diagonal(diagonal: Vec3) -> Self {
+        Self::from_cols(
+            Vec3::new(diagonal.x, 0.0, 0.0),
+            Vec3::new(0.0, diagonal.y, 0.0),
+            Vec3::new(0.0, 0.0, diagonal.z),
+        )
+    }
+
     pub const fn from_rows(rows: [[f64; 3]; 3]) -> Self {
         Self::from_cols(
             Vec3::new(rows[0][0], rows[1][0], rows[2][0]),
@@ -312,6 +320,15 @@ mod tests {
         );
         assert_eq!(matrix.column(3), None);
         assert_eq!(matrix.row(3), None);
+    }
+
+    #[test]
+    fn constructs_diagonal_matrices() {
+        let matrix = Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0));
+
+        assert_eq!(matrix.row(0), Some(Vec3::new(2.0, 0.0, 0.0)));
+        assert_eq!(matrix.row(1), Some(Vec3::new(0.0, 3.0, 0.0)));
+        assert_eq!(matrix.row(2), Some(Vec3::new(0.0, 0.0, 4.0)));
     }
 
     #[test]

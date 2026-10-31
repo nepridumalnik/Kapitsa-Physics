@@ -1,4 +1,4 @@
-use glam::{Mat3, Vec3};
+use kapitsa_math::{Mat3, Vec3};
 
 use super::{BodyId, ColliderId, PhysicsWorld, WorldError};
 use crate::{

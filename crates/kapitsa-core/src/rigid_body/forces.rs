@@ -1,4 +1,4 @@
-use glam::Vec3;
+use kapitsa_math::Vec3;
 
 /// Accumulated force and torque in world space.
 #[derive(Clone, Copy, Debug, PartialEq)]
