@@ -10,6 +10,8 @@ mod gjk;
 #[allow(dead_code)]
 mod manifold;
 #[allow(dead_code)]
+mod mesh;
+#[allow(dead_code)]
 mod narrow_phase;
 pub(crate) mod spatial_index;
 mod step;
