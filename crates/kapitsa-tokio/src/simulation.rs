@@ -187,7 +187,7 @@ async fn run_simulation(
     Ok(())
 }
 
-async fn run_catch_up_batch(
+pub(crate) async fn run_catch_up_batch(
     controller: &mut PhysicsController,
     stop: &watch::Receiver<bool>,
     metrics: &watch::Sender<SimulationMetrics>,
@@ -308,6 +308,34 @@ mod tests {
         assert_eq!(controller.metrics().total_steps, 2);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn catch_up_allows_other_tasks_to_run_with_a_backlog() {
+        let config = SchedulerConfig {
+            max_catch_up_steps: 1,
+            adaptive: false,
+            ..SchedulerConfig::default()
+        };
+        let mut simulation =
+            PhysicsSimulation::with_config(PhysicsWorld::new(), config).expect("simulation");
+        simulation.start().expect("start");
+        let mut snapshots = simulation.metrics_rx.clone();
+        snapshots.borrow_and_update();
+        let observer = tokio::spawn(async move {
+            loop {
+                snapshots.changed().await.expect("metrics channel");
+                let steps = snapshots.borrow_and_update().total_steps;
+                if steps > 0 {
+                    return steps;
+                }
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let observed_steps = observer.await.expect("observer runs");
+        assert!(observed_steps < 60);
+        simulation.stop().await.expect("stop with debt");
+    }
+
     #[test]
     fn invalid_simulation_configuration_is_rejected() {
         for config in [
@@ -400,6 +428,37 @@ mod tests {
                 0
             );
         });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_during_an_active_step_waits_for_its_completion() {
+        let mut simulation = PhysicsSimulation::new(PhysicsWorld::new());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        simulation
+            .controller
+            .as_mut()
+            .expect("controller")
+            .gate_next_step(entered_tx, release_rx);
+        simulation.start().expect("start");
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        entered_rx.await.expect("blocking step started");
+        let task = simulation.task.take().expect("background task");
+        drop(simulation);
+        assert!(!task.is_finished());
+        release_tx.send(()).expect("release active step");
+        let output = task.await.expect("background task completes");
+        assert!(output.result.is_ok());
+        assert_eq!(output.controller.metrics().total_steps, 1);
+        assert_eq!(
+            output
+                .controller
+                .world()
+                .expect("world restored")
+                .body_count(),
+            0
+        );
     }
 
     #[tokio::test(start_paused = true)]

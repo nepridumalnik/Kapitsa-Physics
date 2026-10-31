@@ -111,6 +111,11 @@ pub struct PhysicsController {
     bucket_buffers: Vec<Vec<BodyStep>>,
     adaptive: AdaptiveScheduler,
     metrics: MetricsCollector,
+    #[cfg(test)]
+    step_gate: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
 }
 
 impl PhysicsController {
@@ -140,6 +145,8 @@ impl PhysicsController {
             bucket_buffers: vec![Vec::new()],
             adaptive,
             metrics,
+            #[cfg(test)]
+            step_gate: None,
         }
     }
 
@@ -251,6 +258,15 @@ impl PhysicsController {
         self.metrics.set_simulation_time_debt(debt);
     }
 
+    #[cfg(test)]
+    pub(crate) fn gate_next_step(
+        &mut self,
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.step_gate = Some((entered, release));
+    }
+
     fn start_step(&mut self, step_duration: Duration) -> Result<(), SchedulerError> {
         let mut world = match mem::replace(&mut self.world, WorldState::Lost) {
             WorldState::Available(world) => world,
@@ -268,7 +284,14 @@ impl PhysicsController {
         let step_budget = step_duration.mul_f64(self.config.target_utilization);
         let worker_count = self.active_workers.min(world.body_count()).max(1);
         if worker_count == 1 {
+            #[cfg(test)]
+            let step_gate = self.step_gate.take();
             let task = tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                if let Some((entered, release)) = step_gate {
+                    let _ = entered.send(());
+                    let _ = release.recv();
+                }
                 let result = world.step(step_duration.as_secs_f64());
                 let completed_at = Instant::now();
                 (world, result, completed_at)
@@ -753,6 +776,52 @@ mod tests {
             world.add_body(body).expect("body insertion");
         }
         world
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn catch_up_uses_changed_frequency_without_losing_time() {
+        let mut config = config(1);
+        config.adaptive = false;
+        let mut controller =
+            PhysicsController::new(moving_kinematic_world(), config).expect("controller");
+        let first_quantum = controller.step_duration();
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
+        let mut accumulator = Duration::from_secs(1);
+        let mut previous = tokio::time::Instant::now();
+        crate::simulation::run_catch_up_batch(
+            &mut controller,
+            &stop_rx,
+            &metrics_tx,
+            &mut accumulator,
+            &mut previous,
+        )
+        .await
+        .expect("first batch");
+        controller.current_hz = 30;
+        let second_quantum = controller.step_duration();
+        crate::simulation::run_catch_up_batch(
+            &mut controller,
+            &stop_rx,
+            &metrics_tx,
+            &mut accumulator,
+            &mut previous,
+        )
+        .await
+        .expect("second batch");
+        assert_eq!(
+            accumulator,
+            Duration::from_secs(1) - first_quantum - second_quantum
+        );
+        let body = controller
+            .world()
+            .expect("world")
+            .bodies()
+            .next()
+            .expect("body")
+            .1;
+        let expected = first_quantum.as_secs_f64() + second_quantum.as_secs_f64();
+        assert!((body.state().transform().translation().x - expected).abs() < 1.0e-9);
     }
 
     #[test]
