@@ -2,12 +2,11 @@ use std::fmt;
 
 use kapitsa_core::world::StepError;
 
-/// Failure returned while configuring or advancing the physics scheduler.
+/// Failure returned while configuring or stepping the physics scheduler.
 #[derive(Debug)]
 pub enum SchedulerError {
     InvalidConfig(&'static str),
     MissingRuntime,
-    SimulationTimeOverflow,
     WorldUnavailable,
     WorldLost,
     BlockingTaskFailed(String),
@@ -18,9 +17,8 @@ impl fmt::Display for SchedulerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConfig(reason) => write!(formatter, "invalid scheduler config: {reason}"),
-            Self::MissingRuntime => formatter.write_str("advance requires an active Tokio runtime"),
-            Self::SimulationTimeOverflow => {
-                formatter.write_str("simulation time accumulator overflowed")
+            Self::MissingRuntime => {
+                formatter.write_str("physics steps require an active Tokio runtime")
             }
             Self::WorldUnavailable => {
                 formatter.write_str("physics world is currently owned by a blocking task")

@@ -15,8 +15,13 @@ use crate::{
 };
 
 type PrepareOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
-type CommitOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
-type SequentialOutput = (PhysicsWorld, Result<(), StepError>);
+type CommitOutput = (
+    PhysicsWorld,
+    Vec<Vec<BodyStep>>,
+    Result<(), StepError>,
+    Instant,
+);
+type SequentialOutput = (PhysicsWorld, Result<(), StepError>, Instant);
 
 const BUCKETS_PER_WORKER: usize = 4;
 const MIN_BUCKET_SIZE: usize = 128;
@@ -86,7 +91,7 @@ enum WorldState {
     Lost,
 }
 
-/// Owns a physics world and advances it using the caller's Tokio runtime.
+/// Owns a physics world and runs its fixed steps on the caller's Tokio runtime.
 pub struct PhysicsController {
     world: WorldState,
     config: SchedulerConfig,
@@ -195,8 +200,8 @@ impl PhysicsController {
             return Err(error);
         }
 
-        let measurement = match self.complete_pending_step().await {
-            Ok(measurement) => measurement,
+        let (measurement, completed_at) = match self.complete_pending_step().await {
+            Ok(result) => result,
             Err(error) => {
                 self.metrics.record_error();
                 self.update_metrics_state();
@@ -208,7 +213,7 @@ impl PhysicsController {
         self.active_workers = adaptive.active_workers;
         let (budget_overrun, deadline_missed) =
             self.metrics
-                .record_step(measurement, adaptive, Instant::now());
+                .record_step(measurement, adaptive, completed_at);
         self.update_metrics_state();
         Ok(StepStats::snapshot(
             measurement,
@@ -250,7 +255,8 @@ impl PhysicsController {
         if worker_count == 1 {
             let task = tokio::task::spawn_blocking(move || {
                 let result = world.step(step_duration.as_secs_f64());
-                (world, result)
+                let completed_at = Instant::now();
+                (world, result, completed_at)
             });
             self.world = WorldState::InFlight(InFlightStep {
                 world: None,
@@ -288,7 +294,9 @@ impl PhysicsController {
         Ok(())
     }
 
-    async fn complete_pending_step(&mut self) -> Result<StepMeasurement, SchedulerError> {
+    async fn complete_pending_step(
+        &mut self,
+    ) -> Result<(StepMeasurement, Instant), SchedulerError> {
         loop {
             let phase = match &self.world {
                 WorldState::Available(_) => return Err(SchedulerError::WorldUnavailable),
@@ -315,16 +323,20 @@ impl PhysicsController {
                             return Err(SchedulerError::WorldLost);
                         };
                         match completion {
-                            Ok((world, Ok(()))) => {
+                            Ok((world, Ok(()), completed_at)) => {
                                 self.restore_world(world);
-                                return Ok(StepMeasurement {
-                                    step_duration: in_flight.started.elapsed(),
-                                    task_wait_duration: in_flight.task_wait_duration,
-                                    step_budget: in_flight.step_budget,
-                                    deadline: in_flight.step_duration,
-                                });
+                                return Ok((
+                                    StepMeasurement {
+                                        step_duration: completed_at
+                                            .saturating_duration_since(in_flight.started),
+                                        task_wait_duration: in_flight.task_wait_duration,
+                                        step_budget: in_flight.step_budget,
+                                        deadline: in_flight.step_duration,
+                                    },
+                                    completed_at,
+                                ));
                             }
-                            Ok((world, Err(error))) => {
+                            Ok((world, Err(error), _)) => {
                                 self.restore_world(world);
                                 return Err(SchedulerError::from(error));
                             }
@@ -492,16 +504,20 @@ impl PhysicsController {
                     };
                     let in_flight = self.take_in_flight()?;
                     match completion {
-                        Ok((world, buffers, Ok(()))) => {
+                        Ok((world, buffers, Ok(()), completed_at)) => {
                             self.restore_available(world, buffers);
-                            return Ok(StepMeasurement {
-                                step_duration: in_flight.started.elapsed(),
-                                task_wait_duration: in_flight.task_wait_duration,
-                                step_budget: in_flight.step_budget,
-                                deadline: in_flight.step_duration,
-                            });
+                            return Ok((
+                                StepMeasurement {
+                                    step_duration: completed_at
+                                        .saturating_duration_since(in_flight.started),
+                                    task_wait_duration: in_flight.task_wait_duration,
+                                    step_budget: in_flight.step_budget,
+                                    deadline: in_flight.step_duration,
+                                },
+                                completed_at,
+                            ));
                         }
-                        Ok((world, buffers, Err(error))) => {
+                        Ok((world, buffers, Err(error), _)) => {
                             self.restore_available(world, buffers);
                             return Err(SchedulerError::from(error));
                         }
@@ -591,7 +607,8 @@ impl PhysicsController {
 
         let task = tokio::task::spawn_blocking(move || {
             let result = world.commit_step_shards(&buffers);
-            (world, buffers, result)
+            let completed_at = Instant::now();
+            (world, buffers, result, completed_at)
         });
         self.world = WorldState::InFlight(InFlightStep {
             world: None,

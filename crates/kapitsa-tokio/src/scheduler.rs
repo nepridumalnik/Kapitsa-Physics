@@ -4,7 +4,7 @@ use crate::SchedulerError;
 
 const MAX_FREQUENCY_HZ: u32 = 1_000_000_000;
 
-/// Configuration for fixed-step advancement and scheduler measurements.
+/// Configuration for fixed-step scheduling and scheduler measurements.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SchedulerConfig {
     pub target_hz: u32,
