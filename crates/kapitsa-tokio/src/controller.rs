@@ -788,6 +788,13 @@ mod tests {
         let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let (_command_tx, mut command_rx) = tokio::sync::mpsc::channel(1024);
         let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
+        let snapshot = crate::marshalling::PhysicsSnapshot::from_world(
+            controller.world().expect("world"),
+            0,
+            Duration::ZERO,
+        );
+        let (snapshot_tx, _) = tokio::sync::watch::channel(std::sync::Arc::new(snapshot));
+        let mut simulation_time = Duration::ZERO;
         let mut accumulator = Duration::from_secs(1);
         let mut previous = tokio::time::Instant::now();
         crate::simulation::run_catch_up_batch(
@@ -795,6 +802,8 @@ mod tests {
             &mut command_rx,
             &stop_rx,
             &metrics_tx,
+            &snapshot_tx,
+            &mut simulation_time,
             &mut accumulator,
             &mut previous,
         )
@@ -807,6 +816,8 @@ mod tests {
             &mut command_rx,
             &stop_rx,
             &metrics_tx,
+            &snapshot_tx,
+            &mut simulation_time,
             &mut accumulator,
             &mut previous,
         )
@@ -816,6 +827,7 @@ mod tests {
             accumulator,
             Duration::from_secs(1) - first_quantum - second_quantum
         );
+        assert_eq!(simulation_time, first_quantum + second_quantum);
         let body = controller
             .world()
             .expect("world")
