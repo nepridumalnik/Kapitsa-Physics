@@ -3,7 +3,9 @@ use std::time::Duration;
 use kapitsa_core::world::PhysicsWorld;
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle, time::Instant};
 
-use crate::{PhysicsController, SimulationError, SimulationMetrics, SimulationState};
+use crate::{
+    PhysicsController, SchedulerConfig, SimulationError, SimulationMetrics, SimulationState,
+};
 
 struct SimulationTaskOutput {
     controller: PhysicsController,
@@ -21,7 +23,19 @@ pub struct PhysicsSimulation {
 
 impl PhysicsSimulation {
     pub fn new(world: PhysicsWorld) -> Self {
-        let controller = PhysicsController::with_default_config(world);
+        Self::from_controller(PhysicsController::with_default_config(world))
+    }
+
+    pub fn with_config(
+        world: PhysicsWorld,
+        config: SchedulerConfig,
+    ) -> Result<Self, SimulationError> {
+        Ok(Self::from_controller(PhysicsController::new(
+            world, config,
+        )?))
+    }
+
+    fn from_controller(controller: PhysicsController) -> Self {
         let (metrics_tx, metrics_rx) = watch::channel(controller.metrics());
         Self {
             controller: Some(controller),
@@ -213,7 +227,9 @@ mod tests {
     use kapitsa_math::{Mat3, Vec3};
 
     use super::{PhysicsSimulation, add_elapsed, run_simulation};
-    use crate::{PhysicsController, SchedulerError, SimulationError, SimulationState};
+    use crate::{
+        PhysicsController, SchedulerConfig, SchedulerError, SimulationError, SimulationState,
+    };
 
     fn moving_world() -> (PhysicsWorld, BodyId) {
         let mut world = PhysicsWorld::new();
@@ -241,6 +257,50 @@ mod tests {
             Err(SimulationError::SimulationTimeOverflow)
         ));
         assert_eq!(accumulator, Duration::MAX);
+    }
+
+    #[test]
+    fn invalid_simulation_configuration_is_rejected() {
+        for config in [
+            SchedulerConfig {
+                target_hz: 0,
+                ..SchedulerConfig::default()
+            },
+            SchedulerConfig {
+                max_workers: 0,
+                ..SchedulerConfig::default()
+            },
+        ] {
+            assert!(matches!(
+                PhysicsSimulation::with_config(PhysicsWorld::new(), config),
+                Err(SimulationError::Scheduler(SchedulerError::InvalidConfig(_)))
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_simulation_uses_its_scheduler_settings() {
+        let config = SchedulerConfig {
+            target_hz: 120,
+            min_hz: 40,
+            max_workers: 2,
+            max_catch_up_steps: 1,
+            adaptive: false,
+            ..SchedulerConfig::default()
+        };
+        let mut simulation = PhysicsSimulation::with_config(PhysicsWorld::new(), config.clone())
+            .expect("valid configuration");
+        assert_eq!(
+            simulation.controller.as_ref().expect("controller").config(),
+            &config
+        );
+        assert_eq!(simulation.metrics().target_hz, 120);
+        simulation.start().expect("start");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        simulation.stop().await.expect("stop");
+        assert!(simulation.metrics().total_steps > 0);
+        assert_eq!(simulation.metrics().current_hz, 120);
+        assert_eq!(simulation.metrics().active_workers, 1);
     }
 
     #[tokio::test(start_paused = true)]
