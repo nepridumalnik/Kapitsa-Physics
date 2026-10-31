@@ -2,6 +2,7 @@ use crate::{
     collider::Collider,
     collision::{
         CollisionPair,
+        cache::ContactCache,
         manifold::{ContactManifold, ContactPoint},
         solver::{SolverBody, SolverManifold, SolverMaterial, SolverWorkspace},
     },
@@ -142,6 +143,99 @@ fn friction_limits_tangent_impulses_and_creates_angular_response() {
     assert!(
         contact.tangent_impulse[0].hypot(contact.tangent_impulse[1]) <= friction_limit + 1.0e-12
     );
+}
+
+#[test]
+fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
+    fn solve(warm_start: bool) -> (f64, f64) {
+        let pair = pair();
+        let mut previous = ContactManifold::new(pair);
+        let mut cached_contact = ContactPoint::from_world(
+            &Transform::identity(),
+            &Transform::identity(),
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::Y,
+            0.0,
+            5,
+        )
+        .unwrap();
+        cached_contact.normal_impulse = 0.1;
+        cached_contact.tangent_impulse = [0.05, 0.0];
+        previous.insert(cached_contact, Vec3::ZERO).unwrap();
+        let mut cache = ContactCache::new();
+        cache.stage(&[previous]).unwrap();
+        cache.commit();
+
+        let normal = kapitsa_math::Quat::from_axis_angle(Vec3::Z, 0.1)
+            .unwrap()
+            .rotate_vector(Vec3::Y)
+            .unwrap();
+        let body_transform = Transform::new(normal * 0.45, kapitsa_math::Quat::IDENTITY).unwrap();
+        let mut ball = dynamic_body(body_transform.translation());
+        ball.set_linear_velocity(Vec3::Z - normal * 0.1).unwrap();
+        let point_a = Vec3::ZERO;
+        let point_b = body_transform.translation() - normal * 0.5;
+        let contact = ContactPoint::from_world(
+            &Transform::identity(),
+            &body_transform,
+            point_a,
+            point_b,
+            normal,
+            0.05,
+            5,
+        )
+        .unwrap();
+        let mut manifold = ContactManifold::new(pair);
+        manifold.insert(contact, point_b).unwrap();
+        let ground = RigidBody::new_static(Transform::identity());
+        let ball_state = *ball.state();
+        let mut bodies = vec![
+            SolverBody::from_prediction(ground, *ground.state()),
+            SolverBody::from_prediction(ball, ball_state),
+        ];
+        let mut manifolds = vec![SolverManifold {
+            body_a: 0,
+            body_b: 1,
+            manifold,
+            material: SolverMaterial {
+                restitution: 0.0,
+                static_friction: 0.6,
+                dynamic_friction: 0.6,
+            },
+        }];
+        if warm_start {
+            cache.warm_start_solver(&mut manifolds).unwrap();
+        }
+        let initial_energy = kinetic_energy(bodies[1].body());
+        SolverWorkspace::default()
+            .solve(
+                &mut bodies,
+                &mut manifolds,
+                super::CollisionConfig::default(),
+            )
+            .unwrap();
+        (initial_energy, kinetic_energy(bodies[1].body()))
+    }
+
+    let (warm_initial, warm_final) = solve(true);
+    let (cold_initial, cold_final) = solve(false);
+    assert!((warm_initial - cold_initial).abs() < 1.0e-12);
+    assert!(warm_final <= warm_initial + 1.0e-8);
+    assert!(cold_final <= cold_initial + 1.0e-8);
+    assert!(warm_final <= cold_final + 1.0e-5);
+}
+
+fn kinetic_energy(body: &RigidBody) -> f64 {
+    let mass = body.physics().mass().unwrap();
+    let state = body.state();
+    let rotation = state.transform().rotation().to_mat3().unwrap();
+    let inertia_world = rotation * mass.inertia() * rotation.transpose();
+    0.5 * mass.mass() * state.linear_velocity().length_squared()
+        + 0.5
+            * state
+                .angular_velocity()
+                .dot(inertia_world * state.angular_velocity())
 }
 
 #[test]

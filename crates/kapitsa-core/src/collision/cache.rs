@@ -2,7 +2,11 @@ use std::collections::HashMap;
 
 use kapitsa_math::Vec3;
 
-use super::{CollisionError, CollisionPair, manifold::ContactManifold, solver::SolverManifold};
+use super::{
+    CollisionError, CollisionPair,
+    manifold::ContactManifold,
+    solver::{SolverManifold, tangent_basis},
+};
 
 const MINIMUM_NORMAL_DOT: f64 = 0.95;
 
@@ -16,7 +20,7 @@ struct ContactKey {
 struct CachedImpulse {
     normal: Vec3,
     normal_impulse: f64,
-    tangent_impulse: [f64; 2],
+    tangent_world: Vec3,
 }
 
 /// Transactional warm-start cache for regenerated contact manifolds.
@@ -33,22 +37,23 @@ impl ContactCache {
         }
     }
 
-    pub(crate) fn warm_start(&self, manifolds: &mut [ContactManifold]) {
+    pub(crate) fn warm_start_solver(
+        &self,
+        manifolds: &mut [SolverManifold],
+    ) -> Result<(), CollisionError> {
         for manifold in manifolds {
-            self.warm_start_manifold(manifold);
+            self.warm_start_manifold(manifold)?;
         }
+        Ok(())
     }
 
-    pub(crate) fn warm_start_solver(&self, manifolds: &mut [SolverManifold]) {
-        for manifold in manifolds {
-            self.warm_start_manifold(&mut manifold.manifold);
-        }
-    }
-
-    fn warm_start_manifold(&self, manifold: &mut ContactManifold) {
-        let pair = manifold.pair;
-        for index in 0..manifold.len() {
-            let Some(contact) = manifold.point_mut(index) else {
+    fn warm_start_manifold(
+        &self,
+        solver_manifold: &mut SolverManifold,
+    ) -> Result<(), CollisionError> {
+        let pair = solver_manifold.manifold.pair;
+        for index in 0..solver_manifold.manifold.len() {
+            let Some(contact) = solver_manifold.manifold.point_mut(index) else {
                 continue;
             };
             let key = ContactKey {
@@ -64,9 +69,48 @@ impl ContactCache {
             if normal.dot(cached.normal) < MINIMUM_NORMAL_DOT {
                 continue;
             }
+            let (tangent_a, tangent_b) = tangent_basis(normal)?;
+            let normal_component = cached
+                .tangent_world
+                .checked_dot(normal)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let tangent_world = cached
+                .tangent_world
+                .checked_sub(
+                    normal
+                        .checked_mul_scalar(normal_component)
+                        .ok_or(CollisionError::ArithmeticOverflow)?,
+                )
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let mut tangent_impulse = [
+                tangent_world
+                    .checked_dot(tangent_a)
+                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                tangent_world
+                    .checked_dot(tangent_b)
+                    .ok_or(CollisionError::ArithmeticOverflow)?,
+            ];
+            let friction = solver_manifold
+                .material
+                .static_friction
+                .max(solver_manifold.material.dynamic_friction);
+            if !friction.is_finite() || friction < 0.0 {
+                return Err(CollisionError::InvalidMaterial);
+            }
+            let limit = cached.normal_impulse * friction;
+            let magnitude = tangent_impulse[0].hypot(tangent_impulse[1]);
+            if !limit.is_finite() || !magnitude.is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+            if magnitude > limit && magnitude > 0.0 {
+                let scale = limit / magnitude;
+                tangent_impulse[0] *= scale;
+                tangent_impulse[1] *= scale;
+            }
             contact.normal_impulse = cached.normal_impulse;
-            contact.tangent_impulse = cached.tangent_impulse;
+            contact.tangent_impulse = tangent_impulse;
         }
+        Ok(())
     }
 
     pub(crate) fn stage(&mut self, manifolds: &[ContactManifold]) -> Result<(), CollisionError> {
@@ -98,6 +142,24 @@ impl ContactCache {
                     self.next.clear();
                     return Err(CollisionError::InvalidContact);
                 };
+                let (tangent_a, tangent_b) = match tangent_basis(normal) {
+                    Ok(basis) => basis,
+                    Err(error) => {
+                        self.next.clear();
+                        return Err(error);
+                    }
+                };
+                let Some(tangent_world) = tangent_a
+                    .checked_mul_scalar(contact.tangent_impulse[0])
+                    .and_then(|impulse| {
+                        tangent_b
+                            .checked_mul_scalar(contact.tangent_impulse[1])
+                            .and_then(|other| impulse.checked_add(other))
+                    })
+                else {
+                    self.next.clear();
+                    return Err(CollisionError::ArithmeticOverflow);
+                };
                 self.next.insert(
                     ContactKey {
                         pair: manifold.pair,
@@ -106,7 +168,7 @@ impl ContactCache {
                     CachedImpulse {
                         normal,
                         normal_impulse: contact.normal_impulse,
-                        tangent_impulse: contact.tangent_impulse,
+                        tangent_world,
                     },
                 );
             }

@@ -4,6 +4,7 @@ use crate::{
         CollisionPair,
         cache::ContactCache,
         manifold::{ContactManifold, ContactPoint},
+        solver::{SolverManifold, SolverMaterial, tangent_basis},
     },
     rigid_body::RigidBody,
     shape::{Shape, Sphere},
@@ -55,9 +56,30 @@ fn manifold(pair: CollisionPair, normal: Vec3, feature: u64, impulse: f64) -> Co
     let mut manifold = ContactManifold::new(pair);
     let mut contact = contact;
     contact.normal_impulse = impulse;
-    contact.tangent_impulse = [0.25, -0.5];
+    contact.tangent_impulse = if impulse > 0.0 {
+        [0.25, -0.5]
+    } else {
+        [0.0; 2]
+    };
     manifold.insert(contact, Vec3::ZERO).unwrap();
     manifold
+}
+
+fn solver_manifold(
+    manifold: ContactManifold,
+    static_friction: f64,
+    dynamic_friction: f64,
+) -> SolverManifold {
+    SolverManifold {
+        body_a: 0,
+        body_b: 1,
+        manifold,
+        material: SolverMaterial {
+            restitution: 0.0,
+            static_friction,
+            dynamic_friction,
+        },
+    }
 }
 
 #[test]
@@ -66,9 +88,11 @@ fn cached_impulses_restore_for_matching_pair_feature_and_normal() {
     let mut cache = ContactCache::new();
     cache.stage(&[manifold(pair, Vec3::Y, 7, 2.0)]).unwrap();
     cache.commit();
-    let mut regenerated = manifold(pair, Vec3::Y, 7, 0.0);
-    cache.warm_start(std::slice::from_mut(&mut regenerated));
-    let point = regenerated.points().next().unwrap();
+    let mut regenerated = solver_manifold(manifold(pair, Vec3::Y, 7, 0.0), 0.5, 0.5);
+    cache
+        .warm_start_solver(std::slice::from_mut(&mut regenerated))
+        .unwrap();
+    let point = regenerated.manifold.points().next().unwrap();
     assert_eq!(point.normal_impulse, 2.0);
     assert_eq!(point.tangent_impulse, [0.25, -0.5]);
 }
@@ -80,13 +104,71 @@ fn cache_rejects_changed_normals_and_drops_absent_features_on_commit() {
     cache.stage(&[manifold(pair, Vec3::Y, 7, 2.0)]).unwrap();
     cache.commit();
 
-    let mut changed = manifold(pair, Vec3::X, 7, 0.0);
-    cache.warm_start(std::slice::from_mut(&mut changed));
-    assert_eq!(changed.points().next().unwrap().normal_impulse, 0.0);
+    let mut changed = solver_manifold(manifold(pair, Vec3::X, 7, 0.0), 0.5, 0.5);
+    cache
+        .warm_start_solver(std::slice::from_mut(&mut changed))
+        .unwrap();
+    let changed_contact = changed.manifold.points().next().unwrap();
+    assert_eq!(changed_contact.normal_impulse, 0.0);
+    assert_eq!(changed_contact.tangent_impulse, [0.0; 2]);
 
     cache.stage(&[]).unwrap();
     cache.commit();
     assert_eq!(cache.len(), 0);
+}
+
+#[test]
+fn warm_start_reprojects_world_tangent_impulse_as_contact_normal_rotates() {
+    let pair = pair();
+    let previous = manifold(pair, Vec3::Y, 7, 2.0);
+    let (old_a, old_b) = tangent_basis(Vec3::Y).unwrap();
+    let old_contact = previous.points().next().unwrap();
+    let tangent_world =
+        old_a * old_contact.tangent_impulse[0] + old_b * old_contact.tangent_impulse[1];
+    let mut cache = ContactCache::new();
+    cache.stage(&[previous]).unwrap();
+    cache.commit();
+
+    let normal = kapitsa_math::Quat::from_axis_angle(Vec3::Z, 0.1)
+        .unwrap()
+        .rotate_vector(Vec3::Y)
+        .unwrap();
+    let regenerated = manifold(pair, normal, 7, 0.0);
+    let mut regenerated = solver_manifold(regenerated, 1.0, 1.0);
+    cache
+        .warm_start_solver(std::slice::from_mut(&mut regenerated))
+        .unwrap();
+
+    let contact = regenerated.manifold.points().next().unwrap();
+    let (new_a, new_b) = tangent_basis(normal).unwrap();
+    let tangent_after = new_a * contact.tangent_impulse[0] + new_b * contact.tangent_impulse[1];
+    let expected = tangent_world - normal * tangent_world.dot(normal);
+    assert!((tangent_after - expected).length() < 1.0e-10);
+    assert!(tangent_after.length() <= tangent_world.length() + 1.0e-12);
+}
+
+#[test]
+fn warm_start_drops_changed_features_and_clamps_to_the_new_friction_cone() {
+    let pair = pair();
+    let mut cache = ContactCache::new();
+    cache.stage(&[manifold(pair, Vec3::Y, 7, 2.0)]).unwrap();
+    cache.commit();
+
+    let mut changed_feature = solver_manifold(manifold(pair, Vec3::Y, 8, 0.0), 0.1, 0.1);
+    cache
+        .warm_start_solver(std::slice::from_mut(&mut changed_feature))
+        .unwrap();
+    let changed = changed_feature.manifold.points().next().unwrap();
+    assert_eq!(changed.normal_impulse, 0.0);
+    assert_eq!(changed.tangent_impulse, [0.0; 2]);
+
+    let mut same_feature = solver_manifold(manifold(pair, Vec3::Y, 7, 0.0), 0.1, 0.1);
+    cache
+        .warm_start_solver(std::slice::from_mut(&mut same_feature))
+        .unwrap();
+    let contact = same_feature.manifold.points().next().unwrap();
+    assert_eq!(contact.normal_impulse, 2.0);
+    assert!((contact.tangent_impulse[0].hypot(contact.tangent_impulse[1]) - 0.2).abs() < 1.0e-12);
 }
 
 #[test]

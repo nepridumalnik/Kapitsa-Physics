@@ -291,7 +291,7 @@ impl CollisionSystem {
 
     pub(crate) fn solve_contacts(&mut self, worker_count: usize) -> Result<(), CollisionError> {
         if let Some(cache) = self.contact_cache.as_ref() {
-            cache.warm_start_solver(&mut self.context.solver_manifolds);
+            cache.warm_start_solver(&mut self.context.solver_manifolds)?;
         }
         #[cfg(feature = "bench-internals")]
         let island_started = std::time::Instant::now();

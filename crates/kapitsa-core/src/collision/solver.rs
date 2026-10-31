@@ -667,7 +667,7 @@ fn contact_mut(
         .ok_or(CollisionError::InvalidContact)
 }
 
-fn tangent_basis(normal: Vec3) -> Result<(Vec3, Vec3), CollisionError> {
+pub(crate) fn tangent_basis(normal: Vec3) -> Result<(Vec3, Vec3), CollisionError> {
     let axis = if normal.x.abs() <= normal.y.abs() && normal.x.abs() <= normal.z.abs() {
         Vec3::X
     } else if normal.y.abs() <= normal.z.abs() {
