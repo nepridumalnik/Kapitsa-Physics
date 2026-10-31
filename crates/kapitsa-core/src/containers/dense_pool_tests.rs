@@ -173,3 +173,85 @@ fn inserting_does_not_reuse_a_live_id() -> Result<(), DensePoolError> {
     assert!(pool.contains(second));
     Ok(())
 }
+
+#[test]
+fn values_returns_an_empty_slice_for_an_empty_pool() {
+    let mut pool = DensePool::<i32>::new();
+
+    assert!(pool.values().is_empty());
+    assert!(pool.values_mut().is_empty());
+}
+
+#[test]
+fn values_match_the_inserted_elements() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    pool.insert(10)?;
+    pool.insert(20)?;
+    pool.insert(30)?;
+
+    assert_eq!(pool.values(), &[10, 20, 30]);
+    Ok(())
+}
+
+#[test]
+fn values_mut_changes_each_element() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    pool.insert(1)?;
+    pool.insert(2)?;
+    pool.insert(3)?;
+
+    for value in pool.values_mut() {
+        *value *= 10;
+    }
+
+    assert_eq!(pool.values(), &[10, 20, 30]);
+    Ok(())
+}
+
+#[test]
+fn values_reflect_swap_remove() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let first = pool.insert(1)?;
+    pool.insert(2)?;
+    pool.insert(3)?;
+
+    assert_eq!(pool.remove(first), Some(1));
+    assert_eq!(pool.values(), &[3, 2]);
+    Ok(())
+}
+
+#[test]
+fn dense_ids_remain_valid_after_slice_mutation() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let first = pool.insert(1)?;
+    let second = pool.insert(2)?;
+
+    for value in pool.values_mut() {
+        *value += 10;
+    }
+
+    assert_eq!(pool.get(first), Some(&11));
+    assert_eq!(pool.get(second), Some(&12));
+    assert!(pool.contains(first));
+    assert!(pool.contains(second));
+    Ok(())
+}
+
+#[test]
+fn values_length_stays_synchronized_with_pool_length() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let first = pool.insert(1)?;
+    let second = pool.insert(2)?;
+    assert_eq!(pool.values().len(), pool.len());
+
+    let third = pool.insert(3)?;
+    assert_eq!(pool.values().len(), pool.len());
+    assert_eq!(pool.remove(second), Some(2));
+    assert_eq!(pool.values().len(), pool.len());
+    assert_eq!(pool.remove(first), Some(1));
+    assert_eq!(pool.values().len(), pool.len());
+    assert_eq!(pool.remove(third), Some(3));
+    assert_eq!(pool.values().len(), pool.len());
+    assert!(pool.values().is_empty());
+    Ok(())
+}

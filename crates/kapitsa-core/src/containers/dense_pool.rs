@@ -190,6 +190,20 @@ impl<T> DensePool<T> {
         self.indices(id).is_some()
     }
 
+    /// Returns the live values in dense storage order.
+    ///
+    /// The order is not guaranteed and may change after `remove`.
+    pub fn values(&self) -> &[T] {
+        &self.values
+    }
+
+    /// Mutably borrows the live values in dense storage order.
+    ///
+    /// The order is not guaranteed and may change after `remove`.
+    pub fn values_mut(&mut self) -> &mut [T] {
+        &mut self.values
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (DenseId, &T)> {
         self.values
             .iter()
