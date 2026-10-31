@@ -5,7 +5,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use kapitsa_core::world::{BodyStep, PhysicsWorld, StepError};
+use kapitsa_core::{
+    rigid_body::BodyType,
+    world::{BodyStep, PhysicsWorld, StepError},
+};
 use tokio::{runtime::Handle, task::JoinHandle};
 
 use crate::metrics::MetricsCollector;
@@ -14,7 +17,15 @@ use crate::{
     StepStats,
 };
 
-type PrepareOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
+enum PrepareOutput {
+    Completed(
+        PhysicsWorld,
+        Vec<Vec<BodyStep>>,
+        Result<(), StepError>,
+        Instant,
+    ),
+    Shards(PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>),
+}
 type CommitOutput = (
     PhysicsWorld,
     Vec<Vec<BodyStep>>,
@@ -284,8 +295,23 @@ impl PhysicsController {
         let buffers = mem::take(&mut self.bucket_buffers);
         let task = tokio::task::spawn_blocking(move || {
             let mut buffers = buffers;
+            // Snapshotting inactive bodies costs more than the sequential step in measured workloads.
+            let mut active = 0;
+            let threshold = world.body_count() / 2;
+            for (_, body) in world.bodies() {
+                if body.physics().body_type() != BodyType::Static && !body.state().is_sleeping() {
+                    active += 1;
+                    if active > threshold {
+                        break;
+                    }
+                }
+            }
+            if active <= threshold {
+                let result = world.step(step_duration.as_secs_f64());
+                return PrepareOutput::Completed(world, buffers, result, Instant::now());
+            }
             let result = world.fill_step_shards(&mut buffers);
-            (world, buffers, result)
+            PrepareOutput::Shards(world, buffers, result)
         });
         self.world = WorldState::InFlight(InFlightStep {
             world: None,
@@ -374,7 +400,21 @@ impl PhysicsController {
                         return Err(SchedulerError::WorldLost);
                     };
                     match completion {
-                        Ok((world, buffers, Ok(()))) => {
+                        Ok(PrepareOutput::Completed(world, buffers, result, completed_at)) => {
+                            self.restore_available(world, buffers);
+                            result.map_err(SchedulerError::from)?;
+                            return Ok((
+                                StepMeasurement {
+                                    step_duration: completed_at
+                                        .saturating_duration_since(in_flight.started),
+                                    task_wait_duration: in_flight.task_wait_duration,
+                                    step_budget: in_flight.step_budget,
+                                    deadline: in_flight.step_duration,
+                                },
+                                completed_at,
+                            ));
+                        }
+                        Ok(PrepareOutput::Shards(world, buffers, Ok(()))) => {
                             let bucket_count = buffers.len();
                             let worker_count = self.active_workers.min(bucket_count).max(1);
                             let queue = Arc::new(Mutex::new(
@@ -426,7 +466,7 @@ impl PhysicsController {
                                 step_budget: in_flight.step_budget,
                             });
                         }
-                        Ok((world, buffers, Err(error))) => {
+                        Ok(PrepareOutput::Shards(world, buffers, Err(error))) => {
                             self.restore_available(world, buffers);
                             return Err(SchedulerError::from(error));
                         }
@@ -860,6 +900,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn inactive_body_fallback_matches_world_step_after_slot_reuse() {
+        fn mixed_world() -> PhysicsWorld {
+            let mut world = dynamic_world(12);
+            let ids = world.bodies().map(|(id, _)| id).collect::<Vec<_>>();
+            for id in &ids[..10] {
+                world.body_mut(*id).expect("body").sleep().expect("sleep");
+            }
+            world.remove_body(ids[0]).expect("remove body");
+            world
+                .add_body(RigidBody::new_static(Transform::identity()))
+                .expect("reuse slot");
+            world
+        }
+        let runtime = runtime();
+        let config = config(1);
+        let quantum = config.step_duration(config.target_hz);
+        let mut sequential = mixed_world();
+        let mut controller = PhysicsController::new(mixed_world(), config).expect("controller");
+        controller.set_active_workers(2).expect("workers");
+        sequential
+            .step(quantum.as_secs_f64())
+            .expect("sequential step");
+        runtime.block_on(controller.step()).expect("scheduled step");
+        assert!(
+            controller
+                .world()
+                .expect("world")
+                .bodies()
+                .zip(sequential.bodies())
+                .all(|((id, body), (expected_id, expected))| id == expected_id && body == expected)
+        );
+    }
+
+    #[test]
+    fn inactive_body_fallback_preserves_world_on_integration_error() {
+        let runtime = runtime();
+        let mut world = dynamic_world(8);
+        let ids = world.bodies().map(|(id, _)| id).collect::<Vec<_>>();
+        for id in &ids[..7] {
+            world.body_mut(*id).expect("body").sleep().expect("sleep");
+        }
+        let body = world.body_mut(ids[7]).expect("active body");
+        body.set_mass(
+            MassProperties::new(f64::from_bits(1), Vec3::ZERO, Mat3::IDENTITY).expect("mass"),
+        )
+        .expect("set mass");
+        body.apply_force(Vec3::X * f64::MAX).expect("force");
+        let original = world
+            .bodies()
+            .map(|(id, body)| (id, *body))
+            .collect::<Vec<_>>();
+        let mut controller = PhysicsController::new(world, config(1)).expect("controller");
+        controller.set_active_workers(2).expect("workers");
+        assert!(matches!(
+            runtime.block_on(controller.step()),
+            Err(SchedulerError::PhysicsStep(_))
+        ));
+        assert!(controller.world().expect("world").bodies().zip(original)
+            .all(|((id, body), (original_id, original))| id == original_id && body == &original));
     }
 
     #[test]

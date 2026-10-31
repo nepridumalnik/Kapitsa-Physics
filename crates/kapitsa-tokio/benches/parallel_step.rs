@@ -1,15 +1,20 @@
 use std::{
+    collections::VecDeque,
     error::Error,
     hint::black_box,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use kapitsa_core::{
-    mass::MassProperties, rigid_body::RigidBody, transform::Transform, world::PhysicsWorld,
+    mass::MassProperties,
+    rigid_body::RigidBody,
+    transform::Transform,
+    world::{BodyStep, PhysicsWorld, StepError},
 };
 use kapitsa_math::{Mat3, Vec3};
 use kapitsa_tokio::{PhysicsController, SchedulerConfig};
-use tokio::runtime::Builder;
+use tokio::runtime::{Builder, Runtime};
 
 const BODY_COUNTS: [(&str, usize); 3] = [("small", 256), ("medium", 4_096), ("large", 20_000)];
 const WORKLOADS: [Workload; 3] = [
@@ -91,6 +96,89 @@ fn main() -> Result<(), Box<dyn Error>> {
             report("dynamic buckets x2", dynamic_buckets, sequential);
         }
     }
+    for workload in WORKLOADS {
+        report_phases(&runtime, workload)?;
+    }
+    Ok(())
+}
+
+fn report_phases(runtime: &Runtime, workload: Workload) -> Result<(), Box<dyn Error>> {
+    let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for _ in 0..SAMPLES {
+        let mut world = make_world(20_000, workload)?;
+        let mut buckets = (0..8).map(|_| Vec::new()).collect::<Vec<Vec<BodyStep>>>();
+        let mut times = [Duration::ZERO; 4];
+        for _ in 0..STEPS {
+            let started = Instant::now();
+            world.fill_step_shards(&mut buckets)?;
+            times[0] += started.elapsed();
+
+            let started = Instant::now();
+            let queue = Arc::new(Mutex::new(
+                buckets.into_iter().enumerate().collect::<VecDeque<_>>(),
+            ));
+            let mut tasks = Vec::new();
+            for _ in 0..2 {
+                let queue = Arc::clone(&queue);
+                tasks.push(runtime.spawn_blocking(
+                    move || -> Result<Vec<(usize, Vec<BodyStep>)>, StepError> {
+                        let mut completed = Vec::new();
+                        loop {
+                            let next = queue
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .pop_front();
+                            let Some((index, mut bucket)) = next else {
+                                break;
+                            };
+                            for body in &mut bucket {
+                                body.integrate(1.0 / 60.0)?;
+                            }
+                            completed.push((index, bucket));
+                        }
+                        Ok(completed)
+                    },
+                ));
+            }
+            times[1] += started.elapsed();
+
+            let started = Instant::now();
+            let completed = runtime.block_on(async {
+                let mut completed = Vec::new();
+                for task in tasks {
+                    completed.extend(task.await??);
+                }
+                Ok::<_, Box<dyn Error>>(completed)
+            })?;
+            let mut ordered = (0..8).map(|_| None).collect::<Vec<_>>();
+            for (index, bucket) in completed {
+                ordered[index] = Some(bucket);
+            }
+            buckets = ordered
+                .into_iter()
+                .map(|bucket| bucket.ok_or("missing bucket"))
+                .collect::<Result<_, _>>()?;
+            times[2] += started.elapsed();
+
+            let started = Instant::now();
+            world.commit_step_shards(&buckets)?;
+            times[3] += started.elapsed();
+        }
+        for (sample, time) in samples.iter_mut().zip(times) {
+            sample.push(time);
+        }
+    }
+    for sample in &mut samples {
+        sample.sort_unstable();
+    }
+    println!(
+        "\n{} raw bucket phases, 20,000 bodies (ms / {STEPS} steps): prepare={:.2}, dispatch={:.2}, join+collect={:.2}, commit={:.2}",
+        workload.name,
+        samples[0][SAMPLES / 2].as_secs_f64() * 1000.0,
+        samples[1][SAMPLES / 2].as_secs_f64() * 1000.0,
+        samples[2][SAMPLES / 2].as_secs_f64() * 1000.0,
+        samples[3][SAMPLES / 2].as_secs_f64() * 1000.0
+    );
     Ok(())
 }
 
