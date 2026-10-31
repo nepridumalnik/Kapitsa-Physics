@@ -144,6 +144,50 @@ impl PhysicsWorld {
     pub fn collider_count(&self) -> usize {
         self.colliders.len()
     }
+
+    pub fn remove_body(&mut self, id: BodyId) -> Option<RigidBody> {
+        let mut next = self.bodies.get(id.0)?.first_collider;
+        while let Some(collider) = next {
+            next = self.colliders.get(collider.0)?.next;
+            self.remove_collider(collider)?;
+        }
+        self.bodies.remove(id.0).map(|entry| entry.body)
+    }
+
+    /// Iterates over bodies in dense storage order, which may change after removal.
+    pub fn bodies(&self) -> impl Iterator<Item = (BodyId, &RigidBody)> {
+        self.bodies
+            .iter()
+            .map(|(id, entry)| (BodyId(id), &entry.body))
+    }
+
+    /// Mutably iterates over bodies in dense storage order, which may change after removal.
+    pub fn bodies_mut(&mut self) -> impl Iterator<Item = (BodyId, &mut RigidBody)> {
+        self.bodies
+            .iter_mut()
+            .map(|(id, entry)| (BodyId(id), &mut entry.body))
+    }
+
+    /// Iterates over colliders in dense storage order, which may change after removal.
+    pub fn colliders(&self) -> impl Iterator<Item = (ColliderId, BodyId, &Collider)> {
+        self.colliders
+            .iter()
+            .map(|(id, entry)| (ColliderId(id), entry.body, &entry.collider))
+    }
+
+    /// Iterates over the colliders attached to `body` in linked-list order.
+    pub fn colliders_of(
+        &self,
+        body: BodyId,
+    ) -> Option<impl Iterator<Item = (ColliderId, &Collider)> + '_> {
+        let mut next = self.bodies.get(body.0)?.first_collider;
+        Some(std::iter::from_fn(move || {
+            let id = next?;
+            let entry = self.colliders.get(id.0)?;
+            next = entry.next;
+            Some((id, &entry.collider))
+        }))
+    }
 }
 
 impl Default for PhysicsWorld {

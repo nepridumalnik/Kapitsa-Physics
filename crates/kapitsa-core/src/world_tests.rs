@@ -207,3 +207,162 @@ fn invalid_collider_ids_are_rejected() -> Result<(), DensePoolError> {
     assert!(world.remove_collider(id).is_none());
     Ok(())
 }
+
+#[test]
+fn removing_body_without_colliders_returns_it_and_invalidates_its_id() -> Result<(), WorldError> {
+    let mut world = PhysicsWorld::new();
+    let body_id = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let original = *world.body(body_id).ok_or(WorldError::InvalidBodyId)?;
+
+    assert_eq!(world.remove_body(body_id), Some(original));
+    assert_eq!(world.remove_body(body_id), None);
+    assert!(world.body(body_id).is_none());
+    assert_eq!(world.body_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn removing_body_cascades_one_and_many_colliders() -> Result<(), WorldError> {
+    let mut world = PhysicsWorld::new();
+    let single_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let many_body = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
+    let other_body = world.add_body(dynamic_body())?;
+    let single_collider = world.add_collider(single_body, collider(1.0))?;
+    let many_colliders = [
+        world.add_collider(many_body, collider(2.0))?,
+        world.add_collider(many_body, collider(3.0))?,
+        world.add_collider(many_body, collider(4.0))?,
+    ];
+    let other_collider = world.add_collider(other_body, collider(5.0))?;
+
+    assert!(world.remove_body(single_body).is_some());
+    assert!(world.collider(single_collider).is_none());
+    assert_eq!(world.collider_count(), 4);
+
+    assert!(world.remove_body(many_body).is_some());
+    for id in many_colliders {
+        assert!(world.collider(id).is_none());
+        assert!(world.collider_body(id).is_none());
+    }
+    assert_eq!(world.body_count(), 1);
+    assert_eq!(world.collider_count(), 1);
+    assert!(world.body(other_body).is_some());
+    assert_eq!(world.collider_body(other_collider), Some(other_body));
+    Ok(())
+}
+
+#[test]
+fn iterators_cover_empty_and_populated_worlds() -> Result<(), WorldError> {
+    let mut world = PhysicsWorld::new();
+    assert_eq!(world.bodies().count(), 0);
+    assert_eq!(world.colliders().count(), 0);
+
+    let first_body = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
+    let second_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let first_collider = world.add_collider(first_body, collider(1.0))?;
+    let second_collider = world.add_collider(second_body, collider(2.0))?;
+    let extra_collider = world.add_collider(first_body, collider(3.0))?;
+
+    let bodies: Vec<_> = world.bodies().collect();
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies.iter().any(|(id, _)| *id == first_body));
+    assert!(bodies.iter().any(|(id, _)| *id == second_body));
+    for (id, _) in bodies {
+        assert!(world.body(id).is_some());
+    }
+
+    let colliders: Vec<_> = world.colliders().collect();
+    assert_eq!(colliders.len(), 3);
+    assert!(
+        colliders
+            .iter()
+            .any(|(id, owner, _)| *id == first_collider && *owner == first_body)
+    );
+    assert!(
+        colliders
+            .iter()
+            .any(|(id, owner, _)| *id == extra_collider && *owner == first_body)
+    );
+    assert!(
+        colliders
+            .iter()
+            .any(|(id, owner, _)| *id == second_collider && *owner == second_body)
+    );
+    Ok(())
+}
+
+#[test]
+fn colliders_of_iterates_only_the_requested_body_list() -> Result<(), WorldError> {
+    let mut world = PhysicsWorld::new();
+    let first_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let second_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let first = world.add_collider(first_body, collider(1.0))?;
+    let second = world.add_collider(first_body, collider(2.0))?;
+    let other = world.add_collider(second_body, collider(3.0))?;
+
+    let first_body_colliders: Vec<_> = world
+        .colliders_of(first_body)
+        .ok_or(WorldError::InvalidBodyId)?
+        .map(|(id, _)| id)
+        .collect();
+    let second_body_colliders: Vec<_> = world
+        .colliders_of(second_body)
+        .ok_or(WorldError::InvalidBodyId)?
+        .map(|(id, _)| id)
+        .collect();
+
+    assert_eq!(first_body_colliders.len(), 2);
+    assert!(first_body_colliders.contains(&first));
+    assert!(first_body_colliders.contains(&second));
+    assert_eq!(second_body_colliders, [other]);
+    Ok(())
+}
+
+#[test]
+fn bodies_mut_visits_each_body_once() -> Result<(), WorldError> {
+    let mut world = PhysicsWorld::new();
+    let first = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
+    let second = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
+
+    for (_, body) in world.bodies_mut() {
+        body.set_linear_velocity(Vec3::Y)
+            .expect("kinematic body accepts finite velocity");
+    }
+
+    assert_eq!(
+        world.body(first).map(|body| body.state().linear_velocity()),
+        Some(Vec3::Y)
+    );
+    assert_eq!(
+        world
+            .body(second)
+            .map(|body| body.state().linear_velocity()),
+        Some(Vec3::Y)
+    );
+    Ok(())
+}
+
+#[test]
+fn deleting_body_and_reusing_slots_does_not_revive_old_ids() -> Result<(), WorldError> {
+    let mut world = PhysicsWorld::new();
+    let old_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let old_collider = world.add_collider(old_body, collider(1.0))?;
+    assert!(world.remove_body(old_body).is_some());
+
+    let new_body = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
+    let new_collider = world.add_collider(new_body, collider(2.0))?;
+
+    assert_eq!(old_body.0.index(), new_body.0.index());
+    assert_ne!(old_body.0.generation(), new_body.0.generation());
+    assert!(world.body(old_body).is_none());
+    assert!(world.collider(old_collider).is_none());
+    assert_eq!(world.collider_body(new_collider), Some(new_body));
+    assert_eq!(
+        world
+            .colliders_of(new_body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .count(),
+        1
+    );
+    Ok(())
+}
