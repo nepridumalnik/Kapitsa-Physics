@@ -1,8 +1,10 @@
 use kapitsa_core::{
     collider::{Collider, CollisionFilter},
+    collision::{OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
     mass::MassProperties,
     material::MaterialId,
     rigid_body::RigidBody,
+    shape::Shape,
     transform::Transform,
     world::{BodyId, ColliderId, PhysicsWorld, WorldError},
 };
@@ -63,10 +65,25 @@ pub enum PhysicsCommand {
         id: ColliderId,
         material: Option<MaterialId>,
     },
+    /// Casts a ray against the current world at this command's FIFO position.
+    Raycast { ray: Ray, filter: QueryFilter },
+    /// Sweeps a convex shape against the current world at this command's FIFO position.
+    Sweep {
+        shape: Shape,
+        transform: Transform,
+        displacement: Vec3,
+        filter: QueryFilter,
+    },
+    /// Finds colliders overlapping a convex shape at this command's FIFO position.
+    Overlaps {
+        shape: Shape,
+        transform: Transform,
+        filter: QueryFilter,
+    },
 }
 
 /// Successful result returned by a physics command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PhysicsCommandResult {
     /// The command completed without returning a newly allocated ID.
     Done,
@@ -74,6 +91,12 @@ pub enum PhysicsCommandResult {
     Body(BodyId),
     /// A collider was inserted.
     Collider(ColliderId),
+    /// The result of a ray query.
+    Raycast(Option<RayHit>),
+    /// The result of a shape sweep.
+    Sweep(Option<ShapeHit>),
+    /// All colliders overlapping the requested shape.
+    Overlaps(Vec<OverlapHit>),
 }
 
 pub(crate) struct CommandRequest {
@@ -195,6 +218,24 @@ pub(crate) fn apply_command(
             world.set_collider_material(id, material)?;
             PhysicsCommandResult::Done
         }
+        PhysicsCommand::Raycast { ray, filter } => {
+            PhysicsCommandResult::Raycast(world.raycast(ray, filter)?)
+        }
+        PhysicsCommand::Sweep {
+            shape,
+            transform,
+            displacement,
+            filter,
+        } => PhysicsCommandResult::Sweep(world.sweep(&shape, transform, displacement, filter)?),
+        PhysicsCommand::Overlaps {
+            shape,
+            transform,
+            filter,
+        } => {
+            let mut overlaps = Vec::new();
+            world.overlaps(&shape, transform, filter, &mut overlaps)?;
+            PhysicsCommandResult::Overlaps(overlaps)
+        }
     };
     Ok(result)
 }
@@ -203,6 +244,7 @@ pub(crate) fn apply_command(
 mod tests {
     use kapitsa_core::{
         collider::{Collider, CollisionFilter},
+        collision::{QueryError, QueryFilter, Ray},
         mass::MassProperties,
         material::{MaterialStorage, PhysicsMaterial},
         rigid_body::{BodyError, RigidBody},
@@ -474,5 +516,79 @@ mod tests {
             Err(PhysicsClientError::World(WorldError::InvalidMaterialId))
         ));
         assert_eq!(world.collider(collider).expect("collider").material(), None);
+    }
+
+    #[test]
+    fn spatial_queries_run_through_the_world_command_handler() {
+        use kapitsa_core::collision::{OverlapHit, RayHit, ShapeHit};
+
+        let mut world = PhysicsWorld::new();
+        let body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .unwrap();
+        let collider = world
+            .add_collider(
+                body,
+                Collider::new(
+                    Shape::Sphere(Sphere::new(1.0).unwrap()),
+                    Transform::new(Vec3::new(3.0, 0.0, 0.0), kapitsa_math::Quat::IDENTITY).unwrap(),
+                ),
+            )
+            .unwrap();
+        let filter = QueryFilter::default();
+        let ray = Ray::new(Vec3::ZERO, Vec3::X, 10.0).unwrap();
+        let result = apply_command(&mut world, PhysicsCommand::Raycast { ray, filter }).unwrap();
+        assert!(
+            matches!(result, PhysicsCommandResult::Raycast(Some(RayHit { collider: id, .. })) if id == collider)
+        );
+
+        let result = apply_command(
+            &mut world,
+            PhysicsCommand::Sweep {
+                shape: Shape::Sphere(Sphere::new(0.5).unwrap()),
+                transform: Transform::identity(),
+                displacement: Vec3::new(5.0, 0.0, 0.0),
+                filter,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(result, PhysicsCommandResult::Sweep(Some(ShapeHit { collider: id, .. })) if id == collider)
+        );
+
+        let result = apply_command(
+            &mut world,
+            PhysicsCommand::Overlaps {
+                shape: Shape::Sphere(Sphere::new(1.0).unwrap()),
+                transform: Transform::new(Vec3::new(3.0, 0.0, 0.0), kapitsa_math::Quat::IDENTITY)
+                    .unwrap(),
+                filter,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            PhysicsCommandResult::Overlaps(vec![OverlapHit { body, collider }])
+        );
+    }
+
+    #[test]
+    fn invalid_spatial_queries_keep_the_query_error_variant() {
+        let mut world = PhysicsWorld::new();
+        let result = apply_command(
+            &mut world,
+            PhysicsCommand::Raycast {
+                ray: Ray {
+                    origin: Vec3::ZERO,
+                    direction: Vec3::ZERO,
+                    max_distance: 1.0,
+                },
+                filter: QueryFilter::default(),
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(PhysicsClientError::Query(QueryError::InvalidInput))
+        ));
     }
 }

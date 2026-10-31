@@ -1,6 +1,7 @@
 use std::fmt;
 
 use kapitsa_core::{
+    collision::QueryError,
     rigid_body::BodyError,
     world::{StepError, WorldError},
 };
@@ -16,6 +17,8 @@ pub enum PhysicsClientError {
     World(WorldError),
     /// A rigid-body operation rejected its input or current body type.
     Body(BodyError),
+    /// A spatial query rejected its input or could not complete its geometry calculation.
+    Query(QueryError),
     /// A command handler returned a result variant inconsistent with the request.
     UnexpectedResult,
 }
@@ -27,6 +30,7 @@ impl fmt::Display for PhysicsClientError {
             Self::ChannelClosed => formatter.write_str("physics command channel is closed"),
             Self::World(error) => write!(formatter, "physics world command failed: {error}"),
             Self::Body(error) => write!(formatter, "rigid body command failed: {error}"),
+            Self::Query(error) => write!(formatter, "physics query failed: {error}"),
             Self::UnexpectedResult => {
                 formatter.write_str("physics command returned an unexpected result")
             }
@@ -39,6 +43,7 @@ impl std::error::Error for PhysicsClientError {
         match self {
             Self::World(error) => Some(error),
             Self::Body(error) => Some(error),
+            Self::Query(error) => Some(error),
             Self::NotRunning | Self::ChannelClosed | Self::UnexpectedResult => None,
         }
     }
@@ -53,6 +58,12 @@ impl From<WorldError> for PhysicsClientError {
 impl From<BodyError> for PhysicsClientError {
     fn from(error: BodyError) -> Self {
         Self::Body(error)
+    }
+}
+
+impl From<QueryError> for PhysicsClientError {
+    fn from(error: QueryError) -> Self {
+        Self::Query(error)
     }
 }
 

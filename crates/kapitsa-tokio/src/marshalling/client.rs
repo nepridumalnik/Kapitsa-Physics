@@ -2,9 +2,11 @@ use std::sync::Arc;
 
 use kapitsa_core::{
     collider::{Collider, CollisionFilter},
+    collision::{OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
     mass::MassProperties,
     material::MaterialId,
     rigid_body::RigidBody,
+    shape::Shape,
     transform::Transform,
     world::{BodyId, ColliderId},
 };
@@ -59,9 +61,11 @@ impl PhysicsClient {
     pub async fn add_body(&self, body: RigidBody) -> Result<BodyId, PhysicsClientError> {
         match self.submit(PhysicsCommand::AddBody { body }).await? {
             PhysicsCommandResult::Body(id) => Ok(id),
-            PhysicsCommandResult::Done | PhysicsCommandResult::Collider(_) => {
-                Err(PhysicsClientError::UnexpectedResult)
-            }
+            PhysicsCommandResult::Done
+            | PhysicsCommandResult::Collider(_)
+            | PhysicsCommandResult::Raycast(_)
+            | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
         }
     }
 
@@ -81,9 +85,11 @@ impl PhysicsClient {
             .await?
         {
             PhysicsCommandResult::Collider(id) => Ok(id),
-            PhysicsCommandResult::Done | PhysicsCommandResult::Body(_) => {
-                Err(PhysicsClientError::UnexpectedResult)
-            }
+            PhysicsCommandResult::Done
+            | PhysicsCommandResult::Body(_)
+            | PhysicsCommandResult::Raycast(_)
+            | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
         }
     }
 
@@ -226,6 +232,60 @@ impl PhysicsClient {
         )
     }
 
+    /// Raycasts the latest world state at this request's FIFO position.
+    pub async fn raycast(
+        &self,
+        ray: Ray,
+        filter: QueryFilter,
+    ) -> Result<Option<RayHit>, PhysicsClientError> {
+        match self.submit(PhysicsCommand::Raycast { ray, filter }).await? {
+            PhysicsCommandResult::Raycast(hit) => Ok(hit),
+            _ => Err(PhysicsClientError::UnexpectedResult),
+        }
+    }
+
+    /// Sweeps a convex shape through the latest world state at this request's FIFO position.
+    pub async fn sweep(
+        &self,
+        shape: Shape,
+        transform: Transform,
+        displacement: Vec3,
+        filter: QueryFilter,
+    ) -> Result<Option<ShapeHit>, PhysicsClientError> {
+        match self
+            .submit(PhysicsCommand::Sweep {
+                shape,
+                transform,
+                displacement,
+                filter,
+            })
+            .await?
+        {
+            PhysicsCommandResult::Sweep(hit) => Ok(hit),
+            _ => Err(PhysicsClientError::UnexpectedResult),
+        }
+    }
+
+    /// Returns all colliders overlapping a convex shape at this request's FIFO position.
+    pub async fn overlaps(
+        &self,
+        shape: Shape,
+        transform: Transform,
+        filter: QueryFilter,
+    ) -> Result<Vec<OverlapHit>, PhysicsClientError> {
+        match self
+            .submit(PhysicsCommand::Overlaps {
+                shape,
+                transform,
+                filter,
+            })
+            .await?
+        {
+            PhysicsCommandResult::Overlaps(overlaps) => Ok(overlaps),
+            _ => Err(PhysicsClientError::UnexpectedResult),
+        }
+    }
+
     /// Returns an `Arc` to the latest published snapshot without waiting.
     pub fn snapshot(&self) -> Arc<PhysicsSnapshot> {
         Arc::clone(&self.snapshot_rx.borrow())
@@ -268,9 +328,11 @@ impl PhysicsClient {
 fn expect_done(result: PhysicsCommandResult) -> Result<(), PhysicsClientError> {
     match result {
         PhysicsCommandResult::Done => Ok(()),
-        PhysicsCommandResult::Body(_) | PhysicsCommandResult::Collider(_) => {
-            Err(PhysicsClientError::UnexpectedResult)
-        }
+        PhysicsCommandResult::Body(_)
+        | PhysicsCommandResult::Collider(_)
+        | PhysicsCommandResult::Raycast(_)
+        | PhysicsCommandResult::Sweep(_)
+        | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
     }
 }
 
@@ -284,7 +346,15 @@ mod tests {
         time::Duration,
     };
 
-    use kapitsa_core::{rigid_body::RigidBody, transform::Transform, world::PhysicsWorld};
+    use kapitsa_core::{
+        collider::Collider,
+        collision::{QueryFilter, Ray},
+        rigid_body::RigidBody,
+        shape::{Shape, Sphere},
+        transform::Transform,
+        world::PhysicsWorld,
+    };
+    use kapitsa_math::Vec3;
     use tokio::sync::{mpsc, oneshot, watch};
 
     use super::PhysicsClient;
@@ -369,6 +439,71 @@ mod tests {
             .expect("body ID");
         assert_eq!(server.await.expect("server task"), 1);
         assert_eq!(id.index(), 0);
+    }
+
+    #[tokio::test]
+    async fn spatial_query_helpers_use_the_shared_command_queue() {
+        let ClientHarness {
+            client,
+            mut receiver,
+            ..
+        } = running_client(3);
+        let server = tokio::spawn(async move {
+            let mut world = PhysicsWorld::new();
+            let body = world
+                .add_body(RigidBody::new_static(Transform::identity()))
+                .unwrap();
+            world
+                .add_collider(
+                    body,
+                    Collider::new(
+                        Shape::Sphere(Sphere::new(1.0).unwrap()),
+                        Transform::new(Vec3::new(3.0, 0.0, 0.0), kapitsa_math::Quat::IDENTITY)
+                            .unwrap(),
+                    ),
+                )
+                .unwrap();
+            for _ in 0..3 {
+                let request = receiver.recv().await.expect("query request");
+                let result = apply_command(&mut world, request.command);
+                request.reply.send(result).expect("client is waiting");
+            }
+        });
+
+        let hit = client
+            .raycast(
+                Ray::new(Vec3::ZERO, Vec3::X, 10.0).unwrap(),
+                QueryFilter::default(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!((hit.distance - 2.0).abs() < 1.0e-10);
+        assert!(
+            client
+                .sweep(
+                    Shape::Sphere(Sphere::new(0.5).unwrap()),
+                    Transform::identity(),
+                    Vec3::new(5.0, 0.0, 0.0),
+                    QueryFilter::default(),
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            client
+                .overlaps(
+                    Shape::Sphere(Sphere::new(1.0).unwrap()),
+                    Transform::new(Vec3::new(3.0, 0.0, 0.0), kapitsa_math::Quat::IDENTITY).unwrap(),
+                    QueryFilter::default(),
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]
