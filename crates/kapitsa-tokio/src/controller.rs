@@ -6,8 +6,9 @@ use std::{
 use kapitsa_core::world::{BodyStep, PhysicsWorld, StepError};
 use tokio::{runtime::Handle, task::JoinHandle};
 
+use crate::metrics::MetricsCollector;
 use crate::{
-    AdaptiveScheduler, SchedulerConfig, SchedulerError, SchedulerMetrics, StepMeasurement,
+    AdaptiveScheduler, SchedulerConfig, SchedulerError, SimulationMetrics, StepMeasurement,
     StepStats,
 };
 
@@ -37,9 +38,31 @@ struct InFlightStep {
     world: Option<PhysicsWorld>,
     work: StepWork,
     started: Instant,
-    wait_started: Instant,
+    task_wait_duration: Duration,
     step_duration: Duration,
     step_budget: Duration,
+}
+
+struct TaskWaitTimer<'a> {
+    total: &'a mut Duration,
+    started: Instant,
+}
+
+impl Drop for TaskWaitTimer<'_> {
+    fn drop(&mut self) {
+        *self.total = self.total.saturating_add(self.started.elapsed());
+    }
+}
+
+async fn wait_for_task<T>(
+    task: &mut JoinHandle<T>,
+    total_wait: &mut Duration,
+) -> Result<T, tokio::task::JoinError> {
+    let _timer = TaskWaitTimer {
+        total: total_wait,
+        started: Instant::now(),
+    };
+    task.await
 }
 
 enum WorldState {
@@ -56,7 +79,7 @@ pub struct PhysicsController {
     active_workers: usize,
     worker_buffers: Vec<Vec<BodyStep>>,
     adaptive: AdaptiveScheduler,
-    metrics: SchedulerMetrics,
+    metrics: MetricsCollector,
 }
 
 impl PhysicsController {
@@ -64,7 +87,12 @@ impl PhysicsController {
         config.validate()?;
         let current_hz = config.target_hz;
         let active_workers = 1;
+        let step_budget = config
+            .step_duration(current_hz)
+            .mul_f64(config.target_utilization);
         let adaptive = AdaptiveScheduler::new(config.clone())?;
+        let metrics =
+            MetricsCollector::new(config.target_hz, current_hz, active_workers, step_budget);
         Ok(Self {
             world: WorldState::Available(world),
             config,
@@ -72,7 +100,7 @@ impl PhysicsController {
             active_workers,
             worker_buffers: vec![Vec::new()],
             adaptive,
-            metrics: SchedulerMetrics::new(current_hz, active_workers),
+            metrics,
         })
     }
 
@@ -98,8 +126,8 @@ impl PhysicsController {
         &self.config
     }
 
-    pub fn metrics(&self) -> &SchedulerMetrics {
-        &self.metrics
+    pub fn metrics(&self) -> SimulationMetrics {
+        self.metrics.snapshot()
     }
 
     pub fn current_hz(&self) -> u32 {
@@ -133,22 +161,38 @@ impl PhysicsController {
     /// If a previous call was cancelled while its step was in flight, this call
     /// waits for and reports that step instead of starting another one.
     pub async fn step(&mut self) -> Result<StepStats, SchedulerError> {
-        Handle::try_current().map_err(|_| SchedulerError::MissingRuntime)?;
-        if !matches!(self.world, WorldState::InFlight(_)) {
-            self.start_step(self.step_duration())?;
+        if Handle::try_current().is_err() {
+            self.metrics.record_error();
+            return Err(SchedulerError::MissingRuntime);
+        }
+        if !matches!(self.world, WorldState::InFlight(_))
+            && let Err(error) = self.start_step(self.step_duration())
+        {
+            self.metrics.record_error();
+            return Err(error);
         }
 
-        let measurement = self.complete_pending_step().await?;
+        let measurement = match self.complete_pending_step().await {
+            Ok(measurement) => measurement,
+            Err(error) => {
+                self.metrics.record_error();
+                self.update_metrics_state();
+                return Err(error);
+            }
+        };
         let adaptive = self.adaptive.observe(measurement);
         self.current_hz = adaptive.current_hz;
         self.active_workers = adaptive.active_workers;
-        let budget_overrun = self.metrics.record_step(measurement, adaptive);
+        let (budget_overrun, deadline_missed) =
+            self.metrics
+                .record_step(measurement, adaptive, Instant::now());
         self.update_metrics_state();
         Ok(StepStats::snapshot(
             measurement,
             budget_overrun,
+            deadline_missed,
             adaptive,
-            &self.metrics,
+            &self.metrics.snapshot(),
         ))
     }
 
@@ -184,7 +228,7 @@ impl PhysicsController {
             world: None,
             work: StepWork::Preparing { task },
             started,
-            wait_started: started,
+            task_wait_duration: Duration::ZERO,
             step_duration,
             step_budget,
         });
@@ -208,8 +252,9 @@ impl PhysicsController {
                     let completion = match &mut self.world {
                         WorldState::InFlight(InFlightStep {
                             work: StepWork::Preparing { task },
+                            task_wait_duration,
                             ..
-                        }) => task.await,
+                        }) => wait_for_task(task, task_wait_duration).await,
                         WorldState::Available(_) => {
                             return Err(SchedulerError::WorldUnavailable);
                         }
@@ -252,7 +297,7 @@ impl PhysicsController {
                                     next_task: 0,
                                 },
                                 started: in_flight.started,
-                                wait_started: in_flight.wait_started,
+                                task_wait_duration: in_flight.task_wait_duration,
                                 step_duration: in_flight.step_duration,
                                 step_budget: in_flight.step_budget,
                             });
@@ -287,9 +332,10 @@ impl PhysicsController {
                         let completion = match &mut self.world {
                             WorldState::InFlight(InFlightStep {
                                 work: StepWork::Integrating { tasks, .. },
+                                task_wait_duration,
                                 ..
                             }) => match tasks.get_mut(task_index).and_then(Option::as_mut) {
-                                Some(task) => Some(task.await),
+                                Some(task) => Some(wait_for_task(task, task_wait_duration).await),
                                 None => None,
                             },
                             WorldState::Available(_) => {
@@ -326,8 +372,9 @@ impl PhysicsController {
                     let completion = match &mut self.world {
                         WorldState::InFlight(InFlightStep {
                             work: StepWork::Committing { task },
+                            task_wait_duration,
                             ..
-                        }) => task.await,
+                        }) => wait_for_task(task, task_wait_duration).await,
                         WorldState::Available(_) => {
                             return Err(SchedulerError::WorldUnavailable);
                         }
@@ -340,8 +387,9 @@ impl PhysicsController {
                             self.restore_available(world, buffers);
                             return Ok(StepMeasurement {
                                 step_duration: in_flight.started.elapsed(),
-                                task_wait_duration: in_flight.wait_started.elapsed(),
+                                task_wait_duration: in_flight.task_wait_duration,
                                 step_budget: in_flight.step_budget,
+                                deadline: in_flight.step_duration,
                             });
                         }
                         Ok((world, buffers, Err(error))) => {
@@ -408,7 +456,7 @@ impl PhysicsController {
             world: None,
             work: StepWork::Committing { task },
             started: in_flight.started,
-            wait_started: in_flight.wait_started,
+            task_wait_duration: in_flight.task_wait_duration,
             step_duration: in_flight.step_duration,
             step_budget: in_flight.step_budget,
         });
@@ -433,8 +481,14 @@ impl PhysicsController {
     }
 
     fn update_metrics_state(&mut self) {
-        self.metrics
-            .update_scheduler_state(self.current_hz, self.active_workers, Duration::ZERO);
+        let step_duration = self.step_duration();
+        let step_budget = step_duration.mul_f64(self.config.target_utilization);
+        self.metrics.update_scheduler_state(
+            self.current_hz,
+            self.active_workers,
+            step_budget,
+            self.adaptive.overload_integral(),
+        );
     }
 }
 
@@ -512,7 +566,7 @@ mod tests {
             let stats = runtime.block_on(controller.step()).expect("one fixed step");
             assert!(stats.step_duration > Duration::ZERO);
             assert!(stats.step_budget > Duration::ZERO);
-            assert_eq!(controller.metrics().total_steps(), expected_steps);
+            assert_eq!(controller.metrics().total_steps, expected_steps);
             let translation = controller
                 .world()
                 .expect("world available")
@@ -666,7 +720,7 @@ mod tests {
                 Err(SchedulerError::WorldUnavailable)
             ));
             controller.step().await.expect("in-flight step completes");
-            assert_eq!(controller.metrics().total_steps(), 1);
+            assert_eq!(controller.metrics().total_steps, 1);
             assert_eq!(
                 controller.world().expect("world restored").body_count(),
                 10_000

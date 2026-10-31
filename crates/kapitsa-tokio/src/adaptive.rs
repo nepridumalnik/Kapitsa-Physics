@@ -304,6 +304,7 @@ mod tests {
             step_duration: duration,
             task_wait_duration: duration,
             step_budget: step.mul_f64(0.75),
+            deadline: step,
         }
     }
 
@@ -351,6 +352,7 @@ mod tests {
             step_duration: Duration::from_millis(22),
             task_wait_duration: Duration::from_millis(22),
             step_budget: Duration::from_millis(10),
+            deadline: Duration::from_millis(20),
         };
 
         assert!((scheduler.observe(measurement).overload_integral - 1.0).abs() < 1.0e-12);
@@ -510,6 +512,7 @@ mod tests {
             step_duration: Duration::MAX,
             task_wait_duration: Duration::MAX,
             step_budget: Duration::ZERO,
+            deadline: Duration::from_millis(20),
         });
 
         assert!(status.overloaded);

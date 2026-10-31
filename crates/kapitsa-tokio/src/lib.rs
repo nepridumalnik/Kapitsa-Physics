@@ -7,5 +7,5 @@ mod scheduler;
 pub use adaptive::{AdaptiveScheduler, AdaptiveStatus};
 pub use controller::PhysicsController;
 pub use error::SchedulerError;
-pub use metrics::{SchedulerMetrics, StepMeasurement, StepStats};
+pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
 pub use scheduler::SchedulerConfig;
