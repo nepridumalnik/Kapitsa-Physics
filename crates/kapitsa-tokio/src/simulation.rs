@@ -426,8 +426,11 @@ mod tests {
     };
 
     use kapitsa_core::{
+        collider::Collider,
+        collision::CollisionEventKind,
         mass::MassProperties,
         rigid_body::RigidBody,
+        shape::{Plane, Shape, Sphere},
         transform::Transform,
         world::{BodyId, PhysicsWorld},
     };
@@ -463,6 +466,43 @@ mod tests {
         body.set_linear_velocity(Vec3::X).expect("finite velocity");
         let id = world.add_body(body).expect("body insertion");
         (world, id)
+    }
+
+    fn collision_world() -> (PhysicsWorld, BodyId) {
+        let mut world = PhysicsWorld::new();
+        let plane = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("plane body");
+        world
+            .add_collider(
+                plane,
+                Collider::new(
+                    Shape::Plane(Plane::from_vec(Vec3::Y, 0.0).expect("plane")),
+                    Transform::identity(),
+                ),
+            )
+            .expect("plane collider");
+        let mass =
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
+        let mut ball = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(0.0, 0.6, 0.0), kapitsa_math::Quat::IDENTITY)
+                .expect("transform"),
+            mass,
+        )
+        .expect("dynamic body");
+        ball.set_linear_velocity(Vec3::new(0.0, -10.0, 0.0))
+            .expect("finite velocity");
+        let ball_id = world.add_body(ball).expect("ball body");
+        world
+            .add_collider(
+                ball_id,
+                Collider::new(
+                    Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                    Transform::identity(),
+                ),
+            )
+            .expect("ball collider");
+        (world, ball_id)
     }
 
     #[test]
@@ -575,6 +615,44 @@ mod tests {
         assert_eq!(batch.step(), 1);
         assert_eq!(batch.step(), snapshot_rx.borrow().step());
         assert!(batch.events().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collision_events_and_snapshot_share_the_committed_simulation_step() {
+        let (world, ball) = collision_world();
+        let config = SchedulerConfig {
+            adaptive: false,
+            ..SchedulerConfig::default()
+        };
+        let mut simulation = PhysicsSimulation::with_config(world, config).expect("simulation");
+        let client = simulation.client();
+        let mut events = client.subscribe_collision_events();
+        simulation.start().expect("start");
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(17)).await;
+
+        let batch = tokio::time::timeout(Duration::from_secs(1), events.next_batch())
+            .await
+            .expect("collision event batch arrives")
+            .expect("event stream remains running");
+        let snapshot = client.snapshot();
+        assert_eq!(batch.step(), snapshot.step());
+        assert!(batch.events().iter().any(|event| {
+            event.kind == CollisionEventKind::Begin
+                && event
+                    .contact
+                    .is_some_and(|contact| contact.normal_impulse > 0.0)
+        }));
+        assert!(batch.events().iter().any(|event| {
+            event.kind == CollisionEventKind::Impact
+                && event
+                    .contact
+                    .is_some_and(|contact| contact.normal_impulse > 0.0)
+        }));
+        let state = snapshot.body(ball).expect("ball is in snapshot");
+        assert!(state.transform().translation().y > 0.4);
+        assert!(state.linear_velocity().y > 0.0);
+        simulation.stop().await.expect("stop");
     }
 
     #[tokio::test(start_paused = true)]

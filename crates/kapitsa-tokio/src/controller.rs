@@ -730,9 +730,14 @@ mod tests {
     };
 
     use kapitsa_core::{
-        mass::MassProperties, rigid_body::RigidBody, transform::Transform, world::PhysicsWorld,
+        collider::Collider,
+        mass::MassProperties,
+        rigid_body::RigidBody,
+        shape::{Plane, Shape, Sphere},
+        transform::Transform,
+        world::PhysicsWorld,
     };
-    use kapitsa_math::{Mat3, Vec3};
+    use kapitsa_math::{Mat3, Quat, Vec3};
     use tokio::runtime::Builder;
 
     use crate::{PhysicsController, SchedulerConfig, SchedulerError};
@@ -776,6 +781,71 @@ mod tests {
             world.add_body(body).expect("body insertion");
         }
         world
+    }
+
+    fn collision_world() -> PhysicsWorld {
+        let mut world = PhysicsWorld::new();
+        let plane_body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("plane body");
+        world
+            .add_collider(
+                plane_body,
+                Collider::new(
+                    Shape::Plane(Plane::from_vec(Vec3::Y, 0.0).expect("plane")),
+                    Transform::identity(),
+                ),
+            )
+            .expect("plane collider");
+
+        let mass =
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
+        for index in 0..96 {
+            let x = 100.0 + index as f64 * 5.0;
+            let body = RigidBody::new_dynamic(
+                Transform::new(Vec3::new(x, 10.0, 0.0), Quat::IDENTITY).expect("transform"),
+                mass,
+            )
+            .expect("dynamic body");
+            world.add_body(body).expect("body insertion");
+        }
+        for x in [-4.0, -2.0, 2.0, 4.0] {
+            let mut body = RigidBody::new_dynamic(
+                Transform::new(Vec3::new(x, 0.6, 0.0), Quat::IDENTITY).expect("transform"),
+                mass,
+            )
+            .expect("dynamic body");
+            body.set_linear_velocity(Vec3::new(0.0, -10.0, 0.0))
+                .expect("finite velocity");
+            let id = world.add_body(body).expect("body insertion");
+            world
+                .add_collider(
+                    id,
+                    Collider::new(
+                        Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                        Transform::identity(),
+                    ),
+                )
+                .expect("sphere collider");
+        }
+        world
+    }
+
+    fn assert_vec3_near(actual: Vec3, expected: Vec3) {
+        assert!((actual - expected).length() <= 1.0e-8);
+    }
+
+    fn event_body_indices(
+        world: &PhysicsWorld,
+        event: &kapitsa_core::collision::CollisionEvent,
+    ) -> (u32, u32) {
+        let body_index = |collider| {
+            world
+                .colliders()
+                .find_map(|(id, body, _)| (id == collider).then_some(body.index()))
+                .expect("event collider exists")
+        };
+        (body_index(event.pair.a), body_index(event.pair.b))
     }
 
     #[tokio::test(start_paused = true)]
@@ -955,6 +1025,76 @@ mod tests {
                 assert_eq!(parallel_id.generation(), sequential_id.generation());
                 assert_ne!(parallel_id, sequential_id);
                 assert_eq!(parallel_body, sequential_body);
+            }
+        }
+    }
+
+    #[test]
+    fn collision_results_match_across_sequential_and_worker_counts() {
+        let runtime = runtime();
+        let config = config(1);
+        let dt = config.step_duration(config.target_hz).as_secs_f64();
+        let mut sequential = collision_world();
+        sequential.step(dt).expect("sequential collision step");
+        assert!(!sequential.collision_events().is_empty());
+
+        for workers in [1, 2, 4] {
+            let mut controller =
+                PhysicsController::new(collision_world(), config.clone()).expect("controller");
+            controller
+                .set_active_workers(workers)
+                .expect("worker count within limit");
+            let stats = runtime.block_on(controller.step()).expect("collision step");
+            assert_eq!(stats.active_workers, workers);
+            let parallel = controller.world().expect("world available");
+
+            for ((parallel_id, parallel_body), (sequential_id, sequential_body)) in
+                parallel.bodies().zip(sequential.bodies())
+            {
+                assert_eq!(parallel_id.index(), sequential_id.index());
+                assert_eq!(parallel_id.generation(), sequential_id.generation());
+                let actual = parallel_body.state();
+                let expected = sequential_body.state();
+                assert_vec3_near(
+                    actual.transform().translation(),
+                    expected.transform().translation(),
+                );
+                let actual_rotation = actual.transform().rotation();
+                let expected_rotation = expected.transform().rotation();
+                assert!((actual_rotation.x - expected_rotation.x).abs() <= 1.0e-8);
+                assert!((actual_rotation.y - expected_rotation.y).abs() <= 1.0e-8);
+                assert!((actual_rotation.z - expected_rotation.z).abs() <= 1.0e-8);
+                assert!((actual_rotation.w - expected_rotation.w).abs() <= 1.0e-8);
+                assert_vec3_near(actual.linear_velocity(), expected.linear_velocity());
+                assert_vec3_near(actual.angular_velocity(), expected.angular_velocity());
+                assert_eq!(actual.is_sleeping(), expected.is_sleeping());
+            }
+
+            assert_eq!(
+                parallel.collision_events().len(),
+                sequential.collision_events().len()
+            );
+            for (actual, expected) in parallel
+                .collision_events()
+                .iter()
+                .zip(sequential.collision_events())
+            {
+                assert_eq!(actual.kind, expected.kind);
+                assert_eq!(actual.sensor, expected.sensor);
+                assert_eq!(
+                    event_body_indices(parallel, actual),
+                    event_body_indices(&sequential, expected)
+                );
+                match (actual.contact, expected.contact) {
+                    (Some(actual), Some(expected)) => {
+                        assert_vec3_near(actual.point, expected.point);
+                        assert_vec3_near(actual.normal, expected.normal);
+                        assert!((actual.penetration - expected.penetration).abs() <= 1.0e-8);
+                        assert!((actual.normal_impulse - expected.normal_impulse).abs() <= 1.0e-8);
+                    }
+                    (None, None) => {}
+                    _ => panic!("contact presence differs between execution modes"),
+                }
             }
         }
     }
