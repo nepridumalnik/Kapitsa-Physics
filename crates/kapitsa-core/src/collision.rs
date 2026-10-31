@@ -36,6 +36,8 @@ pub use config::CollisionConfig;
 pub use contact::CollisionPair;
 pub use error::{CollisionError, QueryError};
 pub use event::{CollisionEvent, CollisionEventKind, ContactInfo};
+#[allow(dead_code)]
+pub(crate) use event::{CollisionInteraction, CollisionLifecycle};
 pub use query::{OverlapHit, QueryFilter, Ray, RayHit, ShapeHit};
 pub(crate) use query::{overlaps_shape, raycast_shape, sweep_shape};
 

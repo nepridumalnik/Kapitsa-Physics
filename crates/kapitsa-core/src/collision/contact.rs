@@ -1,7 +1,7 @@
 use crate::world::ColliderId;
 
 /// A canonical, unordered pair of distinct colliders.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CollisionPair {
     pub a: ColliderId,
     pub b: ColliderId,

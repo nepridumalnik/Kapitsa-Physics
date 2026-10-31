@@ -1,6 +1,6 @@
 use super::{
-    CollisionConfig, CollisionError, CollisionEvent, StepContext, broad_phase::BroadPhase,
-    cache::ContactCache, spatial_index::SpatialIndex,
+    CollisionConfig, CollisionError, CollisionEvent, CollisionLifecycle, StepContext,
+    broad_phase::BroadPhase, cache::ContactCache, spatial_index::SpatialIndex,
 };
 use crate::{rigid_body::BodyState, world::BodyId};
 
@@ -12,6 +12,8 @@ pub(crate) struct CollisionSystem {
     spatial_index: Option<SpatialIndex>,
     broad_phase: BroadPhase,
     contact_cache: Option<ContactCache>,
+    lifecycle: CollisionLifecycle,
+    lifecycle_staged: bool,
 }
 
 impl CollisionSystem {
@@ -23,6 +25,8 @@ impl CollisionSystem {
             spatial_index: None,
             broad_phase: BroadPhase::new(),
             contact_cache: None,
+            lifecycle: CollisionLifecycle::new(),
+            lifecycle_staged: false,
         }
     }
 
@@ -76,6 +80,14 @@ impl CollisionSystem {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn stage_lifecycle_events(&mut self) -> Result<(), CollisionError> {
+        self.lifecycle
+            .stage(&mut self.context.interactions, &mut self.context.events)?;
+        self.lifecycle_staged = true;
+        Ok(())
+    }
+
     pub(crate) fn mark_spatial_dirty(&mut self) {
         if let Some(index) = self.spatial_index.as_mut() {
             index.mark_dirty();
@@ -89,11 +101,17 @@ impl CollisionSystem {
     }
 
     pub(crate) fn abort_step(&mut self) {
+        self.lifecycle.abort();
+        self.lifecycle_staged = false;
         self.context.clear();
     }
 
     pub(crate) fn commit_step(&mut self) {
         std::mem::swap(&mut self.events, &mut self.context.events);
+        if self.lifecycle_staged {
+            self.lifecycle.commit();
+            self.lifecycle_staged = false;
+        }
         self.context.clear();
     }
 }
