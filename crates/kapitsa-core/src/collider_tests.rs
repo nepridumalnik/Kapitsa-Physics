@@ -5,6 +5,7 @@ use glam::{Affine3A, Quat, Vec3};
 use crate::{
     aabb::{Aabb, AabbError},
     collider::{Collider, ColliderError, CollisionFilter},
+    material::{MaterialStorage, PhysicsMaterial},
     shape::{
         BoneInfluence, BoundsError, Cuboid, Plane, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh,
     },
@@ -36,6 +37,43 @@ fn stores_shape_and_local_transform() {
 
     assert!(matches!(collider.shape(), Shape::Sphere(_)));
     assert_eq!(collider.local_transform(), local_transform);
+    assert_eq!(collider.material(), None);
+}
+
+#[test]
+fn collider_can_assign_replace_and_clear_material() {
+    let mut storage = MaterialStorage::new();
+    let first = storage
+        .insert(PhysicsMaterial::default())
+        .expect("first material inserts");
+    let second = storage
+        .insert(PhysicsMaterial::default())
+        .expect("second material inserts");
+    let mut collider = Collider::new(sphere(1.0), Transform::identity());
+
+    collider.set_material(Some(first));
+    assert_eq!(collider.material(), Some(first));
+
+    collider.set_material(Some(second));
+    assert_eq!(collider.material(), Some(second));
+
+    collider.set_material(None);
+    assert_eq!(collider.material(), None);
+}
+
+#[test]
+fn assigning_material_does_not_change_collision_filter() {
+    let mut storage = MaterialStorage::new();
+    let material = storage
+        .insert(PhysicsMaterial::default())
+        .expect("material inserts");
+    let mut collider = Collider::new(sphere(1.0), Transform::identity());
+    let filter = CollisionFilter::new(0b0100, 0b1000);
+    collider.set_filter(filter);
+
+    collider.set_material(Some(material));
+
+    assert_eq!(collider.filter(), filter);
 }
 
 #[test]
@@ -124,10 +162,15 @@ fn world_bounds_are_unchanged_when_filter_disables_collisions() {
 
 #[test]
 fn identity_transforms_preserve_shape_bounds() {
-    let collider = Collider::new(
+    let mut storage = MaterialStorage::new();
+    let material = storage
+        .insert(PhysicsMaterial::default())
+        .expect("material inserts");
+    let mut collider = Collider::new(
         Shape::Cuboid(Cuboid::new(2.0, 4.0, 6.0).expect("valid cuboid")),
         Transform::identity(),
     );
+    collider.set_material(Some(material));
 
     assert_eq!(
         collider.world_bounds(&Transform::identity()),
@@ -136,6 +179,21 @@ fn identity_transforms_preserve_shape_bounds() {
                 .expect("valid expected bounds"),
         ))
     );
+}
+
+#[test]
+fn removed_material_leaves_a_stale_id_on_the_collider() {
+    let mut storage = MaterialStorage::new();
+    let material = storage
+        .insert(PhysicsMaterial::default())
+        .expect("material inserts");
+    let mut collider = Collider::new(sphere(1.0), Transform::identity());
+    collider.set_material(Some(material));
+
+    assert!(storage.remove(material).is_some());
+
+    assert_eq!(collider.material(), Some(material));
+    assert_eq!(storage.get(material), None);
 }
 
 #[test]

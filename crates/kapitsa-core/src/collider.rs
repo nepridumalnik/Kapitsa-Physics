@@ -1,4 +1,4 @@
-use crate::{aabb::Aabb, shape::Shape, transform::Transform};
+use crate::{aabb::Aabb, material::MaterialId, shape::Shape, transform::Transform};
 
 pub mod error;
 mod filter;
@@ -10,6 +10,7 @@ pub struct Collider {
     shape: Shape,
     local_transform: Transform,
     filter: CollisionFilter,
+    material: Option<MaterialId>,
 }
 
 impl Collider {
@@ -18,6 +19,7 @@ impl Collider {
             shape,
             local_transform,
             filter: CollisionFilter::default(),
+            material: None,
         }
     }
 
@@ -35,6 +37,18 @@ impl Collider {
 
     pub fn set_filter(&mut self, filter: CollisionFilter) {
         self.filter = filter;
+    }
+
+    /// Returns the assigned material ID, which may be stale after its material is removed.
+    ///
+    /// Resolving the ID and choosing a fallback are responsibilities of the future contact system.
+    pub fn material(&self) -> Option<MaterialId> {
+        self.material
+    }
+
+    /// Assigns a material ID without checking that it exists in any material storage.
+    pub fn set_material(&mut self, material: Option<MaterialId>) {
+        self.material = material;
     }
 
     pub fn world_bounds(
