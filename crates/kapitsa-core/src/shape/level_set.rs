@@ -70,6 +70,6 @@ impl LevelSet {
         );
         let last_node = self.origin + self.grid_spacing * span;
 
-        Aabb::new(self.origin.min(last_node), self.origin.max(last_node))
+        Aabb::new(self.origin.min(last_node), self.origin.max(last_node)).ok()
     }
 }

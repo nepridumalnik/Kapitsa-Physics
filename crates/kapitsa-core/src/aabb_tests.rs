@@ -1,7 +1,7 @@
 use glam::Vec3;
 use rstest::rstest;
 
-use super::Aabb;
+use super::{Aabb, AabbError};
 
 fn bounds(min: Vec3, max: Vec3) -> Aabb {
     Aabb::new(min, max).expect("valid AABB")
@@ -30,12 +30,19 @@ fn accepts_degenerate_bounds() {
 #[case::inverted_x(Vec3::X, Vec3::ZERO)]
 #[case::inverted_y(Vec3::Y, Vec3::ZERO)]
 #[case::inverted_z(Vec3::Z, Vec3::ZERO)]
+fn rejects_inverted_bounds(#[case] min: Vec3, #[case] max: Vec3) {
+    assert_eq!(Aabb::new(min, max), Err(AabbError::InvertedBounds));
+}
+
+#[rstest]
 #[case::nan_min(Vec3::new(f32::NAN, 0.0, 0.0), Vec3::ONE)]
 #[case::nan_max(Vec3::ZERO, Vec3::new(1.0, f32::NAN, 1.0))]
-#[case::infinite_min(Vec3::new(f32::NEG_INFINITY, 0.0, 0.0), Vec3::ONE)]
-#[case::infinite_max(Vec3::ZERO, Vec3::new(1.0, f32::INFINITY, 1.0))]
-fn rejects_invalid_bounds(#[case] min: Vec3, #[case] max: Vec3) {
-    assert!(Aabb::new(min, max).is_none());
+#[case::positive_infinite_min(Vec3::new(f32::INFINITY, 0.0, 0.0), Vec3::ONE)]
+#[case::negative_infinite_min(Vec3::new(f32::NEG_INFINITY, 0.0, 0.0), Vec3::ONE)]
+#[case::positive_infinite_max(Vec3::ZERO, Vec3::new(1.0, f32::INFINITY, 1.0))]
+#[case::negative_infinite_max(Vec3::ZERO, Vec3::new(1.0, f32::NEG_INFINITY, 1.0))]
+fn rejects_non_finite_bounds(#[case] min: Vec3, #[case] max: Vec3) {
+    assert_eq!(Aabb::new(min, max), Err(AabbError::NonFiniteBounds));
 }
 
 #[test]

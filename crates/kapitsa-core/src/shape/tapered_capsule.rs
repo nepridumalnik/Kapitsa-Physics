@@ -55,5 +55,6 @@ impl TaperedCapsule {
             (self.start - start_radius).min(self.end - end_radius),
             (self.start + start_radius).max(self.end + end_radius),
         )
+        .ok()
     }
 }

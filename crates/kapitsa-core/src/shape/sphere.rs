@@ -17,6 +17,6 @@ impl Sphere {
 
     pub fn local_bounds(&self) -> Option<Aabb> {
         let extent = Vec3::splat(self.radius);
-        Aabb::new(-extent, extent)
+        Aabb::new(-extent, extent).ok()
     }
 }

@@ -11,8 +11,15 @@ pub struct Aabb {
 }
 
 impl Aabb {
-    pub fn new(min: Vec3, max: Vec3) -> Option<Self> {
-        (min.is_finite() && max.is_finite() && min.cmple(max).all()).then_some(Self { min, max })
+    pub fn new(min: Vec3, max: Vec3) -> Result<Self, AabbError> {
+        if !min.is_finite() || !max.is_finite() {
+            return Err(AabbError::NonFiniteBounds);
+        }
+        if !min.cmple(max).all() {
+            return Err(AabbError::InvertedBounds);
+        }
+
+        Ok(Self { min, max })
     }
 
     pub fn min(&self) -> Vec3 {

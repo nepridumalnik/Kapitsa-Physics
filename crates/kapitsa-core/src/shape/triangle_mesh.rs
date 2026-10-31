@@ -51,6 +51,6 @@ impl TriangleMesh {
         let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
             (min.min(vertex), max.max(vertex))
         });
-        Aabb::new(min, max)
+        Aabb::new(min, max).ok()
     }
 }

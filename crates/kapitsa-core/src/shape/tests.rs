@@ -259,7 +259,7 @@ fn sphere_local_bounds(#[case] radius: f32) {
     let sphere = Sphere::new(radius).expect("valid sphere");
     let extent = Vec3::splat(radius);
 
-    assert_eq!(sphere.local_bounds(), Aabb::new(-extent, extent));
+    assert_eq!(sphere.local_bounds(), Aabb::new(-extent, extent).ok());
 }
 
 #[test]
@@ -268,7 +268,7 @@ fn cuboid_local_bounds() {
 
     assert_eq!(
         cuboid.local_bounds(),
-        Aabb::new(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0),)
+        Aabb::new(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0),).ok()
     );
 }
 
@@ -278,7 +278,7 @@ fn cuboid_local_bounds_with_maximum_size() {
 
     let half = Vec3::splat(f32::MAX * 0.5);
 
-    assert_eq!(cuboid.local_bounds(), Aabb::new(-half, half));
+    assert_eq!(cuboid.local_bounds(), Aabb::new(-half, half).ok());
 }
 
 #[test]
@@ -288,7 +288,7 @@ fn capsule_local_bounds() {
 
     assert_eq!(
         capsule.local_bounds(),
-        Aabb::new(Vec3::new(-4.5, -2.5, -6.5), Vec3::new(1.5, 5.5, 3.5),)
+        Aabb::new(Vec3::new(-4.5, -2.5, -6.5), Vec3::new(1.5, 5.5, 3.5),).ok()
     );
 }
 
@@ -325,7 +325,7 @@ fn cylinder_local_bounds(
 ) {
     let cylinder = Cylinder::new(start, end, 0.5).expect("valid cylinder");
 
-    assert_eq!(cylinder.local_bounds(), Aabb::new(min, max));
+    assert_eq!(cylinder.local_bounds(), Aabb::new(min, max).ok());
 }
 
 #[rstest]
@@ -356,7 +356,7 @@ fn tapered_capsule_local_bounds(
     let capsule =
         TaperedCapsule::new(start, end, start_radius, end_radius).expect("valid tapered capsule");
 
-    assert_eq!(capsule.local_bounds(), Aabb::new(min, max));
+    assert_eq!(capsule.local_bounds(), Aabb::new(min, max).ok());
 }
 
 #[rstest]
@@ -387,7 +387,7 @@ fn tapered_cylinder_local_bounds(
     let cylinder =
         TaperedCylinder::new(start, end, start_radius, end_radius).expect("valid tapered cylinder");
 
-    assert_eq!(cylinder.local_bounds(), Aabb::new(min, max));
+    assert_eq!(cylinder.local_bounds(), Aabb::new(min, max).ok());
 }
 
 #[rstest]
@@ -429,7 +429,7 @@ fn cylindrical_local_bounds_reject_overflow() {
 fn triangle_local_bounds(#[case] vertices: [Vec3; 3], #[case] min: Vec3, #[case] max: Vec3) {
     let triangle = Triangle::from_vertices(vertices).expect("valid triangle");
 
-    assert_eq!(triangle.local_bounds(), Aabb::new(min, max));
+    assert_eq!(triangle.local_bounds(), Aabb::new(min, max).ok());
 }
 
 #[rstest]
@@ -446,7 +446,7 @@ fn convex_local_bounds_cover_all_vertices() {
 
     assert_eq!(
         convex.local_bounds(),
-        Aabb::new(Vec3::new(-3.0, -4.0, -5.0), Vec3::splat(-1.0))
+        Aabb::new(Vec3::new(-3.0, -4.0, -5.0), Vec3::splat(-1.0)).ok()
     );
 }
 
@@ -467,7 +467,7 @@ fn triangle_mesh_local_bounds_include_unindexed_vertices() {
 
     assert_eq!(
         mesh.local_bounds(),
-        Aabb::new(Vec3::new(-4.0, -3.0, -2.0), Vec3::new(9.0, 8.0, 15.0))
+        Aabb::new(Vec3::new(-4.0, -3.0, -2.0), Vec3::new(9.0, 8.0, 15.0)).ok()
     );
 }
 
@@ -479,7 +479,7 @@ fn height_field_local_bounds_use_grid_extent_and_height_range() {
 
     assert_eq!(
         height_field.local_bounds(),
-        Aabb::new(Vec3::new(0.0, 0.0, -4.0), Vec3::new(2.0, 1.0, 6.0))
+        Aabb::new(Vec3::new(0.0, 0.0, -4.0), Vec3::new(2.0, 1.0, 6.0)).ok()
     );
 }
 
@@ -495,7 +495,7 @@ fn level_set_local_bounds_cover_only_grid_nodes() {
 
     assert_eq!(
         level_set.local_bounds(),
-        Aabb::new(Vec3::new(-3.0, 2.0, -5.0), Vec3::new(-2.0, 4.0, 4.0))
+        Aabb::new(Vec3::new(-3.0, 2.0, -5.0), Vec3::new(-2.0, 4.0, 4.0)).ok()
     );
 }
 
@@ -563,7 +563,7 @@ fn shape_local_bounds_dispatches_to_finite_shapes(
     ];
 
     for (shape, min, max) in shapes {
-        assert_eq!(shape.local_bounds(), Aabb::new(min, max));
+        assert_eq!(shape.local_bounds(), Aabb::new(min, max).ok());
     }
 }
 

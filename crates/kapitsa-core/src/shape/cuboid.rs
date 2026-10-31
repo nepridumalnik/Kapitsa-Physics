@@ -25,6 +25,6 @@ impl Cuboid {
 
     pub fn local_bounds(&self) -> Option<Aabb> {
         let half = self.half_extents();
-        Aabb::new(-half, half)
+        Aabb::new(-half, half).ok()
     }
 }

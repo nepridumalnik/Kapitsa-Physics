@@ -38,5 +38,6 @@ impl Cylinder {
             self.start.min(self.end) - radius,
             self.start.max(self.end) + radius,
         )
+        .ok()
     }
 }
