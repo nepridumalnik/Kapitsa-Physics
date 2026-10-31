@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 
 use crate::{SchedulerConfig, SchedulerError, StepMeasurement};
 
-const ERROR_DECAY: f64 = 0.9;
 const ERROR_MAX: f64 = 4.0;
 const OVERLOAD_LIMIT: f64 = 2.2;
 const CLEAR_LIMIT: f64 = 0.4;
@@ -91,18 +90,20 @@ impl AdaptiveScheduler {
 
         let budget_seconds = measurement.step_budget.as_secs_f64();
         let threshold_seconds = budget_seconds * (1.0 + self.config.overload_tolerance);
-        self.overloaded = duration_seconds > threshold_seconds;
-        let normalized_overrun = if self.overloaded {
-            if threshold_seconds <= 0.0 {
+        let ratio = if threshold_seconds == 0.0 {
+            if duration_seconds == 0.0 {
                 1.0
             } else {
-                ((duration_seconds - threshold_seconds) / threshold_seconds).clamp(0.0, 1.0)
+                f64::INFINITY
             }
         } else {
-            0.0
+            duration_seconds / threshold_seconds
         };
+        let overrun = (ratio - 1.0).clamp(0.0, 1.0);
+        let recovery = (1.0 - ratio).max(0.0);
+        self.overloaded = ratio > 1.0;
         self.overload_integral =
-            (self.overload_integral * ERROR_DECAY + normalized_overrun).clamp(0.0, ERROR_MAX);
+            (self.overload_integral + overrun - recovery).clamp(0.0, ERROR_MAX);
 
         if self.overloaded {
             self.overload_streak = self.overload_streak.saturating_add(1);
@@ -297,28 +298,28 @@ mod tests {
         AdaptiveScheduler::new(config(max_workers)).expect("valid config")
     }
 
-    fn measurement(scheduler: &AdaptiveScheduler, duration_ms: u64) -> StepMeasurement {
+    fn measurement(scheduler: &AdaptiveScheduler, duration: Duration) -> StepMeasurement {
         let step = Duration::from_secs_f64(1.0 / f64::from(scheduler.current_hz()));
         StepMeasurement {
-            step_duration: Duration::from_millis(duration_ms),
-            task_wait_duration: Duration::from_millis(duration_ms),
+            step_duration: duration,
+            task_wait_duration: duration,
             step_budget: step.mul_f64(0.75),
         }
     }
 
-    fn observe(scheduler: &mut AdaptiveScheduler, duration_ms: u64) {
-        scheduler.observe(measurement(scheduler, duration_ms));
+    fn observe(scheduler: &mut AdaptiveScheduler, duration: Duration) -> super::AdaptiveStatus {
+        scheduler.observe(measurement(scheduler, duration))
     }
 
     fn feed_overload(scheduler: &mut AdaptiveScheduler, count: usize) {
         for _ in 0..count {
-            observe(scheduler, 50);
+            observe(scheduler, Duration::from_millis(50));
         }
     }
 
     fn feed_underload(scheduler: &mut AdaptiveScheduler, count: usize) {
         for _ in 0..count {
-            observe(scheduler, 1);
+            observe(scheduler, Duration::from_millis(1));
         }
     }
 
@@ -335,7 +336,7 @@ mod tests {
     #[test]
     fn one_slow_step_does_not_change_the_configuration() {
         let mut scheduler = scheduler(4);
-        observe(&mut scheduler, 100);
+        observe(&mut scheduler, Duration::from_millis(100));
         feed_underload(&mut scheduler, 32);
 
         assert_eq!(scheduler.current_hz(), 60);
@@ -344,8 +345,8 @@ mod tests {
     }
 
     #[test]
-    fn overload_integral_applies_decay_before_adding_clamped_error() {
-        let mut scheduler = scheduler(4);
+    fn overload_integral_accumulates_overrun_and_recovers_by_ratio() {
+        let mut scheduler = scheduler(1);
         let measurement = StepMeasurement {
             step_duration: Duration::from_millis(22),
             task_wait_duration: Duration::from_millis(22),
@@ -353,8 +354,56 @@ mod tests {
         };
 
         assert!((scheduler.observe(measurement).overload_integral - 1.0).abs() < 1.0e-12);
-        assert!((scheduler.observe(measurement).overload_integral - 1.9).abs() < 1.0e-12);
-        assert!((scheduler.observe(measurement).overload_integral - 2.71).abs() < 1.0e-12);
+        assert!((scheduler.observe(measurement).overload_integral - 2.0).abs() < 1.0e-12);
+        assert!((scheduler.observe(measurement).overload_integral - 3.0).abs() < 1.0e-12);
+
+        let recovery = StepMeasurement {
+            step_duration: Duration::from_millis(5),
+            task_wait_duration: Duration::from_millis(5),
+            ..measurement
+        };
+        let status = scheduler.observe(recovery);
+        assert!((status.overload_integral - (3.0 - (1.0 - 0.5 / 1.1))).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn fixed_duration_regressions_cover_threshold_and_sustained_overload() {
+        let mut no_overload = scheduler(4);
+        let below = observe(&mut no_overload, Duration::from_millis(12));
+        assert!(!below.overloaded);
+        assert_eq!(below.overload_integral, 0.0);
+
+        let mut boundary = scheduler(4);
+        let exact = observe(&mut boundary, Duration::from_micros(13_750));
+        assert!(!exact.overloaded);
+        assert_eq!(exact.overload_integral, 0.0);
+
+        for (duration_micros, max_steps) in [(15_000, 64), (16_667, 20)] {
+            let mut scheduler = scheduler(4);
+            for _ in 0..max_steps {
+                observe(&mut scheduler, Duration::from_micros(duration_micros));
+                if scheduler.active_workers() > 1 {
+                    break;
+                }
+            }
+            assert_eq!(
+                scheduler.active_workers(),
+                2,
+                "duration={duration_micros} µs"
+            );
+            assert_eq!(scheduler.current_hz(), 60);
+        }
+    }
+
+    #[test]
+    fn one_50_ms_spike_does_not_reconfigure() {
+        let mut scheduler = scheduler(4);
+        let status = observe(&mut scheduler, Duration::from_millis(50));
+
+        assert!(status.overloaded);
+        assert_eq!(status.overload_integral, 1.0);
+        assert_eq!(scheduler.active_workers(), 1);
+        assert_eq!(scheduler.current_hz(), 60);
     }
 
     #[test]
@@ -409,7 +458,7 @@ mod tests {
                 if scheduler.current_hz() == expected {
                     break;
                 }
-                observe(&mut scheduler, 50);
+                observe(&mut scheduler, Duration::from_millis(50));
             }
             assert_eq!(scheduler.current_hz(), expected);
         }
@@ -433,7 +482,10 @@ mod tests {
     fn oscillating_load_near_the_threshold_does_not_reconfigure() {
         let mut scheduler = scheduler(4);
         for index in 0..120 {
-            observe(&mut scheduler, if index % 2 == 0 { 13 } else { 14 });
+            observe(
+                &mut scheduler,
+                Duration::from_micros(if index % 2 == 0 { 13_740 } else { 13_760 }),
+            );
         }
 
         assert_eq!(scheduler.current_hz(), 60);
@@ -444,7 +496,7 @@ mod tests {
     fn minimum_frequency_still_reports_unresolved_overload() {
         let mut scheduler = scheduler(1);
         feed_overload(&mut scheduler, 200);
-        let status = scheduler.observe(measurement(&scheduler, 50));
+        let status = scheduler.observe(measurement(&scheduler, Duration::from_millis(50)));
 
         assert_eq!(status.current_hz, 30);
         assert!(status.overloaded);

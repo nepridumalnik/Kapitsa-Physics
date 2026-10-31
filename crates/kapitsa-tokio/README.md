@@ -10,7 +10,8 @@ tasks, waits for all results, and commits atomically.
 For each completed step, the working budget is `fixed_dt * target_utilization`
 and the overload threshold is that budget multiplied by
 `1 + overload_tolerance`. The regulator updates its bounded integral as
-`clamp(previous * 0.9 + clamp(duration / threshold - 1, 0, 1), 0, 4)`.
+`clamp(error + min(max(ratio - 1, 0), 1) - max(1 - ratio, 0), 0, 4)`, where
+`ratio = duration / threshold`.
 It changes settings only after at least three consecutive over-threshold steps
 and an integral of at least `2.2`.
 
