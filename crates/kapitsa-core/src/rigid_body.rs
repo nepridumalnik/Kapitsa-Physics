@@ -1,5 +1,6 @@
 pub mod error;
 mod forces;
+pub(crate) mod integrator;
 mod physics;
 mod state;
 
