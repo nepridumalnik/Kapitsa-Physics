@@ -34,6 +34,8 @@ pub(crate) struct CollisionSystem {
     cache_staged: bool,
     #[cfg(feature = "bench-internals")]
     benchmark_metrics: CollisionStepMetrics,
+    #[cfg(feature = "bench-internals")]
+    benchmark_capacity_before_bytes: usize,
 }
 
 impl CollisionSystem {
@@ -54,6 +56,8 @@ impl CollisionSystem {
             cache_staged: false,
             #[cfg(feature = "bench-internals")]
             benchmark_metrics: CollisionStepMetrics::ZERO,
+            #[cfg(feature = "bench-internals")]
+            benchmark_capacity_before_bytes: 0,
         }
     }
 
@@ -80,6 +84,7 @@ impl CollisionSystem {
         self.cache_staged = false;
         #[cfg(feature = "bench-internals")]
         {
+            self.benchmark_capacity_before_bytes = self.retained_scratch_bytes();
             self.benchmark_metrics = CollisionStepMetrics::ZERO;
         }
     }
@@ -87,17 +92,20 @@ impl CollisionSystem {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn record_spatial_index(&mut self, elapsed: std::time::Duration) {
         self.benchmark_metrics.spatial_index += elapsed;
+        self.record_peak_scratch();
     }
 
     #[cfg(feature = "bench-internals")]
     pub(crate) fn record_broad_phase(&mut self, elapsed: std::time::Duration) {
         self.benchmark_metrics.broad_phase += elapsed;
         self.benchmark_metrics.candidate_count = self.candidate_count();
+        self.record_peak_scratch();
     }
 
     #[cfg(feature = "bench-internals")]
     pub(crate) fn record_ccd(&mut self, elapsed: std::time::Duration) {
         self.benchmark_metrics.ccd += elapsed;
+        self.record_peak_scratch();
     }
 
     #[cfg(feature = "bench-internals")]
@@ -117,6 +125,7 @@ impl CollisionSystem {
             .benchmark_metrics
             .contact_count
             .saturating_add(contact_count);
+        self.record_peak_scratch();
     }
 
     #[cfg(feature = "bench-internals")]
@@ -127,26 +136,39 @@ impl CollisionSystem {
     ) {
         self.benchmark_metrics.island_build += elapsed;
         self.benchmark_metrics.island_count = island_count;
+        self.record_peak_scratch();
     }
 
     #[cfg(feature = "bench-internals")]
     pub(crate) fn record_solver(&mut self, elapsed: std::time::Duration) {
         self.benchmark_metrics.solver += elapsed;
+        self.record_peak_scratch();
     }
 
     #[cfg(feature = "bench-internals")]
     pub(crate) fn record_events(&mut self, elapsed: std::time::Duration) {
         self.benchmark_metrics.events += elapsed;
+        self.record_peak_scratch();
     }
 
     #[cfg(feature = "bench-internals")]
     pub(crate) fn record_commit(&mut self, elapsed: std::time::Duration) {
         self.benchmark_metrics.commit += elapsed;
+        self.record_peak_scratch();
     }
 
     #[cfg(feature = "bench-internals")]
     pub(crate) fn benchmark_metrics(&self) -> CollisionStepMetrics {
         let mut metrics = self.benchmark_metrics;
+        metrics.retained_scratch_bytes = self.retained_scratch_bytes();
+        metrics.logical_capacity_growth_bytes = metrics
+            .retained_scratch_bytes
+            .saturating_sub(self.benchmark_capacity_before_bytes);
+        metrics
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn retained_scratch_bytes(&self) -> usize {
         let mut retained = self.context.retained_capacity_bytes()
             + self.events.capacity() * std::mem::size_of::<CollisionEvent>()
             + self.broad_phase.retained_capacity_bytes()
@@ -166,8 +188,15 @@ impl CollisionSystem {
         for island in &self.solver_islands {
             retained = retained.saturating_add(island.retained_capacity_bytes());
         }
-        metrics.retained_scratch_bytes = retained;
-        metrics
+        retained
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn record_peak_scratch(&mut self) {
+        self.benchmark_metrics.peak_scratch_bytes = self
+            .benchmark_metrics
+            .peak_scratch_bytes
+            .max(self.retained_scratch_bytes());
     }
 
     pub(crate) fn stage_prediction(&mut self, body_id: BodyId, state: BodyState) {
@@ -319,9 +348,13 @@ impl CollisionSystem {
                     .solver_bodies
                     .get(body_index)
                     .ok_or(CollisionError::InvalidContact)?;
-                island
-                    .bodies
-                    .push(SolverBody::from_prediction(*body.body(), body.state()));
+                let solver_body = SolverBody::from_prediction(*body.body(), body.state());
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.benchmark_metrics.solver_body_copies =
+                        self.benchmark_metrics.solver_body_copies.saturating_add(1);
+                }
+                island.bodies.push(solver_body);
             }
             island
                 .manifolds
@@ -333,6 +366,13 @@ impl CollisionSystem {
                     .solver_manifolds
                     .get(manifold_index)
                     .ok_or(CollisionError::InvalidContact)?;
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.benchmark_metrics.solver_manifold_copies = self
+                        .benchmark_metrics
+                        .solver_manifold_copies
+                        .saturating_add(1);
+                }
                 manifold.body_a = island
                     .body_indices
                     .binary_search(&manifold.body_a)
@@ -411,10 +451,24 @@ impl CollisionSystem {
                     .get_mut(global_index)
                     .ok_or(CollisionError::InvalidContact)?;
                 original.manifold = solved.manifold;
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.benchmark_metrics.solver_manifold_copies = self
+                        .benchmark_metrics
+                        .solver_manifold_copies
+                        .saturating_add(1);
+                }
             }
         }
         for (manifold, solver) in context.manifolds.iter_mut().zip(&context.solver_manifolds) {
             *manifold = solver.manifold;
+            #[cfg(feature = "bench-internals")]
+            {
+                self.benchmark_metrics.solver_manifold_copies = self
+                    .benchmark_metrics
+                    .solver_manifold_copies
+                    .saturating_add(1);
+            }
         }
         if !self.context.manifolds.is_empty() || self.contact_cache.is_some() {
             self.contact_cache

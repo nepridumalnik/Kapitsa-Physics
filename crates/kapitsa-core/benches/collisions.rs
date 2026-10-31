@@ -16,6 +16,7 @@ use kapitsa_core::{
 use kapitsa_math::{Mat3, Quat, Vec2, Vec3};
 
 const SAMPLES: usize = 5;
+const WARMUP_RUNS: usize = 1;
 const DT: f64 = 1.0 / 60.0;
 
 struct Sample {
@@ -24,7 +25,9 @@ struct Sample {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("Kapitsa collision benchmark: samples={SAMPLES}, statistic=median");
+    println!(
+        "Kapitsa collision benchmark: warmups={WARMUP_RUNS}, samples={SAMPLES}, statistics=min/median/max"
+    );
     for (name, build) in [
         ("256 Dynamic Sphere", separated_spheres as fn() -> _),
         ("4096 Dynamic Sphere", || separated_spheres_of(4_096)),
@@ -291,6 +294,10 @@ fn report_world(
     name: &str,
     build: impl Fn() -> Result<PhysicsWorld, Box<dyn Error>>,
 ) -> Result<(), Box<dyn Error>> {
+    for _ in 0..WARMUP_RUNS {
+        let mut world = build()?;
+        black_box(world.step(DT)?);
+    }
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         let mut world = build()?;
@@ -303,14 +310,18 @@ fn report_world(
     }
     samples.sort_unstable_by_key(|sample| sample.elapsed);
     let median = &samples[SAMPLES / 2];
+    let min = samples.first().ok_or("missing benchmark sample")?;
+    let max = samples.last().ok_or("missing benchmark sample")?;
     let high_water = samples
         .iter()
         .map(|sample| sample.metrics.retained_scratch_bytes)
         .max()
         .unwrap_or(0);
     println!(
-        "{name:38} step={:8.3} ms | candidates={} contacts={} ccd_impacts={} islands={} | index={:.3} broad={:.3} narrow={:.3} ccd={:.3} islands={:.3} solver={:.3} events={:.3} commit={:.3} ms | retained~{} KiB high-water~{} KiB",
+        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} ccd_impacts={} islands={} | index={:.3} broad={:.3} narrow={:.3} ccd={:.3} islands={:.3} solver={:.3} events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained~{} KiB peak_sampled~{} KiB",
+        millis(min.elapsed),
         millis(median.elapsed),
+        millis(max.elapsed),
         median.metrics.candidate_count,
         median.metrics.contact_count,
         median.metrics.ccd_impact_count,
@@ -323,8 +334,11 @@ fn report_world(
         millis(median.metrics.solver),
         millis(median.metrics.events),
         millis(median.metrics.commit),
+        median.metrics.solver_body_copies,
+        median.metrics.solver_manifold_copies,
+        median.metrics.logical_capacity_growth_bytes,
         median.metrics.retained_scratch_bytes / 1024,
-        high_water / 1024,
+        median.metrics.peak_scratch_bytes.max(high_water) / 1024,
     );
     Ok(())
 }
@@ -338,20 +352,27 @@ fn report_queries() -> Result<(), Box<dyn Error>> {
     }
     let ray = Ray::new(Vec3::new(-1.0, 0.0, 0.0), Vec3::X, 500.0)?;
     let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..WARMUP_RUNS {
+        for _ in 0..1_000 {
+            black_box(world.raycast(ray, QueryFilter::default())?);
+        }
+    }
     for _ in 0..SAMPLES {
         let started = Instant::now();
-        for _ in 0..100 {
+        for _ in 0..1_000 {
             black_box(world.raycast(ray, QueryFilter::default())?);
         }
         samples.push(started.elapsed());
     }
     samples.sort_unstable();
     println!(
-        "{:38} 100 rays={:.3} ms | colliders={} | median={:.3} us/query",
+        "{:38} 1,000 rays={:.3}/{:.3}/{:.3} ms min/median/max | colliders={} | median={:.3} us/query",
         "Spatial queries under load",
+        millis(*samples.first().ok_or("missing benchmark sample")?),
         millis(samples[SAMPLES / 2]),
+        millis(*samples.last().ok_or("missing benchmark sample")?),
         world.colliders().count(),
-        samples[SAMPLES / 2].as_secs_f64() * 1.0e6 / 100.0,
+        samples[SAMPLES / 2].as_secs_f64() * 1.0e6 / 1_000.0,
     );
     Ok(())
 }

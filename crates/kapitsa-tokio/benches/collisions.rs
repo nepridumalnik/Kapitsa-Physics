@@ -17,13 +17,14 @@ use kapitsa_tokio::{PhysicsController, SchedulerConfig};
 use tokio::runtime::Builder;
 
 const SAMPLES: usize = 5;
+const WARMUP_RUNS: usize = 1;
 const STEPS: usize = 8;
 const DT: f64 = 1.0 / 60.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let runtime = Builder::new_current_thread().enable_time().build()?;
     println!(
-        "Kapitsa Tokio collision benchmark: samples={SAMPLES}, steps={STEPS}, statistic=median"
+        "Kapitsa Tokio collision benchmark: warmups={WARMUP_RUNS}, samples={SAMPLES}, steps={STEPS}, statistics=min/median/max"
     );
 
     for body_count in [256, 4_096, 20_000] {
@@ -94,19 +95,33 @@ fn config(workers: usize) -> SchedulerConfig {
     }
 }
 
-fn sample(run: impl Fn() -> Result<Duration, Box<dyn Error>>) -> Result<Duration, Box<dyn Error>> {
+fn sample(
+    run: impl Fn() -> Result<Duration, Box<dyn Error>>,
+) -> Result<(Duration, Duration, Duration), Box<dyn Error>> {
+    for _ in 0..WARMUP_RUNS {
+        black_box(run()?);
+    }
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         samples.push(run()?);
     }
     samples.sort_unstable();
-    Ok(black_box(samples[SAMPLES / 2]))
+    let min = *samples.first().ok_or("missing benchmark sample")?;
+    let median = samples[SAMPLES / 2];
+    let max = *samples.last().ok_or("missing benchmark sample")?;
+    Ok((min, black_box(median), max))
 }
 
-fn report(label: &str, duration: Duration, sequential: Duration) {
+fn report(
+    label: &str,
+    (min, median, max): (Duration, Duration, Duration),
+    sequential: (Duration, Duration, Duration),
+) {
     println!(
-        "{label:24} median={:8.2} ms / {STEPS} steps  speedup={:.2}x",
-        duration.as_secs_f64() * 1_000.0,
-        sequential.as_secs_f64() / duration.as_secs_f64()
+        "{label:24} {:8.2}/{:8.2}/{:8.2} ms min/median/max / {STEPS} steps  speedup={:.2}x",
+        min.as_secs_f64() * 1_000.0,
+        median.as_secs_f64() * 1_000.0,
+        max.as_secs_f64() * 1_000.0,
+        sequential.1.as_secs_f64() / median.as_secs_f64()
     );
 }

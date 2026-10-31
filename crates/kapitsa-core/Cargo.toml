@@ -17,3 +17,8 @@ rstest = "0.28"
 name = "collisions"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "collision_storage"
+harness = false
+required-features = ["bench-internals"]

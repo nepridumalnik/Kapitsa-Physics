@@ -72,6 +72,14 @@ pub struct CollisionStepMetrics {
     pub island_count: usize,
     /// Approximate retained capacity of collision scratch buffers.
     pub retained_scratch_bytes: usize,
+    /// Highest sampled retained scratch capacity during the last step.
+    pub peak_scratch_bytes: usize,
+    /// Net increase in retained buffer capacity during this step, in bytes.
+    pub logical_capacity_growth_bytes: usize,
+    /// Logical copies of solver bodies created for island-local state.
+    pub solver_body_copies: usize,
+    /// Logical solver-manifold value copies across build and write-back.
+    pub solver_manifold_copies: usize,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -91,6 +99,10 @@ impl CollisionStepMetrics {
         ccd_impact_count: 0,
         island_count: 0,
         retained_scratch_bytes: 0,
+        peak_scratch_bytes: 0,
+        logical_capacity_growth_bytes: 0,
+        solver_body_copies: 0,
+        solver_manifold_copies: 0,
     };
 }
 pub(crate) use event::{CollisionInteraction, CollisionLifecycle};

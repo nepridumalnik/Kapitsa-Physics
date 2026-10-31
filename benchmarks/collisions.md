@@ -1,5 +1,56 @@
 # Collision pipeline benchmarks
 
+## Refactoring baseline: pinned source
+
+The pre-refactor reference was measured on 2026-11-01 from a temporary `git archive` of source commit `27b9f12a27152de89d0208acfffd9e28f018e0f8`. Benchmark-only capacity and logical-copy instrumentation plus the updated harness were overlaid onto that archive; no collision algorithms were changed. Runs used release builds, one warm-up, five independently built samples, and report min/median/max. The measured region excludes scene setup except where the row explicitly measures repeated API operations. The same harness is retained for later comparisons.
+
+Timings include the `bench-internals` phase timers and the small counter overhead in island build/write-back paths. `Peak sampled` is the largest retained-capacity estimate observed at a phase boundary, not allocator peak or process RSS. `Logical capacity growth` is the net increase in retained vector/hash capacity during the step; it is not a count of malloc calls. Solver body/manifold copies count explicit value copies at the instrumented materialization and write-back sites, not compiler-generated traffic.
+
+### Core steps
+
+Times are milliseconds per step. Phase columns show the median sample.
+
+| Scenario | Step min / median / max | Index | Broad | Narrow | CCD | Island build | Solver | Candidates | Contacts | Islands | Body copies | Manifold copies | Growth bytes | Retained KiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 256 separated Dynamic spheres | 0.201 / 0.216 / 0.241 | 0.117 | 0.030 | 0.000 | 0.000 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 0 | 172,224 | 168 |
+| 4,096 separated Dynamic spheres | 5.156 / 5.189 / 5.208 | 2.390 | 1.500 | 0.000 | 0.000 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 0 | 2,752,704 | 2,688 |
+| 20,000 separated Dynamic spheres | 28.257 / 29.510 / 30.860 | 13.979 | 9.415 | 0.000 | 0.000 | 0.001 | 0.000 | 0 | 0 | 0 | 0 | 0 | 16,814,656 | 16,420 |
+| 20,000 bodies, 128 localized sphere pairs | 31.326 / 32.208 / 32.988 | 13.852 | 9.831 | 0.033 | 0.154 | 0.003 | 1.763 | 128 | 128 | 128 | 256 | 384 | 19,026,112 | 18,580 |
+| 1,000 overlapping cuboids, one island | 18.754 / 19.356 / 20.055 | 0.424 | 0.178 | 3.427 | 0.003 | 0.014 | 13.833 | 999 | 999 | 1 | 1,000 | 2,997 | 4,131,456 | 4,034 |
+| 20,000 Static + 100 separated Dynamic spheres | 22.909 / 24.285 / 25.263 | 12.436 | 9.862 | 0.000 | 0.000 | 0.000 | 0.000 | 0 | 0 | 0 | 0 | 0 | 16,840,928 | 16,446 |
+| Large triangle mesh + 100 movers | 1.482 / 1.559 / 1.659 | 0.066 | 0.027 | 0.521 | 0.001 | 0.003 | 0.793 | 100 | 100 | 100 | 200 | 300 | 778,197 | 759 |
+| HeightField + 512 movers | 6.919 / 7.068 / 7.276 | 0.358 | 0.204 | 0.994 | 0.004 | 0.009 | 4.603 | 512 | 512 | 512 | 1,024 | 1,536 | 4,250,929 | 4,151 |
+| LevelSet + 256 movers | 3.802 / 3.896 / 4.617 | 0.140 | 0.085 | 0.792 | 0.001 | 0.005 | 2.369 | 256 | 256 | 256 | 512 | 768 | 2,126,001 | 2,076 |
+| 64 fast CCD bodies vs. wall | 279.832 / 284.261 / 292.727 | 0.034 | 0.018 | 0.069 | 284.076 | 0.001 | 0.000 | 64 | 0 | 0 | 0 | 0 | 149,380 | 145 |
+
+### Storage, query, sweep, and skin workloads
+
+| Scenario | Time min / median / max | Candidates | Contacts | Islands | Body copies | Manifold copies | Growth / retained bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 island × 1,000 Dynamic bodies | 18.956 / 20.052 / 21.432 ms | 999 | 999 | 1 | 1,000 | 2,997 | 4,131,456 |
+| 500 islands × 2 Dynamic bodies | 8.059 / 8.644 / 10.115 ms | 500 | 500 | 500 | 1,000 | 1,500 | 4,394,344 |
+| 500 Dynamic–Static pairs | 5.703 / 5.884 / 6.649 ms | 500 | 500 | 500 | 1,000 | 1,500 | 4,394,344 |
+| 1,000 Dynamic / 4,000 Static, 4,000 contacts | 43.963 / 44.633 / 46.995 ms | 4,000 | 4,000 | 1,000 | 5,000 | 12,000 | 19,723,720 |
+| 20,000 Static + 1,000 raycasts | 13,808 / 14,239 / 14,314 ms | — | — | — | — | — | — |
+| 1,000 sweeps × 19,800-triangle mesh | 269.327 / 278.131 / 293.291 ms | — | — | — | — | — | — |
+| 1,000 SkinPose updates, 1,024 vertices | 39.160 / 41.041 / 70.505 ms | — | — | — | — | — | — |
+| 1,000 SkinPose updates, 10,000 vertices | 536.726 / 550.005 / 604.568 ms | — | — | — | — | — | — |
+| 1,000 SkinPose updates, 100,172 vertices | 8,013.037 / 8,227.822 / 8,490.997 ms | — | — | — | — | — | — |
+
+### Tokio controller, localized collisions
+
+Times are milliseconds for eight steps; controller/world creation is outside the measured interval.
+
+| Bodies | `PhysicsWorld::step` min / median / max | Controller ×1 | Controller ×2 | Controller ×4 |
+|---:|---:|---:|---:|---:|
+| 256 | 2.88 / 2.89 / 2.96 | 3.61 / 3.68 / 4.21 | 3.75 / 3.99 / 4.39 | 4.70 / 5.05 / 5.43 |
+| 4,096 | 43.67 / 43.99 / 45.73 | 46.40 / 48.05 / 48.33 | 35.09 / 37.83 / 39.92 | 35.16 / 37.07 / 38.58 |
+| 20,000 | 171.31 / 173.59 / 182.39 | 171.93 / 176.27 / 213.53 | 203.67 / 218.11 / 230.13 | 184.58 / 194.51 / 213.38 |
+
+### Allocation profiler availability
+
+Windows Performance Recorder and `xperf` are installed, and the Heap profile is listed. `wpr -start Heap -filemode` failed with `0x80070005 Access is denied` in this session, so no external heap trace or malloc counts were collected. The report therefore uses the explicitly labeled logical capacity metrics above; it does not present them as allocation counts.
+
 Release measurements taken on 2026-10-31 with `rustc 1.98.0` (`x86_64-pc-windows-msvc`) on an AMD Ryzen 9 7900X3D. Each row is the median of five independently constructed worlds; world construction is outside the timed region. Timings are local measurements, not performance targets.
 
 Run the core phase benchmark with:
