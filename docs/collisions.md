@@ -97,12 +97,17 @@ dynamic body is rejected when it is added. Static and kinematic bodies may own
 surface colliders.
 
 The narrow phase uses support mapping with GJK distance/intersection and EPA
-penetration for convex pairs, plane contact generation, triangle contacts,
-mesh BVH traversal, heightfield cell traversal, and interpolated level-set
-sampling. Skinned meshes use the current deformed pose and a refitted BVH.
-Contacts are reduced into persistent manifolds with feature IDs; contact
-impulses are cached for warm starting. Dynamic bodies connected by contacts are
-grouped into deterministically ordered islands.
+penetration for convex pairs. If GJK confirms overlap but its simplex is
+degenerate or EPA cannot converge, support points along the center-to-center
+direction estimate penetration; this fallback can overestimate the minimum
+translation depth for oblique contacts. Convex pairs are processed in a stable
+geometry order so reversing A and B reverses the contact normal. Other contacts
+use plane contact generation, triangle contacts, mesh BVH traversal, heightfield
+cell traversal, and interpolated level-set sampling. Skinned meshes use the
+current deformed pose and a refitted BVH. Contacts are reduced into persistent
+manifolds with feature IDs; contact impulses are cached for warm starting.
+Dynamic bodies connected by contacts are grouped into deterministically ordered
+islands.
 
 ## Bodies, colliders, and materials
 

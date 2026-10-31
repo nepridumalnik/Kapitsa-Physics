@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::{
     aabb::Aabb,
     collider::CollisionMode,
@@ -712,36 +714,59 @@ impl NarrowPhase {
         collider_b: &Transform,
         body_b: &Transform,
     ) -> Result<Option<ContactManifold>, CollisionError> {
+        if compare_convex_geometry(shape_a, collider_a, shape_b, collider_b)? == Ordering::Greater {
+            return self
+                .convex_convex(
+                    pair, shape_b, collider_b, body_b, shape_a, collider_a, body_a,
+                )?
+                .map(|manifold| reverse_manifold(manifold, body_a, body_b))
+                .transpose();
+        }
+        // Recover GJK's valid overlap result if its initial simplex differs by order.
+        match self.convex_convex_ordered(
+            pair, shape_a, collider_a, body_a, shape_b, collider_b, body_b,
+        ) {
+            Err(error @ CollisionError::NonConvergent) => {
+                if let Ok(Some(manifold)) = self.convex_convex_ordered(
+                    pair, shape_b, collider_b, body_b, shape_a, collider_a, body_a,
+                ) {
+                    return reverse_manifold(manifold, body_a, body_b).map(Some);
+                }
+                Err(error)
+            }
+            result => result,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn convex_convex_ordered(
+        &mut self,
+        pair: CollisionPair,
+        shape_a: &Shape,
+        collider_a: &Transform,
+        body_a: &Transform,
+        shape_b: &Shape,
+        collider_b: &Transform,
+        body_b: &Transform,
+    ) -> Result<Option<ContactManifold>, CollisionError> {
         let result = gjk::intersect(shape_a, collider_a, shape_b, collider_b)?;
         if !result.intersects {
             return Ok(None);
         }
+        // Use a directional support contact if GJK's simplex or EPA degenerates.
         let contact = if result.simplex.count == 4 {
-            self.epa
-                .solve(&result.simplex, shape_a, collider_a, shape_b, collider_b)?
+            match self
+                .epa
+                .solve(&result.simplex, shape_a, collider_a, shape_b, collider_b)
+            {
+                Ok(contact) => contact,
+                Err(CollisionError::NonConvergent) => {
+                    convex_support_contact(shape_a, collider_a, shape_b, collider_b)?
+                }
+                Err(error) => return Err(error),
+            }
         } else {
-            let center_delta = collider_b
-                .translation()
-                .checked_sub(collider_a.translation())
-                .ok_or(CollisionError::ArithmeticOverflow)?;
-            let normal = center_delta.try_normalize().unwrap_or(Vec3::X);
-            let support = support_pair(shape_a, collider_a, shape_b, collider_b, normal)?;
-            let distance = support
-                .difference
-                .checked_length()
-                .ok_or(CollisionError::ArithmeticOverflow)?;
-            let scale = support.difference.abs().max_element().max(1.0);
-            if distance > scale * f64::EPSILON * 128.0 {
-                return Err(CollisionError::NonConvergent);
-            }
-            super::epa::EpaResult {
-                normal,
-                penetration: 0.0,
-                point_a: support.point_a,
-                point_b: support.point_b,
-                feature_a: support.feature_a,
-                feature_b: support.feature_b,
-            }
+            convex_support_contact(shape_a, collider_a, shape_b, collider_b)?
         };
         make_manifold(
             pair,
@@ -889,6 +914,128 @@ fn make_manifold(
     let mut manifold = ContactManifold::new(pair);
     manifold.insert(contact, position)?;
     Ok(manifold)
+}
+
+fn reverse_manifold(
+    manifold: ContactManifold,
+    body_a: &Transform,
+    body_b: &Transform,
+) -> Result<ContactManifold, CollisionError> {
+    let mut reversed = ContactManifold::new(manifold.pair);
+    for point in manifold.points() {
+        let world_a = body_a.transform_point(point.local_a);
+        let world_b = body_b.transform_point(point.local_b);
+        let reversed_point = ContactPoint::from_world(
+            body_b,
+            body_a,
+            world_b,
+            world_a,
+            -point.normal,
+            point.penetration,
+            point.feature_id,
+        )?;
+        reversed.insert(reversed_point, world_a * 0.5 + world_b * 0.5)?;
+    }
+    Ok(reversed)
+}
+
+fn compare_convex_geometry(
+    shape_a: &Shape,
+    transform_a: &Transform,
+    shape_b: &Shape,
+    transform_b: &Transform,
+) -> Result<Ordering, CollisionError> {
+    let rank_a = convex_shape_rank(shape_a);
+    let rank_b = convex_shape_rank(shape_b);
+    match rank_a.cmp(&rank_b) {
+        Ordering::Equal => {}
+        order => return Ok(order),
+    }
+    let centers_a = transform_a.translation();
+    let centers_b = transform_b.translation();
+    for (a, b) in [
+        (centers_a.x, centers_b.x),
+        (centers_a.y, centers_b.y),
+        (centers_a.z, centers_b.z),
+    ] {
+        match a.total_cmp(&b) {
+            Ordering::Equal => {}
+            order => return Ok(order),
+        }
+    }
+    let bounds_a = shape_a
+        .world_bounds(transform_a)
+        .map_err(|_| CollisionError::GeometryBounds)?
+        .ok_or(CollisionError::UnsupportedGeometryPair)?;
+    let bounds_b = shape_b
+        .world_bounds(transform_b)
+        .map_err(|_| CollisionError::GeometryBounds)?
+        .ok_or(CollisionError::UnsupportedGeometryPair)?;
+    let values_a = [
+        bounds_a.min().x,
+        bounds_a.min().y,
+        bounds_a.min().z,
+        bounds_a.max().x,
+        bounds_a.max().y,
+        bounds_a.max().z,
+    ];
+    let values_b = [
+        bounds_b.min().x,
+        bounds_b.min().y,
+        bounds_b.min().z,
+        bounds_b.max().x,
+        bounds_b.max().y,
+        bounds_b.max().z,
+    ];
+    for (a, b) in values_a.into_iter().zip(values_b) {
+        match a.total_cmp(&b) {
+            Ordering::Equal => {}
+            order => return Ok(order),
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
+fn convex_shape_rank(shape: &Shape) -> u8 {
+    match shape {
+        Shape::Sphere(_) => 0,
+        Shape::Cuboid(_) => 1,
+        Shape::Capsule(_) => 2,
+        Shape::Cylinder(_) => 3,
+        Shape::TaperedCapsule(_) => 4,
+        Shape::TaperedCylinder(_) => 5,
+        Shape::Convex(_) => 6,
+        _ => u8::MAX,
+    }
+}
+
+fn convex_support_contact(
+    shape_a: &Shape,
+    transform_a: &Transform,
+    shape_b: &Shape,
+    transform_b: &Transform,
+) -> Result<super::epa::EpaResult, CollisionError> {
+    let normal = transform_b
+        .translation()
+        .checked_sub(transform_a.translation())
+        .and_then(Vec3::try_normalize)
+        .unwrap_or(Vec3::X);
+    let support = support_pair(shape_a, transform_a, shape_b, transform_b, normal)?;
+    let penetration = support
+        .difference
+        .checked_dot(normal)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    if penetration < 0.0 {
+        return Err(CollisionError::NonConvergent);
+    }
+    Ok(super::epa::EpaResult {
+        normal,
+        penetration,
+        point_a: support.point_a,
+        point_b: support.point_b,
+        feature_a: support.feature_a,
+        feature_b: support.feature_b,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

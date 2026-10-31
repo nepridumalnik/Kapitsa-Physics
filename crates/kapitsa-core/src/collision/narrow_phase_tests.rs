@@ -8,6 +8,9 @@ use crate::{
 };
 use kapitsa_math::Vec3;
 
+#[path = "geometry_matrix_tests.rs"]
+mod geometry_matrix;
+
 fn pair() -> CollisionPair {
     let mut world = PhysicsWorld::new();
     let body_a = world
