@@ -110,7 +110,10 @@ impl CollisionStepMetrics {
 }
 pub(crate) use event::{CollisionInteraction, CollisionLifecycle};
 pub use query::{OverlapHit, QueryFilter, Ray, RayHit, ShapeHit};
-pub(crate) use query::{overlaps_shape, raycast_shape, sweep_shape};
+pub(crate) use query::{
+    QueryScratch, QueryTarget, overlaps_shape_with_scratch, raycast_shape_with_scratch,
+    sweep_shape_with_scratch,
+};
 
 pub(crate) use broad_phase::CollisionProxy;
 pub(crate) use manifold::{ContactManifold, ContactPoint};

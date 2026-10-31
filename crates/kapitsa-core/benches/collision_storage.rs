@@ -286,6 +286,42 @@ fn run_rays(world: &PhysicsWorld, ray: Ray) -> Result<(), Box<dyn Error>> {
 }
 
 fn report_sweeps() -> Result<(), Box<dyn Error>> {
+    for count in [100, 1_000, 10_000] {
+        report_sweep_variant(count)?;
+    }
+    Ok(())
+}
+
+fn report_sweep_variant(count: usize) -> Result<(), Box<dyn Error>> {
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..WARMUPS {
+        let (world, shape, transform) = sweep_scene()?;
+        run_world_sweeps(&world, &shape, transform, count)?;
+    }
+    for _ in 0..SAMPLES {
+        let (world, shape, transform) = sweep_scene()?;
+        black_box(world.sweep(
+            &shape,
+            transform,
+            Vec3::new(0.0, -3.0, 0.0),
+            QueryFilter::default(),
+        )?);
+        let started = Instant::now();
+        run_world_sweeps(&world, &shape, transform, count)?;
+        samples.push(started.elapsed());
+    }
+    samples.sort_unstable();
+    println!(
+        "{:28} {count:>5} sweeps={:.3}/{:.3}/{:.3} ms min/median/max",
+        "world.sweep",
+        millis(*samples.first().ok_or("missing benchmark sample")?),
+        millis(samples[SAMPLES / 2]),
+        millis(*samples.last().ok_or("missing benchmark sample")?),
+    );
+    Ok(())
+}
+
+fn sweep_scene() -> Result<(PhysicsWorld, Shape, Transform), Box<dyn Error>> {
     let mut world = PhysicsWorld::new();
     let mesh = grid_mesh(100, 101)?;
     let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
@@ -293,43 +329,20 @@ fn report_sweeps() -> Result<(), Box<dyn Error>> {
         body,
         Collider::new(Shape::TriangleMesh(mesh), Transform::identity()),
     )?;
-    let query = Shape::Sphere(Sphere::new(0.5)?);
+    let shape = Shape::Sphere(Sphere::new(0.5)?);
     let transform = Transform::new(Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY)?;
-    let mut samples = Vec::with_capacity(SAMPLES);
-    for _ in 0..WARMUPS {
-        run_sweeps(&world, &query, transform)?;
-    }
-    for _ in 0..SAMPLES {
-        let started = Instant::now();
-        run_sweeps(&world, &query, transform)?;
-        samples.push(started.elapsed());
-    }
-    samples.sort_unstable();
-    println!(
-        "{:<32} 1,000 sweeps={:.3}/{:.3}/{:.3} ms min/median/max | triangles={}",
-        "1,000 Sweep x 20,000-triangle mesh",
-        millis(*samples.first().ok_or("missing benchmark sample")?),
-        millis(samples[SAMPLES / 2]),
-        millis(*samples.last().ok_or("missing benchmark sample")?),
-        world
-            .colliders()
-            .next()
-            .map_or(0, |(_, _, c)| match c.shape() {
-                Shape::TriangleMesh(mesh) => mesh.triangles().len(),
-                _ => 0,
-            }),
-    );
-    Ok(())
+    Ok((world, shape, transform))
 }
 
-fn run_sweeps(
+fn run_world_sweeps(
     world: &PhysicsWorld,
-    query: &Shape,
+    shape: &Shape,
     transform: Transform,
+    count: usize,
 ) -> Result<(), Box<dyn Error>> {
-    for _ in 0..1_000 {
+    for _ in 0..count {
         black_box(world.sweep(
-            query,
+            shape,
             transform,
             Vec3::new(0.0, -3.0, 0.0),
             QueryFilter::default(),

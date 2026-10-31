@@ -12,7 +12,7 @@ use super::{
     ccd::{self, CcdHit},
     gjk,
     height_field::{self, HeightFieldTriangle},
-    level_set,
+    level_set::{self, LevelSetCell},
     mesh::{MeshQueryWorkspace, TriangleBvh},
 };
 
@@ -106,12 +106,44 @@ pub struct OverlapHit {
     pub collider: ColliderId,
 }
 
-pub(crate) fn raycast_shape(
+pub(crate) struct QueryTarget<'a> {
+    pub(crate) shape: &'a Shape,
+    pub(crate) transform: Transform,
+    pub(crate) bvh: Option<&'a TriangleBvh>,
+    pub(crate) deformed_vertices: Option<&'a [Vec3]>,
+}
+
+#[derive(Default)]
+pub(crate) struct QueryScratch {
+    pub(crate) mesh: MeshQueryWorkspace,
+    pub(crate) candidates: Vec<usize>,
+    pub(crate) height_cells: Vec<HeightFieldTriangle>,
+    pub(crate) level_cells: Vec<LevelSetCell>,
+    pub(crate) colliders: Vec<ColliderId>,
+    pub(crate) tree_stack: Vec<usize>,
+    pub(crate) ray_stack: Vec<(usize, f64)>,
+    pub(crate) overlaps: Vec<OverlapHit>,
+}
+
+impl QueryScratch {
+    pub(crate) fn clear(&mut self) {
+        self.candidates.clear();
+        self.height_cells.clear();
+        self.level_cells.clear();
+        self.colliders.clear();
+        self.tree_stack.clear();
+        self.ray_stack.clear();
+        self.overlaps.clear();
+    }
+}
+
+pub(crate) fn raycast_shape_with_scratch(
     shape: &Shape,
     transform: Transform,
     ray: Ray,
     bvh: Option<&TriangleBvh>,
     deformed_vertices: Option<&[Vec3]>,
+    scratch: &mut QueryScratch,
 ) -> Result<Option<(Vec3, Vec3, f64)>, QueryError> {
     ray.validate()?;
     if shape.is_convex() {
@@ -140,10 +172,15 @@ pub(crate) fn raycast_shape(
             local_origin,
             local_direction,
             ray.max_distance,
+            scratch,
         )?,
-        Shape::HeightField(field) => {
-            ray_height_field(field, local_origin, local_direction, ray.max_distance)?
-        }
+        Shape::HeightField(field) => ray_height_field(
+            field,
+            local_origin,
+            local_direction,
+            ray.max_distance,
+            &mut scratch.height_cells,
+        )?,
         Shape::LevelSet(field) => {
             ray_level_set(field, local_origin, local_direction, ray.max_distance)?
         }
@@ -154,6 +191,7 @@ pub(crate) fn raycast_shape(
             local_origin,
             local_direction,
             ray.max_distance,
+            scratch,
         )?,
         Shape::Sphere(_)
         | Shape::Cuboid(_)
@@ -177,14 +215,12 @@ pub(crate) fn raycast_shape(
     Ok(Some((position, normal, distance)))
 }
 
-pub(crate) fn sweep_shape(
+pub(crate) fn sweep_shape_with_scratch(
     query_shape: &Shape,
     query_transform: Transform,
     displacement: Vec3,
-    target_shape: &Shape,
-    target_transform: Transform,
-    bvh: Option<&TriangleBvh>,
-    deformed_vertices: Option<&[Vec3]>,
+    target: QueryTarget<'_>,
+    scratch: &mut QueryScratch,
 ) -> Result<Option<CcdHit>, QueryError> {
     if !query_shape.is_convex() {
         return Err(QueryError::UnsupportedQueryShape);
@@ -198,6 +234,12 @@ pub(crate) fn sweep_shape(
         .ok_or(QueryError::ArithmeticOverflow)?;
     let end_transform = Transform::new(end_translation, query_transform.rotation())
         .map_err(|_| QueryError::ArithmeticOverflow)?;
+    let QueryTarget {
+        shape: target_shape,
+        transform: target_transform,
+        bvh,
+        deformed_vertices,
+    } = target;
     let hit = match target_shape {
         Shape::Plane(plane) => ccd::plane_toi(
             query_shape,
@@ -226,8 +268,8 @@ pub(crate) fn sweep_shape(
             bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
             target_transform,
             target_transform,
-            &mut MeshQueryWorkspace::default(),
-            &mut Vec::new(),
+            &mut scratch.mesh,
+            &mut scratch.candidates,
         ),
         Shape::HeightField(field) => ccd::height_field_toi(
             query_shape,
@@ -236,7 +278,7 @@ pub(crate) fn sweep_shape(
             field,
             target_transform,
             target_transform,
-            &mut Vec::new(),
+            &mut scratch.height_cells,
         ),
         Shape::LevelSet(field) => ccd::level_set_toi(
             query_shape,
@@ -245,7 +287,7 @@ pub(crate) fn sweep_shape(
             field,
             target_transform,
             target_transform,
-            &mut Vec::new(),
+            &mut scratch.level_cells,
         ),
         Shape::SkinnedTriangleMesh(skinned) => ccd::triangle_mesh_toi(
             query_shape,
@@ -256,8 +298,8 @@ pub(crate) fn sweep_shape(
             bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
             target_transform,
             target_transform,
-            &mut MeshQueryWorkspace::default(),
-            &mut Vec::new(),
+            &mut scratch.mesh,
+            &mut scratch.candidates,
         ),
         target if target.is_convex() => ccd::convex_toi(
             query_shape,
@@ -273,17 +315,21 @@ pub(crate) fn sweep_shape(
     Ok(hit)
 }
 
-pub(crate) fn overlaps_shape(
+pub(crate) fn overlaps_shape_with_scratch(
     query_shape: &Shape,
     query_transform: Transform,
-    target_shape: &Shape,
-    target_transform: Transform,
-    bvh: Option<&TriangleBvh>,
-    deformed_vertices: Option<&[Vec3]>,
+    target: QueryTarget<'_>,
+    scratch: &mut QueryScratch,
 ) -> Result<bool, QueryError> {
     if !query_shape.is_convex() {
         return Err(QueryError::UnsupportedQueryShape);
     }
+    let QueryTarget {
+        shape: target_shape,
+        transform: target_transform,
+        bvh,
+        deformed_vertices,
+    } = target;
     match target_shape {
         Shape::Plane(plane) => {
             overlaps_plane(query_shape, query_transform, plane, target_transform)
@@ -298,13 +344,22 @@ pub(crate) fn overlaps_shape(
             deformed_vertices.unwrap_or_else(|| mesh.vertices()),
             bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
             target_transform,
+            scratch,
         ),
-        Shape::HeightField(field) => {
-            overlaps_height_field(query_shape, query_transform, field, target_transform)
-        }
-        Shape::LevelSet(field) => {
-            overlaps_level_set(query_shape, query_transform, field, target_transform)
-        }
+        Shape::HeightField(field) => overlaps_height_field(
+            query_shape,
+            query_transform,
+            field,
+            target_transform,
+            &mut scratch.height_cells,
+        ),
+        Shape::LevelSet(field) => overlaps_level_set(
+            query_shape,
+            query_transform,
+            field,
+            target_transform,
+            &mut scratch.level_cells,
+        ),
         Shape::SkinnedTriangleMesh(skinned) => overlaps_mesh(
             query_shape,
             query_transform,
@@ -312,6 +367,7 @@ pub(crate) fn overlaps_shape(
             deformed_vertices.unwrap_or_else(|| skinned.mesh().vertices()),
             bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
             target_transform,
+            scratch,
         ),
         target if target.is_convex() => {
             overlaps_convex(query_shape, query_transform, target, target_transform)
@@ -369,6 +425,7 @@ fn overlaps_mesh(
     vertices: &[Vec3],
     bvh: &TriangleBvh,
     target_transform: Transform,
+    scratch: &mut QueryScratch,
 ) -> Result<bool, QueryError> {
     if vertices.len() != mesh.vertices().len() || bvh.triangle_count() != mesh.triangles().len() {
         return Err(QueryError::Geometry(CollisionError::InvalidSkinPose));
@@ -376,11 +433,9 @@ fn overlaps_mesh(
     let world_bounds = query_world_bounds(query_shape, query_transform)?;
     let local_bounds = super::mesh::local_query_bounds(world_bounds, &target_transform)
         .map_err(query_collision)?;
-    let mut workspace = MeshQueryWorkspace::default();
-    let mut candidates = Vec::new();
-    bvh.query(local_bounds, &mut workspace, &mut candidates)
+    bvh.query(local_bounds, &mut scratch.mesh, &mut scratch.candidates)
         .map_err(query_collision)?;
-    for triangle_id in candidates {
+    for triangle_id in scratch.candidates.iter().copied() {
         let [a, b, c] = *mesh
             .triangles()
             .get(triangle_id)
@@ -411,12 +466,12 @@ fn overlaps_height_field(
     query_transform: Transform,
     field: &crate::shape::HeightField,
     target_transform: Transform,
+    candidates: &mut Vec<HeightFieldTriangle>,
 ) -> Result<bool, QueryError> {
     let world_bounds = query_world_bounds(query_shape, query_transform)?;
-    let mut candidates: Vec<HeightFieldTriangle> = Vec::new();
-    height_field::query_world_bounds(field, &target_transform, world_bounds, &mut candidates)
+    height_field::query_world_bounds(field, &target_transform, world_bounds, candidates)
         .map_err(query_collision)?;
-    for candidate in candidates {
+    for candidate in candidates.iter().copied() {
         let triangle = Shape::Triangle(
             Triangle::from_vertices(candidate.vertices)
                 .map_err(|_| QueryError::Geometry(CollisionError::InvalidContact))?,
@@ -433,13 +488,12 @@ fn overlaps_level_set(
     query_transform: Transform,
     field: &LevelSet,
     target_transform: Transform,
+    candidates: &mut Vec<LevelSetCell>,
 ) -> Result<bool, QueryError> {
     let world_bounds = query_world_bounds(query_shape, query_transform)?;
     let local_bounds = super::mesh::local_query_bounds(world_bounds, &target_transform)
         .map_err(query_collision)?;
-    let mut candidates = Vec::new();
-    level_set::query_surface_cells(field, local_bounds, &mut candidates)
-        .map_err(query_collision)?;
+    level_set::query_surface_cells(field, local_bounds, candidates).map_err(query_collision)?;
     if candidates.is_empty() {
         return Ok(false);
     }
@@ -472,7 +526,7 @@ fn overlaps_level_set(
         return Ok(true);
     }
 
-    for cell in candidates {
+    for cell in candidates.iter().copied() {
         let seed = inverse
             .transform_point(shape_center)
             .max(cell.bounds.min())
@@ -764,6 +818,7 @@ fn ray_mesh(
     origin: Vec3,
     direction: Vec3,
     max_distance: f64,
+    scratch: &mut QueryScratch,
 ) -> Result<(Option<Vec3>, f64), QueryError> {
     if vertices.len() != mesh.vertices().len() {
         return Err(QueryError::Geometry(CollisionError::InvalidSkinPose));
@@ -774,12 +829,10 @@ fn ray_mesh(
     }
     let segment_bounds = Aabb::new(origin.min(end), origin.max(end))
         .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?;
-    let mut workspace = MeshQueryWorkspace::default();
-    let mut candidates = Vec::new();
-    bvh.query(segment_bounds, &mut workspace, &mut candidates)
+    bvh.query(segment_bounds, &mut scratch.mesh, &mut scratch.candidates)
         .map_err(query_collision)?;
     let mut best = None;
-    for triangle in candidates {
+    for triangle in scratch.candidates.iter().copied() {
         let [a, b, c] = *mesh
             .triangles()
             .get(triangle)
@@ -810,6 +863,7 @@ fn ray_height_field(
     origin: Vec3,
     direction: Vec3,
     max_distance: f64,
+    candidates: &mut Vec<HeightFieldTriangle>,
 ) -> Result<(Option<Vec3>, f64), QueryError> {
     let end = origin + direction * max_distance;
     if !end.is_finite() {
@@ -817,10 +871,9 @@ fn ray_height_field(
     }
     let bounds = Aabb::new(origin.min(end), origin.max(end))
         .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?;
-    let mut candidates: Vec<HeightFieldTriangle> = Vec::new();
-    height_field::query_triangles(field, bounds, &mut candidates).map_err(query_collision)?;
+    height_field::query_triangles(field, bounds, candidates).map_err(query_collision)?;
     let mut best = None;
-    for triangle in candidates {
+    for triangle in candidates.iter().copied() {
         let (normal, distance) = ray_triangle(origin, direction, max_distance, triangle.vertices)?;
         if let Some(normal) = normal
             && best.is_none_or(|(_, best_distance)| distance < best_distance)

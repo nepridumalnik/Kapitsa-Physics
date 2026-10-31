@@ -109,6 +109,44 @@ fn sweep_returns_first_impact_and_overlap_lists_all_matching_colliders() {
         .expect("overlaps");
     assert_eq!(overlaps.len(), 1);
     assert_eq!(overlaps[0].collider, first);
+
+    for _ in 0..2 {
+        assert_eq!(
+            world
+                .raycast(
+                    Ray::new(Vec3::ZERO, Vec3::X, 10.0).expect("ray"),
+                    QueryFilter::default(),
+                )
+                .expect("reused raycast")
+                .expect("reused ray hit")
+                .collider,
+            first
+        );
+        assert_eq!(
+            world
+                .sweep(
+                    &shape,
+                    transform(Vec3::new(-3.0, 0.0, 0.0)),
+                    Vec3::new(10.0, 0.0, 0.0),
+                    QueryFilter::default(),
+                )
+                .expect("reused sweep")
+                .expect("reused sweep hit")
+                .collider,
+            first
+        );
+        let mut reused_overlaps = Vec::new();
+        world
+            .overlaps(
+                &shape,
+                transform(Vec3::new(2.0, 0.0, 0.0)),
+                QueryFilter::default(),
+                &mut reused_overlaps,
+            )
+            .expect("reused overlaps");
+        assert_eq!(reused_overlaps.len(), 1);
+        assert_eq!(reused_overlaps[0].collider, first);
+    }
 }
 
 #[test]

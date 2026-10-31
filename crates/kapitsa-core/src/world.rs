@@ -29,8 +29,9 @@ use crate::{
     collision::{
         CcdHit, CcdMotion, CollisionConfig, CollisionError, CollisionEvent, CollisionInteraction,
         CollisionPair, CollisionSystem, ContactInfo, ContactManifold, ContactPoint, OverlapHit,
-        QueryError, QueryFilter, Ray, RayHit, ShapeHit, SolverBody, SolverManifold, SolverMaterial,
-        overlaps_shape, raycast_shape, spatial_index::SpatialIndex, sweep_shape,
+        QueryError, QueryFilter, QueryScratch, QueryTarget, Ray, RayHit, ShapeHit, SolverBody,
+        SolverManifold, SolverMaterial, overlaps_shape_with_scratch, raycast_shape_with_scratch,
+        spatial_index::SpatialIndex, sweep_shape_with_scratch,
     },
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
@@ -220,6 +221,16 @@ impl PhysicsWorld {
     }
 
     pub fn raycast(&self, ray: Ray, filter: QueryFilter) -> Result<Option<RayHit>, QueryError> {
+        self.raycast_with_scratch(ray, filter, &mut QueryScratch::default())
+    }
+
+    fn raycast_with_scratch(
+        &self,
+        ray: Ray,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+    ) -> Result<Option<RayHit>, QueryError> {
+        scratch.clear();
         ray.validate()?;
         let mut closest = None;
         if self.query_index_dirty {
@@ -228,25 +239,27 @@ impl PhysicsWorld {
                     world: self.world_id,
                     dense: dense_id,
                 };
-                self.update_raycast_hit(collider, ray, filter, &mut closest)?;
+                self.update_raycast_hit(collider, ray, filter, &mut closest, scratch)?;
             }
         } else {
             for collider in self.unbounded_query_colliders.iter().copied() {
-                self.update_raycast_hit(collider, ray, filter, &mut closest)?;
+                self.update_raycast_hit(collider, ray, filter, &mut closest, scratch)?;
             }
             if let Some(index) = &self.query_index {
-                let mut stack = Vec::new();
+                let mut stack = std::mem::take(&mut scratch.ray_stack);
                 let max_distance = closest.map_or(ray.max_distance, |hit: RayHit| hit.distance);
-                index.query_ray(
+                let result = index.query_ray(
                     ray.origin,
                     ray.direction,
                     max_distance,
                     &mut stack,
                     |collider| {
-                        self.update_raycast_hit(collider, ray, filter, &mut closest)
+                        self.update_raycast_hit(collider, ray, filter, &mut closest, scratch)
                             .map(|hit| hit.map(|hit| hit.distance))
                     },
-                )?;
+                );
+                scratch.ray_stack = stack;
+                result?;
             }
         }
         Ok(closest)
@@ -259,6 +272,24 @@ impl PhysicsWorld {
         displacement: Vec3,
         filter: QueryFilter,
     ) -> Result<Option<ShapeHit>, QueryError> {
+        self.sweep_with_scratch(
+            shape,
+            transform,
+            displacement,
+            filter,
+            &mut QueryScratch::default(),
+        )
+    }
+
+    fn sweep_with_scratch(
+        &self,
+        shape: &crate::shape::Shape,
+        transform: crate::transform::Transform,
+        displacement: Vec3,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+    ) -> Result<Option<ShapeHit>, QueryError> {
+        scratch.clear();
         if !shape.is_convex() {
             return Err(QueryError::UnsupportedQueryShape);
         }
@@ -279,9 +310,10 @@ impl PhysicsWorld {
             .world_bounds(&end_transform)
             .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
             .ok_or(QueryError::UnsupportedQueryShape)?;
-        let candidates = self.query_candidates(start_bounds.union(&end_bounds))?;
+        self.query_candidates(start_bounds.union(&end_bounds), scratch)?;
         let mut closest = None;
-        for collider_id in candidates {
+        for candidate_index in 0..scratch.colliders.len() {
+            let collider_id = scratch.colliders[candidate_index];
             let entry = self
                 .colliders
                 .get(collider_id.dense)
@@ -301,14 +333,17 @@ impl PhysicsWorld {
                 .transform()
                 .compose(&entry.collider.local_transform())
                 .map_err(|_| QueryError::ArithmeticOverflow)?;
-            let Some(hit) = sweep_shape(
+            let Some(hit) = sweep_shape_with_scratch(
                 shape,
                 transform,
                 displacement,
-                entry.collider.shape(),
-                target_transform,
-                entry.collider.query_bvh(),
-                entry.collider.query_vertices(),
+                QueryTarget {
+                    shape: entry.collider.shape(),
+                    transform: target_transform,
+                    bvh: entry.collider.query_bvh(),
+                    deformed_vertices: entry.collider.query_vertices(),
+                },
+                scratch,
             )?
             else {
                 continue;
@@ -339,6 +374,24 @@ impl PhysicsWorld {
         filter: QueryFilter,
         output: &mut Vec<OverlapHit>,
     ) -> Result<(), QueryError> {
+        self.overlaps_with_scratch(
+            shape,
+            transform,
+            filter,
+            output,
+            &mut QueryScratch::default(),
+        )
+    }
+
+    fn overlaps_with_scratch(
+        &self,
+        shape: &crate::shape::Shape,
+        transform: crate::transform::Transform,
+        filter: QueryFilter,
+        output: &mut Vec<OverlapHit>,
+        scratch: &mut QueryScratch,
+    ) -> Result<(), QueryError> {
+        scratch.clear();
         if !shape.is_convex() {
             return Err(QueryError::UnsupportedQueryShape);
         }
@@ -346,9 +399,9 @@ impl PhysicsWorld {
             .world_bounds(&transform)
             .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
             .ok_or(QueryError::UnsupportedQueryShape)?;
-        let candidates = self.query_candidates(bounds)?;
-        let mut overlaps = Vec::new();
-        for collider_id in candidates {
+        self.query_candidates(bounds, scratch)?;
+        for candidate_index in 0..scratch.colliders.len() {
+            let collider_id = scratch.colliders[candidate_index];
             let entry = self
                 .colliders
                 .get(collider_id.dense)
@@ -368,27 +421,31 @@ impl PhysicsWorld {
                 .transform()
                 .compose(&entry.collider.local_transform())
                 .map_err(|_| QueryError::ArithmeticOverflow)?;
-            if overlaps_shape(
+            if overlaps_shape_with_scratch(
                 shape,
                 transform,
-                entry.collider.shape(),
-                target_transform,
-                entry.collider.query_bvh(),
-                entry.collider.query_vertices(),
+                QueryTarget {
+                    shape: entry.collider.shape(),
+                    transform: target_transform,
+                    bvh: entry.collider.query_bvh(),
+                    deformed_vertices: entry.collider.query_vertices(),
+                },
+                scratch,
             )? {
-                overlaps.push(OverlapHit {
+                scratch.overlaps.push(OverlapHit {
                     body: entry.body,
                     collider: collider_id,
                 });
             }
         }
-        overlaps.sort_by_key(|hit| (hit.body, hit.collider));
-        *output = overlaps;
+        scratch.overlaps.sort_by_key(|hit| (hit.body, hit.collider));
+        output.clear();
+        output.extend_from_slice(&scratch.overlaps);
         Ok(())
     }
 
-    fn query_candidates(&self, bounds: Aabb) -> Result<Vec<ColliderId>, QueryError> {
-        let mut candidates = Vec::new();
+    fn query_candidates(&self, bounds: Aabb, scratch: &mut QueryScratch) -> Result<(), QueryError> {
+        let candidates = &mut scratch.colliders;
         if self.query_index_dirty || self.query_index.is_none() {
             candidates
                 .try_reserve(self.colliders.len())
@@ -397,20 +454,19 @@ impl PhysicsWorld {
                 world: self.world_id,
                 dense,
             }));
-            return Ok(candidates);
+            return Ok(());
         }
 
-        let mut stack = Vec::new();
         self.query_index
             .as_ref()
             .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?
-            .query_readonly(bounds, &mut stack, &mut candidates)
+            .query_readonly(bounds, &mut scratch.tree_stack, candidates)
             .map_err(QueryError::Geometry)?;
         candidates
             .try_reserve(self.unbounded_query_colliders.len())
             .map_err(|_| QueryError::Geometry(CollisionError::SpatialIndexCapacityExceeded))?;
         candidates.extend(self.unbounded_query_colliders.iter().copied());
-        Ok(candidates)
+        Ok(())
     }
 
     fn update_raycast_hit(
@@ -419,6 +475,7 @@ impl PhysicsWorld {
         ray: Ray,
         filter: QueryFilter,
         closest: &mut Option<RayHit>,
+        scratch: &mut QueryScratch,
     ) -> Result<Option<RayHit>, QueryError> {
         let entry = self
             .colliders
@@ -441,12 +498,13 @@ impl PhysicsWorld {
             .map_err(|_| QueryError::ArithmeticOverflow)?;
         let mut limited_ray = ray;
         limited_ray.max_distance = closest.map_or(ray.max_distance, |hit| hit.distance);
-        let Some((position, normal, distance)) = raycast_shape(
+        let Some((position, normal, distance)) = raycast_shape_with_scratch(
             entry.collider.shape(),
             transform,
             limited_ray,
             entry.collider.query_bvh(),
             entry.collider.query_vertices(),
+            scratch,
         )?
         else {
             return Ok(None);

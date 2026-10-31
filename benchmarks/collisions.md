@@ -201,3 +201,25 @@ The moving median was 0.074 ms above the stationary median, with commit time
 small movement. For context, the 20,000-body no-contact benchmark's step median
 was 27.516 ms versus 27.696 ms in the pre-index stage 3 sample; those ranges
 overlap, so the full-step comparison does not show a measurable change.
+
+## Query workspaces, stage 11
+
+Repeated sweeps against the same 20,000-triangle mesh compared the existing
+one-shot `world.sweep` call with a prewarmed `PhysicsQuery::sweep` candidate.
+Each row is five release samples; the world and mesh are built outside timing.
+The query candidate retained 480 B of scratch capacity before and after each
+timed loop, so it had no logical capacity growth after warm-up. This is a
+capacity estimate, not an allocation count.
+
+| Sweeps | One-shot min / median / max | Reusable query min / median / max | Median change |
+|---:|---:|---:|---:|
+| 100 | 23.875 / 23.931 / 24.028 ms | 24.314 / 24.374 / 25.873 ms | 1.9% slower |
+| 1,000 | 238.931 / 239.504 / 239.545 ms | 243.072 / 243.612 / 258.110 ms | 1.7% slower |
+| 10,000 | 2,507.238 / 2,512.695 / 2,552.082 ms | 2,539.116 / 2,547.752 / 2,566.764 ms | 1.4% slower |
+
+The 10,000-call ranges overlap, and no sample showed a reusable-query speedup.
+The optional public query object was therefore rejected. `QueryScratch` remains
+internal and shares mesh, heightfield, level-set, and collider traversal
+buffers across candidate colliders within each `PhysicsWorld` query call. No
+external allocation trace was collected; the earlier Windows heap profiler
+attempt was denied by the environment.

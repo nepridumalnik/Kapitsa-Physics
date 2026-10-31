@@ -184,6 +184,8 @@ Mutable body or collider access invalidates the tree, so read-only queries use
 a full scan until the next successful step rebuilds it. Equal-distance hits
 are ordered by `ColliderId`; overlap results remain sorted. See the measured
 query workload and step-maintenance cost in `benchmarks/collisions.md`.
+Each query reuses its temporary mesh and surface-cell buffers across candidate
+colliders. The existing `PhysicsWorld` methods remain the complete query API.
 
 ## Events and errors
 
