@@ -65,3 +65,9 @@ impl std::error::Error for BoundsError {
         }
     }
 }
+
+impl From<AabbError> for BoundsError {
+    fn from(error: AabbError) -> Self {
+        Self::InvalidBounds(error)
+    }
+}

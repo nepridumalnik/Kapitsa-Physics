@@ -4,7 +4,12 @@
 //! local endpoints, vertices, or a grid origin. A collider's transform places
 //! this geometry in world space.
 
-use crate::aabb::Aabb;
+use glam::Vec3;
+
+use crate::{
+    aabb::{Aabb, round_down_to_f32, round_up_to_f32},
+    transform::Transform,
+};
 
 pub mod error;
 pub use error::{BoundsError, ShapeError};
@@ -75,6 +80,30 @@ impl Shape {
             Self::LevelSet(shape) => shape.local_bounds().map(Some),
             Self::SkinnedTriangleMesh(_) => Err(BoundsError::NotImplemented),
         }
+    }
+
+    /// Computes world-space bounds using the supplied rigid transform.
+    ///
+    /// `Ok(None)` means the shape has no finite bounds.
+    pub fn world_bounds(&self, transform: &Transform) -> Result<Option<Aabb>, BoundsError> {
+        if let Self::Sphere(sphere) = self {
+            let center = transform.translation();
+            let radius = f64::from(sphere.radius());
+
+            let min = |value: f32| round_down_to_f32(f64::from(value) - radius);
+            let max = |value: f32| round_up_to_f32(f64::from(value) + radius);
+
+            let bounds = Aabb::new(
+                Vec3::new(min(center.x)?, min(center.y)?, min(center.z)?),
+                Vec3::new(max(center.x)?, max(center.y)?, max(center.z)?),
+            )?;
+
+            return Ok(Some(bounds));
+        }
+
+        self.local_bounds()?
+            .map(|bounds| bounds.transformed(transform).map_err(BoundsError::from))
+            .transpose()
     }
 }
 

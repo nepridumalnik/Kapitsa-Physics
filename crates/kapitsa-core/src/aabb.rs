@@ -183,7 +183,7 @@ impl Aabb {
     }
 }
 
-fn round_down_to_f32(value: f64) -> Result<f32, AabbError> {
+pub(crate) fn round_down_to_f32(value: f64) -> Result<f32, AabbError> {
     if !value.is_finite() || value < -(f32::MAX as f64) || value > f32::MAX as f64 {
         return Err(AabbError::TransformOverflow);
     }
@@ -196,7 +196,7 @@ fn round_down_to_f32(value: f64) -> Result<f32, AabbError> {
     })
 }
 
-fn round_up_to_f32(value: f64) -> Result<f32, AabbError> {
+pub(crate) fn round_up_to_f32(value: f64) -> Result<f32, AabbError> {
     if !value.is_finite() || value < -(f32::MAX as f64) || value > f32::MAX as f64 {
         return Err(AabbError::TransformOverflow);
     }
