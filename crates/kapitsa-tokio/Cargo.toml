@@ -1,0 +1,12 @@
+[package]
+name = "kapitsa-tokio"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+kapitsa-core = { path = "../kapitsa-core" }
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+kapitsa-math = { path = "../kapitsa-math" }
