@@ -664,6 +664,40 @@ mod tests {
         simulation.stop().await.expect("second stop");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn restart_after_world_shrink_publishes_compact_snapshot_and_preserves_old_arc() {
+        let mut world = PhysicsWorld::new();
+        let ids = (0..20_000)
+            .map(|_| {
+                world
+                    .add_body(RigidBody::new_static(Transform::identity()))
+                    .expect("body insertion")
+            })
+            .collect::<Vec<_>>();
+        let mut simulation = PhysicsSimulation::new(world);
+        let client = simulation.client();
+        let old = client.snapshot();
+        assert_eq!(old.len(), 20_000);
+
+        simulation.start().expect("first start");
+        simulation.stop().await.expect("first stop");
+        {
+            let world = simulation.world_mut().expect("stopped world");
+            for id in &ids[..19_900] {
+                assert!(world.remove_body(*id).is_some());
+            }
+        }
+
+        simulation.start().expect("restart after shrink");
+        let current = client.snapshot();
+        assert_eq!(current.len(), 100);
+        assert!(ids[..19_900].iter().all(|id| current.body(*id).is_none()));
+        assert!(ids[19_900..].iter().all(|id| current.body(*id).is_some()));
+        assert_eq!(old.len(), 20_000);
+        assert!(ids.iter().all(|id| old.body(*id).is_some()));
+        simulation.stop().await.expect("second stop");
+    }
+
     #[test]
     fn invalid_simulation_configuration_is_rejected() {
         for config in [

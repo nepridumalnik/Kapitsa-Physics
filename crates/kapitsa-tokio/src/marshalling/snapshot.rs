@@ -1,4 +1,9 @@
-use std::{collections::HashMap, mem::size_of, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    mem::{self, size_of},
+    sync::Arc,
+    time::Duration,
+};
 
 use kapitsa_core::{
     rigid_body::BodyState,
@@ -7,6 +12,8 @@ use kapitsa_core::{
 
 const DENSE_ENTER_RATIO: usize = 3;
 const DENSE_EXIT_RATIO: usize = 6;
+const CAPACITY_SHRINK_RATIO: usize = 4;
+const MIN_RETAINED_CAPACITY: usize = 256;
 
 #[derive(Clone, Copy)]
 struct SnapshotEntry {
@@ -93,8 +100,7 @@ impl PhysicsSnapshot {
 
     pub(crate) fn rebuild(&mut self, world: &PhysicsWorld, step: u64, simulation_time: Duration) {
         let body_count = world.body_count();
-        self.entries.clear();
-        self.entries.reserve(body_count);
+        prepare_entries(&mut self.entries, body_count);
         for (id, body) in world.bodies() {
             self.entries.push(SnapshotEntry {
                 id,
@@ -190,6 +196,9 @@ fn rebuild_dense_index(index: &mut Vec<usize>, entries: &[SnapshotEntry], span: 
         index.clear();
         return;
     };
+    if index.capacity() > capacity_limit(span) {
+        drop(mem::take(index));
+    }
     index.clear();
     index.reserve(span);
     index.resize(span, usize::MAX);
@@ -203,11 +212,28 @@ fn rebuild_dense_index(index: &mut Vec<usize>, entries: &[SnapshotEntry], span: 
 }
 
 fn rebuild_sparse_index(index: &mut HashMap<BodyId, usize>, entries: &[SnapshotEntry]) {
+    if index.capacity() > capacity_limit(entries.len()) {
+        drop(mem::take(index));
+    }
     index.clear();
     index.reserve(entries.len());
     for (position, entry) in entries.iter().enumerate() {
         index.insert(entry.id, position);
     }
+}
+
+fn prepare_entries(entries: &mut Vec<SnapshotEntry>, live: usize) {
+    if entries.capacity() > capacity_limit(live) {
+        drop(mem::take(entries));
+    }
+    entries.clear();
+    entries.reserve(live);
+}
+
+fn capacity_limit(required: usize) -> usize {
+    required
+        .saturating_mul(CAPACITY_SHRINK_RATIO)
+        .max(MIN_RETAINED_CAPACITY)
 }
 
 #[cfg(test)]
@@ -231,6 +257,15 @@ mod tests {
                     .expect("body insertion")
             })
             .collect()
+    }
+
+    fn world_with_live_tail(slots: usize, live: usize) -> PhysicsWorld {
+        let mut world = PhysicsWorld::new();
+        let ids = add_bodies(&mut world, slots);
+        for id in &ids[..slots - live] {
+            assert!(world.remove_body(*id).is_some());
+        }
+        world
     }
 
     fn index_len(snapshot: &PhysicsSnapshot) -> usize {
@@ -351,6 +386,115 @@ mod tests {
         assert_eq!(snapshot.len(), dense_world.body_count());
         assert!(dense_ids.iter().all(|id| snapshot.body(*id).is_some()));
         assert_eq!(snapshot.bodies().count(), 100);
+    }
+
+    #[test]
+    fn reused_snapshot_releases_capacity_after_shrink_and_reallocates_on_growth() {
+        let mut world = PhysicsWorld::new();
+        let initial_ids = add_bodies(&mut world, 20_000);
+        let initial = PhysicsSnapshot::from_world(&world, 0, Duration::ZERO);
+        let (initial_entries, initial_index) = initial.buffer_capacities();
+        assert!(initial_entries >= 20_000);
+        assert!(initial_index >= 20_000);
+
+        let mut reusable = None;
+        assert!(PhysicsSnapshot::recycle(Arc::new(initial), &mut reusable));
+        let (mut snapshot, reused) = PhysicsSnapshot::take_reusable(&mut reusable);
+        assert!(reused);
+        for id in &initial_ids[..19_900] {
+            assert!(world.remove_body(*id).is_some());
+        }
+        snapshot.rebuild(&world, 1, Duration::from_millis(10));
+
+        let (shrunk_entries, shrunk_index) = snapshot.buffer_capacities();
+        assert!(!is_dense(&snapshot));
+        assert_eq!(snapshot.len(), 100);
+        assert!(shrunk_entries < initial_entries);
+        assert!(shrunk_entries <= super::capacity_limit(100));
+        assert!(shrunk_index >= snapshot.len());
+        assert!(shrunk_index <= super::capacity_limit(100));
+        assert!(
+            initial_ids[..19_900]
+                .iter()
+                .all(|id| snapshot.body(*id).is_none())
+        );
+        assert!(
+            initial_ids[19_900..]
+                .iter()
+                .all(|id| snapshot.body(*id).is_some())
+        );
+
+        for _ in 0..19_900 {
+            world
+                .add_body(RigidBody::new_kinematic(Transform::identity()))
+                .expect("body insertion after growth");
+        }
+        snapshot.rebuild(&world, 2, Duration::from_millis(20));
+        let (grown_entries, grown_index) = snapshot.buffer_capacities();
+        assert!(is_dense(&snapshot));
+        assert_eq!(snapshot.len(), 20_000);
+        assert!(grown_entries >= 20_000);
+        assert!(grown_index >= 20_000);
+        assert!(snapshot.bodies().all(|(id, _)| snapshot.body(id).is_some()));
+    }
+
+    #[test]
+    fn shrinking_a_world_does_not_mutate_a_snapshot_held_by_a_reader() {
+        let mut world = PhysicsWorld::new();
+        let ids = add_bodies(&mut world, 20_000);
+        let retained = Arc::new(PhysicsSnapshot::from_world(&world, 7, Duration::ZERO));
+        let reader = Arc::clone(&retained);
+        let retained_capacities = reader.buffer_capacities();
+        let mut reusable = None;
+
+        assert!(!PhysicsSnapshot::recycle(retained, &mut reusable));
+        for id in &ids[..19_900] {
+            assert!(world.remove_body(*id).is_some());
+        }
+        let shrunk = PhysicsSnapshot::from_world(&world, 8, Duration::from_millis(10));
+
+        assert!(!is_dense(&shrunk));
+        assert_eq!(shrunk.len(), 100);
+        assert_eq!(reader.step(), 7);
+        assert_eq!(reader.len(), 20_000);
+        assert_eq!(reader.buffer_capacities(), retained_capacities);
+        assert!(ids.iter().all(|id| reader.body(*id).is_some()));
+        assert!(ids[..19_900].iter().all(|id| shrunk.body(*id).is_none()));
+        assert!(ids[19_900..].iter().all(|id| shrunk.body(*id).is_some()));
+    }
+
+    #[test]
+    fn stable_and_oscillating_scenes_do_not_shrink_or_toggle_repeatedly() {
+        let mut full = PhysicsWorld::new();
+        add_bodies(&mut full, 400);
+        let medium = world_with_live_tail(400, 100);
+        let sparse = world_with_live_tail(400, 60);
+        let mut snapshot = PhysicsSnapshot::from_world(&full, 0, Duration::ZERO);
+        assert!(is_dense(&snapshot));
+
+        snapshot.rebuild(&medium, 1, Duration::ZERO);
+        assert!(is_dense(&snapshot));
+        snapshot.rebuild(&sparse, 2, Duration::ZERO);
+        assert!(!is_dense(&snapshot));
+        snapshot.rebuild(&medium, 3, Duration::ZERO);
+        assert!(!is_dense(&snapshot));
+        let warmed_capacities = snapshot.buffer_capacities();
+
+        for step in 4..20 {
+            let world = if step % 2 == 0 { &sparse } else { &medium };
+            snapshot.rebuild(world, step, Duration::ZERO);
+            assert!(!is_dense(&snapshot));
+            assert_eq!(snapshot.buffer_capacities(), warmed_capacities);
+            assert_eq!(snapshot.len(), world.body_count());
+        }
+
+        let dense_capacities =
+            PhysicsSnapshot::from_world(&full, 0, Duration::ZERO).buffer_capacities();
+        let mut stable = PhysicsSnapshot::from_world(&full, 0, Duration::ZERO);
+        for step in 1..6 {
+            stable.rebuild(&full, step, Duration::ZERO);
+            assert_eq!(stable.buffer_capacities(), dense_capacities);
+        }
     }
 
     #[test]
