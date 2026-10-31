@@ -27,6 +27,7 @@ pub struct Collider {
     material: Option<MaterialId>,
     mode: CollisionMode,
     skin_pose: Option<SkinPose>,
+    mesh_bvh: Option<Box<TriangleBvh>>,
 }
 
 struct SkinPose {
@@ -43,6 +44,7 @@ impl Collider {
             material: None,
             mode: CollisionMode::Solid,
             skin_pose: None,
+            mesh_bvh: None,
         }
     }
 
@@ -151,6 +153,31 @@ impl Collider {
             self.skin_pose = Some(SkinPose { vertices, bvh });
         }
         Ok(())
+    }
+
+    pub(crate) fn prepare_query_geometry(&mut self) -> Result<(), CollisionError> {
+        let mesh = match &self.shape {
+            Shape::TriangleMesh(mesh) => Some(mesh),
+            Shape::SkinnedTriangleMesh(mesh) => Some(mesh.mesh()),
+            _ => None,
+        };
+        if let Some(mesh) = mesh
+            && self.mesh_bvh.is_none()
+        {
+            self.mesh_bvh = Some(Box::new(TriangleBvh::build(mesh)?));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn query_bvh(&self) -> Option<&TriangleBvh> {
+        self.skin_pose
+            .as_ref()
+            .map(|pose| &pose.bvh)
+            .or(self.mesh_bvh.as_deref())
+    }
+
+    pub(crate) fn query_vertices(&self) -> Option<&[Vec3]> {
+        self.skin_pose.as_ref().map(|pose| pose.vertices.as_slice())
     }
 
     #[allow(dead_code)]

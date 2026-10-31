@@ -1,4 +1,4 @@
-use kapitsa_math::Affine3;
+use kapitsa_math::{Affine3, Vec3};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod error;
@@ -19,7 +19,10 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 
 use crate::{
     collider::Collider,
-    collision::{CollisionConfig, CollisionError, CollisionEvent, CollisionSystem},
+    collision::{
+        CollisionConfig, CollisionError, CollisionEvent, CollisionSystem, OverlapHit, QueryError,
+        QueryFilter, Ray, RayHit, ShapeHit, overlaps_shape, raycast_shape, sweep_shape,
+    },
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
     rigid_body::{BodyState, RigidBody, predict},
@@ -94,6 +97,159 @@ impl PhysicsWorld {
 
     pub fn collision_events(&self) -> &[CollisionEvent] {
         self.collision_system.events()
+    }
+
+    pub fn raycast(&self, ray: Ray, filter: QueryFilter) -> Result<Option<RayHit>, QueryError> {
+        ray.validate()?;
+        let mut closest = None;
+        for (dense_id, entry) in self.colliders.iter() {
+            if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
+                continue;
+            }
+            let body = self
+                .bodies
+                .get(entry.body.dense)
+                .filter(|_| entry.body.world == self.world_id)
+                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+            let transform = body
+                .body
+                .state()
+                .transform()
+                .compose(&entry.collider.local_transform())
+                .map_err(|_| QueryError::ArithmeticOverflow)?;
+            let Some((position, normal, distance)) = raycast_shape(
+                entry.collider.shape(),
+                transform,
+                ray,
+                entry.collider.query_bvh(),
+                entry.collider.query_vertices(),
+            )?
+            else {
+                continue;
+            };
+            if closest.is_none_or(|hit: RayHit| distance < hit.distance) {
+                closest = Some(RayHit {
+                    body: entry.body,
+                    collider: ColliderId {
+                        world: self.world_id,
+                        dense: dense_id,
+                    },
+                    position,
+                    normal,
+                    distance,
+                });
+            }
+        }
+        Ok(closest)
+    }
+
+    pub fn sweep(
+        &self,
+        shape: &crate::shape::Shape,
+        transform: crate::transform::Transform,
+        displacement: Vec3,
+        filter: QueryFilter,
+    ) -> Result<Option<ShapeHit>, QueryError> {
+        if !shape.is_convex() {
+            return Err(QueryError::UnsupportedQueryShape);
+        }
+        if !displacement.is_finite() {
+            return Err(QueryError::InvalidInput);
+        }
+        let mut closest = None;
+        for (dense_id, entry) in self.colliders.iter() {
+            if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
+                continue;
+            }
+            let body = self
+                .bodies
+                .get(entry.body.dense)
+                .filter(|_| entry.body.world == self.world_id)
+                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+            let target_transform = body
+                .body
+                .state()
+                .transform()
+                .compose(&entry.collider.local_transform())
+                .map_err(|_| QueryError::ArithmeticOverflow)?;
+            let Some(hit) = sweep_shape(
+                shape,
+                transform,
+                displacement,
+                entry.collider.shape(),
+                target_transform,
+                entry.collider.query_bvh(),
+                entry.collider.query_vertices(),
+            )?
+            else {
+                continue;
+            };
+            let position = hit.point_a * 0.5 + hit.point_b * 0.5;
+            if !position.is_finite() || !hit.normal.is_finite() || !hit.toi.is_finite() {
+                return Err(QueryError::ArithmeticOverflow);
+            }
+            if closest.is_none_or(|current: ShapeHit| hit.toi < current.toi) {
+                closest = Some(ShapeHit {
+                    body: entry.body,
+                    collider: ColliderId {
+                        world: self.world_id,
+                        dense: dense_id,
+                    },
+                    position,
+                    normal: hit.normal,
+                    toi: hit.toi,
+                });
+            }
+        }
+        Ok(closest)
+    }
+
+    pub fn overlaps(
+        &self,
+        shape: &crate::shape::Shape,
+        transform: crate::transform::Transform,
+        filter: QueryFilter,
+        output: &mut Vec<OverlapHit>,
+    ) -> Result<(), QueryError> {
+        if !shape.is_convex() {
+            return Err(QueryError::UnsupportedQueryShape);
+        }
+        let mut overlaps = Vec::new();
+        for (dense_id, entry) in self.colliders.iter() {
+            if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
+                continue;
+            }
+            let body = self
+                .bodies
+                .get(entry.body.dense)
+                .filter(|_| entry.body.world == self.world_id)
+                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+            let target_transform = body
+                .body
+                .state()
+                .transform()
+                .compose(&entry.collider.local_transform())
+                .map_err(|_| QueryError::ArithmeticOverflow)?;
+            if overlaps_shape(
+                shape,
+                transform,
+                entry.collider.shape(),
+                target_transform,
+                entry.collider.query_bvh(),
+                entry.collider.query_vertices(),
+            )? {
+                overlaps.push(OverlapHit {
+                    body: entry.body,
+                    collider: ColliderId {
+                        world: self.world_id,
+                        dense: dense_id,
+                    },
+                });
+            }
+        }
+        overlaps.sort_by_key(|hit| (hit.body, hit.collider));
+        *output = overlaps;
+        Ok(())
     }
 
     pub fn add_material(&mut self, material: PhysicsMaterial) -> Result<MaterialId, WorldError> {
@@ -408,7 +564,7 @@ impl PhysicsWorld {
     pub fn add_collider(
         &mut self,
         body: BodyId,
-        collider: Collider,
+        mut collider: Collider,
     ) -> Result<ColliderId, WorldError> {
         if body.world != self.world_id {
             return Err(WorldError::InvalidBodyId);
@@ -429,6 +585,7 @@ impl PhysicsWorld {
         if first.is_some_and(|id| self.colliders.get(id.dense).is_none()) {
             return Err(WorldError::InvalidColliderId);
         }
+        collider.prepare_query_geometry()?;
 
         let dense = self
             .colliders

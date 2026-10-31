@@ -82,14 +82,49 @@ pub(crate) fn distance(
     shape_b: &Shape,
     transform_b: &Transform,
 ) -> Result<GjkDistance, CollisionError> {
-    let mut direction = transform_b
+    let direction = transform_b
         .translation()
         .checked_sub(transform_a.translation())
         .ok_or(CollisionError::ArithmeticOverflow)?;
+    distance_with_support(direction, |direction| {
+        support_pair(shape_a, transform_a, shape_b, transform_b, direction)
+    })
+}
+
+pub(crate) fn distance_to_point(
+    shape: &Shape,
+    transform: &Transform,
+    point: Vec3,
+) -> Result<GjkDistance, CollisionError> {
+    if !point.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    let direction = point
+        .checked_sub(transform.translation())
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    distance_with_support(direction, |direction| {
+        let (point_a, feature_a) = super::support::support_world(shape, transform, direction)?;
+        let difference = point_a
+            .checked_sub(point)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        Ok(SupportPoint {
+            difference,
+            point_a,
+            point_b: point,
+            feature_a,
+            feature_b: 0,
+        })
+    })
+}
+
+fn distance_with_support(
+    mut direction: Vec3,
+    mut support_at: impl FnMut(Vec3) -> Result<SupportPoint, CollisionError>,
+) -> Result<GjkDistance, CollisionError> {
     if direction.try_normalize().is_none() {
         direction = Vec3::X;
     }
-    let first = support_pair(shape_a, transform_a, shape_b, transform_b, direction)?;
+    let first = support_at(direction)?;
     let mut simplex = Simplex::new(first);
     let mut closest = closest_simplex(&simplex)?;
     let mut lower_bound = 0.0;
@@ -113,7 +148,7 @@ pub(crate) fn distance(
         let search_direction = (-closest.point)
             .try_normalize()
             .ok_or(CollisionError::NonConvergent)?;
-        let support = support_pair(shape_a, transform_a, shape_b, transform_b, search_direction)?;
+        let support = support_at(search_direction)?;
         let support_projection = support
             .difference
             .checked_dot(search_direction)

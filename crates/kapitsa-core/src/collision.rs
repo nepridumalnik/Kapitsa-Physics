@@ -23,6 +23,7 @@ mod manifold;
 pub(crate) mod mesh;
 #[allow(dead_code)]
 mod narrow_phase;
+mod query;
 #[allow(dead_code)]
 mod solver;
 pub(crate) mod spatial_index;
@@ -35,6 +36,8 @@ pub use config::CollisionConfig;
 pub use contact::CollisionPair;
 pub use error::{CollisionError, QueryError};
 pub use event::{CollisionEvent, CollisionEventKind, ContactInfo};
+pub use query::{OverlapHit, QueryFilter, Ray, RayHit, ShapeHit};
+pub(crate) use query::{overlaps_shape, raycast_shape, sweep_shape};
 
 pub(crate) use broad_phase::CollisionProxy;
 pub(crate) use step::StepContext;
