@@ -948,7 +948,9 @@ mod tests {
             for ((parallel_id, parallel_body), (sequential_id, sequential_body)) in
                 parallel.bodies().zip(sequential.bodies())
             {
-                assert_eq!(parallel_id, sequential_id);
+                assert_eq!(parallel_id.index(), sequential_id.index());
+                assert_eq!(parallel_id.generation(), sequential_id.generation());
+                assert_ne!(parallel_id, sequential_id);
                 assert_eq!(parallel_body, sequential_body);
             }
         }
@@ -977,11 +979,17 @@ mod tests {
             sequential
                 .step(quantum.as_secs_f64())
                 .expect("sequential step");
-            for id in &ids {
-                assert_eq!(
-                    controller.world().expect("world available").body(*id),
-                    sequential.body(*id)
-                );
+            for ((id, body), (sequential_id, sequential_body)) in controller
+                .world()
+                .expect("world available")
+                .bodies()
+                .zip(sequential.bodies())
+            {
+                assert!(ids.contains(&id));
+                assert_eq!(id.index(), sequential_id.index());
+                assert_eq!(id.generation(), sequential_id.generation());
+                assert_ne!(id, sequential_id);
+                assert_eq!(body, sequential_body);
             }
         }
     }
@@ -1016,7 +1024,12 @@ mod tests {
                 .expect("world")
                 .bodies()
                 .zip(sequential.bodies())
-                .all(|((id, body), (expected_id, expected))| id == expected_id && body == expected)
+                .all(|((id, body), (expected_id, expected))| {
+                    id.index() == expected_id.index()
+                        && id.generation() == expected_id.generation()
+                        && id != expected_id
+                        && body == expected
+                })
         );
     }
 

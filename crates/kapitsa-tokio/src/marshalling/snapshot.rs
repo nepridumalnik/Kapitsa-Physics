@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use kapitsa_core::{
     rigid_body::BodyState,
@@ -13,33 +13,43 @@ struct SnapshotEntry {
 
 /// Immutable body states published after a successful simulation step.
 ///
-/// Body lookup uses slot index and generation, so a removed ID cannot resolve
-/// to a later body that reuses the same slot.
+/// Body lookup uses the complete world-scoped generational ID, so IDs from
+/// other worlds and stale IDs cannot resolve to a live body.
 pub struct PhysicsSnapshot {
     step: u64,
     simulation_time: Duration,
-    bodies: Vec<Option<SnapshotEntry>>,
-    len: usize,
+    entries: Vec<SnapshotEntry>,
+    indices: HashMap<BodyId, usize>,
 }
 
 impl PhysicsSnapshot {
     pub(crate) fn from_world(world: &PhysicsWorld, step: u64, simulation_time: Duration) -> Self {
-        let mut bodies = Vec::new();
+        let mut snapshot = Self {
+            step,
+            simulation_time,
+            entries: Vec::new(),
+            indices: HashMap::new(),
+        };
+        snapshot.rebuild(world, step, simulation_time);
+        snapshot
+    }
+
+    pub(crate) fn rebuild(&mut self, world: &PhysicsWorld, step: u64, simulation_time: Duration) {
+        let body_count = world.body_count();
+        self.entries.clear();
+        self.indices.clear();
+        self.entries.reserve(body_count);
+        self.indices.reserve(body_count);
+        self.step = step;
+        self.simulation_time = simulation_time;
+
         for (id, body) in world.bodies() {
-            let index = usize::try_from(id.index()).unwrap_or(usize::MAX);
-            if index >= bodies.len() {
-                bodies.resize_with(index.saturating_add(1), || None);
-            }
-            bodies[index] = Some(SnapshotEntry {
+            let index = self.entries.len();
+            self.entries.push(SnapshotEntry {
                 id,
                 state: *body.state(),
             });
-        }
-        Self {
-            step,
-            simulation_time,
-            bodies,
-            len: world.body_count(),
+            self.indices.insert(id, index);
         }
     }
 
@@ -53,67 +63,47 @@ impl PhysicsSnapshot {
         self.simulation_time
     }
 
-    /// Looks up a body by its full generational ID in O(1) time.
+    /// Looks up a body by its complete world-scoped generational ID in expected O(1) time.
     pub fn body(&self, id: BodyId) -> Option<&BodyState> {
-        let index = usize::try_from(id.index()).ok()?;
-        let entry = self.bodies.get(index)?.as_ref()?;
-        (entry.id == id).then_some(&entry.state)
+        self.indices
+            .get(&id)
+            .and_then(|index| self.entries.get(*index))
+            .map(|entry| &entry.state)
     }
 
     /// Iterates over current bodies as `(ID, state)` pairs.
     pub fn bodies(&self) -> impl Iterator<Item = (BodyId, &BodyState)> + '_ {
-        self.bodies
-            .iter()
-            .filter_map(|entry| entry.as_ref().map(|entry| (entry.id, &entry.state)))
+        self.entries.iter().map(|entry| (entry.id, &entry.state))
     }
 
     /// Returns the number of live bodies in this snapshot.
     pub fn len(&self) -> usize {
-        self.len
+        self.entries.len()
     }
 
     /// Returns whether this snapshot contains no live bodies.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.entries.is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::HashSet, time::Duration};
 
     use kapitsa_core::{rigid_body::RigidBody, transform::Transform, world::PhysicsWorld};
     use kapitsa_math::Vec3;
 
     use super::PhysicsSnapshot;
 
-    #[test]
-    fn snapshot_uses_slot_indices_and_tracks_exact_body_count() {
-        let mut world = PhysicsWorld::new();
-        let first = world
-            .add_body(RigidBody::new_kinematic(Transform::identity()))
-            .expect("first body");
-        let second = world
-            .add_body(RigidBody::new_kinematic(Transform::identity()))
-            .expect("second body");
-        world.remove_body(first).expect("remove first");
-        let mut body = RigidBody::new_kinematic(Transform::identity());
-        body.set_linear_velocity(Vec3::X).expect("velocity");
-        let replacement = world.add_body(body).expect("reuse slot");
-
-        let snapshot = PhysicsSnapshot::from_world(&world, 7, Duration::from_millis(120));
-
-        assert_eq!(snapshot.step(), 7);
-        assert_eq!(snapshot.simulation_time(), Duration::from_millis(120));
-        assert_eq!(snapshot.len(), 2);
-        assert!(!snapshot.is_empty());
-        assert_eq!(snapshot.body(first), None);
-        assert_eq!(
-            snapshot.body(replacement).unwrap().linear_velocity(),
-            Vec3::X
-        );
-        assert!(snapshot.body(second).is_some());
-        assert_eq!(snapshot.bodies().count(), 2);
+    fn add_bodies(world: &mut PhysicsWorld, count: usize) -> Vec<kapitsa_core::world::BodyId> {
+        (0..count)
+            .map(|_| {
+                world
+                    .add_body(RigidBody::new_kinematic(Transform::identity()))
+                    .expect("body insertion")
+            })
+            .collect()
     }
 
     #[test]
@@ -121,6 +111,110 @@ mod tests {
         let snapshot = PhysicsSnapshot::from_world(&PhysicsWorld::new(), 0, Duration::ZERO);
         assert!(snapshot.is_empty());
         assert_eq!(snapshot.len(), 0);
+        assert_eq!(snapshot.entries.len(), 0);
+        assert_eq!(snapshot.indices.len(), 0);
         assert_eq!(snapshot.bodies().count(), 0);
+    }
+
+    #[test]
+    fn snapshots_store_only_live_bodies_after_removals() {
+        let mut world = PhysicsWorld::new();
+        let ids = add_bodies(&mut world, 100);
+        let mut snapshot = PhysicsSnapshot::from_world(&world, 0, Duration::ZERO);
+        assert_eq!(snapshot.entries.len(), 100);
+        assert_eq!(snapshot.indices.len(), 100);
+
+        for id in &ids[..90] {
+            assert!(world.remove_body(*id).is_some());
+        }
+        snapshot.rebuild(&world, 1, Duration::from_millis(10));
+
+        assert_eq!(snapshot.len(), 10);
+        assert_eq!(snapshot.entries.len(), 10);
+        assert_eq!(snapshot.indices.len(), 10);
+        assert!(ids[..90].iter().all(|id| snapshot.body(*id).is_none()));
+        assert!(ids[90..].iter().all(|id| snapshot.body(*id).is_some()));
+    }
+
+    #[test]
+    fn sparse_slot_history_does_not_expand_snapshot_to_maximum_slot() {
+        let mut world = PhysicsWorld::new();
+        let ids = add_bodies(&mut world, 20_000);
+        for id in &ids[..19_900] {
+            assert!(world.remove_body(*id).is_some());
+        }
+        let live_ids = &ids[19_900..];
+        assert_eq!(live_ids.len(), 100);
+        assert!(live_ids.iter().all(|id| id.index() >= 19_900));
+
+        let snapshot = PhysicsSnapshot::from_world(&world, 4, Duration::ZERO);
+
+        assert_eq!(snapshot.entries.len(), 100);
+        assert_eq!(snapshot.indices.len(), 100);
+        assert_eq!(snapshot.entries.len(), world.body_count());
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| entry.id.index() >= 19_900)
+        );
+        assert!(live_ids.iter().all(|id| snapshot.body(*id).is_some()));
+    }
+
+    #[test]
+    fn lookup_uses_full_ids_and_bodies_are_iterated_once() {
+        let mut world = PhysicsWorld::new();
+        let first = world
+            .add_body(RigidBody::new_kinematic(Transform::identity()))
+            .expect("first body");
+        let mut moving = RigidBody::new_kinematic(Transform::identity());
+        moving.set_linear_velocity(Vec3::X).expect("velocity");
+        let second = world.add_body(moving).expect("second body");
+        let mut other_world = PhysicsWorld::new();
+        other_world
+            .add_body(RigidBody::new_kinematic(Transform::identity()))
+            .expect("foreign first body");
+        let foreign = other_world
+            .add_body(RigidBody::new_kinematic(Transform::identity()))
+            .expect("foreign body");
+        assert_eq!(second.index(), foreign.index());
+
+        let snapshot = PhysicsSnapshot::from_world(&world, 7, Duration::from_millis(120));
+        let body_ids = snapshot.bodies().map(|(id, _)| id).collect::<HashSet<_>>();
+
+        assert_eq!(snapshot.step(), 7);
+        assert_eq!(snapshot.simulation_time(), Duration::from_millis(120));
+        assert_eq!(snapshot.len(), world.body_count());
+        assert_eq!(body_ids, HashSet::from([first, second]));
+        assert_eq!(snapshot.bodies().count(), 2);
+        assert!(snapshot.body(first).is_some());
+        assert_eq!(
+            snapshot.body(second).map(|state| state.linear_velocity()),
+            Some(Vec3::X)
+        );
+        assert!(snapshot.body(foreign).is_none());
+    }
+
+    #[test]
+    fn rebuild_discards_stale_generations_and_old_map_entries() {
+        let mut world = PhysicsWorld::new();
+        let stale = world
+            .add_body(RigidBody::new_kinematic(Transform::identity()))
+            .expect("first body");
+        let mut snapshot = PhysicsSnapshot::from_world(&world, 0, Duration::ZERO);
+        assert!(world.remove_body(stale).is_some());
+        let replacement = world
+            .add_body(RigidBody::new_kinematic(Transform::identity()))
+            .expect("replacement body");
+        assert_eq!(stale.index(), replacement.index());
+        assert_ne!(stale.generation(), replacement.generation());
+
+        snapshot.rebuild(&world, 1, Duration::from_millis(10));
+
+        assert_eq!(snapshot.indices.len(), 1);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert!(!snapshot.indices.contains_key(&stale));
+        assert!(snapshot.body(stale).is_none());
+        assert!(snapshot.body(replacement).is_some());
     }
 }
