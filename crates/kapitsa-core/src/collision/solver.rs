@@ -92,11 +92,27 @@ impl SolverIsland {
         self.bodies.clear();
         self.manifolds.clear();
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        self.body_indices.capacity() * size_of::<usize>()
+            + self.manifold_indices.capacity() * size_of::<usize>()
+            + self.bodies.capacity() * size_of::<SolverBody>()
+            + self.manifolds.capacity() * size_of::<SolverManifold>()
+            + self.workspace.retained_capacity_bytes()
+    }
 }
 
 impl SolverWorkspace {
     pub(crate) const fn new() -> Self {
         Self { points: Vec::new() }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        self.points.capacity() * std::mem::size_of::<SolverPoint>()
     }
 
     pub(crate) fn solve(

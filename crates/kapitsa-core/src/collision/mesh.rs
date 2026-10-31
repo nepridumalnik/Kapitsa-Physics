@@ -42,6 +42,11 @@ impl MeshQueryWorkspace {
     pub(crate) const fn new() -> Self {
         Self { stack: Vec::new() }
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        self.stack.capacity() * std::mem::size_of::<usize>()
+    }
 }
 
 impl TriangleBvh {

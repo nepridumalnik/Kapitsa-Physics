@@ -1,6 +1,9 @@
 use kapitsa_math::{Affine3, Vec3};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "bench-internals")]
+use std::time::Instant;
+
 mod error;
 mod id;
 
@@ -363,12 +366,7 @@ impl PhysicsWorld {
             }
         }
 
-        if let Err(error) = self
-            .stage_spatial_proxies()
-            .and_then(|()| self.collision_system.synchronize_spatial_index())
-            .and_then(|()| self.collision_system.generate_candidates())
-            .and_then(|()| self.process_continuous_collisions(dt))
-        {
+        if let Err(error) = self.prepare_collision_candidates(dt) {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
@@ -377,6 +375,8 @@ impl PhysicsWorld {
             return Err(StepError::Collision(error));
         }
 
+        #[cfg(feature = "bench-internals")]
+        let commit_started = Instant::now();
         for ((dense_id, entry), (body_id, state)) in self.bodies.iter_mut().zip(
             self.collision_system
                 .context
@@ -394,6 +394,9 @@ impl PhysicsWorld {
             entry.body.commit_integrated_state(state);
         }
         self.collision_system.commit_step();
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_commit(commit_started.elapsed());
         Ok(())
     }
 
@@ -475,6 +478,44 @@ impl PhysicsWorld {
             }
         }
         Ok(())
+    }
+
+    fn prepare_collision_candidates(&mut self, dt: f64) -> Result<(), CollisionError> {
+        #[cfg(feature = "bench-internals")]
+        let started = Instant::now();
+        self.stage_spatial_proxies()?;
+        self.collision_system.synchronize_spatial_index()?;
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_spatial_index(started.elapsed());
+
+        #[cfg(feature = "bench-internals")]
+        let started = Instant::now();
+        self.collision_system.generate_candidates()?;
+        #[cfg(feature = "bench-internals")]
+        self.collision_system.record_broad_phase(started.elapsed());
+
+        #[cfg(feature = "bench-internals")]
+        let started = Instant::now();
+        self.process_continuous_collisions(dt)?;
+        #[cfg(feature = "bench-internals")]
+        self.collision_system.record_ccd(started.elapsed());
+        Ok(())
+    }
+
+    fn stage_collision_events(&mut self) -> Result<(), CollisionError> {
+        #[cfg(feature = "bench-internals")]
+        let started = Instant::now();
+        let result = self.collision_system.stage_lifecycle_events();
+        #[cfg(feature = "bench-internals")]
+        self.collision_system.record_events(started.elapsed());
+        result
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn collision_step_metrics(&self) -> crate::collision::CollisionStepMetrics {
+        self.collision_system.benchmark_metrics()
     }
 
     fn process_continuous_collisions(&mut self, dt: f64) -> Result<(), CollisionError> {
@@ -830,6 +871,8 @@ impl PhysicsWorld {
                     impact: true,
                 },
             )?;
+            #[cfg(feature = "bench-internals")]
+            self.collision_system.record_ccd_impact();
             self.collision_system.context.ccd_states[prediction_a] = solved_a;
             self.collision_system.context.ccd_states[prediction_b] = solved_b;
             self.collision_system.context.ccd_elapsed[prediction_a] = impact_elapsed;
@@ -955,7 +998,7 @@ impl PhysicsWorld {
         let candidate_count = self.collision_system.candidate_count();
         if candidate_count == 0 {
             self.collision_system.solve_contacts(worker_count)?;
-            self.collision_system.stage_lifecycle_events()?;
+            self.stage_collision_events()?;
             return Ok(());
         }
         let mut required_slots = 0;
@@ -1059,7 +1102,9 @@ impl PhysicsWorld {
             let transform_b = body_b
                 .compose(&collider_b.collider.local_transform())
                 .map_err(|_| CollisionError::ArithmeticOverflow)?;
-            if let Some(manifold) = self.collision_system.detect(
+            #[cfg(feature = "bench-internals")]
+            let started = Instant::now();
+            let manifold = self.collision_system.detect(
                 pair,
                 collider_a.collider.shape(),
                 &transform_a,
@@ -1073,7 +1118,13 @@ impl PhysicsWorld {
                 collider_b.collider.mode(),
                 collider_b.collider.query_bvh(),
                 collider_b.collider.query_vertices(),
-            )? {
+            )?;
+            #[cfg(feature = "bench-internals")]
+            self.collision_system.record_narrow_phase(
+                started.elapsed(),
+                manifold.as_ref().map_or(0, ContactManifold::len),
+            );
+            if let Some(manifold) = manifold {
                 let sensor = collider_a.collider.mode() == crate::collider::CollisionMode::Sensor
                     || collider_b.collider.mode() == crate::collider::CollisionMode::Sensor;
                 if sensor {
@@ -1239,7 +1290,7 @@ impl PhysicsWorld {
                 },
             )?;
         }
-        self.collision_system.stage_lifecycle_events()?;
+        self.stage_collision_events()?;
         Ok(())
     }
 
@@ -1440,12 +1491,7 @@ impl PhysicsWorld {
                 self.collision_system.stage_prediction(step.body_id, state);
             }
         }
-        if let Err(error) = self
-            .stage_spatial_proxies()
-            .and_then(|()| self.collision_system.synchronize_spatial_index())
-            .and_then(|()| self.collision_system.generate_candidates())
-            .and_then(|()| self.process_continuous_collisions(dt))
-        {
+        if let Err(error) = self.prepare_collision_candidates(dt) {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
@@ -1454,6 +1500,8 @@ impl PhysicsWorld {
             return Err(StepError::Collision(error));
         }
 
+        #[cfg(feature = "bench-internals")]
+        let commit_started = Instant::now();
         for ((dense_id, entry), (body_id, state)) in self.bodies.iter_mut().zip(
             self.collision_system
                 .context
@@ -1471,6 +1519,9 @@ impl PhysicsWorld {
             entry.body.commit_integrated_state(state);
         }
         self.collision_system.commit_step();
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_commit(commit_started.elapsed());
         Ok(())
     }
 

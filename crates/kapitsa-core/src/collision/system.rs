@@ -14,6 +14,9 @@ use super::{
 use crate::collider::CollisionMode;
 use crate::{rigid_body::BodyState, shape::Shape, transform::Transform, world::BodyId};
 
+#[cfg(feature = "bench-internals")]
+use super::CollisionStepMetrics;
+
 /// Owns reusable collision-step scratch and the last committed event batch.
 pub(crate) struct CollisionSystem {
     config: CollisionConfig,
@@ -29,6 +32,8 @@ pub(crate) struct CollisionSystem {
     solver_islands: Vec<SolverIsland>,
     ccd_solver: SolverWorkspace,
     cache_staged: bool,
+    #[cfg(feature = "bench-internals")]
+    benchmark_metrics: CollisionStepMetrics,
 }
 
 impl CollisionSystem {
@@ -47,6 +52,8 @@ impl CollisionSystem {
             solver_islands: Vec::new(),
             ccd_solver: SolverWorkspace::new(),
             cache_staged: false,
+            #[cfg(feature = "bench-internals")]
+            benchmark_metrics: CollisionStepMetrics::ZERO,
         }
     }
 
@@ -71,6 +78,96 @@ impl CollisionSystem {
         self.context.clear();
         self.lifecycle_staged = false;
         self.cache_staged = false;
+        #[cfg(feature = "bench-internals")]
+        {
+            self.benchmark_metrics = CollisionStepMetrics::ZERO;
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_spatial_index(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.spatial_index += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_broad_phase(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.broad_phase += elapsed;
+        self.benchmark_metrics.candidate_count = self.candidate_count();
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.ccd += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_impact(&mut self) {
+        self.benchmark_metrics.ccd_impact_count =
+            self.benchmark_metrics.ccd_impact_count.saturating_add(1);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_narrow_phase(
+        &mut self,
+        elapsed: std::time::Duration,
+        contact_count: usize,
+    ) {
+        self.benchmark_metrics.narrow_phase += elapsed;
+        self.benchmark_metrics.contact_count = self
+            .benchmark_metrics
+            .contact_count
+            .saturating_add(contact_count);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_island_build(
+        &mut self,
+        elapsed: std::time::Duration,
+        island_count: usize,
+    ) {
+        self.benchmark_metrics.island_build += elapsed;
+        self.benchmark_metrics.island_count = island_count;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_solver(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.solver += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_events(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.events += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_commit(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.commit += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn benchmark_metrics(&self) -> CollisionStepMetrics {
+        let mut metrics = self.benchmark_metrics;
+        let mut retained = self.context.retained_capacity_bytes()
+            + self.events.capacity() * std::mem::size_of::<CollisionEvent>()
+            + self.broad_phase.retained_capacity_bytes()
+            + self.narrow_phase.retained_capacity_bytes()
+            + self.islands.retained_capacity_bytes()
+            + self.ccd_solver.retained_capacity_bytes()
+            + self
+                .solver_islands
+                .capacity()
+                .saturating_mul(std::mem::size_of::<SolverIsland>());
+        if let Some(index) = &self.spatial_index {
+            retained = retained.saturating_add(index.retained_capacity_bytes());
+        }
+        if let Some(cache) = &self.contact_cache {
+            retained = retained.saturating_add(cache.retained_capacity_bytes());
+        }
+        for island in &self.solver_islands {
+            retained = retained.saturating_add(island.retained_capacity_bytes());
+        }
+        metrics.retained_scratch_bytes = retained;
+        metrics
     }
 
     pub(crate) fn stage_prediction(&mut self, body_id: BodyId, state: BodyState) {
@@ -170,9 +267,15 @@ impl CollisionSystem {
         if let Some(cache) = self.contact_cache.as_ref() {
             cache.warm_start_solver(&mut self.context.solver_manifolds);
         }
+        #[cfg(feature = "bench-internals")]
+        let island_started = std::time::Instant::now();
         self.islands
             .build(&self.context.body_types, &self.context.solver_manifolds)?;
         let island_count = self.islands.island_count();
+        #[cfg(feature = "bench-internals")]
+        self.record_island_build(island_started.elapsed(), island_count);
+        #[cfg(feature = "bench-internals")]
+        let solver_started = std::time::Instant::now();
         if self.solver_islands.len() < island_count {
             self.solver_islands
                 .try_reserve(island_count - self.solver_islands.len())
@@ -274,6 +377,8 @@ impl CollisionSystem {
                 Ok::<(), CollisionError>(())
             })?;
         }
+        #[cfg(feature = "bench-internals")]
+        self.record_solver(solver_started.elapsed());
 
         let context = &mut self.context;
         for island in self.solver_islands.iter().take(island_count) {

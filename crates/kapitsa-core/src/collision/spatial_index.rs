@@ -460,6 +460,18 @@ impl SpatialIndex {
         node.height = height;
         Ok(())
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        self.nodes.capacity() * size_of::<Option<Node>>()
+            + self.free_nodes.capacity() * size_of::<usize>()
+            + self.leaves.capacity() * size_of::<(ColliderId, usize)>()
+            + self.present.capacity() * size_of::<ColliderId>()
+            + self.stale.capacity() * size_of::<ColliderId>()
+            + self.query_stack.capacity() * size_of::<usize>()
+    }
 }
 
 #[cfg(test)]

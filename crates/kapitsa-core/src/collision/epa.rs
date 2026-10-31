@@ -40,6 +40,16 @@ impl EpaWorkspace {
         }
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        self.vertices.capacity() * size_of::<SupportPoint>()
+            + self.faces.capacity() * size_of::<Face>()
+            + self.visible.capacity() * size_of::<usize>()
+            + self.horizon.capacity() * size_of::<(usize, usize)>()
+    }
+
     pub(crate) fn solve(
         &mut self,
         simplex: &Simplex,

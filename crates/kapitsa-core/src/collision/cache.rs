@@ -135,6 +135,14 @@ impl ContactCache {
         self.next.clear();
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        self.current.capacity() * size_of::<(ContactKey, CachedImpulse)>()
+            + self.next.capacity() * size_of::<(ContactKey, CachedImpulse)>()
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.current.len()

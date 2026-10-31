@@ -148,6 +148,17 @@ impl IslandLayout {
     pub(crate) fn manifold_island(&self, manifold: usize) -> Option<usize> {
         self.manifold_islands.get(manifold).copied().flatten()
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        self.parents.capacity() * size_of::<usize>()
+            + self.root_islands.capacity() * size_of::<Option<usize>>()
+            + self.body_islands.capacity() * size_of::<Option<usize>>()
+            + self.connected.capacity() * size_of::<bool>()
+            + self.manifold_islands.capacity() * size_of::<Option<usize>>()
+    }
 }
 
 fn find(parents: &mut [usize], mut body: usize) -> Result<usize, CollisionError> {

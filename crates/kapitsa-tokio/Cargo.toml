@@ -13,5 +13,9 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio = { version = "1", features = ["test-util"] }
 
 [[bench]]
+name = "collisions"
+harness = false
+
+[[bench]]
 name = "parallel_step"
 harness = false

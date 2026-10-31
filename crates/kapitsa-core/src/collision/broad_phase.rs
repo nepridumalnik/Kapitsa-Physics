@@ -101,6 +101,16 @@ impl BroadPhase {
         &self.candidates
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        self.lookup.as_ref().map_or(0, |lookup| {
+            lookup.capacity() * size_of::<(ColliderId, usize)>()
+        }) + self.query_results.capacity() * size_of::<ColliderId>()
+            + self.candidates.capacity() * size_of::<CollisionPair>()
+    }
+
     fn allows_pair(a: &CollisionProxy, b: &CollisionProxy) -> bool {
         if a.collider == b.collider || a.body == b.body || !a.filter.allows(&b.filter) {
             return false;

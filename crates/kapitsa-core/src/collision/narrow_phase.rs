@@ -752,6 +752,17 @@ impl NarrowPhase {
         )
         .map(Some)
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        self.epa.retained_capacity_bytes()
+            + self.mesh_workspace.retained_capacity_bytes()
+            + self.mesh_candidates.capacity() * size_of::<usize>()
+            + self.height_field_candidates.capacity() * size_of::<HeightFieldTriangle>()
+            + self.level_set_candidates.capacity() * size_of::<super::level_set::LevelSetCell>()
+    }
 }
 
 fn expanded_convex_bounds(

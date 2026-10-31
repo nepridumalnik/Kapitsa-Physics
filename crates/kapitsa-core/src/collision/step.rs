@@ -67,4 +67,29 @@ impl StepContext {
         self.interactions.clear();
         self.events.clear();
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        [
+            self.predicted_states.capacity() * size_of::<(BodyId, BodyState)>(),
+            self.body_indices.capacity() * size_of::<Option<(BodyId, usize)>>(),
+            self.solver_body_indices.capacity() * size_of::<Option<(BodyId, usize)>>(),
+            self.body_types.capacity() * size_of::<BodyType>(),
+            self.colliders.capacity() * size_of::<CollisionProxy>(),
+            self.spatial_proxies.capacity() * size_of::<(ColliderId, Aabb)>(),
+            self.manifolds.capacity() * size_of::<ContactManifold>(),
+            self.solver_bodies.capacity() * size_of::<SolverBody>(),
+            self.solver_body_predictions.capacity() * size_of::<usize>(),
+            self.ccd_states.capacity() * size_of::<BodyState>(),
+            self.ccd_elapsed.capacity() * size_of::<f64>(),
+            self.ccd_impact_counts.capacity() * size_of::<u32>(),
+            self.solver_manifolds.capacity() * size_of::<SolverManifold>(),
+            self.interactions.capacity() * size_of::<CollisionInteraction>(),
+            self.events.capacity() * size_of::<CollisionEvent>(),
+        ]
+        .into_iter()
+        .fold(0_usize, usize::saturating_add)
+    }
 }
