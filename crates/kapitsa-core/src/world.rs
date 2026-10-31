@@ -562,8 +562,11 @@ impl PhysicsWorld {
             context.ccd_elapsed.push(0.0);
             context.ccd_impact_counts.push(0);
         }
+        self.collision_system.context.ccd_processed_pairs.clear();
+        self.collision_system.context.ccd_processed_time = 0.0;
 
         let mut elapsed = 0.0;
+        let time_tolerance = f64::EPSILON * dt.max(1.0) * 128.0;
         loop {
             let remaining = (dt - elapsed).max(0.0);
             if remaining <= f64::EPSILON * dt.max(1.0) {
@@ -577,6 +580,12 @@ impl PhysicsWorld {
                     .collision_system
                     .candidate(candidate_index)
                     .ok_or(CollisionError::InvalidContact)?;
+                let context = &self.collision_system.context;
+                if elapsed <= context.ccd_processed_time + time_tolerance
+                    && context.ccd_processed_pairs.contains(&pair)
+                {
+                    continue;
+                }
                 let (collider_a, collider_b) = {
                     let collider_a = self
                         .colliders
@@ -730,6 +739,9 @@ impl PhysicsWorld {
                 body_b_id,
             )?;
             let impact_elapsed = elapsed + remaining * hit.toi;
+            if impact_elapsed < elapsed {
+                return Err(CollisionError::NonConvergent);
+            }
             let (body_a, body_b) = {
                 (
                     self.bodies
@@ -906,8 +918,110 @@ impl PhysicsWorld {
             {
                 self.collision_system.context.ccd_impact_counts[prediction_b] += 1;
             }
+            if impact_elapsed > self.collision_system.context.ccd_processed_time + time_tolerance {
+                self.collision_system.context.ccd_processed_pairs.clear();
+                self.collision_system.context.ccd_processed_time = impact_elapsed;
+            }
+            if self
+                .collision_system
+                .context
+                .ccd_processed_pairs
+                .contains(&pair)
+            {
+                return Err(CollisionError::NonConvergent);
+            }
+            self.collision_system
+                .context
+                .ccd_processed_pairs
+                .try_reserve(1)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.collision_system.context.ccd_processed_pairs.push(pair);
             elapsed = impact_elapsed;
+            self.refresh_ccd_candidates(elapsed, dt)?;
         }
+    }
+
+    fn refresh_ccd_candidates(&mut self, elapsed: f64, dt: f64) -> Result<(), CollisionError> {
+        let proxy_count = self.collision_system.context.colliders.len();
+        self.collision_system.context.spatial_proxies.clear();
+        for proxy_index in 0..proxy_count {
+            let proxy = self
+                .collision_system
+                .context
+                .colliders
+                .get(proxy_index)
+                .copied()
+                .ok_or(CollisionError::InvalidContact)?;
+            let prediction_index = Self::predicted_body_index(
+                &self.collision_system.context.body_indices,
+                self.world_id,
+                proxy.body,
+            )?;
+            let end_state = self
+                .collision_system
+                .context
+                .predicted_states
+                .get(prediction_index)
+                .map(|(_, state)| *state)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_entry = self
+                .colliders
+                .get(proxy.collider.dense)
+                .filter(|_| proxy.collider.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            if collider_entry.body != proxy.body {
+                return Err(CollisionError::InvalidContact);
+            }
+            let bounds = if proxy.body_type == BodyType::Static {
+                collider_entry
+                    .collider
+                    .world_bounds(&end_state.transform())
+                    .map_err(|_| CollisionError::GeometryBounds)?
+            } else {
+                let start_state =
+                    self.body_state_at_ccd(proxy.body, prediction_index, elapsed, dt)?;
+                let start = start_state
+                    .transform()
+                    .compose(&collider_entry.collider.local_transform())
+                    .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                let end = end_state
+                    .transform()
+                    .compose(&collider_entry.collider.local_transform())
+                    .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                crate::collision::swept_bounds(collider_entry.collider.shape(), start, end)?
+            };
+            self.collision_system
+                .context
+                .colliders
+                .get_mut(proxy_index)
+                .ok_or(CollisionError::InvalidContact)?
+                .bounds = bounds;
+            if let Some(bounds) = bounds {
+                self.collision_system
+                    .context
+                    .spatial_proxies
+                    .try_reserve(1)
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                self.collision_system
+                    .context
+                    .spatial_proxies
+                    .push((proxy.collider, bounds));
+            }
+        }
+
+        #[cfg(feature = "bench-internals")]
+        let started = Instant::now();
+        self.collision_system.synchronize_spatial_index()?;
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_spatial_index(started.elapsed());
+
+        #[cfg(feature = "bench-internals")]
+        let started = Instant::now();
+        self.collision_system.generate_candidates()?;
+        #[cfg(feature = "bench-internals")]
+        self.collision_system.record_broad_phase(started.elapsed());
+        Ok(())
     }
 
     fn body_state_at_ccd(

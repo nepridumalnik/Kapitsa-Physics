@@ -2,6 +2,7 @@ use crate::{
     collider::{Collider, CollisionMode},
     collision::{CollisionConfig, CollisionError, CollisionEventKind, CollisionPair},
     mass::MassProperties,
+    material::PhysicsMaterial,
     rigid_body::{CcdMode, RigidBody},
     shape::{
         BoneInfluence, Capsule, Cuboid, HeightField, LevelSet, Plane, Shape, SkinnedTriangleMesh,
@@ -271,6 +272,83 @@ fn continuous_dynamic_spheres_resolve_relative_toi() {
                 .contact
                 .is_some_and(|contact| contact.normal_impulse > 0.0)
     }));
+}
+
+#[test]
+fn continuous_rebound_refreshes_candidates_for_the_remaining_step() {
+    let mut world = PhysicsWorld::new();
+    let material = world
+        .add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0).unwrap())
+        .unwrap();
+
+    let wall_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let wall = world
+        .add_collider(
+            wall_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    world.set_collider_material(wall, Some(material)).unwrap();
+
+    let target_body = world
+        .add_body(RigidBody::new_static(
+            Transform::new(Vec3::new(15.0, 0.0, 0.0), Quat::IDENTITY).unwrap(),
+        ))
+        .unwrap();
+    let target = world
+        .add_collider(
+            target_body,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    world.set_collider_material(target, Some(material)).unwrap();
+
+    let mut body = dynamic_body(Vec3::new(5.0, 0.0, 0.0), Vec3::new(-2000.0, 0.0, 0.0));
+    body.set_ccd_mode(CcdMode::Continuous);
+    let dynamic = world.add_body(body).unwrap();
+    let sphere = world
+        .add_collider(
+            dynamic,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    world.set_collider_material(sphere, Some(material)).unwrap();
+
+    world.step(0.01).unwrap();
+
+    let wall_pair = CollisionPair::new(wall, sphere).unwrap();
+    let target_pair = CollisionPair::new(target, sphere).unwrap();
+    for pair in [wall_pair, target_pair] {
+        assert!(world.collision_events().iter().any(|event| {
+            event.kind == CollisionEventKind::Impact
+                && event.pair == pair
+                && event
+                    .contact
+                    .is_some_and(|contact| contact.normal_impulse > 0.0)
+        }));
+    }
+    assert_eq!(
+        world
+            .collision_events()
+            .iter()
+            .filter(|event| event.kind == CollisionEventKind::Impact)
+            .count(),
+        2
+    );
+    let state = world.body(dynamic).unwrap().state();
+    assert!(state.transform().translation().x < 15.0);
+    assert!(state.linear_velocity().x < 0.0);
 }
 
 #[test]

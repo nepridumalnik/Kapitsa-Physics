@@ -4,8 +4,9 @@ use kapitsa_core::{
     collider::Collider,
     collision::{CollisionEvent, CollisionEventKind, QueryFilter, Ray},
     mass::MassProperties,
-    rigid_body::RigidBody,
-    shape::{Plane, Shape, Sphere},
+    material::PhysicsMaterial,
+    rigid_body::{CcdMode, RigidBody},
+    shape::{Cuboid, Plane, Shape, Sphere},
     transform::Transform,
     world::PhysicsWorld,
 };
@@ -60,6 +61,63 @@ fn collision_world() -> PhysicsWorld {
             )
             .expect("ball collider");
     }
+    world
+}
+
+fn ccd_rebound_world() -> PhysicsWorld {
+    let mut world = PhysicsWorld::new();
+    let material = world
+        .add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0).expect("material"))
+        .expect("material ID");
+    let wall_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("wall body");
+    let wall = world
+        .add_collider(
+            wall_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).expect("wall")),
+                Transform::identity(),
+            ),
+        )
+        .expect("wall collider");
+    world
+        .set_collider_material(wall, Some(material))
+        .expect("wall material");
+
+    let target_body = world
+        .add_body(RigidBody::new_static(transform(Vec3::new(15.0, 0.0, 0.0))))
+        .expect("target body");
+    let target = world
+        .add_collider(
+            target_body,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).expect("target sphere")),
+                Transform::identity(),
+            ),
+        )
+        .expect("target collider");
+    world
+        .set_collider_material(target, Some(material))
+        .expect("target material");
+
+    let mut body = dynamic(Vec3::new(5.0, 0.0, 0.0));
+    body.set_linear_velocity(Vec3::new(-2000.0, 0.0, 0.0))
+        .expect("body velocity");
+    body.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(body).expect("moving body");
+    let sphere = world
+        .add_collider(
+            body,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                Transform::identity(),
+            ),
+        )
+        .expect("moving collider");
+    world
+        .set_collider_material(sphere, Some(material))
+        .expect("moving material");
     world
 }
 
@@ -244,4 +302,36 @@ async fn collision_results_match_world_and_controller_worker_counts() {
     tokio::task::yield_now().await;
     simulation.stop().await.expect("stop");
     assert_worlds_near(simulation.world().expect("stopped world"), &expected);
+}
+
+#[tokio::test]
+async fn refreshed_ccd_candidates_match_sequential_and_tokio_steps() {
+    let dt = 0.01;
+    let mut expected = ccd_rebound_world();
+    expected.step(dt).expect("sequential CCD step");
+    let expected_impacts = expected
+        .collision_events()
+        .iter()
+        .filter(|event| event.kind == CollisionEventKind::Impact)
+        .count();
+    assert_eq!(expected_impacts, 2);
+
+    let mut worker_config = SchedulerConfig {
+        target_hz: 100,
+        min_hz: 100,
+        max_workers: 1,
+        adaptive: false,
+        ..SchedulerConfig::default()
+    };
+    let mut controller =
+        PhysicsController::new(ccd_rebound_world(), worker_config.clone()).expect("controller");
+    controller.step().await.expect("Tokio CCD step");
+    assert_worlds_near(controller.world().expect("controller world"), &expected);
+
+    worker_config.max_workers = 2;
+    let mut controller =
+        PhysicsController::new(ccd_rebound_world(), worker_config).expect("two-worker controller");
+    controller.set_active_workers(2).expect("worker count");
+    controller.step().await.expect("two-worker CCD step");
+    assert_worlds_near(controller.world().expect("controller world"), &expected);
 }

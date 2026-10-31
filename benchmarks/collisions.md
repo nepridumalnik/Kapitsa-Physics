@@ -51,6 +51,10 @@ Times are milliseconds for eight steps; controller/world creation is outside the
 
 Windows Performance Recorder and `xperf` are installed, and the Heap profile is listed. `wpr -start Heap -filemode` failed with `0x80070005 Access is denied` in this session, so no external heap trace or malloc counts were collected. The report therefore uses the explicitly labeled logical capacity metrics above; it does not present them as allocation counts.
 
+### CCD candidate refresh, stage 2
+
+After rebuilding CCD candidates after each resolved impact, the 64-body wall case measured 140.571 / 142.769 / 149.024 ms per step; its median CCD phase was 142.557 ms. The pinned baseline above was 279.832 / 284.261 / 292.727 ms per step with a 284.076 ms CCD phase. Median full-step time fell by 49.8%; the ranges do not overlap. The updated final candidate set contained 155 pairs versus 64 in the baseline. This is an intermediate stage measurement, before the remaining refactors.
+
 Release measurements taken on 2026-10-31 with `rustc 1.98.0` (`x86_64-pc-windows-msvc`) on an AMD Ryzen 9 7900X3D. Each row is the median of five independently constructed worlds; world construction is outside the timed region. Timings are local measurements, not performance targets.
 
 Run the core phase benchmark with:
