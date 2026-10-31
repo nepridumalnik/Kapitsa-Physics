@@ -160,8 +160,8 @@ impl SolverWorkspace {
             let body_b = bodies
                 .get(manifold.body_b)
                 .ok_or(CollisionError::InvalidContact)?;
-            for (point_index, contact) in manifold.manifold.points().enumerate() {
-                validate_contact(contact)?;
+            for (point_index, contact) in manifold.manifold.points().iter().enumerate() {
+                validate_contact(*contact)?;
                 let normal = contact
                     .normal
                     .try_normalize()

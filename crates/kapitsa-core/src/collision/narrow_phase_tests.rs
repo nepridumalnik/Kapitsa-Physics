@@ -69,7 +69,7 @@ fn plane_contacts_front_side_and_rejects_back_side() {
         )
         .unwrap()
         .unwrap();
-    let contact = front.points().next().unwrap();
+    let contact = front.points().first().unwrap();
     assert_eq!(front.len(), 1);
     assert!((contact.penetration - 0.25).abs() < 1.0e-12);
     assert_eq!(contact.normal, Vec3::Y);
@@ -114,7 +114,7 @@ fn plane_sensor_is_two_sided_and_contact_normal_follows_pair_order() {
         )
         .unwrap()
         .unwrap();
-    assert_eq!(manifold.points().next().unwrap().normal, Vec3::Y);
+    assert_eq!(manifold.points().first().unwrap().normal, Vec3::Y);
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn triangle_contacts_are_two_sided_and_use_exact_triangle_geometry() {
         )
         .unwrap()
         .unwrap();
-    let contact = manifold.points().next().unwrap();
+    let contact = manifold.points().first().unwrap();
     assert!((contact.penetration - 0.25).abs() < 1.0e-12);
     assert_eq!(contact.normal, -Vec3::Y);
 }

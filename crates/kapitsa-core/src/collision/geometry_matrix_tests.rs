@@ -161,14 +161,14 @@ fn triangle_cuboid_contacts_match_independent_sat_reference() {
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(actual.is_some(), expected, "{name}");
         if let Some(manifold) = actual {
-            let contact = manifold.points().next().expect("contact point");
+            let contact = manifold.points().first().expect("contact point");
             assert!(contact.normal.is_finite(), "{name}: invalid normal");
             assert!(contact.penetration.is_finite(), "{name}: invalid depth");
             let mut reverse_narrow_phase = NarrowPhase::new();
             let reverse = detect(&mut reverse_narrow_phase, pair, &cuboid, &triangle)
                 .unwrap_or_else(|error| panic!("{name} reversed: {error}"))
                 .expect("reversed contact");
-            let reverse_normal = reverse.points().next().expect("contact point").normal;
+            let reverse_normal = reverse.points().first().expect("contact point").normal;
             assert!(
                 (contact.normal + reverse_normal).length() < 1.0e-6,
                 "{name}"
@@ -226,7 +226,7 @@ fn triangle_sphere_contacts_match_independent_distance_reference() {
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(manifold.is_some(), expected_contact, "{name}");
         if let Some(manifold) = manifold {
-            let contact = manifold.points().next().expect("contact point");
+            let contact = manifold.points().first().expect("contact point");
             let expected_penetration = (radius - expected_distance).max(0.0);
             assert!(
                 (contact.penetration - expected_penetration).abs() < 1.0e-9,
@@ -237,7 +237,7 @@ fn triangle_sphere_contacts_match_independent_distance_reference() {
             let reverse = detect(&mut reverse_narrow_phase, pair, &sphere, &triangle)
                 .unwrap_or_else(|error| panic!("{name} reversed: {error}"))
                 .expect("reversed contact");
-            let reverse_normal = reverse.points().next().expect("contact point").normal;
+            let reverse_normal = reverse.points().first().expect("contact point").normal;
             assert!(
                 (contact.normal + reverse_normal).length() < 1.0e-6,
                 "{name}"
@@ -591,8 +591,8 @@ fn assert_symmetric_contact(pair: CollisionPair, left: &Geometry, right: &Geomet
     let reverse = detect(&mut reverse_narrow_phase, pair, right, left)
         .unwrap_or_else(|error| panic!("{} vs {} reversed: {error}", left.name, right.name))
         .unwrap_or_else(|| panic!("{} vs {} reversed: expected contact", left.name, right.name));
-    let normal_forward = forward.points().next().expect("contact point").normal;
-    let normal_reverse = reverse.points().next().expect("contact point").normal;
+    let normal_forward = forward.points().first().expect("contact point").normal;
+    let normal_reverse = reverse.points().first().expect("contact point").normal;
     assert!(
         (normal_forward + normal_reverse).length() <= 1.0e-6,
         "{} vs {}: normals did not reverse ({normal_forward:?}, {normal_reverse:?})",
@@ -612,7 +612,7 @@ fn assert_known_penetration(pair: CollisionPair, left: &Geometry, right: &Geomet
         let manifold = detect(&mut narrow_phase, pair, left, right)
             .expect("known geometry should be valid")
             .expect("known geometry should contact");
-        let contact = manifold.points().next().expect("contact point");
+        let contact = manifold.points().first().expect("contact point");
         assert!((contact.penetration - expected).abs() <= 1.0e-5);
         assert!((contact.normal - Vec3::X).length() <= 1.0e-5);
     }

@@ -110,6 +110,9 @@ vertices and BVH bounds in staging buffers; on error, the last committed pose
 and bounds remain active. Contacts are reduced into persistent manifolds with
 feature IDs; contact impulses are cached for warm starting. Dynamic bodies
 connected by contacts are grouped into deterministically ordered islands.
+Each manifold stores up to four active contacts in a fixed array and exposes
+only the counted slice. Its cached world-space contact positions support
+contact reduction and mesh/heightfield manifold merging.
 
 Triangles are finite, zero-thickness, two-sided surfaces. Sphere contacts use
 the closest point on the finite triangle; other convex contacts use GJK distance

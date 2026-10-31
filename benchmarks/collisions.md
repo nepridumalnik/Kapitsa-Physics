@@ -319,6 +319,33 @@ Median full-step speedup was 1.47x at two workers and 2.00x at four workers
 relative to one worker. This measures the current copied layout; it is not a
 packed-layout parallel speedup comparison.
 
+## Fixed-capacity contact manifolds, stage 14
+
+`ContactManifold` now stores `[ContactPoint; 4]` and a `u8` active count; its
+slice exposes only the counted contacts. Unused entries contain a private
+valid sentinel. `world_points` remains because contact reduction uses the
+cached positions. Mesh and heightfield manifold merging and reversed manifold
+creation now reuse those cached positions instead of transforming the same
+local points again. Replacing a deeper duplicate updates its cached position
+alongside its contact.
+
+On this target, `size_of::<ContactManifold>()` fell from 648 B to 616 B, a
+32-byte (4.9%) reduction per inline manifold value. The following five-sample
+release comparisons use the same scenarios and three untimed warm-up steps as
+the solver-island results above:
+
+| Workload | Before min / median / max | After min / median / max |
+|---|---:|---:|
+| 1 island, 1,000 Dynamic | 20.205 / 20.293 / 20.400 ms | 20.245 / 20.280 / 20.651 ms |
+| 500 islands, 2 Dynamic each | 7.200 / 7.247 / 7.473 ms | 7.199 / 7.227 / 7.269 ms |
+| 500 Dynamic, shared Static plane | 4.252 / 4.256 / 4.287 ms | 4.263 / 4.364 / 4.463 ms |
+| 1,000 Dynamic, 4,000 contacts | 39.671 / 39.956 / 40.098 ms | 39.930 / 40.045 / 40.475 ms |
+
+All before/after ranges overlap, so these full-step runs show no measurable
+speed change. The storage reduction is established by the type-size check; the
+cached-position reuse also removes repeated transform calculations in the
+mesh and heightfield merge path. Logical capacity is not an allocator count.
+
 Run the focused groups with:
 
 ```powershell

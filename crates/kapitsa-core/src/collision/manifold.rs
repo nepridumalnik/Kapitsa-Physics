@@ -16,6 +16,17 @@ pub(crate) struct ContactPoint {
 }
 
 impl ContactPoint {
+    const EMPTY: Self = Self {
+        local_a: Vec3::ZERO,
+        local_b: Vec3::ZERO,
+        normal: Vec3::X,
+        penetration: 0.0,
+        feature_id: 0,
+        normal_impulse: 0.0,
+        normal_impulse_delta: 0.0,
+        tangent_impulse: [0.0; 2],
+    };
+
     pub(crate) fn from_world(
         body_a: &Transform,
         body_b: &Transform,
@@ -63,42 +74,73 @@ impl ContactPoint {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ContactManifold {
     pub(crate) pair: CollisionPair,
-    points: [Option<ContactPoint>; 4],
+    points: [ContactPoint; 4],
     world_points: [Vec3; 4],
-    count: usize,
+    count: u8,
 }
 
 impl ContactManifold {
     pub(crate) const fn new(pair: CollisionPair) -> Self {
         Self {
             pair,
-            points: [None; 4],
+            points: [ContactPoint::EMPTY; 4],
             world_points: [Vec3::ZERO; 4],
             count: 0,
         }
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.count
+        usize::from(self.count)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.count == 0
     }
 
-    pub(crate) fn points(&self) -> impl Iterator<Item = ContactPoint> + '_ {
-        self.points
-            .iter()
-            .take(self.count)
-            .filter_map(|point| *point)
+    pub(crate) fn points(&self) -> &[ContactPoint] {
+        &self.points[..usize::from(self.count)]
     }
 
     pub(crate) fn point_mut(&mut self, index: usize) -> Option<&mut ContactPoint> {
-        self.points.get_mut(index)?.as_mut()
+        self.points
+            .get_mut(..usize::from(self.count))?
+            .get_mut(index)
     }
 
     pub(crate) fn point(&self, index: usize) -> Option<&ContactPoint> {
-        self.points.get(index)?.as_ref()
+        self.points.get(..usize::from(self.count))?.get(index)
+    }
+
+    pub(crate) fn world_point(&self, index: usize) -> Option<Vec3> {
+        self.world_points
+            .get(..usize::from(self.count))?
+            .get(index)
+            .copied()
+    }
+
+    pub(crate) fn replace_point(
+        &mut self,
+        index: usize,
+        point: ContactPoint,
+        world_position: Vec3,
+    ) -> Result<(), CollisionError> {
+        if !world_position.is_finite() {
+            return Err(CollisionError::InvalidContact);
+        }
+        let active_count = usize::from(self.count);
+        let point_slot = self
+            .points
+            .get_mut(..active_count)
+            .and_then(|points| points.get_mut(index))
+            .ok_or(CollisionError::InvalidContact)?;
+        let position_slot = self
+            .world_points
+            .get_mut(..active_count)
+            .and_then(|points| points.get_mut(index))
+            .ok_or(CollisionError::InvalidContact)?;
+        *point_slot = point;
+        *position_slot = world_position;
+        Ok(())
     }
 
     pub(crate) fn insert(
@@ -115,33 +157,25 @@ impl ContactManifold {
         {
             return Err(CollisionError::InvalidContact);
         }
-        for index in 0..self.count {
+        for index in 0..usize::from(self.count) {
             let existing = self
                 .points
                 .get(index)
-                .and_then(|entry| *entry)
                 .ok_or(CollisionError::InvalidContact)?;
             if existing.feature_id == point.feature_id {
                 let mut updated = point;
                 updated.normal_impulse = existing.normal_impulse;
                 updated.tangent_impulse = existing.tangent_impulse;
-                *self
-                    .points
-                    .get_mut(index)
-                    .ok_or(CollisionError::InvalidContact)? = Some(updated);
-                *self
-                    .world_points
-                    .get_mut(index)
-                    .ok_or(CollisionError::InvalidContact)? = world_position;
+                self.replace_point(index, updated, world_position)?;
                 return Ok(());
             }
         }
-        if self.count < self.points.len() {
-            let index = self.count;
+        if usize::from(self.count) < self.points.len() {
+            let index = usize::from(self.count);
             *self
                 .points
                 .get_mut(index)
-                .ok_or(CollisionError::InvalidContact)? = Some(point);
+                .ok_or(CollisionError::InvalidContact)? = point;
             *self
                 .world_points
                 .get_mut(index)
@@ -158,20 +192,19 @@ impl ContactManifold {
         point: ContactPoint,
         world_position: Vec3,
     ) -> Result<(), CollisionError> {
-        let mut candidates = [(None, Vec3::ZERO); 5];
+        let mut candidates = [(ContactPoint::EMPTY, Vec3::ZERO); 5];
         let mut deepest = 0;
         let mut deepest_penetration = f64::NEG_INFINITY;
         for (index, candidate) in candidates.iter_mut().take(4).enumerate() {
-            let contact = self
+            let contact = *self
                 .points
                 .get(index)
-                .and_then(|entry| *entry)
                 .ok_or(CollisionError::InvalidContact)?;
             let position = *self
                 .world_points
                 .get(index)
                 .ok_or(CollisionError::InvalidContact)?;
-            *candidate = (Some(contact), position);
+            *candidate = (contact, position);
             if contact.penetration > deepest_penetration {
                 deepest = index;
                 deepest_penetration = contact.penetration;
@@ -179,7 +212,7 @@ impl ContactManifold {
         }
         *candidates
             .get_mut(4)
-            .ok_or(CollisionError::InvalidContact)? = (Some(point), world_position);
+            .ok_or(CollisionError::InvalidContact)? = (point, world_position);
         if point.penetration > deepest_penetration {
             deepest = 4;
         }
@@ -202,11 +235,9 @@ impl ContactManifold {
             if index == excluded {
                 continue;
             }
-            let candidate = candidate.ok_or(CollisionError::InvalidContact)?;
             *self
-                .points
-                .get_mut(destination)
-                .ok_or(CollisionError::InvalidContact)? = Some(candidate);
+                .point_mut(destination)
+                .ok_or(CollisionError::InvalidContact)? = candidate;
             *self
                 .world_points
                 .get_mut(destination)
@@ -219,7 +250,7 @@ impl ContactManifold {
 }
 
 fn patch_spread(
-    candidates: &[(Option<ContactPoint>, Vec3); 5],
+    candidates: &[(ContactPoint, Vec3); 5],
     omitted: usize,
 ) -> Result<f64, CollisionError> {
     let mut maximum_distance = 0.0_f64;

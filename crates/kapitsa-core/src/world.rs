@@ -1280,7 +1280,7 @@ impl PhysicsWorld {
             }
             let solved_point = solved_manifold
                 .points()
-                .next()
+                .first()
                 .ok_or(CollisionError::InvalidContact)?;
             let point_a = solved_a.transform().transform_point(solved_point.local_a);
             let point_b = solved_b.transform().transform_point(solved_point.local_b);
@@ -1785,7 +1785,7 @@ impl PhysicsWorld {
             let mut deepest = None;
             let mut total_impulse = 0.0;
             let mut impact = false;
-            for point in manifold.points() {
+            for point in manifold.points().iter().copied() {
                 total_impulse += point.normal_impulse;
                 if !total_impulse.is_finite() {
                     return Err(CollisionError::ArithmeticOverflow);

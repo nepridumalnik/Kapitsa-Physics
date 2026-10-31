@@ -114,7 +114,7 @@ fn normal_impulses_apply_restitution_and_separate_position_correction() {
         manifolds[0]
             .manifold
             .points()
-            .next()
+            .first()
             .unwrap()
             .normal_impulse
             > 0.0
@@ -138,7 +138,7 @@ fn friction_limits_tangent_impulses_and_creates_angular_response() {
     let ball = bodies[1].body();
     assert!(ball.state().linear_velocity().x < 10.0);
     assert!(ball.state().angular_velocity().z.abs() > 0.0);
-    let contact = manifolds[0].manifold.points().next().unwrap();
+    let contact = manifolds[0].manifold.points().first().unwrap();
     let friction_limit = 0.3 * contact.normal_impulse;
     assert!(
         contact.tangent_impulse[0].hypot(contact.tangent_impulse[1]) <= friction_limit + 1.0e-12

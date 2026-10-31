@@ -64,7 +64,11 @@ fn manifold_reduction_keeps_the_contact_patch_corners() {
         .expect("reduce patch");
 
     assert_eq!(manifold.len(), 4);
-    let features: Vec<_> = manifold.points().map(|point| point.feature_id).collect();
+    let features: Vec<_> = manifold
+        .points()
+        .iter()
+        .map(|point| point.feature_id)
+        .collect();
     assert!(!features.contains(&5));
     assert_eq!(features.len(), 4);
 }
@@ -86,7 +90,31 @@ fn manifold_reduction_preserves_the_deepest_point() {
         .insert(contact(5, 0.5, Vec3::ZERO), Vec3::ZERO)
         .expect("reduce patch");
 
-    assert!(manifold.points().any(|point| point.feature_id == 5));
+    assert!(manifold.points().iter().any(|point| point.feature_id == 5));
+}
+
+#[test]
+fn active_contact_slice_and_checked_mutation_follow_count() {
+    let mut manifold = ContactManifold::new(pair());
+    assert!(manifold.points().is_empty());
+    assert!(manifold.point(0).is_none());
+    assert!(manifold.point_mut(0).is_none());
+
+    let position = Vec3::new(1.0, 2.0, 3.0);
+    manifold
+        .insert(contact(9, 0.1, position), position)
+        .expect("insert contact");
+    assert_eq!(manifold.points().len(), 1);
+    assert!(manifold.point(1).is_none());
+    assert!(manifold.point_mut(1).is_none());
+    assert_eq!(manifold.world_point(0), Some(position));
+
+    let next_position = Vec3::new(4.0, 5.0, 6.0);
+    manifold
+        .replace_point(0, contact(9, 0.2, next_position), next_position)
+        .expect("replace active contact");
+    assert_eq!(manifold.world_point(0), Some(next_position));
+    assert_eq!(manifold.points()[0].penetration, 0.2);
 }
 
 #[test]
@@ -102,7 +130,7 @@ fn regenerated_features_keep_cached_impulses() {
         .insert(contact(7, 0.3, Vec3::X), Vec3::X)
         .expect("update feature");
 
-    let updated = manifold.points().next().expect("updated contact");
+    let updated = manifold.points().first().expect("updated contact");
     assert_eq!(updated.penetration, 0.3);
     assert_eq!(updated.normal_impulse, 3.0);
     assert_eq!(updated.tangent_impulse, [0.25, -0.5]);

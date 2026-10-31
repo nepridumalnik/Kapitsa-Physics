@@ -92,7 +92,7 @@ fn cached_impulses_restore_for_matching_pair_feature_and_normal() {
     cache
         .warm_start_solver(std::slice::from_mut(&mut regenerated))
         .unwrap();
-    let point = regenerated.manifold.points().next().unwrap();
+    let point = regenerated.manifold.points().first().unwrap();
     assert_eq!(point.normal_impulse, 2.0);
     assert_eq!(point.tangent_impulse, [0.25, -0.5]);
 }
@@ -108,7 +108,7 @@ fn cache_rejects_changed_normals_and_drops_absent_features_on_commit() {
     cache
         .warm_start_solver(std::slice::from_mut(&mut changed))
         .unwrap();
-    let changed_contact = changed.manifold.points().next().unwrap();
+    let changed_contact = changed.manifold.points().first().unwrap();
     assert_eq!(changed_contact.normal_impulse, 0.0);
     assert_eq!(changed_contact.tangent_impulse, [0.0; 2]);
 
@@ -122,7 +122,7 @@ fn warm_start_reprojects_world_tangent_impulse_as_contact_normal_rotates() {
     let pair = pair();
     let previous = manifold(pair, Vec3::Y, 7, 2.0);
     let (old_a, old_b) = tangent_basis(Vec3::Y).unwrap();
-    let old_contact = previous.points().next().unwrap();
+    let old_contact = previous.points().first().unwrap();
     let tangent_world =
         old_a * old_contact.tangent_impulse[0] + old_b * old_contact.tangent_impulse[1];
     let mut cache = ContactCache::new();
@@ -139,7 +139,7 @@ fn warm_start_reprojects_world_tangent_impulse_as_contact_normal_rotates() {
         .warm_start_solver(std::slice::from_mut(&mut regenerated))
         .unwrap();
 
-    let contact = regenerated.manifold.points().next().unwrap();
+    let contact = regenerated.manifold.points().first().unwrap();
     let (new_a, new_b) = tangent_basis(normal).unwrap();
     let tangent_after = new_a * contact.tangent_impulse[0] + new_b * contact.tangent_impulse[1];
     let expected = tangent_world - normal * tangent_world.dot(normal);
@@ -158,7 +158,7 @@ fn warm_start_drops_changed_features_and_clamps_to_the_new_friction_cone() {
     cache
         .warm_start_solver(std::slice::from_mut(&mut changed_feature))
         .unwrap();
-    let changed = changed_feature.manifold.points().next().unwrap();
+    let changed = changed_feature.manifold.points().first().unwrap();
     assert_eq!(changed.normal_impulse, 0.0);
     assert_eq!(changed.tangent_impulse, [0.0; 2]);
 
@@ -166,7 +166,7 @@ fn warm_start_drops_changed_features_and_clamps_to_the_new_friction_cone() {
     cache
         .warm_start_solver(std::slice::from_mut(&mut same_feature))
         .unwrap();
-    let contact = same_feature.manifold.points().next().unwrap();
+    let contact = same_feature.manifold.points().first().unwrap();
     assert_eq!(contact.normal_impulse, 2.0);
     assert!((contact.tangent_impulse[0].hypot(contact.tangent_impulse[1]) - 0.2).abs() < 1.0e-12);
 }

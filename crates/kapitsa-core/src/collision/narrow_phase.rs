@@ -675,7 +675,7 @@ impl NarrowPhase {
             };
             let feature =
                 u64::try_from(triangle_index).map_err(|_| CollisionError::ArithmeticOverflow)?;
-            merge_contact_manifold(&mut manifold, contact, body_a, body_b, feature)?;
+            merge_contact_manifold(&mut manifold, contact, feature)?;
         }
         Ok(manifold)
     }
@@ -719,7 +719,7 @@ impl NarrowPhase {
             else {
                 continue;
             };
-            merge_contact_manifold(&mut manifold, contact, body_a, body_b, candidate.feature_id)?;
+            merge_contact_manifold(&mut manifold, contact, candidate.feature_id)?;
         }
         Ok(manifold)
     }
@@ -888,30 +888,22 @@ fn reverse_hit(hit: CcdHit) -> CcdHit {
 fn merge_contact_manifold(
     output: &mut Option<ContactManifold>,
     source: ContactManifold,
-    body_a: &Transform,
-    body_b: &Transform,
     feature: u64,
 ) -> Result<(), CollisionError> {
     let manifold = output.get_or_insert_with(|| ContactManifold::new(source.pair));
-    for mut point in source.points() {
+    for (point_index, mut point) in source.points().iter().copied().enumerate() {
         point.feature_id = combine_feature_ids(feature, point.feature_id);
-        let point_a = body_a.transform_point(point.local_a);
-        let point_b = body_b.transform_point(point.local_b);
-        let world_position = point_a
-            .checked_add(point_b)
-            .and_then(|sum| sum.checked_mul_scalar(0.5))
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let world_position = source
+            .world_point(point_index)
+            .ok_or(CollisionError::InvalidContact)?;
         let mut duplicate = false;
         for index in 0..manifold.len() {
             let existing = *manifold
                 .point(index)
                 .ok_or(CollisionError::InvalidContact)?;
-            let existing_a = body_a.transform_point(existing.local_a);
-            let existing_b = body_b.transform_point(existing.local_b);
-            let existing_position = existing_a
-                .checked_add(existing_b)
-                .and_then(|sum| sum.checked_mul_scalar(0.5))
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let existing_position = manifold
+                .world_point(index)
+                .ok_or(CollisionError::InvalidContact)?;
             let distance = world_position
                 .checked_sub(existing_position)
                 .and_then(Vec3::checked_length)
@@ -925,9 +917,7 @@ fn merge_contact_manifold(
                 && point.normal.dot(existing.normal) >= 0.995
             {
                 if point.penetration > existing.penetration {
-                    *manifold
-                        .point_mut(index)
-                        .ok_or(CollisionError::InvalidContact)? = point;
+                    manifold.replace_point(index, point, world_position)?;
                 }
                 duplicate = true;
                 break;
@@ -984,7 +974,7 @@ fn reverse_manifold(
     body_b: &Transform,
 ) -> Result<ContactManifold, CollisionError> {
     let mut reversed = ContactManifold::new(manifold.pair);
-    for point in manifold.points() {
+    for (index, point) in manifold.points().iter().copied().enumerate() {
         let world_a = body_a.transform_point(point.local_a);
         let world_b = body_b.transform_point(point.local_b);
         let reversed_point = ContactPoint::from_world(
@@ -996,7 +986,10 @@ fn reverse_manifold(
             point.penetration,
             point.feature_id,
         )?;
-        reversed.insert(reversed_point, world_a * 0.5 + world_b * 0.5)?;
+        let world_position = manifold
+            .world_point(index)
+            .ok_or(CollisionError::InvalidContact)?;
+        reversed.insert(reversed_point, world_position)?;
     }
     Ok(reversed)
 }
