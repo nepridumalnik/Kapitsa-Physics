@@ -144,37 +144,43 @@ async fn run_simulation(
         }
 
         let now = Instant::now();
-        accumulator = accumulator.saturating_add(now.duration_since(previous));
+        add_elapsed(&mut accumulator, now.duration_since(previous))?;
         previous = now;
-        let mut steps_since_yield = 0;
 
-        while accumulator >= controller.step_duration() && !*stop.borrow() {
+        for _ in 0..max_catch_up_steps {
+            if accumulator < controller.step_duration() || *stop.borrow() {
+                break;
+            }
             let step_duration = controller.step_duration();
             controller
                 .step()
                 .await
                 .map_err(SimulationError::Scheduler)?;
-            accumulator = accumulator.saturating_sub(step_duration);
+            accumulator -= step_duration;
 
             let completed_at = Instant::now();
-            accumulator = accumulator.saturating_add(completed_at.duration_since(previous));
+            add_elapsed(&mut accumulator, completed_at.duration_since(previous))?;
             previous = completed_at;
             controller
                 .set_simulation_time_debt(accumulator.saturating_sub(controller.step_duration()));
             metrics.send_replace(controller.metrics());
-
-            steps_since_yield += 1;
-            if steps_since_yield >= max_catch_up_steps {
-                tokio::task::yield_now().await;
-                steps_since_yield = 0;
-            }
         }
 
         if *stop.borrow() {
             break;
         }
+        if accumulator >= controller.step_duration() {
+            tokio::task::yield_now().await;
+        }
     }
 
+    Ok(())
+}
+
+fn add_elapsed(accumulator: &mut Duration, elapsed: Duration) -> Result<(), SimulationError> {
+    *accumulator = accumulator
+        .checked_add(elapsed)
+        .ok_or(SimulationError::SimulationTimeOverflow)?;
     Ok(())
 }
 
@@ -194,7 +200,7 @@ mod tests {
     };
     use kapitsa_math::{Mat3, Vec3};
 
-    use super::PhysicsSimulation;
+    use super::{PhysicsSimulation, add_elapsed};
     use crate::{SchedulerError, SimulationError, SimulationState};
 
     fn moving_world() -> (PhysicsWorld, BodyId) {
@@ -213,6 +219,16 @@ mod tests {
             Err(SimulationError::MissingRuntime)
         ));
         assert_eq!(simulation.state(), SimulationState::Stopped);
+    }
+
+    #[test]
+    fn elapsed_overflow_is_reported_without_changing_the_accumulator() {
+        let mut accumulator = Duration::MAX;
+        assert!(matches!(
+            add_elapsed(&mut accumulator, Duration::from_nanos(1)),
+            Err(SimulationError::SimulationTimeOverflow)
+        ));
+        assert_eq!(accumulator, Duration::MAX);
     }
 
     #[tokio::test(start_paused = true)]
