@@ -41,6 +41,7 @@ fn contact(feature_id: u64, penetration: f64, position: Vec3) -> ContactPoint {
         penetration,
         feature_id,
         normal_impulse: 0.0,
+        normal_impulse_delta: 0.0,
         tangent_impulse: [0.0; 2],
     }
 }

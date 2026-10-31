@@ -45,13 +45,11 @@ struct ActivePair {
 }
 
 /// Transactional lifecycle state, committed alongside the world step.
-#[allow(dead_code)]
 pub(crate) struct CollisionLifecycle {
     active: Vec<ActivePair>,
     next: Vec<ActivePair>,
 }
 
-#[allow(dead_code)]
 impl CollisionLifecycle {
     pub(crate) const fn new() -> Self {
         Self {

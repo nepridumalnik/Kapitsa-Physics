@@ -11,6 +11,7 @@ pub(crate) struct ContactPoint {
     pub(crate) penetration: f64,
     pub(crate) feature_id: u64,
     pub(crate) normal_impulse: f64,
+    pub(crate) normal_impulse_delta: f64,
     pub(crate) tangent_impulse: [f64; 2],
 }
 
@@ -52,6 +53,7 @@ impl ContactPoint {
             penetration,
             feature_id,
             normal_impulse: 0.0,
+            normal_impulse_delta: 0.0,
             tangent_impulse: [0.0; 2],
         })
     }

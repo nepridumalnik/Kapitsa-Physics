@@ -20,12 +20,13 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 use crate::{
     collider::Collider,
     collision::{
-        CollisionConfig, CollisionError, CollisionEvent, CollisionSystem, OverlapHit, QueryError,
-        QueryFilter, Ray, RayHit, ShapeHit, overlaps_shape, raycast_shape, sweep_shape,
+        CollisionConfig, CollisionError, CollisionEvent, CollisionInteraction, CollisionSystem,
+        ContactInfo, OverlapHit, QueryError, QueryFilter, Ray, RayHit, ShapeHit, SolverBody,
+        SolverManifold, SolverMaterial, overlaps_shape, raycast_shape, sweep_shape,
     },
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
-    rigid_body::{BodyState, RigidBody, predict},
+    rigid_body::{BodyState, BodyType, RigidBody, predict},
 };
 
 struct BodyEntry {
@@ -368,6 +369,10 @@ impl PhysicsWorld {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
+        if let Err(error) = self.process_collision_candidates(1) {
+            self.collision_system.abort_step();
+            return Err(StepError::Collision(error));
+        }
 
         for ((dense_id, entry), (body_id, state)) in self.bodies.iter_mut().zip(
             self.collision_system
@@ -453,6 +458,396 @@ impl PhysicsWorld {
             }
         }
         Ok(())
+    }
+
+    fn process_collision_candidates(&mut self, worker_count: usize) -> Result<(), CollisionError> {
+        let candidate_count = self.collision_system.candidate_count();
+        if candidate_count == 0 {
+            self.collision_system.solve_contacts(worker_count)?;
+            self.collision_system.stage_lifecycle_events()?;
+            return Ok(());
+        }
+        let mut required_slots = 0;
+        for (id, _) in &self.collision_system.context.predicted_states {
+            let slot = usize::try_from(id.index()).map_err(|_| CollisionError::GeometryBounds)?;
+            required_slots =
+                required_slots.max(slot.checked_add(1).ok_or(CollisionError::GeometryBounds)?);
+        }
+        {
+            let context = &mut self.collision_system.context;
+            if context.body_indices.len() < required_slots {
+                context
+                    .body_indices
+                    .try_reserve(required_slots - context.body_indices.len())
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                context.body_indices.resize(required_slots, None);
+            }
+            if context.solver_body_indices.len() < required_slots {
+                context
+                    .solver_body_indices
+                    .try_reserve(required_slots - context.solver_body_indices.len())
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                context.solver_body_indices.resize(required_slots, None);
+            }
+            context
+                .body_indices
+                .iter_mut()
+                .for_each(|slot| *slot = None);
+            context
+                .solver_body_indices
+                .iter_mut()
+                .for_each(|slot| *slot = None);
+            context.body_types.clear();
+            context.solver_bodies.clear();
+            context.solver_body_predictions.clear();
+            for (index, (body_id, _)) in context.predicted_states.iter().copied().enumerate() {
+                let slot =
+                    usize::try_from(body_id.index()).map_err(|_| CollisionError::GeometryBounds)?;
+                *context
+                    .body_indices
+                    .get_mut(slot)
+                    .ok_or(CollisionError::InvalidContact)? = Some((body_id, index));
+            }
+        }
+
+        self.collision_system.context.manifolds.clear();
+        self.collision_system
+            .context
+            .manifolds
+            .try_reserve(candidate_count)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        self.collision_system.context.interactions.clear();
+        self.collision_system
+            .context
+            .interactions
+            .try_reserve(candidate_count)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for candidate_index in 0..candidate_count {
+            let pair = self
+                .collision_system
+                .candidate(candidate_index)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_a = self
+                .colliders
+                .get(pair.a.dense)
+                .filter(|_| pair.a.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_b = self
+                .colliders
+                .get(pair.b.dense)
+                .filter(|_| pair.b.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            let body_a_index = Self::predicted_body_index(
+                &self.collision_system.context.body_indices,
+                self.world_id,
+                collider_a.body,
+            )?;
+            let body_b_index = Self::predicted_body_index(
+                &self.collision_system.context.body_indices,
+                self.world_id,
+                collider_b.body,
+            )?;
+            let body_a = self
+                .collision_system
+                .context
+                .predicted_states
+                .get(body_a_index)
+                .ok_or(CollisionError::InvalidContact)?
+                .1
+                .transform();
+            let body_b = self
+                .collision_system
+                .context
+                .predicted_states
+                .get(body_b_index)
+                .ok_or(CollisionError::InvalidContact)?
+                .1
+                .transform();
+            let transform_a = body_a
+                .compose(&collider_a.collider.local_transform())
+                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            let transform_b = body_b
+                .compose(&collider_b.collider.local_transform())
+                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            if let Some(manifold) = self.collision_system.detect(
+                pair,
+                collider_a.collider.shape(),
+                &transform_a,
+                &body_a,
+                collider_a.collider.mode(),
+                collider_b.collider.shape(),
+                &transform_b,
+                &body_b,
+                collider_b.collider.mode(),
+            )? {
+                let sensor = collider_a.collider.mode() == crate::collider::CollisionMode::Sensor
+                    || collider_b.collider.mode() == crate::collider::CollisionMode::Sensor;
+                if sensor {
+                    self.collision_system
+                        .context
+                        .interactions
+                        .push(CollisionInteraction {
+                            pair,
+                            sensor: true,
+                            contact: None,
+                            impact: false,
+                        });
+                } else {
+                    self.collision_system.context.manifolds.push(manifold);
+                }
+            }
+        }
+
+        self.collision_system.context.solver_manifolds.clear();
+        self.collision_system
+            .context
+            .solver_manifolds
+            .try_reserve(self.collision_system.context.manifolds.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for manifold_index in 0..self.collision_system.context.manifolds.len() {
+            let manifold = self.collision_system.context.manifolds[manifold_index];
+            let (body_id_a, body_id_b, mode_a, mode_b, material_a, material_b) = {
+                let collider_a = self
+                    .colliders
+                    .get(manifold.pair.a.dense)
+                    .filter(|_| manifold.pair.a.world == self.world_id)
+                    .ok_or(CollisionError::InvalidContact)?;
+                let collider_b = self
+                    .colliders
+                    .get(manifold.pair.b.dense)
+                    .filter(|_| manifold.pair.b.world == self.world_id)
+                    .ok_or(CollisionError::InvalidContact)?;
+                (
+                    collider_a.body,
+                    collider_b.body,
+                    collider_a.collider.mode(),
+                    collider_b.collider.mode(),
+                    collider_a.collider.material(),
+                    collider_b.collider.material(),
+                )
+            };
+            let prediction_a = Self::predicted_body_index(
+                &self.collision_system.context.body_indices,
+                self.world_id,
+                body_id_a,
+            )?;
+            let prediction_b = Self::predicted_body_index(
+                &self.collision_system.context.body_indices,
+                self.world_id,
+                body_id_b,
+            )?;
+            let type_a = self
+                .bodies
+                .get(body_id_a.dense)
+                .filter(|_| body_id_a.world == self.world_id)
+                .map(|entry| entry.body.physics().body_type())
+                .ok_or(CollisionError::InvalidContact)?;
+            let type_b = self
+                .bodies
+                .get(body_id_b.dense)
+                .filter(|_| body_id_b.world == self.world_id)
+                .map(|entry| entry.body.physics().body_type())
+                .ok_or(CollisionError::InvalidContact)?;
+            if type_a != BodyType::Dynamic && type_b != BodyType::Dynamic {
+                continue;
+            }
+            if mode_a == crate::collider::CollisionMode::Sensor
+                || mode_b == crate::collider::CollisionMode::Sensor
+            {
+                return Err(CollisionError::InvalidContact);
+            }
+            let material = self.combined_solver_material(material_a, material_b)?;
+            let body_a = self.solver_body_index(body_id_a, prediction_a)?;
+            let body_b = self.solver_body_index(body_id_b, prediction_b)?;
+            self.collision_system
+                .context
+                .solver_manifolds
+                .push(SolverManifold {
+                    body_a,
+                    body_b,
+                    manifold,
+                    material,
+                });
+        }
+        self.collision_system.solve_contacts(worker_count)?;
+
+        for manifold in self.collision_system.context.manifolds.iter().copied() {
+            let collider_a = self
+                .colliders
+                .get(manifold.pair.a.dense)
+                .filter(|_| manifold.pair.a.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_b = self
+                .colliders
+                .get(manifold.pair.b.dense)
+                .filter(|_| manifold.pair.b.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            let body_a_index = Self::predicted_body_index(
+                &self.collision_system.context.body_indices,
+                self.world_id,
+                collider_a.body,
+            )?;
+            let body_b_index = Self::predicted_body_index(
+                &self.collision_system.context.body_indices,
+                self.world_id,
+                collider_b.body,
+            )?;
+            let body_a = self
+                .collision_system
+                .context
+                .predicted_states
+                .get(body_a_index)
+                .ok_or(CollisionError::InvalidContact)?
+                .1
+                .transform();
+            let body_b = self
+                .collision_system
+                .context
+                .predicted_states
+                .get(body_b_index)
+                .ok_or(CollisionError::InvalidContact)?
+                .1
+                .transform();
+            let mut deepest = None;
+            let mut total_impulse = 0.0;
+            let mut impact = false;
+            for point in manifold.points() {
+                total_impulse += point.normal_impulse;
+                if !total_impulse.is_finite() {
+                    return Err(CollisionError::ArithmeticOverflow);
+                }
+                impact |= point.normal_impulse_delta > 0.0;
+                if deepest.is_none_or(|current: crate::collision::ContactPoint| {
+                    point.penetration > current.penetration
+                }) {
+                    deepest = Some(point);
+                }
+            }
+            let deepest = deepest.ok_or(CollisionError::InvalidContact)?;
+            let point_a = body_a.transform_point(deepest.local_a);
+            let point_b = body_b.transform_point(deepest.local_b);
+            let point = point_a * 0.5 + point_b * 0.5;
+            if !point.is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+            self.collision_system
+                .context
+                .interactions
+                .push(CollisionInteraction {
+                    pair: manifold.pair,
+                    sensor: false,
+                    contact: Some(ContactInfo {
+                        point,
+                        normal: deepest.normal,
+                        penetration: deepest.penetration,
+                        normal_impulse: total_impulse,
+                    }),
+                    impact,
+                });
+        }
+        self.collision_system.stage_lifecycle_events()?;
+        Ok(())
+    }
+
+    fn predicted_body_index(
+        body_indices: &[Option<(BodyId, usize)>],
+        world_id: u64,
+        id: BodyId,
+    ) -> Result<usize, CollisionError> {
+        if id.world != world_id {
+            return Err(CollisionError::InvalidContact);
+        }
+        let slot = usize::try_from(id.index()).map_err(|_| CollisionError::InvalidContact)?;
+        body_indices
+            .get(slot)
+            .and_then(|entry| *entry)
+            .filter(|(current, _)| *current == id)
+            .map(|(_, index)| index)
+            .ok_or(CollisionError::InvalidContact)
+    }
+
+    fn solver_body_index(
+        &mut self,
+        body_id: BodyId,
+        prediction_index: usize,
+    ) -> Result<usize, CollisionError> {
+        let slot = usize::try_from(body_id.index()).map_err(|_| CollisionError::InvalidContact)?;
+        if let Some((current, index)) = self
+            .collision_system
+            .context
+            .solver_body_indices
+            .get(slot)
+            .copied()
+            .flatten()
+            && current == body_id
+        {
+            return Ok(index);
+        }
+        let body = self
+            .bodies
+            .get(body_id.dense)
+            .filter(|_| body_id.world == self.world_id)
+            .map(|entry| entry.body)
+            .ok_or(CollisionError::InvalidContact)?;
+        let state = self
+            .collision_system
+            .context
+            .predicted_states
+            .get(prediction_index)
+            .filter(|(current, _)| *current == body_id)
+            .map(|(_, state)| *state)
+            .ok_or(CollisionError::InvalidContact)?;
+        let context = &mut self.collision_system.context;
+        let index = context.solver_bodies.len();
+        context
+            .solver_bodies
+            .try_reserve(1)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        context
+            .solver_body_predictions
+            .try_reserve(1)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        context
+            .body_types
+            .try_reserve(1)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        *context
+            .solver_body_indices
+            .get_mut(slot)
+            .ok_or(CollisionError::InvalidContact)? = Some((body_id, index));
+        context
+            .solver_bodies
+            .push(SolverBody::from_prediction(body, state));
+        context.solver_body_predictions.push(prediction_index);
+        context.body_types.push(body.physics().body_type());
+        Ok(index)
+    }
+
+    fn combined_solver_material(
+        &self,
+        material_a: Option<MaterialId>,
+        material_b: Option<MaterialId>,
+    ) -> Result<SolverMaterial, CollisionError> {
+        let fallback = PhysicsMaterial::default();
+        let material_a = material_a
+            .and_then(|id| self.materials.get(id))
+            .copied()
+            .unwrap_or(fallback);
+        let material_b = material_b
+            .and_then(|id| self.materials.get(id))
+            .copied()
+            .unwrap_or(fallback);
+        let dynamic_friction = material_a.friction().sqrt() * material_b.friction().sqrt();
+        let static_friction =
+            material_a.static_friction().sqrt() * material_b.static_friction().sqrt();
+        if !dynamic_friction.is_finite() || !static_friction.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        Ok(SolverMaterial {
+            restitution: material_a.restitution().max(material_b.restitution()),
+            static_friction,
+            dynamic_friction,
+        })
     }
 
     fn validate_collision_inputs(&self) -> Result<(), CollisionError> {
@@ -551,11 +946,26 @@ impl PhysicsWorld {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
+        if let Err(error) = self.process_collision_candidates(shards.len().max(1)) {
+            self.collision_system.abort_step();
+            return Err(StepError::Collision(error));
+        }
 
-        for ((_, entry), step) in self.bodies.iter_mut().zip(shards.iter().flatten()) {
-            if let Some(state) = step.predicted {
-                entry.body.commit_integrated_state(state);
-            }
+        for ((dense_id, entry), (body_id, state)) in self.bodies.iter_mut().zip(
+            self.collision_system
+                .context
+                .predicted_states
+                .iter()
+                .copied(),
+        ) {
+            debug_assert_eq!(
+                BodyId {
+                    world: self.world_id,
+                    dense: dense_id,
+                },
+                body_id
+            );
+            entry.body.commit_integrated_state(state);
         }
         self.collision_system.commit_step();
         Ok(())

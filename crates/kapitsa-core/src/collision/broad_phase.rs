@@ -97,6 +97,10 @@ impl BroadPhase {
         Ok(&self.candidates)
     }
 
+    pub(crate) fn candidates(&self) -> &[CollisionPair] {
+        &self.candidates
+    }
+
     fn allows_pair(a: &CollisionProxy, b: &CollisionProxy) -> bool {
         if a.collider == b.collider || a.body == b.body || !a.filter.allows(&b.filter) {
             return false;

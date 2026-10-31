@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use kapitsa_math::Vec3;
 
-use super::{CollisionError, CollisionPair, manifold::ContactManifold};
+use super::{CollisionError, CollisionPair, manifold::ContactManifold, solver::SolverManifold};
 
 const MINIMUM_NORMAL_DOT: f64 = 0.95;
 
@@ -35,27 +35,37 @@ impl ContactCache {
 
     pub(crate) fn warm_start(&self, manifolds: &mut [ContactManifold]) {
         for manifold in manifolds {
-            let pair = manifold.pair;
-            for index in 0..manifold.len() {
-                let Some(contact) = manifold.point_mut(index) else {
-                    continue;
-                };
-                let key = ContactKey {
-                    pair,
-                    feature: contact.feature_id,
-                };
-                let Some(cached) = self.current.get(&key).copied() else {
-                    continue;
-                };
-                let Some(normal) = contact.normal.try_normalize() else {
-                    continue;
-                };
-                if normal.dot(cached.normal) < MINIMUM_NORMAL_DOT {
-                    continue;
-                }
-                contact.normal_impulse = cached.normal_impulse;
-                contact.tangent_impulse = cached.tangent_impulse;
+            self.warm_start_manifold(manifold);
+        }
+    }
+
+    pub(crate) fn warm_start_solver(&self, manifolds: &mut [SolverManifold]) {
+        for manifold in manifolds {
+            self.warm_start_manifold(&mut manifold.manifold);
+        }
+    }
+
+    fn warm_start_manifold(&self, manifold: &mut ContactManifold) {
+        let pair = manifold.pair;
+        for index in 0..manifold.len() {
+            let Some(contact) = manifold.point_mut(index) else {
+                continue;
+            };
+            let key = ContactKey {
+                pair,
+                feature: contact.feature_id,
+            };
+            let Some(cached) = self.current.get(&key).copied() else {
+                continue;
+            };
+            let Some(normal) = contact.normal.try_normalize() else {
+                continue;
+            };
+            if normal.dot(cached.normal) < MINIMUM_NORMAL_DOT {
+                continue;
             }
+            contact.normal_impulse = cached.normal_impulse;
+            contact.tangent_impulse = cached.tangent_impulse;
         }
     }
 
@@ -74,6 +84,8 @@ impl ContactCache {
                 if !contact.normal.is_finite()
                     || !contact.normal_impulse.is_finite()
                     || contact.normal_impulse < 0.0
+                    || !contact.normal_impulse_delta.is_finite()
+                    || contact.normal_impulse_delta < 0.0
                     || contact
                         .tangent_impulse
                         .iter()

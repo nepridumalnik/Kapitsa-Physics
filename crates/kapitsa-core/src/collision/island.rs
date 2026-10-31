@@ -14,6 +14,17 @@ pub(crate) struct IslandLayout {
 }
 
 impl IslandLayout {
+    pub(crate) const fn new() -> Self {
+        Self {
+            parents: Vec::new(),
+            root_islands: Vec::new(),
+            body_islands: Vec::new(),
+            connected: Vec::new(),
+            manifold_islands: Vec::new(),
+            island_count: 0,
+        }
+    }
+
     pub(crate) fn build(
         &mut self,
         body_types: &[BodyType],

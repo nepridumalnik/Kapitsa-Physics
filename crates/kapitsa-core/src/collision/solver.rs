@@ -23,6 +23,10 @@ pub(crate) struct SolverBody {
 }
 
 impl SolverBody {
+    pub(crate) fn state(&self) -> crate::rigid_body::BodyState {
+        *self.body.state()
+    }
+
     pub(crate) fn from_prediction(
         mut body: RigidBody,
         state: crate::rigid_body::BodyState,
@@ -36,6 +40,7 @@ impl SolverBody {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct SolverManifold {
     pub(crate) body_a: usize,
     pub(crate) body_b: usize,
@@ -62,7 +67,38 @@ pub(crate) struct SolverWorkspace {
     points: Vec<SolverPoint>,
 }
 
+pub(crate) struct SolverIsland {
+    pub(crate) body_indices: Vec<usize>,
+    pub(crate) manifold_indices: Vec<usize>,
+    pub(crate) bodies: Vec<SolverBody>,
+    pub(crate) manifolds: Vec<SolverManifold>,
+    pub(crate) workspace: SolverWorkspace,
+}
+
+impl SolverIsland {
+    pub(crate) const fn new() -> Self {
+        Self {
+            body_indices: Vec::new(),
+            manifold_indices: Vec::new(),
+            bodies: Vec::new(),
+            manifolds: Vec::new(),
+            workspace: SolverWorkspace::new(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.body_indices.clear();
+        self.manifold_indices.clear();
+        self.bodies.clear();
+        self.manifolds.clear();
+    }
+}
+
 impl SolverWorkspace {
+    pub(crate) const fn new() -> Self {
+        Self { points: Vec::new() }
+    }
+
     pub(crate) fn solve(
         &mut self,
         bodies: &mut [SolverBody],
@@ -222,7 +258,15 @@ impl SolverWorkspace {
                     point.position_b,
                     point.normal * normal_delta,
                 )?;
-                contact_mut(manifolds, point)?.normal_impulse = next_normal_impulse;
+                let contact = contact_mut(manifolds, point)?;
+                contact.normal_impulse = next_normal_impulse;
+                if normal_delta > 0.0 {
+                    let total_delta = contact.normal_impulse_delta + normal_delta;
+                    if !total_delta.is_finite() {
+                        return Err(CollisionError::ArithmeticOverflow);
+                    }
+                    contact.normal_impulse_delta = total_delta;
+                }
             }
 
             let contact = *contact_at(manifolds, point)?;
