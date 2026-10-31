@@ -4,7 +4,7 @@ use glam::{Affine3A, Quat, Vec3};
 
 use crate::{
     aabb::{Aabb, AabbError},
-    collider::{Collider, ColliderError},
+    collider::{Collider, ColliderError, CollisionFilter},
     shape::{
         BoneInfluence, BoundsError, Cuboid, Plane, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh,
     },
@@ -36,6 +36,90 @@ fn stores_shape_and_local_transform() {
 
     assert!(matches!(collider.shape(), Shape::Sphere(_)));
     assert_eq!(collider.local_transform(), local_transform);
+}
+
+#[test]
+fn collision_filter_defaults_to_first_layer_and_all_masks() {
+    let filter = CollisionFilter::default();
+
+    assert_eq!(filter.layers(), 1);
+    assert_eq!(filter.mask(), u32::MAX);
+}
+
+#[test]
+fn collision_filters_allow_interactions_on_the_same_layer() {
+    let first = CollisionFilter::new(1, 1);
+    let second = CollisionFilter::new(1, 1);
+
+    assert!(first.allows(&second));
+}
+
+#[test]
+fn collision_filters_allow_mutually_permitted_different_layers() {
+    let first = CollisionFilter::new(0b0001, 0b0010);
+    let second = CollisionFilter::new(0b0010, 0b0001);
+
+    assert!(first.allows(&second));
+}
+
+#[test]
+fn one_sided_collision_permission_is_rejected() {
+    let first = CollisionFilter::new(0b0001, 0b0010);
+    let second = CollisionFilter::new(0b0010, 0);
+
+    assert!(!first.allows(&second));
+}
+
+#[test]
+fn zero_collision_mask_disables_interactions() {
+    let no_mask = CollisionFilter::new(1, 0);
+    let default = CollisionFilter::default();
+
+    assert!(!no_mask.allows(&default));
+    assert!(!default.allows(&no_mask));
+}
+
+#[test]
+fn collision_filters_support_multiple_layers() {
+    let first = CollisionFilter::new(0b0011, 0b1100);
+    let second = CollisionFilter::new(0b1100, 0b0011);
+
+    assert!(first.allows(&second));
+}
+
+#[test]
+fn collision_filter_interaction_is_symmetric() {
+    let first = CollisionFilter::new(0b0101, 0b1010);
+    let second = CollisionFilter::new(0b1010, 0b0101);
+
+    assert_eq!(first.allows(&second), second.allows(&first));
+}
+
+#[test]
+fn collider_filter_can_be_read_and_updated() {
+    let mut collider = Collider::new(sphere(1.0), Transform::identity());
+    let filter = CollisionFilter::new(0b0100, 0b1000);
+
+    collider.set_filter(filter);
+
+    assert_eq!(collider.filter(), filter);
+}
+
+#[test]
+fn world_bounds_are_unchanged_when_filter_disables_collisions() {
+    let mut collider = Collider::new(
+        Shape::Cuboid(Cuboid::new(2.0, 4.0, 6.0).expect("valid cuboid")),
+        Transform::identity(),
+    );
+    collider.set_filter(CollisionFilter::new(0, 0));
+
+    assert_eq!(
+        collider.world_bounds(&Transform::identity()),
+        Ok(Some(
+            Aabb::new(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(1.0, 2.0, 3.0))
+                .expect("valid expected bounds"),
+        ))
+    );
 }
 
 #[test]
