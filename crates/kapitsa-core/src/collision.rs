@@ -8,6 +8,8 @@ mod event;
 #[allow(dead_code)]
 mod gjk;
 #[allow(dead_code)]
+mod height_field;
+#[allow(dead_code)]
 mod manifold;
 #[allow(dead_code)]
 mod mesh;
