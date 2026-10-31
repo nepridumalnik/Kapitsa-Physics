@@ -1,7 +1,7 @@
 use glam::{Quat, Vec3};
 use rstest::rstest;
 
-use super::Transform;
+use super::{Transform, TransformError};
 
 fn assert_vec3_close(actual: Vec3, expected: Vec3) {
     const EPSILON: f32 = 1.0e-5;
@@ -39,7 +39,10 @@ fn stores_translation_and_rotation() {
 #[case::positive_infinity(Vec3::new(0.0, f32::INFINITY, 0.0))]
 #[case::negative_infinity(Vec3::new(0.0, 0.0, f32::NEG_INFINITY))]
 fn rejects_non_finite_translation(#[case] translation: Vec3) {
-    assert!(Transform::new(translation, Quat::IDENTITY).is_none());
+    assert_eq!(
+        Transform::new(translation, Quat::IDENTITY),
+        Err(TransformError::NonFiniteTranslation)
+    );
 }
 
 #[rstest]
@@ -48,7 +51,10 @@ fn rejects_non_finite_translation(#[case] translation: Vec3) {
 #[case::nan(Quat::from_xyzw(0.0, 0.0, 0.0, f32::NAN))]
 #[case::infinity(Quat::from_xyzw(0.0, 0.0, f32::INFINITY, 1.0))]
 fn rejects_invalid_rotation(#[case] rotation: Quat) {
-    assert!(Transform::new(Vec3::ZERO, rotation).is_none());
+    assert_eq!(
+        Transform::new(Vec3::ZERO, rotation),
+        Err(TransformError::InvalidRotation)
+    );
 }
 
 #[test]
@@ -166,5 +172,5 @@ fn inverse_rejects_overflow() {
     )
     .expect("valid transform");
 
-    assert!(transform.inverse().is_none());
+    assert_eq!(transform.inverse(), Err(TransformError::InverseOverflow));
 }

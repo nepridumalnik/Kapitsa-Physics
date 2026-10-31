@@ -11,13 +11,18 @@ pub struct Transform {
 }
 
 impl Transform {
-    pub fn new(translation: Vec3, rotation: Quat) -> Option<Self> {
-        (translation.is_finite() && rotation.is_finite() && rotation.is_normalized()).then_some(
-            Self {
-                translation,
-                rotation,
-            },
-        )
+    pub fn new(translation: Vec3, rotation: Quat) -> Result<Self, TransformError> {
+        if !translation.is_finite() {
+            return Err(TransformError::NonFiniteTranslation);
+        }
+        if !rotation.is_finite() || !rotation.is_normalized() {
+            return Err(TransformError::InvalidRotation);
+        }
+
+        Ok(Self {
+            translation,
+            rotation,
+        })
     }
 
     pub const fn identity() -> Self {
@@ -43,11 +48,18 @@ impl Transform {
         self.rotation * vector
     }
 
-    pub fn inverse(&self) -> Option<Self> {
+    pub fn inverse(&self) -> Result<Self, TransformError> {
         let rotation = self.rotation.conjugate();
         let translation = rotation * -self.translation;
 
-        Self::new(translation, rotation)
+        if !translation.is_finite() {
+            return Err(TransformError::InverseOverflow);
+        }
+
+        Ok(Self {
+            translation,
+            rotation,
+        })
     }
 }
 
