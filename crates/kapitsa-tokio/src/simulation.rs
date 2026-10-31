@@ -120,6 +120,18 @@ impl PhysicsSimulation {
     }
 }
 
+impl Drop for PhysicsSimulation {
+    fn drop(&mut self) {
+        if let Some(stop) = &self.stop {
+            stop.send_replace(true);
+        }
+    }
+}
+
+fn stopping(stop: &watch::Receiver<bool>) -> bool {
+    *stop.borrow() || stop.has_changed().is_err()
+}
+
 async fn run_simulation(
     controller: &mut PhysicsController,
     mut stop: watch::Receiver<bool>,
@@ -139,7 +151,7 @@ async fn run_simulation(
             }
             _ = tokio::time::sleep(delay) => {}
         }
-        if *stop.borrow() {
+        if stopping(&stop) {
             break;
         }
 
@@ -148,7 +160,7 @@ async fn run_simulation(
         previous = now;
 
         for _ in 0..max_catch_up_steps {
-            if accumulator < controller.step_duration() || *stop.borrow() {
+            if accumulator < controller.step_duration() || stopping(&stop) {
                 break;
             }
             let step_duration = controller.step_duration();
@@ -166,7 +178,7 @@ async fn run_simulation(
             metrics.send_replace(controller.metrics());
         }
 
-        if *stop.borrow() {
+        if stopping(&stop) {
             break;
         }
         if accumulator >= controller.step_duration() {
@@ -200,8 +212,8 @@ mod tests {
     };
     use kapitsa_math::{Mat3, Vec3};
 
-    use super::{PhysicsSimulation, add_elapsed};
-    use crate::{SchedulerError, SimulationError, SimulationState};
+    use super::{PhysicsSimulation, add_elapsed, run_simulation};
+    use crate::{PhysicsController, SchedulerError, SimulationError, SimulationState};
 
     fn moving_world() -> (PhysicsWorld, BodyId) {
         let mut world = PhysicsWorld::new();
@@ -229,6 +241,29 @@ mod tests {
             Err(SimulationError::SimulationTimeOverflow)
         ));
         assert_eq!(accumulator, Duration::MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_simulation_signals_the_background_task() {
+        let mut simulation = PhysicsSimulation::new(PhysicsWorld::new());
+        simulation.start().expect("start");
+        let task = simulation.task.take().expect("background task");
+        drop(simulation);
+        let output = task.await.expect("background task completes");
+        assert!(output.result.is_ok());
+        assert_eq!(output.controller.metrics().total_steps, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_stop_channel_stops_the_loop() {
+        let mut controller = PhysicsController::with_default_config(PhysicsWorld::new());
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
+        drop(stop_tx);
+        run_simulation(&mut controller, stop_rx, &metrics_tx)
+            .await
+            .expect("closed channel stops loop");
+        assert_eq!(controller.metrics().total_steps, 0);
     }
 
     #[tokio::test(start_paused = true)]

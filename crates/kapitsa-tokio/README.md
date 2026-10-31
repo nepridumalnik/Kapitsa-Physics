@@ -25,6 +25,9 @@ repeated stops are safe. After stopping, `world()` and `world_mut()` provide
 access to the world. They return `WorldUnavailable` while the simulation owns
 it. A stop future can be cancelled and called again later; an already-started
 physics step is allowed to finish before stopping completes.
+Dropping the simulation requests a best-effort stop without waiting. Call
+`stop().await` to recover the world and wait for completion; if the application
+destroys its Tokio runtime first, detached work cannot be guaranteed to finish.
 
 `metrics()` returns the latest ready snapshot without waiting. `actual_hz` is
 computed from recent completion timestamps. `step_budget` accounts for target
