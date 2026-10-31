@@ -5,6 +5,7 @@ use crate::{
     collider::{Collider, CollisionFilter},
     containers::{DensePool, DensePoolError},
     mass::MassProperties,
+    material::PhysicsMaterial,
     rigid_body::{BodyType, IntegrationError, RigidBody},
     shape::{Shape, Sphere},
     transform::Transform,
@@ -82,6 +83,46 @@ fn body_and_collider_ids_are_scoped_to_their_worlds() -> Result<(), WorldError> 
     assert!(second_world.body(second_body).is_some());
     assert!(second_world.collider(second_collider).is_some());
     Ok(())
+}
+
+#[test]
+fn material_ids_are_scoped_to_world_storage_and_in_use_materials_are_retained() {
+    let mut first_world = PhysicsWorld::new();
+    let mut second_world = PhysicsWorld::new();
+    let material = PhysicsMaterial::default();
+    let material_id = first_world.add_material(material).expect("insert material");
+    let other_material_id = second_world
+        .add_material(material)
+        .expect("insert other world material");
+    assert_ne!(material_id, other_material_id);
+    assert_eq!(second_world.material(material_id), None);
+
+    let body = first_world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("insert body");
+    let collider_id = first_world
+        .add_collider(body, collider(1.0))
+        .expect("insert collider");
+    assert_eq!(
+        first_world.set_collider_material(collider_id, Some(other_material_id)),
+        Err(WorldError::InvalidMaterialId)
+    );
+    first_world
+        .set_collider_material(collider_id, Some(material_id))
+        .expect("assign valid material");
+    assert_eq!(
+        first_world.remove_material(material_id),
+        Err(WorldError::MaterialInUse)
+    );
+    assert_eq!(first_world.material(material_id), Some(&material));
+    first_world
+        .set_collider_material(collider_id, None)
+        .expect("clear assignment");
+    assert_eq!(first_world.remove_material(material_id), Ok(material));
+    assert_eq!(
+        first_world.remove_material(material_id),
+        Err(WorldError::InvalidMaterialId)
+    );
 }
 
 #[test]

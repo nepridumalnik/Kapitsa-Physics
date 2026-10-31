@@ -52,6 +52,9 @@ pub enum WorldError {
     WorldIdExhausted,
     InvalidBodyId,
     InvalidColliderId,
+    InvalidMaterialId,
+    MaterialInUse,
+    Collision(CollisionError),
 }
 
 impl fmt::Display for WorldError {
@@ -67,11 +70,30 @@ impl fmt::Display for WorldError {
             Self::WorldIdExhausted => formatter.write_str("physics world ID space is exhausted"),
             Self::InvalidBodyId => formatter.write_str("body ID is invalid for this world"),
             Self::InvalidColliderId => formatter.write_str("collider ID is invalid for this world"),
+            Self::InvalidMaterialId => formatter.write_str("material ID is invalid for this world"),
+            Self::MaterialInUse => {
+                formatter.write_str("physics material is assigned to a collider")
+            }
+            Self::Collision(error) => write!(formatter, "collision configuration failed: {error}"),
         }
     }
 }
 
-impl std::error::Error for WorldError {}
+impl std::error::Error for WorldError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Collision(error) => Some(error),
+            Self::DensePoolIndexOverflow
+            | Self::DensePoolCapacityExceeded
+            | Self::DensePoolInvalidFreeList
+            | Self::WorldIdExhausted
+            | Self::InvalidBodyId
+            | Self::InvalidColliderId
+            | Self::InvalidMaterialId
+            | Self::MaterialInUse => None,
+        }
+    }
+}
 
 impl From<DensePoolError> for WorldError {
     fn from(error: DensePoolError) -> Self {
@@ -79,6 +101,13 @@ impl From<DensePoolError> for WorldError {
             DensePoolError::IndexOverflow => Self::DensePoolIndexOverflow,
             DensePoolError::CapacityExceeded => Self::DensePoolCapacityExceeded,
             DensePoolError::InvalidFreeList => Self::DensePoolInvalidFreeList,
+            DensePoolError::IdentifierExhausted => Self::DensePoolCapacityExceeded,
         }
+    }
+}
+
+impl From<CollisionError> for WorldError {
+    fn from(error: CollisionError) -> Self {
+        Self::Collision(error)
     }
 }

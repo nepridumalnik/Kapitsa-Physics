@@ -20,6 +20,7 @@ use crate::{
     collider::Collider,
     collision::{CollisionConfig, CollisionError, CollisionEvent},
     containers::DensePool,
+    material::{MaterialId, MaterialStorage, PhysicsMaterial},
     rigid_body::{BodyState, RigidBody, predict},
 };
 
@@ -40,6 +41,7 @@ pub struct PhysicsWorld {
     world_id: u64,
     bodies: DensePool<BodyEntry>,
     colliders: DensePool<ColliderEntry>,
+    materials: MaterialStorage,
     step_scratch: Vec<(BodyId, BodyState)>,
     collision_config: CollisionConfig,
     collision_events: Vec<CollisionEvent>,
@@ -78,6 +80,7 @@ impl PhysicsWorld {
             world_id: 0,
             bodies: DensePool::new(),
             colliders: DensePool::new(),
+            materials: MaterialStorage::new(),
             step_scratch: Vec::new(),
             collision_config: CollisionConfig::default_const(),
             collision_events: Vec::new(),
@@ -96,6 +99,53 @@ impl PhysicsWorld {
 
     pub fn collision_events(&self) -> &[CollisionEvent] {
         &self.collision_events
+    }
+
+    pub fn add_material(&mut self, material: PhysicsMaterial) -> Result<MaterialId, WorldError> {
+        self.materials.insert(material).map_err(WorldError::from)
+    }
+
+    pub fn material(&self, id: MaterialId) -> Option<&PhysicsMaterial> {
+        self.materials.get(id)
+    }
+
+    pub fn material_mut(&mut self, id: MaterialId) -> Option<&mut PhysicsMaterial> {
+        self.materials.get_mut(id)
+    }
+
+    pub fn remove_material(&mut self, id: MaterialId) -> Result<PhysicsMaterial, WorldError> {
+        if !self.materials.contains(id) {
+            return Err(WorldError::InvalidMaterialId);
+        }
+        if self
+            .colliders
+            .iter()
+            .any(|(_, entry)| entry.collider.material() == Some(id))
+        {
+            return Err(WorldError::MaterialInUse);
+        }
+        self.materials
+            .remove(id)
+            .ok_or(WorldError::InvalidMaterialId)
+    }
+
+    pub fn set_collider_material(
+        &mut self,
+        id: ColliderId,
+        material: Option<MaterialId>,
+    ) -> Result<(), WorldError> {
+        if id.world != self.world_id || self.colliders.get(id.dense).is_none() {
+            return Err(WorldError::InvalidColliderId);
+        }
+        if material.is_some_and(|material| !self.materials.contains(material)) {
+            return Err(WorldError::InvalidMaterialId);
+        }
+        let entry = self
+            .colliders
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidColliderId)?;
+        entry.collider.set_material(material);
+        Ok(())
     }
 
     pub fn add_body(&mut self, body: RigidBody) -> Result<BodyId, WorldError> {

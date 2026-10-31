@@ -58,7 +58,7 @@ pub enum PhysicsCommand {
         id: ColliderId,
         filter: CollisionFilter,
     },
-    /// Assigns a material ID without resolving it in a material store.
+    /// Assigns a material ID after resolving it in the world material store.
     SetColliderMaterial {
         id: ColliderId,
         material: Option<MaterialId>,
@@ -192,10 +192,7 @@ pub(crate) fn apply_command(
             PhysicsCommandResult::Done
         }
         PhysicsCommand::SetColliderMaterial { id, material } => {
-            world
-                .collider_mut(id)
-                .ok_or(WorldError::InvalidColliderId)?
-                .set_material(material);
+            world.set_collider_material(id, material)?;
             PhysicsCommandResult::Done
         }
     };
@@ -207,6 +204,7 @@ mod tests {
     use kapitsa_core::{
         collider::{Collider, CollisionFilter},
         mass::MassProperties,
+        material::{MaterialStorage, PhysicsMaterial},
         rigid_body::{BodyError, RigidBody},
         shape::{Shape, Sphere},
         transform::Transform,
@@ -453,5 +451,28 @@ mod tests {
             ),
             Err(PhysicsClientError::World(WorldError::InvalidColliderId))
         ));
+    }
+
+    #[test]
+    fn collider_material_command_rejects_ids_from_other_storages() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(dynamic_body()).expect("body");
+        let collider = world.add_collider(body, collider()).expect("collider");
+        let mut foreign_materials = MaterialStorage::new();
+        let foreign_id = foreign_materials
+            .insert(PhysicsMaterial::default())
+            .expect("foreign material");
+
+        assert!(matches!(
+            apply_command(
+                &mut world,
+                PhysicsCommand::SetColliderMaterial {
+                    id: collider,
+                    material: Some(foreign_id),
+                }
+            ),
+            Err(PhysicsClientError::World(WorldError::InvalidMaterialId))
+        ));
+        assert_eq!(world.collider(collider).expect("collider").material(), None);
     }
 }

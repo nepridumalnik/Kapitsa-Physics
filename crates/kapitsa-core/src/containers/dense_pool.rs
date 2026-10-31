@@ -25,6 +25,7 @@ pub enum DensePoolError {
     IndexOverflow,
     CapacityExceeded,
     InvalidFreeList,
+    IdentifierExhausted,
 }
 
 impl fmt::Display for DensePoolError {
@@ -33,6 +34,7 @@ impl fmt::Display for DensePoolError {
             Self::IndexOverflow => "dense pool index exceeds the u32 range",
             Self::CapacityExceeded => "dense pool capacity could not be reserved",
             Self::InvalidFreeList => "dense pool free list is invalid",
+            Self::IdentifierExhausted => "dense pool identifier space is exhausted",
         };
         formatter.write_str(message)
     }
