@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::AdaptiveStatus;
+
 const STEP_WINDOW_CAPACITY: usize = 120;
 
 /// Measurements for one completed synchronous physics step.
@@ -15,6 +17,9 @@ pub struct StepMeasurement {
 pub struct SchedulerMetrics {
     total_steps: u64,
     budget_overruns: u64,
+    overload_events: u64,
+    currently_overloaded: bool,
+    overload_integral: f64,
     current_hz: u32,
     active_workers: usize,
     simulation_time_debt: Duration,
@@ -31,6 +36,9 @@ impl SchedulerMetrics {
         Self {
             total_steps: 0,
             budget_overruns: 0,
+            overload_events: 0,
+            currently_overloaded: false,
+            overload_integral: 0.0,
             current_hz,
             active_workers,
             simulation_time_debt: Duration::ZERO,
@@ -43,7 +51,11 @@ impl SchedulerMetrics {
         }
     }
 
-    pub(crate) fn record_step(&mut self, measurement: StepMeasurement) -> bool {
+    pub(crate) fn record_step(
+        &mut self,
+        measurement: StepMeasurement,
+        adaptive: AdaptiveStatus,
+    ) -> bool {
         self.total_steps = self.total_steps.saturating_add(1);
         self.last_step_duration = measurement.step_duration;
         self.last_task_wait_duration = measurement.task_wait_duration;
@@ -54,6 +66,11 @@ impl SchedulerMetrics {
         if over_budget {
             self.budget_overruns = self.budget_overruns.saturating_add(1);
         }
+        if adaptive.overloaded {
+            self.overload_events = self.overload_events.saturating_add(1);
+        }
+        self.currently_overloaded = adaptive.overloaded;
+        self.overload_integral = adaptive.overload_integral;
 
         if self.step_durations.len() == STEP_WINDOW_CAPACITY {
             self.step_durations.pop_front();
@@ -86,6 +103,18 @@ impl SchedulerMetrics {
 
     pub fn budget_overruns(&self) -> u64 {
         self.budget_overruns
+    }
+
+    pub fn overload_events(&self) -> u64 {
+        self.overload_events
+    }
+
+    pub fn currently_overloaded(&self) -> bool {
+        self.currently_overloaded
+    }
+
+    pub fn overload_integral(&self) -> f64 {
+        self.overload_integral
     }
 
     pub fn current_hz(&self) -> u32 {
@@ -126,11 +155,13 @@ impl SchedulerMetrics {
 pub struct AdvanceStats {
     pub steps_completed: usize,
     pub budget_overruns: usize,
+    pub overload_events: usize,
     pub step_duration: Duration,
     pub task_wait_duration: Duration,
     pub current_hz: u32,
     pub active_workers: usize,
     pub simulation_time_debt: Duration,
+    pub currently_overloaded: bool,
     pub rolling_average_step_duration: Duration,
     pub rolling_max_step_duration: Duration,
 }
@@ -139,6 +170,7 @@ impl AdvanceStats {
     pub(crate) fn snapshot(
         steps_completed: usize,
         budget_overruns: usize,
+        overload_events: usize,
         step_duration: Duration,
         task_wait_duration: Duration,
         metrics: &SchedulerMetrics,
@@ -146,11 +178,13 @@ impl AdvanceStats {
         Self {
             steps_completed,
             budget_overruns,
+            overload_events,
             step_duration,
             task_wait_duration,
             current_hz: metrics.current_hz(),
             active_workers: metrics.active_workers(),
             simulation_time_debt: metrics.simulation_time_debt(),
+            currently_overloaded: metrics.currently_overloaded(),
             rolling_average_step_duration: metrics.rolling_average_step_duration(),
             rolling_max_step_duration: metrics.rolling_max_step_duration(),
         }
@@ -174,25 +208,45 @@ fn average(durations: &std::collections::VecDeque<Duration>) -> Duration {
 mod tests {
     use std::time::Duration;
 
+    use crate::AdaptiveStatus;
+
     use super::{SchedulerMetrics, StepMeasurement};
 
     #[test]
     fn records_budget_overruns_and_rolling_step_statistics() {
         let mut metrics = SchedulerMetrics::new(60, 1);
 
-        assert!(!metrics.record_step(StepMeasurement {
-            step_duration: Duration::from_millis(5),
-            task_wait_duration: Duration::from_millis(6),
-            step_budget: Duration::from_millis(10),
-        }));
-        assert!(metrics.record_step(StepMeasurement {
-            step_duration: Duration::from_millis(15),
-            task_wait_duration: Duration::from_millis(16),
-            step_budget: Duration::from_millis(10),
-        }));
+        let status = AdaptiveStatus {
+            current_hz: 60,
+            active_workers: 1,
+            overloaded: false,
+            overload_integral: 0.0,
+        };
+        assert!(!metrics.record_step(
+            StepMeasurement {
+                step_duration: Duration::from_millis(5),
+                task_wait_duration: Duration::from_millis(6),
+                step_budget: Duration::from_millis(10),
+            },
+            status,
+        ));
+        assert!(metrics.record_step(
+            StepMeasurement {
+                step_duration: Duration::from_millis(15),
+                task_wait_duration: Duration::from_millis(16),
+                step_budget: Duration::from_millis(10),
+            },
+            AdaptiveStatus {
+                overloaded: true,
+                overload_integral: 1.0,
+                ..status
+            },
+        ));
 
         assert_eq!(metrics.total_steps(), 2);
         assert_eq!(metrics.budget_overruns(), 1);
+        assert_eq!(metrics.overload_events(), 1);
+        assert!(metrics.currently_overloaded());
         assert_eq!(metrics.last_step_duration(), Duration::from_millis(15));
         assert_eq!(metrics.last_task_wait_duration(), Duration::from_millis(16));
         assert_eq!(

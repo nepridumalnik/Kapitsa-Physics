@@ -6,7 +6,10 @@ use std::{
 use kapitsa_core::world::{BodyStep, PhysicsWorld, StepError};
 use tokio::{runtime::Handle, task::JoinHandle};
 
-use crate::{AdvanceStats, SchedulerConfig, SchedulerError, SchedulerMetrics, StepMeasurement};
+use crate::{
+    AdaptiveScheduler, AdvanceStats, SchedulerConfig, SchedulerError, SchedulerMetrics,
+    StepMeasurement,
+};
 
 type PrepareOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
 type CommitOutput = (PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>);
@@ -53,6 +56,7 @@ pub struct PhysicsController {
     current_hz: u32,
     active_workers: usize,
     worker_buffers: Vec<Vec<BodyStep>>,
+    adaptive: AdaptiveScheduler,
     metrics: SchedulerMetrics,
 }
 
@@ -61,6 +65,7 @@ impl PhysicsController {
         config.validate()?;
         let current_hz = config.target_hz;
         let active_workers = 1;
+        let adaptive = AdaptiveScheduler::new(config.clone())?;
         Ok(Self {
             world: WorldState::Available(world),
             config,
@@ -68,6 +73,7 @@ impl PhysicsController {
             current_hz,
             active_workers,
             worker_buffers: vec![Vec::new()],
+            adaptive,
             metrics: SchedulerMetrics::new(current_hz, active_workers),
         })
     }
@@ -119,6 +125,7 @@ impl PhysicsController {
             WorldState::Lost => return Err(SchedulerError::WorldLost),
         }
         self.active_workers = workers;
+        self.adaptive.set_active_workers(workers);
         self.metrics
             .update_scheduler_state(self.current_hz, self.active_workers, self.accumulator);
         Ok(())
@@ -129,7 +136,8 @@ impl PhysicsController {
     }
 
     /// Adds elapsed wall time and runs a bounded number of fixed physics steps.
-    /// Remaining time is retained as simulation-time debt for the next call.
+    /// Remaining time is retained as simulation-time debt for the next call;
+    /// overflow returns an error instead of dropping accumulated time.
     pub async fn advance(&mut self, elapsed: Duration) -> Result<AdvanceStats, SchedulerError> {
         Handle::try_current().map_err(|_| SchedulerError::MissingRuntime)?;
         self.accumulator = self
@@ -140,6 +148,7 @@ impl PhysicsController {
 
         let mut steps_completed = 0;
         let mut budget_overruns = 0;
+        let mut overload_events = 0;
         let mut step_duration_total = Duration::ZERO;
         let mut task_wait_total = Duration::ZERO;
 
@@ -149,6 +158,7 @@ impl PhysicsController {
                 measurement,
                 &mut steps_completed,
                 &mut budget_overruns,
+                &mut overload_events,
                 &mut step_duration_total,
                 &mut task_wait_total,
             );
@@ -165,6 +175,7 @@ impl PhysicsController {
                 measurement,
                 &mut steps_completed,
                 &mut budget_overruns,
+                &mut overload_events,
                 &mut step_duration_total,
                 &mut task_wait_total,
             );
@@ -174,6 +185,7 @@ impl PhysicsController {
         Ok(AdvanceStats::snapshot(
             steps_completed,
             budget_overruns,
+            overload_events,
             step_duration_total,
             task_wait_total,
             &self.metrics,
@@ -472,13 +484,21 @@ impl PhysicsController {
         measurement: StepMeasurement,
         steps_completed: &mut usize,
         budget_overruns: &mut usize,
+        overload_events: &mut usize,
         step_duration_total: &mut Duration,
         task_wait_total: &mut Duration,
     ) {
         *steps_completed += 1;
-        if self.metrics.record_step(measurement) {
+        let adaptive = self.adaptive.observe(measurement);
+        self.current_hz = adaptive.current_hz;
+        self.active_workers = adaptive.active_workers;
+        if self.metrics.record_step(measurement, adaptive) {
             *budget_overruns += 1;
         }
+        if adaptive.overloaded {
+            *overload_events += 1;
+        }
+        self.update_metrics_state();
         *step_duration_total = step_duration_total.saturating_add(measurement.step_duration);
         *task_wait_total = task_wait_total.saturating_add(measurement.task_wait_duration);
     }
@@ -491,7 +511,11 @@ impl PhysicsController {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
 
     use kapitsa_core::{
         mass::MassProperties, rigid_body::RigidBody, transform::Transform, world::PhysicsWorld,
@@ -735,5 +759,36 @@ mod tests {
             .zip(originals)
             .all(|((id, body), (original_id, original))| id == original_id && body == &original));
         assert_eq!(controller.simulation_time_debt(), quantum);
+    }
+
+    #[test]
+    fn cancelling_advance_keeps_the_in_flight_world_and_tasks() {
+        let runtime = runtime();
+        let config = config(1);
+        let quantum = config.step_duration(config.target_hz);
+        let mut controller =
+            PhysicsController::new(dynamic_world(10_000), config).expect("controller");
+
+        runtime.block_on(async {
+            let mut advance = Box::pin(controller.advance(quantum));
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            assert!(matches!(advance.as_mut().poll(&mut context), Poll::Pending));
+            drop(advance);
+
+            assert!(matches!(
+                controller.world(),
+                Err(SchedulerError::WorldUnavailable)
+            ));
+            let stats = controller
+                .advance(Duration::ZERO)
+                .await
+                .expect("in-flight step completes");
+            assert_eq!(stats.steps_completed, 1);
+            assert_eq!(
+                controller.world().expect("world restored").body_count(),
+                10_000
+            );
+        });
     }
 }

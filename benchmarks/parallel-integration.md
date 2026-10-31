@@ -9,10 +9,10 @@ Measured with `cargo bench -p kapitsa-tokio --bench parallel_step` on 2026-10-31
 
 | Mode | Median | Speedup vs sequential |
 |---|---:|---:|
-| Synchronous `PhysicsWorld::step` | 151.93 ms | 1.00x |
-| Tokio, 1 worker | 182.91 ms | 0.83x |
-| Tokio, 2 workers | 106.06 ms | 1.43x |
-| Tokio, 4 workers | 71.44 ms | 2.13x |
+| Synchronous `PhysicsWorld::step` | 150.90 ms | 1.00x |
+| Tokio, 1 worker | 177.51 ms | 0.85x |
+| Tokio, 2 workers | 102.63 ms | 1.47x |
+| Tokio, 4 workers | 63.58 ms | 2.37x |
 
 The one-worker path is slower because snapshotting, task dispatch, and commit
 cost more than they save for this workload. Parallel speedup appears at two
