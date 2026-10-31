@@ -1,6 +1,8 @@
 use crate::aabb::Aabb;
 use glam::Vec3;
 
+use super::ShapeError;
+
 /// Capsule swept along a segment in collider-local coordinates.
 pub struct Capsule {
     start: Vec3,
@@ -9,15 +11,23 @@ pub struct Capsule {
 }
 
 impl Capsule {
-    pub fn new(start: Vec3, end: Vec3, radius: f32) -> Option<Self> {
+    pub fn new(start: Vec3, end: Vec3, radius: f32) -> Result<Self, ShapeError> {
+        if !start.is_finite() || !end.is_finite() || !radius.is_finite() {
+            return Err(ShapeError::NonFiniteParameter);
+        }
+
         let length = (end - start).length();
-        (start.is_finite()
-            && end.is_finite()
-            && length.is_finite()
-            && length > 0.0
-            && radius.is_finite()
-            && radius > 0.0)
-            .then_some(Self { start, end, radius })
+        if !length.is_finite() {
+            return Err(ShapeError::ArithmeticOverflow);
+        }
+        if length <= 0.0 {
+            return Err(ShapeError::DegenerateGeometry);
+        }
+        if radius <= 0.0 {
+            return Err(ShapeError::InvalidDimension);
+        }
+
+        Ok(Self { start, end, radius })
     }
 
     pub fn start(&self) -> Vec3 {

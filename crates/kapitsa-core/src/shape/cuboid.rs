@@ -1,18 +1,27 @@
 use crate::aabb::Aabb;
 use glam::Vec3;
 
+use super::ShapeError;
+
 /// Axis-aligned cuboid centered at the collider-local origin.
 pub struct Cuboid {
     size: Vec3,
 }
 
 impl Cuboid {
-    pub fn new(x: f32, y: f32, z: f32) -> Option<Self> {
+    pub fn new(x: f32, y: f32, z: f32) -> Result<Self, ShapeError> {
         Self::from_vec(Vec3::new(x, y, z))
     }
 
-    pub fn from_vec(size: Vec3) -> Option<Self> {
-        (size.is_finite() && size.min_element() > 0.0).then_some(Self { size })
+    pub fn from_vec(size: Vec3) -> Result<Self, ShapeError> {
+        if !size.is_finite() {
+            return Err(ShapeError::NonFiniteParameter);
+        }
+        if size.min_element() <= 0.0 {
+            return Err(ShapeError::InvalidDimension);
+        }
+
+        Ok(Self { size })
     }
 
     pub fn size(&self) -> Vec3 {

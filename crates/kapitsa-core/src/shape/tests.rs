@@ -4,7 +4,8 @@ use rstest::{fixture, rstest};
 
 use super::{
     BoneInfluence, Capsule, Convex, Cuboid, Cylinder, HeightField, LevelSet, Plane, Shape,
-    SkinnedTriangleMesh, Sphere, TaperedCapsule, TaperedCylinder, Triangle, TriangleMesh,
+    ShapeError, SkinnedTriangleMesh, Sphere, TaperedCapsule, TaperedCylinder, Triangle,
+    TriangleMesh,
 };
 
 #[fixture]
@@ -29,16 +30,16 @@ fn vertex_influences() -> Vec<Vec<BoneInfluence>> {
 
 #[rstest]
 fn sphere_accepts_positive_finite_radius() {
-    assert!(Sphere::new(1.0).is_some());
+    assert!(Sphere::new(1.0).is_ok());
 }
 
 #[rstest]
-#[case::zero(0.0)]
-#[case::negative(-1.0)]
-#[case::nan(f32::NAN)]
-#[case::infinity(f32::INFINITY)]
-fn sphere_rejects_invalid_radius(#[case] radius: f32) {
-    assert!(Sphere::new(radius).is_none());
+#[case::zero(0.0, ShapeError::InvalidDimension)]
+#[case::negative(-1.0, ShapeError::InvalidDimension)]
+#[case::nan(f32::NAN, ShapeError::NonFiniteParameter)]
+#[case::infinity(f32::INFINITY, ShapeError::NonFiniteParameter)]
+fn sphere_rejects_invalid_radius(#[case] radius: f32, #[case] error: ShapeError) {
+    assert_eq!(Sphere::new(radius).err(), Some(error));
 }
 
 #[rstest]
@@ -49,11 +50,11 @@ fn cuboid_stores_size_and_half_extents() {
 }
 
 #[rstest]
-#[case::zero_component(Vec3::new(0.0, 1.0, 1.0))]
-#[case::negative_component(Vec3::new(1.0, -1.0, 1.0))]
-#[case::infinite_component(Vec3::splat(f32::INFINITY))]
-fn cuboid_rejects_invalid_size(#[case] size: Vec3) {
-    assert!(Cuboid::from_vec(size).is_none());
+#[case::zero_component(Vec3::new(0.0, 1.0, 1.0), ShapeError::InvalidDimension)]
+#[case::negative_component(Vec3::new(1.0, -1.0, 1.0), ShapeError::InvalidDimension)]
+#[case::infinite_component(Vec3::splat(f32::INFINITY), ShapeError::NonFiniteParameter)]
+fn cuboid_rejects_invalid_size(#[case] size: Vec3, #[case] error: ShapeError) {
+    assert_eq!(Cuboid::from_vec(size).err(), Some(error));
 }
 
 #[rstest]
@@ -70,81 +71,118 @@ fn plane_normalizes_its_equation(
 }
 
 #[rstest]
-#[case::zero_normal(Vec3::ZERO, 0.0)]
-#[case::nan_distance(Vec3::X, f32::NAN)]
-#[case::infinite_normal(Vec3::splat(f32::INFINITY), 1.0)]
-#[case::overflowing_distance(Vec3::splat(f32::MIN_POSITIVE), f32::MAX)]
-fn plane_rejects_invalid_equation(#[case] normal: Vec3, #[case] distance: f32) {
-    assert!(Plane::from_vec(normal, distance).is_none());
+#[case::zero_normal(Vec3::ZERO, 0.0, ShapeError::DegenerateGeometry)]
+#[case::nan_distance(Vec3::X, f32::NAN, ShapeError::NonFiniteParameter)]
+#[case::infinite_normal(Vec3::splat(f32::INFINITY), 1.0, ShapeError::NonFiniteParameter)]
+#[case::overflowing_distance(
+    Vec3::splat(f32::MIN_POSITIVE),
+    f32::MAX,
+    ShapeError::ArithmeticOverflow
+)]
+fn plane_rejects_invalid_equation(
+    #[case] normal: Vec3,
+    #[case] distance: f32,
+    #[case] error: ShapeError,
+) {
+    assert_eq!(Plane::from_vec(normal, distance).err(), Some(error));
 }
 
 #[rstest]
 fn capsule_accepts_distinct_finite_endpoints() {
-    assert!(Capsule::new(Vec3::ZERO, Vec3::Z, 0.5).is_some());
+    assert!(Capsule::new(Vec3::ZERO, Vec3::Z, 0.5).is_ok());
 }
 
 #[rstest]
-#[case::coincident_endpoints(Vec3::ZERO, Vec3::ZERO, 0.5)]
-#[case::zero_radius(Vec3::ZERO, Vec3::Z, 0.0)]
-fn capsule_rejects_invalid_geometry(#[case] start: Vec3, #[case] end: Vec3, #[case] radius: f32) {
-    assert!(Capsule::new(start, end, radius).is_none());
+#[case::coincident_endpoints(Vec3::ZERO, Vec3::ZERO, 0.5, ShapeError::DegenerateGeometry)]
+#[case::zero_radius(Vec3::ZERO, Vec3::Z, 0.0, ShapeError::InvalidDimension)]
+fn capsule_rejects_invalid_geometry(
+    #[case] start: Vec3,
+    #[case] end: Vec3,
+    #[case] radius: f32,
+    #[case] error: ShapeError,
+) {
+    assert_eq!(Capsule::new(start, end, radius).err(), Some(error));
 }
 
 #[rstest]
 fn cylinder_accepts_distinct_finite_endpoints() {
-    assert!(Cylinder::new(Vec3::ZERO, Vec3::Z, 0.5).is_some());
+    assert!(Cylinder::new(Vec3::ZERO, Vec3::Z, 0.5).is_ok());
 }
 
 #[rstest]
-#[case::coincident_endpoints(Vec3::ZERO, Vec3::ZERO, 0.5)]
-#[case::negative_radius(Vec3::ZERO, Vec3::Z, -0.5)]
-fn cylinder_rejects_invalid_geometry(#[case] start: Vec3, #[case] end: Vec3, #[case] radius: f32) {
-    assert!(Cylinder::new(start, end, radius).is_none());
+#[case::coincident_endpoints(Vec3::ZERO, Vec3::ZERO, 0.5, ShapeError::DegenerateGeometry)]
+#[case::negative_radius(Vec3::ZERO, Vec3::Z, -0.5, ShapeError::InvalidDimension)]
+fn cylinder_rejects_invalid_geometry(
+    #[case] start: Vec3,
+    #[case] end: Vec3,
+    #[case] radius: f32,
+    #[case] error: ShapeError,
+) {
+    assert_eq!(Cylinder::new(start, end, radius).err(), Some(error));
 }
 
 #[rstest]
 fn tapered_cylinder_accepts_positive_end_radii() {
-    assert!(TaperedCylinder::new(Vec3::ZERO, Vec3::Z, 0.25, 0.5).is_some());
+    assert!(TaperedCylinder::new(Vec3::ZERO, Vec3::Z, 0.25, 0.5).is_ok());
 }
 
 #[rstest]
-#[case::zero_radius(0.0, 0.5, Vec3::Z)]
-#[case::negative_radius(0.5, -0.5, Vec3::Z)]
-#[case::coincident_endpoints(0.5, 0.5, Vec3::ZERO)]
+#[case::zero_radius(0.0, 0.5, Vec3::Z, ShapeError::InvalidDimension)]
+#[case::negative_radius(0.5, -0.5, Vec3::Z, ShapeError::InvalidDimension)]
+#[case::coincident_endpoints(0.5, 0.5, Vec3::ZERO, ShapeError::DegenerateGeometry)]
 fn tapered_cylinder_rejects_invalid_geometry(
     #[case] start_radius: f32,
     #[case] end_radius: f32,
     #[case] end: Vec3,
+    #[case] error: ShapeError,
 ) {
-    assert!(TaperedCylinder::new(Vec3::ZERO, end, start_radius, end_radius).is_none());
+    assert_eq!(
+        TaperedCylinder::new(Vec3::ZERO, end, start_radius, end_radius).err(),
+        Some(error)
+    );
 }
 
 #[rstest]
 fn tapered_capsule_accepts_uncontained_end_spheres() {
-    assert!(TaperedCapsule::new(Vec3::ZERO, Vec3::Z, 0.5, 0.25).is_some());
+    assert!(TaperedCapsule::new(Vec3::ZERO, Vec3::Z, 0.5, 0.25).is_ok());
 }
 
 #[rstest]
-#[case::contained_end_sphere(Vec3::ZERO, Vec3::Z, 2.0, 0.5)]
-#[case::coincident_endpoints(Vec3::ZERO, Vec3::ZERO, 0.5, 0.5)]
+#[case::contained_end_sphere(Vec3::ZERO, Vec3::Z, 2.0, 0.5, ShapeError::DegenerateGeometry)]
+#[case::coincident_endpoints(Vec3::ZERO, Vec3::ZERO, 0.5, 0.5, ShapeError::DegenerateGeometry)]
 fn tapered_capsule_rejects_invalid_geometry(
     #[case] start: Vec3,
     #[case] end: Vec3,
     #[case] start_radius: f32,
     #[case] end_radius: f32,
+    #[case] error: ShapeError,
 ) {
-    assert!(TaperedCapsule::new(start, end, start_radius, end_radius).is_none());
+    assert_eq!(
+        TaperedCapsule::new(start, end, start_radius, end_radius).err(),
+        Some(error)
+    );
 }
 
 #[rstest]
 fn triangle_accepts_non_degenerate_vertices() {
-    assert!(Triangle::new(Vec3::ZERO, Vec3::X, Vec3::Y).is_some());
+    assert!(Triangle::new(Vec3::ZERO, Vec3::X, Vec3::Y).is_ok());
 }
 
 #[rstest]
-#[case::collinear(Vec3::ZERO, Vec3::X, Vec3::X * 2.0)]
-fn triangle_rejects_degenerate_vertices(#[case] a: Vec3, #[case] b: Vec3, #[case] c: Vec3) {
-    assert!(Triangle::new(a, b, c).is_none());
+#[case::collinear(Vec3::ZERO, Vec3::X, Vec3::X * 2.0, ShapeError::DegenerateGeometry)]
+#[case::non_finite(
+    Vec3::ZERO,
+    Vec3::X,
+    Vec3::splat(f32::NAN),
+    ShapeError::NonFiniteParameter
+)]
+fn triangle_rejects_invalid_vertices(
+    #[case] a: Vec3,
+    #[case] b: Vec3,
+    #[case] c: Vec3,
+    #[case] error: ShapeError,
+) {
+    assert_eq!(Triangle::new(a, b, c).err(), Some(error));
 }
 
 #[rstest]
