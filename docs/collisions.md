@@ -163,8 +163,9 @@ must be finite and nonnegative; penetration slop cannot exceed contact offset.
 
 The solver applies normal impulses, friction, restitution, warm starting, and
 bounded positional correction. Finite iterations and slop permit small
-residual penetration; exact zero penetration is not guaranteed. Bodies can be
-put to sleep explicitly and are woken by relevant state changes and contacts.
+residual penetration; exact zero penetration is not guaranteed. Bodies sleep
+only when explicitly put to sleep; the engine does not automatically put idle
+bodies to sleep. Relevant state changes and contacts wake sleeping bodies.
 
 Set `RigidBody::set_ccd_mode(CcdMode::Continuous)` on bodies that need
 continuous collision detection. Swept broadphase bounds feed time-of-impact

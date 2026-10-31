@@ -17,22 +17,26 @@ use crate::{
     StepStats,
 };
 
+struct StepOutcome {
+    world: PhysicsWorld,
+    result: Result<(), StepError>,
+    completed_at: Instant,
+}
+
 enum PrepareOutput {
-    Completed(
-        PhysicsWorld,
-        Vec<Vec<BodyStep>>,
-        Result<(), StepError>,
-        Instant,
-    ),
+    Completed {
+        outcome: StepOutcome,
+        buffers: Vec<Vec<BodyStep>>,
+    },
     Shards(PhysicsWorld, Vec<Vec<BodyStep>>, Result<(), StepError>),
 }
-type CommitOutput = (
-    PhysicsWorld,
-    Vec<Vec<BodyStep>>,
-    Result<(), StepError>,
-    Instant,
-);
-type SequentialOutput = (PhysicsWorld, Result<(), StepError>, Instant);
+
+struct CommitOutput {
+    outcome: StepOutcome,
+    buffers: Vec<Vec<BodyStep>>,
+}
+
+type SequentialOutput = StepOutcome;
 
 const BUCKETS_PER_WORKER: usize = 4;
 const MIN_BUCKET_SIZE: usize = 128;
@@ -63,6 +67,13 @@ enum StepWork {
     Committing {
         task: JoinHandle<CommitOutput>,
     },
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StepBoundary {
+    Prepared,
+    Integrated,
 }
 
 struct InFlightStep {
@@ -116,6 +127,12 @@ pub struct PhysicsController {
         tokio::sync::oneshot::Sender<()>,
         std::sync::mpsc::Receiver<()>,
     )>,
+    #[cfg(test)]
+    phase_gate: Option<(
+        StepBoundary,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
 }
 
 impl PhysicsController {
@@ -147,6 +164,8 @@ impl PhysicsController {
             metrics,
             #[cfg(test)]
             step_gate: None,
+            #[cfg(test)]
+            phase_gate: None,
         }
     }
 
@@ -294,7 +313,11 @@ impl PhysicsController {
                 }
                 let result = world.step(step_duration.as_secs_f64());
                 let completed_at = Instant::now();
-                (world, result, completed_at)
+                StepOutcome {
+                    world,
+                    result,
+                    completed_at,
+                }
             });
             self.world = WorldState::InFlight(InFlightStep {
                 world: None,
@@ -331,7 +354,14 @@ impl PhysicsController {
             }
             if active <= threshold {
                 let result = world.step(step_duration.as_secs_f64());
-                return PrepareOutput::Completed(world, buffers, result, Instant::now());
+                return PrepareOutput::Completed {
+                    outcome: StepOutcome {
+                        world,
+                        result,
+                        completed_at: Instant::now(),
+                    },
+                    buffers,
+                };
             }
             let result = world.fill_step_shards(&mut buffers);
             PrepareOutput::Shards(world, buffers, result)
@@ -376,23 +406,7 @@ impl PhysicsController {
                             return Err(SchedulerError::WorldLost);
                         };
                         match completion {
-                            Ok((world, Ok(()), completed_at)) => {
-                                self.restore_world(world);
-                                return Ok((
-                                    StepMeasurement {
-                                        step_duration: completed_at
-                                            .saturating_duration_since(in_flight.started),
-                                        task_wait_duration: in_flight.task_wait_duration,
-                                        step_budget: in_flight.step_budget,
-                                        deadline: in_flight.step_duration,
-                                    },
-                                    completed_at,
-                                ));
-                            }
-                            Ok((world, Err(error), _)) => {
-                                self.restore_world(world);
-                                return Err(SchedulerError::from(error));
-                            }
+                            Ok(outcome) => return self.finish_step(outcome, in_flight, None),
                             Err(error) => {
                                 self.world = WorldState::Lost;
                                 self.update_metrics_state();
@@ -423,19 +437,8 @@ impl PhysicsController {
                         return Err(SchedulerError::WorldLost);
                     };
                     match completion {
-                        Ok(PrepareOutput::Completed(world, buffers, result, completed_at)) => {
-                            self.restore_available(world, buffers);
-                            result.map_err(SchedulerError::from)?;
-                            return Ok((
-                                StepMeasurement {
-                                    step_duration: completed_at
-                                        .saturating_duration_since(in_flight.started),
-                                    task_wait_duration: in_flight.task_wait_duration,
-                                    step_budget: in_flight.step_budget,
-                                    deadline: in_flight.step_duration,
-                                },
-                                completed_at,
-                            ));
+                        Ok(PrepareOutput::Completed { outcome, buffers }) => {
+                            return self.finish_step(outcome, in_flight, Some(buffers));
                         }
                         Ok(PrepareOutput::Shards(world, buffers, Ok(()))) => {
                             let bucket_count = buffers.len();
@@ -488,6 +491,8 @@ impl PhysicsController {
                                 step_duration: in_flight.step_duration,
                                 step_budget: in_flight.step_budget,
                             });
+                            #[cfg(test)]
+                            self.wait_at_step_boundary(StepBoundary::Prepared).await;
                         }
                         Ok(PrepareOutput::Shards(world, buffers, Err(error))) => {
                             self.restore_available(world, buffers);
@@ -553,6 +558,8 @@ impl PhysicsController {
                             *next_task = task_index + 1;
                         }
                     } else {
+                        #[cfg(test)]
+                        self.wait_at_step_boundary(StepBoundary::Integrated).await;
                         self.start_commit_step()?;
                     }
                 }
@@ -571,22 +578,8 @@ impl PhysicsController {
                     };
                     let in_flight = self.take_in_flight()?;
                     match completion {
-                        Ok((world, buffers, Ok(()), completed_at)) => {
-                            self.restore_available(world, buffers);
-                            return Ok((
-                                StepMeasurement {
-                                    step_duration: completed_at
-                                        .saturating_duration_since(in_flight.started),
-                                    task_wait_duration: in_flight.task_wait_duration,
-                                    step_budget: in_flight.step_budget,
-                                    deadline: in_flight.step_duration,
-                                },
-                                completed_at,
-                            ));
-                        }
-                        Ok((world, buffers, Err(error), _)) => {
-                            self.restore_available(world, buffers);
-                            return Err(SchedulerError::from(error));
+                        Ok(CommitOutput { outcome, buffers }) => {
+                            return self.finish_step(outcome, in_flight, Some(buffers));
                         }
                         Err(error) => {
                             self.world = WorldState::Lost;
@@ -675,7 +668,14 @@ impl PhysicsController {
         let task = tokio::task::spawn_blocking(move || {
             let result = world.commit_step_shards(&buffers);
             let completed_at = Instant::now();
-            (world, buffers, result, completed_at)
+            CommitOutput {
+                outcome: StepOutcome {
+                    world,
+                    result,
+                    completed_at,
+                },
+                buffers,
+            }
         });
         self.world = WorldState::InFlight(InFlightStep {
             world: None,
@@ -704,9 +704,57 @@ impl PhysicsController {
         self.bucket_buffers = buffers;
     }
 
+    fn finish_step(
+        &mut self,
+        outcome: StepOutcome,
+        in_flight: InFlightStep,
+        buffers: Option<Vec<Vec<BodyStep>>>,
+    ) -> Result<(StepMeasurement, Instant), SchedulerError> {
+        if let Some(buffers) = buffers {
+            self.restore_available(outcome.world, buffers);
+        } else {
+            self.restore_world(outcome.world);
+        }
+        outcome.result.map_err(SchedulerError::from)?;
+        Ok((
+            StepMeasurement {
+                step_duration: outcome
+                    .completed_at
+                    .saturating_duration_since(in_flight.started),
+                task_wait_duration: in_flight.task_wait_duration,
+                step_budget: in_flight.step_budget,
+                deadline: in_flight.step_duration,
+            },
+            outcome.completed_at,
+        ))
+    }
+
     fn restore_world(&mut self, world: PhysicsWorld) {
         self.world = WorldState::Available(world);
         self.update_metrics_state();
+    }
+
+    #[cfg(test)]
+    fn gate_step_boundary(
+        &mut self,
+        boundary: StepBoundary,
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        self.phase_gate = Some((boundary, entered, release));
+    }
+
+    #[cfg(test)]
+    async fn wait_at_step_boundary(&mut self, boundary: StepBoundary) {
+        if self
+            .phase_gate
+            .as_ref()
+            .is_some_and(|(target, _, _)| *target == boundary)
+        {
+            let (_, entered, release) = self.phase_gate.take().expect("phase gate exists");
+            let _ = entered.send(());
+            let _ = release.await;
+        }
     }
 
     fn update_metrics_state(&mut self) {
@@ -740,6 +788,7 @@ mod tests {
     use kapitsa_math::{Mat3, Quat, Vec3};
     use tokio::runtime::Builder;
 
+    use super::{StepBoundary, StepWork, WorldState};
     use crate::{PhysicsController, SchedulerConfig, SchedulerError};
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -1265,6 +1314,58 @@ mod tests {
                 controller.world().expect("world restored").body_count(),
                 10_000
             );
+        });
+    }
+
+    #[test]
+    fn cancelling_between_parallel_phases_preserves_world_and_worker_state() {
+        let runtime = runtime();
+        runtime.block_on(async {
+            for boundary in [StepBoundary::Prepared, StepBoundary::Integrated] {
+                let mut controller =
+                    PhysicsController::new(dynamic_world(1_024), config(1)).expect("controller");
+                controller
+                    .set_active_workers(4)
+                    .expect("worker count within limit");
+                let (entered, entered_rx) = tokio::sync::oneshot::channel();
+                let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
+                controller.gate_step_boundary(boundary, entered, release_rx);
+
+                {
+                    let mut step = Box::pin(controller.step());
+                    tokio::select! {
+                        result = step.as_mut() => panic!("step passed the gated phase: {result:?}"),
+                        signal = entered_rx => signal.expect("phase boundary reached"),
+                    }
+                }
+
+                let WorldState::InFlight(in_flight) = &controller.world else {
+                    panic!("cancelled step must remain in flight");
+                };
+                let StepWork::Integrating {
+                    tasks, next_task, ..
+                } = &in_flight.work
+                else {
+                    panic!("step should be between parallel phases");
+                };
+                assert!(in_flight.world.is_some());
+                if boundary == StepBoundary::Prepared {
+                    assert!(*next_task < tasks.len());
+                } else {
+                    assert_eq!(*next_task, tasks.len());
+                }
+                assert!(matches!(
+                    controller.world(),
+                    Err(SchedulerError::WorldUnavailable)
+                ));
+
+                controller.step().await.expect("resume in-flight step");
+                assert_eq!(controller.metrics().total_steps, 1);
+                assert_eq!(
+                    controller.world().expect("world restored").body_count(),
+                    1_024
+                );
+            }
         });
     }
 }

@@ -1,4 +1,6 @@
-use crate::{aabb::Aabb, shape::LevelSet, transform::Transform};
+#[cfg(test)]
+use crate::transform::Transform;
+use crate::{aabb::Aabb, shape::LevelSet};
 use kapitsa_math::Vec3;
 
 use super::CollisionError;
@@ -138,6 +140,7 @@ pub(crate) fn query_surface_cells(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn query_world_cells(
     level_set: &LevelSet,
     world_transform: &Transform,

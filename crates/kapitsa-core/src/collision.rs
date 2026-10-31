@@ -1,34 +1,22 @@
 mod broad_phase;
-#[allow(dead_code)]
 mod cache;
-#[allow(dead_code)]
 mod ccd;
 mod config;
 mod contact;
-#[allow(dead_code)]
 mod epa;
 mod error;
 mod event;
-#[allow(dead_code)]
 mod gjk;
-#[allow(dead_code)]
 mod height_field;
-#[allow(dead_code)]
 mod island;
-#[allow(dead_code)]
 mod level_set;
-#[allow(dead_code)]
 mod manifold;
-#[allow(dead_code)]
 pub(crate) mod mesh;
-#[allow(dead_code)]
 mod narrow_phase;
 mod query;
-#[allow(dead_code)]
 mod solver;
 pub(crate) mod spatial_index;
 mod step;
-#[allow(dead_code)]
 mod support;
 mod system;
 

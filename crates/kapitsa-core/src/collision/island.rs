@@ -141,6 +141,7 @@ impl IslandLayout {
         self.island_count
     }
 
+    #[cfg(test)]
     pub(crate) fn body_island(&self, body: usize) -> Option<usize> {
         self.body_islands.get(body).copied().flatten()
     }

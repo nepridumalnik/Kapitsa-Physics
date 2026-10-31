@@ -93,16 +93,6 @@ impl PhysicsSnapshot {
         self.entries.capacity() * size_of::<SnapshotEntry>() + index_bytes
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn legacy_slot_storage_bytes(max_index: u32) -> usize {
-        match usize::try_from(max_index) {
-            Ok(index) => index
-                .saturating_add(1)
-                .saturating_mul(size_of::<Option<(u32, u32, BodyState)>>()),
-            Err(_) => usize::MAX,
-        }
-    }
-
     pub(crate) fn rebuild(&mut self, world: &PhysicsWorld, step: u64, simulation_time: Duration) {
         let body_count = world.body_count();
         prepare_entries(&mut self.entries, body_count);

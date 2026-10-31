@@ -225,16 +225,6 @@ impl Collider {
                 + pose.refit_scratch.retained_capacity_bytes()
         })
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn skinned_vertices(&self) -> Option<&[Vec3]> {
-        self.skin_pose.as_ref().map(|pose| pose.vertices.as_slice())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn skinned_bvh(&self) -> Option<&TriangleBvh> {
-        self.skin_pose.as_ref().map(|pose| pose.bvh.as_ref())
-    }
 }
 
 fn fill_deformed_vertices(

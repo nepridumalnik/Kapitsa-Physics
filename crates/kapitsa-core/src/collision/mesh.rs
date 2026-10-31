@@ -126,6 +126,7 @@ impl TriangleBvh {
         self.triangle_count
     }
 
+    #[cfg(test)]
     pub(crate) fn refit_vertices(
         &mut self,
         mesh: &TriangleMesh,

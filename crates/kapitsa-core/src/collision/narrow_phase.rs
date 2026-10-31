@@ -110,6 +110,7 @@ impl NarrowPhase {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn detect(
         &mut self,
         pair: CollisionPair,

@@ -93,10 +93,6 @@ impl ContactManifold {
         usize::from(self.count)
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
     pub(crate) fn points(&self) -> &[ContactPoint] {
         &self.points[..usize::from(self.count)]
     }
