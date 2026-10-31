@@ -13,6 +13,7 @@ pub enum MassError {
     NonPositiveDensity,
     UnsupportedShape,
     ArithmeticOverflow,
+    EmptyComposition,
 }
 
 impl fmt::Display for MassError {
@@ -28,6 +29,7 @@ impl fmt::Display for MassError {
             Self::NonPositiveDensity => "density must be positive",
             Self::UnsupportedShape => "mass properties are not implemented for this shape",
             Self::ArithmeticOverflow => "mass property calculation exceeds the supported range",
+            Self::EmptyComposition => "cannot combine an empty set of parts",
         };
         formatter.write_str(message)
     }
