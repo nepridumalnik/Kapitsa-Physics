@@ -153,7 +153,6 @@ async fn run_simulation(
     mut stop: watch::Receiver<bool>,
     metrics: &watch::Sender<SimulationMetrics>,
 ) -> Result<(), SimulationError> {
-    let max_catch_up_steps = controller.config().max_catch_up_steps;
     let mut previous = Instant::now();
     let mut accumulator = Duration::ZERO;
 
@@ -175,24 +174,7 @@ async fn run_simulation(
         add_elapsed(&mut accumulator, now.duration_since(previous))?;
         previous = now;
 
-        for _ in 0..max_catch_up_steps {
-            if accumulator < controller.step_duration() || stopping(&stop) {
-                break;
-            }
-            let step_duration = controller.step_duration();
-            controller
-                .step()
-                .await
-                .map_err(SimulationError::Scheduler)?;
-            accumulator -= step_duration;
-
-            let completed_at = Instant::now();
-            add_elapsed(&mut accumulator, completed_at.duration_since(previous))?;
-            previous = completed_at;
-            controller
-                .set_simulation_time_debt(accumulator.saturating_sub(controller.step_duration()));
-            metrics.send_replace(controller.metrics());
-        }
+        run_catch_up_batch(controller, &stop, metrics, &mut accumulator, &mut previous).await?;
 
         if stopping(&stop) {
             break;
@@ -202,6 +184,32 @@ async fn run_simulation(
         }
     }
 
+    Ok(())
+}
+
+async fn run_catch_up_batch(
+    controller: &mut PhysicsController,
+    stop: &watch::Receiver<bool>,
+    metrics: &watch::Sender<SimulationMetrics>,
+    accumulator: &mut Duration,
+    previous: &mut Instant,
+) -> Result<(), SimulationError> {
+    for _ in 0..controller.config().max_catch_up_steps {
+        let step_duration = controller.step_duration();
+        if *accumulator < step_duration || stopping(stop) {
+            break;
+        }
+        controller
+            .step()
+            .await
+            .map_err(SimulationError::Scheduler)?;
+        *accumulator -= step_duration;
+        let completed_at = Instant::now();
+        add_elapsed(accumulator, completed_at.duration_since(*previous))?;
+        *previous = completed_at;
+        controller.set_simulation_time_debt(accumulator.saturating_sub(controller.step_duration()));
+        metrics.send_replace(controller.metrics());
+    }
     Ok(())
 }
 
@@ -228,7 +236,7 @@ mod tests {
     };
     use kapitsa_math::{Mat3, Vec3};
 
-    use super::{PhysicsSimulation, add_elapsed, run_simulation};
+    use super::{PhysicsSimulation, add_elapsed, run_catch_up_batch, run_simulation};
     use crate::{
         PhysicsController, SchedulerConfig, SchedulerError, SimulationError, SimulationState,
     };
@@ -259,6 +267,45 @@ mod tests {
             Err(SimulationError::SimulationTimeOverflow)
         ));
         assert_eq!(accumulator, Duration::MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn catch_up_batch_is_bounded_and_retains_debt() {
+        let config = SchedulerConfig {
+            max_catch_up_steps: 2,
+            adaptive: false,
+            ..SchedulerConfig::default()
+        };
+        let mut controller =
+            PhysicsController::new(PhysicsWorld::new(), config).expect("controller");
+        let quantum = controller.step_duration();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (metrics_tx, _) = tokio::sync::watch::channel(controller.metrics());
+        let mut accumulator = Duration::from_secs(1);
+        let mut previous = tokio::time::Instant::now();
+        run_catch_up_batch(
+            &mut controller,
+            &stop_rx,
+            &metrics_tx,
+            &mut accumulator,
+            &mut previous,
+        )
+        .await
+        .expect("batch");
+        assert_eq!(controller.metrics().total_steps, 2);
+        assert!(accumulator >= Duration::from_secs(1) - quantum * 2);
+        assert!(controller.metrics().simulation_time_debt > Duration::ZERO);
+        stop_tx.send_replace(true);
+        run_catch_up_batch(
+            &mut controller,
+            &stop_rx,
+            &metrics_tx,
+            &mut accumulator,
+            &mut previous,
+        )
+        .await
+        .expect("stopped batch");
+        assert_eq!(controller.metrics().total_steps, 2);
     }
 
     #[test]
@@ -314,6 +361,45 @@ mod tests {
         let output = task.await.expect("background task completes");
         assert!(output.result.is_ok());
         assert_eq!(output.controller.metrics().total_steps, 0);
+    }
+
+    #[test]
+    fn dropping_with_a_queued_step_and_large_debt_finishes_that_step() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+            });
+            entered_rx.await.expect("blocking thread occupied");
+            let mut simulation = PhysicsSimulation::new(PhysicsWorld::new());
+            simulation.start().expect("start");
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            let task = simulation.task.take().expect("background task");
+            drop(simulation);
+            release_tx.send(()).expect("release blocking thread");
+            blocker.await.expect("blocker completes");
+            let output = task.await.expect("background task completes");
+            assert!(output.result.is_ok());
+            assert_eq!(output.controller.metrics().total_steps, 1);
+            assert_eq!(
+                output
+                    .controller
+                    .world()
+                    .expect("world restored")
+                    .body_count(),
+                0
+            );
+        });
     }
 
     #[tokio::test(start_paused = true)]

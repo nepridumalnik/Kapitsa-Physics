@@ -10,22 +10,35 @@ with two workers.
 
 | Bodies | Synchronous | Tokio fast path | Static shards x2 | Dynamic buckets x2 |
 |---:|---:|---:|---:|---:|
-| 256 | 1.01 ms | 1.29 ms | 1.88 ms | 1.51 ms |
-| 4,096 | 17.03 ms | 17.23 ms | 17.57 ms | 12.46 ms |
-| 20,000 | 81.40 ms | 82.02 ms | 89.15 ms | 62.76 ms |
+| 256 | 0.95 ms | 1.09 ms | 1.39 ms | 0.95 ms |
+| 4,096 | 15.47 ms | 15.66 ms | 15.23 ms | 10.27 ms |
+| 20,000 | 75.54 ms | 75.33 ms | 78.12 ms | 48.28 ms |
 
 ## Mixed 20,000-Body Worlds
 
 | Mix | Synchronous | Tokio fast path | Static shards x2 | Dynamic buckets x2 |
 |---|---:|---:|---:|---:|
-| 50% static, 25% sleeping, 25% dynamic | 23.28 ms | 26.99 ms | 73.64 ms | 33.94 ms |
-| 10% static, 80% sleeping, 10% dynamic | 11.86 ms | 14.46 ms | 61.86 ms | 26.56 ms |
+| 50% static, 25% sleeping, 25% dynamic | 21.68 ms | 22.89 ms | 58.79 ms | 22.30 ms |
+| 10% static, 80% sleeping, 10% dynamic | 10.75 ms | 11.07 ms | 46.83 ms | 11.53 ms |
 
-Dynamic buckets beat static sharding in each measured profile. They are faster
-than synchronous stepping for the larger all-dynamic worlds, but not for the
-small world or the mixed and sleeping-heavy cases, where the one-worker path is
-cheaper. The adaptive controller starts with one worker and only keeps worker
-increases when measured full-step time improves by at least 5%.
+The two-worker controller selects the sequential blocking path when at least
+half the bodies are inactive. In the preceding run, before that selection, its
+20,000-body mixed and sleeping-heavy medians were 23.68 ms and 21.25 ms.
+The adaptive controller starts with one worker and keeps worker increases only
+when measured full-step time improves by at least 5%.
+
+## Raw Bucket Phase Timings
+
+These timings exercise the bucket pipeline directly, including for workloads
+that now choose the sequential path. Values are median milliseconds per 12 steps.
+Dispatch overlaps worker execution; join and collection therefore measure the
+remaining wall-clock wait and result ordering, not summed worker CPU time.
+
+| 20,000-body mix | Prepare snapshots | Dispatch | Join and collect | Commit |
+|---|---:|---:|---:|---:|
+| Dynamic | 5.01 | 0.06 | 39.83 | 4.02 |
+| Mixed | 4.94 | 0.06 | 11.70 | 3.37 |
+| Sleeping-heavy | 5.07 | 0.06 | 9.85 | 3.65 |
 
 These measurements are specific to this machine, runtime, and workload; use the
 benchmark for comparisons rather than treating the timings as guarantees.

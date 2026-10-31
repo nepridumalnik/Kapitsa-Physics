@@ -29,12 +29,20 @@ Dropping the simulation requests a best-effort stop without waiting. Call
 `stop().await` to recover the world and wait for completion; if the application
 destroys its Tokio runtime first, detached work cannot be guaranteed to finish.
 
+Use `PhysicsSimulation::with_config(world, config)?` to supply a validated
+`SchedulerConfig`. The default constructor remains available without configuration.
+`max_catch_up_steps` limits each scheduling batch; excess accumulated time is
+retained and the task yields before the next batch. Accumulator overflow is
+reported as `SimulationError::SimulationTimeOverflow`.
+
 `metrics()` returns the latest ready snapshot without waiting. `actual_hz` is
 computed from recent completion timestamps. `step_budget` accounts for target
 utilization; `deadline` is the full physics interval used internally for step
 measurements. `budget_overruns` and `deadline_misses` count those limits
-separately. `simulation_time_debt` reports whole-step lag and excludes the
-normal fractional remainder retained by the scheduler.
+separately. `actual_hz` is zero while stopped and until two steps complete in a
+new run. Cumulative counters survive restarts. `simulation_time_debt` is the
+accumulated time exceeding the next step interval after a completed step; a
+normal remainder below one interval is retained internally but reported as zero.
 
 ## Manual stepping
 
@@ -43,6 +51,10 @@ when to run each step. Every `step()` call performs exactly one fixed step; it
 does not accept elapsed time or run catch-up steps. The one-worker path calls
 `PhysicsWorld::step(dt)` on Tokio's blocking pool. With multiple workers, the
 controller schedules bounded buckets and atomically commits their results.
+When at least half the bodies are static or sleeping, the controller instead
+uses the atomic sequential step within a blocking task. This avoids full-body
+bucket snapshots for those workloads; the chosen worker count remains the
+scheduler's configured concurrency.
 
 `PhysicsWorld::step(dt)` remains available for synchronous use without Tokio.
 
