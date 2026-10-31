@@ -2,26 +2,30 @@ use crate::containers::DenseId;
 
 /// Identifies a rigid body in the [`super::PhysicsWorld`] that created it.
 ///
-/// `DenseId` does not contain an owner identifier; a `BodyId` must only be used
-/// with its originating world.
+/// The opaque owner identifier prevents IDs from resolving in another world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct BodyId(pub(super) DenseId);
+pub struct BodyId {
+    pub(super) world: u64,
+    pub(super) dense: DenseId,
+}
 
 impl BodyId {
     /// Returns the stable slot index within the world that created this ID.
     pub fn index(self) -> u32 {
-        self.0.index()
+        self.dense.index()
     }
 
     /// Returns the slot generation used to reject stale IDs after reuse.
     pub fn generation(self) -> u32 {
-        self.0.generation()
+        self.dense.generation()
     }
 }
 
 /// Identifies a collider in the [`super::PhysicsWorld`] that created it.
 ///
-/// `DenseId` does not contain an owner identifier; a `ColliderId` must only be
-/// used with its originating world.
+/// The opaque owner identifier prevents IDs from resolving in another world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ColliderId(pub(super) DenseId);
+pub struct ColliderId {
+    pub(super) world: u64,
+    pub(super) dense: DenseId,
+}

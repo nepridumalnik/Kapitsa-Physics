@@ -171,3 +171,27 @@ async fn queued_cancellation_applies_and_stop_discards_other_session_requests() 
     assert_eq!(restarted.len(), 1);
     simulation.stop().await.expect("second stop");
 }
+
+#[tokio::test(start_paused = true)]
+async fn body_ids_remain_valid_across_simulation_restart() {
+    let mut world = PhysicsWorld::new();
+    let id = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("body insertion");
+    let mut simulation = simulation(world);
+    let client = simulation.client();
+
+    simulation.start().expect("start");
+    simulation.stop().await.expect("stop");
+    assert!(
+        simulation
+            .world()
+            .expect("stopped world")
+            .body(id)
+            .is_some()
+    );
+
+    simulation.start().expect("restart");
+    assert!(client.snapshot().body(id).is_some());
+    simulation.stop().await.expect("second stop");
+}

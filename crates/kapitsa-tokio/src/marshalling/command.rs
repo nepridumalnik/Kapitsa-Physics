@@ -279,6 +279,43 @@ mod tests {
     }
 
     #[test]
+    fn commands_reject_body_ids_from_another_world() {
+        let mut source = PhysicsWorld::new();
+        let foreign = source
+            .add_body(dynamic_body())
+            .expect("source body insertion");
+        let mut target = PhysicsWorld::new();
+        let local = target
+            .add_body(dynamic_body())
+            .expect("target body insertion");
+
+        assert!(matches!(
+            apply_command(
+                &mut target,
+                PhysicsCommand::SetLinearVelocity {
+                    id: foreign,
+                    velocity: Vec3::X,
+                }
+            ),
+            Err(PhysicsClientError::World(WorldError::InvalidBodyId))
+        ));
+        assert!(matches!(
+            apply_command(&mut target, PhysicsCommand::RemoveBody { id: foreign }),
+            Err(PhysicsClientError::World(WorldError::InvalidBodyId))
+        ));
+        assert_eq!(target.body_count(), 1);
+        assert!(target.body(local).is_some());
+        assert_eq!(
+            target
+                .body(local)
+                .expect("local body remains")
+                .state()
+                .linear_velocity(),
+            Vec3::ZERO
+        );
+    }
+
+    #[test]
     fn body_commands_delegate_to_existing_body_operations() {
         let mut world = PhysicsWorld::new();
         let id = world.add_body(dynamic_body()).expect("body");

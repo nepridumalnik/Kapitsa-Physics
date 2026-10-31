@@ -1,6 +1,6 @@
 use kapitsa_math::{Mat3, Vec3};
 
-use super::{BodyId, ColliderId, PhysicsWorld, StepError, WorldError};
+use super::{BodyId, ColliderId, PhysicsWorld, StepError, WorldError, allocate_world_id};
 use crate::{
     collider::{Collider, CollisionFilter},
     containers::{DensePool, DensePoolError},
@@ -9,6 +9,7 @@ use crate::{
     shape::{Shape, Sphere},
     transform::Transform,
 };
+use std::{collections::HashSet, sync::atomic::AtomicU64};
 
 fn dynamic_body() -> RigidBody {
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
@@ -48,6 +49,75 @@ fn stores_each_body_type_and_assigns_ids() -> Result<(), WorldError> {
 }
 
 #[test]
+fn body_and_collider_ids_are_scoped_to_their_worlds() -> Result<(), WorldError> {
+    let mut first_world = PhysicsWorld::new();
+    let mut second_world = PhysicsWorld::new();
+    let first_body = first_world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let second_body = second_world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let first_collider = first_world.add_collider(first_body, collider(1.0))?;
+    let second_collider = second_world.add_collider(second_body, collider(2.0))?;
+
+    assert_eq!(first_body.dense, second_body.dense);
+    assert_ne!(first_body, second_body);
+    assert_eq!(first_collider.dense, second_collider.dense);
+    assert_ne!(first_collider, second_collider);
+    assert_eq!(HashSet::from([first_body, second_body]).len(), 2);
+    assert_eq!(HashSet::from([first_collider, second_collider]).len(), 2);
+
+    assert!(second_world.body(first_body).is_none());
+    assert!(second_world.body_mut(first_body).is_none());
+    assert!(second_world.colliders_of(first_body).is_none());
+    assert_eq!(
+        second_world.add_collider(first_body, collider(3.0)),
+        Err(WorldError::InvalidBodyId)
+    );
+    assert!(second_world.remove_body(first_body).is_none());
+    assert_eq!(second_world.body_count(), 1);
+
+    assert!(second_world.collider(first_collider).is_none());
+    assert!(second_world.collider_mut(first_collider).is_none());
+    assert!(second_world.collider_body(first_collider).is_none());
+    assert!(second_world.remove_collider(first_collider).is_none());
+    assert_eq!(second_world.collider_count(), 1);
+    assert!(second_world.body(second_body).is_some());
+    assert!(second_world.collider(second_collider).is_some());
+    Ok(())
+}
+
+#[test]
+fn world_id_survives_moves_and_removing_all_bodies() -> Result<(), WorldError> {
+    fn move_world(world: PhysicsWorld) -> PhysicsWorld {
+        world
+    }
+
+    let mut world = PhysicsWorld::new();
+    let first = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let world_id = world.world_id;
+    world = move_world(world);
+    assert!(world.body(first).is_some());
+    assert!(world.remove_body(first).is_some());
+    let second = world.add_body(RigidBody::new_static(Transform::identity()))?;
+
+    assert_eq!(world.world_id, world_id);
+    assert_eq!(second.world, world_id);
+    assert!(world.body(first).is_none());
+    assert!(world.body(second).is_some());
+    Ok(())
+}
+
+#[test]
+fn world_id_allocator_reports_exhaustion_without_wrapping() {
+    let counter = AtomicU64::new(u64::MAX - 1);
+    assert_eq!(allocate_world_id(&counter), Ok(u64::MAX - 1));
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), u64::MAX);
+    assert_eq!(
+        allocate_world_id(&counter),
+        Err(WorldError::WorldIdExhausted)
+    );
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), u64::MAX);
+}
+
+#[test]
 fn body_mut_updates_the_stored_body() -> Result<(), WorldError> {
     let mut world = PhysicsWorld::default();
     let id = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
@@ -65,7 +135,10 @@ fn body_mut_updates_the_stored_body() -> Result<(), WorldError> {
 #[test]
 fn unknown_body_id_is_rejected() -> Result<(), DensePoolError> {
     let mut source = DensePool::new();
-    let id = BodyId(source.insert(())?);
+    let id = BodyId {
+        world: u64::MAX,
+        dense: source.insert(())?,
+    };
     let world = PhysicsWorld::new();
 
     assert!(world.body(id).is_none());
@@ -130,7 +203,10 @@ fn invalid_body_rejects_collider_without_changing_world() -> Result<(), DensePoo
     let mut stale_ids = DensePool::new();
     let first = stale_ids.insert(())?;
     let _ = stale_ids.remove(first);
-    let stale_body = BodyId(stale_ids.insert(())?);
+    let stale_body = BodyId {
+        world: u64::MAX,
+        dense: stale_ids.insert(())?,
+    };
     let mut world = PhysicsWorld::new();
     world
         .add_body(RigidBody::new_static(Transform::identity()))
@@ -175,8 +251,8 @@ fn removed_collider_slot_reuses_generation_without_reviving_old_id() -> Result<(
 
     let replacement = world.add_collider(body, collider(2.0))?;
 
-    assert_eq!(stale.0.index(), replacement.0.index());
-    assert_ne!(stale.0.generation(), replacement.0.generation());
+    assert_eq!(stale.dense.index(), replacement.dense.index());
+    assert_ne!(stale.dense.generation(), replacement.dense.generation());
     assert!(world.collider(stale).is_none());
     assert_eq!(world.collider_body(replacement), Some(body));
     assert_eq!(world.collider_count(), 1);
@@ -198,7 +274,10 @@ fn body_state_is_unchanged_when_colliders_are_added_or_removed() -> Result<(), W
 #[test]
 fn invalid_collider_ids_are_rejected() -> Result<(), DensePoolError> {
     let mut source = DensePool::new();
-    let id = ColliderId(source.insert(())?);
+    let id = ColliderId {
+        world: u64::MAX,
+        dense: source.insert(())?,
+    };
     let mut world = PhysicsWorld::new();
 
     assert!(world.collider(id).is_none());
@@ -352,8 +431,8 @@ fn deleting_body_and_reusing_slots_does_not_revive_old_ids() -> Result<(), World
     let new_body = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
     let new_collider = world.add_collider(new_body, collider(2.0))?;
 
-    assert_eq!(old_body.0.index(), new_body.0.index());
-    assert_ne!(old_body.0.generation(), new_body.0.generation());
+    assert_eq!(old_body.dense.index(), new_body.dense.index());
+    assert_ne!(old_body.dense.generation(), new_body.dense.generation());
     assert!(world.body(old_body).is_none());
     assert!(world.collider(old_collider).is_none());
     assert_eq!(world.collider_body(new_collider), Some(new_body));
@@ -529,13 +608,19 @@ fn step_shards_are_balanced_and_commit_the_same_states() -> Result<(), Box<dyn s
     for step in shards.iter_mut().flatten() {
         step.integrate(0.125)?;
     }
+    assert_eq!(
+        sequential_world.commit_step_shards(&shards),
+        Err(StepError::InvalidStepResults)
+    );
     parallel_world.commit_step_shards(&shards)?;
     sequential_world.step(0.125)?;
 
     for ((parallel_id, parallel), (sequential_id, sequential)) in
         parallel_world.bodies().zip(sequential_world.bodies())
     {
-        assert_eq!(parallel_id, sequential_id);
+        assert_eq!(parallel_id.index(), sequential_id.index());
+        assert_eq!(parallel_id.generation(), sequential_id.generation());
+        assert_ne!(parallel_id, sequential_id);
         assert_eq!(parallel, sequential);
     }
     Ok(())

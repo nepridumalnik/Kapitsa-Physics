@@ -45,6 +45,7 @@ pub enum WorldError {
     DensePoolIndexOverflow,
     DensePoolCapacityExceeded,
     DensePoolInvalidFreeList,
+    WorldIdExhausted,
     InvalidBodyId,
     InvalidColliderId,
 }
@@ -59,6 +60,7 @@ impl fmt::Display for WorldError {
             Self::DensePoolInvalidFreeList => {
                 formatter.write_str("world storage free list is invalid")
             }
+            Self::WorldIdExhausted => formatter.write_str("physics world ID space is exhausted"),
             Self::InvalidBodyId => formatter.write_str("body ID is invalid for this world"),
             Self::InvalidColliderId => formatter.write_str("collider ID is invalid for this world"),
         }
