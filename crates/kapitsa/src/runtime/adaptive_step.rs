@@ -443,6 +443,7 @@ mod tests {
 
     use kapitsa_core::{
         collider::Collider,
+        collision::CollisionEventKind,
         gravity::CentralGravity,
         joint::{FixedJoint, Joint, JointCommon, JointFrame, SpringJoint},
         mass::MassProperties,
@@ -513,6 +514,119 @@ mod tests {
             )
             .expect("spring joint");
         (world, moving)
+    }
+
+    fn collision_world() -> (PhysicsWorld, BodyId, BodyId) {
+        let mut world = PhysicsWorld::new();
+        let body_a = world
+            .add_body(dynamic_body(Vec3::X * -2.0, Vec3::X * 4.0))
+            .expect("body a");
+        let body_b = world
+            .add_body(dynamic_body(Vec3::X * 2.0, Vec3::X * -4.0))
+            .expect("body b");
+        world
+            .add_collider(
+                body_a,
+                Collider::new(
+                    Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                    Transform::identity(),
+                ),
+            )
+            .expect("collider a");
+        world
+            .add_collider(
+                body_b,
+                Collider::new(
+                    Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                    Transform::identity(),
+                ),
+            )
+            .expect("collider b");
+        (world, body_a, body_b)
+    }
+
+    fn collision_state(warp: Option<f64>, end: Duration) -> (RigidBody, RigidBody, bool, usize) {
+        let (mut world, body_a, body_b) = collision_world();
+        let mut config = adaptive_config();
+        if let TimeStepPolicy::Adaptive(mut adaptive) = config.time_step_policy {
+            adaptive.minimum_step = Duration::from_nanos(1);
+            config.time_step_policy = TimeStepPolicy::Adaptive(adaptive);
+        }
+        let base_step = config.step_budget();
+        let target_step = warp.map(|warp| {
+            Duration::try_from_secs_f64(base_step.as_secs_f64() * warp).expect("target step")
+        });
+        let reference_step = Duration::from_micros(100);
+        let mut simulation_time = Duration::ZERO;
+        let mut steps = 0;
+        let mut contact_started = false;
+        while simulation_time < end {
+            let remaining = end.saturating_sub(simulation_time);
+            let step = if let Some(target_step) = target_step {
+                match choose_step(&world, &config, target_step, remaining, base_step) {
+                    StepChoice::Step(step) => step,
+                    other => panic!("adaptive collision did not progress: {other:?}"),
+                }
+            } else {
+                reference_step.min(remaining)
+            };
+            world.step(step.as_secs_f64()).expect("collision step");
+            contact_started |= world
+                .collision_events()
+                .iter()
+                .any(|event| event.kind == CollisionEventKind::Begin);
+            simulation_time += step;
+            steps += 1;
+        }
+        (
+            *world.body(body_a).expect("body a state"),
+            *world.body(body_b).expect("body b state"),
+            contact_started,
+            steps,
+        )
+    }
+
+    fn collision_after_warp_switch(
+        switch_at: Duration,
+        end: Duration,
+    ) -> (RigidBody, RigidBody, bool, usize) {
+        let (mut world, body_a, body_b) = collision_world();
+        let mut config = adaptive_config();
+        if let TimeStepPolicy::Adaptive(mut adaptive) = config.time_step_policy {
+            adaptive.minimum_step = Duration::from_nanos(1);
+            config.time_step_policy = TimeStepPolicy::Adaptive(adaptive);
+        }
+        let base_step = config.step_budget();
+        let mut simulation_time = Duration::ZERO;
+        let mut steps = 0;
+        let mut contact_started = false;
+        while simulation_time < end {
+            let warp = if simulation_time < switch_at {
+                1_000.0
+            } else {
+                1.0
+            };
+            let target_step =
+                Duration::try_from_secs_f64(base_step.as_secs_f64() * warp).expect("target step");
+            let remaining = end.saturating_sub(simulation_time);
+            let step = match choose_step(&world, &config, target_step, remaining, base_step) {
+                StepChoice::Step(step) => step,
+                other => panic!("warp transition made no progress: {other:?}"),
+            };
+            world.step(step.as_secs_f64()).expect("collision step");
+            contact_started |= world
+                .collision_events()
+                .iter()
+                .any(|event| event.kind == CollisionEventKind::Begin);
+            simulation_time += step;
+            steps += 1;
+        }
+        (
+            *world.body(body_a).expect("body a state"),
+            *world.body(body_b).expect("body b state"),
+            contact_started,
+            steps,
+        )
     }
 
     fn fixed_joint_world() -> (PhysicsWorld, BodyId, BodyId, Vec3, Vec3) {
@@ -859,6 +973,43 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_warps_preserve_contact_outcomes_at_the_same_simulation_time() {
+        let end = Duration::from_millis(500);
+        let (reference_a, reference_b, reference_contact, _) = collision_state(None, end);
+        assert!(
+            reference_contact,
+            "fine reference should observe the contact"
+        );
+        for warp in [1.0, 10.0, 100.0, 1_000.0] {
+            let (body_a, body_b, contact_started, steps) = collision_state(Some(warp), end);
+            let (repeat_a, repeat_b, repeat_contact, _) = collision_state(Some(warp), end);
+            let position_error = (body_a.state().transform().translation()
+                - reference_a.state().transform().translation())
+            .length()
+                + (body_b.state().transform().translation()
+                    - reference_b.state().transform().translation())
+                .length();
+            let velocity_error =
+                (body_a.state().linear_velocity() - reference_a.state().linear_velocity()).length()
+                    + (body_b.state().linear_velocity() - reference_b.state().linear_velocity())
+                        .length();
+            assert!(contact_started, "warp={warp}x missed the contact");
+            assert!(position_error < 0.1, "warp={warp}x: {position_error} m");
+            assert!(velocity_error < 0.2, "warp={warp}x: {velocity_error} m/s");
+            assert!(steps <= 150, "warp={warp}x: {steps} steps");
+            assert!(body_a.state().linear_velocity().x < 0.0);
+            assert!(body_b.state().linear_velocity().x > 0.0);
+            assert!(
+                body_a.state().transform().translation().x
+                    < body_b.state().transform().translation().x
+            );
+            assert_eq!(contact_started, repeat_contact);
+            assert_eq!(body_a.state(), repeat_a.state());
+            assert_eq!(body_b.state(), repeat_b.state());
+        }
+    }
+
+    #[test]
     fn adaptive_warps_preserve_fixed_joint_anchors_at_the_same_simulation_time() {
         let end = Duration::from_millis(500);
         let (reference_a, reference_b, anchor_a, anchor_b, _) = fixed_joint_state(None, end);
@@ -887,6 +1038,89 @@ mod tests {
             assert_eq!(body_a.state(), repeat_a.state());
             assert_eq!(body_b.state(), repeat_b.state());
         }
+    }
+
+    #[test]
+    fn adaptive_joint_break_uses_the_selected_substep_duration() {
+        let mut world = PhysicsWorld::new();
+        let body_a = world
+            .add_body(dynamic_body(Vec3::ZERO, Vec3::ZERO))
+            .expect("body a");
+        let body_b = world
+            .add_body(dynamic_body(Vec3::ZERO, Vec3::X * 10.0))
+            .expect("body b");
+        let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        common.break_force = Some(100.0);
+        let joint_id = world
+            .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+            .expect("breakable joint");
+        let mut config = adaptive_config();
+        if let TimeStepPolicy::Adaptive(mut adaptive) = config.time_step_policy {
+            adaptive.minimum_step = Duration::from_nanos(1);
+            config.time_step_policy = TimeStepPolicy::Adaptive(adaptive);
+        }
+        let base_step = config.step_budget();
+        let target_step = base_step * 1_000;
+        let step = match choose_step(
+            &world,
+            &config,
+            target_step,
+            Duration::from_secs(1),
+            base_step,
+        ) {
+            StepChoice::Step(step) => step,
+            other => panic!("adaptive breakable joint made no progress: {other:?}"),
+        };
+        assert!(
+            step < base_step,
+            "the relative anchor motion should subdivide dt"
+        );
+
+        world.step(step.as_secs_f64()).expect("break step");
+
+        assert_eq!(world.joint_count(), 0);
+        assert_eq!(world.joint_events().len(), 1);
+        let event = world.joint_events()[0];
+        assert_eq!(event.joint(), joint_id);
+        let impulse = world
+            .body(body_a)
+            .expect("body a after break")
+            .state()
+            .linear_velocity()
+            .length();
+        assert!((event.force() - impulse / step.as_secs_f64()).abs() < 1.0e-6);
+        assert!(event.force() > 100.0);
+        assert!(event.torque() < 1.0e-6);
+    }
+
+    #[test]
+    fn adaptive_warp_can_drop_from_one_thousand_before_contact() {
+        let end = Duration::from_millis(500);
+        let (reference_a, reference_b, reference_contact, _) = collision_state(None, end);
+        assert!(reference_contact);
+        let switch_at = Duration::from_millis(350);
+        let (body_a, body_b, contact_started, steps) = collision_after_warp_switch(switch_at, end);
+        let (repeat_a, repeat_b, repeat_contact, _) = collision_after_warp_switch(switch_at, end);
+        assert!(
+            contact_started,
+            "the scheduled collision should be observed"
+        );
+        assert!(steps <= 150);
+        assert!(
+            (body_a.state().transform().translation()
+                - reference_a.state().transform().translation())
+            .length()
+                < 0.1
+        );
+        assert!(
+            (body_b.state().transform().translation()
+                - reference_b.state().transform().translation())
+            .length()
+                < 0.1
+        );
+        assert_eq!(contact_started, repeat_contact);
+        assert_eq!(body_a.state(), repeat_a.state());
+        assert_eq!(body_b.state(), repeat_b.state());
     }
 
     #[test]

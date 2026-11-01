@@ -160,10 +160,14 @@ orbit position and velocity errors are about 62% lower. This is an explicit
 accuracy/throughput tradeoff; it does not indicate a regression in the fixed
 compatibility path.
 
-Automated tests also integrate the orbit, a damped spring, and a fixed-joint
-anchor pair at equal simulated time for 1x, 10x, 100x, and 1,000x requested
-warp. They compare against a 100 µs reference and verify repeatability for the
-same warp. The fixed-joint test checks anchor separation and relative
-orientation. These checks establish same-configuration reproducibility and
-bounded error for these fixtures; they do not claim bitwise equality across
-different warp factors.
+Automated tests also integrate the orbit, a damped spring, a fixed-joint
+anchor pair, and colliding spheres at equal simulated time for 1x, 10x, 100x,
+and 1,000x requested warp. They compare against a 100 µs reference and verify
+repeatability for the same configuration. The fixed-joint test checks anchor
+separation and relative orientation; the breakable-joint test verifies that
+reported force uses the selected substep duration. The collision fixture also
+tests a 1,000x to 1x transition 25 ms before impact. Collision and break
+fixtures lower `minimum_step` to 1 ns so their terminal time can match exactly;
+the production default remains 10 µs. These checks establish
+same-configuration reproducibility and bounded error for these fixtures; they
+do not claim bitwise equality across different warp factors.
