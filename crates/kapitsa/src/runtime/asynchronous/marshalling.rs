@@ -7,7 +7,7 @@ pub use client::PhysicsClient;
 pub use command::{
     BatchId, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSubmitError,
 };
-pub(crate) use command::{CommandRequest, apply_command, apply_command_batch};
+pub(crate) use command::{BatchScratch, CommandRequest, apply_command, apply_command_batch};
 pub use events::{
     CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsBatchError,
     PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults,

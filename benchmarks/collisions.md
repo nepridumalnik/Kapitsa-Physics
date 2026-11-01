@@ -1021,3 +1021,105 @@ cargo test -p kapitsa --release --lib --features bench-internals benchmark_apply
 Both harnesses live in the private command module's unit tests. The allocation
 feature only enables the test-binary allocator wrapper; neither harness adds a
 production export or changes the public 128-command limit.
+
+## Reusable command-batch staging comparison
+
+Measured on the same AMD Ryzen 9 7900X3D and `rustc 1.98.0` Release setup as
+the baseline above, based on source HEAD
+`00d2a367191a697cf2d2e5be80e0fa5136f85c9c`.
+Each point reports five independent timing samples. Each sample creates a
+separate world and command list, warms its scratch once, then times repeated
+calls. World, bodies, sources, and commands stay outside the timed region.
+`Change` compares optimized and
+baseline medians; a negative value is a reduction. `Growth` is the optimized
+median ratio to the preceding command size.
+
+The runtime command queue now owns one `BatchScratch` for its lifetime. It is
+reused across batches and cleared without shrinking. Staged values stay in
+vectors in first-touch order; hash maps only resolve IDs to vector indices.
+Lookups scan at most 64 staged IDs before switching to the map, keeping small
+repeated-target batches on the lower-overhead path while bounding the linear
+prefix for large inputs. No buffer reserves from command count: vectors and
+maps grow as unique affected IDs are encountered.
+
+### One repeated body
+
+| Commands | Baseline median us | Optimized min / median / max us | ns / command | Change | Growth |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 0.511 | 0.389 / 0.392 / 0.396 | 3.06 | -23.3% | — |
+| 256 | 0.948 | 0.751 / 0.757 / 0.857 | 2.96 | -20.1% | 1.93x |
+| 512 | 1.764 | 1.522 / 1.560 / 1.702 | 3.05 | -11.6% | 2.06x |
+| 1,024 | 3.474 | 2.982 / 2.991 / 3.047 | 2.92 | -13.9% | 1.92x |
+| 2,048 | 6.830 | 6.208 / 6.278 / 6.693 | 3.07 | -8.1% | 2.10x |
+| 4,096 | 21.265 | 12.112 / 12.196 / 12.241 | 2.98 | -42.6% | 1.94x |
+| 8,192 | 37.875 | 25.773 / 25.916 / 26.772 | 3.16 | -31.6% | 2.12x |
+
+### A different body per command
+
+| Commands | Baseline median us | Optimized min / median / max us | ns / command | Change | Growth |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 12.768 | 7.214 / 7.268 / 7.306 | 56.78 | -43.1% | — |
+| 256 | 28.489 | 14.104 / 14.356 / 14.786 | 56.08 | -49.6% | 1.98x |
+| 512 | 67.601 | 28.562 / 29.135 / 30.176 | 56.90 | -56.9% | 2.03x |
+| 1,024 | 261.819 | 58.167 / 60.259 / 61.358 | 58.85 | -77.0% | 2.07x |
+| 2,048 | 982.460 | 125.580 / 126.249 / 126.617 | 61.64 | -87.1% | 2.10x |
+| 4,096 | 4,031.150 | 253.540 / 254.975 / 256.725 | 62.25 | -93.7% | 2.02x |
+| 8,192 | 15,860.400 | 515.610 / 521.150 / 527.140 | 63.62 | -96.7% | 2.04x |
+
+### Repeated body and unique force sources
+
+| Commands | Baseline median us | Optimized min / median / max us | ns / command | Change | Growth |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 2.538 | 1.852 / 1.885 / 1.899 | 14.73 | -25.7% | — |
+| 256 | 6.947 | 6.081 / 6.151 / 6.528 | 24.03 | -11.5% | 3.26x |
+| 512 | 20.349 | 12.665 / 12.735 / 12.923 | 24.87 | -37.4% | 2.07x |
+| 1,024 | 66.664 | 25.020 / 25.784 / 26.777 | 25.18 | -61.3% | 2.02x |
+| 2,048 | 272.389 | 50.226 / 50.564 / 53.435 | 24.69 | -81.4% | 1.96x |
+| 4,096 | 1,064.220 | 102.643 / 103.822 / 111.420 | 25.35 | -90.2% | 2.05x |
+| 8,192 | 3,961.150 | 220.109 / 222.817 / 225.548 | 27.20 | -94.4% | 2.15x |
+
+All optimized medians are below their baseline medians, including the 128- and
+256-command cases. Distinct-body batches improve by 30.4x at 8,192 commands;
+the mixed unique-source workload improves by 17.8x. Once the bounded small-set
+prefix is passed, doubling the batch approximately doubles runtime. The 3.26x
+transition from 128 to 256 mixed commands includes crossing the 64-unique-source
+index threshold; larger doublings return to about 2x.
+
+### Warm allocations and retained capacities
+
+The allocation harness warms each case once, then counts allocator requests
+for a second batch. All 21 cases recorded **0 allocations and 0 requested
+bytes** after warm-up. The capacities below are vector element capacities and
+`HashMap::capacity()` entry capacities after the warm batch; they are retained
+when the scratch is cleared.
+
+| Workload | Commands | Body Vec / index | Source Vec / index |
+|---|---:|---:|---:|
+| One body | 128–8,192 | 4 / 0 | 0 / 0 |
+| Distinct bodies | 128 | 128 / 224 | 0 / 0 |
+| Distinct bodies | 256 | 256 / 448 | 0 / 0 |
+| Distinct bodies | 512 | 512 / 896 | 0 / 0 |
+| Distinct bodies | 1,024 | 1,024 / 1,792 | 0 / 0 |
+| Distinct bodies | 2,048 | 2,048 / 3,584 | 0 / 0 |
+| Distinct bodies | 4,096 | 4,096 / 7,168 | 0 / 0 |
+| Distinct bodies | 8,192 | 8,192 / 14,336 | 0 / 0 |
+| Mixed body/source | 128 | 4 / 0 | 64 / 0 |
+| Mixed body/source | 256 | 4 / 0 | 128 / 224 |
+| Mixed body/source | 512 | 4 / 0 | 256 / 448 |
+| Mixed body/source | 1,024 | 4 / 0 | 512 / 896 |
+| Mixed body/source | 2,048 | 4 / 0 | 1,024 / 1,792 |
+| Mixed body/source | 4,096 | 4 / 0 | 2,048 / 3,584 |
+| Mixed body/source | 8,192 | 4 / 0 | 4,096 / 7,168 |
+
+The one-shot buffer-control column emitted by the timing harness reproduces the
+baseline's temporary-vector preparation; it is not a measurement of work on
+the warmed reusable scratch. Allocation counts and retained capacities above
+measure the optimized path directly. Scratch retains the high-water capacity
+until the runtime command queue is dropped.
+
+The same Release timing and warm-allocation commands are:
+
+```powershell
+cargo test -p kapitsa --release --lib benchmark_apply_command_batch_scaling -- --ignored --nocapture
+cargo test -p kapitsa --release --lib --features bench-internals benchmark_apply_command_batch_allocations -- --ignored --nocapture
+```

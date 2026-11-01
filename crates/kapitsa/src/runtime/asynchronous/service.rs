@@ -14,8 +14,8 @@ use tokio::{
 use super::{
     StepRunner, StepRunnerError,
     marshalling::{
-        CollisionEventBatch, CommandRequest, PhysicsBatchError, PhysicsBatchResult, PhysicsClient,
-        PhysicsClientError, PhysicsSnapshot, apply_command, apply_command_batch,
+        BatchScratch, CollisionEventBatch, CommandRequest, PhysicsBatchError, PhysicsBatchResult,
+        PhysicsClient, PhysicsClientError, PhysicsSnapshot, apply_command, apply_command_batch,
     },
 };
 use crate::runtime::{ConfigError, SimulationConfig, SimulationMetrics, SimulationState};
@@ -40,6 +40,7 @@ struct SimulationEvents {
 struct CommandQueue {
     receiver: mpsc::Receiver<CommandRequest>,
     pending: Option<CommandRequest>,
+    batch_scratch: BatchScratch,
 }
 
 /// Owns a clock-driven physics simulation and exposes its client API.
@@ -308,6 +309,7 @@ async fn run_simulation(
     let mut commands = CommandQueue {
         receiver: commands,
         pending: None,
+        batch_scratch: BatchScratch::default(),
     };
     let result = run_simulation_loop(
         simulation,
@@ -442,8 +444,12 @@ fn apply_queued_commands(
                 let result = apply_command(world, command);
                 let _ = reply.send(result);
             }
-            CommandRequest::Batch { id, commands } => {
-                let result = apply_command_batch(world, &commands);
+            CommandRequest::Batch {
+                id,
+                commands: batch_commands,
+            } => {
+                let result =
+                    apply_command_batch(world, &batch_commands, &mut commands.batch_scratch);
                 let _ = events.batch_results.send(PhysicsBatchResult {
                     batch_id: id,
                     step,

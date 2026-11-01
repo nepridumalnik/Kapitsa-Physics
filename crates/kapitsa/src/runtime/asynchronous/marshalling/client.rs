@@ -522,7 +522,7 @@ mod tests {
     use super::super::{
         PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
         PhysicsSnapshot, PhysicsSubmitError,
-        command::{CommandRequest, apply_command, apply_command_batch},
+        command::{BatchScratch, CommandRequest, apply_command, apply_command_batch},
     };
     use super::PhysicsClient;
 
@@ -650,7 +650,8 @@ mod tests {
             let Some(CommandRequest::Batch { commands, .. }) = receiver.recv().await else {
                 panic!("source updates arrive as one command batch");
             };
-            apply_command_batch(&mut world, &commands).expect("source update batch");
+            apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
+                .expect("source update batch");
             let configured = world.force_source(source).expect("source remains live");
             assert_eq!(configured.local_point(), Vec3::Y);
             assert_eq!(configured.local_force(), Vec3::Z * 4.0);

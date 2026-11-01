@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use kapitsa_core::{
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{CollisionConfig, OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
@@ -339,13 +341,42 @@ struct StagedForceSource {
     command_index: usize,
 }
 
+// Bound small-set scans to avoid hashing overhead on repeated-target batches.
+const SMALL_STAGING_LINEAR_SEARCH_LIMIT: usize = 64;
+
+#[derive(Default)]
+pub(crate) struct BatchScratch {
+    updated_bodies: Vec<(BodyId, RigidBody)>,
+    body_indices: HashMap<BodyId, usize>,
+    updated_force_sources: Vec<StagedForceSource>,
+    force_source_indices: HashMap<ForceSourceId, usize>,
+}
+
+impl BatchScratch {
+    fn clear(&mut self) {
+        self.updated_bodies.clear();
+        self.body_indices.clear();
+        self.updated_force_sources.clear();
+        self.force_source_indices.clear();
+    }
+}
+
 pub(crate) fn apply_command_batch(
     world: &mut PhysicsWorld,
     commands: &[PhysicsCommand],
+    scratch: &mut BatchScratch,
 ) -> Result<(), PhysicsBatchError> {
-    let mut updated_bodies = Vec::with_capacity(commands.len());
-    let mut updated_force_sources = Vec::new();
+    scratch.clear();
+    let result = apply_command_batch_staged(world, commands, scratch);
+    scratch.clear();
+    result
+}
 
+fn apply_command_batch_staged(
+    world: &mut PhysicsWorld,
+    commands: &[PhysicsCommand],
+    scratch: &mut BatchScratch,
+) -> Result<(), PhysicsBatchError> {
     for (command_index, command) in commands.iter().enumerate() {
         if let PhysicsCommand::SetForceSource {
             id,
@@ -353,24 +384,22 @@ pub(crate) fn apply_command_batch(
             local_force,
         } = command
         {
-            let source_index =
-                staged_force_source_index(world, &mut updated_force_sources, *id, command_index)?;
+            let source_index = staged_force_source_index(world, scratch, *id, command_index)?;
             if !local_point.is_finite() || !local_force.is_finite() {
                 return Err(PhysicsBatchError {
                     command_index: Some(command_index),
                     error: PhysicsClientError::ForceSource(ForceSourceError::NonFiniteValue),
                 });
             }
-            let source = &mut updated_force_sources[source_index];
+            let source = &mut scratch.updated_force_sources[source_index];
             source.local_point = *local_point;
             source.local_force = *local_force;
             source.command_index = command_index;
             continue;
         }
         if let PhysicsCommand::SetForceSourceEnabled { id, enabled } = command {
-            let source_index =
-                staged_force_source_index(world, &mut updated_force_sources, *id, command_index)?;
-            let source = &mut updated_force_sources[source_index];
+            let source_index = staged_force_source_index(world, scratch, *id, command_index)?;
+            let source = &mut scratch.updated_force_sources[source_index];
             source.enabled = *enabled;
             source.command_index = command_index;
             continue;
@@ -383,10 +412,15 @@ pub(crate) fn apply_command_batch(
             });
         };
 
-        let body_index = match updated_bodies
-            .iter()
-            .position(|(updated_id, _)| *updated_id == id)
-        {
+        let body_index = if scratch.updated_bodies.len() <= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
+            scratch
+                .updated_bodies
+                .iter()
+                .position(|(updated_id, _)| *updated_id == id)
+        } else {
+            scratch.body_indices.get(&id).copied()
+        };
+        let body_index = match body_index {
             Some(index) => index,
             None => {
                 let Some(body) = world.body(id).copied() else {
@@ -395,12 +429,23 @@ pub(crate) fn apply_command_batch(
                         error: PhysicsClientError::World(WorldError::InvalidBodyId),
                     });
                 };
-                updated_bodies.push((id, body));
-                updated_bodies.len() - 1
+                let index = scratch.updated_bodies.len();
+                if index >= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
+                    if scratch.body_indices.is_empty() {
+                        for (existing_index, (existing_id, _)) in
+                            scratch.updated_bodies.iter().enumerate()
+                        {
+                            scratch.body_indices.insert(*existing_id, existing_index);
+                        }
+                    }
+                    scratch.body_indices.insert(id, index);
+                }
+                scratch.updated_bodies.push((id, body));
+                index
             }
         };
 
-        if let Err(error) = apply_body_command(&mut updated_bodies[body_index].1, command) {
+        if let Err(error) = apply_body_command(&mut scratch.updated_bodies[body_index].1, command) {
             return Err(PhysicsBatchError {
                 command_index: Some(command_index),
                 error,
@@ -408,7 +453,7 @@ pub(crate) fn apply_command_batch(
         }
     }
 
-    for source in updated_force_sources {
+    for source in &scratch.updated_force_sources {
         world
             .set_force_source(source.id, source.local_point, source.local_force)
             .and_then(|()| world.set_force_source_enabled(source.id, source.enabled))
@@ -420,9 +465,9 @@ pub(crate) fn apply_command_batch(
 
     // These commands cannot change world membership, so every ID validated above
     // remains live until the staged body copies are committed.
-    for (id, body) in updated_bodies {
-        if let Some(target) = world.body_mut(id) {
-            *target = body;
+    for (id, body) in &scratch.updated_bodies {
+        if let Some(target) = world.body_mut(*id) {
+            *target = *body;
         }
     }
     Ok(())
@@ -430,11 +475,19 @@ pub(crate) fn apply_command_batch(
 
 fn staged_force_source_index(
     world: &PhysicsWorld,
-    updated: &mut Vec<StagedForceSource>,
+    scratch: &mut BatchScratch,
     id: ForceSourceId,
     command_index: usize,
 ) -> Result<usize, PhysicsBatchError> {
-    if let Some(index) = updated.iter().position(|source| source.id == id) {
+    let source_index = if scratch.updated_force_sources.len() <= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
+        scratch
+            .updated_force_sources
+            .iter()
+            .position(|source| source.id == id)
+    } else {
+        scratch.force_source_indices.get(&id).copied()
+    };
+    if let Some(index) = source_index {
         return Ok(index);
     }
     let Some(source) = world.force_source(id) else {
@@ -444,14 +497,25 @@ fn staged_force_source_index(
         });
     };
     let source: ForceSource = *source;
-    updated.push(StagedForceSource {
+    let index = scratch.updated_force_sources.len();
+    if index >= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
+        if scratch.force_source_indices.is_empty() {
+            for (existing_index, source) in scratch.updated_force_sources.iter().enumerate() {
+                scratch
+                    .force_source_indices
+                    .insert(source.id, existing_index);
+            }
+        }
+        scratch.force_source_indices.insert(id, index);
+    }
+    scratch.updated_force_sources.push(StagedForceSource {
         id,
         local_point: source.local_point(),
         local_force: source.local_force(),
         enabled: source.is_enabled(),
         command_index,
     });
-    Ok(updated.len() - 1)
+    Ok(index)
 }
 
 fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
@@ -742,7 +806,8 @@ mod tests {
 
     use super::super::PhysicsClientError;
     use super::{
-        PhysicsCommand, PhysicsCommandResult, StagedForceSource, apply_command, apply_command_batch,
+        BatchScratch, PhysicsCommand, PhysicsCommandResult, SMALL_STAGING_LINEAR_SEARCH_LIMIT,
+        StagedForceSource, apply_command, apply_command_batch,
     };
 
     #[cfg(feature = "bench-internals")]
@@ -827,9 +892,10 @@ mod tests {
     fn tracked_batch_allocations(
         world: &mut PhysicsWorld,
         commands: &[PhysicsCommand],
+        scratch: &mut BatchScratch,
     ) -> BatchAllocationStats {
         let tracking = AllocationTracking::start();
-        let result = apply_command_batch(world, commands);
+        let result = apply_command_batch(world, commands, scratch);
         drop(tracking);
         result.expect("benchmark batch applies");
         BatchAllocationStats {
@@ -864,6 +930,7 @@ mod tests {
     struct BatchCase {
         world: PhysicsWorld,
         commands: Vec<PhysicsCommand>,
+        scratch: BatchScratch,
         staged_bodies: Vec<kapitsa_core::world::BodyId>,
         staged_sources: Vec<kapitsa_core::world::ForceSourceId>,
     }
@@ -919,14 +986,19 @@ mod tests {
         BatchCase {
             world,
             commands,
+            scratch: BatchScratch::default(),
             staged_bodies,
             staged_sources,
         }
     }
 
     fn apply_batch(case: &mut BatchCase) {
-        apply_command_batch(&mut case.world, black_box(&case.commands))
-            .expect("benchmark batch applies");
+        apply_command_batch(
+            &mut case.world,
+            black_box(&case.commands),
+            &mut case.scratch,
+        )
+        .expect("benchmark batch applies");
     }
 
     fn staged_buffer_control(case: &BatchCase) {
@@ -1375,6 +1447,81 @@ mod tests {
     }
 
     #[test]
+    fn indexed_batch_keeps_order_for_repeated_body_and_source_ids() {
+        const UNIQUE_IDS: usize = SMALL_STAGING_LINEAR_SEARCH_LIMIT + 1;
+
+        let mut world = PhysicsWorld::new();
+        let bodies: Vec<_> = (0..UNIQUE_IDS)
+            .map(|_| world.add_body(dynamic_body()).expect("body"))
+            .collect();
+        let sources: Vec<_> = (0..UNIQUE_IDS)
+            .map(|_| {
+                world
+                    .add_force_source(bodies[0], Vec3::ZERO, Vec3::X)
+                    .expect("force source")
+            })
+            .collect();
+        let mut commands = Vec::with_capacity(UNIQUE_IDS * 2 + 3);
+        for (index, id) in bodies.iter().copied().enumerate() {
+            commands.push(PhysicsCommand::SetLinearVelocity {
+                id,
+                velocity: Vec3::new(index as f64 + 1.0, 0.0, 0.0),
+            });
+        }
+        for (index, id) in sources.iter().copied().enumerate() {
+            commands.push(PhysicsCommand::SetForceSource {
+                id,
+                local_point: Vec3::ZERO,
+                local_force: Vec3::new(index as f64 + 1.0, 0.0, 0.0),
+            });
+        }
+        commands.push(PhysicsCommand::SetLinearVelocity {
+            id: bodies[0],
+            velocity: -Vec3::X,
+        });
+        commands.push(PhysicsCommand::SetForceSource {
+            id: sources[0],
+            local_point: Vec3::Y,
+            local_force: Vec3::Z,
+        });
+        commands.push(PhysicsCommand::SetForceSourceEnabled {
+            id: sources[0],
+            enabled: false,
+        });
+
+        apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
+            .expect("indexed batch applies");
+
+        assert_eq!(
+            world
+                .body(bodies[0])
+                .expect("first body")
+                .state()
+                .linear_velocity(),
+            -Vec3::X
+        );
+        assert_eq!(
+            world
+                .body(bodies[1])
+                .expect("second body")
+                .state()
+                .linear_velocity(),
+            Vec3::new(2.0, 0.0, 0.0)
+        );
+        let first_source = world.force_source(sources[0]).expect("first source");
+        assert_eq!(first_source.local_point(), Vec3::Y);
+        assert_eq!(first_source.local_force(), Vec3::Z);
+        assert!(!first_source.is_enabled());
+        assert_eq!(
+            world
+                .force_source(sources[1])
+                .expect("second source")
+                .local_force(),
+            Vec3::new(2.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
     fn body_batch_preserves_order_and_applies_impulse_with_updated_mass() {
         let mut world = PhysicsWorld::new();
         let body = world.add_body(dynamic_body()).expect("body");
@@ -1389,7 +1536,8 @@ mod tests {
             },
         ];
 
-        apply_command_batch(&mut world, &commands).expect("atomic batch");
+        apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
+            .expect("atomic batch");
 
         assert_eq!(
             world.body(body).expect("body").state().linear_velocity(),
@@ -1415,7 +1563,9 @@ mod tests {
             },
         ];
 
-        let error = apply_command_batch(&mut world, &commands).expect_err("static mass rejected");
+        let mut scratch = BatchScratch::default();
+        let error = apply_command_batch(&mut world, &commands, &mut scratch)
+            .expect_err("static mass rejected");
 
         assert_eq!(error.command_index, Some(1));
         assert_eq!(
@@ -1429,6 +1579,30 @@ mod tests {
                 .state()
                 .linear_velocity(),
             Vec3::ZERO
+        );
+        assert!(scratch.updated_bodies.is_empty());
+        assert!(scratch.body_indices.is_empty());
+        let retained_body_capacity = scratch.updated_bodies.capacity();
+        let retained_index_capacity = scratch.body_indices.capacity();
+
+        apply_command_batch(
+            &mut world,
+            &[PhysicsCommand::SetLinearVelocity {
+                id: dynamic,
+                velocity: Vec3::Y,
+            }],
+            &mut scratch,
+        )
+        .expect("scratch can be reused after a failed batch");
+        assert_eq!(scratch.updated_bodies.capacity(), retained_body_capacity);
+        assert_eq!(scratch.body_indices.capacity(), retained_index_capacity);
+        assert_eq!(
+            world
+                .body(dynamic)
+                .expect("updated body")
+                .state()
+                .linear_velocity(),
+            Vec3::Y
         );
     }
 
@@ -1455,7 +1629,8 @@ mod tests {
             },
         ];
 
-        apply_command_batch(&mut world, &commands).expect("atomic batch");
+        apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
+            .expect("atomic batch");
 
         let source = world.force_source(source).expect("updated source");
         assert_eq!(source.local_point(), Vec3::Y);
@@ -1495,7 +1670,9 @@ mod tests {
             },
         ];
 
-        let error = apply_command_batch(&mut world, &commands).expect_err("foreign source");
+        let mut scratch = BatchScratch::default();
+        let error =
+            apply_command_batch(&mut world, &commands, &mut scratch).expect_err("foreign source");
 
         assert_eq!(error.command_index, Some(2));
         assert_eq!(
@@ -1510,6 +1687,10 @@ mod tests {
             world.body(body).expect("body").state().linear_velocity(),
             Vec3::ZERO
         );
+        assert!(scratch.updated_bodies.is_empty());
+        assert!(scratch.body_indices.is_empty());
+        assert!(scratch.updated_force_sources.is_empty());
+        assert!(scratch.force_source_indices.is_empty());
     }
 
     #[test]
@@ -1519,7 +1700,7 @@ mod tests {
         const TARGET_SAMPLE_TIME: Duration = Duration::from_millis(5);
 
         println!(
-            "scenario,commands,repeats,min_us_per_batch,median_us_per_batch,max_us_per_batch,median_ns_per_command,temp_buffer_us,temp_buffer_share_pct"
+            "scenario,commands,repeats,min_us_per_batch,median_us_per_batch,max_us_per_batch,median_ns_per_command,one_shot_buffer_control_us,one_shot_control_share_pct"
         );
         for scenario in BatchScenario::ALL {
             for command_count in COMMAND_COUNTS {
@@ -1564,18 +1745,25 @@ mod tests {
     fn benchmark_apply_command_batch_allocations() {
         const COMMAND_COUNTS: [usize; 7] = [128, 256, 512, 1_024, 2_048, 4_096, 8_192];
 
-        println!("scenario,commands,allocations_per_batch,requested_bytes_per_batch");
+        println!(
+            "scenario,commands,warm_allocations,warm_requested_bytes,body_vec_capacity,body_index_capacity,source_vec_capacity,source_index_capacity"
+        );
         for scenario in BatchScenario::ALL {
             for command_count in COMMAND_COUNTS {
                 let mut case = batch_case(scenario, command_count);
                 apply_batch(&mut case);
-                let allocations = tracked_batch_allocations(&mut case.world, &case.commands);
+                let allocations =
+                    tracked_batch_allocations(&mut case.world, &case.commands, &mut case.scratch);
                 verify_batch_result(&case);
                 println!(
-                    "{},{command_count},{},{}",
+                    "{},{command_count},{},{},{},{},{},{}",
                     scenario.name(),
                     allocations.count,
                     allocations.bytes,
+                    case.scratch.updated_bodies.capacity(),
+                    case.scratch.body_indices.capacity(),
+                    case.scratch.updated_force_sources.capacity(),
+                    case.scratch.force_source_indices.capacity(),
                 );
             }
         }
