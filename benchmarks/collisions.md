@@ -429,3 +429,23 @@ step was 144.215 ms and median CCD phase 143.986 ms; these ranges overlap the
 stage 1 run, so this is not a performance change. The graph tests cover a
 dynamic chain, repeated colliders on one body, shared kinematic and static
 surfaces, empty candidate sets, and stable island ordering.
+
+### Stage 3: local CCD processing
+
+Each island now keeps absolute TOI times in a reusable cache. After an impact,
+only entries that involve either changed dynamic body are invalidated. The
+single-island path still uses the global refresh fallback so the established
+wall-rebound-to-new-static-target scenario remains correct while selective
+cross-island resweep is implemented in stage 4.
+
+| Scenario | Step min / median / max | CCD | Initial candidates | TOI calls | Repeated calls | Broadphase builds | Refreshes | CCD islands | Impacts | Retained scratch |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 64 fast spheres vs. one wall | 5.585 / 5.614 / 6.017 ms | 5.447 ms | 64 | 64 | 0 | 1 | 0 | 64 | 64 | ~164 KiB |
+
+Against the stage 1 instrumented baseline, the median CCD phase fell from
+146.563 ms to 5.447 ms and full-step median from 146.847 ms to 5.614 ms.
+Candidate work fell from 5,560 TOI calls (5,405 repeats) to one call per sphere.
+The release benchmark includes counters; all 459 core unit tests, core
+integration tests, and four Tokio collision simulation tests passed. A
+feature-enabled regression test asserts the two-island case performs exactly
+two TOI calls and no candidate refreshes.

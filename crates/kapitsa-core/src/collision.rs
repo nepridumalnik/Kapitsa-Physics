@@ -24,7 +24,7 @@ mod system;
 #[cfg(feature = "bench-internals")]
 use std::time::Duration;
 
-pub(crate) use ccd::{CcdHit, CcdMotion, swept_bounds_motion};
+pub(crate) use ccd::{CcdCandidateToi, CcdHit, CcdMotion, swept_bounds_motion};
 pub(crate) use ccd_island::CcdIslandLayout;
 pub use config::CollisionConfig;
 pub use contact::CollisionPair;

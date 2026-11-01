@@ -274,6 +274,47 @@ fn continuous_dynamic_spheres_resolve_relative_toi() {
     }));
 }
 
+#[cfg(feature = "bench-internals")]
+#[test]
+fn independent_ccd_islands_evaluate_only_their_own_candidates() {
+    let mut world = PhysicsWorld::new();
+    let wall = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    world
+        .add_collider(
+            wall,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 20.0, 20.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    for y in [-2.0, 2.0] {
+        let mut body = dynamic_body(Vec3::new(-5.0, y, 0.0), Vec3::new(1000.0, 0.0, 0.0));
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body).unwrap();
+        world
+            .add_collider(
+                body,
+                Collider::new(
+                    Shape::Sphere(Sphere::new(0.5).unwrap()),
+                    Transform::identity(),
+                ),
+            )
+            .unwrap();
+    }
+
+    world.step(1.0 / 60.0).unwrap();
+    let metrics = world.collision_step_metrics();
+    assert_eq!(metrics.ccd_island_count, 2);
+    assert_eq!(metrics.ccd_initial_candidate_count, 2);
+    assert_eq!(metrics.ccd_toi_call_count, 2);
+    assert_eq!(metrics.ccd_candidate_refresh_count, 0);
+    assert_eq!(metrics.ccd_impact_count, 2);
+}
+
 #[test]
 fn continuous_rebound_refreshes_candidates_for_the_remaining_step() {
     let mut world = PhysicsWorld::new();

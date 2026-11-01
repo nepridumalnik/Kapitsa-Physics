@@ -11,6 +11,7 @@ use crate::{
 
 use super::{
     CollisionEvent, CollisionInteraction, CollisionPair, CollisionProxy,
+    ccd::CcdCandidateToi,
     manifold::ContactManifold,
     solver::{SolverBody, SolverManifold},
 };
@@ -33,6 +34,7 @@ pub(crate) struct StepContext {
     pub(crate) ccd_body_types: Vec<BodyType>,
     pub(crate) ccd_continuous_bodies: Vec<bool>,
     pub(crate) ccd_candidate_bodies: Vec<(usize, usize)>,
+    pub(crate) ccd_toi_cache: Vec<CcdCandidateToi>,
     pub(crate) ccd_processed_pairs: Vec<super::CollisionPair>,
     pub(crate) ccd_processed_time: f64,
     #[cfg(feature = "bench-internals")]
@@ -63,6 +65,7 @@ impl StepContext {
             ccd_body_types: Vec::new(),
             ccd_continuous_bodies: Vec::new(),
             ccd_candidate_bodies: Vec::new(),
+            ccd_toi_cache: Vec::new(),
             ccd_processed_pairs: Vec::new(),
             ccd_processed_time: 0.0,
             #[cfg(feature = "bench-internals")]
@@ -91,6 +94,7 @@ impl StepContext {
         self.ccd_body_types.clear();
         self.ccd_continuous_bodies.clear();
         self.ccd_candidate_bodies.clear();
+        self.ccd_toi_cache.clear();
         self.ccd_processed_pairs.clear();
         self.ccd_processed_time = 0.0;
         #[cfg(feature = "bench-internals")]
@@ -129,6 +133,7 @@ impl StepContext {
             self.ccd_body_types.capacity() * size_of::<BodyType>(),
             self.ccd_continuous_bodies.capacity() * size_of::<bool>(),
             self.ccd_candidate_bodies.capacity() * size_of::<(usize, usize)>(),
+            self.ccd_toi_cache.capacity() * size_of::<CcdCandidateToi>(),
             self.ccd_processed_pairs.capacity() * size_of::<super::CollisionPair>(),
             ccd_toi_seen_pairs,
             self.solver_manifolds.capacity() * size_of::<SolverManifold>(),

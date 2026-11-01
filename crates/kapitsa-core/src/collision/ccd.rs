@@ -24,6 +24,23 @@ pub(crate) struct CcdHit {
     pub(crate) point_b: Vec3,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CcdCandidateToi {
+    pub(crate) evaluated: bool,
+    pub(crate) impact_time: f64,
+    pub(crate) hit: Option<CcdHit>,
+}
+
+impl Default for CcdCandidateToi {
+    fn default() -> Self {
+        Self {
+            evaluated: false,
+            impact_time: 0.0,
+            hit: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct CcdMotion<'a> {
     start: Transform,
