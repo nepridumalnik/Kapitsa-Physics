@@ -78,6 +78,7 @@ mod tests {
             angular_b: Vec3::ZERO,
             error: 0.0,
             target_velocity: 0.0,
+            position_enabled: true,
             compliance: 0.0,
             damping: 0.0,
             min_multiplier: f64::NEG_INFINITY,

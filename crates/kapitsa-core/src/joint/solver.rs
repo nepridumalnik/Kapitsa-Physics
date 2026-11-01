@@ -22,6 +22,10 @@ struct RowSettings {
     body_b: usize,
     common: super::JointCommon,
     dt: f64,
+    position_enabled: bool,
+    velocity_target: f64,
+    multiplier_bounds: Option<(f64, f64)>,
+    impulse_bounds: Option<(f64, f64)>,
 }
 
 impl JointSolver {
@@ -92,10 +96,31 @@ pub(crate) fn prepare_joint_rows(
                 joint,
                 dt,
             )?,
-            super::Joint::Hinge(_)
-            | super::Joint::Slider(_)
-            | super::Joint::Cylindrical(_)
-            | super::Joint::Planar(_)
+            super::Joint::Hinge(joint) => append_hinge_rows(
+                bodies,
+                workspace,
+                constraint.body_a,
+                constraint.body_b,
+                joint,
+                dt,
+            )?,
+            super::Joint::Slider(joint) => append_slider_rows(
+                bodies,
+                workspace,
+                constraint.body_a,
+                constraint.body_b,
+                joint,
+                dt,
+            )?,
+            super::Joint::Cylindrical(joint) => append_cylindrical_rows(
+                bodies,
+                workspace,
+                constraint.body_a,
+                constraint.body_b,
+                joint,
+                dt,
+            )?,
+            super::Joint::Planar(_)
             | super::Joint::Spring(_)
             | super::Joint::ConeTwist(_)
             | super::Joint::D6(_) => {}
@@ -114,12 +139,7 @@ fn append_fixed_rows(
 ) -> Result<(), CollisionError> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
-    let settings = RowSettings {
-        body_a,
-        body_b,
-        common: joint.common,
-        dt,
-    };
+    let settings = row_settings(body_a, body_b, joint.common, dt);
     let position_error = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -163,12 +183,7 @@ fn append_ball_rows(
 ) -> Result<(), CollisionError> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
-    let settings = RowSettings {
-        body_a,
-        body_b,
-        common: joint.common,
-        dt,
-    };
+    let settings = row_settings(body_a, body_b, joint.common, dt);
     let position_error = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -254,12 +269,7 @@ fn append_distance_rows(
 ) -> Result<(), CollisionError> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, _) = world_frame(bodies, body_b, joint.common.frame_b)?;
-    let settings = RowSettings {
-        body_a,
-        body_b,
-        common: joint.common,
-        dt,
-    };
+    let settings = row_settings(body_a, body_b, joint.common, dt);
     let delta = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -293,6 +303,433 @@ fn append_distance_rows(
         error,
         (lower, upper),
     )
+}
+
+fn append_hinge_rows(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    body_a: usize,
+    body_b: usize,
+    joint: super::HingeJoint,
+    dt: f64,
+) -> Result<(), CollisionError> {
+    let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
+    let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
+    let settings = row_settings(body_a, body_b, joint.common, dt);
+    append_anchor_lock(bodies, workspace, settings, anchor_a, anchor_b, rotation_a)?;
+    append_axis_alignment(workspace, settings, rotation_a, rotation_b)?;
+
+    let angle = twist_angle(canonical_relative_rotation(rotation_a, rotation_b)?)?;
+    if let Some(settings) = drive_settings(settings, joint.drive)? {
+        push_angular_row(
+            workspace,
+            settings,
+            rotation_a
+                .rotate_vector(Vec3::Z)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+            angle - joint.drive.target_position,
+            bilateral_bounds(),
+        )?;
+    }
+    if let Some(limit) = joint.angle_limit {
+        append_angular_limit(bodies, workspace, settings, rotation_a, angle, limit)?;
+    }
+    Ok(())
+}
+
+fn append_slider_rows(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    body_a: usize,
+    body_b: usize,
+    joint: super::SliderJoint,
+    dt: f64,
+) -> Result<(), CollisionError> {
+    let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
+    let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
+    let settings = row_settings(body_a, body_b, joint.common, dt);
+    append_linear_axes(
+        bodies,
+        workspace,
+        settings,
+        anchor_a,
+        anchor_b,
+        &perpendicular_basis(
+            rotation_a
+                .rotate_vector(Vec3::Z)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )?,
+    )?;
+    append_rotation_lock(workspace, settings, rotation_a, rotation_b)?;
+
+    let axis = rotation_a
+        .rotate_vector(Vec3::Z)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let coordinate = anchor_b
+        .checked_sub(anchor_a)
+        .and_then(|delta| delta.checked_dot(axis))
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    if let Some(drive) = drive_settings(settings, joint.drive)? {
+        push_linear_row(
+            bodies,
+            workspace,
+            drive,
+            [anchor_a, anchor_b],
+            axis,
+            coordinate - joint.drive.target_position,
+            bilateral_bounds(),
+        )?;
+    }
+    if let Some(limit) = joint.translation_limit {
+        append_linear_limit(
+            bodies,
+            workspace,
+            settings,
+            [anchor_a, anchor_b],
+            axis,
+            coordinate,
+            limit,
+        )?;
+    }
+    Ok(())
+}
+
+fn append_cylindrical_rows(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    body_a: usize,
+    body_b: usize,
+    joint: super::CylindricalJoint,
+    dt: f64,
+) -> Result<(), CollisionError> {
+    let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
+    let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
+    let settings = row_settings(body_a, body_b, joint.common, dt);
+    let axis = rotation_a
+        .rotate_vector(Vec3::Z)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    append_linear_axes(
+        bodies,
+        workspace,
+        settings,
+        anchor_a,
+        anchor_b,
+        &perpendicular_basis(axis)?,
+    )?;
+    append_axis_alignment(workspace, settings, rotation_a, rotation_b)?;
+
+    let coordinate = anchor_b
+        .checked_sub(anchor_a)
+        .and_then(|delta| delta.checked_dot(axis))
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    if let Some(drive) = drive_settings(settings, joint.translation_drive)? {
+        push_linear_row(
+            bodies,
+            workspace,
+            drive,
+            [anchor_a, anchor_b],
+            axis,
+            coordinate - joint.translation_drive.target_position,
+            bilateral_bounds(),
+        )?;
+    }
+    if let Some(limit) = joint.translation_limit {
+        append_linear_limit(
+            bodies,
+            workspace,
+            settings,
+            [anchor_a, anchor_b],
+            axis,
+            coordinate,
+            limit,
+        )?;
+    }
+
+    let angle = twist_angle(canonical_relative_rotation(rotation_a, rotation_b)?)?;
+    if let Some(drive) = drive_settings(settings, joint.angular_drive)? {
+        push_angular_row(
+            workspace,
+            drive,
+            axis,
+            angle - joint.angular_drive.target_position,
+            bilateral_bounds(),
+        )?;
+    }
+    if let Some(limit) = joint.angle_limit {
+        append_angular_limit(bodies, workspace, settings, rotation_a, angle, limit)?;
+    }
+    Ok(())
+}
+
+fn append_anchor_lock(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    settings: RowSettings,
+    anchor_a: Vec3,
+    anchor_b: Vec3,
+    frame_rotation: Quat,
+) -> Result<(), CollisionError> {
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| frame_rotation.rotate_vector(axis));
+    let axes = [
+        axes[0].ok_or(CollisionError::ArithmeticOverflow)?,
+        axes[1].ok_or(CollisionError::ArithmeticOverflow)?,
+        axes[2].ok_or(CollisionError::ArithmeticOverflow)?,
+    ];
+    append_linear_axes(bodies, workspace, settings, anchor_a, anchor_b, &axes)
+}
+
+fn append_linear_axes(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    settings: RowSettings,
+    anchor_a: Vec3,
+    anchor_b: Vec3,
+    axes: &[Vec3],
+) -> Result<(), CollisionError> {
+    let delta = anchor_b
+        .checked_sub(anchor_a)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    for axis in axes.iter().copied() {
+        let error = delta
+            .checked_dot(axis)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        push_linear_row(
+            bodies,
+            workspace,
+            settings,
+            [anchor_a, anchor_b],
+            axis,
+            error,
+            bilateral_bounds(),
+        )?;
+    }
+    Ok(())
+}
+
+fn append_rotation_lock(
+    workspace: &mut JointWorkspace,
+    settings: RowSettings,
+    rotation_a: Quat,
+    rotation_b: Quat,
+) -> Result<(), CollisionError> {
+    let error = relative_rotation_error(rotation_a, rotation_b)?;
+    for local_axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        let axis = rotation_a
+            .rotate_vector(local_axis)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        push_angular_row(
+            workspace,
+            settings,
+            axis,
+            error
+                .checked_dot(local_axis)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+            bilateral_bounds(),
+        )?;
+    }
+    Ok(())
+}
+
+fn append_axis_alignment(
+    workspace: &mut JointWorkspace,
+    settings: RowSettings,
+    rotation_a: Quat,
+    rotation_b: Quat,
+) -> Result<(), CollisionError> {
+    let axis_a = rotation_a
+        .rotate_vector(Vec3::Z)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let axis_b = rotation_b
+        .rotate_vector(Vec3::Z)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let dot = axis_a
+        .checked_dot(axis_b)
+        .ok_or(CollisionError::ArithmeticOverflow)?
+        .clamp(-1.0, 1.0);
+    let cross = axis_a
+        .checked_cross(axis_b)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let sine = cross
+        .checked_length()
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let error = if sine > f64::MIN_POSITIVE {
+        cross * (sine.atan2(dot) / sine)
+    } else if dot < 0.0 {
+        let (axis, _) = crate::collision::solver::tangent_basis(axis_a)?;
+        axis * std::f64::consts::PI
+    } else {
+        Vec3::ZERO
+    };
+    let (tangent_a, tangent_b) = crate::collision::solver::tangent_basis(axis_a)?;
+    for axis in [tangent_a, tangent_b] {
+        let component = error
+            .checked_dot(axis)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        if component != 0.0 {
+            push_angular_row(workspace, settings, axis, component, bilateral_bounds())?;
+        }
+    }
+    Ok(())
+}
+
+fn append_linear_limit(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    settings: RowSettings,
+    anchors: [Vec3; 2],
+    axis: Vec3,
+    coordinate: f64,
+    limit: super::JointLimit,
+) -> Result<(), CollisionError> {
+    let mut row_settings = settings;
+    let active = if let Some(violation) = limit_error(coordinate, limit) {
+        Some(violation)
+    } else {
+        let body_a = bodies
+            .get(settings.body_a)
+            .ok_or(CollisionError::InvalidContact)?;
+        let body_b = bodies
+            .get(settings.body_b)
+            .ok_or(CollisionError::InvalidContact)?;
+        let speed =
+            constraint::relative_velocity_at(body_a.body(), body_b.body(), anchors[0], anchors[1])
+                .map_err(map_constraint_error)?
+                .checked_dot(axis)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+        let predicted = coordinate + speed * settings.dt;
+        if !predicted.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        if speed > 0.0 && predicted > limit.upper {
+            row_settings.position_enabled = false;
+            row_settings.velocity_target = (limit.upper - coordinate) / settings.dt;
+            Some((0.0, (f64::NEG_INFINITY, 0.0)))
+        } else if speed < 0.0 && predicted < limit.lower {
+            row_settings.position_enabled = false;
+            row_settings.velocity_target = (limit.lower - coordinate) / settings.dt;
+            Some((0.0, (0.0, f64::INFINITY)))
+        } else {
+            None
+        }
+    };
+    if let Some((error, bounds)) = active {
+        push_linear_row(
+            bodies,
+            workspace,
+            row_settings,
+            anchors,
+            axis,
+            error,
+            bounds,
+        )?;
+    }
+    Ok(())
+}
+
+fn append_angular_limit(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    settings: RowSettings,
+    rotation_a: Quat,
+    angle: f64,
+    limit: super::JointLimit,
+) -> Result<(), CollisionError> {
+    let axis = rotation_a
+        .rotate_vector(Vec3::Z)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let mut row_settings = settings;
+    let active = if let Some(violation) = limit_error(angle, limit) {
+        Some(violation)
+    } else {
+        let body_a = bodies
+            .get(settings.body_a)
+            .ok_or(CollisionError::InvalidContact)?;
+        let body_b = bodies
+            .get(settings.body_b)
+            .ok_or(CollisionError::InvalidContact)?;
+        let speed = body_b
+            .state()
+            .angular_velocity()
+            .checked_sub(body_a.state().angular_velocity())
+            .and_then(|velocity| velocity.checked_dot(axis))
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let predicted = angle + speed * settings.dt;
+        if !predicted.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        if speed > 0.0 && predicted > limit.upper {
+            row_settings.position_enabled = false;
+            row_settings.velocity_target = (limit.upper - angle) / settings.dt;
+            Some((0.0, (f64::NEG_INFINITY, 0.0)))
+        } else if speed < 0.0 && predicted < limit.lower {
+            row_settings.position_enabled = false;
+            row_settings.velocity_target = (limit.lower - angle) / settings.dt;
+            Some((0.0, (0.0, f64::INFINITY)))
+        } else {
+            None
+        }
+    };
+    if let Some((error, bounds)) = active {
+        push_angular_row(workspace, row_settings, axis, error, bounds)?;
+    }
+    Ok(())
+}
+
+fn limit_error(value: f64, limit: super::JointLimit) -> Option<(f64, (f64, f64))> {
+    if value < limit.lower {
+        Some((value - limit.lower, (0.0, f64::INFINITY)))
+    } else if value > limit.upper {
+        Some((value - limit.upper, (f64::NEG_INFINITY, 0.0)))
+    } else {
+        None
+    }
+}
+
+fn row_settings(body_a: usize, body_b: usize, common: super::JointCommon, dt: f64) -> RowSettings {
+    RowSettings {
+        body_a,
+        body_b,
+        common,
+        dt,
+        position_enabled: true,
+        velocity_target: 0.0,
+        multiplier_bounds: None,
+        impulse_bounds: None,
+    }
+}
+
+fn perpendicular_basis(axis: Vec3) -> Result<[Vec3; 2], CollisionError> {
+    let (first, second) = crate::collision::solver::tangent_basis(axis)?;
+    Ok([first, second])
+}
+
+fn drive_settings(
+    mut settings: RowSettings,
+    drive: super::JointDrive,
+) -> Result<Option<RowSettings>, CollisionError> {
+    if !drive.enabled || drive.max_force == 0.0 {
+        return Ok(None);
+    }
+    let max_impulse = drive.max_force * settings.dt;
+    let max_multiplier = max_impulse * settings.dt;
+    if !max_impulse.is_finite() || !max_multiplier.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    let compliance = if drive.stiffness > 0.0 {
+        drive.stiffness.recip()
+    } else {
+        0.0
+    };
+    if !compliance.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    settings.common.compliance = compliance;
+    settings.common.damping = drive.damping;
+    settings.position_enabled = drive.stiffness > 0.0;
+    settings.velocity_target = drive.target_velocity;
+    settings.multiplier_bounds = Some((-max_multiplier, max_multiplier));
+    settings.impulse_bounds = Some((-max_impulse, max_impulse));
+    Ok(Some(settings))
 }
 
 fn world_frame(
@@ -402,13 +839,14 @@ fn push_linear_row(
         linear_b: axis,
         angular_b,
         error,
-        target_velocity: -error * (0.2 / settings.dt),
+        target_velocity: -error * (0.2 / settings.dt) + settings.velocity_target,
+        position_enabled: settings.position_enabled,
         compliance: settings.common.compliance,
         damping: settings.common.damping,
-        min_multiplier: bounds.0,
-        max_multiplier: bounds.1,
-        min_impulse: bounds.0,
-        max_impulse: bounds.1,
+        min_multiplier: settings.multiplier_bounds.map_or(bounds.0, |value| value.0),
+        max_multiplier: settings.multiplier_bounds.map_or(bounds.1, |value| value.1),
+        min_impulse: settings.impulse_bounds.map_or(bounds.0, |value| value.0),
+        max_impulse: settings.impulse_bounds.map_or(bounds.1, |value| value.1),
         accumulated_multiplier: 0.0,
         accumulated_impulse: 0.0,
     });
@@ -433,13 +871,14 @@ fn push_angular_row(
         linear_b: Vec3::ZERO,
         angular_b: axis,
         error,
-        target_velocity: -error * (0.2 / settings.dt),
+        target_velocity: -error * (0.2 / settings.dt) + settings.velocity_target,
+        position_enabled: settings.position_enabled,
         compliance: settings.common.compliance,
         damping: settings.common.damping,
-        min_multiplier: bounds.0,
-        max_multiplier: bounds.1,
-        min_impulse: bounds.0,
-        max_impulse: bounds.1,
+        min_multiplier: settings.multiplier_bounds.map_or(bounds.0, |value| value.0),
+        max_multiplier: settings.multiplier_bounds.map_or(bounds.1, |value| value.1),
+        min_impulse: settings.impulse_bounds.map_or(bounds.0, |value| value.0),
+        max_impulse: settings.impulse_bounds.map_or(bounds.1, |value| value.1),
         accumulated_multiplier: 0.0,
         accumulated_impulse: 0.0,
     });
@@ -470,6 +909,9 @@ fn solve_position_iteration(
             .ok_or(CollisionError::InvalidContact)?;
         if !row.is_valid(bodies.len()) {
             return Err(CollisionError::InvalidContact);
+        }
+        if !row.position_enabled {
+            continue;
         }
         let effective_mass = effective_mass_for_row(bodies, row)?;
         let alpha = row.compliance * alpha_scale;
@@ -514,12 +956,18 @@ fn solve_velocity_iteration(
         }
         let velocity = row_velocity(bodies, row)?;
         let speed_error = row.target_velocity - velocity;
+        let alpha = row.compliance / (dt * dt);
+        if !alpha.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
         let delta = if row.compliance == 0.0 && row.damping == 0.0 {
             speed_error / effective_mass
         } else if row.damping > 0.0 {
             let scaled_damping = row.damping * dt;
-            let denominator = 1.0_f64 + scaled_damping * effective_mass;
+            let denominator = 1.0_f64 + scaled_damping * (effective_mass + alpha);
             scaled_damping * speed_error / denominator
+        } else if row.target_velocity != 0.0 {
+            speed_error / (effective_mass + alpha)
         } else {
             0.0
         };
@@ -659,11 +1107,24 @@ mod tests {
     }
 
     fn solver_body_with_rotation(position: Vec3, rotation: Quat) -> SolverBody {
+        solver_body_with_velocities(position, rotation, Vec3::ZERO, Vec3::ZERO)
+    }
+
+    fn solver_body_with_velocities(
+        position: Vec3,
+        rotation: Quat,
+        linear_velocity: Vec3,
+        angular_velocity: Vec3,
+    ) -> SolverBody {
         let mass =
             MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY).expect("valid mass");
-        let body =
+        let mut body =
             RigidBody::new_dynamic(Transform::new(position, rotation).expect("transform"), mass)
                 .expect("dynamic body");
+        body.set_linear_velocity(linear_velocity)
+            .expect("finite linear velocity");
+        body.set_angular_velocity(angular_velocity)
+            .expect("finite angular velocity");
         let state = *body.state();
         SolverBody::from_prediction(body, state)
     }
@@ -691,6 +1152,7 @@ mod tests {
             angular_b: Vec3::ZERO,
             error,
             target_velocity: 0.0,
+            position_enabled: true,
             compliance: 0.0,
             damping: 0.0,
             min_multiplier: f64::NEG_INFINITY,
@@ -882,5 +1344,251 @@ mod tests {
             .expect("axis B");
         let swing_angle = axis_a.dot(axis_b).clamp(-1.0, 1.0).acos();
         assert!((swing_angle - 0.2).abs() < 1.0e-10, "swing={swing_angle}");
+    }
+
+    #[test]
+    fn hinge_joint_aligns_axes_and_enforces_twist_limit() {
+        let tilt = Quat::from_axis_angle(Vec3::X, 0.4).expect("tilt");
+        let twist = Quat::from_axis_angle(Vec3::Z, 0.7).expect("twist");
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_rotation(Vec3::new(2.0, 1.0, -1.0), tilt * twist),
+        ];
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let mut joint = super::super::HingeJoint::new(common);
+        joint.angle_limit = Some(super::super::JointLimit::new(-0.2, 0.2));
+        solve_joint(super::super::Joint::Hinge(joint), &mut bodies);
+
+        let position_delta = bodies[1]
+            .state()
+            .transform()
+            .translation()
+            .checked_sub(bodies[0].state().transform().translation())
+            .expect("finite delta");
+        let rotation_error = relative_rotation_error(
+            bodies[0].state().transform().rotation(),
+            bodies[1].state().transform().rotation(),
+        )
+        .expect("relative rotation");
+        assert!(position_delta.length() < 1.0e-10);
+        assert!(rotation_error.x.abs() < 1.0e-10);
+        assert!(rotation_error.y.abs() < 1.0e-10);
+        assert!((rotation_error.z - 0.2).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn slider_joint_locks_sideways_motion_and_rotation() {
+        let rotation = Quat::from_axis_angle(Vec3::X, 0.4).expect("rotation");
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_rotation(Vec3::new(2.0, 3.0, 4.0), rotation),
+        ];
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let mut joint = super::super::SliderJoint::new(common);
+        joint.translation_limit = Some(super::super::JointLimit::new(-1.0, 2.0));
+        solve_joint(super::super::Joint::Slider(joint), &mut bodies);
+
+        let delta = bodies[1].state().transform().translation()
+            - bodies[0].state().transform().translation();
+        let rotation_error = relative_rotation_error(
+            bodies[0].state().transform().rotation(),
+            bodies[1].state().transform().rotation(),
+        )
+        .expect("relative rotation");
+        let axis = bodies[0]
+            .state()
+            .transform()
+            .rotation()
+            .rotate_vector(Vec3::Z)
+            .expect("slider axis");
+        let axial = delta.dot(axis);
+        let sideways = delta - axis * axial;
+        assert!(sideways.length() < 1.0e-10, "slider sideways={sideways:?}");
+        assert!((-1.0 - 1.0e-10..=2.0 + 1.0e-10).contains(&axial));
+        assert!(rotation_error.length() < 1.0e-10);
+    }
+
+    #[test]
+    fn cylindrical_joint_limits_slide_and_twist_independently() {
+        let tilt = Quat::from_axis_angle(Vec3::X, 0.5).expect("tilt");
+        let twist = Quat::from_axis_angle(Vec3::Z, 0.7).expect("twist");
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_rotation(Vec3::new(2.0, 3.0, 4.0), tilt * twist),
+        ];
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let mut joint = super::super::CylindricalJoint::new(common);
+        joint.translation_limit = Some(super::super::JointLimit::new(-1.0, 2.0));
+        joint.angle_limit = Some(super::super::JointLimit::new(-0.25, 0.25));
+        solve_joint(super::super::Joint::Cylindrical(joint), &mut bodies);
+
+        let delta = bodies[1].state().transform().translation()
+            - bodies[0].state().transform().translation();
+        let rotation_error = relative_rotation_error(
+            bodies[0].state().transform().rotation(),
+            bodies[1].state().transform().rotation(),
+        )
+        .expect("relative rotation");
+        let axis = bodies[0]
+            .state()
+            .transform()
+            .rotation()
+            .rotate_vector(Vec3::Z)
+            .expect("cylindrical axis");
+        let axial = delta.dot(axis);
+        let sideways = delta - axis * axial;
+        assert!(sideways.length() < 1.0e-10, "sideways={sideways:?}");
+        assert!((-1.0 - 1.0e-10..=2.0 + 1.0e-10).contains(&axial));
+        assert!(rotation_error.x.abs() < 1.0e-10);
+        assert!(rotation_error.y.abs() < 1.0e-10);
+        assert!((rotation_error.z - 0.25).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn joint_drives_respect_force_limit_and_target_velocity() {
+        let drive = super::super::JointDrive {
+            enabled: true,
+            target_position: 0.0,
+            target_velocity: 10.0,
+            stiffness: 0.0,
+            damping: 0.0,
+            max_force: 100.0,
+        };
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+
+        let mut hinge = super::super::HingeJoint::new(common);
+        hinge.drive = drive;
+        let mut hinge_bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        solve_joint(super::super::Joint::Hinge(hinge), &mut hinge_bodies);
+        let relative_angular_speed = hinge_bodies[1].state().angular_velocity().z
+            - hinge_bodies[0].state().angular_velocity().z;
+        assert!((relative_angular_speed - 2.0).abs() < 1.0e-10);
+
+        let mut slider = super::super::SliderJoint::new(common);
+        slider.drive = drive;
+        let mut slider_bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        solve_joint(super::super::Joint::Slider(slider), &mut slider_bodies);
+        let relative_linear_speed = slider_bodies[1].state().linear_velocity().z
+            - slider_bodies[0].state().linear_velocity().z;
+        assert!((relative_linear_speed - 2.0).abs() < 1.0e-10);
+
+        let mut cylindrical = super::super::CylindricalJoint::new(common);
+        cylindrical.translation_drive = drive;
+        cylindrical.angular_drive = drive;
+        let mut cylindrical_bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        solve_joint(
+            super::super::Joint::Cylindrical(cylindrical),
+            &mut cylindrical_bodies,
+        );
+        let linear_speed = cylindrical_bodies[1].state().linear_velocity().z
+            - cylindrical_bodies[0].state().linear_velocity().z;
+        let angular_speed = cylindrical_bodies[1].state().angular_velocity().z
+            - cylindrical_bodies[0].state().angular_velocity().z;
+        assert!((linear_speed - 2.0).abs() < 1.0e-10);
+        assert!((angular_speed - 2.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn position_drives_move_hinge_and_slider_toward_targets() {
+        let drive = super::super::JointDrive {
+            enabled: true,
+            target_position: 0.4,
+            target_velocity: 0.0,
+            stiffness: 100_000.0,
+            damping: 0.0,
+            max_force: 1.0e7,
+        };
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+
+        let mut hinge = super::super::HingeJoint::new(common);
+        hinge.drive = drive;
+        let mut hinge_bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        solve_joint(super::super::Joint::Hinge(hinge), &mut hinge_bodies);
+        let hinge_angle = relative_rotation_error(
+            hinge_bodies[0].state().transform().rotation(),
+            hinge_bodies[1].state().transform().rotation(),
+        )
+        .expect("hinge angle")
+        .z;
+        assert!(hinge_angle > 0.3, "hinge angle={hinge_angle}");
+
+        let mut slider = super::super::SliderJoint::new(common);
+        slider.drive = drive;
+        let mut slider_bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        solve_joint(super::super::Joint::Slider(slider), &mut slider_bodies);
+        let slider_position = slider_bodies[1].state().transform().translation().z
+            - slider_bodies[0].state().transform().translation().z;
+        assert!(slider_position > 0.3, "slider position={slider_position}");
+    }
+
+    #[test]
+    fn slider_limit_brakes_outward_velocity_before_crossing() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let mut joint = super::super::SliderJoint::new(common);
+        joint.translation_limit = Some(super::super::JointLimit::new(-1.0, 1.0));
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_velocities(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Vec3::new(0.0, 0.0, 200.0),
+                Vec3::ZERO,
+            ),
+        ];
+
+        solve_joint(super::super::Joint::Slider(joint), &mut bodies);
+
+        let relative_speed =
+            bodies[1].state().linear_velocity().z - bodies[0].state().linear_velocity().z;
+        assert!(
+            relative_speed <= 100.0 + 1.0e-10,
+            "relative speed={relative_speed}"
+        );
+    }
+
+    #[test]
+    fn hinge_limit_brakes_outward_angular_velocity_before_crossing() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let mut joint = super::super::HingeJoint::new(common);
+        joint.angle_limit = Some(super::super::JointLimit::new(-1.0, 1.0));
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_velocities(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.0, 200.0),
+            ),
+        ];
+
+        solve_joint(super::super::Joint::Hinge(joint), &mut bodies);
+
+        let relative_speed =
+            bodies[1].state().angular_velocity().z - bodies[0].state().angular_velocity().z;
+        assert!(
+            relative_speed <= 100.0 + 1.0e-10,
+            "relative speed={relative_speed}"
+        );
     }
 }

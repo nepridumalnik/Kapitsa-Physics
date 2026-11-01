@@ -11,6 +11,7 @@ pub(crate) struct ConstraintRow {
     pub(crate) angular_b: Vec3,
     pub(crate) error: f64,
     pub(crate) target_velocity: f64,
+    pub(crate) position_enabled: bool,
     pub(crate) compliance: f64,
     /// Viscous damping in N·s/m or N·m·s/rad.
     pub(crate) damping: f64,
