@@ -118,18 +118,7 @@ impl PhysicsBatchResults {
     ) -> Result<PhysicsBatchResult, PhysicsBatchResultStreamError> {
         loop {
             if self.running.borrow().is_none() {
-                return match self.receiver.try_recv() {
-                    Ok(result) => Ok(result),
-                    Err(broadcast::error::TryRecvError::Lagged(missed_results)) => {
-                        Err(PhysicsBatchResultStreamError::Lagged { missed_results })
-                    }
-                    Err(broadcast::error::TryRecvError::Empty) => {
-                        Err(PhysicsBatchResultStreamError::NotRunning)
-                    }
-                    Err(broadcast::error::TryRecvError::Closed) => {
-                        Err(PhysicsBatchResultStreamError::ChannelClosed)
-                    }
-                };
+                return self.try_result_after_stop();
             }
             tokio::select! {
                 result = self.receiver.recv() => match result {
@@ -146,9 +135,26 @@ impl PhysicsBatchResults {
                         return Err(PhysicsBatchResultStreamError::ChannelClosed);
                     }
                     if self.running.borrow().is_none() {
-                        return Err(PhysicsBatchResultStreamError::NotRunning);
+                        return self.try_result_after_stop();
                     }
                 }
+            }
+        }
+    }
+
+    fn try_result_after_stop(
+        &mut self,
+    ) -> Result<PhysicsBatchResult, PhysicsBatchResultStreamError> {
+        match self.receiver.try_recv() {
+            Ok(result) => Ok(result),
+            Err(broadcast::error::TryRecvError::Lagged(missed_results)) => {
+                Err(PhysicsBatchResultStreamError::Lagged { missed_results })
+            }
+            Err(broadcast::error::TryRecvError::Empty) => {
+                Err(PhysicsBatchResultStreamError::NotRunning)
+            }
+            Err(broadcast::error::TryRecvError::Closed) => {
+                Err(PhysicsBatchResultStreamError::ChannelClosed)
             }
         }
     }

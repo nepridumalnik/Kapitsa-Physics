@@ -21,7 +21,7 @@ use std::fmt;
 use kapitsa_core::{
     collision::QueryError,
     rigid_body::BodyError,
-    world::{ForceSourceError, WorldError},
+    world::{ForceSourceError, StepError, WorldError},
 };
 
 /// Failure returned while submitting or applying a physics command.
@@ -33,6 +33,7 @@ pub enum PhysicsClientError {
     Body(BodyError),
     Query(QueryError),
     ForceSource(ForceSourceError),
+    StepFailedAfterApply { step: u64, cause: StepError },
     UnsupportedBatchCommand,
     UnexpectedResult,
 }
@@ -46,6 +47,10 @@ impl fmt::Display for PhysicsClientError {
             Self::Body(error) => write!(formatter, "rigid body command failed: {error}"),
             Self::Query(error) => write!(formatter, "physics query failed: {error}"),
             Self::ForceSource(error) => write!(formatter, "force source command failed: {error}"),
+            Self::StepFailedAfterApply { step, cause } => write!(
+                formatter,
+                "physics step {step} failed after the command was applied: {cause}"
+            ),
             Self::UnsupportedBatchCommand => {
                 formatter.write_str("command cannot be used in an atomic body batch")
             }
@@ -63,6 +68,7 @@ impl std::error::Error for PhysicsClientError {
             Self::Body(error) => Some(error),
             Self::Query(error) => Some(error),
             Self::ForceSource(error) => Some(error),
+            Self::StepFailedAfterApply { cause, .. } => Some(cause),
             Self::NotRunning
             | Self::ChannelClosed
             | Self::UnsupportedBatchCommand

@@ -3,7 +3,10 @@ use std::{
     time::Duration,
 };
 
-use kapitsa_core::world::PhysicsWorld;
+use kapitsa_core::{
+    collision::CollisionError,
+    world::{PhysicsWorld, StepError},
+};
 use tokio::{
     runtime::Handle,
     sync::{broadcast, mpsc, watch},
@@ -42,6 +45,7 @@ struct CommandQueue {
     receiver: mpsc::Receiver<CommandRequest>,
     pending: Option<CommandRequest>,
     batch_scratch: BatchScratch,
+    pending_batch_results: Vec<PhysicsBatchResult>,
     buffer_pool: Arc<CommandBufferPool>,
 }
 
@@ -51,6 +55,7 @@ impl CommandQueue {
             receiver,
             pending: None,
             batch_scratch: BatchScratch::default(),
+            pending_batch_results: Vec::with_capacity(MAX_COMMANDS_PER_STEP),
             buffer_pool,
         }
     }
@@ -385,8 +390,17 @@ async fn run_simulation_loop(
             let next_simulation_time = simulation_time
                 .checked_add(step_duration)
                 .ok_or(SimulationError::SimulationTimeOverflow)?;
-            apply_queued_commands(simulation, commands, events)?;
-            simulation.step().await?;
+            let attempted_step = simulation.metrics().total_steps.saturating_add(1);
+            apply_queued_commands(simulation, commands)?;
+            if let Err(error) = simulation.step().await {
+                publish_failed_batch_results(
+                    commands,
+                    events,
+                    attempted_step,
+                    step_error_for_result(&error),
+                );
+                return Err(error.into());
+            }
             *simulation_time = next_simulation_time;
 
             let (mut snapshot, _) = PhysicsSnapshot::take_reusable(&mut reusable_snapshot);
@@ -397,6 +411,7 @@ async fn run_simulation_loop(
             );
             let previous_snapshot = snapshots.send_replace(Arc::new(snapshot));
             PhysicsSnapshot::recycle(previous_snapshot, &mut reusable_snapshot);
+            publish_batch_results(commands, events);
             if events.collisions.receiver_count() > 0 {
                 let batch = CollisionEventBatch::new(
                     simulation.metrics().total_steps,
@@ -432,7 +447,6 @@ async fn run_simulation_loop(
 fn apply_queued_commands(
     simulation: &mut StepRunner,
     commands: &mut CommandQueue,
-    events: &SimulationEvents,
 ) -> Result<(), SimulationError> {
     let step = simulation.metrics().total_steps.saturating_add(1);
     let world = simulation.world_mut().map_err(SimulationError::from)?;
@@ -461,7 +475,7 @@ fn apply_queued_commands(
                 let result =
                     apply_command_batch(world, &buffer.commands, &mut commands.batch_scratch);
                 commands.buffer_pool.recycle(buffer);
-                let _ = events.batch_results.send(PhysicsBatchResult {
+                commands.pending_batch_results.push(PhysicsBatchResult {
                     batch_id: id,
                     step,
                     result,
@@ -471,6 +485,44 @@ fn apply_queued_commands(
         processed_commands += command_count;
     }
     Ok(())
+}
+
+fn publish_batch_results(commands: &mut CommandQueue, events: &SimulationEvents) {
+    for result in commands.pending_batch_results.drain(..) {
+        let _ = events.batch_results.send(result);
+    }
+}
+
+fn publish_failed_batch_results(
+    commands: &mut CommandQueue,
+    events: &SimulationEvents,
+    attempted_step: u64,
+    cause: StepError,
+) {
+    for mut result in commands.pending_batch_results.drain(..) {
+        result.step = attempted_step;
+        if result.result.is_ok() {
+            result.result = Err(PhysicsBatchError {
+                command_index: None,
+                error: PhysicsClientError::StepFailedAfterApply {
+                    step: attempted_step,
+                    cause,
+                },
+            });
+        }
+        let _ = events.batch_results.send(result);
+    }
+}
+
+fn step_error_for_result(error: &StepRunnerError) -> StepError {
+    match error {
+        StepRunnerError::Physics(error) => *error,
+        StepRunnerError::InvalidConfig(_)
+        | StepRunnerError::InvalidWorkerConfig(_)
+        | StepRunnerError::RayonPool(_)
+        | StepRunnerError::WorldUnavailable
+        | StepRunnerError::WorldLost => StepError::Collision(CollisionError::WorkerFailed),
+    }
 }
 
 fn reject_request(
@@ -506,16 +558,20 @@ fn add_elapsed(accumulator: &mut Duration, elapsed: Duration) -> Result<(), Simu
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
     use std::time::Duration;
+    use std::{num::NonZeroUsize, sync::mpsc};
 
-    use kapitsa_core::{mass::MassProperties, rigid_body::RigidBody, transform::Transform};
+    use kapitsa_core::{
+        mass::MassProperties, rigid_body::RigidBody, transform::Transform, world::StepError,
+    };
     use kapitsa_math::{Mat3, Vec3};
-    use tokio::time::sleep;
+    use tokio::{sync::oneshot, time::sleep};
 
-    use crate::runtime::{SimulationConfig, SimulationError, SimulationState, WorkerConfig};
+    use crate::runtime::{
+        PhysicsClientError, SimulationConfig, SimulationError, SimulationState, WorkerConfig,
+    };
 
-    use super::Simulation;
+    use super::{PhysicsBatchError, Simulation};
 
     fn dynamic_body() -> RigidBody {
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass");
@@ -653,6 +709,202 @@ mod tests {
         assert_eq!(simulation.buffer_pool.stats().0, 1);
 
         simulation.stop().await.expect("stop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn batch_results_follow_fifo_and_wait_for_snapshot_publication() {
+        let mut simulation = Simulation::new_from_config(config(100)).expect("simulation");
+        let body = simulation
+            .simulation
+            .as_mut()
+            .expect("simulation runner")
+            .world_mut()
+            .expect("world")
+            .add_body(dynamic_body())
+            .expect("body ID");
+        let client = simulation.client();
+        let mut results = client.subscribe_batch_results();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        simulation
+            .simulation
+            .as_mut()
+            .expect("simulation runner")
+            .gate_next_step(entered_tx, release_rx);
+        simulation.start().expect("start");
+        tokio::task::yield_now().await;
+
+        let mut valid = client.commands();
+        valid.set_linear_velocity(body, Vec3::Y);
+        let valid_id = client.try_submit(valid).expect("valid batch");
+        let mut invalid = client.commands();
+        invalid.set_linear_velocity(body, Vec3::X);
+        invalid.set_linear_velocity(body, Vec3::new(f64::NAN, 0.0, 0.0));
+        let invalid_id = client.try_submit(invalid).expect("invalid batch");
+
+        tokio::time::advance(Duration::from_millis(10)).await;
+        entered_rx.await.expect("step worker entered gate");
+        assert_eq!(client.snapshot().step(), 0);
+        assert_eq!(
+            client
+                .snapshot()
+                .body(body)
+                .expect("initial body")
+                .linear_velocity(),
+            Vec3::ZERO
+        );
+        tokio::select! {
+            biased;
+            result = results.next_result() => panic!("batch result arrived before step completion: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+
+        release_tx.send(()).expect("release step worker");
+        let first = results.next_result().await.expect("first batch result");
+        let second = results.next_result().await.expect("second batch result");
+        assert_eq!((first.batch_id, second.batch_id), (valid_id, invalid_id));
+        assert!(first.result.is_ok());
+        assert_eq!(
+            second.result,
+            Err(PhysicsBatchError {
+                command_index: Some(1),
+                error: PhysicsClientError::Body(
+                    kapitsa_core::rigid_body::BodyError::NonFiniteValue
+                ),
+            })
+        );
+        assert_eq!(first.step, second.step);
+        assert!(client.snapshot().step() >= first.step);
+        assert_eq!(
+            client
+                .snapshot()
+                .body(body)
+                .expect("published body")
+                .linear_velocity(),
+            Vec3::Y
+        );
+        simulation.stop().await.expect("stop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_stop_during_step_preserves_applied_batch_completion() {
+        let mut simulation = Simulation::new_from_config(config(100)).expect("simulation");
+        let body = simulation
+            .simulation
+            .as_mut()
+            .expect("simulation runner")
+            .world_mut()
+            .expect("world")
+            .add_body(dynamic_body())
+            .expect("body ID");
+        let client = simulation.client();
+        let mut results = client.subscribe_batch_results();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        simulation
+            .simulation
+            .as_mut()
+            .expect("simulation runner")
+            .gate_next_step(entered_tx, release_rx);
+        simulation.start().expect("start");
+        tokio::task::yield_now().await;
+
+        let mut buffer = client.commands();
+        buffer.set_linear_velocity(body, Vec3::X);
+        let batch_id = client.try_submit(buffer).expect("accepted batch");
+        tokio::time::advance(Duration::from_millis(10)).await;
+        entered_rx.await.expect("step worker entered gate");
+
+        let mut stop = Box::pin(simulation.stop());
+        tokio::select! {
+            biased;
+            result = &mut stop => panic!("stop returned while its step was gated: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        drop(stop);
+        assert!(matches!(
+            client
+                .add_body(RigidBody::new_static(Transform::identity()))
+                .await,
+            Err(PhysicsClientError::NotRunning)
+        ));
+
+        release_tx.send(()).expect("release step worker");
+        simulation.stop().await.expect("join cancelled stop");
+        let result = results.next_result().await.expect("applied batch result");
+        assert_eq!(result.batch_id, batch_id);
+        assert!(result.result.is_ok());
+        assert!(client.snapshot().step() >= result.step);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn applied_batch_reports_step_failure_without_rolling_back_commands() {
+        let mut simulation = Simulation::new_from_config(config(100)).expect("simulation");
+        let tiny_mass =
+            MassProperties::new(f64::from_bits(1), Vec3::ZERO, Mat3::IDENTITY).expect("tiny mass");
+        let body = simulation
+            .simulation
+            .as_mut()
+            .expect("simulation runner")
+            .world_mut()
+            .expect("world")
+            .add_body(RigidBody::new_dynamic(Transform::identity(), tiny_mass).expect("body"))
+            .expect("body ID");
+        let client = simulation.client();
+        let mut results = client.subscribe_batch_results();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        simulation
+            .simulation
+            .as_mut()
+            .expect("simulation runner")
+            .gate_next_step(entered_tx, release_rx);
+        simulation.start().expect("start");
+        tokio::task::yield_now().await;
+
+        let mut buffer = client.commands();
+        buffer.set_linear_velocity(body, Vec3::Y);
+        buffer.apply_force(body, Vec3::X * f64::MAX);
+        let batch_id = client.try_submit(buffer).expect("accepted batch");
+        tokio::time::advance(Duration::from_millis(10)).await;
+        entered_rx.await.expect("step worker entered gate");
+        assert_eq!(simulation.buffer_pool.stats().0, 1);
+        release_tx.send(()).expect("release step worker");
+
+        let result = results.next_result().await.expect("failed step result");
+        assert_eq!(result.batch_id, batch_id);
+        assert_eq!(result.step, 1);
+        assert_eq!(
+            result.result,
+            Err(PhysicsBatchError {
+                command_index: None,
+                error: PhysicsClientError::StepFailedAfterApply {
+                    step: 1,
+                    cause: StepError::BodyIntegration {
+                        body_id: body,
+                        cause: kapitsa_core::rigid_body::IntegrationError::ArithmeticOverflow,
+                    },
+                },
+            })
+        );
+        assert!(matches!(
+            simulation.stop().await,
+            Err(SimulationError::Physics(StepError::BodyIntegration { .. }))
+        ));
+        assert_eq!(client.snapshot().step(), 0);
+        assert_eq!(
+            simulation
+                .simulation
+                .as_ref()
+                .expect("runner returned after failed step")
+                .world()
+                .expect("world restored")
+                .body(body)
+                .expect("body")
+                .state()
+                .linear_velocity(),
+            Vec3::Y
+        );
     }
 
     #[tokio::test]
