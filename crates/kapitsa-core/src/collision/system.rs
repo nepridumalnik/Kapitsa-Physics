@@ -558,6 +558,7 @@ impl CollisionSystem {
         &mut self,
         collider: ColliderId,
         bounds: Option<Aabb>,
+        unbounded_query_colliders: &[ColliderId],
     ) -> Result<(usize, usize), CollisionError> {
         let proxy_index = self
             .broad_phase
@@ -569,19 +570,27 @@ impl CollisionSystem {
             .ok_or(CollisionError::InvalidContact)?
             .bounds = bounds;
 
-        let (spatial_index, context) = (&mut self.spatial_index, &mut self.context);
+        let (spatial_index, context, broad_phase) = (
+            &mut self.spatial_index,
+            &mut self.context,
+            &self.broad_phase,
+        );
         context.ccd_query_results.clear();
         let mut colliders_visited = 0;
         if let Some(bounds) = bounds {
             let index = spatial_index.get_or_insert_with(SpatialIndex::new);
             index.update(collider, bounds)?;
             index.query(bounds, &mut context.ccd_query_results)?;
-            colliders_visited = context.colliders.len();
-            for proxy in context
-                .colliders
-                .iter()
-                .filter(|proxy| proxy.bounds.is_none())
-            {
+            colliders_visited = unbounded_query_colliders.len();
+            for collider in unbounded_query_colliders.iter().copied() {
+                let proxy_index = broad_phase
+                    .proxy_index(collider)
+                    .ok_or(CollisionError::InvalidContact)?;
+                let proxy = context
+                    .colliders
+                    .get(proxy_index)
+                    .filter(|proxy| proxy.collider == collider && proxy.bounds.is_none())
+                    .ok_or(CollisionError::InvalidContact)?;
                 context
                     .ccd_query_results
                     .try_reserve(1)

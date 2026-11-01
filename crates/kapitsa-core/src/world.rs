@@ -2160,79 +2160,69 @@ impl PhysicsWorld {
         let mut proxies_updated = 0_usize;
         #[cfg(feature = "bench-internals")]
         let mut found_interisland_dependency = false;
-        let proxy_count = self.collision_system.context.colliders.len();
+        let world_id = self.world_id;
+        let (body_pool, colliders, collision_system, unbounded_query_colliders) = (
+            &self.bodies,
+            &self.colliders,
+            &mut self.collision_system,
+            &self.unbounded_query_colliders,
+        );
 
         for (body_id, prediction_index, changed) in bodies {
             if !changed {
                 continue;
             }
-            let body = self
-                .bodies
+            let body_entry = body_pool
                 .get(body_id.dense)
-                .filter(|_| body_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .filter(|_| body_id.world == world_id)
                 .ok_or(CollisionError::InvalidContact)?;
-            let end_state = self
-                .collision_system
+            let body = body_entry.body;
+            let end_state = collision_system
                 .context
                 .predicted_states
                 .get(prediction_index)
                 .map(|(_, state)| *state)
                 .ok_or(CollisionError::InvalidContact)?;
 
-            for proxy_index in 0..proxy_count {
+            let colliders_of_body = collider_entries_of(world_id, body_pool, colliders, body_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            for (collider_id, collider_body, collider) in colliders_of_body {
+                if collider_id.world != world_id || collider_body != body_id {
+                    return Err(CollisionError::InvalidContact);
+                }
+                let proxy = collision_system.ccd_proxy(collider_id)?;
+                if proxy.body != body_id {
+                    return Err(CollisionError::InvalidContact);
+                }
                 #[cfg(feature = "bench-internals")]
                 {
                     colliders_visited = colliders_visited.saturating_add(1);
-                }
-                let proxy = self
-                    .collision_system
-                    .context
-                    .colliders
-                    .get(proxy_index)
-                    .copied()
-                    .ok_or(CollisionError::InvalidContact)?;
-                if proxy.body != body_id {
-                    continue;
-                }
-                #[cfg(feature = "bench-internals")]
-                {
                     proxies_updated = proxies_updated.saturating_add(1);
                 }
                 let bounds = {
-                    let collider_entry = self
-                        .colliders
-                        .get(proxy.collider.dense)
-                        .filter(|_| proxy.collider.world == self.world_id)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    if collider_entry.body != body_id {
-                        return Err(CollisionError::InvalidContact);
-                    }
                     let trajectory = ColliderTrajectory {
                         body,
-                        base_state: self.collision_system.context.ccd_states[prediction_index],
-                        base_time: self.collision_system.context.ccd_elapsed[prediction_index],
+                        base_state: collision_system.context.ccd_states[prediction_index],
+                        base_time: collision_system.context.ccd_elapsed[prediction_index],
                         sample_start_time: elapsed,
                         end_time: dt,
-                        local_transform: collider_entry.collider.local_transform(),
-                        frozen: self.collision_system.context.ccd_clipped_bodies[prediction_index],
+                        local_transform: collider.local_transform(),
+                        frozen: collision_system.context.ccd_clipped_bodies[prediction_index],
                     };
-                    swept_bounds_for_trajectory(&collider_entry.collider, &trajectory, end_state)?
+                    swept_bounds_for_trajectory(collider, &trajectory, end_state)?
                 };
-                let (query_count, _unbounded_colliders_visited) = self
-                    .collision_system
-                    .prepare_ccd_resweep_proxy(proxy.collider, bounds)?;
+                let (query_count, _unbounded_colliders_visited) = collision_system
+                    .prepare_ccd_resweep_proxy(collider_id, bounds, unbounded_query_colliders)?;
                 #[cfg(feature = "bench-internals")]
                 {
                     colliders_visited =
                         colliders_visited.saturating_add(_unbounded_colliders_visited);
                 }
                 for query_index in 0..query_count {
-                    let other_id = self
-                        .collision_system
+                    let other_id = collision_system
                         .ccd_query_result(query_index)
                         .ok_or(CollisionError::InvalidContact)?;
-                    let other_proxy = self.collision_system.ccd_proxy(other_id)?;
+                    let other_proxy = collision_system.ccd_proxy(other_id)?;
                     if bounds.is_some_and(|bounds| {
                         other_proxy
                             .bounds
@@ -2240,33 +2230,29 @@ impl PhysicsWorld {
                     }) {
                         continue;
                     }
-                    if !self
-                        .collision_system
-                        .ccd_pair_allowed(proxy.collider, other_id)?
-                    {
+                    if !collision_system.ccd_pair_allowed(collider_id, other_id)? {
                         continue;
                     }
-                    let pair = CollisionPair::new(proxy.collider, other_id)
+                    let pair = CollisionPair::new(collider_id, other_id)
                         .ok_or(CollisionError::InvalidContact)?;
                     let other_prediction = Self::predicted_body_index(
-                        &self.collision_system.context.body_indices,
-                        self.world_id,
+                        &collision_system.context.body_indices,
+                        world_id,
                         other_proxy.body,
                     )?;
-                    let (body_a, body_b) = if pair.a == proxy.collider {
+                    let (body_a, body_b) = if pair.a == collider_id {
                         (prediction_index, other_prediction)
                     } else {
                         (other_prediction, prediction_index)
                     };
-                    let (added, is_ccd) = self
-                        .collision_system
-                        .add_ccd_candidate(pair, body_a, body_b)?;
+                    let (added, is_ccd) =
+                        collision_system.add_ccd_candidate(pair, body_a, body_b)?;
                     if added && is_ccd {
                         new_ccd_candidates += 1;
                         #[cfg(feature = "bench-internals")]
-                        if self.collision_system.context.ccd_body_types[other_prediction]
+                        if collision_system.context.ccd_body_types[other_prediction]
                             == BodyType::Dynamic
-                            && self.collision_system.ccd_body_island(other_prediction)
+                            && collision_system.ccd_body_island(other_prediction)
                                 != Some(_island_index)
                         {
                             found_interisland_dependency = true;
@@ -2277,7 +2263,7 @@ impl PhysicsWorld {
         }
 
         #[cfg(feature = "bench-internals")]
-        self.collision_system.record_ccd_resweep(
+        collision_system.record_ccd_resweep(
             started.elapsed(),
             _invalidated_count,
             colliders_visited,
@@ -3203,16 +3189,8 @@ impl PhysicsWorld {
         &self,
         body: BodyId,
     ) -> Option<impl Iterator<Item = (ColliderId, &Collider)> + '_> {
-        if body.world != self.world_id {
-            return None;
-        }
-        let mut next = self.bodies.get(body.dense)?.first_collider;
-        Some(std::iter::from_fn(move || {
-            let id = next?;
-            let entry = self.colliders.get(id.dense)?;
-            next = entry.next;
-            Some((id, &entry.collider))
-        }))
+        collider_entries_of(self.world_id, &self.bodies, &self.colliders, body)
+            .map(|entries| entries.map(|(id, _, collider)| (id, collider)))
     }
 }
 
@@ -3244,6 +3222,24 @@ fn body_point_velocity(
         .linear_velocity()
         .checked_add(angular_velocity)
         .ok_or(CollisionError::ArithmeticOverflow)
+}
+
+fn collider_entries_of<'a>(
+    world_id: u64,
+    bodies: &DensePool<BodyEntry>,
+    colliders: &'a DensePool<ColliderEntry>,
+    body: BodyId,
+) -> Option<impl Iterator<Item = (ColliderId, BodyId, &'a Collider)> + 'a> {
+    if body.world != world_id {
+        return None;
+    }
+    let mut next = bodies.get(body.dense)?.first_collider;
+    Some(std::iter::from_fn(move || {
+        let id = next?;
+        let entry = colliders.get(id.dense)?;
+        next = entry.next;
+        Some((id, entry.body, &entry.collider))
+    }))
 }
 
 fn update_query_index_for_body(

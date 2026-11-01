@@ -318,6 +318,104 @@ fn independent_ccd_islands_evaluate_only_their_own_candidates() {
     assert_eq!(metrics.ccd_impact_count, 2);
 }
 
+#[cfg(feature = "bench-internals")]
+#[test]
+fn ccd_resweep_only_visits_live_colliders_attached_to_the_changed_body() {
+    for collider_count in [1, 10, 100, 1_000] {
+        let mut world = PhysicsWorld::new();
+        let wall_body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .unwrap();
+        world
+            .add_collider(
+                wall_body,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(0.1, 2.0, 2.0).unwrap()),
+                    Transform::identity(),
+                ),
+            )
+            .unwrap();
+
+        let mut moving = dynamic_body(Vec3::new(-5.0, 0.0, 0.0), Vec3::new(1_000.0, 0.0, 0.0));
+        moving.set_ccd_mode(CcdMode::Continuous);
+        let moving_body = world.add_body(moving).unwrap();
+        let mut component_ids = Vec::with_capacity(collider_count);
+        for index in 0..collider_count {
+            let local_y = index as f64 * 4.0;
+            component_ids.push(
+                world
+                    .add_collider(
+                        moving_body,
+                        Collider::new(
+                            Shape::Sphere(Sphere::new(0.5).unwrap()),
+                            Transform::new(Vec3::new(0.0, local_y, 0.0), Quat::IDENTITY).unwrap(),
+                        ),
+                    )
+                    .unwrap(),
+            );
+        }
+        let replaced_local_y = (collider_count - 1) as f64 * 4.0;
+        assert!(
+            world
+                .remove_collider(*component_ids.last().unwrap())
+                .is_some()
+        );
+        world
+            .add_collider(
+                moving_body,
+                Collider::new(
+                    Shape::Sphere(Sphere::new(0.5).unwrap()),
+                    Transform::new(Vec3::new(0.0, replaced_local_y, 0.0), Quat::IDENTITY).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        let unrelated_body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .unwrap();
+        for index in 0..64 {
+            world
+                .add_collider(
+                    unrelated_body,
+                    Collider::new(
+                        Shape::Sphere(Sphere::new(0.5).unwrap()),
+                        Transform::new(
+                            Vec3::new(1_000.0 + index as f64 * 3.0, 2_000.0, 0.0),
+                            Quat::IDENTITY,
+                        )
+                        .unwrap(),
+                    ),
+                )
+                .unwrap();
+        }
+
+        world.step(1.0 / 60.0).unwrap();
+
+        let metrics = world.collision_step_metrics();
+        assert_eq!(
+            metrics.ccd_impact_count, 1,
+            "collider count {collider_count}"
+        );
+        assert_eq!(
+            metrics.ccd_resweep_count, 1,
+            "collider count {collider_count}"
+        );
+        assert_eq!(
+            metrics.ccd_resweep_colliders_visited, collider_count,
+            "collider count {collider_count}"
+        );
+        assert_eq!(
+            metrics.ccd_resweep_proxies_updated, collider_count,
+            "collider count {collider_count}"
+        );
+        assert_eq!(
+            world.colliders_of(moving_body).unwrap().count(),
+            collider_count,
+            "collider count {collider_count}"
+        );
+    }
+}
+
 #[test]
 fn expensive_independent_ccd_islands_match_across_worker_counts() {
     let make_world = || {

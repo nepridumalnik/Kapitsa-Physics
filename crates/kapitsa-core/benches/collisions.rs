@@ -44,9 +44,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("HeightField + colliders", height_field_scene),
         ("LevelSet + colliders", level_set_scene),
         ("CCD fast bodies", ccd_scene),
-        ("CCD 20k statics + 64 mixed", || ccd_static_load_scene(64)),
-        ("CCD 20k statics + 128 mixed", || ccd_static_load_scene(128)),
-        ("CCD 20k statics + 256 mixed", || ccd_static_load_scene(256)),
+        ("CCD 1k statics + 64 mixed", || {
+            ccd_static_load_scene(1_000, 64)
+        }),
+        ("CCD 20k statics + 64 mixed", || {
+            ccd_static_load_scene(20_000, 64)
+        }),
+        ("CCD 20k statics + 128 mixed", || {
+            ccd_static_load_scene(20_000, 128)
+        }),
+        ("CCD 20k statics + 256 mixed", || {
+            ccd_static_load_scene(20_000, 256)
+        }),
         ("CCD fast no-contact candidates", ccd_no_contact_scene),
         ("CCD one large island", ccd_large_island_scene),
         ("CCD sequential wall bounces", ccd_sequence_scene),
@@ -241,12 +250,15 @@ fn ccd_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     Ok(world)
 }
 
-fn ccd_static_load_scene(dynamic_count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
+fn ccd_static_load_scene(
+    static_count: usize,
+    dynamic_count: usize,
+) -> Result<PhysicsWorld, Box<dyn Error>> {
     let mut world = PhysicsWorld::new();
     let static_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let impact_count = dynamic_count / 4;
 
-    for index in 0..20_000 - impact_count {
+    for index in 0..static_count.saturating_sub(impact_count) {
         let x = 10_000.0 + (index % 200) as f64 * 2.0;
         let y = (index / 200) as f64 * 2.0;
         world.add_collider(

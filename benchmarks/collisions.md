@@ -608,3 +608,30 @@ The full step exceeds a 16.67 ms frame at this scene size, but CCD accounts for
 0.669–2.607 ms of the median step; spatial index construction and broadphase
 account for roughly 21 ms combined. Those timings are recorded as context and
 are outside this resweep optimization's scope.
+
+## CCD follow-up stage 2: body-local resweep
+
+`resweep_ccd_bodies()` now walks the changed body's existing collider links.
+Each collider ID is checked against the owning body and the broadphase proxy
+lookup before its swept bounds are updated. New candidates still come from the
+spatial index; unbounded colliders are read from the world's maintained
+unbounded-collider list instead of scanning every proxy.
+
+The test covers compound bodies with 1, 10, 100, and 1,000 colliders, removes
+and replaces a component before stepping, and keeps 64 unrelated static
+colliders in the scene. In every case, one impact updates and visits exactly
+the number of live colliders attached to the moving body.
+
+| Scene | Step min / median / max | CCD min / median / max | Impacts / resweeps | Resweep visits / proxies updated | Refresh median |
+|---|---:|---:|---:|---:|---:|
+| 64 fast spheres vs. wall | 0.664 / 0.678 / 0.692 ms | 0.529 / 0.533 / 0.540 ms | 64 / 64 | 64 / 64 | 0.046 ms |
+| 1k statics + 64 mixed | 0.814 / 0.867 / 0.883 ms | 0.141 / 0.143 / 0.145 ms | 16 / 16 | 16 / 16 | 0.015 ms |
+| 20k statics + 64 mixed | 20.695 / 20.938 / 21.533 ms | 0.168 / 0.172 / 0.178 ms | 16 / 16 | 16 / 16 | 0.021 ms |
+| 20k statics + 128 mixed | 20.693 / 21.025 / 21.744 ms | 0.313 / 0.320 / 0.330 ms | 32 / 32 | 32 / 32 | 0.037 ms |
+| 20k statics + 256 mixed | 21.432 / 21.479 / 21.817 ms | 0.608 / 0.615 / 0.644 ms | 64 / 64 | 64 / 64 | 0.078 ms |
+
+At 20k static colliders, direct visits fell from 642,048 / 1,288,192 /
+2,592,768 to 16 / 32 / 64 for the three mixed scenes. The refresh medians
+dropped from 0.506 / 1.046 / 2.008 ms to 0.021 / 0.037 / 0.078 ms. The 1k
+and 20k scenes with 64 dynamic bodies both visit 16 proxies, showing that
+unrelated finite colliders do not add work to the changed-body traversal.

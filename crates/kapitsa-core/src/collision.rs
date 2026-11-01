@@ -92,7 +92,7 @@ pub struct CollisionStepMetrics {
     pub ccd_candidate_refresh_count: usize,
     /// Number of changed-body selective resweeps.
     pub ccd_resweep_count: usize,
-    /// Number of collider proxies inspected while looking up changed bodies.
+    /// Body and unbounded collider proxies visited during selective resweeps.
     pub ccd_resweep_colliders_visited: usize,
     /// Number of changed-body collider proxies sent through spatial-index update.
     pub ccd_resweep_proxies_updated: usize,
