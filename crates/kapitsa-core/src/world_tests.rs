@@ -1221,6 +1221,7 @@ fn ccd_swept_bounds_cover_offset_com_rotation_arcs() {
         sample_start_time: 0.0,
         end_time: 1.0,
         local_transform: Transform::identity(),
+        frozen: false,
     };
     let collider = Collider::new(
         Shape::Sphere(Sphere::new(0.1).expect("sphere")),

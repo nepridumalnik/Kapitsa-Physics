@@ -26,7 +26,7 @@ use std::time::Duration;
 
 pub(crate) use ccd::{CcdCandidateToi, CcdHit, CcdMotion, swept_bounds_motion};
 pub(crate) use ccd_island::CcdIslandLayout;
-pub use config::CollisionConfig;
+pub use config::{CcdLimitPolicy, CollisionConfig};
 pub use contact::CollisionPair;
 pub use error::{CollisionError, QueryError};
 pub use event::{CollisionEvent, CollisionEventKind, ContactInfo};
@@ -70,6 +70,8 @@ pub struct CollisionStepMetrics {
     pub contact_count: usize,
     /// Number of continuous time-of-impact contacts resolved.
     pub ccd_impact_count: usize,
+    /// Number of CCD islands clipped after reaching the impact budget.
+    pub ccd_clipped_island_count: usize,
     /// Candidate pairs present when CCD processing began.
     pub ccd_initial_candidate_count: usize,
     /// Number of TOI evaluations performed by the CCD solver.
@@ -129,6 +131,7 @@ impl CollisionStepMetrics {
         candidate_count: 0,
         contact_count: 0,
         ccd_impact_count: 0,
+        ccd_clipped_island_count: 0,
         ccd_initial_candidate_count: 0,
         ccd_toi_call_count: 0,
         ccd_repeated_toi_call_count: 0,

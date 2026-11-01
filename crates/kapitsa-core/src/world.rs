@@ -27,12 +27,12 @@ use crate::{
     aabb::Aabb,
     collider::Collider,
     collision::{
-        CcdCandidateToi, CcdHit, CcdMotion, CollisionConfig, CollisionError, CollisionEvent,
-        CollisionInteraction, CollisionPair, CollisionSystem, ContactInfo, ContactManifold,
-        ContactPoint, NarrowPhase, OverlapHit, QueryError, QueryFilter, QueryScratch, QueryTarget,
-        Ray, RayHit, ShapeHit, SolverBody, SolverManifold, SolverMaterial, StepContext,
-        overlaps_shape_with_scratch, raycast_shape_with_scratch, spatial_index::SpatialIndex,
-        sweep_shape_with_scratch,
+        CcdCandidateToi, CcdHit, CcdLimitPolicy, CcdMotion, CollisionConfig, CollisionError,
+        CollisionEvent, CollisionInteraction, CollisionPair, CollisionSystem, ContactInfo,
+        ContactManifold, ContactPoint, NarrowPhase, OverlapHit, QueryError, QueryFilter,
+        QueryScratch, QueryTarget, Ray, RayHit, ShapeHit, SolverBody, SolverManifold,
+        SolverMaterial, StepContext, overlaps_shape_with_scratch, raycast_shape_with_scratch,
+        spatial_index::SpatialIndex, sweep_shape_with_scratch,
     },
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
@@ -61,10 +61,18 @@ struct ColliderTrajectory {
     sample_start_time: f64,
     end_time: f64,
     local_transform: crate::transform::Transform,
+    frozen: bool,
 }
 
 impl ColliderTrajectory {
     fn transform_at(&self, amount: f64) -> Result<crate::transform::Transform, CollisionError> {
+        if self.frozen {
+            return self
+                .base_state
+                .transform()
+                .compose(&self.local_transform)
+                .map_err(|_| CollisionError::ArithmeticOverflow);
+        }
         let sample_time =
             self.sample_start_time + (self.end_time - self.sample_start_time) * amount;
         let duration = sample_time - self.base_time;
@@ -81,6 +89,9 @@ impl ColliderTrajectory {
     }
 
     fn path_bounds(&self, end: BodyState) -> Result<(f64, f64, bool), CollisionError> {
+        if self.frozen {
+            return Ok((0.0, 0.0, true));
+        }
         let base_duration = self.end_time - self.base_time;
         if base_duration <= 0.0 {
             return Err(CollisionError::InvalidContact);
@@ -106,7 +117,10 @@ impl ColliderTrajectory {
     }
 
     fn has_linear_collider_origin(&self, end: BodyState) -> bool {
-        if self.base_state.is_sleeping() || self.body.physics().body_type() == BodyType::Static {
+        if self.frozen
+            || self.base_state.is_sleeping()
+            || self.body.physics().body_type() == BodyType::Static
+        {
             return true;
         }
         if self.base_state.linear_velocity() != end.linear_velocity() {
@@ -813,6 +827,7 @@ impl PhysicsWorld {
                         sample_start_time: 0.0,
                         end_time: dt,
                         local_transform: collider_entry.collider.local_transform(),
+                        frozen: false,
                     };
                     swept_bounds_for_trajectory(
                         &collider_entry.collider,
@@ -971,6 +986,7 @@ impl PhysicsWorld {
             context.ccd_states.clear();
             context.ccd_elapsed.clear();
             context.ccd_impact_counts.clear();
+            context.ccd_clipped_bodies.clear();
             context.ccd_body_types.clear();
             context.ccd_continuous_bodies.clear();
             context
@@ -983,6 +999,10 @@ impl PhysicsWorld {
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
             context
                 .ccd_impact_counts
+                .try_reserve(prediction_count)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            context
+                .ccd_clipped_bodies
                 .try_reserve(prediction_count)
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
             context
@@ -1006,6 +1026,7 @@ impl PhysicsWorld {
             context.ccd_states.push(*body.state());
             context.ccd_elapsed.push(0.0);
             context.ccd_impact_counts.push(0);
+            context.ccd_clipped_bodies.push(false);
             context.ccd_body_types.push(body.physics().body_type());
             context.ccd_continuous_bodies.push(
                 body.physics().body_type() == BodyType::Dynamic
@@ -1184,6 +1205,7 @@ impl PhysicsWorld {
                             sample_start_time: elapsed,
                             end_time: dt,
                             local_transform: local_transform_a,
+                            frozen: context.ccd_clipped_bodies[prediction_a],
                         };
                         let trajectory_b = ColliderTrajectory {
                             body: body_b,
@@ -1192,6 +1214,7 @@ impl PhysicsWorld {
                             sample_start_time: elapsed,
                             end_time: dt,
                             local_transform: local_transform_b,
+                            frozen: context.ccd_clipped_bodies[prediction_b],
                         };
                         let (translation_bound_a, rotation_bound_a, linear_translation_a) =
                             trajectory_a.path_bounds(end_state_a)?;
@@ -1394,16 +1417,57 @@ impl PhysicsWorld {
                     {
                         return Err(CollisionError::InvalidContact);
                     }
+                    let mut budget_exhausted = false;
                     for (body, prediction) in [(body_a, prediction_a), (body_b, prediction_b)] {
                         if body.physics().body_type() == BodyType::Dynamic
                             && body.ccd_mode() == CcdMode::Continuous
                         {
                             let impacts =
                                 self.collision_system.context.ccd_impact_counts[prediction];
-                            if impacts >= self.collision_system.config().max_ccd_impacts {
-                                return Err(CollisionError::CcdLimitExceeded);
-                            }
+                            budget_exhausted |=
+                                impacts >= self.collision_system.config().max_ccd_impacts;
                         }
+                    }
+                    let already_clipped = self.collision_system.context.ccd_clipped_bodies
+                        [prediction_a]
+                        || self.collision_system.context.ccd_clipped_bodies[prediction_b];
+                    let limit_policy = self.collision_system.config().ccd_limit_policy;
+                    if budget_exhausted && limit_policy == CcdLimitPolicy::AbortStep {
+                        return Err(CollisionError::CcdLimitExceeded);
+                    }
+                    if budget_exhausted || already_clipped {
+                        self.clip_ccd_island(island_index, impact_elapsed, dt)?;
+                        let has_prior_impact = self
+                            .collision_system
+                            .context
+                            .interaction_indices
+                            .as_ref()
+                            .and_then(|indices| indices.get(&pair))
+                            .and_then(|index| {
+                                self.collision_system.context.interactions.get(*index)
+                            })
+                            .is_some_and(|interaction| interaction.impact);
+                        if !has_prior_impact {
+                            upsert_interaction(
+                                &mut self.collision_system.context.interactions,
+                                &mut self.collision_system.context.interaction_indices,
+                                CollisionInteraction {
+                                    pair,
+                                    sensor: false,
+                                    transient: false,
+                                    contact: Some(ContactInfo {
+                                        point: contact_position,
+                                        normal: hit.normal,
+                                        penetration: (-separation).max(0.0),
+                                        normal_impulse: 0.0,
+                                    }),
+                                    impact: false,
+                                },
+                            )?;
+                        }
+                        #[cfg(feature = "bench-internals")]
+                        self.collision_system.record_ccd_clipped_island();
+                        break;
                     }
                     let material = self.combined_solver_material(material_a, material_b)?;
                     let (solved_a, solved_b, solved_manifold) = self
@@ -1845,6 +1909,7 @@ impl PhysicsWorld {
             sample_start_time: elapsed,
             end_time: dt,
             local_transform: collider_a.collider.local_transform(),
+            frozen: self.collision_system.context.ccd_clipped_bodies[prediction_a],
         };
         let trajectory_b = ColliderTrajectory {
             body: body_b,
@@ -1853,6 +1918,7 @@ impl PhysicsWorld {
             sample_start_time: elapsed,
             end_time: dt,
             local_transform: collider_b.collider.local_transform(),
+            frozen: self.collision_system.context.ccd_clipped_bodies[prediction_b],
         };
         let (translation_bound_a, rotation_bound_a, linear_translation_a) =
             trajectory_a.path_bounds(end_state_a)?;
@@ -2055,6 +2121,7 @@ impl PhysicsWorld {
                         sample_start_time: elapsed,
                         end_time: dt,
                         local_transform: collider_entry.collider.local_transform(),
+                        frozen: self.collision_system.context.ccd_clipped_bodies[prediction_index],
                     };
                     swept_bounds_for_trajectory(&collider_entry.collider, &trajectory, end_state)?
                 };
@@ -2124,6 +2191,7 @@ impl PhysicsWorld {
             context.ccd_states[prediction] = *body.state();
             context.ccd_elapsed[prediction] = 0.0;
             context.ccd_impact_counts[prediction] = 0;
+            context.ccd_clipped_bodies[prediction] = false;
         }
         {
             let context = &mut self.collision_system.context;
@@ -2175,12 +2243,58 @@ impl PhysicsWorld {
         if elapsed == start_time {
             return Ok(state_start);
         }
+        if self
+            .collision_system
+            .context
+            .ccd_clipped_bodies
+            .get(prediction_index)
+            .copied()
+            .ok_or(CollisionError::InvalidContact)?
+        {
+            return Ok(state_start);
+        }
         let duration = elapsed - start_time;
         if dt - start_time <= 0.0 {
             return Err(CollisionError::InvalidContact);
         }
         predict_from_state(&body, state_start, duration)
             .map_err(|_| CollisionError::ArithmeticOverflow)
+    }
+
+    fn clip_ccd_island(
+        &mut self,
+        island_index: usize,
+        elapsed: f64,
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        let prediction_count = self.collision_system.context.predicted_states.len();
+        for prediction in 0..prediction_count {
+            if self.collision_system.ccd_body_island(prediction) != Some(island_index)
+                || self.collision_system.context.ccd_body_types[prediction] != BodyType::Dynamic
+            {
+                continue;
+            }
+            let body_id = self.collision_system.context.predicted_states[prediction].0;
+            let state = self.body_state_at_ccd(body_id, prediction, elapsed, dt)?;
+            let mut body = self
+                .bodies
+                .get(body_id.dense)
+                .filter(|_| body_id.world == self.world_id)
+                .map(|entry| entry.body)
+                .ok_or(CollisionError::InvalidContact)?;
+            body.set_state_preserving_forces(state);
+            body.set_linear_velocity(Vec3::ZERO)
+                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            body.set_angular_velocity(Vec3::ZERO)
+                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            let clipped_state = *body.state();
+            let context = &mut self.collision_system.context;
+            context.ccd_states[prediction] = clipped_state;
+            context.ccd_elapsed[prediction] = elapsed;
+            context.ccd_clipped_bodies[prediction] = true;
+            context.predicted_states[prediction].1 = clipped_state;
+        }
+        Ok(())
     }
 
     fn required_body_index_slots(context: &StepContext) -> Result<usize, CollisionError> {

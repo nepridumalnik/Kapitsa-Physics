@@ -130,6 +130,14 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_clipped_island(&mut self) {
+        self.benchmark_metrics.ccd_clipped_island_count = self
+            .benchmark_metrics
+            .ccd_clipped_island_count
+            .saturating_add(1);
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_ccd_toi_search(&mut self, elapsed: std::time::Duration) {
         self.benchmark_metrics.ccd_toi_search += elapsed;
     }

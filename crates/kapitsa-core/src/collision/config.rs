@@ -9,6 +9,17 @@ pub struct CollisionConfig {
     pub penetration_slop: f64,
     pub restitution_threshold: f64,
     pub max_ccd_impacts: u32,
+    pub ccd_limit_policy: CcdLimitPolicy,
+}
+
+/// Action taken when a continuous body reaches its per-step impact budget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CcdLimitPolicy {
+    /// Stop all dynamic bodies in the connected CCD island at the limiting contact.
+    #[default]
+    ClipIsland,
+    /// Abort the step and preserve the last committed world state.
+    AbortStep,
 }
 
 impl CollisionConfig {
@@ -20,6 +31,7 @@ impl CollisionConfig {
             penetration_slop: 0.001,
             restitution_threshold: 1.0,
             max_ccd_impacts: 8,
+            ccd_limit_policy: CcdLimitPolicy::ClipIsland,
         }
     }
 
