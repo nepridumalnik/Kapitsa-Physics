@@ -1,6 +1,7 @@
 use kapitsa_math::{Affine3, Vec3};
 use std::{
     collections::HashMap,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -770,6 +771,23 @@ impl PhysicsWorld {
 
     /// Advances one step using the supplied statically dispatched task executor.
     pub fn step_with_executor<E: StepExecutor>(
+        &mut self,
+        dt: f64,
+        executor: &E,
+        worker_count: usize,
+    ) -> Result<(), StepError> {
+        match catch_unwind(AssertUnwindSafe(|| {
+            self.step_with_executor_inner(dt, executor, worker_count)
+        })) {
+            Ok(result) => result,
+            Err(_) => {
+                self.collision_system.abort_step();
+                Err(StepError::Collision(CollisionError::WorkerFailed))
+            }
+        }
+    }
+
+    fn step_with_executor_inner<E: StepExecutor>(
         &mut self,
         dt: f64,
         executor: &E,

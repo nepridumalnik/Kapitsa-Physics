@@ -98,12 +98,7 @@ impl RayonPool {
     where
         F: FnOnce() + Send + 'static,
     {
-        let pool = self
-            .pool
-            .as_ref()
-            .ok_or(RayonPoolError::PoolAlreadyShutDown)?;
-        pool.spawn(operation);
-        Ok(())
+        self.executor()?.spawn(operation)
     }
 
     /// Stops the pool and asynchronously waits for each Tokio blocking worker to exit.
@@ -178,6 +173,22 @@ impl StepExecutor for RayonExecutor {
             }
         });
         Ok(())
+    }
+}
+
+impl RayonExecutor {
+    /// Schedules a top-level task on the shared pool.
+    pub fn spawn<F>(&self, operation: F) -> Result<(), RayonPoolError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.pool.spawn(operation);
+        Ok(())
+    }
+
+    /// Returns the fixed number of worker threads in this pool.
+    pub fn worker_count(&self) -> usize {
+        self.pool.current_num_threads()
     }
 }
 

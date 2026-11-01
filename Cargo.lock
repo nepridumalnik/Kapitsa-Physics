@@ -110,6 +110,7 @@ name = "kapitsa"
 version = "0.1.0"
 dependencies = [
  "kapitsa-core",
+ "kapitsa-math",
  "rayon",
  "tokio",
 ]
