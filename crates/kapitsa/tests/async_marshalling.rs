@@ -281,6 +281,45 @@ async fn cloned_clients_do_not_lose_concurrent_body_commands() {
     assert_eq!(reader.snapshot().len(), 100);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cloned_clients_submit_command_buffers_concurrently() {
+    const CLIENTS: usize = 24;
+
+    let mut simulation = simulation();
+    let client = simulation.client();
+    simulation.start().expect("start");
+    let body = client.add_body(dynamic_body()).await.expect("body");
+    let mut results = client.subscribe_batch_results();
+
+    let mut clients = JoinSet::new();
+    for index in 0..CLIENTS {
+        let client = client.clone();
+        clients.spawn(async move {
+            let mut commands = client.commands();
+            commands.set_linear_velocity(body, Vec3::new(index as f64 + 1.0, 0.0, 0.0));
+            client.try_submit(commands).expect("submit command buffer")
+        });
+    }
+
+    let mut submitted = HashSet::new();
+    while let Some(result) = clients.join_next().await {
+        submitted.insert(result.expect("client task"));
+    }
+    assert_eq!(submitted.len(), CLIENTS);
+
+    let mut applied = HashSet::new();
+    for _ in 0..CLIENTS {
+        let result = tokio::time::timeout(Duration::from_secs(5), results.next_result())
+            .await
+            .expect("batch result timeout")
+            .expect("batch result");
+        assert!(result.result.is_ok());
+        applied.insert(result.batch_id);
+    }
+    assert_eq!(applied, submitted);
+    simulation.stop().await.expect("stop");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_cancellation_applies_and_stop_discards_other_session_requests() {
     let mut simulation = simulation();

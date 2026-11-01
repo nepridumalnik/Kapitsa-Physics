@@ -20,6 +20,7 @@ use super::PhysicsClientError;
 use super::{
     CollisionEventBatch, CollisionEvents, PhysicsBatchResult, PhysicsBatchResults, PhysicsCommand,
     PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSnapshot, PhysicsSubmitError,
+    buffer_pool::CommandBufferPool,
     command::{BatchId, CommandRequest},
 };
 
@@ -31,6 +32,7 @@ pub struct PhysicsClient {
     collision_events: broadcast::Sender<CollisionEventBatch>,
     batch_results: broadcast::Sender<PhysicsBatchResult>,
     batch_id_sequence: Arc<AtomicU64>,
+    buffer_pool: Arc<CommandBufferPool>,
 }
 
 impl PhysicsClient {
@@ -40,6 +42,7 @@ impl PhysicsClient {
         collision_events: broadcast::Sender<CollisionEventBatch>,
         batch_results: broadcast::Sender<PhysicsBatchResult>,
         batch_id_sequence: Arc<AtomicU64>,
+        buffer_pool: Arc<CommandBufferPool>,
     ) -> Self {
         Self {
             command_tx,
@@ -47,12 +50,15 @@ impl PhysicsClient {
             collision_events,
             batch_results,
             batch_id_sequence,
+            buffer_pool,
         }
     }
 
     /// Creates an empty command buffer for nonblocking submission.
     pub fn commands(&self) -> PhysicsCommandBuffer {
-        PhysicsCommandBuffer::new()
+        PhysicsCommandBuffer {
+            commands: self.buffer_pool.take(),
+        }
     }
 
     /// Attempts to enqueue a complete command buffer without waiting.
@@ -82,21 +88,14 @@ impl PhysicsClient {
             Err(_) => return Err(PhysicsSubmitError::BatchIdExhausted(buffer)),
         };
 
-        let request = CommandRequest::Batch {
-            id,
-            commands: buffer.commands,
-        };
+        let request = CommandRequest::Batch { id, buffer };
         match sender.try_send(request) {
             Ok(()) => Ok(id),
-            Err(mpsc::error::TrySendError::Full(CommandRequest::Batch { commands, .. })) => {
-                Err(PhysicsSubmitError::QueueFull(PhysicsCommandBuffer {
-                    commands,
-                }))
+            Err(mpsc::error::TrySendError::Full(CommandRequest::Batch { buffer, .. })) => {
+                Err(PhysicsSubmitError::QueueFull(buffer))
             }
-            Err(mpsc::error::TrySendError::Closed(CommandRequest::Batch { commands, .. })) => {
-                Err(PhysicsSubmitError::ChannelClosed(PhysicsCommandBuffer {
-                    commands,
-                }))
+            Err(mpsc::error::TrySendError::Closed(CommandRequest::Batch { buffer, .. })) => {
+                Err(PhysicsSubmitError::ChannelClosed(buffer))
             }
             Err(mpsc::error::TrySendError::Full(CommandRequest::Single { .. }))
             | Err(mpsc::error::TrySendError::Closed(CommandRequest::Single { .. })) => Err(
@@ -520,8 +519,8 @@ mod tests {
     use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
     use super::super::{
-        PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
-        PhysicsSnapshot, PhysicsSubmitError,
+        CommandBufferPool, PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer,
+        PhysicsCommandResult, PhysicsSnapshot, PhysicsSubmitError,
         command::{BatchScratch, CommandRequest, apply_command, apply_command_batch},
     };
     use super::PhysicsClient;
@@ -529,6 +528,7 @@ mod tests {
     struct ClientHarness {
         client: PhysicsClient,
         receiver: mpsc::Receiver<CommandRequest>,
+        buffer_pool: Arc<CommandBufferPool>,
         _command_tx: watch::Sender<Option<mpsc::Sender<CommandRequest>>>,
         _snapshot_tx: watch::Sender<Arc<PhysicsSnapshot>>,
     }
@@ -538,6 +538,7 @@ mod tests {
         let (command_state_tx, command_state_rx) = watch::channel(Some(command_tx));
         let (collision_events, _) = broadcast::channel(4);
         let (batch_results, _) = broadcast::channel(4);
+        let buffer_pool = Arc::new(CommandBufferPool::default());
         let initial = Arc::new(PhysicsSnapshot::from_world(
             &PhysicsWorld::new(),
             0,
@@ -551,8 +552,10 @@ mod tests {
                 collision_events,
                 batch_results,
                 Arc::new(AtomicU64::new(1)),
+                Arc::clone(&buffer_pool),
             ),
             receiver: command_rx,
+            buffer_pool,
             _command_tx: command_state_tx,
             _snapshot_tx: snapshot_tx,
         }
@@ -647,10 +650,10 @@ mod tests {
             let source = *source;
             reply.send(result).expect("client awaits source ID");
 
-            let Some(CommandRequest::Batch { commands, .. }) = receiver.recv().await else {
+            let Some(CommandRequest::Batch { buffer, .. }) = receiver.recv().await else {
                 panic!("source updates arrive as one command batch");
             };
-            apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
+            apply_command_batch(&mut world, &buffer.commands, &mut BatchScratch::default())
                 .expect("source update batch");
             let configured = world.force_source(source).expect("source remains live");
             assert_eq!(configured.local_point(), Vec3::Y);
@@ -926,18 +929,38 @@ mod tests {
             panic!("expected QueueFull");
         };
         assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer.commands.capacity(), 2);
 
         let _ = take_single_request(receiver.recv().await.expect("queued command"));
         let id = client.try_submit(buffer).expect("retry accepted");
         let Some(CommandRequest::Batch {
             id: queued_id,
-            commands,
+            buffer,
         }) = receiver.try_recv().ok()
         else {
             panic!("batch must be one queue message");
         };
         assert_eq!(queued_id, id);
-        assert_eq!(commands.len(), 2);
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer.commands.capacity(), 2);
+    }
+
+    #[test]
+    fn commands_reuses_a_cleared_buffer_from_the_pool() {
+        let harness = running_client(1);
+        let mut world = PhysicsWorld::new();
+        let body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("body ID");
+        let mut returned = PhysicsCommandBuffer::with_capacity(12);
+        returned.set_linear_velocity(body, Vec3::X);
+        let capacity = returned.commands.capacity();
+        harness.buffer_pool.recycle(returned);
+
+        let buffer = harness.client.commands();
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.commands.capacity(), capacity);
+        assert_eq!(harness.buffer_pool.stats(), (0, 0));
     }
 
     #[test]
@@ -1053,6 +1076,7 @@ mod tests {
             collision_events,
             batch_results,
             Arc::new(AtomicU64::new(1)),
+            Arc::new(CommandBufferPool::default()),
         );
         assert!(matches!(
             client.submit(add_body()).await,

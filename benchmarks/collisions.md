@@ -1123,3 +1123,45 @@ The same Release timing and warm-allocation commands are:
 cargo test -p kapitsa --release --lib benchmark_apply_command_batch_scaling -- --ignored --nocapture
 cargo test -p kapitsa --release --lib --features bench-internals benchmark_apply_command_batch_allocations -- --ignored --nocapture
 ```
+
+## Command buffer pool full-cycle benchmark
+
+Measured on 2026-11-01 on an AMD Ryzen 9 7900X3D, Windows MSVC target, with
+`rustc 1.98.0` / `cargo 1.98.0` and Cargo's default optimized Release profile.
+This compares a fresh `PhysicsCommandBuffer::new()` that is dropped after
+processing with `PhysicsClient::commands()` backed by the bounded pool. The
+benchmark uses a fixed batch of 128 `SetLinearVelocity` commands on one dynamic
+body. World, body, client, channels, and staging scratch are constructed before
+measurement. Each full cycle fills the buffer, calls `try_submit`, dequeues and
+applies the batch synchronously, checks the resulting velocity, then drops or
+returns the buffer. A 500-cycle warm-up precedes five independently timed
+samples of 10,000 cycles. Allocations are counted in a separate 10,000-cycle
+post-warm run.
+
+| Buffer lifecycle | Full-cycle min / median / max us | Median sample-mean `try_submit` ns/call | Median batches/s | Median commands/s | Allocations / batch | Requested bytes / batch | Retained buffers | Retained pool bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Fresh and drop | 2.896 / 3.147 / 9.124 | 76.0 | 317,751 | 40,672,107 | 6 | 122,976 | 0 | 0 |
+| Reused pool | 1.942 / 1.950 / 1.976 | 71.0 | 512,884 | 65,649,106 | 0 | 0 | 1 | 62,888 |
+
+The pool reduced median full-cycle time by 38.0% and increased measured
+throughput by 61.4%. The median of the five sample-mean `try_submit` costs was
+76 ns for fresh buffers and 71 ns for pooled buffers; this small difference is
+reported without treating it as a separate performance claim. The fresh-vector
+control made six allocation/reallocation requests per cycle while growing to
+128 commands. The pool retained one 128-command-capacity buffer after warm-up
+and made no measured allocations during the post-warm cycle. Its 62,888-byte retained
+footprint includes 62,464 bytes of command-vector capacity plus 424 bytes for
+the fixed Arc-backed pool state. The control retains no command buffer; its
+pool-state footprint is excluded because it models the pre-pool implementation.
+
+The fresh-control maximum is much higher than its median; all samples are
+reported without filtering, with no causal attribution. The harness is
+single-threaded and uses a synchronous dequeue/apply loop to make the complete
+ownership cycle repeatable; the separate concurrent-client test exercises the
+runtime's shared pool under parallel submissions.
+
+Exact Release command:
+
+```powershell
+cargo test -p kapitsa --release --lib --features bench-internals benchmark_command_buffer_pool_full_cycle -- --ignored --nocapture
+```

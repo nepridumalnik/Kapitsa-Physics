@@ -1,8 +1,10 @@
+mod buffer_pool;
 mod client;
 mod command;
 mod events;
 mod snapshot;
 
+pub(crate) use buffer_pool::CommandBufferPool;
 pub use client::PhysicsClient;
 pub use command::{
     BatchId, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSubmitError,

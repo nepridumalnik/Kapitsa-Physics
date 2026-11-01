@@ -14,8 +14,9 @@ use tokio::{
 use super::{
     StepRunner, StepRunnerError,
     marshalling::{
-        BatchScratch, CollisionEventBatch, CommandRequest, PhysicsBatchError, PhysicsBatchResult,
-        PhysicsClient, PhysicsClientError, PhysicsSnapshot, apply_command, apply_command_batch,
+        BatchScratch, CollisionEventBatch, CommandBufferPool, CommandRequest, PhysicsBatchError,
+        PhysicsBatchResult, PhysicsClient, PhysicsClientError, PhysicsSnapshot, apply_command,
+        apply_command_batch,
     },
 };
 use crate::runtime::{ConfigError, SimulationConfig, SimulationMetrics, SimulationState};
@@ -41,6 +42,18 @@ struct CommandQueue {
     receiver: mpsc::Receiver<CommandRequest>,
     pending: Option<CommandRequest>,
     batch_scratch: BatchScratch,
+    buffer_pool: Arc<CommandBufferPool>,
+}
+
+impl CommandQueue {
+    fn new(receiver: mpsc::Receiver<CommandRequest>, buffer_pool: Arc<CommandBufferPool>) -> Self {
+        Self {
+            receiver,
+            pending: None,
+            batch_scratch: BatchScratch::default(),
+            buffer_pool,
+        }
+    }
 }
 
 /// Owns a clock-driven physics simulation and exposes its client API.
@@ -55,6 +68,7 @@ pub struct Simulation {
     collision_events_tx: broadcast::Sender<CollisionEventBatch>,
     batch_results_tx: broadcast::Sender<PhysicsBatchResult>,
     batch_id_sequence: Arc<AtomicU64>,
+    buffer_pool: Arc<CommandBufferPool>,
     simulation_time: Duration,
     metrics_tx: watch::Sender<SimulationMetrics>,
     metrics_rx: watch::Receiver<SimulationMetrics>,
@@ -149,6 +163,7 @@ impl Simulation {
         let (snapshot_tx, snapshot_rx) = watch::channel(initial_snapshot);
         let (collision_events_tx, _) = broadcast::channel(COLLISION_EVENT_BATCH_CAPACITY);
         let (batch_results_tx, _) = broadcast::channel(PHYSICS_BATCH_RESULT_CAPACITY);
+        let buffer_pool = Arc::new(CommandBufferPool::default());
         Ok(Self {
             simulation: Some(simulation),
             task: None,
@@ -160,6 +175,7 @@ impl Simulation {
             collision_events_tx,
             batch_results_tx,
             batch_id_sequence: Arc::new(AtomicU64::new(1)),
+            buffer_pool,
             simulation_time: Duration::ZERO,
             metrics_tx,
             metrics_rx,
@@ -209,11 +225,12 @@ impl Simulation {
             batch_results: self.batch_results_tx.clone(),
         };
         let mut simulation_time = self.simulation_time;
+        let buffer_pool = Arc::clone(&self.buffer_pool);
         self.stop = Some(stop_tx);
         self.task = Some(self.runtime.spawn(async move {
             let result = run_simulation(
                 &mut simulation,
-                command_receiver,
+                CommandQueue::new(command_receiver, buffer_pool),
                 stop_rx,
                 &metrics_tx,
                 &snapshot_tx,
@@ -280,6 +297,7 @@ impl Simulation {
             self.collision_events_tx.clone(),
             self.batch_results_tx.clone(),
             Arc::clone(&self.batch_id_sequence),
+            Arc::clone(&self.buffer_pool),
         )
     }
 }
@@ -299,18 +317,13 @@ fn stopping(stop: &watch::Receiver<bool>) -> bool {
 
 async fn run_simulation(
     simulation: &mut StepRunner,
-    commands: mpsc::Receiver<CommandRequest>,
+    mut commands: CommandQueue,
     stop: watch::Receiver<bool>,
     metrics: &watch::Sender<SimulationMetrics>,
     snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
     events: &SimulationEvents,
     simulation_time: &mut Duration,
 ) -> Result<(), SimulationError> {
-    let mut commands = CommandQueue {
-        receiver: commands,
-        pending: None,
-        batch_scratch: BatchScratch::default(),
-    };
     let result = run_simulation_loop(
         simulation,
         &mut commands,
@@ -324,10 +337,10 @@ async fn run_simulation(
     commands.receiver.close();
     let stopped_at_step = simulation.metrics().total_steps;
     if let Some(request) = commands.pending.take() {
-        reject_request(request, stopped_at_step, events);
+        reject_request(request, stopped_at_step, events, &commands.buffer_pool);
     }
     while let Ok(request) = commands.receiver.try_recv() {
-        reject_request(request, stopped_at_step, events);
+        reject_request(request, stopped_at_step, events, &commands.buffer_pool);
     }
     result
 }
@@ -444,12 +457,10 @@ fn apply_queued_commands(
                 let result = apply_command(world, command);
                 let _ = reply.send(result);
             }
-            CommandRequest::Batch {
-                id,
-                commands: batch_commands,
-            } => {
+            CommandRequest::Batch { id, buffer } => {
                 let result =
-                    apply_command_batch(world, &batch_commands, &mut commands.batch_scratch);
+                    apply_command_batch(world, &buffer.commands, &mut commands.batch_scratch);
+                commands.buffer_pool.recycle(buffer);
                 let _ = events.batch_results.send(PhysicsBatchResult {
                     batch_id: id,
                     step,
@@ -462,12 +473,18 @@ fn apply_queued_commands(
     Ok(())
 }
 
-fn reject_request(request: CommandRequest, step: u64, events: &SimulationEvents) {
+fn reject_request(
+    request: CommandRequest,
+    step: u64,
+    events: &SimulationEvents,
+    buffer_pool: &CommandBufferPool,
+) {
     match request {
         CommandRequest::Single { reply, .. } => {
             let _ = reply.send(Err(PhysicsClientError::NotRunning));
         }
-        CommandRequest::Batch { id, .. } => {
+        CommandRequest::Batch { id, buffer } => {
+            buffer_pool.recycle(buffer);
             let _ = events.batch_results.send(PhysicsBatchResult {
                 batch_id: id,
                 step,
@@ -559,6 +576,83 @@ mod tests {
         simulation.stop().await.expect("stop");
         assert_eq!(simulation.state(), SimulationState::Stopped);
         assert_eq!(simulation.metrics().total_steps, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopped_queue_batches_are_recycled_and_available_after_restart() {
+        let mut simulation = Simulation::new_from_config(config(100)).expect("simulation");
+        let body = simulation
+            .simulation
+            .as_mut()
+            .expect("simulation runner")
+            .world_mut()
+            .expect("world")
+            .add_body(dynamic_body())
+            .expect("body ID");
+        let client = simulation.client();
+        let mut results = client.subscribe_batch_results();
+        simulation.start().expect("start");
+
+        let mut buffer = client.commands();
+        buffer.reserve(15);
+        buffer.set_linear_velocity(body, Vec3::X);
+        let capacity = buffer.commands.capacity();
+        let batch_id = client.try_submit(buffer).expect("accepted batch");
+        simulation.stop().await.expect("stop");
+
+        let result = results.next_result().await.expect("rejected batch result");
+        assert_eq!(result.batch_id, batch_id);
+        assert!(result.result.is_err());
+        assert_eq!(simulation.buffer_pool.stats().0, 1);
+
+        simulation.start().expect("restart");
+        let reused = client.commands();
+        assert!(reused.is_empty());
+        assert_eq!(reused.commands.capacity(), capacity);
+        drop(reused);
+        simulation.stop().await.expect("second stop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn applied_and_failed_batches_are_recycled() {
+        let mut simulation = Simulation::new_from_config(config(100)).expect("simulation");
+        let body = simulation
+            .simulation
+            .as_mut()
+            .expect("simulation runner")
+            .world_mut()
+            .expect("world")
+            .add_body(dynamic_body())
+            .expect("body ID");
+        let client = simulation.client();
+        let mut results = client.subscribe_batch_results();
+        simulation.start().expect("start");
+        tokio::task::yield_now().await;
+
+        let mut first = client.commands();
+        first.reserve(15);
+        first.set_linear_velocity(body, Vec3::X);
+        let first_capacity = first.commands.capacity();
+        let first_id = client.try_submit(first).expect("accepted batch");
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        let result = results.next_result().await.expect("applied batch result");
+        assert_eq!(result.batch_id, first_id);
+        assert!(result.result.is_ok());
+        assert_eq!(simulation.buffer_pool.stats().0, 1);
+
+        let mut second = client.commands();
+        assert_eq!(second.commands.capacity(), first_capacity);
+        second.set_linear_velocity(body, Vec3::new(f64::NAN, 0.0, 0.0));
+        let second_id = client.try_submit(second).expect("accepted invalid batch");
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        let result = results.next_result().await.expect("failed batch result");
+        assert_eq!(result.batch_id, second_id);
+        assert!(result.result.is_err());
+        assert_eq!(simulation.buffer_pool.stats().0, 1);
+
+        simulation.stop().await.expect("stop");
     }
 
     #[tokio::test]

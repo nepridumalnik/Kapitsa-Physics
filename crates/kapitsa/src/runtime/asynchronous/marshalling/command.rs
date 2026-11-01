@@ -320,7 +320,7 @@ pub(crate) enum CommandRequest {
     },
     Batch {
         id: BatchId,
-        commands: Vec<PhysicsCommand>,
+        buffer: PhysicsCommandBuffer,
     },
 }
 
@@ -328,7 +328,7 @@ impl CommandRequest {
     pub(crate) fn command_count(&self) -> usize {
         match self {
             Self::Single { .. } => 1,
-            Self::Batch { commands, .. } => commands.len(),
+            Self::Batch { buffer, .. } => buffer.len(),
         }
     }
 }
@@ -811,7 +811,11 @@ mod tests {
     };
 
     #[cfg(feature = "bench-internals")]
+    use std::sync::Arc;
+    #[cfg(feature = "bench-internals")]
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[cfg(feature = "bench-internals")]
+    use tokio::sync::{broadcast, mpsc, watch};
 
     #[cfg(feature = "bench-internals")]
     static TRACK_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
@@ -1766,6 +1770,181 @@ mod tests {
                     case.scratch.force_source_indices.capacity(),
                 );
             }
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release full-cycle timing and allocations; run separately with bench-internals"]
+    fn benchmark_command_buffer_pool_full_cycle() {
+        use super::super::{CommandBufferPool, PhysicsClient, PhysicsSnapshot};
+        use std::sync::atomic::AtomicU64;
+
+        const WARMUP_CYCLES: usize = 500;
+        const CYCLES_PER_SAMPLE: usize = 10_000;
+        const SAMPLE_COUNT: usize = 5;
+
+        let (command_tx, receiver) = mpsc::channel(1);
+        let (_state_tx, state_rx) = watch::channel(Some(command_tx));
+        let (collision_events, _) = broadcast::channel(4);
+        let (batch_results, _) = broadcast::channel(4);
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(dynamic_body()).expect("body ID");
+        let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(PhysicsSnapshot::from_world(
+            &world,
+            0,
+            Duration::ZERO,
+        )));
+        let pool = Arc::new(CommandBufferPool::default());
+        let client = PhysicsClient::new(
+            state_rx,
+            snapshot_rx,
+            collision_events,
+            batch_results,
+            Arc::new(AtomicU64::new(1)),
+            Arc::clone(&pool),
+        );
+        drop(snapshot_tx);
+        let mut harness = FullCycleHarness {
+            client,
+            receiver,
+            pool,
+            world,
+            body,
+            scratch: BatchScratch::default(),
+        };
+
+        println!(
+            "mode,commands_per_batch,samples,min_us_per_cycle,median_us_per_cycle,max_us_per_cycle,try_submit_ns_per_call,batches_per_second,commands_per_second,allocations_per_cycle,requested_bytes_per_cycle,retained_buffers,retained_pool_bytes"
+        );
+        for use_pool in [false, true] {
+            run_full_cycles(&mut harness, use_pool, WARMUP_CYCLES);
+
+            let mut cycle_ns = Vec::with_capacity(SAMPLE_COUNT);
+            let mut submit_ns = Vec::with_capacity(SAMPLE_COUNT);
+            for _ in 0..SAMPLE_COUNT {
+                let measurement = run_full_cycles(&mut harness, use_pool, CYCLES_PER_SAMPLE);
+                cycle_ns.push(measurement.elapsed.as_nanos() as f64 / CYCLES_PER_SAMPLE as f64);
+                submit_ns
+                    .push(measurement.submit_elapsed.as_nanos() as f64 / CYCLES_PER_SAMPLE as f64);
+            }
+            let allocations =
+                tracked_full_cycle_allocations(&mut harness, use_pool, CYCLES_PER_SAMPLE);
+            cycle_ns.sort_by(f64::total_cmp);
+            submit_ns.sort_by(f64::total_cmp);
+            let median_cycle_ns = cycle_ns[SAMPLE_COUNT / 2];
+            let (retained_buffers, retained_command_bytes) = harness.pool.stats();
+            let retained_bytes = if use_pool {
+                retained_command_bytes + CommandBufferPool::fixed_memory_bytes()
+            } else {
+                0
+            };
+            let mode = if use_pool { "pooled" } else { "new-and-drop" };
+            println!(
+                "{mode},128,{SAMPLE_COUNT},{:.3},{:.3},{:.3},{:.1},{:.0},{:.0},{:.3},{:.1},{retained_buffers},{retained_bytes}",
+                cycle_ns[0] / 1_000.0,
+                median_cycle_ns / 1_000.0,
+                cycle_ns[SAMPLE_COUNT - 1] / 1_000.0,
+                submit_ns[SAMPLE_COUNT / 2],
+                1.0e9 / median_cycle_ns,
+                128.0e9 / median_cycle_ns,
+                allocations.count as f64 / CYCLES_PER_SAMPLE as f64,
+                allocations.bytes as f64 / CYCLES_PER_SAMPLE as f64,
+            );
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    struct FullCycleMeasurement {
+        elapsed: Duration,
+        submit_elapsed: Duration,
+    }
+
+    #[cfg(feature = "bench-internals")]
+    struct FullCycleHarness {
+        client: super::super::PhysicsClient,
+        receiver: tokio::sync::mpsc::Receiver<super::super::CommandRequest>,
+        pool: Arc<super::super::CommandBufferPool>,
+        world: PhysicsWorld,
+        body: kapitsa_core::world::BodyId,
+        scratch: BatchScratch,
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn run_full_cycles(
+        harness: &mut FullCycleHarness,
+        use_pool: bool,
+        cycles: usize,
+    ) -> FullCycleMeasurement {
+        const COMMANDS_PER_BATCH: usize = 128;
+
+        let started = Instant::now();
+        let mut submit_elapsed = Duration::ZERO;
+        for cycle in 0..cycles {
+            let mut buffer = if use_pool {
+                harness.client.commands()
+            } else {
+                super::super::PhysicsCommandBuffer::new()
+            };
+            for command_index in 0..COMMANDS_PER_BATCH {
+                let value = (cycle * COMMANDS_PER_BATCH + command_index) as f64;
+                buffer.set_linear_velocity(harness.body, Vec3::new(value, 1.0, 0.0));
+            }
+
+            let submit_started = Instant::now();
+            let batch_id = harness
+                .client
+                .try_submit(black_box(buffer))
+                .expect("submit batch");
+            submit_elapsed += submit_started.elapsed();
+            let Some(super::super::CommandRequest::Batch {
+                id: queued_id,
+                buffer,
+            }) = harness.receiver.try_recv().ok()
+            else {
+                panic!("submitted batch must be queued");
+            };
+            assert_eq!(queued_id, batch_id);
+            apply_command_batch(
+                &mut harness.world,
+                black_box(&buffer.commands),
+                &mut harness.scratch,
+            )
+            .expect("batch applies");
+            let expected = Vec3::new(((cycle + 1) * COMMANDS_PER_BATCH - 1) as f64, 1.0, 0.0);
+            assert_eq!(
+                harness
+                    .world
+                    .body(harness.body)
+                    .expect("updated body")
+                    .state()
+                    .linear_velocity(),
+                expected
+            );
+            black_box(expected);
+
+            if use_pool {
+                harness.pool.recycle(buffer);
+            }
+        }
+        FullCycleMeasurement {
+            elapsed: started.elapsed(),
+            submit_elapsed,
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn tracked_full_cycle_allocations(
+        harness: &mut FullCycleHarness,
+        use_pool: bool,
+        cycles: usize,
+    ) -> BatchAllocationStats {
+        let tracking = AllocationTracking::start();
+        let _ = run_full_cycles(harness, use_pool, cycles);
+        drop(tracking);
+        BatchAllocationStats {
+            count: ALLOCATION_COUNT.load(Ordering::Relaxed),
+            bytes: ALLOCATION_BYTES.load(Ordering::Relaxed),
         }
     }
 }
