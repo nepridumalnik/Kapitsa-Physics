@@ -855,14 +855,18 @@ impl CollisionSystem {
         &mut self,
         worker_count: usize,
         executor: &impl StepExecutor,
+        dt: f64,
     ) -> Result<(), CollisionError> {
         if let Some(cache) = self.contact_cache.as_ref() {
             cache.warm_start_solver(&mut self.context.solver_manifolds)?;
         }
         #[cfg(feature = "bench-internals")]
         let island_started = std::time::Instant::now();
-        self.islands
-            .build(&self.context.body_types, &self.context.solver_manifolds)?;
+        self.islands.build_with_joints(
+            &self.context.body_types,
+            &self.context.solver_manifolds,
+            &self.context.joint_constraints,
+        )?;
         let island_count = self.islands.island_count();
         #[cfg(feature = "bench-internals")]
         self.record_island_build(island_started.elapsed(), island_count);
@@ -899,6 +903,26 @@ impl CollisionSystem {
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
             island.body_indices.push(manifold.body_a);
             island.body_indices.push(manifold.body_b);
+        }
+        for (joint_index, joint) in self.context.joint_constraints.iter().enumerate() {
+            let Some(island_index) = self.islands.joint_island(joint_index) else {
+                continue;
+            };
+            let island = self
+                .solver_islands
+                .get_mut(island_index)
+                .ok_or(CollisionError::InvalidContact)?;
+            island
+                .joint_indices
+                .try_reserve(1)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            island.joint_indices.push(joint_index);
+            island
+                .body_indices
+                .try_reserve(2)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            island.body_indices.push(joint.body_a);
+            island.body_indices.push(joint.body_b);
         }
         for island in self.solver_islands.iter_mut().take(island_count) {
             island.body_indices.sort_unstable();
@@ -948,6 +972,26 @@ impl CollisionSystem {
                     .map_err(|_| CollisionError::InvalidContact)?;
                 island.manifolds.push(manifold);
             }
+            island
+                .joints
+                .try_reserve(island.joint_indices.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            for joint_index in island.joint_indices.iter().copied() {
+                let mut joint = *self
+                    .context
+                    .joint_constraints
+                    .get(joint_index)
+                    .ok_or(CollisionError::InvalidContact)?;
+                joint.body_a = island
+                    .body_indices
+                    .binary_search(&joint.body_a)
+                    .map_err(|_| CollisionError::InvalidContact)?;
+                joint.body_b = island
+                    .body_indices
+                    .binary_search(&joint.body_b)
+                    .map_err(|_| CollisionError::InvalidContact)?;
+                island.joints.push(joint);
+            }
         }
         #[cfg(feature = "bench-internals")]
         {
@@ -958,9 +1002,14 @@ impl CollisionSystem {
         let iterations_started = std::time::Instant::now();
         if worker_count <= 1 || island_count <= 1 {
             for island in self.solver_islands.iter_mut().take(island_count) {
-                island
-                    .workspace
-                    .solve(&mut island.bodies, &mut island.manifolds, config)?;
+                island.workspace.solve_with_joints(
+                    &mut island.bodies,
+                    &mut island.manifolds,
+                    &mut island.joint_workspace,
+                    &island.joints,
+                    dt,
+                    config,
+                )?;
             }
         } else {
             let worker_count = worker_count.min(island_count);
@@ -973,9 +1022,12 @@ impl CollisionSystem {
                     chunk_size,
                     |_, chunk| {
                         for island in chunk {
-                            if let Err(error) = island.workspace.solve(
+                            if let Err(error) = island.workspace.solve_with_joints(
                                 &mut island.bodies,
                                 &mut island.manifolds,
+                                &mut island.joint_workspace,
+                                &island.joints,
+                                dt,
                                 config,
                             ) {
                                 island.worker_error = Some(error);

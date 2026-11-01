@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     aabb::Aabb,
+    joint::JointConstraint,
     rigid_body::{BodyState, BodyType},
     world::{BodyId, ColliderId},
 };
@@ -118,6 +119,8 @@ pub(crate) struct StepContext {
     #[cfg(feature = "bench-internals")]
     pub(crate) ccd_toi_seen_pairs: Option<HashSet<super::CollisionPair>>,
     pub(crate) solver_manifolds: Vec<SolverManifold>,
+    pub(crate) joint_constraints: Vec<JointConstraint>,
+    pub(crate) joint_collision_pairs: Vec<(BodyId, BodyId)>,
     pub(crate) interactions: Vec<CollisionInteraction>,
     /// Created on first use so the owning PhysicsWorld can remain const-constructible.
     pub(crate) interaction_indices: Option<HashMap<CollisionPair, usize>>,
@@ -163,6 +166,8 @@ impl StepContext {
             #[cfg(feature = "bench-internals")]
             ccd_toi_seen_pairs: None,
             solver_manifolds: Vec::new(),
+            joint_constraints: Vec::new(),
+            joint_collision_pairs: Vec::new(),
             interactions: Vec::new(),
             interaction_indices: None,
             events: Vec::new(),
@@ -212,11 +217,22 @@ impl StepContext {
             pairs.clear();
         }
         self.solver_manifolds.clear();
+        self.joint_constraints.clear();
+        self.joint_collision_pairs.clear();
         self.interactions.clear();
         if let Some(indices) = &mut self.interaction_indices {
             indices.clear();
         }
         self.events.clear();
+    }
+
+    pub(crate) fn suppresses_joint_collision(&self, body_a: BodyId, body_b: BodyId) -> bool {
+        let pair = if body_a < body_b {
+            (body_a, body_b)
+        } else {
+            (body_b, body_a)
+        };
+        self.joint_collision_pairs.binary_search(&pair).is_ok()
     }
 
     #[cfg(feature = "bench-internals")]
@@ -262,6 +278,8 @@ impl StepContext {
             self.ccd_processed_pairs.capacity() * size_of::<super::CollisionPair>(),
             ccd_toi_seen_pairs,
             self.solver_manifolds.capacity() * size_of::<SolverManifold>(),
+            self.joint_constraints.capacity() * size_of::<JointConstraint>(),
+            self.joint_collision_pairs.capacity() * size_of::<(BodyId, BodyId)>(),
             self.interactions.capacity() * size_of::<CollisionInteraction>(),
             self.interaction_indices.as_ref().map_or(0, |indices| {
                 indices.capacity() * size_of::<(CollisionPair, usize)>()

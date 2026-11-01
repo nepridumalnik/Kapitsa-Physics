@@ -1,4 +1,4 @@
-use crate::rigid_body::BodyType;
+use crate::{joint::JointConstraint, rigid_body::BodyType};
 
 use super::{CollisionError, solver::SolverManifold};
 
@@ -10,6 +10,7 @@ pub(crate) struct IslandLayout {
     body_islands: Vec<Option<usize>>,
     connected: Vec<bool>,
     manifold_islands: Vec<Option<usize>>,
+    joint_islands: Vec<Option<usize>>,
     island_count: usize,
 }
 
@@ -21,14 +22,25 @@ impl IslandLayout {
             body_islands: Vec::new(),
             connected: Vec::new(),
             manifold_islands: Vec::new(),
+            joint_islands: Vec::new(),
             island_count: 0,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn build(
         &mut self,
         body_types: &[BodyType],
         manifolds: &[SolverManifold],
+    ) -> Result<(), CollisionError> {
+        self.build_with_joints(body_types, manifolds, &[])
+    }
+
+    pub(crate) fn build_with_joints(
+        &mut self,
+        body_types: &[BodyType],
+        manifolds: &[SolverManifold],
+        joints: &[JointConstraint],
     ) -> Result<(), CollisionError> {
         self.parents.clear();
         self.parents
@@ -55,11 +67,36 @@ impl IslandLayout {
             .try_reserve(manifolds.len())
             .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
         self.manifold_islands.resize(manifolds.len(), None);
+        self.joint_islands.clear();
+        self.joint_islands
+            .try_reserve(joints.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        self.joint_islands.resize(joints.len(), None);
         self.island_count = 0;
 
         for manifold in manifolds {
             let a = manifold.body_a;
             let b = manifold.body_b;
+            if a == b || a >= body_types.len() || b >= body_types.len() {
+                return Err(CollisionError::InvalidContact);
+            }
+            if body_types[a] == BodyType::Dynamic {
+                self.connected[a] = true;
+            }
+            if body_types[b] == BodyType::Dynamic {
+                self.connected[b] = true;
+            }
+            if body_types[a] == BodyType::Dynamic && body_types[b] == BodyType::Dynamic {
+                union(&mut self.parents, a, b)?;
+            }
+        }
+
+        for joint in joints {
+            if !joint.joint.common().enabled {
+                continue;
+            }
+            let a = joint.body_a;
+            let b = joint.body_b;
             if a == b || a >= body_types.len() || b >= body_types.len() {
                 return Err(CollisionError::InvalidContact);
             }
@@ -134,6 +171,46 @@ impl IslandLayout {
                 .get_mut(index)
                 .ok_or(CollisionError::InvalidContact)? = Some(island);
         }
+        for (index, joint) in joints.iter().enumerate() {
+            if !joint.joint.common().enabled {
+                continue;
+            }
+            let body_a = joint.body_a;
+            let body_b = joint.body_b;
+            let a_dynamic = body_types[body_a] == BodyType::Dynamic;
+            let b_dynamic = body_types[body_b] == BodyType::Dynamic;
+            let island = match (a_dynamic, b_dynamic) {
+                (true, true) => {
+                    let root_a = find(&mut self.parents, body_a)?;
+                    let root_b = find(&mut self.parents, body_b)?;
+                    if root_a != root_b {
+                        return Err(CollisionError::InvalidContact);
+                    }
+                    self.root_islands
+                        .get(root_a)
+                        .copied()
+                        .flatten()
+                        .ok_or(CollisionError::InvalidContact)?
+                }
+                (true, false) => self
+                    .body_islands
+                    .get(body_a)
+                    .copied()
+                    .flatten()
+                    .ok_or(CollisionError::InvalidContact)?,
+                (false, true) => self
+                    .body_islands
+                    .get(body_b)
+                    .copied()
+                    .flatten()
+                    .ok_or(CollisionError::InvalidContact)?,
+                (false, false) => continue,
+            };
+            *self
+                .joint_islands
+                .get_mut(index)
+                .ok_or(CollisionError::InvalidContact)? = Some(island);
+        }
         Ok(())
     }
 
@@ -150,6 +227,10 @@ impl IslandLayout {
         self.manifold_islands.get(manifold).copied().flatten()
     }
 
+    pub(crate) fn joint_island(&self, joint: usize) -> Option<usize> {
+        self.joint_islands.get(joint).copied().flatten()
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         use std::mem::size_of;
@@ -159,6 +240,7 @@ impl IslandLayout {
             + self.body_islands.capacity() * size_of::<Option<usize>>()
             + self.connected.capacity() * size_of::<bool>()
             + self.manifold_islands.capacity() * size_of::<Option<usize>>()
+            + self.joint_islands.capacity() * size_of::<Option<usize>>()
     }
 }
 

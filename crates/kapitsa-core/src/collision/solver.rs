@@ -1,4 +1,8 @@
-use crate::{constraint, joint::JointWorkspace, rigid_body::RigidBody};
+use crate::{
+    constraint,
+    joint::{JointConstraint, JointSolver, JointWorkspace},
+    rigid_body::RigidBody,
+};
 use kapitsa_math::Vec3;
 
 use super::{
@@ -71,8 +75,10 @@ pub(crate) struct SolverWorkspace {
 pub(crate) struct SolverIsland {
     pub(crate) body_indices: Vec<usize>,
     pub(crate) manifold_indices: Vec<usize>,
+    pub(crate) joint_indices: Vec<usize>,
     pub(crate) bodies: Vec<SolverBody>,
     pub(crate) manifolds: Vec<SolverManifold>,
+    pub(crate) joints: Vec<JointConstraint>,
     pub(crate) workspace: SolverWorkspace,
     pub(crate) joint_workspace: JointWorkspace,
     pub(crate) worker_error: Option<CollisionError>,
@@ -83,8 +89,10 @@ impl SolverIsland {
         Self {
             body_indices: Vec::new(),
             manifold_indices: Vec::new(),
+            joint_indices: Vec::new(),
             bodies: Vec::new(),
             manifolds: Vec::new(),
+            joints: Vec::new(),
             workspace: SolverWorkspace::new(),
             joint_workspace: JointWorkspace::new(),
             worker_error: None,
@@ -94,8 +102,10 @@ impl SolverIsland {
     pub(crate) fn clear(&mut self) {
         self.body_indices.clear();
         self.manifold_indices.clear();
+        self.joint_indices.clear();
         self.bodies.clear();
         self.manifolds.clear();
+        self.joints.clear();
         self.joint_workspace.clear();
         self.worker_error = None;
     }
@@ -106,8 +116,10 @@ impl SolverIsland {
 
         self.body_indices.capacity() * size_of::<usize>()
             + self.manifold_indices.capacity() * size_of::<usize>()
+            + self.joint_indices.capacity() * size_of::<usize>()
             + self.bodies.capacity() * size_of::<SolverBody>()
             + self.manifolds.capacity() * size_of::<SolverManifold>()
+            + self.joints.capacity() * size_of::<JointConstraint>()
             + self.workspace.retained_capacity_bytes()
             + self.joint_workspace.retained_capacity_bytes()
     }
@@ -140,6 +152,39 @@ impl SolverWorkspace {
             self.solve_velocity_iteration(bodies, manifolds)?;
         }
         self.solve_position_constraints(bodies, manifolds, config)
+    }
+
+    pub(crate) fn solve_with_joints(
+        &mut self,
+        bodies: &mut [SolverBody],
+        manifolds: &mut [SolverManifold],
+        joint_workspace: &mut JointWorkspace,
+        joints: &[JointConstraint],
+        dt: f64,
+        config: CollisionConfig,
+    ) -> Result<(), CollisionError> {
+        if joints.is_empty() {
+            return self.solve(bodies, manifolds, config);
+        }
+        config.validate()?;
+        if !dt.is_finite() || dt <= 0.0 {
+            return Err(CollisionError::InvalidConfig);
+        }
+        self.prepare_points(bodies, manifolds, config)?;
+        self.warm_start(bodies, manifolds)?;
+        JointSolver::begin_step(joint_workspace);
+
+        for _ in 0..config.velocity_iterations {
+            self.solve_velocity_iteration(bodies, manifolds)?;
+            JointSolver::prepare(joint_workspace, bodies, joints, dt)?;
+            JointSolver::solve_velocity_iteration(joint_workspace, bodies, dt)?;
+        }
+        for _ in 0..config.position_iterations {
+            self.solve_position_iteration(bodies, manifolds, config)?;
+            JointSolver::prepare(joint_workspace, bodies, joints, dt)?;
+            JointSolver::solve_position_iteration(joint_workspace, bodies, dt)?;
+        }
+        Ok(())
     }
 
     fn prepare_points(
@@ -339,48 +384,58 @@ impl SolverWorkspace {
         config: CollisionConfig,
     ) -> Result<(), CollisionError> {
         for _ in 0..config.position_iterations {
-            for point in self.points.iter().copied() {
-                let contact = contact_at(manifolds, point)?;
-                let (body_a, body_b) = bodies_at(bodies, point.body_a, point.body_b)?;
-                let position_a = body_a
-                    .body
-                    .state()
-                    .transform()
-                    .transform_point(contact.local_a);
-                let position_b = body_b
-                    .body
-                    .state()
-                    .transform()
-                    .transform_point(contact.local_b);
-                let separation = position_b
-                    .checked_sub(position_a)
-                    .and_then(|delta| delta.checked_dot(point.normal))
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
-                let correction =
-                    (-separation - config.penetration_slop).max(0.0) * POSITION_CORRECTION_FRACTION;
-                if correction == 0.0 {
-                    continue;
-                }
-                let denominator = effective_mass(
-                    &body_a.body,
-                    &body_b.body,
-                    position_a,
-                    position_b,
-                    point.normal,
-                )?;
-                if denominator <= f64::MIN_POSITIVE {
-                    return Err(CollisionError::InvalidContact);
-                }
-                let impulse = point.normal * (correction / denominator);
-                apply_pair_position_impulse(
-                    bodies,
-                    point.body_a,
-                    point.body_b,
-                    position_a,
-                    position_b,
-                    impulse,
-                )?;
+            self.solve_position_iteration(bodies, manifolds, config)?;
+        }
+        Ok(())
+    }
+
+    fn solve_position_iteration(
+        &self,
+        bodies: &mut [SolverBody],
+        manifolds: &[SolverManifold],
+        config: CollisionConfig,
+    ) -> Result<(), CollisionError> {
+        for point in self.points.iter().copied() {
+            let contact = contact_at(manifolds, point)?;
+            let (body_a, body_b) = bodies_at(bodies, point.body_a, point.body_b)?;
+            let position_a = body_a
+                .body
+                .state()
+                .transform()
+                .transform_point(contact.local_a);
+            let position_b = body_b
+                .body
+                .state()
+                .transform()
+                .transform_point(contact.local_b);
+            let separation = position_b
+                .checked_sub(position_a)
+                .and_then(|delta| delta.checked_dot(point.normal))
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let correction =
+                (-separation - config.penetration_slop).max(0.0) * POSITION_CORRECTION_FRACTION;
+            if correction == 0.0 {
+                continue;
             }
+            let denominator = effective_mass(
+                &body_a.body,
+                &body_b.body,
+                position_a,
+                position_b,
+                point.normal,
+            )?;
+            if denominator <= f64::MIN_POSITIVE {
+                return Err(CollisionError::InvalidContact);
+            }
+            let impulse = point.normal * (correction / denominator);
+            apply_pair_position_impulse(
+                bodies,
+                point.body_a,
+                point.body_b,
+                position_a,
+                position_b,
+                impulse,
+            )?;
         }
         Ok(())
     }

@@ -6,6 +6,7 @@ use crate::{
         manifold::ContactManifold,
         solver::{SolverManifold, SolverMaterial},
     },
+    joint::{FixedJoint, Joint, JointCommon, JointConstraint, JointFrame},
     rigid_body::{BodyType, RigidBody},
     shape::{Shape, Sphere},
     transform::Transform,
@@ -51,6 +52,16 @@ fn manifold(body_a: usize, body_b: usize) -> SolverManifold {
             static_friction: 0.0,
             dynamic_friction: 0.0,
         },
+    }
+}
+
+fn joint(body_a: usize, body_b: usize, enabled: bool) -> JointConstraint {
+    let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    common.enabled = enabled;
+    JointConstraint {
+        body_a,
+        body_b,
+        joint: Joint::Fixed(FixedJoint::new(common)),
     }
 }
 
@@ -109,4 +120,44 @@ fn constraints_without_dynamic_bodies_have_no_solver_island() {
     layout.build(&body_types, &manifolds).unwrap();
     assert_eq!(layout.island_count(), 0);
     assert_eq!(layout.manifold_island(0), None);
+}
+
+#[test]
+fn joint_and_contact_edges_form_one_component_without_merging_shared_static_supports() {
+    let body_types = [
+        BodyType::Dynamic,
+        BodyType::Dynamic,
+        BodyType::Dynamic,
+        BodyType::Static,
+        BodyType::Dynamic,
+    ];
+    let manifolds = [manifold(1, 2)];
+    let joints = [joint(0, 1, true), joint(0, 3, true), joint(4, 3, true)];
+    let mut layout = IslandLayout::default();
+    layout
+        .build_with_joints(&body_types, &manifolds, &joints)
+        .unwrap();
+
+    assert_eq!(layout.island_count(), 2);
+    assert_eq!(layout.body_island(0), Some(0));
+    assert_eq!(layout.body_island(1), Some(0));
+    assert_eq!(layout.body_island(2), Some(0));
+    assert_eq!(layout.body_island(4), Some(1));
+    assert_eq!(layout.joint_island(0), Some(0));
+    assert_eq!(layout.joint_island(1), Some(0));
+    assert_eq!(layout.joint_island(2), Some(1));
+    assert_eq!(layout.manifold_island(0), Some(0));
+}
+
+#[test]
+fn disabled_joints_do_not_create_or_merge_solver_islands() {
+    let body_types = [BodyType::Dynamic, BodyType::Dynamic];
+    let joints = [joint(0, 1, false)];
+    let mut layout = IslandLayout::default();
+    layout.build_with_joints(&body_types, &[], &joints).unwrap();
+
+    assert_eq!(layout.island_count(), 0);
+    assert_eq!(layout.body_island(0), None);
+    assert_eq!(layout.body_island(1), None);
+    assert_eq!(layout.joint_island(0), None);
 }

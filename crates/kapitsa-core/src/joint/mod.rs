@@ -27,6 +27,7 @@ pub use fixed::FixedJoint;
 pub use hinge::HingeJoint;
 pub use planar::PlanarJoint;
 pub use slider::SliderJoint;
+pub(crate) use solver::{JointConstraint, JointSolver};
 pub use spring::SpringJoint;
 pub(crate) use workspace::JointWorkspace;
 

@@ -46,17 +46,59 @@ impl JointSolver {
         }
         workspace.begin_step();
         for _ in 0..position_iterations {
-            workspace.begin_prepare();
-            prepare_rows(bodies, workspace)?;
-            workspace.finish_prepare();
-            solve_position_iteration(workspace, bodies, dt)?;
+            Self::prepare_iteration(workspace, bodies, &mut prepare_rows)?;
+            Self::solve_position_iteration(workspace, bodies, dt)?;
         }
         for _ in 0..velocity_iterations {
-            workspace.begin_prepare();
-            prepare_rows(bodies, workspace)?;
-            workspace.finish_prepare();
-            solve_velocity_iteration(workspace, bodies, dt)?;
+            Self::prepare_iteration(workspace, bodies, &mut prepare_rows)?;
+            Self::solve_velocity_iteration(workspace, bodies, dt)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn begin_step(workspace: &mut JointWorkspace) {
+        workspace.begin_step();
+    }
+
+    pub(crate) fn prepare(
+        workspace: &mut JointWorkspace,
+        bodies: &[SolverBody],
+        joints: &[JointConstraint],
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        workspace.begin_prepare();
+        prepare_joint_rows(bodies, workspace, joints, dt)?;
+        workspace.finish_prepare();
+        Ok(())
+    }
+
+    pub(crate) fn solve_position_iteration(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        solve_position_iteration(workspace, bodies, dt)
+    }
+
+    pub(crate) fn solve_velocity_iteration(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        solve_velocity_iteration(workspace, bodies, dt)
+    }
+
+    fn prepare_iteration<F>(
+        workspace: &mut JointWorkspace,
+        bodies: &[SolverBody],
+        prepare_rows: &mut F,
+    ) -> Result<(), CollisionError>
+    where
+        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), CollisionError>,
+    {
+        workspace.begin_prepare();
+        prepare_rows(bodies, workspace)?;
+        workspace.finish_prepare();
         Ok(())
     }
 }

@@ -1,6 +1,8 @@
 use kapitsa_core::{
     collider::{Collider, CollisionMode},
     collision::{CollisionEventKind, CollisionPair},
+    execution::{ExecutionError, SequentialExecutor, StepExecutor},
+    joint::{FixedJoint, Joint, JointCommon, JointFrame},
     mass::MassProperties,
     material::PhysicsMaterial,
     rigid_body::{CcdMode, RigidBody},
@@ -10,6 +12,62 @@ use kapitsa_core::{
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
 use std::collections::HashSet;
+
+struct ScopedExecutor;
+
+impl StepExecutor for ScopedExecutor {
+    fn for_each_chunk_mut<T, F>(
+        &self,
+        values: &mut [T],
+        chunk_size: usize,
+        operation: F,
+    ) -> Result<(), ExecutionError>
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Send + Sync,
+    {
+        if chunk_size == 0 {
+            return Err(ExecutionError::InvalidChunkLayout);
+        }
+        std::thread::scope(|scope| {
+            for (index, chunk) in values.chunks_mut(chunk_size).enumerate() {
+                let operation = &operation;
+                scope.spawn(move || operation(index, chunk));
+            }
+        });
+        Ok(())
+    }
+
+    fn for_each_chunk_layout_mut<T, F>(
+        &self,
+        values: &mut [T],
+        chunk_sizes: &[usize],
+        operation: F,
+    ) -> Result<(), ExecutionError>
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Send + Sync,
+    {
+        let total = chunk_sizes
+            .iter()
+            .try_fold(0_usize, |total, size| total.checked_add(*size));
+        if chunk_sizes.contains(&0) || total != Some(values.len()) {
+            return Err(ExecutionError::InvalidChunkLayout);
+        }
+        std::thread::scope(|scope| {
+            let mut remaining = values;
+            let mut start = 0;
+            for size in chunk_sizes.iter().copied() {
+                let (chunk, tail) = remaining.split_at_mut(size);
+                let operation = &operation;
+                scope.spawn(move || operation(start, chunk));
+                start += size;
+                remaining = tail;
+            }
+        });
+        Ok(())
+    }
+}
 
 fn transform(position: Vec3) -> Transform {
     Transform::new(position, Quat::IDENTITY).expect("valid transform")
@@ -349,4 +407,165 @@ fn compound_body_keeps_contacts_for_each_distinct_collider() {
         .map(|event| event.pair)
         .collect::<HashSet<_>>();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn joint_only_world_solves_connected_bodies_without_contacts() {
+    let mut world = PhysicsWorld::new();
+    let body_a = world.add_body(dynamic(Vec3::ZERO, Vec3::ZERO)).unwrap();
+    let body_b = world
+        .add_body(dynamic(Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO))
+        .unwrap();
+    let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    world
+        .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+        .unwrap();
+
+    world.step(0.01).expect("joint-only step");
+
+    let position_a = world
+        .body(body_a)
+        .unwrap()
+        .state()
+        .transform()
+        .translation();
+    let position_b = world
+        .body(body_b)
+        .unwrap()
+        .state()
+        .transform()
+        .translation();
+    assert!((position_b - position_a).length() < 1.0e-10);
+}
+
+#[test]
+fn contact_and_joint_constraints_solve_together_and_respect_collision_suppression() {
+    let mut world = PhysicsWorld::new();
+    let body_a = world.add_body(dynamic(Vec3::ZERO, Vec3::ZERO)).unwrap();
+    let body_b = world
+        .add_body(dynamic(Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO))
+        .unwrap();
+    let body_c = world
+        .add_body(dynamic(Vec3::new(2.8, 0.0, 0.0), Vec3::ZERO))
+        .unwrap();
+    let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    world
+        .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+        .unwrap();
+    add_sphere(&mut world, body_b);
+    add_sphere(&mut world, body_c);
+
+    world.step(0.01).expect("combined contact and joint step");
+
+    let position_a = world
+        .body(body_a)
+        .unwrap()
+        .state()
+        .transform()
+        .translation();
+    let position_b = world
+        .body(body_b)
+        .unwrap()
+        .state()
+        .transform()
+        .translation();
+    let position_c = world
+        .body(body_c)
+        .unwrap()
+        .state()
+        .transform()
+        .translation();
+    assert!((position_b - position_a).length() < 1.0e-10);
+    assert!(position_c.x > 2.8);
+
+    let mut suppressed_world = PhysicsWorld::new();
+    let first = suppressed_world
+        .add_body(dynamic(Vec3::ZERO, Vec3::ZERO))
+        .unwrap();
+    let second = suppressed_world
+        .add_body(dynamic(Vec3::new(0.5, 0.0, 0.0), Vec3::ZERO))
+        .unwrap();
+    let first_collider = add_sphere(&mut suppressed_world, first);
+    let second_collider = add_sphere(&mut suppressed_world, second);
+    let joint_id = suppressed_world
+        .add_joint(first, second, Joint::Fixed(FixedJoint::new(common)))
+        .unwrap();
+
+    suppressed_world
+        .step(0.01)
+        .expect("suppressed joint contact");
+    assert!(suppressed_world.collision_events().is_empty());
+
+    let mut collide_common = common;
+    collide_common.collide_connected = true;
+    suppressed_world
+        .update_joint(joint_id, Joint::Fixed(FixedJoint::new(collide_common)))
+        .unwrap();
+    suppressed_world.step(0.01).expect("enabled joint contact");
+    let pair = CollisionPair::new(first_collider, second_collider).unwrap();
+    assert!(
+        suppressed_world
+            .collision_events()
+            .iter()
+            .any(|event| { event.kind == CollisionEventKind::Begin && event.pair == pair })
+    );
+}
+
+#[test]
+fn joint_solver_error_rolls_back_every_body_state() {
+    let mut world = PhysicsWorld::new();
+    let body_a = world
+        .add_body(dynamic(Vec3::new(-f64::MAX, 0.0, 0.0), Vec3::ZERO))
+        .unwrap();
+    let body_b = world
+        .add_body(dynamic(Vec3::new(f64::MAX, 0.0, 0.0), Vec3::ZERO))
+        .unwrap();
+    let before_a = *world.body(body_a).unwrap().state();
+    let before_b = *world.body(body_b).unwrap().state();
+    let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    world
+        .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+        .unwrap();
+
+    assert!(world.step(0.01).is_err());
+    assert_eq!(*world.body(body_a).unwrap().state(), before_a);
+    assert_eq!(*world.body(body_b).unwrap().state(), before_b);
+}
+
+#[test]
+fn independent_joint_islands_match_sequential_and_parallel_execution() {
+    let create_world = || {
+        let mut world = PhysicsWorld::new();
+        let bodies = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 10.0, 0.0),
+            Vec3::new(0.0, 13.0, 0.0),
+        ]
+        .map(|position| world.add_body(dynamic(position, Vec3::ZERO)).unwrap());
+        let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        world
+            .add_joint(bodies[0], bodies[1], Joint::Fixed(FixedJoint::new(common)))
+            .unwrap();
+        world
+            .add_joint(bodies[2], bodies[3], Joint::Fixed(FixedJoint::new(common)))
+            .unwrap();
+        (world, bodies)
+    };
+    let (mut sequential, sequential_bodies) = create_world();
+    let (mut parallel, parallel_bodies) = create_world();
+
+    sequential
+        .step_with_executor(0.01, &SequentialExecutor, 1)
+        .expect("sequential joint islands");
+    parallel
+        .step_with_executor(0.01, &ScopedExecutor, 2)
+        .expect("parallel joint islands");
+
+    for (sequential_id, parallel_id) in sequential_bodies.into_iter().zip(parallel_bodies) {
+        assert_eq!(
+            sequential.body(sequential_id).unwrap().state(),
+            parallel.body(parallel_id).unwrap().state()
+        );
+    }
 }
