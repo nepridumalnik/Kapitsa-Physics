@@ -11,8 +11,8 @@ use std::time::Instant;
 mod error;
 mod id;
 
-pub use error::{StepError, WorldError};
-pub use id::{BodyId, ColliderId};
+pub use error::{ForceSourceError, StepError, WorldError};
+pub use id::{BodyId, ColliderId, ForceSourceId};
 
 static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -46,6 +46,43 @@ use crate::{
 struct BodyEntry {
     body: RigidBody,
     first_collider: Option<ColliderId>,
+}
+
+/// Persistent force applied at a point expressed in body-local coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ForceSource {
+    body: BodyId,
+    local_point: Vec3,
+    local_force: Vec3,
+    enabled: bool,
+}
+
+impl ForceSource {
+    /// Returns the dynamic body receiving this force.
+    pub fn body(&self) -> BodyId {
+        self.body
+    }
+
+    /// Returns the application point relative to the body's origin, in meters.
+    pub fn local_point(&self) -> Vec3 {
+        self.local_point
+    }
+
+    /// Returns the force vector in body-local coordinates, in newtons.
+    pub fn local_force(&self) -> Vec3 {
+        self.local_force
+    }
+
+    /// Returns whether this source is applied on each physics step.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+struct ForceSourceBodyUpdate {
+    id: BodyId,
+    original: RigidBody,
+    prepared: RigidBody,
 }
 
 struct ColliderEntry {
@@ -98,6 +135,8 @@ pub struct PhysicsWorld {
     world_id: u64,
     bodies: DensePool<BodyEntry>,
     colliders: DensePool<ColliderEntry>,
+    force_sources: DensePool<ForceSource>,
+    force_source_body_updates: Vec<ForceSourceBodyUpdate>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
     query_index: Option<SpatialIndex>,
@@ -149,6 +188,8 @@ impl PhysicsWorld {
             world_id: 0,
             bodies: DensePool::new(),
             colliders: DensePool::new(),
+            force_sources: DensePool::new(),
+            force_source_body_updates: Vec::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
             query_index: None,
@@ -684,6 +725,90 @@ impl PhysicsWorld {
         self.bodies.len()
     }
 
+    /// Adds a persistent force source to an existing dynamic body.
+    pub fn add_force_source(
+        &mut self,
+        body: BodyId,
+        local_point: Vec3,
+        local_force: Vec3,
+    ) -> Result<ForceSourceId, ForceSourceError> {
+        let Some(body_state) = self.body(body) else {
+            return Err(ForceSourceError::InvalidBodyId);
+        };
+        if body_state.physics().body_type() != BodyType::Dynamic {
+            return Err(ForceSourceError::BodyMustBeDynamic);
+        }
+        validate_force_source_values(local_point, local_force)?;
+        let dense = self
+            .force_sources
+            .insert(ForceSource {
+                body,
+                local_point,
+                local_force,
+                enabled: true,
+            })
+            .map_err(|_| ForceSourceError::StorageCapacityExceeded)?;
+        Ok(ForceSourceId {
+            world: self.world_id,
+            dense,
+        })
+    }
+
+    /// Looks up a force source by its world-scoped ID.
+    pub fn force_source(&self, id: ForceSourceId) -> Option<&ForceSource> {
+        (id.world == self.world_id)
+            .then(|| self.force_sources.get(id.dense))
+            .flatten()
+    }
+
+    /// Replaces the local application point and force vector of a source.
+    pub fn set_force_source(
+        &mut self,
+        id: ForceSourceId,
+        local_point: Vec3,
+        local_force: Vec3,
+    ) -> Result<(), ForceSourceError> {
+        validate_force_source_values(local_point, local_force)?;
+        let source = self
+            .force_source_mut(id)
+            .ok_or(ForceSourceError::InvalidForceSourceId)?;
+        source.local_point = local_point;
+        source.local_force = local_force;
+        Ok(())
+    }
+
+    /// Enables or disables a source without removing it.
+    pub fn set_force_source_enabled(
+        &mut self,
+        id: ForceSourceId,
+        enabled: bool,
+    ) -> Result<(), ForceSourceError> {
+        self.force_source_mut(id)
+            .ok_or(ForceSourceError::InvalidForceSourceId)?
+            .enabled = enabled;
+        Ok(())
+    }
+
+    /// Removes a source and returns its last configuration.
+    pub fn remove_force_source(
+        &mut self,
+        id: ForceSourceId,
+    ) -> Result<ForceSource, ForceSourceError> {
+        if id.world != self.world_id {
+            return Err(ForceSourceError::InvalidForceSourceId);
+        }
+        self.force_sources
+            .remove(id.dense)
+            .ok_or(ForceSourceError::InvalidForceSourceId)
+    }
+
+    fn force_source_mut(&mut self, id: ForceSourceId) -> Option<&mut ForceSource> {
+        if id.world != self.world_id {
+            return None;
+        }
+        self.force_sources.get_mut(id.dense)
+    }
+
     /// Advances every body by one fixed timestep, atomically committing the results.
     pub fn step(&mut self, dt: f64) -> Result<(), StepError> {
         self.step_with_executor(dt, &SequentialExecutor, 1)
@@ -705,6 +830,7 @@ impl PhysicsWorld {
             Ok(result) => result,
             Err(_) => {
                 self.collision_system.abort_step();
+                self.rollback_force_source_updates();
                 Err(StepError::Collision(CollisionError::WorkerFailed))
             }
         }
@@ -721,6 +847,25 @@ impl PhysicsWorld {
         }
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
+        if let Err((source_id, cause)) = self.prepare_force_source_updates() {
+            return Err(StepError::ForceSource { source_id, cause });
+        }
+
+        let result = self.step_prepared(dt, executor, worker_count);
+        if result.is_err() {
+            self.rollback_force_source_updates();
+        } else {
+            self.force_source_body_updates.clear();
+        }
+        result
+    }
+
+    fn step_prepared<E: StepExecutor>(
+        &mut self,
+        dt: f64,
+        executor: &E,
+        worker_count: usize,
+    ) -> Result<(), StepError> {
         self.collision_system.begin_step();
 
         for (dense_id, entry) in self.bodies.iter() {
@@ -755,6 +900,85 @@ impl PhysicsWorld {
         self.collision_system
             .record_commit(commit_started.elapsed());
         Ok(())
+    }
+
+    fn prepare_force_source_updates(&mut self) -> Result<(), (ForceSourceId, ForceSourceError)> {
+        self.force_source_body_updates.clear();
+        if self.force_sources.is_empty() {
+            return Ok(());
+        }
+
+        for (dense, source) in self.force_sources.iter() {
+            let source_id = ForceSourceId {
+                world: self.world_id,
+                dense,
+            };
+            let source = *source;
+            if !source.enabled {
+                continue;
+            }
+            let Some(body) = self.body(source.body).copied() else {
+                self.force_source_body_updates.clear();
+                return Err((source_id, ForceSourceError::InvalidBodyId));
+            };
+            if body.physics().body_type() != BodyType::Dynamic {
+                self.force_source_body_updates.clear();
+                return Err((source_id, ForceSourceError::BodyMustBeDynamic));
+            }
+
+            let update_index = match self
+                .force_source_body_updates
+                .iter()
+                .position(|update| update.id == source.body)
+            {
+                Some(index) => index,
+                None => {
+                    if self.force_source_body_updates.try_reserve(1).is_err() {
+                        self.force_source_body_updates.clear();
+                        return Err((source_id, ForceSourceError::StorageCapacityExceeded));
+                    }
+                    self.force_source_body_updates.push(ForceSourceBodyUpdate {
+                        id: source.body,
+                        original: body,
+                        prepared: body,
+                    });
+                    self.force_source_body_updates.len() - 1
+                }
+            };
+
+            let body = &mut self.force_source_body_updates[update_index].prepared;
+            let transform = body.state().transform();
+            let force = transform.transform_vector(source.local_force);
+            let point = transform.transform_point(source.local_point);
+            if let Err(error) = body.apply_force_at_point(force, point) {
+                self.force_source_body_updates.clear();
+                return Err((source_id, ForceSourceError::from(error)));
+            }
+        }
+
+        for update in &self.force_source_body_updates {
+            if let Some(entry) = self
+                .bodies
+                .get_mut(update.id.dense)
+                .filter(|_| update.id.world == self.world_id)
+            {
+                entry.body = update.prepared;
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_force_source_updates(&mut self) {
+        for update in &self.force_source_body_updates {
+            if let Some(entry) = self
+                .bodies
+                .get_mut(update.id.dense)
+                .filter(|_| update.id.world == self.world_id)
+            {
+                entry.body = update.original;
+            }
+        }
+        self.force_source_body_updates.clear();
     }
 
     fn stage_spatial_proxies(&mut self, dt: f64) -> Result<(), CollisionError> {
@@ -4160,6 +4384,18 @@ impl PhysicsWorld {
             next = self.colliders.get(collider.dense)?.next;
             self.remove_collider(collider)?;
         }
+        loop {
+            let source = self.force_sources.iter().find_map(|(dense, source)| {
+                (source.body == id).then_some(ForceSourceId {
+                    world: self.world_id,
+                    dense,
+                })
+            });
+            let Some(source) = source else {
+                break;
+            };
+            self.force_sources.remove(source.dense)?;
+        }
         self.bodies.remove(id.dense).map(|entry| entry.body)
     }
 
@@ -4219,6 +4455,16 @@ impl Default for PhysicsWorld {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn validate_force_source_values(
+    local_point: Vec3,
+    local_force: Vec3,
+) -> Result<(), ForceSourceError> {
+    if !local_point.is_finite() || !local_force.is_finite() {
+        return Err(ForceSourceError::NonFiniteValue);
+    }
+    Ok(())
 }
 
 fn body_point_velocity(

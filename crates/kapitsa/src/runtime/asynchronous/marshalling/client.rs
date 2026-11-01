@@ -11,7 +11,7 @@ use kapitsa_core::{
     rigid_body::{CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
-    world::{BodyId, ColliderId},
+    world::{BodyId, ColliderId, ForceSourceId},
 };
 use kapitsa_math::{Affine3, Vec3};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -134,6 +134,7 @@ impl PhysicsClient {
             PhysicsCommandResult::Body(id) => Ok(id),
             PhysicsCommandResult::Done
             | PhysicsCommandResult::Collider(_)
+            | PhysicsCommandResult::ForceSource(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
@@ -158,6 +159,7 @@ impl PhysicsClient {
             PhysicsCommandResult::Collider(id) => Ok(id),
             PhysicsCommandResult::Done
             | PhysicsCommandResult::Body(_)
+            | PhysicsCommandResult::ForceSource(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
@@ -167,6 +169,42 @@ impl PhysicsClient {
     /// Removes a collider from the world.
     pub async fn remove_collider(&self, id: ColliderId) -> Result<(), PhysicsClientError> {
         expect_done(self.submit(PhysicsCommand::RemoveCollider { id }).await?)
+    }
+
+    /// Creates a persistent force source attached to a dynamic body.
+    ///
+    /// The application point is body-local and measured in meters. The force
+    /// vector is body-local and measured in newtons.
+    pub async fn add_force_source(
+        &self,
+        body: BodyId,
+        local_point: Vec3,
+        local_force: Vec3,
+    ) -> Result<ForceSourceId, PhysicsClientError> {
+        match self
+            .submit(PhysicsCommand::AddForceSource {
+                body,
+                local_point,
+                local_force,
+            })
+            .await?
+        {
+            PhysicsCommandResult::ForceSource(id) => Ok(id),
+            PhysicsCommandResult::Done
+            | PhysicsCommandResult::Body(_)
+            | PhysicsCommandResult::Collider(_)
+            | PhysicsCommandResult::Raycast(_)
+            | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
+        }
+    }
+
+    /// Removes a persistent force source.
+    pub async fn remove_force_source(&self, id: ForceSourceId) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::RemoveForceSource { id })
+                .await?,
+        )
     }
 
     /// Replaces a body's transform while preserving its velocities.
@@ -451,6 +489,7 @@ fn expect_done(result: PhysicsCommandResult) -> Result<(), PhysicsClientError> {
         PhysicsCommandResult::Done => Ok(()),
         PhysicsCommandResult::Body(_)
         | PhysicsCommandResult::Collider(_)
+        | PhysicsCommandResult::ForceSource(_)
         | PhysicsCommandResult::Raycast(_)
         | PhysicsCommandResult::Sweep(_)
         | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
@@ -470,19 +509,20 @@ mod tests {
     use kapitsa_core::{
         collider::{Collider, CollisionMode},
         collision::{CollisionConfig, QueryFilter, Ray},
+        mass::MassProperties,
         material::PhysicsMaterial,
         rigid_body::{CcdMode, RigidBody},
         shape::{BoneInfluence, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh},
         transform::Transform,
         world::PhysicsWorld,
     };
-    use kapitsa_math::{Affine3, Vec3};
+    use kapitsa_math::{Affine3, Mat3, Vec3};
     use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
     use super::super::{
         PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
         PhysicsSnapshot, PhysicsSubmitError,
-        command::{CommandRequest, apply_command},
+        command::{CommandRequest, apply_command, apply_command_batch},
     };
     use super::PhysicsClient;
 
@@ -522,6 +562,11 @@ mod tests {
         PhysicsCommand::AddBody {
             body: RigidBody::new_static(Transform::identity()),
         }
+    }
+
+    fn dynamic_body() -> RigidBody {
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+        RigidBody::new_dynamic(Transform::identity(), mass).expect("dynamic body")
     }
 
     fn take_single_request(
@@ -580,6 +625,58 @@ mod tests {
             .expect("body ID");
         assert_eq!(server.await.expect("server task"), 1);
         assert_eq!(id.index(), 0);
+    }
+
+    #[tokio::test]
+    async fn client_creates_updates_and_removes_persistent_force_sources() {
+        let ClientHarness {
+            client,
+            mut receiver,
+            ..
+        } = running_client(3);
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(dynamic_body()).expect("body");
+        let server = tokio::spawn(async move {
+            let request = receiver.recv().await.expect("create source request");
+            let (command, reply) = take_single_request(request);
+            let result = apply_command(&mut world, command);
+            let PhysicsCommandResult::ForceSource(source) = result.as_ref().expect("source result")
+            else {
+                panic!("create source must return its ID");
+            };
+            let source = *source;
+            reply.send(result).expect("client awaits source ID");
+
+            let Some(CommandRequest::Batch { commands, .. }) = receiver.recv().await else {
+                panic!("source updates arrive as one command batch");
+            };
+            apply_command_batch(&mut world, &commands).expect("source update batch");
+            let configured = world.force_source(source).expect("source remains live");
+            assert_eq!(configured.local_point(), Vec3::Y);
+            assert_eq!(configured.local_force(), Vec3::Z * 4.0);
+            assert!(!configured.is_enabled());
+
+            let request = receiver.recv().await.expect("remove source request");
+            let (command, reply) = take_single_request(request);
+            let result = apply_command(&mut world, command);
+            reply.send(result).expect("client awaits removal");
+            world.force_source(source).is_none()
+        });
+
+        let source = client
+            .add_force_source(body, Vec3::ZERO, Vec3::X)
+            .await
+            .expect("source ID");
+        let mut commands = client.commands();
+        commands.set_force_source(source, Vec3::Y, Vec3::Z * 4.0);
+        commands.set_force_source_enabled(source, false);
+        client.try_submit(commands).expect("submit source updates");
+        client
+            .remove_force_source(source)
+            .await
+            .expect("remove source");
+
+        assert!(server.await.expect("server task"));
     }
 
     #[tokio::test]

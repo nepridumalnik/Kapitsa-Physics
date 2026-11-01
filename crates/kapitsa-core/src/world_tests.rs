@@ -1,7 +1,8 @@
 use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
 
 use super::{
-    BodyId, ColliderId, PhysicsWorld, StepError, WorldError, allocate_world_id, upsert_interaction,
+    BodyId, ColliderId, ForceSourceError, PhysicsWorld, StepError, WorldError, allocate_world_id,
+    upsert_interaction,
 };
 use crate::{
     collider::{Collider, CollisionFilter, CollisionMode},
@@ -1238,6 +1239,125 @@ fn step_advances_each_body_type_and_clears_accumulated_forces() -> Result<(), Wo
         Some(&sleeping_state)
     );
     Ok(())
+}
+
+#[test]
+fn persistent_force_source_uses_current_body_rotation_each_step() {
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(dynamic_body()).expect("body");
+    let source = world
+        .add_force_source(body, Vec3::ZERO, Vec3::X)
+        .expect("source");
+
+    world.step(0.1).expect("first step");
+    let rotation =
+        Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_2).expect("valid rotation");
+    world
+        .body_mut(body)
+        .expect("body")
+        .set_transform(Transform::new(Vec3::ZERO, rotation).expect("valid transform"))
+        .expect("rotate body");
+    world.step(0.1).expect("second step");
+
+    let body = world.body(body).expect("body");
+    assert!((body.state().linear_velocity().x - 0.1).abs() < 1.0e-12);
+    assert!((body.state().linear_velocity().y - 0.1).abs() < 1.0e-12);
+    assert_eq!(
+        world.force_source(source).map(|source| source.is_enabled()),
+        Some(true)
+    );
+}
+
+#[test]
+fn persistent_force_source_applies_torque_from_its_local_point() {
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(dynamic_body()).expect("body");
+    world
+        .add_force_source(body, Vec3::Y, Vec3::X)
+        .expect("source");
+
+    world.step(0.1).expect("physics step");
+
+    let body = world.body(body).expect("body");
+    assert_eq!(body.state().linear_velocity(), Vec3::X * 0.1);
+    assert_eq!(body.state().angular_velocity(), Vec3::Z * -0.1);
+}
+
+#[test]
+fn body_removal_invalidates_its_force_sources_and_disable_stops_force() {
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(dynamic_body()).expect("body");
+    let source = world
+        .add_force_source(body, Vec3::ZERO, Vec3::X)
+        .expect("source");
+
+    world
+        .set_force_source_enabled(source, false)
+        .expect("disable source");
+    world.step(0.1).expect("step without source");
+    assert_eq!(
+        world.body(body).expect("body").state().linear_velocity(),
+        Vec3::ZERO
+    );
+    world
+        .set_force_source_enabled(source, true)
+        .expect("enable source");
+    world.step(0.1).expect("step with source");
+    assert_eq!(
+        world.body(body).expect("body").state().linear_velocity(),
+        Vec3::X * 0.1
+    );
+
+    assert!(world.remove_body(body).is_some());
+    assert_eq!(world.force_source(source), None);
+    assert_eq!(
+        world.remove_force_source(source),
+        Err(ForceSourceError::InvalidForceSourceId)
+    );
+}
+
+#[test]
+fn force_source_setup_rejects_static_bodies_and_non_finite_values() {
+    let mut world = PhysicsWorld::new();
+    let static_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("body");
+    assert_eq!(
+        world.add_force_source(static_body, Vec3::ZERO, Vec3::X),
+        Err(ForceSourceError::BodyMustBeDynamic)
+    );
+
+    let dynamic = world.add_body(dynamic_body()).expect("dynamic body");
+    assert_eq!(
+        world.add_force_source(dynamic, Vec3::ZERO, Vec3::splat(f64::NAN)),
+        Err(ForceSourceError::NonFiniteValue)
+    );
+}
+
+#[test]
+fn force_source_step_error_preserves_existing_body_forces() {
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(dynamic_body()).expect("body");
+    world
+        .body_mut(body)
+        .expect("body")
+        .apply_force(Vec3::new(1.0e308, 0.0, 0.0))
+        .expect("initial finite force");
+    let source = world
+        .add_force_source(body, Vec3::ZERO, Vec3::new(1.0e308, 0.0, 0.0))
+        .expect("source");
+
+    assert_eq!(
+        world.step(0.1),
+        Err(StepError::ForceSource {
+            source_id: source,
+            cause: ForceSourceError::ArithmeticOverflow,
+        })
+    );
+    assert_eq!(
+        world.body(body).expect("body").forces().force(),
+        Vec3::new(1.0e308, 0.0, 0.0)
+    );
 }
 
 #[test]

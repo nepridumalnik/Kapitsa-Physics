@@ -15,7 +15,7 @@ use super::{
     StepRunner, StepRunnerError,
     marshalling::{
         CollisionEventBatch, CommandRequest, PhysicsBatchError, PhysicsBatchResult, PhysicsClient,
-        PhysicsClientError, PhysicsSnapshot, apply_body_batch, apply_command,
+        PhysicsClientError, PhysicsSnapshot, apply_command, apply_command_batch,
     },
 };
 use crate::runtime::{ConfigError, SimulationConfig, SimulationMetrics, SimulationState};
@@ -443,7 +443,7 @@ fn apply_queued_commands(
                 let _ = reply.send(result);
             }
             CommandRequest::Batch { id, commands } => {
-                let result = apply_body_batch(world, &commands);
+                let result = apply_command_batch(world, &commands);
                 let _ = events.batch_results.send(PhysicsBatchResult {
                     batch_id: id,
                     step,

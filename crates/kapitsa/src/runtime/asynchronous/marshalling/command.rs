@@ -6,7 +6,9 @@ use kapitsa_core::{
     rigid_body::{CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
-    world::{BodyId, ColliderId, PhysicsWorld, WorldError},
+    world::{
+        BodyId, ColliderId, ForceSource, ForceSourceError, ForceSourceId, PhysicsWorld, WorldError,
+    },
 };
 use kapitsa_math::{Affine3, Vec3};
 use tokio::sync::oneshot;
@@ -38,6 +40,22 @@ pub enum PhysicsCommand {
     AddCollider { body: BodyId, collider: Collider },
     /// Removes a collider.
     RemoveCollider { id: ColliderId },
+    /// Creates a persistent local-space force source and returns its ID.
+    AddForceSource {
+        body: BodyId,
+        local_point: Vec3,
+        local_force: Vec3,
+    },
+    /// Removes a persistent force source.
+    RemoveForceSource { id: ForceSourceId },
+    /// Updates the local point and force of an existing persistent source.
+    SetForceSource {
+        id: ForceSourceId,
+        local_point: Vec3,
+        local_force: Vec3,
+    },
+    /// Enables or disables a persistent force source.
+    SetForceSourceEnabled { id: ForceSourceId, enabled: bool },
     /// Replaces a body's transform while preserving its velocities.
     SetTransform { id: BodyId, transform: Transform },
     /// Sets the world-space linear velocity.
@@ -207,6 +225,21 @@ impl PhysicsCommandBuffer {
     pub fn clear_forces(&mut self, id: BodyId) {
         self.commands.push(PhysicsCommand::ClearForces { id });
     }
+
+    /// Replaces a persistent force source's local point and force.
+    pub fn set_force_source(&mut self, id: ForceSourceId, local_point: Vec3, local_force: Vec3) {
+        self.commands.push(PhysicsCommand::SetForceSource {
+            id,
+            local_point,
+            local_force,
+        });
+    }
+
+    /// Enables or disables a persistent force source.
+    pub fn set_force_source_enabled(&mut self, id: ForceSourceId, enabled: bool) {
+        self.commands
+            .push(PhysicsCommand::SetForceSourceEnabled { id, enabled });
+    }
 }
 
 /// A synchronous failure while submitting a command buffer.
@@ -266,6 +299,8 @@ pub enum PhysicsCommandResult {
     Body(BodyId),
     /// A collider was inserted.
     Collider(ColliderId),
+    /// A persistent force source was inserted.
+    ForceSource(ForceSourceId),
     /// The result of a ray query.
     Raycast(Option<RayHit>),
     /// The result of a shape sweep.
@@ -296,13 +331,51 @@ impl CommandRequest {
     }
 }
 
-pub(crate) fn apply_body_batch(
+struct StagedForceSource {
+    id: ForceSourceId,
+    local_point: Vec3,
+    local_force: Vec3,
+    enabled: bool,
+    command_index: usize,
+}
+
+pub(crate) fn apply_command_batch(
     world: &mut PhysicsWorld,
     commands: &[PhysicsCommand],
 ) -> Result<(), PhysicsBatchError> {
     let mut updated_bodies = Vec::with_capacity(commands.len());
+    let mut updated_force_sources = Vec::new();
 
     for (command_index, command) in commands.iter().enumerate() {
+        if let PhysicsCommand::SetForceSource {
+            id,
+            local_point,
+            local_force,
+        } = command
+        {
+            let source_index =
+                staged_force_source_index(world, &mut updated_force_sources, *id, command_index)?;
+            if !local_point.is_finite() || !local_force.is_finite() {
+                return Err(PhysicsBatchError {
+                    command_index: Some(command_index),
+                    error: PhysicsClientError::ForceSource(ForceSourceError::NonFiniteValue),
+                });
+            }
+            let source = &mut updated_force_sources[source_index];
+            source.local_point = *local_point;
+            source.local_force = *local_force;
+            source.command_index = command_index;
+            continue;
+        }
+        if let PhysicsCommand::SetForceSourceEnabled { id, enabled } = command {
+            let source_index =
+                staged_force_source_index(world, &mut updated_force_sources, *id, command_index)?;
+            let source = &mut updated_force_sources[source_index];
+            source.enabled = *enabled;
+            source.command_index = command_index;
+            continue;
+        }
+
         let Some(id) = body_command_id(command) else {
             return Err(PhysicsBatchError {
                 command_index: Some(command_index),
@@ -335,6 +408,16 @@ pub(crate) fn apply_body_batch(
         }
     }
 
+    for source in updated_force_sources {
+        world
+            .set_force_source(source.id, source.local_point, source.local_force)
+            .and_then(|()| world.set_force_source_enabled(source.id, source.enabled))
+            .map_err(|error| PhysicsBatchError {
+                command_index: Some(source.command_index),
+                error: PhysicsClientError::ForceSource(error),
+            })?;
+    }
+
     // These commands cannot change world membership, so every ID validated above
     // remains live until the staged body copies are committed.
     for (id, body) in updated_bodies {
@@ -343,6 +426,32 @@ pub(crate) fn apply_body_batch(
         }
     }
     Ok(())
+}
+
+fn staged_force_source_index(
+    world: &PhysicsWorld,
+    updated: &mut Vec<StagedForceSource>,
+    id: ForceSourceId,
+    command_index: usize,
+) -> Result<usize, PhysicsBatchError> {
+    if let Some(index) = updated.iter().position(|source| source.id == id) {
+        return Ok(index);
+    }
+    let Some(source) = world.force_source(id) else {
+        return Err(PhysicsBatchError {
+            command_index: Some(command_index),
+            error: PhysicsClientError::ForceSource(ForceSourceError::InvalidForceSourceId),
+        });
+    };
+    let source: ForceSource = *source;
+    updated.push(StagedForceSource {
+        id,
+        local_point: source.local_point(),
+        local_force: source.local_force(),
+        enabled: source.is_enabled(),
+        command_index,
+    });
+    Ok(updated.len() - 1)
 }
 
 fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
@@ -364,6 +473,10 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::RemoveBody { .. }
         | PhysicsCommand::AddCollider { .. }
         | PhysicsCommand::RemoveCollider { .. }
+        | PhysicsCommand::AddForceSource { .. }
+        | PhysicsCommand::RemoveForceSource { .. }
+        | PhysicsCommand::SetForceSource { .. }
+        | PhysicsCommand::SetForceSourceEnabled { .. }
         | PhysicsCommand::SetCollisionConfig { .. }
         | PhysicsCommand::SetColliderFilter { .. }
         | PhysicsCommand::SetColliderMode { .. }
@@ -405,6 +518,10 @@ fn apply_body_command(
         | PhysicsCommand::RemoveBody { .. }
         | PhysicsCommand::AddCollider { .. }
         | PhysicsCommand::RemoveCollider { .. }
+        | PhysicsCommand::AddForceSource { .. }
+        | PhysicsCommand::RemoveForceSource { .. }
+        | PhysicsCommand::SetForceSource { .. }
+        | PhysicsCommand::SetForceSourceEnabled { .. }
         | PhysicsCommand::SetCollisionConfig { .. }
         | PhysicsCommand::SetColliderFilter { .. }
         | PhysicsCommand::SetColliderMode { .. }
@@ -436,6 +553,31 @@ pub(crate) fn apply_command(
             world
                 .remove_collider(id)
                 .ok_or(WorldError::InvalidColliderId)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::AddForceSource {
+            body,
+            local_point,
+            local_force,
+        } => PhysicsCommandResult::ForceSource(world.add_force_source(
+            body,
+            local_point,
+            local_force,
+        )?),
+        PhysicsCommand::RemoveForceSource { id } => {
+            world.remove_force_source(id)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetForceSource {
+            id,
+            local_point,
+            local_force,
+        } => {
+            world.set_force_source(id, local_point, local_force)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetForceSourceEnabled { id, enabled } => {
+            world.set_force_source_enabled(id, enabled)?;
             PhysicsCommandResult::Done
         }
         PhysicsCommand::SetTransform { id, transform } => {
@@ -588,12 +730,12 @@ mod tests {
         rigid_body::{BodyError, RigidBody},
         shape::{Shape, Sphere},
         transform::Transform,
-        world::{PhysicsWorld, WorldError},
+        world::{ForceSourceError, PhysicsWorld, WorldError},
     };
     use kapitsa_math::{Mat3, Quat, Vec3};
 
     use super::super::PhysicsClientError;
-    use super::{PhysicsCommand, PhysicsCommandResult, apply_body_batch, apply_command};
+    use super::{PhysicsCommand, PhysicsCommandResult, apply_command, apply_command_batch};
 
     fn mass(value: f64) -> MassProperties {
         MassProperties::new(value, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass")
@@ -944,7 +1086,7 @@ mod tests {
             },
         ];
 
-        apply_body_batch(&mut world, &commands).expect("atomic batch");
+        apply_command_batch(&mut world, &commands).expect("atomic batch");
 
         assert_eq!(
             world.body(body).expect("body").state().linear_velocity(),
@@ -970,7 +1112,7 @@ mod tests {
             },
         ];
 
-        let error = apply_body_batch(&mut world, &commands).expect_err("static mass rejected");
+        let error = apply_command_batch(&mut world, &commands).expect_err("static mass rejected");
 
         assert_eq!(error.command_index, Some(1));
         assert_eq!(
@@ -983,6 +1125,86 @@ mod tests {
                 .expect("dynamic body")
                 .state()
                 .linear_velocity(),
+            Vec3::ZERO
+        );
+    }
+
+    #[test]
+    fn force_source_updates_share_atomic_body_batch_commit() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(dynamic_body()).expect("body");
+        let source = world
+            .add_force_source(body, Vec3::ZERO, Vec3::X)
+            .expect("force source");
+        let commands = [
+            PhysicsCommand::SetForceSource {
+                id: source,
+                local_point: Vec3::Y,
+                local_force: Vec3::Z,
+            },
+            PhysicsCommand::SetForceSourceEnabled {
+                id: source,
+                enabled: false,
+            },
+            PhysicsCommand::SetLinearVelocity {
+                id: body,
+                velocity: Vec3::X,
+            },
+        ];
+
+        apply_command_batch(&mut world, &commands).expect("atomic batch");
+
+        let source = world.force_source(source).expect("updated source");
+        assert_eq!(source.local_point(), Vec3::Y);
+        assert_eq!(source.local_force(), Vec3::Z);
+        assert!(!source.is_enabled());
+        assert_eq!(
+            world.body(body).expect("body").state().linear_velocity(),
+            Vec3::X
+        );
+    }
+
+    #[test]
+    fn failed_force_source_batch_does_not_commit_source_or_body_changes() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(dynamic_body()).expect("body");
+        let source = world
+            .add_force_source(body, Vec3::ZERO, Vec3::X)
+            .expect("force source");
+        let mut other_world = PhysicsWorld::new();
+        let other_body = other_world.add_body(dynamic_body()).expect("other body");
+        let foreign_source = other_world
+            .add_force_source(other_body, Vec3::ZERO, Vec3::Y)
+            .expect("foreign source");
+        let commands = [
+            PhysicsCommand::SetForceSource {
+                id: source,
+                local_point: Vec3::Y,
+                local_force: Vec3::Z,
+            },
+            PhysicsCommand::SetLinearVelocity {
+                id: body,
+                velocity: Vec3::X,
+            },
+            PhysicsCommand::SetForceSourceEnabled {
+                id: foreign_source,
+                enabled: false,
+            },
+        ];
+
+        let error = apply_command_batch(&mut world, &commands).expect_err("foreign source");
+
+        assert_eq!(error.command_index, Some(2));
+        assert_eq!(
+            error.error,
+            PhysicsClientError::ForceSource(ForceSourceError::InvalidForceSourceId)
+        );
+        let source = world.force_source(source).expect("unchanged source");
+        assert_eq!(source.local_point(), Vec3::ZERO);
+        assert_eq!(source.local_force(), Vec3::X);
+        assert!(source.is_enabled());
+        assert_eq!(
+            world.body(body).expect("body").state().linear_velocity(),
             Vec3::ZERO
         );
     }

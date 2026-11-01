@@ -2,9 +2,49 @@ use std::fmt;
 
 use crate::collision::CollisionError;
 use crate::containers::DensePoolError;
-use crate::rigid_body::IntegrationError;
+use crate::rigid_body::{BodyError, IntegrationError};
 
-use super::BodyId;
+use super::{BodyId, ForceSourceId};
+
+/// Failure while configuring or applying a persistent body force.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForceSourceError {
+    InvalidBodyId,
+    InvalidForceSourceId,
+    BodyMustBeDynamic,
+    NonFiniteValue,
+    ArithmeticOverflow,
+    StorageCapacityExceeded,
+}
+
+impl fmt::Display for ForceSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::InvalidBodyId => "force source body ID is invalid",
+            Self::InvalidForceSourceId => "force source ID is invalid",
+            Self::BodyMustBeDynamic => "force sources require a dynamic body",
+            Self::NonFiniteValue => "force source values must be finite",
+            Self::ArithmeticOverflow => "force source calculation exceeds the supported range",
+            Self::StorageCapacityExceeded => "force source storage capacity could not be reserved",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for ForceSourceError {}
+
+impl From<BodyError> for ForceSourceError {
+    fn from(error: BodyError) -> Self {
+        match error {
+            BodyError::BodyMustBeDynamic => Self::BodyMustBeDynamic,
+            BodyError::NonFiniteValue => Self::NonFiniteValue,
+            BodyError::ArithmeticOverflow | BodyError::InvalidInertiaTensor => {
+                Self::ArithmeticOverflow
+            }
+            BodyError::StaticBodyCannotHaveVelocity => Self::BodyMustBeDynamic,
+        }
+    }
+}
 
 /// Failure returned when a world timestep cannot be completed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,6 +55,10 @@ pub enum StepError {
     BodyIntegration {
         body_id: BodyId,
         cause: IntegrationError,
+    },
+    ForceSource {
+        source_id: ForceSourceId,
+        cause: ForceSourceError,
     },
 }
 
@@ -29,6 +73,9 @@ impl fmt::Display for StepError {
             Self::BodyIntegration { body_id, cause } => {
                 write!(formatter, "integration failed for {body_id:?}: {cause}")
             }
+            Self::ForceSource { source_id, cause } => {
+                write!(formatter, "force source {source_id:?} failed: {cause}")
+            }
         }
     }
 }
@@ -39,6 +86,7 @@ impl std::error::Error for StepError {
             Self::Collision(error) => Some(error),
             Self::InvalidDeltaTime | Self::InvalidStepResults => None,
             Self::BodyIntegration { cause, .. } => Some(cause),
+            Self::ForceSource { cause, .. } => Some(cause),
         }
     }
 }

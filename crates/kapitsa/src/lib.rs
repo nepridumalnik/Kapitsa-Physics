@@ -47,7 +47,9 @@ pub mod transform {
 }
 
 pub mod world {
-    pub use kapitsa_core::world::{BodyId, ColliderId, StepError, WorldError};
+    pub use kapitsa_core::world::{
+        BodyId, ColliderId, ForceSource, ForceSourceError, ForceSourceId, StepError, WorldError,
+    };
 }
 
 pub use kapitsa_core::{
@@ -61,7 +63,7 @@ pub use kapitsa_core::{
     rigid_body::{BodyState, CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
-    world::{BodyId, ColliderId, StepError, WorldError},
+    world::{BodyId, ColliderId, ForceSourceId, StepError, WorldError},
 };
 
 pub use runtime::{

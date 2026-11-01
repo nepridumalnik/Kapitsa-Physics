@@ -7,7 +7,7 @@ pub use client::PhysicsClient;
 pub use command::{
     BatchId, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSubmitError,
 };
-pub(crate) use command::{CommandRequest, apply_body_batch, apply_command};
+pub(crate) use command::{CommandRequest, apply_command, apply_command_batch};
 pub use events::{
     CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsBatchError,
     PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults,
@@ -16,7 +16,11 @@ pub use snapshot::PhysicsSnapshot;
 
 use std::fmt;
 
-use kapitsa_core::{collision::QueryError, rigid_body::BodyError, world::WorldError};
+use kapitsa_core::{
+    collision::QueryError,
+    rigid_body::BodyError,
+    world::{ForceSourceError, WorldError},
+};
 
 /// Failure returned while submitting or applying a physics command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +30,7 @@ pub enum PhysicsClientError {
     World(WorldError),
     Body(BodyError),
     Query(QueryError),
+    ForceSource(ForceSourceError),
     UnsupportedBatchCommand,
     UnexpectedResult,
 }
@@ -38,6 +43,7 @@ impl fmt::Display for PhysicsClientError {
             Self::World(error) => write!(formatter, "physics world command failed: {error}"),
             Self::Body(error) => write!(formatter, "rigid body command failed: {error}"),
             Self::Query(error) => write!(formatter, "physics query failed: {error}"),
+            Self::ForceSource(error) => write!(formatter, "force source command failed: {error}"),
             Self::UnsupportedBatchCommand => {
                 formatter.write_str("command cannot be used in an atomic body batch")
             }
@@ -54,6 +60,7 @@ impl std::error::Error for PhysicsClientError {
             Self::World(error) => Some(error),
             Self::Body(error) => Some(error),
             Self::Query(error) => Some(error),
+            Self::ForceSource(error) => Some(error),
             Self::NotRunning
             | Self::ChannelClosed
             | Self::UnsupportedBatchCommand
@@ -77,5 +84,11 @@ impl From<BodyError> for PhysicsClientError {
 impl From<QueryError> for PhysicsClientError {
     fn from(error: QueryError) -> Self {
         Self::Query(error)
+    }
+}
+
+impl From<ForceSourceError> for PhysicsClientError {
+    fn from(error: ForceSourceError) -> Self {
+        Self::ForceSource(error)
     }
 }
