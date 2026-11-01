@@ -64,14 +64,6 @@ impl Simulation {
         self.engine.world()
     }
 
-    pub fn world_mut(&mut self) -> &mut PhysicsWorld {
-        self.engine.world_mut()
-    }
-
-    pub fn config(&self) -> &SimulationConfig {
-        self.engine.config()
-    }
-
     pub fn metrics(&self) -> &SimulationMetrics {
         self.engine.metrics()
     }

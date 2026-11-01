@@ -1,13 +1,16 @@
 use std::time::Duration;
 
+use super::planner::{WorkerConfig, WorkerConfigError};
+
 const MAX_TICK_RATE: u32 = 1_000_000_000;
 
 /// Shared fixed-step and batching settings.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SimulationConfig {
     pub tick_rate: u32,
     pub max_catch_up_steps: usize,
     pub scheduler: SchedulerConfig,
+    pub workers: WorkerConfig,
 }
 
 impl Default for SimulationConfig {
@@ -16,6 +19,7 @@ impl Default for SimulationConfig {
             tick_rate: 60,
             max_catch_up_steps: 4,
             scheduler: SchedulerConfig::default(),
+            workers: WorkerConfig::default(),
         }
     }
 }
@@ -28,7 +32,10 @@ impl SimulationConfig {
         if self.max_catch_up_steps == 0 {
             return Err(ConfigError::ZeroCatchUpSteps);
         }
-        self.scheduler.validate()
+        self.scheduler.validate()?;
+        self.workers
+            .validate()
+            .map_err(ConfigError::InvalidWorkerConfig)
     }
 
     pub fn fixed_step_seconds(&self) -> f64 {
@@ -75,21 +82,37 @@ pub enum ConfigError {
     ZeroCatchUpSteps,
     ZeroBatchSize,
     ZeroBatchesPerWorker,
+    InvalidWorkerConfig(WorkerConfigError),
 }
 
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::InvalidTickRate => "tick_rate must be in 1..=1,000,000,000",
-            Self::ZeroCatchUpSteps => "max_catch_up_steps must be positive",
-            Self::ZeroBatchSize => "min_batch_size must be positive",
-            Self::ZeroBatchesPerWorker => "max_batches_per_worker must be positive",
-        };
-        formatter.write_str(message)
+        match self {
+            Self::InvalidTickRate => formatter.write_str("tick_rate must be in 1..=1,000,000,000"),
+            Self::ZeroCatchUpSteps => formatter.write_str("max_catch_up_steps must be positive"),
+            Self::ZeroBatchSize => formatter.write_str("min_batch_size must be positive"),
+            Self::ZeroBatchesPerWorker => {
+                formatter.write_str("max_batches_per_worker must be positive")
+            }
+            Self::InvalidWorkerConfig(error) => write!(formatter, "worker config: {error}"),
+        }
     }
 }
 
-impl std::error::Error for ConfigError {}
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidWorkerConfig(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<WorkerConfigError> for ConfigError {
+    fn from(error: WorkerConfigError) -> Self {
+        Self::InvalidWorkerConfig(error)
+    }
+}
 
 #[cfg(test)]
 mod tests {

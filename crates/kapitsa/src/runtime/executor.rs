@@ -5,12 +5,16 @@ use std::{
 
 use kapitsa_core::execution::{ExecutionError, StepExecutor};
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use tokio::{runtime::Handle, sync::mpsc as async_mpsc};
+use tokio::runtime::Handle;
+#[cfg(test)]
+use tokio::sync::mpsc as async_mpsc;
 
 /// Owns a Rayon pool whose long-lived workers run on a host Tokio blocking pool.
 pub struct RayonPool {
     pool: Option<Arc<ThreadPool>>,
+    #[cfg(test)]
     worker_exits: async_mpsc::UnboundedReceiver<usize>,
+    #[cfg(test)]
     worker_count: usize,
 }
 
@@ -53,6 +57,7 @@ impl RayonPool {
             return Err(RayonPoolError::InvalidWorkerCount);
         }
 
+        #[cfg(test)]
         let (worker_exit_tx, worker_exits) = async_mpsc::unbounded_channel();
         let handle = handle.clone();
         let pool = catch_unwind(AssertUnwindSafe(|| {
@@ -60,9 +65,12 @@ impl RayonPool {
                 .num_threads(worker_count)
                 .thread_name(|index| format!("kapitsa-rayon-{index}"))
                 .spawn_handler(move |thread| {
+                    #[cfg(test)]
                     let index = thread.index();
+                    #[cfg(test)]
                     let worker_exit_tx = worker_exit_tx.clone();
                     handle.spawn_blocking(move || {
+                        #[cfg(test)]
                         let _exit_signal = WorkerExitSignal {
                             index,
                             sender: worker_exit_tx,
@@ -78,7 +86,9 @@ impl RayonPool {
 
         Ok(Self {
             pool: Some(Arc::new(pool)),
+            #[cfg(test)]
             worker_exits,
+            #[cfg(test)]
             worker_count,
         })
     }
@@ -93,7 +103,7 @@ impl RayonPool {
             .ok_or(RayonPoolError::PoolAlreadyShutDown)
     }
 
-    /// Schedules a top-level task on this pool.
+    #[cfg(test)]
     pub fn spawn<F>(&self, operation: F) -> Result<(), RayonPoolError>
     where
         F: FnOnce() + Send + 'static,
@@ -102,6 +112,7 @@ impl RayonPool {
     }
 
     /// Stops the pool and asynchronously waits for each Tokio blocking worker to exit.
+    #[cfg(test)]
     pub async fn shutdown(&mut self) -> Result<(), RayonPoolError> {
         let Some(pool) = self.pool.as_ref() else {
             return Err(RayonPoolError::PoolAlreadyShutDown);
@@ -192,11 +203,13 @@ impl RayonExecutor {
     }
 }
 
+#[cfg(test)]
 struct WorkerExitSignal {
     index: usize,
     sender: async_mpsc::UnboundedSender<usize>,
 }
 
+#[cfg(test)]
 impl Drop for WorkerExitSignal {
     fn drop(&mut self) {
         let _ = self.sender.send(self.index);

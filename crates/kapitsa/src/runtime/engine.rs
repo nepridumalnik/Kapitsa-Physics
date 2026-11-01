@@ -8,8 +8,10 @@ use kapitsa_core::{
     world::{BodyStep, PhysicsWorld, StepError},
 };
 
+#[cfg(test)]
+use super::config::ConfigError;
 use super::{
-    config::{ConfigError, SimulationConfig},
+    config::SimulationConfig,
     metrics::{SimulationMetrics, SimulationState, StepStats},
 };
 
@@ -27,19 +29,28 @@ pub(crate) struct StepEngine<E: StepExecutor> {
 }
 
 impl<E: StepExecutor> StepEngine<E> {
+    #[cfg(test)]
     pub(crate) fn new(
         world: PhysicsWorld,
         config: SimulationConfig,
         executor: E,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
+        Ok(Self::new_validated(world, config, executor))
+    }
+
+    pub(crate) fn new_validated(
+        world: PhysicsWorld,
+        config: SimulationConfig,
+        executor: E,
+    ) -> Self {
         let step_budget = config.step_budget();
         let metrics = SimulationMetrics {
             step_budget,
             active_workers: 1,
             ..SimulationMetrics::default()
         };
-        Ok(Self {
+        Self {
             world,
             executor,
             config,
@@ -48,7 +59,7 @@ impl<E: StepExecutor> StepEngine<E> {
             bucket_buffers: Vec::new(),
             recent_step_durations: VecDeque::with_capacity(METRICS_WINDOW),
             metrics,
-        })
+        }
     }
 
     pub(crate) fn world(&self) -> &PhysicsWorld {
@@ -57,10 +68,6 @@ impl<E: StepExecutor> StepEngine<E> {
 
     pub(crate) fn world_mut(&mut self) -> &mut PhysicsWorld {
         &mut self.world
-    }
-
-    pub(crate) fn config(&self) -> &SimulationConfig {
-        &self.config
     }
 
     pub(crate) fn metrics(&self) -> &SimulationMetrics {
@@ -97,7 +104,7 @@ impl<E: StepExecutor> StepEngine<E> {
         self.metrics.simulation_time_debt = simulation_time_debt;
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(test)]
     pub(crate) fn into_world(self) -> PhysicsWorld {
         self.world
     }

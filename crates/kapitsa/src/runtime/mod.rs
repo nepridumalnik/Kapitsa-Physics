@@ -1,25 +1,25 @@
 //! Simulation runtime configuration and execution APIs.
 
 #[cfg(feature = "async")]
-pub mod asynchronous;
+mod asynchronous;
 mod config;
+#[cfg(any(test, feature = "async"))]
 mod engine;
 #[cfg(feature = "async")]
-pub mod executor;
+mod executor;
 pub mod metrics;
-#[cfg(feature = "async")]
 mod planner;
-pub mod sync;
+#[cfg(test)]
+mod sync;
 
 #[cfg(feature = "async")]
 pub use asynchronous::{
     CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsClient,
-    PhysicsClientError, PhysicsCommand, PhysicsCommandResult, PhysicsService, PhysicsServiceError,
-    PhysicsSnapshot, Simulation as AsyncSimulation, SimulationError as AsyncSimulationError,
+    PhysicsClientError, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot, Simulation,
+    SimulationError,
 };
 pub use config::{ConfigError, SchedulerConfig, SimulationConfig};
 #[cfg(feature = "async")]
-pub use executor::{RayonExecutor, RayonPool, RayonPoolError};
+pub use executor::RayonPoolError;
 pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
-#[cfg(feature = "async")]
-pub use planner::{AdaptiveScheduler, AdaptiveStatus, WorkerConfig, WorkerConfigError};
+pub use planner::{WorkerConfig, WorkerConfigError};

@@ -1,17 +1,26 @@
 use std::num::NonZeroUsize;
+#[cfg(feature = "async")]
 use std::time::Duration;
 
 const EARLY_WARNING_AT: f64 = 0.75;
+#[cfg(feature = "async")]
 const MIN_SCALE_UP_STEPS: u32 = 3;
+#[cfg(feature = "async")]
 const MIN_SCALE_DOWN_STEPS: u32 = 24;
+#[cfg(feature = "async")]
 const STABILIZATION_STEPS: u32 = 12;
+#[cfg(feature = "async")]
 const WORKER_PROBE_STEPS: usize = 12;
+#[cfg(feature = "async")]
 const REQUIRED_SPEEDUP: f64 = 0.05;
+#[cfg(feature = "async")]
 const SIGNIFICANT_LOAD_INCREASE: f64 = 1.25;
+#[cfg(feature = "async")]
 const SCALE_UP_HYSTERESIS: f64 = 0.10;
+#[cfg(feature = "async")]
 const SCALE_DOWN_HYSTERESIS: f64 = 1.15;
 
-/// Async-only worker pool limits and adaptive thresholds.
+/// Worker pool limits and adaptive thresholds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkerConfig {
     /// Fixed Rayon pool size; `None` uses the host's available parallelism.
@@ -56,6 +65,7 @@ impl WorkerConfig {
         Ok(())
     }
 
+    #[cfg(feature = "async")]
     pub(crate) fn resolve_max_workers(&self, available: usize) -> usize {
         self.max_workers
             .map(NonZeroUsize::get)
@@ -89,6 +99,7 @@ impl std::fmt::Display for WorkerConfigError {
 impl std::error::Error for WorkerConfigError {}
 
 /// Current adaptive worker and step-budget status.
+#[cfg(feature = "async")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdaptiveStatus {
     pub active_workers: usize,
@@ -98,6 +109,7 @@ pub struct AdaptiveStatus {
     pub smoothed_step_duration: Duration,
 }
 
+#[cfg(feature = "async")]
 struct WorkerProbe {
     previous_workers: usize,
     candidate_workers: usize,
@@ -106,12 +118,14 @@ struct WorkerProbe {
     candidate_samples: usize,
 }
 
+#[cfg(feature = "async")]
 struct RejectedIncrease {
     candidate_workers: usize,
     baseline_seconds: f64,
 }
 
 /// Adapts active Rayon work while keeping the fixed pool size unchanged.
+#[cfg(feature = "async")]
 pub struct AdaptiveScheduler {
     config: WorkerConfig,
     max_workers: usize,
@@ -126,7 +140,9 @@ pub struct AdaptiveScheduler {
     rejected_increase: Option<RejectedIncrease>,
 }
 
+#[cfg(feature = "async")]
 impl AdaptiveScheduler {
+    #[cfg(test)]
     pub fn new(config: WorkerConfig, max_workers: usize) -> Result<Self, WorkerConfigError> {
         config.validate()?;
         if max_workers == 0 {
@@ -151,12 +167,9 @@ impl AdaptiveScheduler {
         }
     }
 
+    #[cfg(test)]
     pub fn active_workers(&self) -> usize {
         self.active_workers
-    }
-
-    pub fn max_workers(&self) -> usize {
-        self.max_workers
     }
 
     pub fn observe(&mut self, step_duration: Duration, step_budget: Duration) -> AdaptiveStatus {
@@ -207,6 +220,7 @@ impl AdaptiveScheduler {
         self.status()
     }
 
+    #[cfg(test)]
     pub fn set_active_workers(&mut self, workers: usize) -> Result<(), WorkerConfigError> {
         if workers == 0 || workers > self.max_workers {
             return Err(WorkerConfigError::ActiveWorkersOutOfRange);
@@ -308,7 +322,7 @@ impl AdaptiveScheduler {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 mod tests {
     use std::time::Duration;
 

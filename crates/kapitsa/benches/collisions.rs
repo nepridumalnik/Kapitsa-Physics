@@ -1,11 +1,9 @@
 use std::{
     error::Error,
     hint::black_box,
-    num::NonZeroUsize,
     time::{Duration, Instant},
 };
 
-use kapitsa::runtime::{SimulationConfig, WorkerConfig, asynchronous::Simulation};
 use kapitsa_core::{
     collider::Collider,
     mass::MassProperties,
@@ -15,7 +13,6 @@ use kapitsa_core::{
     world::PhysicsWorld,
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
-use tokio::runtime::Builder;
 
 const SAMPLES: usize = 5;
 const WARMUP_RUNS: usize = 1;
@@ -23,13 +20,11 @@ const STEPS: usize = 8;
 const DT: f64 = 1.0 / 60.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let runtime = Builder::new_current_thread().enable_time().build()?;
     println!(
-        "Kapitsa async collision benchmark: warmups={WARMUP_RUNS}, samples={SAMPLES}, steps={STEPS}, statistics=min/median/max"
+        "Kapitsa collision baseline: warmups={WARMUP_RUNS}, samples={SAMPLES}, steps={STEPS}, statistics=min/median/max"
     );
-
     for body_count in [256, 4_096, 20_000] {
-        let sequential = sample(|| {
+        let elapsed = sample(|| {
             let mut world = collision_world(body_count)?;
             let started = Instant::now();
             for _ in 0..STEPS {
@@ -37,76 +32,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Ok(started.elapsed())
         })?;
-        println!("\n{body_count} bodies, localized collision workload");
-        report("PhysicsWorld::step", sequential, sequential);
-
-        for workers in [1, 2, 4] {
-            let elapsed = sample(|| {
-                let world = collision_world(body_count)?;
-                let mut simulation = Simulation::new_on_with_worker_config(
-                    world,
-                    config(),
-                    worker_config(workers),
-                    runtime.handle().clone(),
-                )?;
-                simulation.set_active_workers(workers)?;
-                runtime.block_on(async {
-                    let started = Instant::now();
-                    for _ in 0..STEPS {
-                        black_box(simulation.step().await?);
-                    }
-                    let elapsed = started.elapsed();
-                    simulation.shutdown().await?;
-                    Ok::<_, Box<dyn Error>>(elapsed)
-                })
-            })?;
-            report(&format!("Async Simulation x{workers}"), elapsed, sequential);
-        }
+        report(&format!("{body_count} body step"), elapsed, elapsed);
     }
-    report_gjk_ccd_scaling(&runtime)?;
-    Ok(())
-}
 
-fn report_gjk_ccd_scaling(runtime: &tokio::runtime::Runtime) -> Result<(), Box<dyn Error>> {
     println!("\nIndependent GJK CCD islands (one step/sample)");
     for body_count in [256, 1_024] {
-        let sequential = sample(|| {
+        let elapsed = sample(|| {
             let mut world = gjk_ccd_world(body_count)?;
             let started = Instant::now();
             black_box(world.step(DT)?);
             Ok(started.elapsed())
         })?;
-        println!(
-            "{body_count} bodies, PhysicsWorld::step median={:.3} ms",
-            millis(sequential.1)
-        );
-
-        for workers in [1, 2, 4] {
-            let elapsed = sample(|| {
-                let world = gjk_ccd_world(body_count)?;
-                let mut simulation = Simulation::new_on_with_worker_config(
-                    world,
-                    config(),
-                    worker_config(workers),
-                    runtime.handle().clone(),
-                )?;
-                simulation.set_active_workers(workers)?;
-                runtime.block_on(async {
-                    let started = Instant::now();
-                    black_box(simulation.step().await?);
-                    let elapsed = started.elapsed();
-                    simulation.shutdown().await?;
-                    Ok::<_, Box<dyn Error>>(elapsed)
-                })
-            })?;
-            println!(
-                "  Async Simulation x{workers}: {:.3}/{:.3}/{:.3} ms min/median/max, speedup={:.2}x",
-                millis(elapsed.0),
-                millis(elapsed.1),
-                millis(elapsed.2),
-                sequential.1.as_secs_f64() / elapsed.1.as_secs_f64(),
-            );
-        }
+        println!("{body_count} bodies, median={:.3} ms", millis(elapsed.1));
     }
     Ok(())
 }
@@ -167,20 +104,6 @@ fn collision_world(body_count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
         )?;
     }
     Ok(world)
-}
-
-fn config() -> SimulationConfig {
-    SimulationConfig {
-        max_catch_up_steps: 1,
-        ..SimulationConfig::default()
-    }
-}
-
-fn worker_config(workers: usize) -> WorkerConfig {
-    WorkerConfig {
-        max_workers: NonZeroUsize::new(workers),
-        ..WorkerConfig::default()
-    }
 }
 
 fn sample(

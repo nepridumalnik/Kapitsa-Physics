@@ -9,29 +9,27 @@ use tokio::{
 };
 
 use super::{
-    Simulation, SimulationError,
+    StepRunner, StepRunnerError,
     marshalling::{
-        CollisionEventBatch, CommandRequest, PhysicsClient, PhysicsSnapshot, apply_command,
+        CollisionEventBatch, CommandRequest, PhysicsClient, PhysicsClientError, PhysicsSnapshot,
+        apply_command,
     },
 };
-use crate::runtime::{SimulationConfig, SimulationMetrics, SimulationState, WorkerConfig};
+use crate::runtime::{ConfigError, SimulationConfig, SimulationMetrics, SimulationState};
 
 const COMMAND_QUEUE_CAPACITY: usize = 1024;
 const MAX_COMMANDS_PER_STEP: usize = 1024;
 const COLLISION_EVENT_BATCH_CAPACITY: usize = 64;
 
 struct ServiceTaskOutput {
-    simulation: Simulation,
+    simulation: StepRunner,
     simulation_time: Duration,
-    result: Result<(), PhysicsServiceError>,
+    result: Result<(), SimulationError>,
 }
 
-/// Drives a simulation from a fixed-rate Tokio timer and exposes its client API.
-///
-/// [`Simulation::step`] remains a manual one-step operation. Use this service
-/// when commands, snapshots, events, and clock-driven catch-up are needed.
-pub struct PhysicsService {
-    simulation: Option<Simulation>,
+/// Owns a clock-driven physics simulation and exposes its client API.
+pub struct Simulation {
+    simulation: Option<StepRunner>,
     task: Option<JoinHandle<ServiceTaskOutput>>,
     stop: Option<watch::Sender<bool>>,
     command_tx: watch::Sender<Option<mpsc::Sender<CommandRequest>>>,
@@ -47,101 +45,81 @@ pub struct PhysicsService {
 
 /// Failure returned by a clock-driven physics service.
 #[derive(Debug)]
-pub enum PhysicsServiceError {
+pub enum SimulationError {
+    InvalidConfig(ConfigError),
     MissingRuntime,
     SimulationTimeOverflow,
-    WorldUnavailable,
+    AlreadyRunning,
     TaskRequiresStop,
-    Simulation(SimulationError),
+    Physics(kapitsa_core::world::StepError),
+    RayonPool(super::super::executor::RayonPoolError),
+    WorldUnavailable,
+    WorldLost,
     TaskFailed(String),
 }
 
-impl std::fmt::Display for PhysicsServiceError {
+impl std::fmt::Display for SimulationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidConfig(error) => write!(formatter, "invalid simulation config: {error}"),
             Self::MissingRuntime => {
                 formatter.write_str("starting a physics service requires a Tokio runtime")
             }
             Self::SimulationTimeOverflow => {
                 formatter.write_str("simulation time accumulator overflowed")
             }
-            Self::WorldUnavailable => {
-                formatter.write_str("physics world is available only while the service is stopped")
-            }
+            Self::AlreadyRunning => formatter.write_str("simulation is already running"),
             Self::TaskRequiresStop => {
-                formatter.write_str("stop the completed physics service before restarting")
+                formatter.write_str("stop the completed simulation before restarting")
             }
-            Self::Simulation(error) => write!(formatter, "physics service failed: {error}"),
-            Self::TaskFailed(reason) => write!(formatter, "physics service task failed: {reason}"),
+            Self::Physics(error) => write!(formatter, "physics step failed: {error}"),
+            Self::RayonPool(error) => write!(formatter, "Rayon runtime failed: {error}"),
+            Self::WorldUnavailable => formatter.write_str("physics world is unavailable"),
+            Self::WorldLost => formatter.write_str("the physics world was lost"),
+            Self::TaskFailed(reason) => write!(formatter, "simulation task failed: {reason}"),
         }
     }
 }
 
-impl std::error::Error for PhysicsServiceError {
+impl std::error::Error for SimulationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Simulation(error) => Some(error),
+            Self::InvalidConfig(error) => Some(error),
+            Self::Physics(error) => Some(error),
+            Self::RayonPool(error) => Some(error),
             _ => None,
         }
     }
 }
 
-impl From<SimulationError> for PhysicsServiceError {
-    fn from(error: SimulationError) -> Self {
-        Self::Simulation(error)
+impl From<StepRunnerError> for SimulationError {
+    fn from(error: StepRunnerError) -> Self {
+        match error {
+            StepRunnerError::InvalidConfig(error) => Self::InvalidConfig(error),
+            StepRunnerError::InvalidWorkerConfig(error) => {
+                Self::InvalidConfig(ConfigError::InvalidWorkerConfig(error))
+            }
+            StepRunnerError::RayonPool(error) => Self::RayonPool(error),
+            StepRunnerError::Physics(error) => Self::Physics(error),
+            StepRunnerError::WorldUnavailable => Self::WorldUnavailable,
+            StepRunnerError::WorldLost => Self::WorldLost,
+        }
     }
 }
 
-impl PhysicsService {
-    /// Creates a service from the currently entered Tokio runtime.
-    pub fn new(world: PhysicsWorld, config: SimulationConfig) -> Result<Self, PhysicsServiceError> {
-        Self::new_with_worker_config(world, config, WorkerConfig::default())
+impl Simulation {
+    /// Creates an empty simulation using the default fixed-step configuration.
+    pub fn new() -> Result<Self, SimulationError> {
+        Self::new_from_config(SimulationConfig::default())
     }
 
-    /// Creates a service with explicit worker-pool settings.
-    pub fn new_with_worker_config(
-        world: PhysicsWorld,
-        config: SimulationConfig,
-        worker_config: WorkerConfig,
-    ) -> Result<Self, PhysicsServiceError> {
-        let runtime = Handle::try_current().map_err(|_| PhysicsServiceError::MissingRuntime)?;
-        let simulation = Simulation::new_with_worker_config(world, config, worker_config)?;
-        Self::from_simulation_on(simulation, runtime)
-    }
-
-    /// Creates a service on the supplied host runtime.
-    pub fn new_on(
-        world: PhysicsWorld,
-        config: SimulationConfig,
-        runtime: Handle,
-    ) -> Result<Self, PhysicsServiceError> {
-        Self::new_on_with_worker_config(world, config, WorkerConfig::default(), runtime)
-    }
-
-    /// Creates a service on the supplied host runtime with explicit worker settings.
-    pub fn new_on_with_worker_config(
-        world: PhysicsWorld,
-        config: SimulationConfig,
-        worker_config: WorkerConfig,
-        runtime: Handle,
-    ) -> Result<Self, PhysicsServiceError> {
+    /// Creates an empty simulation using the supplied configuration.
+    pub fn new_from_config(config: SimulationConfig) -> Result<Self, SimulationError> {
+        config.validate().map_err(SimulationError::InvalidConfig)?;
+        let runtime = Handle::try_current().map_err(|_| SimulationError::MissingRuntime)?;
         let simulation =
-            Simulation::new_on_with_worker_config(world, config, worker_config, runtime.clone())?;
-        Self::from_simulation_on(simulation, runtime)
-    }
-
-    /// Wraps a manually configured simulation as a clock-driven service.
-    pub fn from_simulation(simulation: Simulation) -> Result<Self, PhysicsServiceError> {
-        let runtime = Handle::try_current().map_err(|_| PhysicsServiceError::MissingRuntime)?;
-        Self::from_simulation_on(simulation, runtime)
-    }
-
-    /// Wraps a simulation and schedules the service on the supplied Tokio runtime.
-    pub fn from_simulation_on(
-        simulation: Simulation,
-        runtime: Handle,
-    ) -> Result<Self, PhysicsServiceError> {
-        let world = simulation.world().map_err(PhysicsServiceError::from)?;
+            StepRunner::new_on_validated(PhysicsWorld::new(), config, runtime.clone())?;
+        let world = simulation.world().map_err(SimulationError::from)?;
         let initial_snapshot = Arc::new(PhysicsSnapshot::from_world(
             world,
             simulation.metrics().total_steps,
@@ -168,12 +146,12 @@ impl PhysicsService {
     }
 
     /// Starts clock-driven stepping on the configured Tokio runtime.
-    pub fn start(&mut self) -> Result<(), PhysicsServiceError> {
+    pub fn start(&mut self) -> Result<(), SimulationError> {
         if let Some(task) = &self.task {
             return if task.is_finished() {
-                Err(PhysicsServiceError::TaskRequiresStop)
+                Err(SimulationError::TaskRequiresStop)
             } else {
-                Ok(())
+                Err(SimulationError::AlreadyRunning)
             };
         }
 
@@ -181,9 +159,9 @@ impl PhysicsService {
             let simulation = self
                 .simulation
                 .as_ref()
-                .ok_or(PhysicsServiceError::TaskRequiresStop)?;
+                .ok_or(SimulationError::TaskRequiresStop)?;
             Arc::new(PhysicsSnapshot::from_world(
-                simulation.world().map_err(PhysicsServiceError::from)?,
+                simulation.world().map_err(SimulationError::from)?,
                 simulation.metrics().total_steps,
                 self.simulation_time,
             ))
@@ -191,7 +169,7 @@ impl PhysicsService {
         let simulation = self
             .simulation
             .take()
-            .ok_or(PhysicsServiceError::TaskRequiresStop)?;
+            .ok_or(SimulationError::TaskRequiresStop)?;
         self.snapshot_tx.send_replace(snapshot);
 
         let (stop_tx, stop_rx) = watch::channel(false);
@@ -236,7 +214,7 @@ impl PhysicsService {
     }
 
     /// Stops scheduling steps and waits for any active step to finish.
-    pub async fn stop(&mut self) -> Result<(), PhysicsServiceError> {
+    pub async fn stop(&mut self) -> Result<(), SimulationError> {
         let Some(task) = &mut self.task else {
             return Ok(());
         };
@@ -257,24 +235,9 @@ impl PhysicsService {
                 self.metrics_tx.send_modify(|metrics| {
                     metrics.state = SimulationState::Error;
                 });
-                Err(PhysicsServiceError::TaskFailed(error.to_string()))
+                Err(SimulationError::TaskFailed(error.to_string()))
             }
         }
-    }
-
-    /// Stops the service, shuts down its owned Rayon pool, and returns the world.
-    pub async fn shutdown(mut self) -> Result<PhysicsWorld, PhysicsServiceError> {
-        let stop_result = self.stop().await;
-        let simulation = self
-            .simulation
-            .take()
-            .ok_or(PhysicsServiceError::WorldUnavailable)?;
-        let world = simulation
-            .shutdown()
-            .await
-            .map_err(PhysicsServiceError::from);
-        stop_result?;
-        world
     }
 
     pub fn state(&self) -> SimulationState {
@@ -292,25 +255,9 @@ impl PhysicsService {
             self.collision_events_tx.clone(),
         )
     }
-
-    pub fn world(&self) -> Result<&PhysicsWorld, PhysicsServiceError> {
-        self.simulation
-            .as_ref()
-            .ok_or(PhysicsServiceError::WorldUnavailable)?
-            .world()
-            .map_err(PhysicsServiceError::from)
-    }
-
-    pub fn world_mut(&mut self) -> Result<&mut PhysicsWorld, PhysicsServiceError> {
-        self.simulation
-            .as_mut()
-            .ok_or(PhysicsServiceError::WorldUnavailable)?
-            .world_mut()
-            .map_err(PhysicsServiceError::from)
-    }
 }
 
-impl Drop for PhysicsService {
+impl Drop for Simulation {
     fn drop(&mut self) {
         self.command_tx.send_replace(None);
         if let Some(stop) = &self.stop {
@@ -324,14 +271,39 @@ fn stopping(stop: &watch::Receiver<bool>) -> bool {
 }
 
 async fn run_simulation(
-    simulation: &mut Simulation,
+    simulation: &mut StepRunner,
     mut commands: mpsc::Receiver<CommandRequest>,
+    stop: watch::Receiver<bool>,
+    metrics: &watch::Sender<SimulationMetrics>,
+    snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
+    collision_events: &broadcast::Sender<CollisionEventBatch>,
+    simulation_time: &mut Duration,
+) -> Result<(), SimulationError> {
+    let result = run_simulation_loop(
+        simulation,
+        &mut commands,
+        stop,
+        metrics,
+        snapshots,
+        collision_events,
+        simulation_time,
+    )
+    .await;
+    while let Ok(request) = commands.try_recv() {
+        let _ = request.reply.send(Err(PhysicsClientError::NotRunning));
+    }
+    result
+}
+
+async fn run_simulation_loop(
+    simulation: &mut StepRunner,
+    commands: &mut mpsc::Receiver<CommandRequest>,
     mut stop: watch::Receiver<bool>,
     metrics: &watch::Sender<SimulationMetrics>,
     snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
     collision_events: &broadcast::Sender<CollisionEventBatch>,
     simulation_time: &mut Duration,
-) -> Result<(), PhysicsServiceError> {
+) -> Result<(), SimulationError> {
     let step_duration = simulation.config().step_budget();
     let max_catch_up_steps = simulation.config().max_catch_up_steps;
     let mut previous = Instant::now();
@@ -362,14 +334,14 @@ async fn run_simulation(
             }
             let next_simulation_time = simulation_time
                 .checked_add(step_duration)
-                .ok_or(PhysicsServiceError::SimulationTimeOverflow)?;
-            apply_queued_commands(simulation, &mut commands)?;
+                .ok_or(SimulationError::SimulationTimeOverflow)?;
+            apply_queued_commands(simulation, commands)?;
             simulation.step().await?;
             *simulation_time = next_simulation_time;
 
             let (mut snapshot, _) = PhysicsSnapshot::take_reusable(&mut reusable_snapshot);
             snapshot.rebuild(
-                simulation.world().map_err(PhysicsServiceError::from)?,
+                simulation.world().map_err(SimulationError::from)?,
                 simulation.metrics().total_steps,
                 *simulation_time,
             );
@@ -380,7 +352,7 @@ async fn run_simulation(
                     simulation.metrics().total_steps,
                     simulation
                         .world()
-                        .map_err(PhysicsServiceError::from)?
+                        .map_err(SimulationError::from)?
                         .collision_events()
                         .to_vec(),
                 );
@@ -408,10 +380,10 @@ async fn run_simulation(
 }
 
 fn apply_queued_commands(
-    simulation: &mut Simulation,
+    simulation: &mut StepRunner,
     commands: &mut mpsc::Receiver<CommandRequest>,
-) -> Result<(), PhysicsServiceError> {
-    let world = simulation.world_mut().map_err(PhysicsServiceError::from)?;
+) -> Result<(), SimulationError> {
+    let world = simulation.world_mut().map_err(SimulationError::from)?;
     for _ in 0..MAX_COMMANDS_PER_STEP {
         let request = match commands.try_recv() {
             Ok(request) => request,
@@ -425,10 +397,10 @@ fn apply_queued_commands(
     Ok(())
 }
 
-fn add_elapsed(accumulator: &mut Duration, elapsed: Duration) -> Result<(), PhysicsServiceError> {
+fn add_elapsed(accumulator: &mut Duration, elapsed: Duration) -> Result<(), SimulationError> {
     *accumulator = accumulator
         .checked_add(elapsed)
-        .ok_or(PhysicsServiceError::SimulationTimeOverflow)?;
+        .ok_or(SimulationError::SimulationTimeOverflow)?;
     Ok(())
 }
 
@@ -437,92 +409,83 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::time::Duration;
 
-    use kapitsa_core::{
-        mass::MassProperties, rigid_body::RigidBody, transform::Transform, world::PhysicsWorld,
-    };
+    use kapitsa_core::{mass::MassProperties, rigid_body::RigidBody, transform::Transform};
     use kapitsa_math::{Mat3, Vec3};
     use tokio::time::sleep;
 
-    use crate::runtime::{SimulationConfig, SimulationState, WorkerConfig};
+    use crate::runtime::{SimulationConfig, SimulationError, SimulationState, WorkerConfig};
 
-    use super::PhysicsService;
+    use super::Simulation;
 
     fn dynamic_body() -> RigidBody {
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass");
         RigidBody::new_dynamic(Transform::identity(), mass).expect("dynamic body")
     }
 
-    fn worker_config() -> WorkerConfig {
-        WorkerConfig {
+    fn config(tick_rate: u32) -> SimulationConfig {
+        let workers = WorkerConfig {
             max_workers: NonZeroUsize::new(2),
             ..WorkerConfig::default()
+        };
+        SimulationConfig {
+            tick_rate,
+            workers,
+            ..SimulationConfig::default()
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn service_start_stop_restart_and_client_commands_work() {
-        let mut service = PhysicsService::new_with_worker_config(
-            PhysicsWorld::new(),
-            SimulationConfig {
-                tick_rate: 100,
-                ..SimulationConfig::default()
-            },
-            worker_config(),
-        )
-        .expect("service");
-        let client = service.client();
-        service.start().expect("start");
-        assert_eq!(service.state(), SimulationState::Running);
+    async fn simulation_start_stop_restart_and_client_commands_work() {
+        let mut simulation = Simulation::new_from_config(config(100)).expect("simulation");
+        let client = simulation.client();
+        simulation.start().expect("start");
+        assert_eq!(simulation.state(), SimulationState::Running);
         let id = client.add_body(dynamic_body()).await.expect("add body");
         client.apply_force(id, Vec3::X).await.expect("apply force");
         sleep(Duration::from_millis(35)).await;
-        service.stop().await.expect("stop");
-        assert_eq!(service.state(), SimulationState::Stopped);
-        assert!(service.metrics().total_steps >= 1);
-        assert!(service.world().expect("world restored").body(id).is_some());
+        simulation.stop().await.expect("stop");
+        assert_eq!(simulation.state(), SimulationState::Stopped);
+        assert!(simulation.metrics().total_steps >= 1);
+        assert!(client.snapshot().body(id).is_some());
 
-        let previous_steps = service.metrics().total_steps;
-        service.start().expect("restart");
+        let previous_steps = simulation.metrics().total_steps;
+        simulation.start().expect("restart");
         sleep(Duration::from_millis(25)).await;
-        service.stop().await.expect("second stop");
-        assert!(service.metrics().total_steps > previous_steps);
+        simulation.stop().await.expect("second stop");
+        assert!(simulation.metrics().total_steps > previous_steps);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn service_manual_client_is_not_running_and_shutdown_returns_world() {
-        let service = PhysicsService::new_with_worker_config(
-            PhysicsWorld::new(),
-            SimulationConfig::default(),
-            worker_config(),
-        )
-        .expect("service");
+    async fn client_rejects_commands_before_simulation_starts() {
+        let simulation = Simulation::new_from_config(config(60)).expect("simulation");
         assert!(matches!(
-            service
+            simulation
                 .client()
                 .add_body(RigidBody::new_static(Transform::identity()))
                 .await,
-            Err(crate::runtime::asynchronous::PhysicsClientError::NotRunning)
+            Err(crate::runtime::PhysicsClientError::NotRunning)
         ));
-        let world = service.shutdown().await.expect("shutdown");
-        assert_eq!(world.body_count(), 0);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stop_waits_for_an_active_step_before_restoring_world() {
-        let mut service = PhysicsService::new_with_worker_config(
-            PhysicsWorld::new(),
-            SimulationConfig {
-                tick_rate: 100,
-                ..SimulationConfig::default()
-            },
-            worker_config(),
-        )
-        .expect("service");
-        service.start().expect("start");
+    async fn stop_completes_when_called_before_the_first_tick() {
+        let mut simulation = Simulation::new_from_config(config(100)).expect("simulation");
+        simulation.start().expect("start");
         tokio::time::advance(Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
-        service.stop().await.expect("stop");
-        assert_eq!(service.state(), SimulationState::Stopped);
-        assert!(service.world().is_ok());
+        simulation.stop().await.expect("stop");
+        assert_eq!(simulation.state(), SimulationState::Stopped);
+        assert_eq!(simulation.metrics().total_steps, 0);
+    }
+
+    #[tokio::test]
+    async fn start_twice_reports_an_invalid_transition() {
+        let mut simulation = Simulation::new().expect("simulation");
+        simulation.start().expect("start");
+        assert!(matches!(
+            simulation.start(),
+            Err(SimulationError::AlreadyRunning)
+        ));
+        simulation.stop().await.expect("stop");
     }
 }
