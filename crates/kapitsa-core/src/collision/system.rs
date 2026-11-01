@@ -232,6 +232,18 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_local_replay(&mut self, island_count: usize) {
+        self.benchmark_metrics.ccd_local_replay_count = self
+            .benchmark_metrics
+            .ccd_local_replay_count
+            .saturating_add(1);
+        self.benchmark_metrics.ccd_replayed_island_count = self
+            .benchmark_metrics
+            .ccd_replayed_island_count
+            .saturating_add(island_count);
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_worker_tasks_started(&mut self, count: usize) {
         self.benchmark_metrics.worker_tasks_started = self
             .benchmark_metrics
@@ -242,6 +254,11 @@ impl CollisionSystem {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn record_ccd_final_candidate_count(&mut self, count: usize) {
         self.benchmark_metrics.ccd_final_candidate_count = count;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_final_impact_count(&mut self, count: usize) {
+        self.benchmark_metrics.ccd_impact_count = count;
     }
 
     #[cfg(feature = "bench-internals")]
@@ -445,6 +462,75 @@ impl CollisionSystem {
 
     pub(crate) fn ccd_island_candidates(&self, island: usize) -> Option<&[usize]> {
         self.ccd_islands.candidates(island)
+    }
+
+    pub(crate) fn ccd_island_bodies(&self, island: usize) -> Option<&[usize]> {
+        self.ccd_islands.bodies(island)
+    }
+
+    pub(crate) fn append_ccd_island_bodies_to_replay(
+        &mut self,
+        island: usize,
+    ) -> Result<(), CollisionError> {
+        let (layout, context) = (&self.ccd_islands, &mut self.context);
+        let bodies = layout
+            .bodies(island)
+            .ok_or(CollisionError::InvalidContact)?;
+        context
+            .ccd_replay_bodies
+            .try_reserve(bodies.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        context.ccd_replay_bodies.extend_from_slice(bodies);
+        Ok(())
+    }
+
+    pub(crate) fn ccd_island_completed(&self, island: usize) -> Result<bool, CollisionError> {
+        let bodies = self
+            .ccd_island_bodies(island)
+            .ok_or(CollisionError::InvalidContact)?;
+        Ok(bodies.iter().all(|body| {
+            self.context
+                .ccd_completed_bodies
+                .get(*body)
+                .copied()
+                .unwrap_or(false)
+        }))
+    }
+
+    pub(crate) fn mark_ccd_island_completed(
+        &mut self,
+        island: usize,
+    ) -> Result<(), CollisionError> {
+        let bodies = self
+            .ccd_islands
+            .bodies(island)
+            .ok_or(CollisionError::InvalidContact)?;
+        for body in bodies {
+            *self
+                .context
+                .ccd_completed_bodies
+                .get_mut(*body)
+                .ok_or(CollisionError::InvalidContact)? = true;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn collect_ccd_replay_candidates(&mut self) -> Result<(), CollisionError> {
+        let (layout, context) = (&self.ccd_islands, &mut self.context);
+        let candidates = &mut context.ccd_resweep_candidates;
+        candidates.clear();
+        for body in context.ccd_replay_bodies.iter().copied() {
+            let body_candidates = layout
+                .body_candidates(body)
+                .ok_or(CollisionError::InvalidContact)?;
+            candidates
+                .try_reserve(body_candidates.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            candidates.extend_from_slice(body_candidates);
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        Ok(())
     }
 
     pub(crate) fn ccd_body_island(&self, body: usize) -> Option<usize> {

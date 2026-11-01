@@ -29,6 +29,10 @@ pub(crate) struct StepContext {
     pub(crate) ccd_elapsed: Vec<f64>,
     pub(crate) ccd_impact_counts: Vec<u32>,
     pub(crate) ccd_clipped_bodies: Vec<bool>,
+    pub(crate) ccd_completed_bodies: Vec<bool>,
+    pub(crate) ccd_replay_bodies: Vec<usize>,
+    pub(crate) ccd_replay_pairs: Vec<super::CollisionPair>,
+    pub(crate) ccd_deferred_candidates: Vec<usize>,
     #[cfg(feature = "bench-internals")]
     pub(crate) ccd_clipped_metrics: Vec<bool>,
     pub(crate) ccd_body_types: Vec<BodyType>,
@@ -68,6 +72,10 @@ impl StepContext {
             ccd_elapsed: Vec::new(),
             ccd_impact_counts: Vec::new(),
             ccd_clipped_bodies: Vec::new(),
+            ccd_completed_bodies: Vec::new(),
+            ccd_replay_bodies: Vec::new(),
+            ccd_replay_pairs: Vec::new(),
+            ccd_deferred_candidates: Vec::new(),
             #[cfg(feature = "bench-internals")]
             ccd_clipped_metrics: Vec::new(),
             ccd_body_types: Vec::new(),
@@ -105,6 +113,10 @@ impl StepContext {
         self.ccd_elapsed.clear();
         self.ccd_impact_counts.clear();
         self.ccd_clipped_bodies.clear();
+        self.ccd_completed_bodies.clear();
+        self.ccd_replay_bodies.clear();
+        self.ccd_replay_pairs.clear();
+        self.ccd_deferred_candidates.clear();
         #[cfg(feature = "bench-internals")]
         self.ccd_clipped_metrics.clear();
         self.ccd_body_types.clear();
@@ -154,6 +166,10 @@ impl StepContext {
             self.ccd_elapsed.capacity() * size_of::<f64>(),
             self.ccd_impact_counts.capacity() * size_of::<u32>(),
             self.ccd_clipped_bodies.capacity() * size_of::<bool>(),
+            self.ccd_completed_bodies.capacity() * size_of::<bool>(),
+            self.ccd_replay_bodies.capacity() * size_of::<usize>(),
+            self.ccd_replay_pairs.capacity() * size_of::<super::CollisionPair>(),
+            self.ccd_deferred_candidates.capacity() * size_of::<usize>(),
             self.ccd_clipped_metrics.capacity() * size_of::<bool>(),
             self.ccd_body_types.capacity() * size_of::<BodyType>(),
             self.ccd_continuous_bodies.capacity() * size_of::<bool>(),

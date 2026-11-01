@@ -615,7 +615,7 @@ fn report_world(
         .max()
         .unwrap_or(0);
     println!(
-        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} solver_islands={} ccd_islands={} ccd_impacts={} ccd_clipped={} clipped_bodies={} | CCD initial={} final={} toi_calls={} repeated={} broad_builds={} refreshes={} resweeps={} local/inter={} / {} visited={} proxy_updates={} new_pairs={} fallback={} recalc(local/global)={}/{} replay_islands={} tasks={} invalidated={} | ccd={:.3}/{:.3}/{:.3} ms min/median/max phases(prep/exec/commit)={:.3}/{:.3}/{:.3} search={:.3} refresh={:.3} resolve={:.3} ms | index={:.3} broad={:.3} narrow={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
+        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} solver_islands={} ccd_islands={} ccd_impacts={} ccd_clipped={} clipped_bodies={} | CCD initial={} final={} toi_calls={} repeated={} broad_builds={} refreshes={} resweeps={} local/inter={} / {} visited={} proxy_updates={} new_pairs={} fallback={} recalc(local/global)={}/{} replay(local/islands)={}/{} tasks={} invalidated={} | ccd={:.3}/{:.3}/{:.3} ms min/median/max phases(prep/exec/commit)={:.3}/{:.3}/{:.3} search={:.3} refresh={:.3} resolve={:.3} ms | index={:.3} broad={:.3} narrow={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
         millis(min.elapsed),
         millis(median.elapsed),
         millis(max.elapsed),
@@ -641,6 +641,7 @@ fn report_world(
         median.metrics.ccd_global_fallback_count,
         median.metrics.ccd_local_toi_recalculation_count,
         median.metrics.ccd_global_toi_recalculation_count,
+        median.metrics.ccd_local_replay_count,
         median.metrics.ccd_replayed_island_count,
         median.metrics.worker_tasks_started,
         median.metrics.ccd_invalidated_toi_count,

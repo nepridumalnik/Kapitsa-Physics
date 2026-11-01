@@ -652,3 +652,22 @@ contact, repeated wall impacts, a moving kinematic contact, contact-event
 publication, and `AbortStep` rollback. The full `kapitsa-core` test suite with
 `bench-internals` passed 474 unit tests, 16 integration/query/geometry tests,
 and the doctests. Core and workspace Clippy passed with warnings denied.
+
+## CCD follow-up stage 4: localized cross-island replay
+
+When a resweep discovers a dynamic pair assigned to another CCD island, the
+candidate becomes a temporary graph bridge. The engine restores and replays
+only the resulting connected component, invalidating the TOI cache and staged
+interactions for its incident candidates. Completed independent islands remain
+staged and are skipped. A bridge with no hit on the initial trajectories stays
+deferred in that component so impacts created by earlier rebounds can activate
+it later. Static and kinematic surfaces remain shared without joining dynamic
+components. Full-scene replay is retained for the bounded non-convergence path.
+
+Tests cover two independent A-to-B-to-C rebound cascades, a dependency on an
+already completed island, an independent body using the same static wall,
+deterministic impact-event ordering, and `AbortStep` rollback followed by a
+successful retry. These scenarios report local replay and zero global fallback.
+The existing layout tests also verify that shared static and kinematic bodies
+do not merge otherwise independent dynamic islands. Final release timing for
+the rebound and cascade scenes is included in the stage 9 benchmark matrix.

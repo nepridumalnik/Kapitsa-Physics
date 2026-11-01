@@ -35,6 +35,7 @@ fn connected_dynamic_chain_forms_one_island() {
 
     assert_eq!(layout.island_count(), 1);
     assert_eq!(layout.candidates(0), Some(&[0, 1, 2][..]));
+    assert_eq!(layout.bodies(0), Some(&[0, 1, 2, 3][..]));
 }
 
 #[test]

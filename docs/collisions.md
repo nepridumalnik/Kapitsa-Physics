@@ -184,6 +184,16 @@ body and applies to solver-resolved impacts; clipped bodies remain fixed at
 their contact poses for the rest of the current step. `AbortStep` returns
 `CollisionError::CcdLimitExceeded` without committing the step.
 
+When a resweep discovers a dynamic pair between CCD islands, the bridge and
+its connected components are replayed from their committed start states. Only
+TOI caches and staged interactions incident to those bodies are invalidated;
+completed independent islands keep their staged states and events. A bridge
+that is not an initial-trajectory hit remains scheduled so contacts created by
+an earlier rebound in the replay are still found. Static and kinematic bodies
+remain shared read-only surfaces and do not join dynamic islands. The engine
+retains a full-scene replay as a bounded safe fallback if local expansion does
+not converge.
+
 ## Queries
 
 - `PhysicsWorld::raycast` returns the closest `RayHit` or `None`.

@@ -619,7 +619,20 @@ fn continuous_rebound_reschedules_a_new_cross_island_pair() {
             ),
         )
         .unwrap();
-    for collider in [wall, first_collider, second_collider] {
+    let mut independent_body =
+        dynamic_body(Vec3::new(5.0, 1.25, 0.0), Vec3::new(-2_000.0, 0.0, 0.0));
+    independent_body.set_ccd_mode(CcdMode::Continuous);
+    let independent = world.add_body(independent_body).unwrap();
+    let independent_collider = world
+        .add_collider(
+            independent,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    for collider in [wall, first_collider, second_collider, independent_collider] {
         world
             .set_collider_material(collider, Some(material))
             .unwrap();
@@ -629,7 +642,8 @@ fn continuous_rebound_reschedules_a_new_cross_island_pair() {
 
     let wall_pair = CollisionPair::new(wall, first_collider).unwrap();
     let dynamic_pair = CollisionPair::new(first_collider, second_collider).unwrap();
-    for pair in [wall_pair, dynamic_pair] {
+    let independent_pair = CollisionPair::new(wall, independent_collider).unwrap();
+    for pair in [wall_pair, dynamic_pair, independent_pair] {
         assert!(world.collision_events().iter().any(|event| {
             event.kind == CollisionEventKind::Impact
                 && event.pair == pair
@@ -640,12 +654,262 @@ fn continuous_rebound_reschedules_a_new_cross_island_pair() {
     }
 
     let metrics = world.collision_step_metrics();
-    assert_eq!(metrics.ccd_initial_candidate_count, 1);
-    assert_eq!(metrics.ccd_final_candidate_count, 2);
-    assert_eq!(metrics.ccd_new_candidate_count, 1);
-    assert_eq!(metrics.ccd_global_fallback_count, 1);
-    assert_eq!(metrics.ccd_impact_count, 2);
-    assert_eq!(metrics.ccd_island_count, 1);
+    assert_eq!(metrics.ccd_initial_candidate_count, 3);
+    assert!(metrics.ccd_final_candidate_count > metrics.ccd_initial_candidate_count);
+    assert!(metrics.ccd_new_candidate_count > 0);
+    assert_eq!(metrics.ccd_global_fallback_count, 0);
+    assert!(metrics.ccd_local_replay_count > 0);
+    assert_eq!(metrics.ccd_impact_count, 3);
+    assert!(metrics.ccd_island_count > 0);
+    assert!(world.body(independent).unwrap().state().linear_velocity().x > 0.0);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn continuous_rebound_locally_replays_a_cascade_of_dynamic_islands() {
+    let mut world = PhysicsWorld::new();
+    let material = world
+        .add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0).unwrap())
+        .unwrap();
+    let wall_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let wall = world
+        .add_collider(
+            wall_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    let mut first_body = dynamic_body(Vec3::new(5.0, 0.0, 0.0), Vec3::new(-2_000.0, 0.0, 0.0));
+    first_body.set_ccd_mode(CcdMode::Continuous);
+    let first = world.add_body(first_body).unwrap();
+    let first_collider = world
+        .add_collider(
+            first,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    let mut second_body = dynamic_body(Vec3::new(13.0, 0.0, 0.0), Vec3::ZERO);
+    second_body.set_ccd_mode(CcdMode::Continuous);
+    let second = world.add_body(second_body).unwrap();
+    let second_collider = world
+        .add_collider(
+            second,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    let mut third_body = dynamic_body(Vec3::new(16.3, 0.0, 0.0), Vec3::ZERO);
+    third_body.set_ccd_mode(CcdMode::Continuous);
+    let third = world.add_body(third_body).unwrap();
+    let third_collider = world
+        .add_collider(
+            third,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    for collider in [wall, first_collider, second_collider, third_collider] {
+        world
+            .set_collider_material(collider, Some(material))
+            .unwrap();
+    }
+
+    let second_wall_body = world
+        .add_body(RigidBody::new_static(
+            Transform::new(Vec3::new(0.0, 10.0, 0.0), Quat::IDENTITY).unwrap(),
+        ))
+        .unwrap();
+    let second_wall = world
+        .add_collider(
+            second_wall_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    let mut second_chain = Vec::with_capacity(3);
+    for (x, velocity) in [(5.0, -2_000.0), (13.0, 0.0), (16.3, 0.0)] {
+        let mut body = dynamic_body(Vec3::new(x, 10.0, 0.0), Vec3::new(velocity, 0.0, 0.0));
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body).unwrap();
+        second_chain.push(
+            world
+                .add_collider(
+                    body,
+                    Collider::new(
+                        Shape::Sphere(Sphere::new(0.5).unwrap()),
+                        Transform::identity(),
+                    ),
+                )
+                .unwrap(),
+        );
+    }
+    for collider in [
+        second_wall,
+        second_chain[0],
+        second_chain[1],
+        second_chain[2],
+    ] {
+        world
+            .set_collider_material(collider, Some(material))
+            .unwrap();
+    }
+
+    world.step(0.01).unwrap();
+
+    let expected_pairs = [
+        CollisionPair::new(wall, first_collider).unwrap(),
+        CollisionPair::new(first_collider, second_collider).unwrap(),
+        CollisionPair::new(second_collider, third_collider).unwrap(),
+        CollisionPair::new(second_wall, second_chain[0]).unwrap(),
+        CollisionPair::new(second_chain[0], second_chain[1]).unwrap(),
+        CollisionPair::new(second_chain[1], second_chain[2]).unwrap(),
+    ];
+    let impact_pairs = world
+        .collision_events()
+        .iter()
+        .filter(|event| event.kind == CollisionEventKind::Impact)
+        .map(|event| event.pair)
+        .collect::<Vec<_>>();
+    assert_eq!(impact_pairs, expected_pairs);
+    assert!(world.body(third).unwrap().state().linear_velocity().x > 0.0);
+    let metrics = world.collision_step_metrics();
+    assert!(metrics.ccd_local_replay_count >= 4);
+    assert_eq!(metrics.ccd_global_fallback_count, 0);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn continuous_rebound_replays_an_already_completed_island() {
+    let mut world = PhysicsWorld::new();
+    let material = world
+        .add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0).unwrap())
+        .unwrap();
+    let make_wall = |world: &mut PhysicsWorld, x| {
+        let body = world
+            .add_body(RigidBody::new_static(
+                Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY).unwrap(),
+            ))
+            .unwrap();
+        world
+            .add_collider(
+                body,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).unwrap()),
+                    Transform::identity(),
+                ),
+            )
+            .unwrap()
+    };
+    let left_wall = make_wall(&mut world, 0.0);
+    let right_wall = make_wall(&mut world, 18.0);
+
+    let mut completed_body = dynamic_body(Vec3::new(13.0, 0.0, 0.0), Vec3::new(2_000.0, 0.0, 0.0));
+    completed_body.set_ccd_mode(CcdMode::Continuous);
+    let completed = world.add_body(completed_body).unwrap();
+    let completed_collider = world
+        .add_collider(
+            completed,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    let mut rebound_body = dynamic_body(Vec3::new(5.0, 0.0, 0.0), Vec3::new(-2_000.0, 0.0, 0.0));
+    rebound_body.set_ccd_mode(CcdMode::Continuous);
+    let rebound = world.add_body(rebound_body).unwrap();
+    let rebound_collider = world
+        .add_collider(
+            rebound,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    for collider in [left_wall, right_wall, completed_collider, rebound_collider] {
+        world
+            .set_collider_material(collider, Some(material))
+            .unwrap();
+    }
+
+    let before_completed = *world.body(completed).unwrap().state();
+    let before_rebound = *world.body(rebound).unwrap().state();
+    world
+        .set_collision_config(CollisionConfig {
+            max_ccd_impacts: 1,
+            ccd_limit_policy: CcdLimitPolicy::AbortStep,
+            ..world.collision_config()
+        })
+        .unwrap();
+    assert_eq!(
+        world.step(0.01),
+        Err(crate::world::StepError::Collision(
+            CollisionError::CcdLimitExceeded
+        ))
+    );
+    assert_eq!(*world.body(completed).unwrap().state(), before_completed);
+    assert_eq!(*world.body(rebound).unwrap().state(), before_rebound);
+    assert!(world.collision_events().is_empty());
+    world
+        .set_collision_config(CollisionConfig {
+            max_ccd_impacts: 2,
+            ..world.collision_config()
+        })
+        .unwrap();
+
+    world.step(0.01).unwrap();
+
+    let expected_pairs = [
+        CollisionPair::new(left_wall, rebound_collider).unwrap(),
+        CollisionPair::new(right_wall, completed_collider).unwrap(),
+        CollisionPair::new(completed_collider, rebound_collider).unwrap(),
+    ];
+    let impact_pairs = world
+        .collision_events()
+        .iter()
+        .filter(|event| event.kind == CollisionEventKind::Impact)
+        .map(|event| event.pair)
+        .collect::<Vec<_>>();
+    assert_eq!(impact_pairs, expected_pairs);
+    assert!(
+        world
+            .body(completed)
+            .unwrap()
+            .state()
+            .transform()
+            .translation()
+            .is_finite()
+    );
+    assert!(
+        world
+            .body(rebound)
+            .unwrap()
+            .state()
+            .transform()
+            .translation()
+            .is_finite()
+    );
+    let metrics = world.collision_step_metrics();
+    assert!(metrics.ccd_local_replay_count > 0);
+    assert_eq!(metrics.ccd_global_fallback_count, 0);
 }
 
 #[test]

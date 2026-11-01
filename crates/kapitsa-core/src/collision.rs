@@ -104,6 +104,8 @@ pub struct CollisionStepMetrics {
     pub ccd_local_toi_recalculation_count: usize,
     /// Candidate TOIs invalidated by full-scene CCD replay.
     pub ccd_global_toi_recalculation_count: usize,
+    /// Local replays of connected CCD island components.
+    pub ccd_local_replay_count: usize,
     /// Number of CCD islands reprocessed by local or global replay.
     pub ccd_replayed_island_count: usize,
     /// Worker tasks launched by collision preparation or solving.
@@ -172,6 +174,7 @@ impl CollisionStepMetrics {
         ccd_interisland_resweep_count: 0,
         ccd_local_toi_recalculation_count: 0,
         ccd_global_toi_recalculation_count: 0,
+        ccd_local_replay_count: 0,
         ccd_replayed_island_count: 0,
         worker_tasks_started: 0,
         ccd_new_candidate_count: 0,

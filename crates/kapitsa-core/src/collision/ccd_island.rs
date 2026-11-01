@@ -13,6 +13,8 @@ pub(crate) struct CcdIslandLayout {
     candidate_islands: Vec<Option<usize>>,
     candidate_offsets: Vec<usize>,
     candidate_indices: Vec<usize>,
+    island_body_offsets: Vec<usize>,
+    island_body_indices: Vec<usize>,
     write_offsets: Vec<usize>,
     body_candidate_offsets: Vec<usize>,
     body_candidate_indices: Vec<usize>,
@@ -29,6 +31,8 @@ impl CcdIslandLayout {
             candidate_islands: Vec::new(),
             candidate_offsets: Vec::new(),
             candidate_indices: Vec::new(),
+            island_body_offsets: Vec::new(),
+            island_body_indices: Vec::new(),
             write_offsets: Vec::new(),
             body_candidate_offsets: Vec::new(),
             body_candidate_indices: Vec::new(),
@@ -179,6 +183,35 @@ impl CcdIslandLayout {
             }
         }
 
+        resize_with_reserve(&mut self.island_body_offsets, self.island_count + 1, 0)?;
+        self.island_body_offsets.fill(0);
+        for island in self.body_islands.iter().flatten().copied() {
+            self.island_body_offsets[island + 1] = self.island_body_offsets[island + 1]
+                .checked_add(1)
+                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+        }
+        for island in 0..self.island_count {
+            self.island_body_offsets[island + 1] = self.island_body_offsets[island + 1]
+                .checked_add(self.island_body_offsets[island])
+                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+        }
+        let island_body_count = *self
+            .island_body_offsets
+            .last()
+            .ok_or(CollisionError::InvalidContact)?;
+        resize_with_reserve(&mut self.island_body_indices, island_body_count, 0)?;
+        resize_with_reserve(&mut self.write_offsets, self.island_count, 0)?;
+        self.write_offsets
+            .copy_from_slice(&self.island_body_offsets[..self.island_count]);
+        for (body, island) in self.body_islands.iter().copied().enumerate() {
+            let Some(island) = island else {
+                continue;
+            };
+            let write_index = self.write_offsets[island];
+            self.island_body_indices[write_index] = body;
+            self.write_offsets[island] += 1;
+        }
+
         resize_with_reserve(&mut self.candidate_offsets, self.island_count + 1, 0)?;
         self.candidate_offsets.fill(0);
         for island_index in self.candidate_islands.iter().flatten().copied() {
@@ -273,6 +306,12 @@ impl CcdIslandLayout {
         self.candidate_indices.get(start..end)
     }
 
+    pub(crate) fn bodies(&self, island: usize) -> Option<&[usize]> {
+        let start = *self.island_body_offsets.get(island)?;
+        let end = *self.island_body_offsets.get(island + 1)?;
+        self.island_body_indices.get(start..end)
+    }
+
     pub(crate) fn body_island(&self, body: usize) -> Option<usize> {
         self.body_islands.get(body).copied().flatten()
     }
@@ -294,6 +333,8 @@ impl CcdIslandLayout {
             + self.candidate_islands.capacity() * size_of::<Option<usize>>()
             + self.candidate_offsets.capacity() * size_of::<usize>()
             + self.candidate_indices.capacity() * size_of::<usize>()
+            + self.island_body_offsets.capacity() * size_of::<usize>()
+            + self.island_body_indices.capacity() * size_of::<usize>()
             + self.write_offsets.capacity() * size_of::<usize>()
             + self.body_candidate_offsets.capacity() * size_of::<usize>()
             + self.body_candidate_indices.capacity() * size_of::<usize>()
