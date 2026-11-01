@@ -124,6 +124,21 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_island_prepare(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.ccd_island_prepare += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_island_execute(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.ccd_island_execute += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_island_commit(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.ccd_island_commit += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_ccd_impact(&mut self) {
         self.benchmark_metrics.ccd_impact_count =
             self.benchmark_metrics.ccd_impact_count.saturating_add(1);
@@ -138,6 +153,14 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_clipped_body(&mut self) {
+        self.benchmark_metrics.ccd_clipped_body_count = self
+            .benchmark_metrics
+            .ccd_clipped_body_count
+            .saturating_add(1);
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_ccd_toi_search(&mut self, elapsed: std::time::Duration) {
         self.benchmark_metrics.ccd_toi_search += elapsed;
     }
@@ -147,10 +170,32 @@ impl CollisionSystem {
         &mut self,
         elapsed: std::time::Duration,
         invalidated_count: usize,
+        colliders_visited: usize,
+        proxies_updated: usize,
+        found_interisland_dependency: bool,
     ) {
         self.benchmark_metrics.ccd_candidate_refresh += elapsed;
         self.benchmark_metrics.ccd_resweep_count =
             self.benchmark_metrics.ccd_resweep_count.saturating_add(1);
+        self.benchmark_metrics.ccd_resweep_colliders_visited = self
+            .benchmark_metrics
+            .ccd_resweep_colliders_visited
+            .saturating_add(colliders_visited);
+        self.benchmark_metrics.ccd_resweep_proxies_updated = self
+            .benchmark_metrics
+            .ccd_resweep_proxies_updated
+            .saturating_add(proxies_updated);
+        if found_interisland_dependency {
+            self.benchmark_metrics.ccd_interisland_resweep_count = self
+                .benchmark_metrics
+                .ccd_interisland_resweep_count
+                .saturating_add(1);
+        } else {
+            self.benchmark_metrics.ccd_local_resweep_count = self
+                .benchmark_metrics
+                .ccd_local_resweep_count
+                .saturating_add(1);
+        }
         self.benchmark_metrics.ccd_invalidated_toi_count = self
             .benchmark_metrics
             .ccd_invalidated_toi_count
@@ -158,12 +203,40 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
-    pub(crate) fn record_ccd_global_fallback(&mut self) {
+    pub(crate) fn record_ccd_local_recalculation(&mut self, candidate_count: usize) {
+        self.benchmark_metrics.ccd_local_toi_recalculation_count = self
+            .benchmark_metrics
+            .ccd_local_toi_recalculation_count
+            .saturating_add(candidate_count);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_global_fallback(
+        &mut self,
+        candidate_count: usize,
+        island_count: usize,
+    ) {
         self.benchmark_metrics.ccd_global_fallback_count = self
             .benchmark_metrics
             .ccd_global_fallback_count
             .saturating_add(1);
+        self.benchmark_metrics.ccd_global_toi_recalculation_count = self
+            .benchmark_metrics
+            .ccd_global_toi_recalculation_count
+            .saturating_add(candidate_count);
+        self.benchmark_metrics.ccd_replayed_island_count = self
+            .benchmark_metrics
+            .ccd_replayed_island_count
+            .saturating_add(island_count);
         self.benchmark_metrics.ccd_impact_count = 0;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_worker_tasks_started(&mut self, count: usize) {
+        self.benchmark_metrics.worker_tasks_started = self
+            .benchmark_metrics
+            .worker_tasks_started
+            .saturating_add(count);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -485,7 +558,7 @@ impl CollisionSystem {
         &mut self,
         collider: ColliderId,
         bounds: Option<Aabb>,
-    ) -> Result<usize, CollisionError> {
+    ) -> Result<(usize, usize), CollisionError> {
         let proxy_index = self
             .broad_phase
             .proxy_index(collider)
@@ -498,10 +571,12 @@ impl CollisionSystem {
 
         let (spatial_index, context) = (&mut self.spatial_index, &mut self.context);
         context.ccd_query_results.clear();
+        let mut colliders_visited = 0;
         if let Some(bounds) = bounds {
             let index = spatial_index.get_or_insert_with(SpatialIndex::new);
             index.update(collider, bounds)?;
             index.query(bounds, &mut context.ccd_query_results)?;
+            colliders_visited = context.colliders.len();
             for proxy in context
                 .colliders
                 .iter()
@@ -516,7 +591,7 @@ impl CollisionSystem {
         } else if let Some(index) = spatial_index.as_mut() {
             index.remove(collider)?;
         }
-        Ok(context.ccd_query_results.len())
+        Ok((context.ccd_query_results.len(), colliders_visited))
     }
 
     pub(crate) fn add_ccd_candidate(
@@ -763,6 +838,8 @@ impl CollisionSystem {
         } else {
             let worker_count = worker_count.min(island_count);
             let chunk_size = island_count.div_ceil(worker_count);
+            #[cfg(feature = "bench-internals")]
+            self.record_worker_tasks_started(island_count.div_ceil(chunk_size));
             std::thread::scope(|scope| {
                 let mut workers = Vec::new();
                 workers

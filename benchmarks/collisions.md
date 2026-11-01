@@ -579,3 +579,32 @@ existing same-machine sweep comparison remains 240.198 ms baseline to
 The final refactor review, architecture limitations, implementation size,
 commit list, and validation matrix are in
 [`docs/reviews/ccd-chaos-refactoring-report.md`](../docs/reviews/ccd-chaos-refactoring-report.md).
+
+## CCD follow-up baseline: static-scene resweep cost
+
+This baseline was measured from the completed CCD refactor at commit
+`038e4d4` before the follow-up optimizations. Release benchmark settings were
+one warm-up and five samples at `dt = 1/60 s`; the table reports min/median/max.
+The new mixed scenes contain 20,000 static collider proxies and 64, 128, or
+256 independent dynamic CCD spheres. One quarter of the dynamic spheres hit a
+wall; the rest have no obstacle.
+
+| Scene | Step min / median / max | CCD min / median / max | CCD islands / candidates / TOI calls / impacts | Resweeps | Proxy visits | Proxies updated | Local / global TOI recalculations | Retained scratch |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 64 fast spheres vs. wall | 0.685 / 0.690 / 0.700 ms | 0.542 / 0.545 / 0.556 ms | 64 / 64 / 64 / 64 | 64 | 8,320 | 64 | 0 / 0 | 171 KiB |
+| 20k statics + 64 mixed | 21.793 / 22.172 / 22.896 ms | 0.654 / 0.669 / 0.690 ms | 16 / 16 / 16 / 16 | 16 | 642,048 | 16 | 0 / 0 | 12,396 KiB |
+| 20k statics + 128 mixed | 22.298 / 23.140 / 23.460 ms | 1.300 / 1.329 / 1.364 ms | 32 / 32 / 32 / 32 | 32 | 1,288,192 | 32 | 0 / 0 | 12,467 KiB |
+| 20k statics + 256 mixed | 23.725 / 24.126 / 24.787 ms | 2.550 / 2.607 / 2.659 ms | 64 / 64 / 64 / 64 | 64 | 2,592,768 | 64 | 0 / 0 | 12,609 KiB |
+
+Each changed body causes two full proxy-list passes in the existing resweep:
+one to find that body's colliders, then another to locate unbounded colliders.
+The visit totals are exactly `2 * 20,064 proxies * impacts`. As a result,
+resweep refresh time grows from 0.506 ms at 16 impacts to 2.008 ms at 64,
+despite updating only one proxy per impact. This isolates a CCD cost that is
+linear in unrelated static proxies and motivates the next linked-list and
+unbounded-proxy lookup change.
+
+The full step exceeds a 16.67 ms frame at this scene size, but CCD accounts for
+0.669–2.607 ms of the median step; spatial index construction and broadphase
+account for roughly 21 ms combined. Those timings are recorded as context and
+are outside this resweep optimization's scope.

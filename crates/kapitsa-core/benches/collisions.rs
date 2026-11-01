@@ -44,6 +44,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("HeightField + colliders", height_field_scene),
         ("LevelSet + colliders", level_set_scene),
         ("CCD fast bodies", ccd_scene),
+        ("CCD 20k statics + 64 mixed", || ccd_static_load_scene(64)),
+        ("CCD 20k statics + 128 mixed", || ccd_static_load_scene(128)),
+        ("CCD 20k statics + 256 mixed", || ccd_static_load_scene(256)),
         ("CCD fast no-contact candidates", ccd_no_contact_scene),
         ("CCD one large island", ccd_large_island_scene),
         ("CCD sequential wall bounces", ccd_sequence_scene),
@@ -230,6 +233,46 @@ fn ccd_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
         add_sphere_with_velocity(
             &mut world,
             Vec3::new(-5.0, y, z),
+            Vec3::new(1000.0, 0.0, 0.0),
+            mass,
+            true,
+        )?;
+    }
+    Ok(world)
+}
+
+fn ccd_static_load_scene(dynamic_count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let static_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let impact_count = dynamic_count / 4;
+
+    for index in 0..20_000 - impact_count {
+        let x = 10_000.0 + (index % 200) as f64 * 2.0;
+        let y = (index / 200) as f64 * 2.0;
+        world.add_collider(
+            static_body,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5)?),
+                Transform::new(Vec3::new(x, y, 0.0), Quat::IDENTITY)?,
+            ),
+        )?;
+    }
+    for index in 0..impact_count {
+        let y = index as f64 * 4.0;
+        world.add_collider(
+            static_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 1.0, 1.0)?),
+                Transform::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY)?,
+            ),
+        )?;
+    }
+
+    let mass = mass()?;
+    for index in 0..dynamic_count {
+        add_sphere_with_velocity(
+            &mut world,
+            Vec3::new(-5.0, index as f64 * 4.0, 0.0),
             Vec3::new(1000.0, 0.0, 0.0),
             mass,
             true,
@@ -560,7 +603,7 @@ fn report_world(
         .max()
         .unwrap_or(0);
     println!(
-        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} solver_islands={} ccd_islands={} ccd_impacts={} ccd_clipped={} | CCD initial={} final={} toi_calls={} repeated={} broad_builds={} refreshes={} resweeps={} new_pairs={} fallback={} invalidated={} | ccd={:.3}/{:.3}/{:.3} ms min/median/max search={:.3} refresh={:.3} resolve={:.3} ms | index={:.3} broad={:.3} narrow={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
+        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} solver_islands={} ccd_islands={} ccd_impacts={} ccd_clipped={} clipped_bodies={} | CCD initial={} final={} toi_calls={} repeated={} broad_builds={} refreshes={} resweeps={} local/inter={} / {} visited={} proxy_updates={} new_pairs={} fallback={} recalc(local/global)={}/{} replay_islands={} tasks={} invalidated={} | ccd={:.3}/{:.3}/{:.3} ms min/median/max phases(prep/exec/commit)={:.3}/{:.3}/{:.3} search={:.3} refresh={:.3} resolve={:.3} ms | index={:.3} broad={:.3} narrow={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
         millis(min.elapsed),
         millis(median.elapsed),
         millis(max.elapsed),
@@ -570,6 +613,7 @@ fn report_world(
         median.metrics.ccd_island_count,
         median.metrics.ccd_impact_count,
         median.metrics.ccd_clipped_island_count,
+        median.metrics.ccd_clipped_body_count,
         median.metrics.ccd_initial_candidate_count,
         median.metrics.ccd_final_candidate_count,
         median.metrics.ccd_toi_call_count,
@@ -577,12 +621,23 @@ fn report_world(
         median.metrics.ccd_broad_phase_build_count,
         median.metrics.ccd_candidate_refresh_count,
         median.metrics.ccd_resweep_count,
+        median.metrics.ccd_local_resweep_count,
+        median.metrics.ccd_interisland_resweep_count,
+        median.metrics.ccd_resweep_colliders_visited,
+        median.metrics.ccd_resweep_proxies_updated,
         median.metrics.ccd_new_candidate_count,
         median.metrics.ccd_global_fallback_count,
+        median.metrics.ccd_local_toi_recalculation_count,
+        median.metrics.ccd_global_toi_recalculation_count,
+        median.metrics.ccd_replayed_island_count,
+        median.metrics.worker_tasks_started,
         median.metrics.ccd_invalidated_toi_count,
         millis(ccd_samples[0]),
         millis(ccd_samples[SAMPLES / 2]),
         millis(ccd_samples[SAMPLES - 1]),
+        millis(median.metrics.ccd_island_prepare),
+        millis(median.metrics.ccd_island_execute),
+        millis(median.metrics.ccd_island_commit),
         millis(median.metrics.ccd_toi_search),
         millis(median.metrics.ccd_candidate_refresh),
         millis(median.metrics.ccd_contact_resolution),

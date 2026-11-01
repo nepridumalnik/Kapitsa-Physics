@@ -1034,6 +1034,8 @@ impl PhysicsWorld {
                     && body.ccd_mode() == CcdMode::Continuous,
             );
         }
+        #[cfg(feature = "bench-internals")]
+        let ccd_prepare_started = Instant::now();
         self.rebuild_ccd_candidate_bodies()?;
         let mut force_single_island = false;
         self.collision_system
@@ -1054,7 +1056,12 @@ impl PhysicsWorld {
         }
         self.precompute_ccd_tois_parallel(dt, worker_count)?;
         self.collision_system.build_ccd_islands(false)?;
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_ccd_island_prepare(ccd_prepare_started.elapsed());
 
+        #[cfg(feature = "bench-internals")]
+        let ccd_execute_started = Instant::now();
         let time_tolerance = f64::EPSILON * dt.max(1.0) * 128.0;
         'passes: loop {
             let mut island_index = 0;
@@ -1496,6 +1503,8 @@ impl PhysicsWorld {
                         .checked_add(point_b)
                         .and_then(|sum| sum.checked_mul_scalar(0.5))
                         .ok_or(CollisionError::ArithmeticOverflow)?;
+                    #[cfg(feature = "bench-internals")]
+                    let island_commit_started = Instant::now();
                     upsert_interaction(
                         &mut self.collision_system.context.interactions,
                         &mut self.collision_system.context.interaction_indices,
@@ -1548,6 +1557,9 @@ impl PhysicsWorld {
                     {
                         self.collision_system.context.ccd_impact_counts[prediction_b] += 1;
                     }
+                    #[cfg(feature = "bench-internals")]
+                    self.collision_system
+                        .record_ccd_island_commit(island_commit_started.elapsed());
                     let body_a_dynamic = body_a.physics().body_type() == BodyType::Dynamic;
                     let body_b_dynamic = body_b.physics().body_type() == BodyType::Dynamic;
                     if impact_elapsed
@@ -1580,6 +1592,7 @@ impl PhysicsWorld {
                         )?;
                         let invalidated_count = self.collision_system.ccd_resweep_candidate_count();
                         let new_ccd_candidates = self.resweep_ccd_bodies(
+                            island_index,
                             [
                                 (body_a_id, prediction_a, body_a_dynamic),
                                 (body_b_id, prediction_b, body_b_dynamic),
@@ -1653,6 +1666,8 @@ impl PhysicsWorld {
                                     dt,
                                     &mut narrow_phase,
                                 )?;
+                                #[cfg(feature = "bench-internals")]
+                                self.collision_system.record_ccd_local_recalculation(1);
                                 self.collision_system.context.ccd_toi_cache[candidate_index] = toi;
                                 if toi.hit.is_some() {
                                     layout_changed |=
@@ -1685,7 +1700,10 @@ impl PhysicsWorld {
                             if cross_island && !force_single_island {
                                 force_single_island = true;
                                 #[cfg(feature = "bench-internals")]
-                                self.collision_system.record_ccd_global_fallback();
+                                self.collision_system.record_ccd_global_fallback(
+                                    self.collision_system.ccd_candidate_count(),
+                                    self.collision_system.ccd_island_count(),
+                                );
                                 self.reset_ccd_pass(dt, force_single_island)?;
                                 restart_pass = true;
                                 break;
@@ -1704,6 +1722,9 @@ impl PhysicsWorld {
             }
             break;
         }
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_ccd_island_execute(ccd_execute_started.elapsed());
         #[cfg(feature = "bench-internals")]
         self.collision_system
             .record_ccd_final_candidate_count(self.collision_system.candidate_count());
@@ -1729,6 +1750,9 @@ impl PhysicsWorld {
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
         let chunk_size = island_count.div_ceil(worker_count);
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_worker_tasks_started(island_count.div_ceil(chunk_size));
         let shared_world = &*self;
         let evaluated = std::thread::scope(|scope| {
             let mut workers = Vec::new();
@@ -2121,6 +2145,7 @@ impl PhysicsWorld {
 
     fn resweep_ccd_bodies(
         &mut self,
+        _island_index: usize,
         bodies: [(BodyId, usize, bool); 2],
         elapsed: f64,
         dt: f64,
@@ -2129,6 +2154,12 @@ impl PhysicsWorld {
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
         let mut new_ccd_candidates = 0;
+        #[cfg(feature = "bench-internals")]
+        let mut colliders_visited = 0_usize;
+        #[cfg(feature = "bench-internals")]
+        let mut proxies_updated = 0_usize;
+        #[cfg(feature = "bench-internals")]
+        let mut found_interisland_dependency = false;
         let proxy_count = self.collision_system.context.colliders.len();
 
         for (body_id, prediction_index, changed) in bodies {
@@ -2150,6 +2181,10 @@ impl PhysicsWorld {
                 .ok_or(CollisionError::InvalidContact)?;
 
             for proxy_index in 0..proxy_count {
+                #[cfg(feature = "bench-internals")]
+                {
+                    colliders_visited = colliders_visited.saturating_add(1);
+                }
                 let proxy = self
                     .collision_system
                     .context
@@ -2159,6 +2194,10 @@ impl PhysicsWorld {
                     .ok_or(CollisionError::InvalidContact)?;
                 if proxy.body != body_id {
                     continue;
+                }
+                #[cfg(feature = "bench-internals")]
+                {
+                    proxies_updated = proxies_updated.saturating_add(1);
                 }
                 let bounds = {
                     let collider_entry = self
@@ -2180,9 +2219,14 @@ impl PhysicsWorld {
                     };
                     swept_bounds_for_trajectory(&collider_entry.collider, &trajectory, end_state)?
                 };
-                let query_count = self
+                let (query_count, _unbounded_colliders_visited) = self
                     .collision_system
                     .prepare_ccd_resweep_proxy(proxy.collider, bounds)?;
+                #[cfg(feature = "bench-internals")]
+                {
+                    colliders_visited =
+                        colliders_visited.saturating_add(_unbounded_colliders_visited);
+                }
                 for query_index in 0..query_count {
                     let other_id = self
                         .collision_system
@@ -2219,14 +2263,27 @@ impl PhysicsWorld {
                         .add_ccd_candidate(pair, body_a, body_b)?;
                     if added && is_ccd {
                         new_ccd_candidates += 1;
+                        #[cfg(feature = "bench-internals")]
+                        if self.collision_system.context.ccd_body_types[other_prediction]
+                            == BodyType::Dynamic
+                            && self.collision_system.ccd_body_island(other_prediction)
+                                != Some(_island_index)
+                        {
+                            found_interisland_dependency = true;
+                        }
                     }
                 }
             }
         }
 
         #[cfg(feature = "bench-internals")]
-        self.collision_system
-            .record_ccd_resweep(started.elapsed(), _invalidated_count);
+        self.collision_system.record_ccd_resweep(
+            started.elapsed(),
+            _invalidated_count,
+            colliders_visited,
+            proxies_updated,
+            found_interisland_dependency,
+        );
         Ok(new_ccd_candidates)
     }
 
@@ -2344,10 +2401,16 @@ impl PhysicsWorld {
                 .map_err(|_| CollisionError::ArithmeticOverflow)?;
             let clipped_state = *body.state();
             let context = &mut self.collision_system.context;
+            #[cfg(feature = "bench-internals")]
+            let newly_clipped = !context.ccd_clipped_bodies[prediction];
             context.ccd_states[prediction] = clipped_state;
             context.ccd_elapsed[prediction] = elapsed;
             context.ccd_clipped_bodies[prediction] = true;
             context.predicted_states[prediction].1 = clipped_state;
+            #[cfg(feature = "bench-internals")]
+            if newly_clipped {
+                self.collision_system.record_ccd_clipped_body();
+            }
         }
         Ok(())
     }

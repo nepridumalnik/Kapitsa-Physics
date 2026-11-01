@@ -48,6 +48,12 @@ pub struct CollisionStepMetrics {
     pub ccd_candidate_refresh: Duration,
     /// Time spent constructing and solving CCD contacts.
     pub ccd_contact_resolution: Duration,
+    /// Time spent building CCD islands and preparing their initial TOIs.
+    pub ccd_island_prepare: Duration,
+    /// Time spent processing CCD islands, including local resweeps.
+    pub ccd_island_execute: Duration,
+    /// Time spent publishing CCD impacts into staged step results.
+    pub ccd_island_commit: Duration,
     /// Time spent on discrete narrowphase contact generation.
     pub narrow_phase: Duration,
     /// Time spent assigning contacts to deterministic islands.
@@ -72,6 +78,8 @@ pub struct CollisionStepMetrics {
     pub ccd_impact_count: usize,
     /// Number of CCD islands clipped after reaching the impact budget.
     pub ccd_clipped_island_count: usize,
+    /// Number of dynamic bodies stopped after reaching the impact budget.
+    pub ccd_clipped_body_count: usize,
     /// Candidate pairs present when CCD processing began.
     pub ccd_initial_candidate_count: usize,
     /// Number of TOI evaluations performed by the CCD solver.
@@ -84,6 +92,22 @@ pub struct CollisionStepMetrics {
     pub ccd_candidate_refresh_count: usize,
     /// Number of changed-body selective resweeps.
     pub ccd_resweep_count: usize,
+    /// Number of collider proxies inspected while looking up changed bodies.
+    pub ccd_resweep_colliders_visited: usize,
+    /// Number of changed-body collider proxies sent through spatial-index update.
+    pub ccd_resweep_proxies_updated: usize,
+    /// Resweep calls that found no dependency on another CCD island.
+    pub ccd_local_resweep_count: usize,
+    /// Resweep calls that discovered a dynamic dependency on another island.
+    pub ccd_interisland_resweep_count: usize,
+    /// Candidate TOIs recalculated by selective local resweeps.
+    pub ccd_local_toi_recalculation_count: usize,
+    /// Candidate TOIs invalidated by full-scene CCD replay.
+    pub ccd_global_toi_recalculation_count: usize,
+    /// Number of CCD islands reprocessed by local or global replay.
+    pub ccd_replayed_island_count: usize,
+    /// Worker tasks launched by collision preparation or solving.
+    pub worker_tasks_started: usize,
     /// Number of new pairs found during selective resweeps.
     pub ccd_new_candidate_count: usize,
     /// Number of full sequential restarts after a cross-island dependency.
@@ -120,6 +144,9 @@ impl CollisionStepMetrics {
         ccd_toi_search: Duration::ZERO,
         ccd_candidate_refresh: Duration::ZERO,
         ccd_contact_resolution: Duration::ZERO,
+        ccd_island_prepare: Duration::ZERO,
+        ccd_island_execute: Duration::ZERO,
+        ccd_island_commit: Duration::ZERO,
         narrow_phase: Duration::ZERO,
         island_build: Duration::ZERO,
         solver: Duration::ZERO,
@@ -132,12 +159,21 @@ impl CollisionStepMetrics {
         contact_count: 0,
         ccd_impact_count: 0,
         ccd_clipped_island_count: 0,
+        ccd_clipped_body_count: 0,
         ccd_initial_candidate_count: 0,
         ccd_toi_call_count: 0,
         ccd_repeated_toi_call_count: 0,
         ccd_broad_phase_build_count: 0,
         ccd_candidate_refresh_count: 0,
         ccd_resweep_count: 0,
+        ccd_resweep_colliders_visited: 0,
+        ccd_resweep_proxies_updated: 0,
+        ccd_local_resweep_count: 0,
+        ccd_interisland_resweep_count: 0,
+        ccd_local_toi_recalculation_count: 0,
+        ccd_global_toi_recalculation_count: 0,
+        ccd_replayed_island_count: 0,
+        worker_tasks_started: 0,
         ccd_new_candidate_count: 0,
         ccd_global_fallback_count: 0,
         ccd_invalidated_toi_count: 0,
