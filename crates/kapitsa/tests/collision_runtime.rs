@@ -1,18 +1,13 @@
 use std::time::Duration;
 
-use kapitsa::runtime::{
-    CollisionEventBatch, PhysicsClient, Simulation, SimulationConfig, WorkerConfig,
+use kapitsa::math::{Mat3, Quat, Vec3};
+use kapitsa::query::{QueryFilter, Ray};
+use kapitsa::shape::{Cuboid, Sphere};
+use kapitsa::{
+    BodyId, CcdMode, Collider, ColliderId, CollisionEventBatch, CollisionEventKind,
+    CollisionEvents, MassProperties, PhysicsClient, RigidBody, Shape, Simulation, SimulationConfig,
+    Transform, WorkerConfig,
 };
-use kapitsa_core::{
-    collider::Collider,
-    collision::{CollisionEventKind, QueryFilter, Ray},
-    mass::MassProperties,
-    rigid_body::{CcdMode, RigidBody},
-    shape::{Cuboid, Shape, Sphere},
-    transform::Transform,
-    world::{BodyId, ColliderId},
-};
-use kapitsa_math::{Mat3, Quat, Vec3};
 
 fn transform(position: Vec3) -> Transform {
     Transform::new(position, Quat::IDENTITY).expect("valid transform")
@@ -36,7 +31,7 @@ fn config(tick_rate: u32) -> SimulationConfig {
 }
 
 async fn next_batch_with(
-    events: &mut kapitsa::runtime::CollisionEvents,
+    events: &mut CollisionEvents,
     kind: CollisionEventKind,
 ) -> CollisionEventBatch {
     tokio::time::timeout(Duration::from_secs(3), async {

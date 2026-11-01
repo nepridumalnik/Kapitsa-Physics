@@ -29,7 +29,9 @@ pub enum RayonPoolError {
     InvalidWorkerCount,
     BuildFailed,
     RuntimeUnavailable,
+    #[cfg(test)]
     ExecutorsStillActive,
+    #[cfg(test)]
     WorkerExitedEarly,
     PoolAlreadyShutDown,
 }
@@ -40,7 +42,9 @@ impl std::fmt::Display for RayonPoolError {
             Self::InvalidWorkerCount => "Rayon worker count must be positive",
             Self::BuildFailed => "Rayon worker pool could not be created",
             Self::RuntimeUnavailable => "the host Tokio runtime cannot start Rayon workers",
+            #[cfg(test)]
             Self::ExecutorsStillActive => "Rayon executor handles are still active",
+            #[cfg(test)]
             Self::WorkerExitedEarly => "a Rayon worker exited before shutdown completed",
             Self::PoolAlreadyShutDown => "Rayon worker pool is already shut down",
         };

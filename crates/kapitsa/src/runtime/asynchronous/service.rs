@@ -52,7 +52,7 @@ pub enum SimulationError {
     AlreadyRunning,
     TaskRequiresStop,
     Physics(kapitsa_core::world::StepError),
-    RayonPool(super::super::executor::RayonPoolError),
+    WorkerPoolInitializationFailed,
     WorldUnavailable,
     WorldLost,
     TaskFailed(String),
@@ -73,7 +73,9 @@ impl std::fmt::Display for SimulationError {
                 formatter.write_str("stop the completed simulation before restarting")
             }
             Self::Physics(error) => write!(formatter, "physics step failed: {error}"),
-            Self::RayonPool(error) => write!(formatter, "Rayon runtime failed: {error}"),
+            Self::WorkerPoolInitializationFailed => {
+                formatter.write_str("physics worker pool could not be initialized")
+            }
             Self::WorldUnavailable => formatter.write_str("physics world is unavailable"),
             Self::WorldLost => formatter.write_str("the physics world was lost"),
             Self::TaskFailed(reason) => write!(formatter, "simulation task failed: {reason}"),
@@ -86,7 +88,6 @@ impl std::error::Error for SimulationError {
         match self {
             Self::InvalidConfig(error) => Some(error),
             Self::Physics(error) => Some(error),
-            Self::RayonPool(error) => Some(error),
             _ => None,
         }
     }
@@ -99,7 +100,7 @@ impl From<StepRunnerError> for SimulationError {
             StepRunnerError::InvalidWorkerConfig(error) => {
                 Self::InvalidConfig(ConfigError::InvalidWorkerConfig(error))
             }
-            StepRunnerError::RayonPool(error) => Self::RayonPool(error),
+            StepRunnerError::RayonPool(_) => Self::WorkerPoolInitializationFailed,
             StepRunnerError::Physics(error) => Self::Physics(error),
             StepRunnerError::WorldUnavailable => Self::WorldUnavailable,
             StepRunnerError::WorldLost => Self::WorldLost,

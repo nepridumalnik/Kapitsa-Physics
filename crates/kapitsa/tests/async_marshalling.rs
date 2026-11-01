@@ -7,11 +7,11 @@ use std::{
     time::Duration,
 };
 
-use kapitsa::runtime::{
-    PhysicsClient, PhysicsClientError, PhysicsSnapshot, Simulation, SimulationConfig, WorkerConfig,
+use kapitsa::math::{Mat3, Vec3};
+use kapitsa::{
+    MassProperties, PhysicsClient, PhysicsClientError, PhysicsSnapshot, RigidBody, Simulation,
+    SimulationConfig, Transform, WorkerConfig,
 };
-use kapitsa_core::{mass::MassProperties, rigid_body::RigidBody, transform::Transform};
-use kapitsa_math::{Mat3, Vec3};
 use tokio::task::JoinSet;
 
 fn simulation() -> Simulation {

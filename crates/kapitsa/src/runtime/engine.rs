@@ -74,7 +74,6 @@ impl<E: StepExecutor> StepEngine<E> {
         &self.metrics
     }
 
-    #[cfg(feature = "async")]
     pub(crate) fn set_parallelism(&mut self, active_workers: usize, pool_size: Option<usize>) {
         self.active_workers = active_workers.max(1);
         self.rayon_pool_size = pool_size;
@@ -82,19 +81,16 @@ impl<E: StepExecutor> StepEngine<E> {
         self.metrics.rayon_pool_size = pool_size;
     }
 
-    #[cfg(feature = "async")]
     pub(crate) fn record_task_wait(&mut self, stats: &mut StepStats, duration: Duration) {
         stats.task_wait_duration = duration;
         self.metrics.task_wait_duration = duration;
     }
 
-    #[cfg(feature = "async")]
     pub(crate) fn set_budget_status(&mut self, warning: bool, overloaded: bool) {
         self.metrics.budget_warning = warning;
         self.metrics.overloaded = overloaded;
     }
 
-    #[cfg(feature = "async")]
     pub(crate) fn set_runtime_status(
         &mut self,
         state: SimulationState,
