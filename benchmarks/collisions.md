@@ -729,3 +729,82 @@ parallel work below the estimated cost threshold regressed on 8 to 64 islands,
 so that workload now stays sequential until the estimated island cost reaches
 256. Small scenes therefore avoid both worker setup and solver scratch growth.
 The expanded benchmark covers up to 1,024 independent CCD islands.
+
+## CCD follow-up stage 9: final benchmark matrix
+
+Release benchmarks were rerun on 2026-11-01 with `rustc 1.98.0` on the same
+AMD Ryzen 9 7900X3D / Windows MSVC machine as the follow-up baseline. Each
+scenario used one warm-up and five samples; world construction was excluded
+from step timings. Times are min / median / max in milliseconds unless noted.
+
+### Resweep against a large static scene
+
+The original baseline is the completed CCD refactor at `038e4d4`, before this
+follow-up. These mixed workloads contain 20,000 static proxies and 64, 128, or
+256 fast dynamic bodies; one quarter of the bodies hit static walls. The
+resweep counters count visits to live colliders of changed bodies.
+
+| Scenario | Baseline step / CCD median | Final step / CCD min / median / max | Baseline / final proxy visits | Final proxies updated |
+|---|---:|---:|---:|---:|
+| 20k statics + 64 dynamic | 22.172 / 0.669 | 19.656 / 20.470 / 20.585; 0.167 / 0.170 / 0.173 | 642,048 / 16 | 16 |
+| 20k statics + 128 dynamic | 23.140 / 1.329 | 19.964 / 20.724 / 21.238; 0.311 / 0.321 / 0.333 | 1,288,192 / 32 | 32 |
+| 20k statics + 256 dynamic | 24.126 / 2.607 | 21.070 / 21.584 / 21.824; 0.612 / 0.619 / 0.644 | 2,592,768 / 64 | 64 |
+
+The median CCD phase fell by 74.6%, 75.8%, and 76.3%. Full-step medians
+fell by 7.7%, 10.4%, and 10.5%. The final 64 / 128 / 256 impact cases each
+made 16 / 32 / 64 local resweeps, one per impacted body, with zero global
+fallbacks and zero extra candidate pairs. The 20k static-scene step still
+exceeds the 16.67 ms frame budget: index and broadphase work dominate while
+CCD itself is 0.170–0.619 ms.
+
+### CCD worker scaling
+
+For the 64-sphere analytic wall case, the original 038e4d4 baseline was
+0.685 / 0.690 / 0.700 ms per step and 0.542 / 0.545 / 0.556 ms in CCD. The
+final run measured 0.666 / 0.673 / 0.690 ms per step and 0.526 / 0.537 /
+0.547 ms in CCD. These ranges overlap; this fast path has no established
+before/after change and stays sequential at this size.
+
+The final GJK-heavy 1,024-island workload compares active worker counts:
+
+| Workers | Step min / median / max | CCD min / median / max | Parallel islands / tasks | Retained scratch |
+|---:|---:|---:|---:|---:|
+| 1 | 16.937 / 17.499 / 17.521 | 13.893 / 14.308 / 14.393 | 0 / 0 | 2,746 KiB |
+| 2 | 13.209 / 13.631 / 14.363 | 8.975 / 9.374 / 9.995 | 1,024 / 4 | 6,033 KiB |
+| 4 | 10.237 / 10.459 / 11.251 | 6.117 / 6.282 / 7.014 | 1,024 / 8 | 6,033 KiB |
+
+Four workers reduced the median step by 40.2% relative to one worker; the
+sample ranges do not overlap. The four-worker step is below the 16.67 ms
+budget, while the one-worker step is slightly above it. Parallel scratch is
+about 2.2x the one-worker estimate. The parallel impact batch covers
+independent islands with one initial candidate; multi-candidate islands and
+later impacts discovered during resweep continue through the ordered
+coordinator path.
+
+For the contact solver, 4,096 dynamic bodies in 2,048 two-body islands measured
+41.723 / 30.846 / 23.765 ms median step time at 1 / 2 / 4 workers. The four
+worker result is 1.76x faster than one worker but remains above 16.67 ms.
+
+### Other measured workloads
+
+| Scenario | Final min / median / max | Notes |
+|---|---:|---|
+| 20k dynamic bodies, no contacts | 25.984 / 26.131 / 29.360 ms | Baseline and final ranges overlap; still above frame budget |
+| 1k bodies, one contact island | 17.237 / 17.248 / 17.392 ms | 999 contacts, one solver island; slightly above frame budget |
+| 20k static + 100 separated dynamic | 20.908 / 21.295 / 21.585 ms | No contacts; index and broadphase dominate |
+| 20k-static raycast load | 0.769 / 0.778 / 0.778 ms per 1,000 rays | 0.778 us per ray |
+| 1,000 sweeps against the triangle mesh | 281.311 / 282.237 / 285.843 ms | Overlapping range with the earlier 269.327 / 278.131 / 293.291 ms baseline |
+| 20k dynamic + 128 contact pairs | 23.985 / 24.938 / 29.030 ms | 128 contacts; no logical scratch growth |
+
+The Tokio localized-collision harness measured eight steps. At 20,000 bodies,
+`PhysicsWorld::step()` was 200.72 / 203.40 / 212.04 ms and the four-worker
+controller was 190.12 / 195.77 / 198.63 ms (1.04x by medians). The ranges do
+not overlap for this run, but the absolute improvement is small. The broader
+`parallel_step` harness confirms workload sensitivity: dynamic-heavy scenes
+benefit from dynamic buckets at 4,096 and 20,000 bodies, while 256-body,
+mixed, and sleeping-heavy scenes generally lose time to scheduling.
+
+All four required Release benchmark commands completed. Full workspace Release
+tests, both Clippy commands, formatting check, and workspace documentation
+also passed; the final report records the exact validation commands and
+remaining performance limits.
