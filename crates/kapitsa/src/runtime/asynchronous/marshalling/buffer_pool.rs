@@ -6,17 +6,17 @@ const MAX_POOLED_BUFFERS: usize = 16;
 const MAX_POOL_MEMORY_BYTES: usize = 256 * 1024;
 
 struct PoolState {
-    buffers: [Option<Vec<PhysicsCommand>>; MAX_POOLED_BUFFERS],
-    len: usize,
+    buffers: Vec<Vec<PhysicsCommand>>,
     retained_bytes: usize,
 }
 
 impl Default for PoolState {
     fn default() -> Self {
+        let buffers = Vec::with_capacity(MAX_POOLED_BUFFERS);
+        let retained_bytes = buffers.capacity() * std::mem::size_of::<Vec<PhysicsCommand>>();
         Self {
-            buffers: std::array::from_fn(|_| None),
-            len: 0,
-            retained_bytes: 0,
+            buffers,
+            retained_bytes,
         }
     }
 }
@@ -35,13 +35,9 @@ impl CommandBufferPool {
         let Ok(mut state) = self.state.try_lock() else {
             return Vec::new();
         };
-        let Some(index) = state.len.checked_sub(1) else {
+        let Some(commands) = state.buffers.pop() else {
             return Vec::new();
         };
-        state.len = index;
-        let commands = state.buffers[index]
-            .take()
-            .expect("occupied pool slot must contain a buffer");
         state.retained_bytes -= command_buffer_bytes(commands.capacity());
         commands
     }
@@ -56,16 +52,14 @@ impl CommandBufferPool {
         let Ok(mut state) = self.state.try_lock() else {
             return;
         };
-        if state.len == MAX_POOLED_BUFFERS
+        if state.buffers.len() == MAX_POOLED_BUFFERS
             || state.retained_bytes.saturating_add(command_bytes) > MAX_RETAINED_BUFFER_BYTES
         {
             return;
         }
 
         state.retained_bytes += command_bytes;
-        let index = state.len;
-        state.buffers[index] = Some(std::mem::take(&mut buffer.commands));
-        state.len += 1;
+        state.buffers.push(std::mem::take(&mut buffer.commands));
     }
 
     #[cfg(test)]
@@ -73,7 +67,7 @@ impl CommandBufferPool {
         let Ok(state) = self.state.try_lock() else {
             return (0, 0);
         };
-        (state.len, state.retained_bytes)
+        (state.buffers.len(), state.retained_bytes)
     }
 
     #[cfg(test)]
@@ -100,6 +94,7 @@ mod tests {
     #[test]
     fn recycle_clears_commands_and_preserves_capacity() {
         let pool = CommandBufferPool::default();
+        let list_bytes = pool.stats().1;
         let mut buffer = PhysicsCommandBuffer::with_capacity(8);
         let mut world = PhysicsWorld::new();
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
@@ -113,12 +108,23 @@ mod tests {
 
         assert_eq!(
             pool.stats(),
-            (1, capacity * std::mem::size_of::<super::PhysicsCommand>())
+            (
+                1,
+                list_bytes + capacity * std::mem::size_of::<super::PhysicsCommand>()
+            )
         );
         let commands = pool.take();
         assert!(commands.is_empty());
         assert_eq!(commands.capacity(), capacity);
-        assert_eq!(pool.stats(), (0, 0));
+        assert_eq!(pool.stats(), (0, list_bytes));
+
+        let mut reused = PhysicsCommandBuffer { commands };
+        reused.set_linear_velocity(body, Vec3::Y);
+        pool.recycle(reused);
+        let commands = pool.take();
+        assert!(commands.is_empty());
+        assert_eq!(commands.capacity(), capacity);
+        assert_eq!(pool.stats(), (0, list_bytes));
     }
 
     #[test]
@@ -129,15 +135,17 @@ mod tests {
         }
         assert_eq!(pool.stats().0, MAX_POOLED_BUFFERS);
 
-        let oversized =
-            MAX_RETAINED_BUFFER_BYTES / std::mem::size_of::<super::PhysicsCommand>() + 1;
         let pool = CommandBufferPool::default();
+        let list_bytes = pool.stats().1;
+        let available_bytes = MAX_RETAINED_BUFFER_BYTES - list_bytes;
+        let oversized = available_bytes / std::mem::size_of::<super::PhysicsCommand>() + 1;
         pool.recycle(PhysicsCommandBuffer::with_capacity(oversized));
         assert_eq!(pool.stats().0, 0);
 
-        let capacity =
-            MAX_RETAINED_BUFFER_BYTES / (2 * std::mem::size_of::<super::PhysicsCommand>());
         let pool = CommandBufferPool::default();
+        let list_bytes = pool.stats().1;
+        let available_bytes = MAX_RETAINED_BUFFER_BYTES - list_bytes;
+        let capacity = available_bytes / (2 * std::mem::size_of::<super::PhysicsCommand>());
         pool.recycle(PhysicsCommandBuffer::with_capacity(capacity));
         pool.recycle(PhysicsCommandBuffer::with_capacity(capacity));
         pool.recycle(PhysicsCommandBuffer::with_capacity(capacity));

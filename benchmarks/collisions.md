@@ -1140,18 +1140,19 @@ post-warm run.
 
 | Buffer lifecycle | Full-cycle min / median / max us | Median sample-mean `try_submit` ns/call | Median batches/s | Median commands/s | Allocations / batch | Requested bytes / batch | Retained buffers | Retained pool bytes |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Fresh and drop | 2.896 / 3.147 / 9.124 | 76.0 | 317,751 | 40,672,107 | 6 | 122,976 | 0 | 0 |
-| Reused pool | 1.942 / 1.950 / 1.976 | 71.0 | 512,884 | 65,649,106 | 0 | 0 | 1 | 62,888 |
+| Fresh and drop | 2.681 / 2.709 / 2.792 | 74.3 | 369,200 | 47,257,583 | 6 | 122,976 | 0 | 0 |
+| Reused pool | 1.901 / 1.911 / 1.955 | 72.9 | 523,179 | 66,966,972 | 0 | 0 | 1 | 62,904 |
 
-The pool reduced median full-cycle time by 38.0% and increased measured
-throughput by 61.4%. The median of the five sample-mean `try_submit` costs was
-76 ns for fresh buffers and 71 ns for pooled buffers; this small difference is
+The pool reduced median full-cycle time by 29.5% and increased measured
+throughput by 41.7%. The median of the five sample-mean `try_submit` costs was
+74.3 ns for fresh buffers and 72.9 ns for pooled buffers; this small difference is
 reported without treating it as a separate performance claim. The fresh-vector
 control made six allocation/reallocation requests per cycle while growing to
 128 commands. The pool retained one 128-command-capacity buffer after warm-up
-and made no measured allocations during the post-warm cycle. Its 62,888-byte retained
-footprint includes 62,464 bytes of command-vector capacity plus 424 bytes for
-the fixed Arc-backed pool state. The control retains no command buffer; its
+and made no measured allocations during the post-warm cycle. Its 62,904-byte
+footprint includes 62,464 bytes of command-vector capacity, a 384-byte
+preallocated buffer table, and 56 bytes for the Arc-backed pool state. The
+control retains no command buffer; its
 pool-state footprint is excluded because it models the pre-pool implementation.
 
 The fresh-control maximum is much higher than its median; all samples are
