@@ -125,8 +125,10 @@ mod tests {
 
     #[test]
     fn rejects_invalid_configuration_before_owning_the_world() {
-        let mut config = SimulationConfig::default();
-        config.tick_rate = 0;
+        let config = SimulationConfig {
+            tick_rate: 0,
+            ..SimulationConfig::default()
+        };
 
         assert!(matches!(
             Simulation::new(PhysicsWorld::new(), config),

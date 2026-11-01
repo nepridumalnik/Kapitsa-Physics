@@ -93,7 +93,7 @@ impl std::error::Error for ConfigError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, SimulationConfig};
+    use super::{ConfigError, SchedulerConfig, SimulationConfig};
 
     #[test]
     fn defaults_use_a_fixed_sixty_hertz_step() {
@@ -109,26 +109,39 @@ mod tests {
 
     #[test]
     fn rejects_zero_and_unrepresentable_tick_rates() {
-        let mut config = SimulationConfig::default();
-        config.tick_rate = 0;
-        assert_eq!(config.validate(), Err(ConfigError::InvalidTickRate));
-
-        config.tick_rate = u32::MAX;
-        assert_eq!(config.validate(), Err(ConfigError::InvalidTickRate));
+        for tick_rate in [0, u32::MAX] {
+            let config = SimulationConfig {
+                tick_rate,
+                ..SimulationConfig::default()
+            };
+            assert_eq!(config.validate(), Err(ConfigError::InvalidTickRate));
+        }
     }
 
     #[test]
     fn rejects_zero_catch_up_and_batch_limits() {
-        let mut config = SimulationConfig::default();
-        config.max_catch_up_steps = 0;
+        let config = SimulationConfig {
+            max_catch_up_steps: 0,
+            ..SimulationConfig::default()
+        };
         assert_eq!(config.validate(), Err(ConfigError::ZeroCatchUpSteps));
 
-        config.max_catch_up_steps = 4;
-        config.scheduler.min_batch_size = 0;
+        let config = SimulationConfig {
+            scheduler: SchedulerConfig {
+                min_batch_size: 0,
+                ..SchedulerConfig::default()
+            },
+            ..SimulationConfig::default()
+        };
         assert_eq!(config.validate(), Err(ConfigError::ZeroBatchSize));
 
-        config.scheduler.min_batch_size = 128;
-        config.scheduler.max_batches_per_worker = 0;
+        let config = SimulationConfig {
+            scheduler: SchedulerConfig {
+                max_batches_per_worker: 0,
+                ..SchedulerConfig::default()
+            },
+            ..SimulationConfig::default()
+        };
         assert_eq!(config.validate(), Err(ConfigError::ZeroBatchesPerWorker));
     }
 }

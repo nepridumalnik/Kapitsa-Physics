@@ -31,9 +31,11 @@ impl<E: StepExecutor> StepEngine<E> {
     ) -> Result<Self, ConfigError> {
         config.validate()?;
         let step_budget = config.step_budget();
-        let mut metrics = SimulationMetrics::default();
-        metrics.step_budget = step_budget;
-        metrics.active_workers = 1;
+        let metrics = SimulationMetrics {
+            step_budget,
+            active_workers: 1,
+            ..SimulationMetrics::default()
+        };
         Ok(Self {
             world,
             executor,
