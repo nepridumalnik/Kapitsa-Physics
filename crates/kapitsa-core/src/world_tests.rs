@@ -34,14 +34,21 @@ fn independent_wall_ccd_world() -> Result<PhysicsWorld, Box<dyn std::error::Erro
     world.add_collider(
         wall_body,
         Collider::new(
-            Shape::Cuboid(Cuboid::new(0.1, 30.0, 5.0)?),
+            Shape::Cuboid(Cuboid::new(0.1, 100.0, 100.0)?),
             Transform::identity(),
         ),
     )?;
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
-    for index in 0..8 {
+    for index in 0..128 {
         let mut body = RigidBody::new_dynamic(
-            Transform::new(Vec3::new(-5.0, f64::from(index) * 3.0, 0.0), Quat::IDENTITY)?,
+            Transform::new(
+                Vec3::new(
+                    -5.0,
+                    f64::from(index % 16) * 3.0,
+                    f64::from(index / 16) * 3.0,
+                ),
+                Quat::IDENTITY,
+            )?,
             mass,
         )?;
         body.set_linear_velocity(Vec3::new(1000.0, 0.0, 0.0))?;
@@ -1394,10 +1401,7 @@ fn independent_single_pair_ccd_islands_resolve_across_workers()
         .iter()
         .filter(|event| event.kind == crate::collision::CollisionEventKind::Impact)
         .count();
-    assert!(
-        expected_impacts >= 4,
-        "fixture should contain independent impacts"
-    );
+    assert_eq!(expected_impacts, 128);
 
     for workers in [2, 4] {
         let mut world = independent_wall_ccd_world()?;

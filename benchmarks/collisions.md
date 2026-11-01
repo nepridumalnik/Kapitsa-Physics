@@ -699,5 +699,33 @@ Core equivalence tests compare the sequential `step()` API with 2 and 4 workers
 for independent fast bodies hitting a shared static wall. They compare body
 states and ordered collision events. Existing Tokio checks for independent
 islands, connected cascades, localized replay, and sequential/worker equivalence
-also pass. Scoped worker threads are still created for each parallel step here;
-stage 7 evaluates and replaces that execution model.
+also pass.
+
+## CCD follow-up stage 7: reusable collision executor
+
+CCD TOI preparation, independent impact resolution, and contact-island solving
+now use one lazily initialized Rayon pool shared by `kapitsa-core`. The sync
+`PhysicsWorld::step()` API remains sync and core still has no Tokio dependency.
+The Tokio controller continues to call the sync commit through its blocking
+task. Each scoped batch submits at most the configured active worker count, so
+changing that count changes active work without rebuilding the pool. Pool
+initialization failures and worker panics return `WorkerFailed`; task errors are
+collected before any staged result is committed.
+
+The scoped-thread baseline and pooled executor were measured with the same
+Release harness on 2026-11-01. Each value is the median of five independently
+constructed worlds after one warm-up. Results below compare GJK-heavy cuboid
+islands, where both implementations take the parallel path:
+
+| Bodies | Workers | Scoped step / CCD ms | Reused pool step / CCD ms |
+|---:|---:|---:|---:|
+| 64 | 4 | 0.852 / 0.651 | 0.765 / 0.524 |
+| 128 | 4 | 1.608 / 1.167 | 1.421 / 0.981 |
+| 256 | 4 | 3.148 / 2.232 | 3.034 / 1.966 |
+
+The medians trend lower with the reusable pool, while sample ranges overlap;
+these runs do not establish a general speedup. For analytic sphere-wall CCD,
+parallel work below the estimated cost threshold regressed on 8 to 64 islands,
+so that workload now stays sequential until the estimated island cost reaches
+256. Small scenes therefore avoid both worker setup and solver scratch growth.
+The expanded benchmark covers up to 1,024 independent CCD islands.

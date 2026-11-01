@@ -32,8 +32,8 @@ use crate::{
         CollisionError, CollisionEvent, CollisionInteraction, CollisionPair, CollisionSystem,
         ContactInfo, ContactManifold, ContactPoint, NarrowPhase, OverlapHit, QueryError,
         QueryFilter, QueryScratch, QueryTarget, Ray, RayHit, ShapeHit, SolverBody, SolverManifold,
-        SolverMaterial, StepContext, overlaps_shape_with_scratch, raycast_shape_with_scratch,
-        spatial_index::SpatialIndex, sweep_shape_with_scratch,
+        SolverMaterial, StepContext, collision_worker_pool, overlaps_shape_with_scratch,
+        raycast_shape_with_scratch, spatial_index::SpatialIndex, sweep_shape_with_scratch,
     },
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
@@ -1708,10 +1708,11 @@ impl PhysicsWorld {
             total_cost = total_cost.saturating_add(cost);
             self.collision_system.context.ccd_island_results[island].work_cost = cost;
         }
-        if eligible_count < MIN_PARALLEL_ISLANDS {
+        if eligible_count < MIN_PARALLEL_ISLANDS || total_cost < 256 {
             return Ok(());
         }
 
+        let pool = collision_worker_pool()?;
         let active_workers = worker_count.min(eligible_count);
         self.collision_system
             .context
@@ -1750,53 +1751,55 @@ impl PhysicsWorld {
 
         let mut results = std::mem::take(&mut self.collision_system.context.ccd_island_results);
         let shared_world = &*self;
-        let computed = std::thread::scope(|scope| {
-            let mut workers = Vec::new();
-            workers
-                .try_reserve(active_workers)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-            let mut remaining = &mut results[..island_count];
-            let mut first_island = 0;
-            for chunk_size in chunk_sizes.iter().copied() {
-                let (chunk, tail) = remaining.split_at_mut(chunk_size);
-                let world = shared_world;
-                let chunk_start = first_island;
-                workers.push(scope.spawn(move || {
-                    let mut narrow_phase = NarrowPhase::new();
-                    for (offset, result) in chunk.iter_mut().enumerate() {
-                        let island = chunk_start + offset;
-                        let cost = result.work_cost;
-                        if cost == 0 {
-                            continue;
+        let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.scope(|scope| {
+                let mut remaining = &mut results[..island_count];
+                let mut first_island = 0;
+                for chunk_size in chunk_sizes.iter().copied() {
+                    let (chunk, tail) = remaining.split_at_mut(chunk_size);
+                    let world = shared_world;
+                    let chunk_start = first_island;
+                    scope.spawn(move |_| {
+                        let mut narrow_phase = NarrowPhase::new();
+                        for (offset, result) in chunk.iter_mut().enumerate() {
+                            let island = chunk_start + offset;
+                            let cost = result.work_cost;
+                            if cost == 0 {
+                                continue;
+                            }
+                            result.clear();
+                            result.work_cost = cost;
+                            if let Err(error) = world.prepare_single_candidate_ccd_island(
+                                island,
+                                dt,
+                                &mut narrow_phase,
+                                result,
+                            ) {
+                                result.worker_error = Some(error);
+                                break;
+                            }
                         }
-                        result.clear();
-                        result.work_cost = cost;
-                        world.prepare_single_candidate_ccd_island(
-                            island,
-                            dt,
-                            &mut narrow_phase,
-                            result,
-                        )?;
-                    }
-                    Ok::<_, CollisionError>(())
-                }));
-                remaining = tail;
-                first_island += chunk_size;
-            }
-            let mut result = Ok(());
-            for worker in workers {
-                match worker.join() {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) if result.is_ok() => result = Err(error),
-                    Err(_) if result.is_ok() => result = Err(CollisionError::WorkerFailed),
-                    _ => {}
+                    });
+                    remaining = tail;
+                    first_island += chunk_size;
                 }
-            }
-            result
-        });
+            })
+        }));
         self.collision_system.context.ccd_island_results = results;
         self.collision_system.context.ccd_worker_chunks = chunk_sizes;
-        computed?;
+        if computed.is_err() {
+            return Err(CollisionError::WorkerFailed);
+        }
+        if let Some(error) = self
+            .collision_system
+            .context
+            .ccd_island_results
+            .iter()
+            .take(island_count)
+            .find_map(|result| result.worker_error)
+        {
+            return Err(error);
+        }
         #[cfg(feature = "bench-internals")]
         self.collision_system
             .record_ccd_parallel_islands(eligible_count, active_workers);
@@ -1988,43 +1991,7 @@ impl PhysicsWorld {
         narrow_phase: &mut NarrowPhase,
         result: &mut CcdIslandResult,
     ) -> Result<(), CollisionError> {
-        let bodies = self
-            .collision_system
-            .ccd_island_bodies(island)
-            .ok_or(CollisionError::InvalidContact)?;
-        result
-            .bodies
-            .try_reserve(bodies.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-        for prediction in bodies.iter().copied() {
-            let context = &self.collision_system.context;
-            result.bodies.push(CcdIslandBodyResult {
-                prediction,
-                ccd_state: *context
-                    .ccd_states
-                    .get(prediction)
-                    .ok_or(CollisionError::InvalidContact)?,
-                predicted_state: context
-                    .predicted_states
-                    .get(prediction)
-                    .map(|(_, state)| *state)
-                    .ok_or(CollisionError::InvalidContact)?,
-                elapsed: *context
-                    .ccd_elapsed
-                    .get(prediction)
-                    .ok_or(CollisionError::InvalidContact)?,
-                impact_count: *context
-                    .ccd_impact_counts
-                    .get(prediction)
-                    .ok_or(CollisionError::InvalidContact)?,
-                clipped: context
-                    .ccd_clipped_bodies
-                    .get(prediction)
-                    .copied()
-                    .ok_or(CollisionError::InvalidContact)?,
-            });
-        }
-
+        self.snapshot_ccd_island_bodies(island, result)?;
         let candidates = self
             .collision_system
             .ccd_island_candidates(island)
@@ -2237,6 +2204,83 @@ impl PhysicsWorld {
             solve_time,
         });
         result.handled = true;
+        Ok(())
+    }
+
+    fn precompute_ccd_island(
+        &self,
+        island: usize,
+        dt: f64,
+        narrow_phase: &mut NarrowPhase,
+        result: &mut CcdIslandResult,
+    ) -> Result<(), CollisionError> {
+        self.snapshot_ccd_island_bodies(island, result)?;
+        let candidates = self
+            .collision_system
+            .ccd_island_candidates(island)
+            .ok_or(CollisionError::InvalidContact)?;
+        result
+            .candidates
+            .try_reserve(candidates.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for candidate_index in candidates.iter().copied() {
+            let pair = self
+                .collision_system
+                .ccd_candidate_pair(candidate_index)
+                .ok_or(CollisionError::InvalidContact)?;
+            let (toi, interaction) = self.evaluate_ccd_candidate(pair, 0.0, dt, narrow_phase)?;
+            result.candidates.push(CcdIslandCandidateResult {
+                candidate: candidate_index,
+                pair,
+                toi,
+                interaction,
+                evaluated_now: true,
+            });
+        }
+        Ok(())
+    }
+
+    fn snapshot_ccd_island_bodies(
+        &self,
+        island: usize,
+        result: &mut CcdIslandResult,
+    ) -> Result<(), CollisionError> {
+        let bodies = self
+            .collision_system
+            .ccd_island_bodies(island)
+            .ok_or(CollisionError::InvalidContact)?;
+        result
+            .bodies
+            .try_reserve(bodies.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for prediction in bodies.iter().copied() {
+            let context = &self.collision_system.context;
+            result.bodies.push(CcdIslandBodyResult {
+                prediction,
+                ccd_state: *context
+                    .ccd_states
+                    .get(prediction)
+                    .ok_or(CollisionError::InvalidContact)?,
+                predicted_state: context
+                    .predicted_states
+                    .get(prediction)
+                    .map(|(_, state)| *state)
+                    .ok_or(CollisionError::InvalidContact)?,
+                elapsed: *context
+                    .ccd_elapsed
+                    .get(prediction)
+                    .ok_or(CollisionError::InvalidContact)?,
+                impact_count: *context
+                    .ccd_impact_counts
+                    .get(prediction)
+                    .ok_or(CollisionError::InvalidContact)?,
+                clipped: context
+                    .ccd_clipped_bodies
+                    .get(prediction)
+                    .copied()
+                    .ok_or(CollisionError::InvalidContact)?,
+            });
+        }
         Ok(())
     }
 
@@ -2720,12 +2764,13 @@ impl PhysicsWorld {
         if worker_count <= 1 || island_count <= 1 {
             return Ok(());
         }
-        // Cuboid GJK sweeps first repay scoped-worker overhead at 256 candidates.
+        // Cuboid GJK sweeps first repay task-dispatch overhead at 256 candidates.
         const MIN_PARALLEL_EXPENSIVE_TOIS: usize = 256;
         if self.expensive_ccd_candidate_count()? < MIN_PARALLEL_EXPENSIVE_TOIS {
             return Ok(());
         }
         let worker_count = worker_count.min(island_count);
+        let pool = collision_worker_pool()?;
 
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
@@ -2749,90 +2794,43 @@ impl PhysicsWorld {
         let mut results = std::mem::take(&mut self.collision_system.context.ccd_island_results);
         debug_assert!(results.len() >= island_count);
         let shared_world = &*self;
-        let evaluated = std::thread::scope(|scope| {
-            let mut workers = Vec::new();
-            workers
-                .try_reserve(worker_count)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-            for (worker_index, island_results) in
-                results[..island_count].chunks_mut(chunk_size).enumerate()
-            {
-                let start = worker_index * chunk_size;
-                let end = start + island_results.len();
-                let world = shared_world;
-                workers.push(scope.spawn(move || {
-                    let mut narrow_phase = NarrowPhase::new();
-                    for (island, result) in (start..end).zip(island_results) {
-                        let bodies = world
-                            .collision_system
-                            .ccd_island_bodies(island)
-                            .ok_or(CollisionError::InvalidContact)?;
-                        result
-                            .bodies
-                            .try_reserve(bodies.len())
-                            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-                        for prediction in bodies.iter().copied() {
-                            let context = &world.collision_system.context;
-                            result.bodies.push(CcdIslandBodyResult {
-                                prediction,
-                                ccd_state: *context
-                                    .ccd_states
-                                    .get(prediction)
-                                    .ok_or(CollisionError::InvalidContact)?,
-                                predicted_state: context
-                                    .predicted_states
-                                    .get(prediction)
-                                    .map(|(_, state)| *state)
-                                    .ok_or(CollisionError::InvalidContact)?,
-                                elapsed: *context
-                                    .ccd_elapsed
-                                    .get(prediction)
-                                    .ok_or(CollisionError::InvalidContact)?,
-                                impact_count: *context
-                                    .ccd_impact_counts
-                                    .get(prediction)
-                                    .ok_or(CollisionError::InvalidContact)?,
-                                clipped: *context
-                                    .ccd_clipped_bodies
-                                    .get(prediction)
-                                    .ok_or(CollisionError::InvalidContact)?,
-                            });
+        let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pool.scope(|scope| {
+                for (worker_index, island_results) in
+                    results[..island_count].chunks_mut(chunk_size).enumerate()
+                {
+                    let start = worker_index * chunk_size;
+                    let end = start + island_results.len();
+                    let world = shared_world;
+                    scope.spawn(move |_| {
+                        let mut narrow_phase = NarrowPhase::new();
+                        for (island, result) in (start..end).zip(island_results) {
+                            result.clear();
+                            if let Err(error) =
+                                world.precompute_ccd_island(island, dt, &mut narrow_phase, result)
+                            {
+                                result.worker_error = Some(error);
+                                break;
+                            }
                         }
-                        let candidates = world
-                            .collision_system
-                            .ccd_island_candidates(island)
-                            .ok_or(CollisionError::InvalidContact)?;
-                        result
-                            .candidates
-                            .try_reserve(candidates.len())
-                            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-                        for candidate_index in candidates.iter().copied() {
-                            let pair = world
-                                .collision_system
-                                .ccd_candidate_pair(candidate_index)
-                                .ok_or(CollisionError::InvalidContact)?;
-                            let (toi, interaction) =
-                                world.evaluate_ccd_candidate(pair, 0.0, dt, &mut narrow_phase)?;
-                            result.candidates.push(CcdIslandCandidateResult {
-                                candidate: candidate_index,
-                                pair,
-                                toi,
-                                interaction,
-                                evaluated_now: true,
-                            });
-                        }
-                    }
-                    Ok::<_, CollisionError>(())
-                }));
-            }
-
-            for worker in workers {
-                worker.join().map_err(|_| CollisionError::NonConvergent)??;
-            }
-            Ok::<_, CollisionError>(())
-        });
+                    });
+                }
+            })
+        }));
         self.collision_system.context.ccd_island_results = results;
-        evaluated?;
+        if evaluated.is_err() {
+            return Err(CollisionError::WorkerFailed);
+        }
+        if let Some(error) = self
+            .collision_system
+            .context
+            .ccd_island_results
+            .iter()
+            .take(island_count)
+            .find_map(|result| result.worker_error)
+        {
+            return Err(error);
+        }
 
         for island in 0..island_count {
             let body_count = self.collision_system.context.ccd_island_results[island]

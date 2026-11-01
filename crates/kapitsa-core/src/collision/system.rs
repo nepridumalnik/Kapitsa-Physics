@@ -4,6 +4,7 @@ use super::{
     broad_phase::BroadPhase,
     cache::ContactCache,
     ccd::{CcdHit, CcdMotion},
+    collision_worker_pool,
     island::IslandLayout,
     manifold::ContactManifold,
     mesh::TriangleBvh,
@@ -962,28 +963,36 @@ impl CollisionSystem {
             let chunk_size = island_count.div_ceil(worker_count);
             #[cfg(feature = "bench-internals")]
             self.record_worker_tasks_started(island_count.div_ceil(chunk_size));
-            std::thread::scope(|scope| {
-                let mut workers = Vec::new();
-                workers
-                    .try_reserve(worker_count)
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-                for chunk in self.solver_islands[..island_count].chunks_mut(chunk_size) {
-                    workers.push(scope.spawn(move || {
-                        for island in chunk {
-                            island.workspace.solve(
-                                &mut island.bodies,
-                                &mut island.manifolds,
-                                config,
-                            )?;
-                        }
-                        Ok::<(), CollisionError>(())
-                    }));
-                }
-                for worker in workers {
-                    worker.join().map_err(|_| CollisionError::WorkerFailed)??;
-                }
-                Ok::<(), CollisionError>(())
-            })?;
+            let pool = collision_worker_pool()?;
+            let solved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pool.scope(|scope| {
+                    for chunk in self.solver_islands[..island_count].chunks_mut(chunk_size) {
+                        scope.spawn(move |_| {
+                            for island in chunk {
+                                if let Err(error) = island.workspace.solve(
+                                    &mut island.bodies,
+                                    &mut island.manifolds,
+                                    config,
+                                ) {
+                                    island.worker_error = Some(error);
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                })
+            }));
+            if solved.is_err() {
+                return Err(CollisionError::WorkerFailed);
+            }
+            if let Some(error) = self
+                .solver_islands
+                .iter()
+                .take(island_count)
+                .find_map(|island| island.worker_error)
+            {
+                return Err(error);
+            }
         }
         #[cfg(feature = "bench-internals")]
         {

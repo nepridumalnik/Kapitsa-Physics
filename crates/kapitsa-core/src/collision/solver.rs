@@ -73,6 +73,7 @@ pub(crate) struct SolverIsland {
     pub(crate) bodies: Vec<SolverBody>,
     pub(crate) manifolds: Vec<SolverManifold>,
     pub(crate) workspace: SolverWorkspace,
+    pub(crate) worker_error: Option<CollisionError>,
 }
 
 impl SolverIsland {
@@ -83,6 +84,7 @@ impl SolverIsland {
             bodies: Vec::new(),
             manifolds: Vec::new(),
             workspace: SolverWorkspace::new(),
+            worker_error: None,
         }
     }
 
@@ -91,6 +93,7 @@ impl SolverIsland {
         self.manifold_indices.clear();
         self.bodies.clear();
         self.manifolds.clear();
+        self.worker_error = None;
     }
 
     #[cfg(feature = "bench-internals")]

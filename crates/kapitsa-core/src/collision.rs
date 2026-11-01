@@ -7,6 +7,7 @@ mod contact;
 mod epa;
 mod error;
 mod event;
+mod executor;
 mod gjk;
 mod height_field;
 mod island;
@@ -202,6 +203,7 @@ pub(crate) use query::{
 };
 
 pub(crate) use broad_phase::CollisionProxy;
+pub(crate) use executor::collision_worker_pool;
 pub(crate) use manifold::{ContactManifold, ContactPoint};
 pub(crate) use narrow_phase::NarrowPhase;
 pub(crate) use solver::{SolverBody, SolverManifold, SolverMaterial};

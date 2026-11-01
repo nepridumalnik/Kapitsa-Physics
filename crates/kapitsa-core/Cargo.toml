@@ -9,6 +9,7 @@ bench-internals = []
 
 [dependencies]
 kapitsa-math = { path = "../kapitsa-math" }
+rayon = "1.12.0"
 
 [dev-dependencies]
 rstest = "0.28"

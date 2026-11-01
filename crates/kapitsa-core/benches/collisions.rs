@@ -451,12 +451,12 @@ fn ccd_box_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
 
 fn report_ccd_worker_scaling() -> Result<(), Box<dyn Error>> {
     println!("\nIndependent CCD islands by worker count");
-    report_ccd_worker_scaling_for(&[1, 2, 4, 8, 16, 64, 128, 256], ccd_scene_of)
+    report_ccd_worker_scaling_for(&[1, 2, 4, 8, 16, 64, 128, 256, 512, 1_024], ccd_scene_of)
 }
 
 fn report_ccd_gjk_worker_scaling() -> Result<(), Box<dyn Error>> {
     println!("\nIndependent GJK-heavy CCD islands by worker count");
-    report_ccd_worker_scaling_for(&[8, 16, 64, 128, 256, 512], ccd_box_scene_of)
+    report_ccd_worker_scaling_for(&[8, 16, 64, 128, 256, 512, 1_024], ccd_box_scene_of)
 }
 
 fn report_ccd_worker_scaling_for(
