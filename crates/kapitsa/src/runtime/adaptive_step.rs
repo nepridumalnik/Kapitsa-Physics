@@ -448,9 +448,9 @@ mod tests {
         joint::{FixedJoint, Joint, JointCommon, JointFrame, SpringJoint},
         mass::MassProperties,
         rigid_body::RigidBody,
-        shape::{Cuboid, Plane, Shape, Sphere},
+        shape::{Shape, Sphere},
         transform::Transform,
-        world::{BodyId, ForceSourceId, JointId, PhysicsWorld},
+        world::{BodyId, PhysicsWorld},
     };
     use kapitsa_math::{Mat3, Quat, Vec3};
 
@@ -768,17 +768,7 @@ mod tests {
         )
     }
 
-    const ROCKET_STAGE_PARTS: usize = 60;
-
-    struct ModularRocket {
-        world: PhysicsWorld,
-        bodies: Vec<BodyId>,
-        lower_root: BodyId,
-        upper_root: BodyId,
-        separation_joint: JointId,
-        lower_engine: ForceSourceId,
-        upper_engine: ForceSourceId,
-    }
+    const ROCKET_PARTS: usize = 100;
 
     #[derive(Debug, PartialEq)]
     struct RocketPartState {
@@ -800,134 +790,10 @@ mod tests {
         remaining_joints: usize,
     }
 
-    fn modular_rocket() -> ModularRocket {
-        let mut world = PhysicsWorld::new();
-        let gravity_radius = 6_371_000.0;
-        world.set_central_gravity(Some(
-            CentralGravity::new(
-                Vec3::new(0.0, -gravity_radius, 0.0),
-                9.81 * gravity_radius * gravity_radius,
-            )
-            .expect("surface gravity"),
-        ));
-
-        let surface = world
-            .add_body(RigidBody::new_static(Transform::identity()))
-            .expect("surface body");
-        world
-            .add_collider(
-                surface,
-                Collider::new(
-                    Shape::Plane(Plane::new(0.0, 1.0, 0.0, 0.0).expect("surface shape")),
-                    Transform::identity(),
-                ),
-            )
-            .expect("surface collider");
-
-        let mut bodies = Vec::with_capacity(ROCKET_STAGE_PARTS * 2);
-        let mut root_bodies = Vec::with_capacity(2);
-        for stage in 0..2 {
-            let root_position = Vec3::new(0.0, if stage == 0 { 0.249 } else { 0.949 }, 0.0);
-            let mut stage_bodies = Vec::with_capacity(ROCKET_STAGE_PARTS);
-            let mut positions = Vec::with_capacity(ROCKET_STAGE_PARTS);
-            for index in 0..ROCKET_STAGE_PARTS {
-                let (position, parent) = if index == 0 {
-                    (root_position, None)
-                } else {
-                    let parent = (index - 1) / 2;
-                    let side = if index % 2 == 0 { 1.0 } else { -1.0 };
-                    let depth_side = if (index / 2) % 2 == 0 { 1.0 } else { -1.0 };
-                    let offset = Vec3::new(side * 0.1, 0.15, depth_side * 0.06);
-                    (positions[parent] + offset, Some((parent, offset)))
-                };
-                let part_mass = if index == 0 {
-                    5.0
-                } else {
-                    0.45 + (index % 5) as f64 * 0.1
-                };
-                let mass = rocket_part_mass(index == 0, part_mass);
-                let body = RigidBody::new_dynamic(
-                    Transform::new(position, Quat::IDENTITY).expect("part transform"),
-                    mass,
-                )
-                .expect("rocket part");
-                let body = world.add_body(body).expect("rocket part body");
-                stage_bodies.push(body);
-                positions.push(position);
-                if let Some((parent, offset)) = parent {
-                    world
-                        .add_joint(stage_bodies[parent], body, fixed_joint_for_offset(offset))
-                        .expect("branching fixed joint");
-                }
-                if index == 0 {
-                    world
-                        .add_collider(
-                            body,
-                            Collider::new(
-                                Shape::Cuboid(
-                                    Cuboid::new(0.5, 0.5, 0.5).expect("rocket root shape"),
-                                ),
-                                Transform::identity(),
-                            ),
-                        )
-                        .expect("rocket root collider");
-                }
-            }
-            root_bodies.push(stage_bodies[0]);
-            bodies.extend(stage_bodies);
-        }
-
-        let lower_root = root_bodies[0];
-        let upper_root = root_bodies[1];
-        let separation_joint = world
-            .add_joint(
-                lower_root,
-                upper_root,
-                fixed_joint_for_offset(Vec3::Y * 0.7),
-            )
-            .expect("stage connection");
-        let lower_engine = world
-            .add_force_source(lower_root, Vec3::new(-0.04, -0.2, 0.0), Vec3::Y * 800.0)
-            .expect("booster engine");
-        let upper_engine = world
-            .add_force_source(upper_root, Vec3::new(-0.04, -0.2, 0.0), Vec3::Y * 800.0)
-            .expect("upper stage engine");
-        world
-            .set_force_source_enabled(upper_engine, false)
-            .expect("upper engine cutoff");
-
-        ModularRocket {
-            world,
-            bodies,
-            lower_root,
-            upper_root,
-            separation_joint,
-            lower_engine,
-            upper_engine,
-        }
-    }
-
-    fn rocket_part_mass(root: bool, mass: f64) -> MassProperties {
-        let center = if root {
-            Vec3::new(-0.05, 0.0, 0.0)
-        } else {
-            Vec3::ZERO
-        };
-        let inertia = if root { 2.0 } else { mass * 0.04 };
-        MassProperties::new(mass, center, Mat3::from_diagonal(Vec3::splat(inertia)))
-            .expect("part mass")
-    }
-
-    fn fixed_joint_for_offset(offset: Vec3) -> Joint {
-        let common = JointCommon::new(
-            JointFrame::new(offset * 0.5, Quat::IDENTITY),
-            JointFrame::new(offset * -0.5, Quat::IDENTITY),
-        );
-        Joint::Fixed(FixedJoint::new(common))
-    }
-
     fn modular_rocket_state(warp: Option<f64>, end: Duration) -> RocketRun {
-        let mut rocket = modular_rocket();
+        use super::super::modular_rocket_fixture::{ModularRocket, rocket_part_mass};
+
+        let mut rocket = ModularRocket::new(ROCKET_PARTS);
         let config = adaptive_config();
         let base_step = config.step_budget();
         let minimum_step = match &config.time_step_policy {
@@ -1025,7 +891,7 @@ mod tests {
         assert!(separated && lower_fuel_updated && upper_fuel_updated);
         let (max_anchor_error, max_frame_error) = modular_rocket_joint_error(&rocket.world);
         let parts = rocket
-            .bodies
+            .parts
             .iter()
             .map(|id| {
                 let body = rocket.world.body(*id).expect("rocket part state");
@@ -1442,14 +1308,14 @@ mod tests {
     fn modular_rocket_remains_bounded_and_reproducible_through_adaptive_warp() {
         let end = Duration::from_millis(500);
         let reference = modular_rocket_state(None, end);
-        assert_eq!(reference.parts.len(), ROCKET_STAGE_PARTS * 2);
+        assert_eq!(reference.parts.len(), ROCKET_PARTS);
         assert!(
             reference.surface_contact_seen,
             "rocket must contact the pad"
         );
         assert_eq!(reference.lower_fuel_mass, 3.5);
         assert_eq!(reference.upper_fuel_mass, 3.5);
-        assert_eq!(reference.remaining_joints, ROCKET_STAGE_PARTS * 2 - 2);
+        assert_eq!(reference.remaining_joints, ROCKET_PARTS - 2);
         assert!(reference.separation_distance > 1.0);
         assert!(
             reference.max_anchor_error < 0.03,
@@ -1480,7 +1346,7 @@ mod tests {
             );
             assert_eq!(result.lower_fuel_mass, 3.5);
             assert_eq!(result.upper_fuel_mass, 3.5);
-            assert_eq!(result.remaining_joints, ROCKET_STAGE_PARTS * 2 - 2);
+            assert_eq!(result.remaining_joints, ROCKET_PARTS - 2);
             assert!(result.separation_distance > 1.0, "warp={warp}x");
             assert!(
                 result.max_anchor_error < 0.03,
@@ -1506,9 +1372,9 @@ mod tests {
             assert!(position_error < 0.5, "warp={warp}x: {position_error} m");
             assert!(velocity_error < 2.5, "warp={warp}x: {velocity_error} m/s");
             assert!(
-                result.parts[ROCKET_STAGE_PARTS].position.y > 1.1,
+                result.parts[ROCKET_PARTS / 2].position.y > 1.1,
                 "upper stage must climb at {warp}x: {} m",
-                result.parts[ROCKET_STAGE_PARTS].position.y
+                result.parts[ROCKET_PARTS / 2].position.y
             );
         }
     }

@@ -6,6 +6,8 @@ mod config;
 mod engine;
 mod executor;
 pub mod metrics;
+#[cfg(test)]
+mod modular_rocket_fixture;
 mod planner;
 #[cfg(test)]
 mod sync;
