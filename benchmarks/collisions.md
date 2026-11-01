@@ -635,3 +635,20 @@ At 20k static colliders, direct visits fell from 642,048 / 1,288,192 /
 dropped from 0.506 / 1.046 / 2.008 ms to 0.021 / 0.037 / 0.078 ms. The 1k
 and 20k scenes with 64 dynamic bodies both visit 16 proxies, showing that
 unrelated finite colliders do not add work to the changed-body traversal.
+
+## CCD follow-up stage 3: local impact-budget clipping
+
+The source-compatible `CcdLimitPolicy::ClipIsland` setting now clips only
+dynamic bodies participating in the unresolved contact. Their state is fixed
+at that contact pose for the remainder of the step, their CCD candidates are
+invalidated and reswept, and the solver continues with the other bodies in the
+same island. A moving kinematic body keeps its authored trajectory. The
+benchmark-only clipped-body count records distinct bodies across a global
+replay.
+
+Regression coverage includes a clipped body inside a 100-body CCD island while
+another body continues moving, two budget-exhausted bodies meeting at a shared
+contact, repeated wall impacts, a moving kinematic contact, contact-event
+publication, and `AbortStep` rollback. The full `kapitsa-core` test suite with
+`bench-internals` passed 474 unit tests, 16 integration/query/geometry tests,
+and the doctests. Core and workspace Clippy passed with warnings denied.

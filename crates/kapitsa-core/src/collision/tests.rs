@@ -1463,6 +1463,227 @@ fn ccd_impact_limit_clips_the_connected_island_at_the_contact() {
     assert_eq!(world.collision_step_metrics().ccd_clipped_island_count, 1);
 }
 
+#[cfg(feature = "bench-internals")]
+#[test]
+fn ccd_budget_clips_only_the_contacting_body_in_a_hundred_body_island() {
+    let mut world = PhysicsWorld::new();
+    add_plane_at(&mut world, Vec3::Y, -1.0, CollisionMode::Solid);
+    add_plane_at(&mut world, -Vec3::Y, -1.0, CollisionMode::Solid);
+    let mut bodies = Vec::with_capacity(100);
+    for index in 0..100 {
+        let velocity = if index == 0 {
+            Vec3::new(0.0, 3_000.0, 0.0)
+        } else if index == 99 {
+            Vec3::new(10.0, 0.0, 0.0)
+        } else {
+            Vec3::ZERO
+        };
+        let mut body = dynamic_body(Vec3::ZERO, velocity);
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body_id = world.add_body(body).unwrap();
+        let mut sensor = Collider::new(
+            Shape::Sphere(Sphere::new(0.5).unwrap()),
+            Transform::identity(),
+        );
+        sensor.set_mode(CollisionMode::Sensor);
+        world.add_collider(body_id, sensor).unwrap();
+        bodies.push(body_id);
+    }
+    world
+        .add_collider(
+            bodies[0],
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    world
+        .set_collision_config(CollisionConfig {
+            max_ccd_impacts: 1,
+            ..world.collision_config()
+        })
+        .unwrap();
+
+    world.step(0.01).unwrap();
+
+    let clipped = world.body(bodies[0]).unwrap().state();
+    assert_eq!(clipped.linear_velocity(), Vec3::ZERO);
+    assert_eq!(clipped.angular_velocity(), Vec3::ZERO);
+    assert!(clipped.transform().translation().y < 0.0);
+    let continuing = world.body(bodies[99]).unwrap().state();
+    assert_eq!(continuing.linear_velocity(), Vec3::new(10.0, 0.0, 0.0));
+    assert_eq!(continuing.transform().translation().x, 0.1);
+
+    let metrics = world.collision_step_metrics();
+    assert_eq!(metrics.ccd_island_count, 1);
+    assert_eq!(metrics.ccd_clipped_island_count, 1);
+    assert_eq!(metrics.ccd_clipped_body_count, 1);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn two_ccd_bodies_with_exhausted_budgets_clip_at_their_shared_contact() {
+    let mut world = PhysicsWorld::new();
+    let material = world
+        .add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0).unwrap())
+        .unwrap();
+    let left_wall_body = world
+        .add_body(RigidBody::new_static(
+            Transform::new(Vec3::new(-8.0, 0.0, 0.0), Quat::IDENTITY).unwrap(),
+        ))
+        .unwrap();
+    let left_wall = world
+        .add_collider(
+            left_wall_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    let right_wall_body = world
+        .add_body(RigidBody::new_static(
+            Transform::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY).unwrap(),
+        ))
+        .unwrap();
+    let right_wall = world
+        .add_collider(
+            right_wall_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    let mut left_body = dynamic_body(Vec3::new(-5.0, 0.0, 0.0), Vec3::new(-1_000.0, 0.0, 0.0));
+    left_body.set_ccd_mode(CcdMode::Continuous);
+    let left = world.add_body(left_body).unwrap();
+    let left_collider = world
+        .add_collider(
+            left,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    let mut right_body = dynamic_body(Vec3::new(5.0, 0.0, 0.0), Vec3::new(1_000.0, 0.0, 0.0));
+    right_body.set_ccd_mode(CcdMode::Continuous);
+    let right = world.add_body(right_body).unwrap();
+    let right_collider = world
+        .add_collider(
+            right,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    for collider in [left_wall, right_wall, left_collider, right_collider] {
+        world
+            .set_collider_material(collider, Some(material))
+            .unwrap();
+    }
+    world
+        .set_collision_config(CollisionConfig {
+            max_ccd_impacts: 1,
+            ..world.collision_config()
+        })
+        .unwrap();
+
+    world.step(0.02).unwrap();
+
+    for body in [left, right] {
+        let state = world.body(body).unwrap().state();
+        assert_eq!(state.linear_velocity(), Vec3::ZERO);
+        assert_eq!(state.angular_velocity(), Vec3::ZERO);
+    }
+    let pair = CollisionPair::new(left_collider, right_collider).unwrap();
+    assert!(world.collision_events().iter().any(|event| {
+        event.pair == pair
+            && event.kind == CollisionEventKind::Begin
+            && event
+                .contact
+                .is_some_and(|contact| contact.normal_impulse == 0.0)
+    }));
+    assert_eq!(world.collision_step_metrics().ccd_clipped_body_count, 2);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn ccd_budget_clip_keeps_moving_kinematic_trajectories() {
+    let mut world = PhysicsWorld::new();
+    let mut kinematic_bodies = Vec::new();
+    let mut kinematic_colliders = Vec::new();
+    for (x, velocity) in [(-3.0, Vec3::X * 1_000.0), (3.0, -Vec3::X * 1_000.0)] {
+        let mut body = RigidBody::new_kinematic(
+            Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY).unwrap(),
+        );
+        body.set_linear_velocity(velocity).unwrap();
+        let body_id = world.add_body(body).unwrap();
+        let collider_id = world
+            .add_collider(
+                body_id,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(0.1, 2.0, 2.0).unwrap()),
+                    Transform::identity(),
+                ),
+            )
+            .unwrap();
+        kinematic_bodies.push(body_id);
+        kinematic_colliders.push(collider_id);
+    }
+    let mut dynamic = dynamic_body(Vec3::ZERO, Vec3::ZERO);
+    dynamic.set_ccd_mode(CcdMode::Continuous);
+    let dynamic_body = world.add_body(dynamic).unwrap();
+    let dynamic_collider = world
+        .add_collider(
+            dynamic_body,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    world
+        .set_collision_config(CollisionConfig {
+            max_ccd_impacts: 1,
+            ..world.collision_config()
+        })
+        .unwrap();
+
+    world.step(0.01).unwrap();
+
+    for (body, expected_x) in kinematic_bodies.into_iter().zip([7.0, -7.0]) {
+        assert_eq!(
+            world
+                .body(body)
+                .unwrap()
+                .state()
+                .transform()
+                .translation()
+                .x,
+            expected_x
+        );
+    }
+    let dynamic = world.body(dynamic_body).unwrap().state();
+    assert_eq!(dynamic.linear_velocity(), Vec3::ZERO);
+    assert!(dynamic.transform().translation().is_finite());
+    assert!(kinematic_colliders.into_iter().any(|kinematic| {
+        let pair = CollisionPair::new(kinematic, dynamic_collider).unwrap();
+        world.collision_events().iter().any(|event| {
+            event.pair == pair
+                && event.kind == CollisionEventKind::Begin
+                && event
+                    .contact
+                    .is_some_and(|contact| contact.normal_impulse == 0.0)
+        })
+    }));
+    assert_eq!(world.collision_step_metrics().ccd_clipped_body_count, 1);
+}
+
 #[test]
 fn ccd_budget_clips_a_newly_connected_dynamic_pair() {
     let mut world = PhysicsWorld::new();

@@ -145,7 +145,7 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
-    pub(crate) fn record_ccd_clipped_island(&mut self) {
+    pub(crate) fn record_ccd_clipped_contact(&mut self) {
         self.benchmark_metrics.ccd_clipped_island_count = self
             .benchmark_metrics
             .ccd_clipped_island_count

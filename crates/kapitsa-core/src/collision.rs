@@ -76,9 +76,9 @@ pub struct CollisionStepMetrics {
     pub contact_count: usize,
     /// Number of continuous time-of-impact contacts resolved.
     pub ccd_impact_count: usize,
-    /// Number of CCD islands clipped after reaching the impact budget.
+    /// Number of unresolved CCD contacts handled by local budget clipping.
     pub ccd_clipped_island_count: usize,
-    /// Number of dynamic bodies stopped after reaching the impact budget.
+    /// Distinct dynamic bodies stopped after reaching the impact budget.
     pub ccd_clipped_body_count: usize,
     /// Candidate pairs present when CCD processing began.
     pub ccd_initial_candidate_count: usize,

@@ -161,9 +161,12 @@ slop, `1.0` restitution threshold, and 8 CCD impacts per continuous body.
 Iteration counts and the impact limit must be positive; distances and threshold
 must be finite and nonnegative; penetration slop cannot exceed contact offset.
 When a body reaches its impact limit, the default `CcdLimitPolicy::ClipIsland`
-stops dynamic bodies in its connected CCD island at the limiting contact for
-the rest of that step. The clipped contact is reported as a normal contact with
-zero impulse; it does not emit an `Impact` event. Set `ccd_limit_policy` to
+stops only the dynamic bodies involved in that unresolved contact at the
+contact time for the rest of the step. Other bodies in the CCD island continue
+their motion and collision processing. The clipped contact is reported as a
+normal contact with zero impulse; it does not emit an `Impact` event. The
+`ClipIsland` variant name remains for source compatibility. Set
+`ccd_limit_policy` to
 `CcdLimitPolicy::AbortStep` to preserve the previous transactional error behavior.
 
 The solver applies normal impulses, friction, restitution, warm starting, and
@@ -177,8 +180,8 @@ continuous collision detection. Swept broadphase bounds feed time-of-impact
 queries for the supported convex-convex and convex-surface pairings. The
 continuous path handles moving and rotating transforms over the step and
 resolves impacts in chronological order. The impact budget is per continuous
-body and applies to solver-resolved impacts; clipping an island ends further
-CCD motion for that group in the current step. `AbortStep` returns
+body and applies to solver-resolved impacts; clipped bodies remain fixed at
+their contact poses for the rest of the current step. `AbortStep` returns
 `CollisionError::CcdLimitExceeded` without committing the step.
 
 ## Queries

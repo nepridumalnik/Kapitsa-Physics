@@ -15,7 +15,7 @@ pub struct CollisionConfig {
 /// Action taken when a continuous body reaches its per-step impact budget.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CcdLimitPolicy {
-    /// Stop all dynamic bodies in the connected CCD island at the limiting contact.
+    /// Compatibility name: stop only dynamic participants in the unresolved contact.
     #[default]
     ClipIsland,
     /// Abort the step and preserve the last committed world state.
