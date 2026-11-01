@@ -12,6 +12,7 @@ use crate::{
     },
     containers::{DensePool, DensePoolError},
     gravity::{CentralGravity, GravityError},
+    joint::{FixedJoint, Joint, JointCommon, JointFrame},
     mass::MassProperties,
     material::PhysicsMaterial,
     rigid_body::{BodyType, CcdMode, IntegrationError, RigidBody},
@@ -183,6 +184,61 @@ fn body_at(position: Vec3, mass_value: f64) -> RigidBody {
         mass,
     )
     .expect("valid dynamic body")
+}
+
+#[test]
+fn joint_ids_validate_world_and_generation_and_body_removal_cascades() {
+    let mut world = PhysicsWorld::new();
+    let body_a = world
+        .add_body(body_at(Vec3::ZERO, 1.0))
+        .expect("first body");
+    let body_b = world.add_body(body_at(Vec3::X, 1.0)).expect("second body");
+    let joint = Joint::Fixed(FixedJoint::new(JointCommon::new(
+        JointFrame::IDENTITY,
+        JointFrame::IDENTITY,
+    )));
+    let joint_id = world
+        .add_joint(body_a, body_b, joint)
+        .expect("joint between world bodies");
+
+    assert_eq!(joint_id.generation(), 0);
+    assert_eq!(world.joint_count(), 1);
+    assert_eq!(world.joint(joint_id), Some(&joint));
+    assert_eq!(world.joint_bodies(joint_id), Some((body_a, body_b)));
+
+    let mut other_world = PhysicsWorld::new();
+    let foreign_body = other_world
+        .add_body(body_at(Vec3::ZERO, 1.0))
+        .expect("foreign body");
+    assert_eq!(
+        world.add_joint(body_a, foreign_body, joint),
+        Err(WorldError::InvalidJointBodies)
+    );
+    assert_eq!(other_world.joint(joint_id), None);
+
+    world
+        .set_joint_enabled(joint_id, false)
+        .expect("disable joint");
+    assert!(!world.joint(joint_id).expect("joint").common().enabled);
+    world
+        .update_joint(joint_id, joint)
+        .expect("update joint settings");
+    assert!(world.joint(joint_id).expect("joint").common().enabled);
+
+    world.remove_body(body_b).expect("remove attached body");
+    assert_eq!(world.joint_count(), 0);
+    assert_eq!(world.joint(joint_id), None);
+    assert_eq!(world.remove_joint(joint_id), None);
+
+    let body_c = world
+        .add_body(body_at(Vec3::new(2.0, 0.0, 0.0), 1.0))
+        .expect("replacement body");
+    let replacement = world
+        .add_joint(body_a, body_c, joint)
+        .expect("replacement joint");
+    assert_eq!(replacement.index(), joint_id.index());
+    assert_eq!(replacement.generation(), joint_id.generation() + 1);
+    assert_eq!(world.joint(joint_id), None);
 }
 
 #[test]

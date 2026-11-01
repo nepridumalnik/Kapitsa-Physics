@@ -126,6 +126,21 @@ impl Joint {
         }
         Ok(())
     }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        match self {
+            Self::Fixed(joint) => joint.common.enabled = enabled,
+            Self::Hinge(joint) => joint.common.enabled = enabled,
+            Self::Slider(joint) => joint.common.enabled = enabled,
+            Self::Ball(joint) => joint.common.enabled = enabled,
+            Self::Cylindrical(joint) => joint.common.enabled = enabled,
+            Self::Planar(joint) => joint.common.enabled = enabled,
+            Self::Distance(joint) => joint.common.enabled = enabled,
+            Self::Spring(joint) => joint.common.enabled = enabled,
+            Self::ConeTwist(joint) => joint.common.enabled = enabled,
+            Self::D6(joint) => joint.common.enabled = enabled,
+        }
+    }
 }
 
 fn validate_limit(limit: Option<JointLimit>) -> Result<(), JointError> {

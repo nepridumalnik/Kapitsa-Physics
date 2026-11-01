@@ -12,7 +12,7 @@ mod error;
 mod id;
 
 pub use error::{ForceSourceError, StepError, WorldError};
-pub use id::{BodyId, ColliderId, ForceSourceId};
+pub use id::{BodyId, ColliderId, ForceSourceId, JointId};
 
 static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -39,6 +39,7 @@ use crate::{
     containers::DensePool,
     execution::{SequentialExecutor, StepExecutor},
     gravity::{CentralGravity, GravityError},
+    joint::Joint,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
     rigid_body::{BodyState, BodyType, CcdMode, RigidBody, predict, predict_from_state},
     shape::Shape,
@@ -84,6 +85,12 @@ struct ForceSourceBodyUpdate {
     id: BodyId,
     original: RigidBody,
     prepared: RigidBody,
+}
+
+struct JointEntry {
+    body_a: BodyId,
+    body_b: BodyId,
+    joint: Joint,
 }
 
 struct GravityBodyUpdate {
@@ -145,6 +152,7 @@ pub struct PhysicsWorld {
     bodies: DensePool<BodyEntry>,
     colliders: DensePool<ColliderEntry>,
     force_sources: DensePool<ForceSource>,
+    joints: DensePool<JointEntry>,
     force_source_body_updates: Vec<ForceSourceBodyUpdate>,
     force_source_body_indices: Option<HashMap<BodyId, usize>>,
     central_gravity: Option<CentralGravity>,
@@ -202,6 +210,7 @@ impl PhysicsWorld {
             bodies: DensePool::new(),
             colliders: DensePool::new(),
             force_sources: DensePool::new(),
+            joints: DensePool::new(),
             force_source_body_updates: Vec::new(),
             force_source_body_indices: None,
             central_gravity: None,
@@ -747,6 +756,103 @@ impl PhysicsWorld {
 
     pub fn body_count(&self) -> usize {
         self.bodies.len()
+    }
+
+    /// Adds a constraint between two existing, distinct bodies.
+    pub fn add_joint(
+        &mut self,
+        body_a: BodyId,
+        body_b: BodyId,
+        joint: Joint,
+    ) -> Result<JointId, WorldError> {
+        if body_a == body_b || self.body(body_a).is_none() || self.body(body_b).is_none() {
+            return Err(WorldError::InvalidJointBodies);
+        }
+        joint.validate()?;
+        let dense = self
+            .joints
+            .insert(JointEntry {
+                body_a,
+                body_b,
+                joint,
+            })
+            .map_err(WorldError::from)?;
+        Ok(JointId {
+            world: self.world_id,
+            dense,
+        })
+    }
+
+    /// Returns the configuration of a live joint in this world.
+    pub fn joint(&self, id: JointId) -> Option<&Joint> {
+        if id.world != self.world_id {
+            return None;
+        }
+        self.joints.get(id.dense).map(|entry| &entry.joint)
+    }
+
+    /// Returns the two bodies connected by a live joint.
+    pub fn joint_bodies(&self, id: JointId) -> Option<(BodyId, BodyId)> {
+        if id.world != self.world_id {
+            return None;
+        }
+        self.joints
+            .get(id.dense)
+            .map(|entry| (entry.body_a, entry.body_b))
+    }
+
+    /// Replaces a joint's settings while retaining its ID and attached bodies.
+    pub fn update_joint(&mut self, id: JointId, joint: Joint) -> Result<(), WorldError> {
+        joint.validate()?;
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidJointId);
+        }
+        let entry = self
+            .joints
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidJointId)?;
+        entry.joint = joint;
+        Ok(())
+    }
+
+    /// Enables or disables a live joint without changing its settings.
+    pub fn set_joint_enabled(&mut self, id: JointId, enabled: bool) -> Result<(), WorldError> {
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidJointId);
+        }
+        self.joints
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidJointId)?
+            .joint
+            .set_enabled(enabled);
+        Ok(())
+    }
+
+    /// Removes a live joint and returns its final configuration.
+    pub fn remove_joint(&mut self, id: JointId) -> Option<Joint> {
+        if id.world != self.world_id {
+            return None;
+        }
+        self.joints.remove(id.dense).map(|entry| entry.joint)
+    }
+
+    pub fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
+
+    /// Iterates over joints in dense storage order, which may change after removal.
+    pub fn joints(&self) -> impl Iterator<Item = (JointId, BodyId, BodyId, &Joint)> {
+        self.joints.iter().map(|(dense, entry)| {
+            (
+                JointId {
+                    world: self.world_id,
+                    dense,
+                },
+                entry.body_a,
+                entry.body_b,
+                &entry.joint,
+            )
+        })
     }
 
     /// Adds a persistent force source to an existing dynamic body.
@@ -4667,6 +4773,18 @@ impl PhysicsWorld {
         while let Some(collider) = next {
             next = self.colliders.get(collider.dense)?.next;
             self.remove_collider(collider)?;
+        }
+        loop {
+            let joint = self.joints.iter().find_map(|(dense, entry)| {
+                (entry.body_a == id || entry.body_b == id).then_some(JointId {
+                    world: self.world_id,
+                    dense,
+                })
+            });
+            let Some(joint) = joint else {
+                break;
+            };
+            self.joints.remove(joint.dense)?;
         }
         loop {
             let source = self.force_sources.iter().find_map(|(dense, source)| {

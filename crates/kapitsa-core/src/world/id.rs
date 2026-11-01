@@ -48,3 +48,22 @@ pub struct ColliderId {
     pub(super) world: u64,
     pub(super) dense: DenseId,
 }
+
+/// Identifies a joint in the world that created it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct JointId {
+    pub(super) world: u64,
+    pub(super) dense: DenseId,
+}
+
+impl JointId {
+    /// Returns the stable slot index within the owning world.
+    pub fn index(self) -> u32 {
+        self.dense.index()
+    }
+
+    /// Returns the slot generation used to reject stale IDs after reuse.
+    pub fn generation(self) -> u32 {
+        self.dense.generation()
+    }
+}

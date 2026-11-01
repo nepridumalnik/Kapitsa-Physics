@@ -6,6 +6,7 @@ use crate::gravity::GravityError;
 use crate::rigid_body::{BodyError, IntegrationError};
 
 use super::{BodyId, ForceSourceId};
+use crate::joint::JointError;
 
 /// Failure while configuring or applying a persistent body force.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,9 +110,12 @@ pub enum WorldError {
     WorldIdExhausted,
     InvalidBodyId,
     InvalidColliderId,
+    InvalidJointId,
+    InvalidJointBodies,
     InvalidMaterialId,
     MaterialInUse,
     Collision(CollisionError),
+    Joint(JointError),
 }
 
 impl fmt::Display for WorldError {
@@ -127,11 +131,16 @@ impl fmt::Display for WorldError {
             Self::WorldIdExhausted => formatter.write_str("physics world ID space is exhausted"),
             Self::InvalidBodyId => formatter.write_str("body ID is invalid for this world"),
             Self::InvalidColliderId => formatter.write_str("collider ID is invalid for this world"),
+            Self::InvalidJointId => formatter.write_str("joint ID is invalid for this world"),
+            Self::InvalidJointBodies => {
+                formatter.write_str("joint body IDs must identify two bodies in this world")
+            }
             Self::InvalidMaterialId => formatter.write_str("material ID is invalid for this world"),
             Self::MaterialInUse => {
                 formatter.write_str("physics material is assigned to a collider")
             }
             Self::Collision(error) => write!(formatter, "collision configuration failed: {error}"),
+            Self::Joint(error) => write!(formatter, "joint configuration failed: {error}"),
         }
     }
 }
@@ -140,12 +149,15 @@ impl std::error::Error for WorldError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Collision(error) => Some(error),
+            Self::Joint(error) => Some(error),
             Self::DensePoolIndexOverflow
             | Self::DensePoolCapacityExceeded
             | Self::DensePoolInvalidFreeList
             | Self::WorldIdExhausted
             | Self::InvalidBodyId
             | Self::InvalidColliderId
+            | Self::InvalidJointId
+            | Self::InvalidJointBodies
             | Self::InvalidMaterialId
             | Self::MaterialInUse => None,
         }
@@ -166,5 +178,11 @@ impl From<DensePoolError> for WorldError {
 impl From<CollisionError> for WorldError {
     fn from(error: CollisionError) -> Self {
         Self::Collision(error)
+    }
+}
+
+impl From<JointError> for WorldError {
+    fn from(error: JointError) -> Self {
+        Self::Joint(error)
     }
 }
