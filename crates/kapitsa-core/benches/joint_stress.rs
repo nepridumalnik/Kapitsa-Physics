@@ -1,10 +1,15 @@
+#[cfg(windows)]
+use std::ffi::c_void;
 use std::{
+    alloc::{GlobalAlloc, Layout, System},
     error::Error,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
 use kapitsa_core::{
     collider::Collider,
+    collision::CollisionStepMetrics,
     gravity::CentralGravity,
     joint::{FixedJoint, Joint, JointCommon, JointFrame},
     mass::MassProperties,
@@ -19,21 +24,216 @@ use kapitsa_math::{Mat3, Quat, Vec3};
 mod scoped_executor;
 use scoped_executor::ScopedThreadExecutor;
 
-const SIZES: [usize; 5] = [144, 576, 1_440, 7_200, 14_400];
-const WARMUPS: usize = 1;
-const SAMPLES: usize = 3;
+const SIZES: [usize; 3] = [144, 1_440, 14_400];
+const WARMUPS: usize = 3;
+const SAMPLES: usize = 10;
 const DT: f64 = 1.0 / 120.0;
 const WORKERS: [usize; 4] = [1, 2, 4, 8];
 
+static TRACK_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ALLOCATION_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+struct CountingAllocator;
+
+// SAFETY: all allocation operations delegate to the system allocator.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        record_allocation(pointer, layout.size());
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        record_allocation(pointer, layout.size());
+        pointer
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        let pointer = unsafe { System.realloc(pointer, layout, size) };
+        record_allocation(pointer, size);
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+fn record_allocation(pointer: *mut u8, requested_bytes: usize) {
+    if !pointer.is_null() && TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+        ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+        ALLOCATION_BYTES.fetch_add(requested_bytes, Ordering::Relaxed);
+    }
+}
+
+fn begin_allocation_sample() {
+    ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+    ALLOCATION_BYTES.store(0, Ordering::Relaxed);
+    TRACK_ALLOCATIONS.store(true, Ordering::Relaxed);
+}
+
+fn end_allocation_sample() -> (usize, usize) {
+    TRACK_ALLOCATIONS.store(false, Ordering::Relaxed);
+    (
+        ALLOCATION_COUNT.load(Ordering::Relaxed),
+        ALLOCATION_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct StepSample {
+    timing: TimedSample,
+    metrics: CollisionStepMetrics,
+}
+
+#[derive(Clone, Copy)]
+struct TimedSample {
+    elapsed: Duration,
+    cpu: Option<Duration>,
+    allocations: usize,
+    requested_bytes: usize,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct FileTime {
+    low: u32,
+    high: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentProcess() -> *mut c_void;
+    fn GetProcessTimes(
+        process: *mut c_void,
+        creation: *mut FileTime,
+        exit: *mut FileTime,
+        kernel: *mut FileTime,
+        user: *mut FileTime,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+fn process_cpu_time() -> Option<Duration> {
+    let mut creation = FileTime::default();
+    let mut exit = FileTime::default();
+    let mut kernel = FileTime::default();
+    let mut user = FileTime::default();
+    // SAFETY: GetCurrentProcess returns a pseudo-handle and all output pointers
+    // point to initialized, writable FILETIME values.
+    let succeeded = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if succeeded == 0 {
+        return None;
+    }
+    let ticks = |time: FileTime| (u64::from(time.high) << 32) | u64::from(time.low);
+    Some(Duration::from_nanos(
+        ticks(kernel)
+            .saturating_add(ticks(user))
+            .saturating_mul(100),
+    ))
+}
+
+#[cfg(not(windows))]
+fn process_cpu_time() -> Option<Duration> {
+    None
+}
+
+fn measure<T>(operation: impl FnOnce() -> T) -> (T, TimedSample) {
+    let cpu_started = process_cpu_time();
+    let started = Instant::now();
+    begin_allocation_sample();
+    let result = operation();
+    let elapsed = started.elapsed();
+    let (allocations, requested_bytes) = end_allocation_sample();
+    let cpu = cpu_started
+        .zip(process_cpu_time())
+        .and_then(|(started, ended)| ended.checked_sub(started));
+    (
+        result,
+        TimedSample {
+            elapsed,
+            cpu,
+            allocations,
+            requested_bytes,
+        },
+    )
+}
+
+fn percentile_index(count: usize, percentile: usize) -> usize {
+    count
+        .saturating_mul(percentile)
+        .div_ceil(100)
+        .saturating_sub(1)
+        .min(count.saturating_sub(1))
+}
+
+fn cpu_summary(samples: impl Iterator<Item = Option<Duration>>, count: usize) -> String {
+    let mut times = samples.collect::<Option<Vec<_>>>();
+    let Some(times) = times.as_mut() else {
+        return "n/a".to_owned();
+    };
+    if times.len() != count {
+        return "n/a".to_owned();
+    }
+    times.sort_unstable();
+    let p95 = percentile_index(times.len(), 95);
+    format!(
+        "{:.3}/{:.3}/{:.3}/{:.3}",
+        milliseconds(times[0]),
+        milliseconds(times[count / 2]),
+        milliseconds(times[p95]),
+        milliseconds(times[count - 1]),
+    )
+}
+
+fn timing_summary(samples: &[TimedSample]) -> String {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable_by_key(|sample| sample.elapsed);
+    let p95 = percentile_index(sorted.len(), 95);
+    format!(
+        "wall_ms={}/{}/{}/{} cpu_ms={}",
+        milliseconds(sorted[0].elapsed),
+        milliseconds(sorted[sorted.len() / 2].elapsed),
+        milliseconds(sorted[p95].elapsed),
+        milliseconds(sorted[sorted.len() - 1].elapsed),
+        cpu_summary(sorted.iter().map(|sample| sample.cpu), sorted.len()),
+    )
+}
+
+fn allocation_percentile<T>(
+    samples: &[T],
+    value: impl Fn(&T) -> usize,
+    percentile: usize,
+) -> usize {
+    let mut values = samples.iter().map(value).collect::<Vec<_>>();
+    values.sort_unstable();
+    values[percentile_index(values.len(), percentile)]
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("Joint stress scenes: warmups={WARMUPS}, samples={SAMPLES}, workers={WORKERS:?}");
+    println!(
+        "Joint stress scenes: warmups={WARMUPS}, samples={SAMPLES}, sizes={SIZES:?}, workers={WORKERS:?}"
+    );
     report("fleet of 100 two-stage rockets", 100, rocket_fleet)?;
     for size in SIZES {
-        report("one body / colliders", size, colliders_on_one_body)?;
         report("fixed-joint chain", size, fixed_chain)?;
         report("branching fixed-joint assembly", size, branching_assembly)?;
         report("independent two-body assemblies", size, independent_pairs)?;
-        report("independent debris with colliders", size, debris_cloud)?;
         report("dense vertical contact stack", size, dense_contact_stack)?;
         report_first_step("mass joint break", size, mass_break)?;
         report_mass_separation(size)?;
@@ -54,35 +254,62 @@ fn report(
         }
         let mut samples = Vec::with_capacity(SAMPLES);
         for _ in 0..SAMPLES {
-            let started = Instant::now();
-            world.step_with_executor(DT, &ScopedThreadExecutor, workers)?;
-            let elapsed = started.elapsed();
-            samples.push((elapsed, world.collision_step_metrics()));
+            let (result, timing) =
+                measure(|| world.step_with_executor(DT, &ScopedThreadExecutor, workers));
+            result?;
+            samples.push(StepSample {
+                timing,
+                metrics: world.collision_step_metrics(),
+            });
         }
         let joint_errors = max_joint_frame_errors(&world)?;
-        samples.sort_unstable_by_key(|sample| sample.0);
+        validate_bodies(&world)?;
+        if expected_joints(name, size) > 0 && (joint_errors.0 > 0.002 || joint_errors.1 > 0.0002) {
+            return Err(format!(
+                "{name} size={size} workers={workers} failed joint tolerances: {joint_errors:?}"
+            )
+            .into());
+        }
+        if name == "dense vertical contact stack"
+            && samples
+                .iter()
+                .any(|sample| sample.metrics.contact_count != size)
+        {
+            return Err(format!("{name} size={size} did not retain all {size} contacts").into());
+        }
+        samples.sort_unstable_by_key(|sample| sample.timing.elapsed);
         let min = &samples[0];
         let median = &samples[SAMPLES / 2];
+        let p95 = &samples[percentile_index(SAMPLES, 95)];
         let max = &samples[SAMPLES - 1];
         println!(
-            "{name:34} size={size:>6} workers={workers}: step_ms={:.3}/{:.3}/{:.3} solver_prepare_ms={:.3} solver_iterations_ms={:.3} narrow_ms={:.3} candidates={} contacts={} islands={} joints={} initial_joint_error_m/rad={:.6e}/{:.6e} final_joint_error_m/rad={:.6e}/{:.6e} retained_scratch_kib={} peak_scratch_kib={} logical_growth_bytes={}",
-            milliseconds(min.0),
-            milliseconds(median.0),
-            milliseconds(max.0),
-            milliseconds(median.1.solver_prepare),
-            milliseconds(median.1.solver_iterations),
-            milliseconds(median.1.narrow_phase),
-            median.1.candidate_count,
-            median.1.contact_count,
-            median.1.island_count,
+            "{name:34} size={size:>6} workers={workers}: wall_ms={}/{}/{}/{} cpu_ms={} allocs_med/p95={}/{} requested_bytes_med/p95={}/{} solver_prepare_ms={:.3} solver_iterations_ms={:.3} narrow_ms={:.3} candidates={} contacts={} islands={} joints={} initial_joint_error_m/rad={:.6e}/{:.6e} final_joint_error_m/rad={:.6e}/{:.6e} retained_scratch_kib={} peak_scratch_kib={} logical_growth_bytes={}",
+            milliseconds(min.timing.elapsed),
+            milliseconds(median.timing.elapsed),
+            milliseconds(p95.timing.elapsed),
+            milliseconds(max.timing.elapsed),
+            cpu_summary(
+                samples.iter().map(|sample| sample.timing.cpu),
+                samples.len()
+            ),
+            allocation_percentile(&samples, |sample| sample.timing.allocations, 50),
+            allocation_percentile(&samples, |sample| sample.timing.allocations, 95),
+            allocation_percentile(&samples, |sample| sample.timing.requested_bytes, 50),
+            allocation_percentile(&samples, |sample| sample.timing.requested_bytes, 95),
+            milliseconds(median.metrics.solver_prepare),
+            milliseconds(median.metrics.solver_iterations),
+            milliseconds(median.metrics.narrow_phase),
+            median.metrics.candidate_count,
+            median.metrics.contact_count,
+            median.metrics.island_count,
             expected_joints(name, size),
             initial_joint_errors.0,
             initial_joint_errors.1,
             joint_errors.0,
             joint_errors.1,
-            median.1.retained_scratch_bytes / 1024,
-            median.1.peak_scratch_bytes / 1024,
-            median.1.logical_capacity_growth_bytes,
+            median.metrics.retained_scratch_bytes / 1024,
+            median.metrics.peak_scratch_bytes / 1024,
+            median.metrics.logical_capacity_growth_bytes,
         );
     }
     Ok(())
@@ -97,6 +324,19 @@ fn expected_joints(name: &str, size: usize) -> usize {
     }
 }
 
+fn validate_bodies(world: &PhysicsWorld) -> Result<(), Box<dyn Error>> {
+    if world.bodies().any(|(_, body)| {
+        let state = body.state();
+        !state.transform().translation().is_finite()
+            || !state.transform().rotation().is_normalized()
+            || !state.linear_velocity().is_finite()
+            || !state.angular_velocity().is_finite()
+    }) {
+        return Err("benchmark produced an invalid body state".into());
+    }
+    Ok(())
+}
+
 fn report_first_step(
     name: &str,
     size: usize,
@@ -107,24 +347,40 @@ fn report_first_step(
         for _ in 0..SAMPLES {
             let mut world = build(size)?;
             // Breaking destroys the measured joints, so this is intentionally the first step.
-            let started = Instant::now();
-            world.step_with_executor(DT, &ScopedThreadExecutor, workers)?;
-            let elapsed = started.elapsed();
+            let (result, timing) =
+                measure(|| world.step_with_executor(DT, &ScopedThreadExecutor, workers));
+            result?;
+            validate_bodies(&world)?;
+            if world.joint_events().len() != size / 2 {
+                return Err(format!(
+                    "{name} size={size} broke {} of {} joints",
+                    world.joint_events().len(),
+                    size / 2
+                )
+                .into());
+            }
             samples.push((
-                elapsed,
+                timing,
                 world.collision_step_metrics(),
                 world.joint_events().len(),
             ));
         }
-        samples.sort_unstable_by_key(|sample| sample.0);
+        samples.sort_unstable_by_key(|sample| sample.0.elapsed);
         let min = &samples[0];
         let median = &samples[SAMPLES / 2];
+        let p95 = &samples[percentile_index(SAMPLES, 95)];
         let max = &samples[SAMPLES - 1];
         println!(
-            "{name:34} elements={size:>6} workers={workers}: first_step_ms={:.3}/{:.3}/{:.3} islands={} break_events={} retained_scratch_kib={} peak_scratch_kib={} logical_growth_bytes={}",
-            milliseconds(min.0),
-            milliseconds(median.0),
-            milliseconds(max.0),
+            "{name:34} elements={size:>6} workers={workers}: wall_ms={}/{}/{}/{} cpu_ms={} allocs_med/p95={}/{} requested_bytes_med/p95={}/{} islands={} break_events={} retained_scratch_kib={} peak_scratch_kib={} logical_growth_bytes={}",
+            milliseconds(min.0.elapsed),
+            milliseconds(median.0.elapsed),
+            milliseconds(p95.0.elapsed),
+            milliseconds(max.0.elapsed),
+            cpu_summary(samples.iter().map(|sample| sample.0.cpu), samples.len()),
+            allocation_percentile(&samples, |sample| sample.0.allocations, 50),
+            allocation_percentile(&samples, |sample| sample.0.allocations, 95),
+            allocation_percentile(&samples, |sample| sample.0.requested_bytes, 50),
+            allocation_percentile(&samples, |sample| sample.0.requested_bytes, 95),
             median.1.island_count,
             median.2,
             median.1.retained_scratch_bytes / 1024,
@@ -142,31 +398,40 @@ fn report_mass_separation(count: usize) -> Result<(), Box<dyn Error>> {
             let (mut world, joints) = independent_pair_world(count)?;
             world.step_with_executor(DT, &ScopedThreadExecutor, workers)?;
 
-            let remove_started = Instant::now();
-            for joint in joints {
-                world.remove_joint(joint);
+            let (_, remove_timing) = measure(|| {
+                for joint in joints {
+                    world.remove_joint(joint);
+                }
+            });
+            let (result, detached_timing) =
+                measure(|| world.step_with_executor(DT, &ScopedThreadExecutor, workers));
+            result?;
+            validate_bodies(&world)?;
+            if world.joint_count() != 0 {
+                return Err(format!("mass separation left joints attached at size={count}").into());
             }
-            let remove_time = remove_started.elapsed();
-
-            let step_started = Instant::now();
-            world.step_with_executor(DT, &ScopedThreadExecutor, workers)?;
-            let step_time = step_started.elapsed();
-            samples.push((remove_time, step_time, world.collision_step_metrics()));
+            samples.push((
+                remove_timing,
+                detached_timing,
+                world.collision_step_metrics(),
+            ));
         }
-        let mut remove_times: Vec<_> = samples.iter().map(|sample| sample.0).collect();
-        let mut step_times: Vec<_> = samples.iter().map(|sample| sample.1).collect();
-        remove_times.sort_unstable();
-        step_times.sort_unstable();
-        samples.sort_unstable_by_key(|sample| sample.0 + sample.1);
+        let mut remove_samples: Vec<_> = samples.iter().map(|sample| sample.0).collect();
+        let mut detached_samples: Vec<_> = samples.iter().map(|sample| sample.1).collect();
+        remove_samples.sort_unstable_by_key(|sample| sample.elapsed);
+        detached_samples.sort_unstable_by_key(|sample| sample.elapsed);
+        samples.sort_unstable_by_key(|sample| sample.0.elapsed + sample.1.elapsed);
         let median = &samples[SAMPLES / 2];
         println!(
-            "mass stage separation               elements={count:>6} workers={workers}: remove_ms={:.3}/{:.3}/{:.3} detached_step_ms={:.3}/{:.3}/{:.3} retained_scratch_kib={} peak_scratch_kib={} logical_growth_bytes={}",
-            milliseconds(remove_times[0]),
-            milliseconds(remove_times[SAMPLES / 2]),
-            milliseconds(remove_times[SAMPLES - 1]),
-            milliseconds(step_times[0]),
-            milliseconds(step_times[SAMPLES / 2]),
-            milliseconds(step_times[SAMPLES - 1]),
+            "mass stage separation               elements={count:>6} workers={workers}: remove={} detached_step={} remove_allocs/bytes_med/p95={}/{}/{} detached_allocs/bytes_med/p95={}/{}/{} retained_scratch_kib={} peak_scratch_kib={} logical_growth_bytes={}",
+            timing_summary(&remove_samples),
+            timing_summary(&detached_samples),
+            allocation_percentile(&remove_samples, |sample| sample.allocations, 50),
+            allocation_percentile(&remove_samples, |sample| sample.requested_bytes, 50),
+            allocation_percentile(&remove_samples, |sample| sample.requested_bytes, 95),
+            allocation_percentile(&detached_samples, |sample| sample.allocations, 50),
+            allocation_percentile(&detached_samples, |sample| sample.requested_bytes, 50),
+            allocation_percentile(&detached_samples, |sample| sample.requested_bytes, 95),
             median.2.retained_scratch_bytes / 1024,
             median.2.peak_scratch_bytes / 1024,
             median.2.logical_capacity_growth_bytes,
@@ -175,23 +440,11 @@ fn report_mass_separation(count: usize) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn colliders_on_one_body(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
-    let mut world = PhysicsWorld::new();
-    let body = world.add_body(dynamic_body(Vec3::ZERO)?)?;
-    for _ in 0..count {
-        world.add_collider(
-            body,
-            Collider::new(Shape::Sphere(Sphere::new(0.25)?), Transform::identity()),
-        )?;
-    }
-    Ok(world)
-}
-
 fn fixed_chain(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     let mut world = PhysicsWorld::new();
     let mut bodies = Vec::with_capacity(count);
     for index in 0..count {
-        bodies.push(world.add_body(dynamic_body(Vec3::X * (index as f64 * 1.01))?)?);
+        bodies.push(world.add_body(dynamic_body(Vec3::X * index as f64)?)?);
     }
     let common = fixed_joint_frames();
     for pair in bodies.windows(2) {
@@ -245,18 +498,6 @@ fn rocket_fleet(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
         let body_a = world.add_body(dynamic_body(Vec3::X * x)?)?;
         let body_b = world.add_body(dynamic_body(Vec3::X * (x + 1.0))?)?;
         world.add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))?;
-    }
-    Ok(world)
-}
-
-fn debris_cloud(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
-    let mut world = PhysicsWorld::new();
-    for index in 0..count {
-        let body = world.add_body(dynamic_body(Vec3::X * (index as f64 * 2.0))?)?;
-        world.add_collider(
-            body,
-            Collider::new(Shape::Sphere(Sphere::new(0.25)?), Transform::identity()),
-        )?;
     }
     Ok(world)
 }

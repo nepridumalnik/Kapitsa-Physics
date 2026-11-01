@@ -14,13 +14,14 @@ struct JointReaction {
 pub(crate) struct JointWorkspace {
     rows: Vec<ConstraintRow>,
     row_joint_indices: Vec<usize>,
-    row_joint_ids: Vec<Option<crate::world::JointId>>,
+    joint_ids: Vec<Option<crate::world::JointId>>,
     preparing_rows: Vec<ConstraintRow>,
     preparing_joint_indices: Vec<usize>,
     preparing_joint_ids: Vec<Option<crate::world::JointId>>,
     prepared_rows: usize,
     active_joint_index: usize,
     active_joint_id: Option<crate::world::JointId>,
+    sequential_joint_prepare: bool,
     previous_row_start: usize,
     previous_row_end: usize,
     reactions: Vec<JointReaction>,
@@ -32,13 +33,14 @@ impl JointWorkspace {
         Self {
             rows: Vec::new(),
             row_joint_indices: Vec::new(),
-            row_joint_ids: Vec::new(),
+            joint_ids: Vec::new(),
             preparing_rows: Vec::new(),
             preparing_joint_indices: Vec::new(),
             preparing_joint_ids: Vec::new(),
             prepared_rows: 0,
             active_joint_index: 0,
             active_joint_id: None,
+            sequential_joint_prepare: false,
             previous_row_start: 0,
             previous_row_end: 0,
             reactions: Vec::new(),
@@ -50,6 +52,7 @@ impl JointWorkspace {
         self.prepared_rows = 0;
         self.active_joint_index = 0;
         self.active_joint_id = None;
+        self.sequential_joint_prepare = false;
         self.previous_row_start = 0;
         self.previous_row_end = 0;
         self.reactions.clear();
@@ -63,13 +66,14 @@ impl JointWorkspace {
     pub(crate) fn clear(&mut self) {
         self.rows.clear();
         self.row_joint_indices.clear();
-        self.row_joint_ids.clear();
+        self.joint_ids.clear();
         self.preparing_rows.clear();
         self.preparing_joint_indices.clear();
         self.preparing_joint_ids.clear();
         self.prepared_rows = 0;
         self.active_joint_index = 0;
         self.active_joint_id = None;
+        self.sequential_joint_prepare = false;
         self.previous_row_start = 0;
         self.previous_row_end = 0;
         self.reactions.clear();
@@ -80,6 +84,7 @@ impl JointWorkspace {
         self.prepared_rows = 0;
         self.active_joint_index = 0;
         self.active_joint_id = None;
+        self.sequential_joint_prepare = false;
         self.previous_row_start = 0;
         self.previous_row_end = self.rows.len();
         self.preparing_rows.clear();
@@ -90,7 +95,12 @@ impl JointWorkspace {
     pub(crate) fn push(&mut self, mut row: ConstraintRow) {
         let previous = (self.previous_row_start..self.previous_row_end).find_map(|index| {
             (self.row_joint_indices.get(index) == Some(&self.active_joint_index)
-                && self.row_joint_ids.get(index) == Some(&self.active_joint_id)
+                && self
+                    .joint_ids
+                    .get(self.active_joint_index)
+                    .copied()
+                    .flatten()
+                    == self.active_joint_id
                 && self
                     .rows
                     .get(index)
@@ -102,8 +112,9 @@ impl JointWorkspace {
             row.accumulated_impulse = previous.accumulated_impulse;
         }
         self.preparing_rows.push(row);
-        self.preparing_joint_indices.push(self.active_joint_index);
-        self.preparing_joint_ids.push(self.active_joint_id);
+        if !self.sequential_joint_prepare {
+            self.preparing_joint_indices.push(self.active_joint_index);
+        }
         self.prepared_rows += 1;
     }
 
@@ -113,10 +124,11 @@ impl JointWorkspace {
             &mut self.row_joint_indices,
             &mut self.preparing_joint_indices,
         );
-        std::mem::swap(&mut self.row_joint_ids, &mut self.preparing_joint_ids);
+        std::mem::swap(&mut self.joint_ids, &mut self.preparing_joint_ids);
         self.preparing_rows.clear();
         self.preparing_joint_indices.clear();
         self.preparing_joint_ids.clear();
+        self.sequential_joint_prepare = false;
     }
 
     pub(crate) fn begin_joint_prepare(
@@ -135,6 +147,7 @@ impl JointWorkspace {
         self.prepared_rows = 0;
         self.active_joint_index = joint_index;
         self.active_joint_id = Some(joint_id);
+        self.sequential_joint_prepare = true;
         self.preparing_rows.clear();
         self.preparing_joint_indices.clear();
         self.preparing_joint_ids.clear();
@@ -148,15 +161,27 @@ impl JointWorkspace {
         let joint_id = self.active_joint_id.ok_or(CollisionError::InvalidContact)?;
         let new_count = self.preparing_rows.len();
         let old_count = self.previous_row_end - self.previous_row_start;
+        if new_count == old_count {
+            self.rows[self.previous_row_start..self.previous_row_end]
+                .copy_from_slice(&self.preparing_rows);
+            let owners =
+                &mut self.row_joint_indices[self.previous_row_start..self.previous_row_end];
+            if owners.first() != Some(&self.active_joint_index) {
+                owners.fill(self.active_joint_index);
+            }
+            self.update_joint_id(joint_id)?;
+            self.preparing_rows.clear();
+            self.preparing_joint_indices.clear();
+            self.preparing_joint_ids.clear();
+            self.sequential_joint_prepare = false;
+            return Ok(());
+        }
         if new_count > old_count {
             let additional = new_count - old_count;
             self.rows
                 .try_reserve(additional)
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
             self.row_joint_indices
-                .try_reserve(additional)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-            self.row_joint_ids
                 .try_reserve(additional)
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
         }
@@ -166,15 +191,13 @@ impl JointWorkspace {
         );
         self.row_joint_indices.splice(
             self.previous_row_start..self.previous_row_end,
-            std::iter::repeat(self.active_joint_index).take(new_count),
+            std::iter::repeat_n(self.active_joint_index, new_count),
         );
-        self.row_joint_ids.splice(
-            self.previous_row_start..self.previous_row_end,
-            std::iter::repeat(Some(joint_id)).take(new_count),
-        );
+        self.update_joint_id(joint_id)?;
         self.preparing_rows.clear();
         self.preparing_joint_indices.clear();
         self.preparing_joint_ids.clear();
+        self.sequential_joint_prepare = false;
         Ok(())
     }
 
@@ -195,6 +218,18 @@ impl JointWorkspace {
             .partition_point(|&owner| owner <= index);
         self.active_joint_index = index;
         self.active_joint_id = Some(id);
+        set_joint_id(&mut self.preparing_joint_ids, index, id);
+    }
+
+    fn update_joint_id(&mut self, id: crate::world::JointId) -> Result<(), CollisionError> {
+        if self.active_joint_index >= self.joint_ids.len() {
+            self.joint_ids
+                .try_reserve(self.active_joint_index + 1 - self.joint_ids.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.joint_ids.resize(self.active_joint_index + 1, None);
+        }
+        self.joint_ids[self.active_joint_index] = Some(id);
+        Ok(())
     }
 
     pub(crate) fn collect_break_events(
@@ -271,7 +306,7 @@ impl JointWorkspace {
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         self.rows.capacity() * std::mem::size_of::<ConstraintRow>()
             + self.row_joint_indices.capacity() * std::mem::size_of::<usize>()
-            + self.row_joint_ids.capacity() * std::mem::size_of::<Option<crate::world::JointId>>()
+            + self.joint_ids.capacity() * std::mem::size_of::<Option<crate::world::JointId>>()
             + self.preparing_rows.capacity() * std::mem::size_of::<ConstraintRow>()
             + self.preparing_joint_indices.capacity() * std::mem::size_of::<usize>()
             + self.preparing_joint_ids.capacity()
@@ -279,6 +314,17 @@ impl JointWorkspace {
             + self.reactions.capacity() * std::mem::size_of::<JointReaction>()
             + self.break_events.capacity() * std::mem::size_of::<JointBreakEvent>()
     }
+}
+
+fn set_joint_id(
+    ids: &mut Vec<Option<crate::world::JointId>>,
+    index: usize,
+    id: crate::world::JointId,
+) {
+    if index >= ids.len() {
+        ids.resize(index + 1, None);
+    }
+    ids[index] = Some(id);
 }
 
 #[cfg(test)]
@@ -371,7 +417,7 @@ mod tests {
         add_rows(&mut workspace);
         let row_capacity = workspace.rows.capacity();
         let owner_capacity = workspace.row_joint_indices.capacity();
-        let id_capacity = workspace.row_joint_ids.capacity();
+        let id_capacity = workspace.joint_ids.capacity();
         assert!(row_capacity >= 32);
         assert!(owner_capacity >= 32);
         assert!(id_capacity >= 32);
@@ -380,15 +426,15 @@ mod tests {
 
         assert!(workspace.rows.is_empty());
         assert!(workspace.row_joint_indices.is_empty());
-        assert!(workspace.row_joint_ids.is_empty());
+        assert!(workspace.joint_ids.is_empty());
         assert_eq!(workspace.rows.capacity(), row_capacity);
         assert_eq!(workspace.row_joint_indices.capacity(), owner_capacity);
-        assert_eq!(workspace.row_joint_ids.capacity(), id_capacity);
+        assert_eq!(workspace.joint_ids.capacity(), id_capacity);
 
         add_rows(&mut workspace);
         assert_eq!(workspace.rows.capacity(), row_capacity);
         assert_eq!(workspace.row_joint_indices.capacity(), owner_capacity);
-        assert_eq!(workspace.row_joint_ids.capacity(), id_capacity);
+        assert_eq!(workspace.joint_ids.capacity(), id_capacity);
     }
 
     #[test]
@@ -432,5 +478,28 @@ mod tests {
         workspace.begin_step();
         assert_eq!(workspace.rows()[0].accumulated_multiplier, 0.0);
         assert_eq!(workspace.rows()[0].accumulated_impulse, 0.0);
+    }
+
+    #[test]
+    fn sequential_updates_keep_row_owner_and_multiplier_identity() {
+        let mut workspace = JointWorkspace::new();
+        let first_joint = test_joint_id();
+        let replacement_joint = test_joint_id();
+
+        workspace.begin_joint_prepare(0, first_joint);
+        workspace.push(row(4));
+        workspace.finish_joint_prepare().unwrap();
+        workspace.rows_mut()[0].accumulated_multiplier = 3.0;
+
+        workspace.begin_joint_prepare(0, first_joint);
+        workspace.push(row(4));
+        workspace.finish_joint_prepare().unwrap();
+        assert_eq!(workspace.rows()[0].accumulated_multiplier, 3.0);
+
+        workspace.begin_joint_prepare(0, replacement_joint);
+        workspace.push(row(4));
+        workspace.finish_joint_prepare().unwrap();
+        assert_eq!(workspace.rows()[0].accumulated_multiplier, 0.0);
+        assert_eq!(workspace.joint_ids[0], Some(replacement_joint));
     }
 }
