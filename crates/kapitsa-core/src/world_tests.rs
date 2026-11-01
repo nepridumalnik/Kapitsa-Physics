@@ -59,6 +59,44 @@ fn independent_wall_ccd_world() -> Result<PhysicsWorld, Box<dyn std::error::Erro
     Ok(world)
 }
 
+fn seeded_independent_ccd_world(mut seed: u64) -> Result<PhysicsWorld, Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    world.add_collider(
+        wall_body,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 100.0, 100.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    for index in 0..192 {
+        let random = |state: &mut u64| {
+            *state = (*state)
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (*state >> 32) as u32
+        };
+        let x_offset = f64::from(random(&mut seed) % 200) / 100.0;
+        let speed = 1_200.0 + f64::from(random(&mut seed) % 600);
+        let y = f64::from(index % 16) * 3.0;
+        let z = f64::from(index / 16) * 3.0;
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(-6.0 - x_offset, y, z), Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::new(speed, 0.0, 0.0))?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body)?;
+        let mut collider = collider(0.5);
+        if index % 11 == 0 {
+            collider.set_filter(CollisionFilter::new(1, 0));
+        }
+        world.add_collider(body, collider)?;
+    }
+    Ok(world)
+}
+
 #[test]
 fn interaction_index_preserves_duplicate_merge_rules_and_resets_with_step_scratch() {
     let mut world = PhysicsWorld::new();
@@ -1446,6 +1484,166 @@ fn independent_single_pair_ccd_islands_resolve_across_workers()
             "the CCD island resolver should launch work for this scene"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn seeded_independent_ccd_stress_matches_across_worker_counts()
+-> Result<(), Box<dyn std::error::Error>> {
+    const SEED: u64 = 0x5eed_c0de_2026;
+    const DT: f64 = 1.0 / 60.0;
+
+    let mut sequential = seeded_independent_ccd_world(SEED)?;
+    sequential.step(DT)?;
+    let expected_impacts = sequential
+        .collision_events()
+        .iter()
+        .filter(|event| event.kind == crate::collision::CollisionEventKind::Impact)
+        .count();
+    assert!(expected_impacts >= 150);
+
+    for workers in [1, 2, 4] {
+        let mut world = seeded_independent_ccd_world(SEED)?;
+        let mut shards = vec![Vec::new(); workers];
+        world.fill_step_shards(&mut shards)?;
+        for shard in &mut shards {
+            for step in shard {
+                step.integrate(DT)?;
+            }
+        }
+        world.commit_step_shards_with_workers(&shards, workers)?;
+
+        for ((_, actual), (_, expected)) in world.bodies().zip(sequential.bodies()) {
+            assert!(actual.state().transform().translation().is_finite());
+            assert!(actual.state().linear_velocity().is_finite());
+            assert!(actual.state().angular_velocity().is_finite());
+            assert_eq!(
+                actual.state().transform().translation(),
+                expected.state().transform().translation()
+            );
+            assert_eq!(
+                actual.state().linear_velocity(),
+                expected.state().linear_velocity()
+            );
+        }
+        assert_eq!(
+            world.collision_events().len(),
+            sequential.collision_events().len()
+        );
+        for (actual, expected) in world
+            .collision_events()
+            .iter()
+            .zip(sequential.collision_events())
+        {
+            assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.pair.a.dense.index(), expected.pair.a.dense.index());
+            assert_eq!(actual.pair.b.dense.index(), expected.pair.b.dense.index());
+            assert_eq!(actual.contact, expected.contact);
+        }
+        #[cfg(feature = "bench-internals")]
+        if workers > 1 {
+            assert!(world.collision_step_metrics().ccd_parallel_island_count >= workers);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn std::error::Error>>
+{
+    const DT: f64 = 0.02;
+
+    let mut world = PhysicsWorld::new();
+    let restitution = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    let front_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let front_wall = world.add_collider(
+        front_body,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 100.0, 100.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    let rear_body = world.add_body(RigidBody::new_static(Transform::new(
+        Vec3::new(-10.0, -3.0, 0.0),
+        Quat::IDENTITY,
+    )?))?;
+    let rear_wall = world.add_collider(
+        rear_body,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 1.0, 1.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    world.set_collider_material(front_wall, Some(restitution))?;
+    world.set_collider_material(rear_wall, Some(restitution))?;
+
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut body_ids = Vec::new();
+    for index in 0..128 {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(
+                Vec3::new(
+                    -5.0,
+                    3.0 + f64::from(index % 16) * 3.0,
+                    f64::from(index / 16) * 3.0,
+                ),
+                Quat::IDENTITY,
+            )?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::new(1_200.0, 0.0, 0.0))?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let id = world.add_body(body)?;
+        world.add_collider(id, collider(0.5))?;
+        body_ids.push(id);
+    }
+
+    let mut rebound = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(-5.0, -3.0, 0.0), Quat::IDENTITY)?,
+        mass,
+    )?;
+    rebound.set_linear_velocity(Vec3::new(1_200.0, 0.0, 0.0))?;
+    rebound.set_ccd_mode(CcdMode::Continuous);
+    let rebound_id = world.add_body(rebound)?;
+    world.add_collider(rebound_id, collider(0.5))?;
+    body_ids.push(rebound_id);
+
+    world.set_collision_config(crate::collision::CollisionConfig {
+        max_ccd_impacts: 1,
+        ccd_limit_policy: crate::collision::CcdLimitPolicy::AbortStep,
+        ..world.collision_config()
+    })?;
+    let before = body_ids
+        .iter()
+        .map(|&id| {
+            world
+                .body(id)
+                .map(|body| *body.state())
+                .ok_or(WorldError::InvalidBodyId)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut shards = vec![Vec::new(); 4];
+    world.fill_step_shards(&mut shards)?;
+    for shard in &mut shards {
+        for step in shard {
+            step.integrate(DT)?;
+        }
+    }
+    assert_eq!(
+        world.commit_step_shards_with_workers(&shards, 4),
+        Err(StepError::Collision(CollisionError::CcdLimitExceeded))
+    );
+
+    for (&id, expected) in body_ids.iter().zip(before) {
+        assert_eq!(
+            world.body(id).ok_or(WorldError::InvalidBodyId)?.state(),
+            &expected
+        );
+    }
+    assert!(world.collision_events().is_empty());
+    #[cfg(feature = "bench-internals")]
+    assert!(world.collision_step_metrics().ccd_parallel_island_count >= 4);
     Ok(())
 }
 
