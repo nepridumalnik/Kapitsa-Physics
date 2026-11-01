@@ -449,3 +449,40 @@ The release benchmark includes counters; all 459 core unit tests, core
 integration tests, and four Tokio collision simulation tests passed. A
 feature-enabled regression test asserts the two-island case performs exactly
 two TOI calls and no candidate refreshes.
+
+### Stages 4–7: selective resweep, worker scheduling, clipping, and TOI sweep
+
+The Release `bench-internals` profile after stages 1–6 measured the 64-sphere
+wall case at about 2.05 ms per step, with a 1.858 ms CCD phase and 0.932 ms in
+TOI search. The sphere–cuboid specialization solves translation against the
+rounded box analytically; rotation of the cuboid still uses GJK. On the same
+64-impact scene, median step time was 0.656 ms, CCD was 0.513 ms, and TOI
+search was 0.045 ms. This reduced the CCD phase by 72% and full-step time by
+68% relative to the pre-specialization measurement. The benchmark wall was
+extended to contain the entire grid, so all 64 spheres produce impacts.
+
+The sphere workload is now cheap enough that scoped workers do not improve it:
+at 64 spheres, 1/2/4 workers measured 0.661/0.662/0.662 ms per step. Parallel
+TOI preparation is therefore skipped for analytic sphere pairs. For
+GJK-heavy independent cuboid islands, the measured cutoff is 256 candidates:
+
+| Cuboid bodies | Workers | Step median | CCD median |
+|---:|---:|---:|---:|
+| 64 | 1 / 2 / 4 | 1.021 / 0.999 / 0.993 ms | 0.852 / 0.833 / 0.832 ms |
+| 128 | 1 / 2 / 4 | 2.007 / 2.020 / 2.003 ms | 1.670 / 1.677 / 1.659 ms |
+| 256 | 1 / 2 / 4 | 4.082 / 3.953 / 3.836 ms | 3.388 / 3.240 / 3.110 ms |
+| 512 | 1 / 2 / 4 | 8.401 / 8.102 / 7.502 ms | 6.953 / 6.587 / 5.994 ms |
+
+At 256 candidates, four workers reduced median step time by 6%; at 512, by
+11%. The 64 and 128 cases showed no stable gain. This cutoff is for candidate
+TOI preparation only; island impact resolution remains ordered so trajectory
+changes and cross-island contacts retain deterministic handling. The worker
+benchmarks use static shared walls and separate dynamic islands. Their retained
+scratch estimates were 683 KiB at 256 candidates and 1,364 KiB at 512; parallel
+preparation returned the same estimate as the sequential path.
+
+The specialized solver tests face, edge, corner and tangential contact,
+near-misses, fixed rotated boxes, translating pairs, initial overlap, and
+reversed pair order. Rotating box motion continues through the general GJK
+path. The exact table and broad validation results will be consolidated in
+the final CCD refactor report.

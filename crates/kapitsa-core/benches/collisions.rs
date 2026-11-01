@@ -47,6 +47,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         report_world(name, build)?;
     }
     report_ccd_worker_scaling()?;
+    report_ccd_gjk_worker_scaling()?;
     report_queries()?;
     Ok(())
 }
@@ -209,7 +210,7 @@ fn ccd_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     let mut world = PhysicsWorld::new();
     let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let columns = (count as f64).sqrt().ceil() as usize;
-    let side = columns as f64 * 4.0 + 4.0;
+    let side = columns as f64 * 8.0 + 4.0;
     world.add_collider(
         wall,
         Collider::new(
@@ -219,8 +220,8 @@ fn ccd_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     )?;
     let mass = mass()?;
     for index in 0..count {
-        let y = (index % columns) as f64 * 2.0;
-        let z = (index / columns) as f64 * 2.0;
+        let y = (index % columns) as f64 * 4.0;
+        let z = (index / columns) as f64 * 4.0;
         add_sphere_with_velocity(
             &mut world,
             Vec3::new(-5.0, y, z),
@@ -232,16 +233,60 @@ fn ccd_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     Ok(world)
 }
 
+fn ccd_box_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let columns = (count as f64).sqrt().ceil() as usize;
+    let side = columns as f64 * 8.0 + 4.0;
+    world.add_collider(
+        wall,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, side, side)?),
+            Transform::identity(),
+        ),
+    )?;
+    let mass = mass()?;
+    for index in 0..count {
+        let y = (index % columns) as f64 * 4.0;
+        let z = (index / columns) as f64 * 4.0;
+        let mut moving_body =
+            RigidBody::new_dynamic(Transform::new(Vec3::new(-5.0, y, z), Quat::IDENTITY)?, mass)?;
+        moving_body.set_linear_velocity(Vec3::new(1000.0, 0.0, 0.0))?;
+        moving_body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(moving_body)?;
+        world.add_collider(
+            body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            ),
+        )?;
+    }
+    Ok(world)
+}
+
 fn report_ccd_worker_scaling() -> Result<(), Box<dyn Error>> {
     println!("\nIndependent CCD islands by worker count");
-    for body_count in [1, 2, 4, 8, 16, 64, 128, 256] {
+    report_ccd_worker_scaling_for(&[1, 2, 4, 8, 16, 64, 128, 256], ccd_scene_of)
+}
+
+fn report_ccd_gjk_worker_scaling() -> Result<(), Box<dyn Error>> {
+    println!("\nIndependent GJK-heavy CCD islands by worker count");
+    report_ccd_worker_scaling_for(&[8, 16, 64, 128, 256, 512], ccd_box_scene_of)
+}
+
+fn report_ccd_worker_scaling_for(
+    body_counts: &[usize],
+    scene: fn(usize) -> Result<PhysicsWorld, Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    for body_count in body_counts.iter().copied() {
         for worker_count in [1, 2, 4] {
             for _ in 0..WARMUP_RUNS {
-                run_ccd_shards(body_count, worker_count)?;
+                run_ccd_shards_with(body_count, worker_count, scene)?;
             }
             let mut samples = Vec::with_capacity(SAMPLES);
             for _ in 0..SAMPLES {
-                samples.push(run_ccd_shards(body_count, worker_count)?);
+                samples.push(run_ccd_shards_with(body_count, worker_count, scene)?);
             }
             samples.sort_unstable_by_key(|sample| sample.0);
             let median = samples[SAMPLES / 2];
@@ -263,11 +308,12 @@ fn report_ccd_worker_scaling() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_ccd_shards(
+fn run_ccd_shards_with(
     body_count: usize,
     worker_count: usize,
+    scene: fn(usize) -> Result<PhysicsWorld, Box<dyn Error>>,
 ) -> Result<(Duration, CollisionStepMetrics), Box<dyn Error>> {
-    let mut world = ccd_scene_of(body_count)?;
+    let mut world = scene(body_count)?;
     let mut shards = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
     world.fill_step_shards(&mut shards)?;
     let started = Instant::now();

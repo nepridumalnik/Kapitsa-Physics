@@ -39,6 +39,7 @@ use crate::{
     rigid_body::{
         BodyState, BodyType, CcdMode, RigidBody, predict, predict_from_state, trajectory_bounds,
     },
+    shape::Shape,
 };
 
 struct BodyEntry {
@@ -1715,15 +1716,15 @@ impl PhysicsWorld {
         worker_count: usize,
     ) -> Result<(), CollisionError> {
         let island_count = self.collision_system.ccd_island_count();
-        // Benchmarks show scoped-worker overhead outweighs CCD work below eight candidates.
-        const MIN_PARALLEL_CCD_CANDIDATES: usize = 8;
-        if self.collision_system.ccd_candidate_count() < MIN_PARALLEL_CCD_CANDIDATES {
+        if worker_count <= 1 || island_count <= 1 {
+            return Ok(());
+        }
+        // Cuboid GJK sweeps first repay scoped-worker overhead at 256 candidates.
+        const MIN_PARALLEL_EXPENSIVE_TOIS: usize = 256;
+        if self.expensive_ccd_candidate_count()? < MIN_PARALLEL_EXPENSIVE_TOIS {
             return Ok(());
         }
         let worker_count = worker_count.min(island_count);
-        if worker_count <= 1 {
-            return Ok(());
-        }
 
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
@@ -1815,6 +1816,60 @@ impl PhysicsWorld {
         self.collision_system
             .record_ccd_toi_search(started.elapsed());
         Ok(())
+    }
+
+    fn expensive_ccd_candidate_count(&self) -> Result<usize, CollisionError> {
+        let mut count = 0_usize;
+        for candidate_index in 0..self.collision_system.ccd_candidate_count() {
+            let pair = self
+                .collision_system
+                .ccd_candidate_pair(candidate_index)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_a = self
+                .colliders
+                .get(pair.a.dense)
+                .filter(|_| pair.a.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_b = self
+                .colliders
+                .get(pair.b.dense)
+                .filter(|_| pair.b.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            let analytic_pair = matches!(
+                (collider_a.collider.shape(), collider_b.collider.shape()),
+                (Shape::Sphere(_), Shape::Sphere(_))
+                    | (Shape::Sphere(_), Shape::Cuboid(_))
+                    | (Shape::Cuboid(_), Shape::Sphere(_))
+            );
+            let mut rotational_motion = false;
+            for body_id in [collider_a.body, collider_b.body] {
+                let body = self
+                    .bodies
+                    .get(body_id.dense)
+                    .filter(|_| body_id.world == self.world_id)
+                    .map(|entry| entry.body)
+                    .ok_or(CollisionError::InvalidContact)?;
+                let prediction = Self::predicted_body_index(
+                    &self.collision_system.context.body_indices,
+                    self.world_id,
+                    body_id,
+                )?;
+                let end_state = self
+                    .collision_system
+                    .context
+                    .predicted_states
+                    .get(prediction)
+                    .map(|(_, state)| *state)
+                    .ok_or(CollisionError::InvalidContact)?;
+                rotational_motion |= body.state().angular_velocity() != Vec3::ZERO
+                    || end_state.angular_velocity() != Vec3::ZERO
+                    || body.state().transform().rotation() != end_state.transform().rotation();
+            }
+            if !analytic_pair || rotational_motion {
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
     }
 
     fn evaluate_ccd_candidate(

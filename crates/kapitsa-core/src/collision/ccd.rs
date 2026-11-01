@@ -137,6 +137,22 @@ pub(crate) fn convex_toi_motion(
             motion_b.end,
         );
     }
+    if motion_a.linear_translation
+        && motion_b.linear_translation
+        && motion_a.rotation_bound == 0.0
+        && motion_b.rotation_bound == 0.0
+    {
+        match (shape_a, shape_b) {
+            (Shape::Sphere(sphere), Shape::Cuboid(cuboid)) => {
+                return sphere_cuboid_toi(sphere.radius(), motion_a, cuboid, motion_b);
+            }
+            (Shape::Cuboid(cuboid), Shape::Sphere(sphere)) => {
+                return sphere_cuboid_toi(sphere.radius(), motion_b, cuboid, motion_a)
+                    .map(|hit| hit.map(reverse_hit));
+            }
+            _ => {}
+        }
+    }
     let radius_a = rotation_radius(shape_a)?;
     let radius_b = rotation_radius(shape_b)?;
     let translation_bound = if motion_a.linear_translation && motion_b.linear_translation {
@@ -291,6 +307,288 @@ fn sphere_sphere_toi(
         point_a,
         point_b,
     }))
+}
+
+fn reverse_hit(hit: CcdHit) -> CcdHit {
+    CcdHit {
+        toi: hit.toi,
+        normal: -hit.normal,
+        point_a: hit.point_b,
+        point_b: hit.point_a,
+    }
+}
+
+fn sphere_cuboid_toi(
+    radius: f64,
+    sphere_motion: &CcdMotion<'_>,
+    cuboid: &crate::shape::Cuboid,
+    cuboid_motion: &CcdMotion<'_>,
+) -> Result<Option<CcdHit>, CollisionError> {
+    let inverse_start = cuboid_motion
+        .start
+        .inverse()
+        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+    let relative_start = inverse_start.transform_point(sphere_motion.start.translation());
+    let sphere_delta = translation_delta(sphere_motion.start, sphere_motion.end)?;
+    let cuboid_delta = translation_delta(cuboid_motion.start, cuboid_motion.end)?;
+    let relative_delta = inverse_start.transform_vector(
+        sphere_delta
+            .checked_sub(cuboid_delta)
+            .ok_or(CollisionError::ArithmeticOverflow)?,
+    );
+    if !relative_start.is_finite() || !relative_delta.is_finite() || !radius.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    let half = cuboid.half_extents();
+    let start = [relative_start.x, relative_start.y, relative_start.z];
+    let delta = [relative_delta.x, relative_delta.y, relative_delta.z];
+    let half = [half.x, half.y, half.z];
+    let radius_squared = radius * radius;
+    if !radius_squared.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+
+    let mut boundaries = [0.0; 8];
+    let mut boundary_count = 1;
+    for axis in 0..3 {
+        if delta[axis] == 0.0 {
+            continue;
+        }
+        for face in [-half[axis], half[axis]] {
+            let crossing = (face - start[axis]) / delta[axis];
+            if !crossing.is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+            if crossing > 0.0 && crossing < 1.0 {
+                boundaries[boundary_count] = crossing;
+                boundary_count += 1;
+            }
+        }
+    }
+    boundaries[boundary_count] = 1.0;
+    boundary_count += 1;
+    for index in 1..boundary_count {
+        let mut cursor = index;
+        while cursor > 0 && boundaries[cursor] < boundaries[cursor - 1] {
+            boundaries.swap(cursor, cursor - 1);
+            cursor -= 1;
+        }
+    }
+
+    for interval in 0..boundary_count - 1 {
+        let start_time = boundaries[interval];
+        let end_time = boundaries[interval + 1];
+        if end_time <= start_time {
+            continue;
+        }
+        let at_start = point_on_segment(start, delta, start_time)?;
+        if let Some(contact) = sphere_cuboid_contact(at_start, half, radius_squared)? {
+            return Ok(Some(sphere_cuboid_hit(
+                start_time,
+                contact,
+                radius,
+                sphere_motion,
+                cuboid_motion,
+            )?));
+        }
+
+        let midpoint = point_on_segment(start, delta, (start_time + end_time) * 0.5)?;
+        let mut a = 0.0;
+        let mut b = 0.0;
+        let mut c = -radius_squared;
+        for axis in 0..3 {
+            let face = if midpoint[axis] < -half[axis] {
+                Some(-half[axis])
+            } else if midpoint[axis] > half[axis] {
+                Some(half[axis])
+            } else {
+                None
+            };
+            let Some(face) = face else {
+                continue;
+            };
+            let offset = at_start[axis] - face;
+            a += delta[axis] * delta[axis];
+            b += 2.0 * offset * delta[axis];
+            c += offset * offset;
+        }
+        if !a.is_finite() || !b.is_finite() || !c.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        if a <= f64::MIN_POSITIVE {
+            continue;
+        }
+        let discriminant = b * b - 4.0 * a * c;
+        if !discriminant.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        let tolerance = (b * b).max((4.0 * a * c).abs()).max(1.0) * f64::EPSILON * 128.0;
+        if discriminant < -tolerance {
+            continue;
+        }
+        let local_time = (-b - discriminant.max(0.0).sqrt()) / (2.0 * a);
+        let interval_duration = end_time - start_time;
+        if !local_time.is_finite()
+            || local_time < 0.0
+            || local_time > interval_duration + f64::EPSILON * 128.0
+        {
+            continue;
+        }
+        let toi = (start_time + local_time).min(end_time);
+        let at_toi = point_on_segment(start, delta, toi)?;
+        if let Some(contact) = sphere_cuboid_contact(at_toi, half, radius_squared)? {
+            return Ok(Some(sphere_cuboid_hit(
+                toi,
+                contact,
+                radius,
+                sphere_motion,
+                cuboid_motion,
+            )?));
+        }
+    }
+    Ok(None)
+}
+
+fn point_on_segment(
+    start: [f64; 3],
+    delta: [f64; 3],
+    time: f64,
+) -> Result<[f64; 3], CollisionError> {
+    let point = [
+        start[0] + delta[0] * time,
+        start[1] + delta[1] * time,
+        start[2] + delta[2] * time,
+    ];
+    point
+        .iter()
+        .all(|coordinate| coordinate.is_finite())
+        .then_some(point)
+        .ok_or(CollisionError::ArithmeticOverflow)
+}
+
+fn sphere_cuboid_contact(
+    center: [f64; 3],
+    half: [f64; 3],
+    radius_squared: f64,
+) -> Result<Option<(Vec3, Vec3)>, CollisionError> {
+    let closest = [
+        center[0].clamp(-half[0], half[0]),
+        center[1].clamp(-half[1], half[1]),
+        center[2].clamp(-half[2], half[2]),
+    ];
+    let difference = Vec3::new(
+        center[0] - closest[0],
+        center[1] - closest[1],
+        center[2] - closest[2],
+    );
+    let distance_squared = difference
+        .checked_dot(difference)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let tolerance = distance_squared.max(radius_squared).max(1.0) * f64::EPSILON * 128.0;
+    if distance_squared > radius_squared + tolerance {
+        return Ok(None);
+    }
+    if distance_squared > f64::MIN_POSITIVE {
+        let normal = -difference
+            .try_normalize()
+            .ok_or(CollisionError::InvalidContact)?;
+        return Ok(Some((
+            normal,
+            Vec3::new(closest[0], closest[1], closest[2]),
+        )));
+    }
+
+    let face_distances = [
+        (center[0] + half[0], Vec3::new(-1.0, 0.0, 0.0)),
+        (half[0] - center[0], Vec3::X),
+        (center[1] + half[1], Vec3::new(0.0, -1.0, 0.0)),
+        (half[1] - center[1], Vec3::Y),
+        (center[2] + half[2], Vec3::new(0.0, 0.0, -1.0)),
+        (half[2] - center[2], Vec3::Z),
+    ];
+    let (face_distance, normal) = face_distances
+        .into_iter()
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .ok_or(CollisionError::InvalidContact)?;
+    let point = Vec3::new(
+        if normal.x < 0.0 {
+            -half[0]
+        } else if normal.x > 0.0 {
+            half[0]
+        } else {
+            center[0]
+        },
+        if normal.y < 0.0 {
+            -half[1]
+        } else if normal.y > 0.0 {
+            half[1]
+        } else {
+            center[1]
+        },
+        if normal.z < 0.0 {
+            -half[2]
+        } else if normal.z > 0.0 {
+            half[2]
+        } else {
+            center[2]
+        },
+    );
+    if face_distance < 0.0 {
+        return Err(CollisionError::InvalidContact);
+    }
+    Ok(Some((normal, point)))
+}
+
+fn sphere_cuboid_hit(
+    toi: f64,
+    (normal_local, point_local): (Vec3, Vec3),
+    radius: f64,
+    sphere_motion: &CcdMotion<'_>,
+    cuboid_motion: &CcdMotion<'_>,
+) -> Result<CcdHit, CollisionError> {
+    let sphere_delta = translation_delta(sphere_motion.start, sphere_motion.end)?;
+    let sphere_center = sphere_motion
+        .start
+        .translation()
+        .checked_add(
+            sphere_delta
+                .checked_mul_scalar(toi)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let cuboid_delta = translation_delta(cuboid_motion.start, cuboid_motion.end)?;
+    let cuboid_translation = cuboid_motion
+        .start
+        .translation()
+        .checked_add(
+            cuboid_delta
+                .checked_mul_scalar(toi)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let cuboid_transform = Transform::new(cuboid_translation, cuboid_motion.start.rotation())
+        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+    let normal = cuboid_transform
+        .transform_vector(normal_local)
+        .try_normalize()
+        .ok_or(CollisionError::InvalidContact)?;
+    let point_a = sphere_center
+        .checked_add(
+            normal
+                .checked_mul_scalar(radius)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let point_b = cuboid_transform.transform_point(point_local);
+    if !point_a.is_finite() || !point_b.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    Ok(CcdHit {
+        toi,
+        normal,
+        point_a,
+        point_b,
+    })
 }
 
 /// Finds a convex shape's first contact with a moving plane.
