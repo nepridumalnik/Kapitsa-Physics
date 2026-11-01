@@ -1166,3 +1166,108 @@ Exact Release command:
 ```powershell
 cargo test -p kapitsa --release --lib --features bench-internals benchmark_command_buffer_pool_full_cycle -- --ignored --nocapture
 ```
+
+## Persistent force-source staging index
+
+The force-source preparation path previously searched the staged body vector
+for every source. It now keeps a reusable `HashMap<BodyId, usize>` alongside
+the existing first-touch-ordered staging vector. The map is enabled only after
+more than 128 unique bodies have been staged; smaller sets continue to use the
+vector scan. The vector remains authoritative for accumulation and commit
+order. The threshold was selected with the same Release harness and 5 ms
+calibration: at threshold 64, representative medians were 868.433 us for
+8,192 sources on one body, 19.849 us for 128 distinct bodies, and 988.475 us
+for the 8,192-source mixed case. At threshold 128 those medians were 830.117,
+18.945, and 899.140 us; the 8,192-distinct case was close (1,328.667 vs.
+1,334.800 us). These are directional measurements from the same machine and
+sample procedure.
+
+Baseline is the unindexed implementation from parent commit
+`5d9284bc95852fae336d617dd383e51ad0a258c2`, measured in a detached worktree
+with the same benchmark-only harness. Optimized results are from this change.
+Both use `rustc 1.98.0` / `cargo 1.98.0`, `x86_64-pc-windows-msvc`, an AMD
+Ryzen 9 7900X3D, and Cargo's default optimized Release profile. Each point has
+five independently constructed worlds, one warm-up per world, and a 5 ms
+calibration target. Setup is outside timing. Preparation time covers only
+force-source staging; the complete-step time is measured separately. Allocation
+counts are collected after warm-up. Commands and bodies in the benchmark may
+exceed the public command-buffer limit because this internal core benchmark
+calls the preparation path directly and does not change that limit or the
+production API.
+
+Each preparation timing cell shows `min / median / max us`, baseline → indexed.
+Growth is the median preparation-time ratio versus the preceding source count;
+the first row has no preceding point. `Vec / map` is the retained body staging
+vector capacity and index entry capacity after warm-up. Every warmed
+preparation and full-step sample recorded zero allocation/reallocation requests
+and zero requested bytes in both baseline and indexed runs.
+
+### All sources target one body
+
+| Sources | Preparation min / median / max us, before → after | ns/source, before → after | Doubling growth, before → after | Full-step median us, before → after | Indexed Vec / map capacity |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 12.479 / 12.565 / 13.217 → 12.836 / 13.048 / 13.497 | 98.17 → 101.94 | — | 18.719 → 19.176 | 4 / 0 |
+| 256 | 24.973 / 25.193 / 25.842 → 25.441 / 25.989 / 26.947 | 98.41 → 101.52 | 2.00x → 1.99x | 37.430 → 37.208 | 4 / 0 |
+| 512 | 50.731 / 51.171 / 54.394 → 50.145 / 51.407 / 58.692 | 99.94 → 100.40 | 2.03x → 1.98x | 71.236 → 73.585 | 4 / 0 |
+| 1,024 | 99.755 / 100.560 / 105.752 → 101.047 / 105.042 / 122.277 | 98.20 → 102.58 | 1.97x → 2.04x | 145.769 → 145.482 | 4 / 0 |
+| 2,048 | 200.616 / 202.836 / 210.684 → 204.250 / 207.346 / 216.088 | 99.04 → 101.24 | 2.02x → 1.97x | 284.600 → 290.794 | 4 / 0 |
+| 4,096 | 399.310 / 416.040 / 417.070 → 407.030 / 408.400 / 420.230 | 101.57 → 99.71 | 2.05x → 1.97x | 604.200 → 588.237 | 4 / 0 |
+| 8,192 | 794.417 / 798.333 / 844.100 → 821.017 / 830.117 / 931.633 | 97.45 → 101.33 | 1.92x → 2.03x | 1,123.225 → 1,157.100 | 4 / 0 |
+
+Repeated lookup of the same body remains linear in source count. The indexed
+path's 8,192-source preparation median is 4.0% higher and its full-step median
+is 3.0% higher than baseline; sample ranges overlap, so this does not indicate
+a clear regression. The map is not allocated for this workload.
+
+### Each source targets a distinct body
+
+| Sources | Preparation min / median / max us, before → after | ns/source, before → after | Doubling growth, before → after | Full-step median us, before → after | Indexed Vec / map capacity |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 17.581 / 17.863 / 19.005 → 17.942 / 18.945 / 21.911 | 139.56 → 148.01 | — | 63.822 → 62.419 | 128 / 0 |
+| 256 | 40.218 / 40.436 / 41.304 → 39.264 / 40.145 / 44.516 | 157.95 → 156.82 | 2.26x → 2.12x | 130.021 → 136.237 | 256 / 448 |
+| 512 | 103.314 / 105.586 / 116.400 → 79.155 / 80.186 / 81.770 | 206.22 → 156.61 | 2.61x → 2.00x | 287.694 → 257.315 | 512 / 896 |
+| 1,024 | 329.250 / 341.190 / 384.280 → 160.290 / 173.329 / 184.623 | 333.19 → 169.27 | 3.23x → 2.16x | 711.914 → 536.356 | 1,024 / 1,792 |
+| 2,048 | 1,198.575 / 1,287.625 / 1,361.650 → 327.171 / 356.743 / 442.736 | 628.72 → 174.19 | 3.77x → 2.06x | 1,895.200 → 1,045.550 | 2,048 / 3,584 |
+| 4,096 | 4,141.700 / 4,345.100 / 6,349.300 → 659.820 / 784.920 / 953.360 | 1,060.82 → 191.63 | 3.37x → 2.20x | 5,960.800 → 2,188.450 | 4,096 / 7,168 |
+| 8,192 | 18,123.200 / 18,811.100 / 20,039.500 → 1,296.200 / 1,328.667 / 1,534.367 | 2,296.28 → 162.19 | 4.33x → 1.69x | 20,373.900 → 4,343.400 | 8,192 / 14,336 |
+
+At 8,192 distinct bodies, preparation is 14.2x faster (92.9% lower) and the
+complete step is 4.7x faster (78.7% lower). Doubling preparation time is near
+2x for the indexed workload; baseline growth rises as repeated linear scans
+accumulate. The first index-backed point is 256 bodies because the threshold
+is crossed only after 128 unique bodies.
+
+### Mixed body and source updates
+
+The mixed workload has one source per body for one eighth of the sources; the
+remaining sources target a shared body. This preserves an uneven distribution
+while exercising both repeated and unique-body lookups.
+
+| Sources | Preparation min / median / max us, before → after | ns/source, before → after | Doubling growth, before → after | Full-step median us, before → after | Indexed Vec / map capacity |
+|---:|---:|---:|---:|---:|---:|
+| 128 | 12.909 / 13.143 / 13.429 → 13.117 / 13.266 / 13.306 | 102.68 → 103.64 | — | 23.704 → 24.092 | 16 / 0 |
+| 256 | 26.207 / 26.386 / 27.521 → 26.192 / 26.883 / 28.440 | 103.07 → 105.01 | 2.01x → 2.03x | 50.518 → 47.167 | 32 / 0 |
+| 512 | 53.143 / 54.618 / 59.749 → 55.584 / 56.038 / 58.899 | 106.68 → 109.45 | 2.07x → 2.08x | 97.215 → 94.475 | 64 / 0 |
+| 1,024 | 106.483 / 107.845 / 109.255 → 106.286 / 109.693 / 111.267 | 105.32 → 107.12 | 1.97x → 1.96x | 189.341 → 196.046 | 128 / 0 |
+| 2,048 | 217.274 / 221.563 / 228.574 → 217.759 / 220.809 / 223.223 | 108.19 → 107.82 | 2.05x → 2.01x | 404.170 → 389.540 | 256 / 448 |
+| 4,096 | 460.100 / 470.150 / 507.720 → 434.791 / 442.991 / 451.273 | 114.78 → 108.15 | 2.12x → 2.01x | 780.067 → 764.717 | 512 / 896 |
+| 8,192 | 1,109.650 / 1,176.700 / 1,417.675 → 889.100 / 899.140 / 943.060 | 143.64 → 109.76 | 2.50x → 2.03x | 1,682.700 → 1,576.600 | 1,024 / 1,792 |
+
+Mixed preparation is nearly linear after indexing. At 8,192 sources its
+median is 23.6% lower, while the full-step median is 6.3% lower. For this
+largest workload, preparation accounts for about 70% of baseline step time and
+57% of indexed step time. For distinct bodies, this share falls from about 92%
+to 31%. For one body it stays near 70%, as expected when the work is repeated
+force accumulation rather than searching different bodies.
+
+All three warmed workloads retain staging and map capacities across steps;
+the hash map's backing memory is therefore a steady-state cost for workloads
+that exceed the threshold. No collision/force equations, source iteration
+order, public exports, command limits, or runtime APIs were changed.
+
+Exact Release command for the preparation, full-step, capacity, and allocation
+measurements:
+
+```powershell
+cargo test -p kapitsa-core --release --lib --features bench-internals benchmark_force_source_update_scaling -- --ignored --nocapture
+```

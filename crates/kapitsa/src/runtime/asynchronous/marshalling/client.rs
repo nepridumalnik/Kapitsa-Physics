@@ -955,12 +955,13 @@ mod tests {
         let mut returned = PhysicsCommandBuffer::with_capacity(12);
         returned.set_linear_velocity(body, Vec3::X);
         let capacity = returned.commands.capacity();
+        let empty_pool_stats = harness.buffer_pool.stats();
         harness.buffer_pool.recycle(returned);
 
         let buffer = harness.client.commands();
         assert!(buffer.is_empty());
         assert_eq!(buffer.commands.capacity(), capacity);
-        assert_eq!(harness.buffer_pool.stats(), (0, 0));
+        assert_eq!(harness.buffer_pool.stats(), empty_pool_stats);
     }
 
     #[test]

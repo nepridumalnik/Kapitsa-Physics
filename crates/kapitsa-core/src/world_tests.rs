@@ -19,6 +19,13 @@ use crate::{
 };
 use std::{collections::HashSet, sync::atomic::AtomicU64};
 
+#[cfg(feature = "bench-internals")]
+use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(feature = "bench-internals")]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(feature = "bench-internals")]
+use std::time::Duration;
+
 use crate::execution::{ExecutionError, StepExecutor};
 
 struct ScopedThreadExecutor;
@@ -1284,6 +1291,173 @@ fn persistent_force_source_applies_torque_from_its_local_point() {
 }
 
 #[test]
+fn indexed_force_sources_preserve_first_touch_and_accumulation_order() {
+    let mut world = PhysicsWorld::new();
+    let bodies = (0..=128)
+        .map(|_| world.add_body(dynamic_body()).expect("body"))
+        .collect::<Vec<_>>();
+    let sources = bodies
+        .iter()
+        .map(|body| {
+            world
+                .add_force_source(*body, Vec3::ZERO, Vec3::ZERO)
+                .expect("source")
+        })
+        .collect::<Vec<_>>();
+
+    for force in [Vec3::X * 1.0e16, Vec3::X * -1.0e16, Vec3::X]
+        .into_iter()
+        .chain(std::iter::repeat_n(Vec3::X * 1.0e-3, 127))
+    {
+        world
+            .add_force_source(bodies[0], Vec3::ZERO, force)
+            .expect("repeated source");
+    }
+
+    world.step(1.0).expect("indexed mixed-source step");
+    let velocity = world
+        .body(bodies[0])
+        .expect("first body")
+        .state()
+        .linear_velocity()
+        .x;
+    assert!((velocity - 1.127).abs() < 1.0e-10);
+    assert!(bodies[1..].iter().all(|body| {
+        world
+            .body(*body)
+            .is_some_and(|body| body.state().linear_velocity() == Vec3::ZERO)
+    }));
+
+    let stale_source = sources[1];
+    assert!(world.remove_body(bodies[1]).is_some());
+    assert_eq!(world.force_source(stale_source), None);
+    assert_eq!(
+        world.add_force_source(bodies[1], Vec3::ZERO, Vec3::X),
+        Err(ForceSourceError::InvalidBodyId)
+    );
+    let replacement = world.add_body(dynamic_body()).expect("replacement body");
+    assert_eq!(replacement.index(), bodies[1].index());
+    assert_ne!(replacement.generation(), bodies[1].generation());
+    world
+        .add_force_source(replacement, Vec3::ZERO, Vec3::Y)
+        .expect("replacement source");
+    world.step(0.1).expect("step after slot reuse");
+    assert_eq!(
+        world
+            .body(replacement)
+            .expect("replacement")
+            .state()
+            .linear_velocity(),
+        Vec3::Y * 0.1
+    );
+}
+
+#[test]
+fn indexed_force_source_preparation_errors_do_not_commit_staged_bodies() {
+    let mut world = PhysicsWorld::new();
+    let bodies = (0..=128)
+        .map(|_| world.add_body(dynamic_body()).expect("body"))
+        .collect::<Vec<_>>();
+    for body in &bodies {
+        world
+            .add_force_source(*body, Vec3::ZERO, Vec3::X * 0.25)
+            .expect("source");
+    }
+    let stale_body = world.add_body(dynamic_body()).expect("stale body");
+    assert!(world.remove_body(stale_body).is_some());
+    let replacement = world.add_body(dynamic_body()).expect("replacement body");
+    let invalid_source = world
+        .add_force_source(replacement, Vec3::ZERO, Vec3::Y)
+        .expect("source to corrupt for test");
+    world
+        .force_sources
+        .get_mut(invalid_source.dense)
+        .expect("force source")
+        .body = stale_body;
+    let originals = bodies
+        .iter()
+        .map(|body| (*body, *world.body(*body).expect("body")))
+        .collect::<Vec<_>>();
+    let replacement_original = *world.body(replacement).expect("replacement");
+
+    assert_eq!(
+        world.prepare_force_source_updates(),
+        Err((invalid_source, ForceSourceError::InvalidBodyId))
+    );
+    assert!(
+        originals
+            .iter()
+            .all(|(id, original)| world.body(*id) == Some(original))
+    );
+    assert_eq!(world.body(replacement), Some(&replacement_original));
+    assert!(world.force_source_body_updates.is_empty());
+    assert!(
+        world
+            .force_source_body_indices
+            .as_ref()
+            .is_some_and(|indices| indices.is_empty())
+    );
+}
+
+#[test]
+fn indexed_force_source_step_failure_rolls_back_and_keeps_capacity() {
+    let mut world = PhysicsWorld::new();
+    let bodies = (0..=128)
+        .map(|_| world.add_body(dynamic_body()).expect("body"))
+        .collect::<Vec<_>>();
+    for body in &bodies {
+        world
+            .add_force_source(*body, Vec3::ZERO, Vec3::X * 1.0e-3)
+            .expect("source");
+    }
+    let overflow_source = world
+        .add_force_source(bodies[0], Vec3::ZERO, Vec3::X * f64::MAX)
+        .expect("overflow source");
+    let originals = bodies
+        .iter()
+        .map(|body| (*body, *world.body(*body).expect("body")))
+        .collect::<Vec<_>>();
+
+    assert!(matches!(
+        world.step(2.0),
+        Err(StepError::BodyIntegration {
+            body_id,
+            cause: IntegrationError::ArithmeticOverflow,
+        }) if body_id == bodies[0]
+    ));
+    assert!(
+        originals
+            .iter()
+            .all(|(id, original)| world.body(*id) == Some(original))
+    );
+    assert!(world.force_source_body_updates.is_empty());
+    let index_capacity = world
+        .force_source_body_indices
+        .as_ref()
+        .map_or(0, |indices| indices.capacity());
+    assert!(index_capacity > 0);
+
+    world
+        .remove_force_source(overflow_source)
+        .expect("remove overflow source");
+    world.step(0.1).expect("retry after rollback");
+    assert!(
+        world
+            .force_source_body_indices
+            .as_ref()
+            .is_some_and(|indices| indices.is_empty())
+    );
+    assert_eq!(
+        world
+            .body(bodies[0])
+            .expect("first body")
+            .state()
+            .linear_velocity(),
+        Vec3::X * 1.0e-4
+    );
+}
+
+#[test]
 fn body_removal_invalidates_its_force_sources_and_disable_stops_force() {
     let mut world = PhysicsWorld::new();
     let body = world.add_body(dynamic_body()).expect("body");
@@ -1850,4 +2024,293 @@ fn step_errors_expose_the_integration_cause() -> Result<(), WorldError> {
     assert!(error.to_string().contains("integration failed"));
     assert!(std::error::Error::source(&error).is_some());
     Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+static TRACK_WORLD_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "bench-internals")]
+static WORLD_ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "bench-internals")]
+static WORLD_ALLOCATION_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "bench-internals")]
+struct WorldTrackingAllocator;
+
+#[cfg(feature = "bench-internals")]
+// SAFETY: all allocation operations delegate to the system allocator.
+unsafe impl GlobalAlloc for WorldTrackingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() && TRACK_WORLD_ALLOCATIONS.load(Ordering::Relaxed) {
+            WORLD_ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            WORLD_ALLOCATION_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        if !pointer.is_null() && TRACK_WORLD_ALLOCATIONS.load(Ordering::Relaxed) {
+            WORLD_ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            WORLD_ALLOCATION_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        pointer
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        let pointer = unsafe { System.realloc(pointer, layout, size) };
+        if !pointer.is_null() && TRACK_WORLD_ALLOCATIONS.load(Ordering::Relaxed) {
+            WORLD_ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            WORLD_ALLOCATION_BYTES.fetch_add(size, Ordering::Relaxed);
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[global_allocator]
+static WORLD_TEST_ALLOCATOR: WorldTrackingAllocator = WorldTrackingAllocator;
+
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy)]
+enum ForceSourceBenchScenario {
+    OneBody,
+    DistinctBodies,
+    MixedBodies,
+}
+
+#[cfg(feature = "bench-internals")]
+impl ForceSourceBenchScenario {
+    const ALL: [Self; 3] = [Self::OneBody, Self::DistinctBodies, Self::MixedBodies];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::OneBody => "one-body",
+            Self::DistinctBodies => "distinct-bodies",
+            Self::MixedBodies => "mixed-unbalanced",
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn force_source_bench_world(
+    scenario: ForceSourceBenchScenario,
+    source_count: usize,
+) -> PhysicsWorld {
+    let body_count = match scenario {
+        ForceSourceBenchScenario::OneBody => 1,
+        ForceSourceBenchScenario::DistinctBodies => source_count,
+        ForceSourceBenchScenario::MixedBodies => (source_count / 8).max(2),
+    };
+    let mut world = PhysicsWorld::new();
+    let mut bodies = Vec::with_capacity(body_count);
+    let body_template = dynamic_body();
+    for _ in 0..body_count {
+        bodies.push(world.add_body(body_template).expect("benchmark body"));
+    }
+
+    let dominant_source_count = source_count.saturating_sub(body_count - 1);
+    for source_index in 0..source_count {
+        let body_index = match scenario {
+            ForceSourceBenchScenario::OneBody => 0,
+            ForceSourceBenchScenario::DistinctBodies => source_index,
+            ForceSourceBenchScenario::MixedBodies => {
+                if source_index < dominant_source_count {
+                    0
+                } else {
+                    source_index - dominant_source_count + 1
+                }
+            }
+        };
+        let scale = (source_index % 5 + 1) as f64 * 1.0e-6;
+        world
+            .add_force_source(
+                bodies[body_index],
+                Vec3::Y * 0.01,
+                Vec3::new(scale, scale * 2.0, -scale),
+            )
+            .expect("benchmark force source");
+    }
+    world
+}
+
+#[cfg(feature = "bench-internals")]
+fn prepare_and_restore_force_sources(world: &mut PhysicsWorld) {
+    world
+        .prepare_force_source_updates()
+        .expect("benchmark source preparation");
+    let digest = world
+        .force_source_body_updates
+        .iter()
+        .map(|update| update.prepared.forces().force().x)
+        .sum::<f64>();
+    std::hint::black_box(digest);
+    world.rollback_force_source_updates();
+}
+
+#[cfg(feature = "bench-internals")]
+fn calibrated_force_source_repeats(pilot: Duration) -> usize {
+    const TARGET: Duration = Duration::from_millis(5);
+    usize::try_from(TARGET.as_nanos() / pilot.as_nanos().max(1))
+        .unwrap_or(5_000)
+        .clamp(1, 5_000)
+}
+
+#[cfg(feature = "bench-internals")]
+fn tracked_world_allocations(mut operation: impl FnMut()) -> (usize, usize) {
+    WORLD_ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+    WORLD_ALLOCATION_BYTES.store(0, Ordering::Relaxed);
+    TRACK_WORLD_ALLOCATIONS.store(true, Ordering::Relaxed);
+    operation();
+    TRACK_WORLD_ALLOCATIONS.store(false, Ordering::Relaxed);
+    (
+        WORLD_ALLOCATION_COUNT.load(Ordering::Relaxed),
+        WORLD_ALLOCATION_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+#[cfg(feature = "bench-internals")]
+fn force_source_preparation_samples(
+    scenario: ForceSourceBenchScenario,
+    source_count: usize,
+) -> ([f64; 5], usize, usize, usize, usize, usize) {
+    let mut pilot = force_source_bench_world(scenario, source_count);
+    prepare_and_restore_force_sources(&mut pilot);
+    let started = std::time::Instant::now();
+    let result = pilot.prepare_force_source_updates();
+    let pilot_time = started.elapsed();
+    result.expect("pilot source preparation");
+    pilot.rollback_force_source_updates();
+    let repeats = calibrated_force_source_repeats(pilot_time);
+
+    let mut samples = [0.0; 5];
+    let mut update_capacity = 0;
+    let mut index_capacity = 0;
+    for sample in &mut samples {
+        let mut world = force_source_bench_world(scenario, source_count);
+        prepare_and_restore_force_sources(&mut world);
+        let mut elapsed = Duration::ZERO;
+        for _ in 0..repeats {
+            let started = std::time::Instant::now();
+            let result = world.prepare_force_source_updates();
+            elapsed += started.elapsed();
+            result.expect("benchmark source preparation");
+            let digest = world
+                .force_source_body_updates
+                .iter()
+                .map(|update| update.prepared.forces().force().x)
+                .sum::<f64>();
+            std::hint::black_box(digest);
+            world.rollback_force_source_updates();
+        }
+        *sample = elapsed.as_nanos() as f64 / repeats as f64;
+        update_capacity = world.force_source_body_updates.capacity();
+        index_capacity = world
+            .force_source_body_indices
+            .as_ref()
+            .map_or(0, |indices| indices.capacity());
+    }
+    samples.sort_by(f64::total_cmp);
+
+    let mut allocation_world = force_source_bench_world(scenario, source_count);
+    prepare_and_restore_force_sources(&mut allocation_world);
+    let (allocations, bytes) = tracked_world_allocations(|| {
+        for _ in 0..32 {
+            prepare_and_restore_force_sources(&mut allocation_world);
+        }
+    });
+    (
+        samples,
+        repeats,
+        allocations / 32,
+        bytes / 32,
+        update_capacity,
+        index_capacity,
+    )
+}
+
+#[cfg(feature = "bench-internals")]
+fn full_force_source_step_samples(
+    scenario: ForceSourceBenchScenario,
+    source_count: usize,
+) -> ([f64; 5], usize, usize, usize) {
+    const DT: f64 = 1.0 / 60.0;
+    let mut pilot = force_source_bench_world(scenario, source_count);
+    pilot.step(DT).expect("warm full step");
+    let started = std::time::Instant::now();
+    pilot.step(DT).expect("pilot full step");
+    let repeats = calibrated_force_source_repeats(started.elapsed());
+
+    let mut samples = [0.0; 5];
+    for sample in &mut samples {
+        let mut world = force_source_bench_world(scenario, source_count);
+        world.step(DT).expect("warm full step");
+        let started = std::time::Instant::now();
+        for _ in 0..repeats {
+            world.step(DT).expect("benchmark full step");
+        }
+        *sample = started.elapsed().as_nanos() as f64 / repeats as f64;
+        std::hint::black_box(world.body(world.bodies().next().expect("body").0));
+    }
+    samples.sort_by(f64::total_cmp);
+
+    let mut allocation_world = force_source_bench_world(scenario, source_count);
+    allocation_world.step(DT).expect("warm full step");
+    let (allocations, bytes) = tracked_world_allocations(|| {
+        for _ in 0..32 {
+            allocation_world
+                .step(DT)
+                .expect("benchmark full step allocation count");
+        }
+    });
+    (samples, repeats, allocations / 32, bytes / 32)
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Release scaling benchmark; run with bench-internals"]
+fn benchmark_force_source_update_scaling() {
+    const SOURCE_COUNTS: [usize; 7] = [128, 256, 512, 1_024, 2_048, 4_096, 8_192];
+    println!(
+        "scenario,sources,prep_min_us,prep_median_us,prep_max_us,ns_per_source,growth_x,prep_repeats,prep_allocations,prep_bytes,update_vec_capacity,index_capacity,step_repeats,step_min_us,step_median_us,step_max_us,step_allocations,step_bytes"
+    );
+    for scenario in ForceSourceBenchScenario::ALL {
+        let mut previous_median = None;
+        for source_count in SOURCE_COUNTS {
+            let (
+                preparation,
+                prep_repeats,
+                prep_allocations,
+                prep_bytes,
+                update_capacity,
+                index_capacity,
+            ) = force_source_preparation_samples(scenario, source_count);
+            let (full_step, step_repeats, step_allocations, step_bytes) =
+                full_force_source_step_samples(scenario, source_count);
+            let median = preparation[2];
+            let growth = previous_median
+                .map(|previous: f64| format!("{:.2}", median / previous))
+                .unwrap_or_else(|| "-".to_owned());
+            previous_median = Some(median);
+            println!(
+                "{},{source_count},{:.3},{:.3},{:.3},{:.2},{growth},{prep_repeats},{:.3},{:.1},{update_capacity},{index_capacity},{step_repeats},{:.3},{:.3},{:.3},{:.3},{:.1}",
+                scenario.name(),
+                preparation[0] / 1_000.0,
+                preparation[2] / 1_000.0,
+                preparation[4] / 1_000.0,
+                median / source_count as f64,
+                prep_allocations as f64,
+                prep_bytes as f64,
+                full_step[0] / 1_000.0,
+                full_step[2] / 1_000.0,
+                full_step[4] / 1_000.0,
+                step_allocations as f64,
+                step_bytes as f64,
+            );
+        }
+    }
 }

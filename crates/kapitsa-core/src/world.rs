@@ -85,6 +85,8 @@ struct ForceSourceBodyUpdate {
     prepared: RigidBody,
 }
 
+const FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT: usize = 128;
+
 struct ColliderEntry {
     collider: Collider,
     body: BodyId,
@@ -137,6 +139,7 @@ pub struct PhysicsWorld {
     colliders: DensePool<ColliderEntry>,
     force_sources: DensePool<ForceSource>,
     force_source_body_updates: Vec<ForceSourceBodyUpdate>,
+    force_source_body_indices: Option<HashMap<BodyId, usize>>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
     query_index: Option<SpatialIndex>,
@@ -190,6 +193,7 @@ impl PhysicsWorld {
             colliders: DensePool::new(),
             force_sources: DensePool::new(),
             force_source_body_updates: Vec::new(),
+            force_source_body_indices: None,
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
             query_index: None,
@@ -855,7 +859,7 @@ impl PhysicsWorld {
         if result.is_err() {
             self.rollback_force_source_updates();
         } else {
-            self.force_source_body_updates.clear();
+            self.clear_force_source_updates();
         }
         result
     }
@@ -903,7 +907,7 @@ impl PhysicsWorld {
     }
 
     fn prepare_force_source_updates(&mut self) -> Result<(), (ForceSourceId, ForceSourceError)> {
-        self.force_source_body_updates.clear();
+        self.clear_force_source_updates();
         if self.force_sources.is_empty() {
             return Ok(());
         }
@@ -919,30 +923,84 @@ impl PhysicsWorld {
             }
             let Some(body) = self.body(source.body).copied() else {
                 self.force_source_body_updates.clear();
+                if let Some(indices) = &mut self.force_source_body_indices {
+                    indices.clear();
+                }
                 return Err((source_id, ForceSourceError::InvalidBodyId));
             };
             if body.physics().body_type() != BodyType::Dynamic {
                 self.force_source_body_updates.clear();
+                if let Some(indices) = &mut self.force_source_body_indices {
+                    indices.clear();
+                }
                 return Err((source_id, ForceSourceError::BodyMustBeDynamic));
             }
 
-            let update_index = match self
-                .force_source_body_updates
-                .iter()
-                .position(|update| update.id == source.body)
-            {
+            let index_active = self
+                .force_source_body_indices
+                .as_ref()
+                .is_some_and(|indices| !indices.is_empty());
+            let update_index = if index_active {
+                self.force_source_body_indices
+                    .as_ref()
+                    .and_then(|indices| indices.get(&source.body).copied())
+            } else {
+                self.force_source_body_updates
+                    .iter()
+                    .position(|update| update.id == source.body)
+            };
+            let update_index = match update_index {
                 Some(index) => index,
                 None => {
                     if self.force_source_body_updates.try_reserve(1).is_err() {
                         self.force_source_body_updates.clear();
+                        if let Some(indices) = &mut self.force_source_body_indices {
+                            indices.clear();
+                        }
                         return Err((source_id, ForceSourceError::StorageCapacityExceeded));
                     }
+                    if index_active {
+                        let map_reserve_failed = self
+                            .force_source_body_indices
+                            .as_mut()
+                            .is_none_or(|indices| indices.try_reserve(1).is_err());
+                        if map_reserve_failed {
+                            self.force_source_body_updates.clear();
+                            if let Some(indices) = &mut self.force_source_body_indices {
+                                indices.clear();
+                            }
+                            return Err((source_id, ForceSourceError::StorageCapacityExceeded));
+                        }
+                    }
+                    let index = self.force_source_body_updates.len();
                     self.force_source_body_updates.push(ForceSourceBodyUpdate {
                         id: source.body,
                         original: body,
                         prepared: body,
                     });
-                    self.force_source_body_updates.len() - 1
+                    if index_active {
+                        if let Some(indices) = &mut self.force_source_body_indices {
+                            indices.insert(source.body, index);
+                        }
+                    } else if self.force_source_body_updates.len()
+                        > FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT
+                    {
+                        let indices = self
+                            .force_source_body_indices
+                            .get_or_insert_with(HashMap::new);
+                        if indices
+                            .try_reserve(self.force_source_body_updates.len())
+                            .is_err()
+                        {
+                            self.force_source_body_updates.clear();
+                            indices.clear();
+                            return Err((source_id, ForceSourceError::StorageCapacityExceeded));
+                        }
+                        for (index, update) in self.force_source_body_updates.iter().enumerate() {
+                            indices.insert(update.id, index);
+                        }
+                    }
+                    index
                 }
             };
 
@@ -952,6 +1010,9 @@ impl PhysicsWorld {
             let point = transform.transform_point(source.local_point);
             if let Err(error) = body.apply_force_at_point(force, point) {
                 self.force_source_body_updates.clear();
+                if let Some(indices) = &mut self.force_source_body_indices {
+                    indices.clear();
+                }
                 return Err((source_id, ForceSourceError::from(error)));
             }
         }
@@ -968,6 +1029,13 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    fn clear_force_source_updates(&mut self) {
+        self.force_source_body_updates.clear();
+        if let Some(indices) = &mut self.force_source_body_indices {
+            indices.clear();
+        }
+    }
+
     fn rollback_force_source_updates(&mut self) {
         for update in &self.force_source_body_updates {
             if let Some(entry) = self
@@ -978,7 +1046,7 @@ impl PhysicsWorld {
                 entry.body = update.original;
             }
         }
-        self.force_source_body_updates.clear();
+        self.clear_force_source_updates();
     }
 
     fn stage_spatial_proxies(&mut self, dt: f64) -> Result<(), CollisionError> {
