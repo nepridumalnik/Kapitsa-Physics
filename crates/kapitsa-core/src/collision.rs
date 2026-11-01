@@ -40,6 +40,12 @@ pub struct CollisionStepMetrics {
     pub broad_phase: Duration,
     /// Time spent finding continuous collision impacts.
     pub ccd: Duration,
+    /// Time spent scanning the active broadphase candidates for the next TOI.
+    pub ccd_toi_search: Duration,
+    /// Time spent rebuilding the CCD broadphase after an impact.
+    pub ccd_candidate_refresh: Duration,
+    /// Time spent constructing and solving CCD contacts.
+    pub ccd_contact_resolution: Duration,
     /// Time spent on discrete narrowphase contact generation.
     pub narrow_phase: Duration,
     /// Time spent assigning contacts to deterministic islands.
@@ -62,6 +68,16 @@ pub struct CollisionStepMetrics {
     pub contact_count: usize,
     /// Number of continuous time-of-impact contacts resolved.
     pub ccd_impact_count: usize,
+    /// Candidate pairs present when CCD processing began.
+    pub ccd_initial_candidate_count: usize,
+    /// Number of TOI evaluations performed by the CCD solver.
+    pub ccd_toi_call_count: usize,
+    /// TOI evaluations for pairs already evaluated earlier in this step.
+    pub ccd_repeated_toi_call_count: usize,
+    /// Number of broadphase candidate builds during this step.
+    pub ccd_broad_phase_build_count: usize,
+    /// Number of full CCD candidate refreshes after impacts.
+    pub ccd_candidate_refresh_count: usize,
     /// Number of solver islands built for the step.
     pub island_count: usize,
     /// Approximate retained capacity of collision scratch buffers.
@@ -85,6 +101,9 @@ impl CollisionStepMetrics {
         spatial_index: Duration::ZERO,
         broad_phase: Duration::ZERO,
         ccd: Duration::ZERO,
+        ccd_toi_search: Duration::ZERO,
+        ccd_candidate_refresh: Duration::ZERO,
+        ccd_contact_resolution: Duration::ZERO,
         narrow_phase: Duration::ZERO,
         island_build: Duration::ZERO,
         solver: Duration::ZERO,
@@ -96,6 +115,11 @@ impl CollisionStepMetrics {
         candidate_count: 0,
         contact_count: 0,
         ccd_impact_count: 0,
+        ccd_initial_candidate_count: 0,
+        ccd_toi_call_count: 0,
+        ccd_repeated_toi_call_count: 0,
+        ccd_broad_phase_build_count: 0,
+        ccd_candidate_refresh_count: 0,
         island_count: 0,
         retained_scratch_bytes: 0,
         peak_scratch_bytes: 0,

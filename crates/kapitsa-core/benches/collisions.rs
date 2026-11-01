@@ -318,7 +318,7 @@ fn report_world(
         .max()
         .unwrap_or(0);
     println!(
-        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} ccd_impacts={} islands={} | index={:.3} broad={:.3} narrow={:.3} ccd={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
+        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} ccd_impacts={} islands={} | CCD initial={} toi_calls={} repeated={} broad_builds={} refreshes={} | ccd={:.3} search={:.3} refresh={:.3} resolve={:.3} ms | index={:.3} broad={:.3} narrow={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
         millis(min.elapsed),
         millis(median.elapsed),
         millis(max.elapsed),
@@ -326,10 +326,18 @@ fn report_world(
         median.metrics.contact_count,
         median.metrics.ccd_impact_count,
         median.metrics.island_count,
+        median.metrics.ccd_initial_candidate_count,
+        median.metrics.ccd_toi_call_count,
+        median.metrics.ccd_repeated_toi_call_count,
+        median.metrics.ccd_broad_phase_build_count,
+        median.metrics.ccd_candidate_refresh_count,
+        millis(median.metrics.ccd),
+        millis(median.metrics.ccd_toi_search),
+        millis(median.metrics.ccd_candidate_refresh),
+        millis(median.metrics.ccd_contact_resolution),
         millis(median.metrics.spatial_index),
         millis(median.metrics.broad_phase),
         millis(median.metrics.narrow_phase),
-        millis(median.metrics.ccd),
         millis(median.metrics.island_build),
         millis(median.metrics.solver),
         millis(median.metrics.solver_prepare),

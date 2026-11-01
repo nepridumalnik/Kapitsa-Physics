@@ -395,3 +395,30 @@ the adaptive Dense/Sparse snapshot index were not adopted: their workload
 comparisons did not show a consistent end-to-end benefit. Full correctness,
 memory-estimate limits, and implementation details are in
 [`docs/reviews/collision-refactoring-report.md`](../docs/reviews/collision-refactoring-report.md).
+
+## CCD Chaos refactor, stage 1 baseline
+
+The current CCD implementation at source commit
+`8c359eaf96a994c1b5a0c97fdd05fef7663d11e5` was measured before changing its
+algorithm. Runs used the existing Release benchmark, one warm-up, five
+independently built worlds, and a 1/60-second step. The 64 continuous spheres
+start at 1,000 m/s and hit one static cuboid wall. An uninstrumented run had a
+136.898 / 145.533 / 158.071 ms full-step range and a 145.273 ms median CCD
+phase. With the new `bench-internals` counters enabled, the full-step range was
+138.483 / 146.847 / 148.403 ms and the median CCD phase was 146.563 ms. The
+medians are within the observed run-to-run variation; default builds compile
+out these counters and their pair-tracking set.
+
+| Initial candidates | TOI calls | Repeated TOI calls | Broadphase builds | CCD refreshes | TOI search | Refresh | Contact resolution | CCD impacts | Retained scratch |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 64 | 5,560 | 5,405 | 65 | 64 | 142.518 ms | 3.313 ms | 0.666 ms | 64 | ~234 KiB |
+
+`TOI search` covers each candidate scan, including narrowphase calls. `Refresh`
+covers the full proxy update and candidate rebuild, so its time overlaps the
+separate spatial-index and broadphase phase timers. The broadphase build count
+includes the initial build; 64 subsequent builds refreshed candidates after
+impacts. A repeated TOI call means the same collider pair was evaluated again
+later in this step; pairs skipped by the existing processed-pair rule are not
+counted. The 5,405 repeated evaluations identify the global rescanning cost
+that the next stages target. The retained-scratch estimate includes the
+benchmark-only set used to count repeats.

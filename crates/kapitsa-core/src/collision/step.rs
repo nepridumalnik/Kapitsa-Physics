@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "bench-internals")]
+use std::collections::HashSet;
+
 use crate::{
     aabb::Aabb,
     rigid_body::{BodyState, BodyType},
@@ -29,6 +32,8 @@ pub(crate) struct StepContext {
     pub(crate) ccd_impact_counts: Vec<u32>,
     pub(crate) ccd_processed_pairs: Vec<super::CollisionPair>,
     pub(crate) ccd_processed_time: f64,
+    #[cfg(feature = "bench-internals")]
+    pub(crate) ccd_toi_seen_pairs: Option<HashSet<super::CollisionPair>>,
     pub(crate) solver_manifolds: Vec<SolverManifold>,
     pub(crate) interactions: Vec<CollisionInteraction>,
     /// Created on first use so the owning PhysicsWorld can remain const-constructible.
@@ -54,6 +59,8 @@ impl StepContext {
             ccd_impact_counts: Vec::new(),
             ccd_processed_pairs: Vec::new(),
             ccd_processed_time: 0.0,
+            #[cfg(feature = "bench-internals")]
+            ccd_toi_seen_pairs: None,
             solver_manifolds: Vec::new(),
             interactions: Vec::new(),
             interaction_indices: None,
@@ -77,6 +84,10 @@ impl StepContext {
         self.ccd_impact_counts.clear();
         self.ccd_processed_pairs.clear();
         self.ccd_processed_time = 0.0;
+        #[cfg(feature = "bench-internals")]
+        if let Some(pairs) = &mut self.ccd_toi_seen_pairs {
+            pairs.clear();
+        }
         self.solver_manifolds.clear();
         self.interactions.clear();
         if let Some(indices) = &mut self.interaction_indices {
@@ -88,6 +99,10 @@ impl StepContext {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         use std::mem::size_of;
+
+        let ccd_toi_seen_pairs = self.ccd_toi_seen_pairs.as_ref().map_or(0, |pairs| {
+            pairs.capacity() * size_of::<super::CollisionPair>()
+        });
 
         [
             self.predicted_states.capacity() * size_of::<(BodyId, BodyState)>(),
@@ -103,6 +118,7 @@ impl StepContext {
             self.ccd_elapsed.capacity() * size_of::<f64>(),
             self.ccd_impact_counts.capacity() * size_of::<u32>(),
             self.ccd_processed_pairs.capacity() * size_of::<super::CollisionPair>(),
+            ccd_toi_seen_pairs,
             self.solver_manifolds.capacity() * size_of::<SolverManifold>(),
             self.interactions.capacity() * size_of::<CollisionInteraction>(),
             self.interaction_indices.as_ref().map_or(0, |indices| {

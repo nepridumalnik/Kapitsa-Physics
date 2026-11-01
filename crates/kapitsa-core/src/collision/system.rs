@@ -99,6 +99,13 @@ impl CollisionSystem {
     pub(crate) fn record_broad_phase(&mut self, elapsed: std::time::Duration) {
         self.benchmark_metrics.broad_phase += elapsed;
         self.benchmark_metrics.candidate_count = self.candidate_count();
+        self.benchmark_metrics.ccd_broad_phase_build_count = self
+            .benchmark_metrics
+            .ccd_broad_phase_build_count
+            .saturating_add(1);
+        if self.benchmark_metrics.ccd_broad_phase_build_count == 1 {
+            self.benchmark_metrics.ccd_initial_candidate_count = self.candidate_count();
+        }
         self.record_peak_scratch();
     }
 
@@ -112,6 +119,39 @@ impl CollisionSystem {
     pub(crate) fn record_ccd_impact(&mut self) {
         self.benchmark_metrics.ccd_impact_count =
             self.benchmark_metrics.ccd_impact_count.saturating_add(1);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_toi_search(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.ccd_toi_search += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_candidate_refresh(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.ccd_candidate_refresh += elapsed;
+        self.benchmark_metrics.ccd_candidate_refresh_count = self
+            .benchmark_metrics
+            .ccd_candidate_refresh_count
+            .saturating_add(1);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_contact_resolution(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.ccd_contact_resolution += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_toi_call(&mut self) {
+        self.benchmark_metrics.ccd_toi_call_count =
+            self.benchmark_metrics.ccd_toi_call_count.saturating_add(1);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_repeated_toi_call(&mut self) {
+        self.benchmark_metrics.ccd_repeated_toi_call_count = self
+            .benchmark_metrics
+            .ccd_repeated_toi_call_count
+            .saturating_add(1);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -285,9 +325,12 @@ impl CollisionSystem {
         vertices_b: Option<&[kapitsa_math::Vec3]>,
         sensor: bool,
     ) -> Result<Option<CcdHit>, CollisionError> {
-        self.narrow_phase.time_of_impact(
+        let result = self.narrow_phase.time_of_impact(
             shape_a, motion_a, bvh_a, vertices_a, shape_b, motion_b, bvh_b, vertices_b, sensor,
-        )
+        );
+        #[cfg(feature = "bench-internals")]
+        self.record_ccd_toi_call();
+        result
     }
 
     pub(crate) fn solve_contacts(&mut self, worker_count: usize) -> Result<(), CollisionError> {

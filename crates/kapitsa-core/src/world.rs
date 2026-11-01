@@ -990,6 +990,18 @@ impl PhysicsWorld {
         }
         self.collision_system.context.ccd_processed_pairs.clear();
         self.collision_system.context.ccd_processed_time = 0.0;
+        #[cfg(feature = "bench-internals")]
+        {
+            let candidate_count = self.collision_system.candidate_count();
+            let seen_pairs = self
+                .collision_system
+                .context
+                .ccd_toi_seen_pairs
+                .get_or_insert_with(std::collections::HashSet::new);
+            seen_pairs
+                .try_reserve(candidate_count)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        }
 
         let mut elapsed = 0.0;
         let time_tolerance = f64::EPSILON * dt.max(1.0) * 128.0;
@@ -1001,6 +1013,8 @@ impl PhysicsWorld {
 
             let mut earliest: Option<(CollisionPair, CcdHit)> = None;
             let candidate_count = self.collision_system.candidate_count();
+            #[cfg(feature = "bench-internals")]
+            let toi_search_started = Instant::now();
             for candidate_index in 0..candidate_count {
                 let pair = self
                     .collision_system
@@ -1129,6 +1143,18 @@ impl PhysicsWorld {
                 )?;
                 let sensor = collider_a.collider.mode() == crate::collider::CollisionMode::Sensor
                     || collider_b.collider.mode() == crate::collider::CollisionMode::Sensor;
+                #[cfg(feature = "bench-internals")]
+                let repeated_toi_call = if let Some(seen_pairs) =
+                    &mut self.collision_system.context.ccd_toi_seen_pairs
+                {
+                    !seen_pairs.insert(pair)
+                } else {
+                    false
+                };
+                #[cfg(feature = "bench-internals")]
+                if repeated_toi_call {
+                    self.collision_system.record_ccd_repeated_toi_call();
+                }
                 let Some(hit) = self.collision_system.time_of_impact(
                     collider_a.collider.shape(),
                     &motion_a,
@@ -1178,6 +1204,10 @@ impl PhysicsWorld {
                 }
             }
 
+            #[cfg(feature = "bench-internals")]
+            self.collision_system
+                .record_ccd_toi_search(toi_search_started.elapsed());
+
             let Some((pair, hit)) = earliest else {
                 return Ok(());
             };
@@ -1223,6 +1253,8 @@ impl PhysicsWorld {
                         .ok_or(CollisionError::InvalidContact)?,
                 )
             };
+            #[cfg(feature = "bench-internals")]
+            let contact_resolution_started = Instant::now();
             let state_a = self.body_state_at_ccd(body_a_id, prediction_a, impact_elapsed, dt)?;
             let state_b = self.body_state_at_ccd(body_b_id, prediction_b, impact_elapsed, dt)?;
             let body_transform_a = state_a.transform();
@@ -1325,7 +1357,11 @@ impl PhysicsWorld {
                 },
             )?;
             #[cfg(feature = "bench-internals")]
-            self.collision_system.record_ccd_impact();
+            {
+                self.collision_system.record_ccd_impact();
+                self.collision_system
+                    .record_ccd_contact_resolution(contact_resolution_started.elapsed());
+            }
             self.collision_system.context.ccd_states[prediction_a] = solved_a;
             self.collision_system.context.ccd_states[prediction_b] = solved_b;
             self.collision_system.context.ccd_elapsed[prediction_a] = impact_elapsed;
@@ -1381,7 +1417,12 @@ impl PhysicsWorld {
             if remaining_after_impact <= f64::EPSILON * dt.max(1.0) {
                 return Ok(());
             }
+            #[cfg(feature = "bench-internals")]
+            let refresh_started = Instant::now();
             self.refresh_ccd_candidates(elapsed, dt)?;
+            #[cfg(feature = "bench-internals")]
+            self.collision_system
+                .record_ccd_candidate_refresh(refresh_started.elapsed());
         }
     }
 
@@ -1469,6 +1510,14 @@ impl PhysicsWorld {
         self.collision_system.generate_candidates()?;
         #[cfg(feature = "bench-internals")]
         self.collision_system.record_broad_phase(started.elapsed());
+        #[cfg(feature = "bench-internals")]
+        let candidate_count = self.collision_system.candidate_count();
+        #[cfg(feature = "bench-internals")]
+        if let Some(seen_pairs) = &mut self.collision_system.context.ccd_toi_seen_pairs {
+            seen_pairs
+                .try_reserve(candidate_count)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        }
         Ok(())
     }
 
