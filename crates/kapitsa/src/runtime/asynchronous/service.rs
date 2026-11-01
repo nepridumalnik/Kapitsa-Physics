@@ -625,6 +625,7 @@ mod tests {
     use kapitsa_core::{
         collider::Collider,
         collision::{QueryFilter, Ray},
+        gravity::CentralGravity,
         mass::MassProperties,
         rigid_body::RigidBody,
         shape::{Shape, Sphere},
@@ -1074,6 +1075,34 @@ mod tests {
         let body = world.body(body).expect("body");
         assert_eq!(body.state().linear_velocity(), Vec3::Y);
         assert_eq!(body.forces().force(), Vec3::X * f64::MAX);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_config_applies_central_gravity() {
+        let mut config = config(1_000);
+        config.central_gravity =
+            Some(CentralGravity::new(Vec3::ZERO, 100.0).expect("valid central gravity"));
+        let mut simulation = Simulation::new_from_config(config).expect("simulation");
+        let client = simulation.client();
+        simulation.start().expect("start");
+        let mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+        let body = RigidBody::new_dynamic(
+            Transform::new(Vec3::Y * 10.0, kapitsa_math::Quat::IDENTITY).expect("transform"),
+            mass,
+        )
+        .expect("body");
+        let id = client.add_body(body).await.expect("body added");
+
+        assert!(
+            client
+                .snapshot()
+                .body(id)
+                .expect("body published")
+                .linear_velocity()
+                .y
+                < 0.0
+        );
+        simulation.stop().await.expect("stop");
     }
 
     #[tokio::test]

@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use kapitsa_core::gravity::CentralGravity;
+
 use super::planner::{WorkerConfig, WorkerConfigError};
 
 const MAX_TICK_RATE: u32 = 1_000_000_000;
@@ -11,6 +13,8 @@ pub struct SimulationConfig {
     pub max_catch_up_steps: usize,
     pub scheduler: SchedulerConfig,
     pub workers: WorkerConfig,
+    /// Optional point-mass field configured as `μ = GM`.
+    pub central_gravity: Option<CentralGravity>,
 }
 
 impl Default for SimulationConfig {
@@ -20,6 +24,7 @@ impl Default for SimulationConfig {
             max_catch_up_steps: 4,
             scheduler: SchedulerConfig::default(),
             workers: WorkerConfig::default(),
+            central_gravity: None,
         }
     }
 }

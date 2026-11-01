@@ -15,6 +15,10 @@ pub mod collision {
     };
 }
 
+pub mod gravity {
+    pub use kapitsa_core::gravity::{CentralGravity, GravityError};
+}
+
 pub mod mass {
     pub use kapitsa_core::mass::{MassError, MassProperties};
 }
@@ -58,6 +62,7 @@ pub use kapitsa_core::{
         CcdLimitPolicy, CollisionConfig, CollisionError, CollisionEvent, CollisionEventKind,
         CollisionPair, ContactInfo,
     },
+    gravity::{CentralGravity, GravityError},
     mass::MassProperties,
     material::{MaterialId, PhysicsMaterial},
     rigid_body::{BodyState, CcdMode, RigidBody},

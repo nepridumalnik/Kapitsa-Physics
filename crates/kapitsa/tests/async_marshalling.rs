@@ -4,8 +4,11 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll, Waker},
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+#[cfg(feature = "bench-internals")]
+use std::time::Instant;
 
 #[cfg(feature = "bench-internals")]
 use std::{

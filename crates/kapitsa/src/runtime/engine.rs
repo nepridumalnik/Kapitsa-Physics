@@ -40,10 +40,13 @@ impl<E: StepExecutor> StepEngine<E> {
     }
 
     pub(crate) fn new_validated(
-        world: PhysicsWorld,
+        mut world: PhysicsWorld,
         config: SimulationConfig,
         executor: E,
     ) -> Self {
+        if let Some(gravity) = config.central_gravity {
+            world.set_central_gravity(Some(gravity));
+        }
         let step_budget = config.step_budget();
         let metrics = SimulationMetrics {
             step_budget,

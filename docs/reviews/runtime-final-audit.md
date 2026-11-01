@@ -6,16 +6,17 @@ snapshot reuse, command-buffer pooling, and the fixed-step engine.
 
 ## Summary
 
-No confirmed P0 or P1 correctness defect was found in the reviewed lifecycle or
-command paths. Existing tests cover the key ordering, atomicity, cancellation,
-restart, failure, and bounded-pool contracts. The following P2/P3 items are
-operational limits or observability gaps; they do not require changing runtime
-semantics for this release.
+One confirmed P1 physics correctness defect was found in the parallel shard
+path. The reviewed runtime lifecycle and command semantics otherwise have no
+confirmed P0 defect. Existing tests cover the key ordering, atomicity,
+cancellation, restart, failure, and bounded-pool contracts. The P2/P3 items
+below are operational limits or observability gaps.
 
 ## Findings
 
 | Priority | Finding | Evidence and impact | Recommendation |
 |---|---|---|---|
+| P1 | The parallel shard path skips persistent force-source preparation. | `StepEngine::run_step` selects `fill_step_shards` plus `commit_step_shards_with_executor` when there are multiple active workers and more than half of the bodies are active. That path does not call `PhysicsWorld::prepare_force_source_updates`; shard copies therefore omit enabled persistent sources on those steps. Existing source tests cover the direct world path, but no test covers a runtime step selected into the parallel shard branch. | Fix the shard path in a focused change and add a runtime test with enough active bodies to cross the branch condition. This was discovered after the audit commit and is not mixed into the gravity change. |
 | P2 | Event streams are bounded and intentionally lossy for slow subscribers. | Collision events have capacity 64 and batch results capacity 256. A receiver that falls behind receives a typed `Lagged` error and must decide whether to resynchronize. Accepted batches still execute; the stream is not a durable result log. | Drain result streams promptly, handle `Lagged`, and correlate important work through a separately retained application record if it must survive subscriber lag. |
 | P2 | Snapshot reuse depends on readers releasing old snapshots. | The runtime recycles an `Arc<PhysicsSnapshot>` only when it has no external readers. A client retaining snapshots can prevent reuse and cause later snapshot buffers to be allocated. This is the cost of immutable snapshots and does not change their contents. | Keep only the snapshots needed by the application; use snapshot iteration/copying for long-term records. |
 | P2 | Some non-physics step failures have a generic client-facing cause. | `StepFailedAfterApply` preserves a concrete `StepError` for physics failures. Internal runner failures such as worker-pool or world availability errors are converted to `StepError::Collision(CollisionError::WorkerFailed)` before being attached to the result, so their lower-level source is not available from that public result. | If these infrastructure failures become actionable in applications, add a compatible diagnostic channel rather than widening physics error semantics. |
@@ -65,6 +66,6 @@ semantics for this release.
 | Pool bound, reuse, and nonblocking contention | `pool_bounds_buffer_count_and_retained_capacity_bytes`; `recycle_clears_commands_and_preserves_capacity`; `lock_contention_uses_nonblocking_fallbacks` |
 | Lag signaling, restart subscriptions, and snapshot readers | `lagged_batches_report_the_exact_loss_and_receiver_can_continue`; `subscription_reports_stop_and_resumes_after_restart`; `arc_recycling_skips_readers_and_reuses_released_capacity` |
 
-The audit found no small, isolated correctness defect that warranted a runtime
-change. Later stages in this task add gravity, scheduler time scaling, and
-flight workloads; they are not part of this audit's scope.
+The audit did not make runtime changes. Later stages add gravity, scheduler
+time scaling, and flight workloads; they do not address the parallel
+persistent-force-source defect recorded above.

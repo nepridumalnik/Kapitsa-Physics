@@ -2,6 +2,7 @@ use std::fmt;
 
 use crate::collision::CollisionError;
 use crate::containers::DensePoolError;
+use crate::gravity::GravityError;
 use crate::rigid_body::{BodyError, IntegrationError};
 
 use super::{BodyId, ForceSourceId};
@@ -60,6 +61,10 @@ pub enum StepError {
         source_id: ForceSourceId,
         cause: ForceSourceError,
     },
+    Gravity {
+        body_id: BodyId,
+        cause: GravityError,
+    },
 }
 
 impl fmt::Display for StepError {
@@ -76,6 +81,9 @@ impl fmt::Display for StepError {
             Self::ForceSource { source_id, cause } => {
                 write!(formatter, "force source {source_id:?} failed: {cause}")
             }
+            Self::Gravity { body_id, cause } => {
+                write!(formatter, "gravity failed for {body_id:?}: {cause}")
+            }
         }
     }
 }
@@ -87,6 +95,7 @@ impl std::error::Error for StepError {
             Self::InvalidDeltaTime | Self::InvalidStepResults => None,
             Self::BodyIntegration { cause, .. } => Some(cause),
             Self::ForceSource { cause, .. } => Some(cause),
+            Self::Gravity { cause, .. } => Some(cause),
         }
     }
 }

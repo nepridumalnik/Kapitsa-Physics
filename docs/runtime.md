@@ -80,6 +80,14 @@ point, then delivered when that step attempt finishes. A query result is a read
 of that earlier state, not a claim about the published post-step snapshot; a
 query error remains distinct from a later integration error.
 
+`SimulationConfig::central_gravity` optionally enables a point-mass field with
+`CentralGravity::new(center, μ)`, where `μ = GM` is in m³/s². The field acts on
+dynamic bodies at their world-space center of mass; static and kinematic bodies
+are unaffected. The physical step stays fixed at `1 / tick_rate`. A body at the
+field center, non-finite input, or an unrepresentable acceleration fails the
+step atomically with a typed gravity cause. `PhysicsWorld` also exposes
+`set_central_gravity` for synchronous world stepping.
+
 `apply_impulse` changes velocity immediately at the next command boundary;
 `apply_force` adds a one-step force that is cleared after a successful step. A
 persistent `ForceSource` applies its body-local force at its body-local point on

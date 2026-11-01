@@ -11,6 +11,7 @@ use crate::{
         Ray, RayHit, ShapeHit,
     },
     containers::{DensePool, DensePoolError},
+    gravity::{CentralGravity, GravityError},
     mass::MassProperties,
     material::PhysicsMaterial,
     rigid_body::{BodyType, CcdMode, IntegrationError, RigidBody},
@@ -88,6 +89,147 @@ impl StepExecutor for ScopedThreadExecutor {
 fn dynamic_body() -> RigidBody {
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
     RigidBody::new_dynamic(Transform::identity(), mass).expect("valid dynamic body")
+}
+
+fn body_at(position: Vec3, mass_value: f64) -> RigidBody {
+    let mass =
+        MassProperties::new(mass_value, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
+    RigidBody::new_dynamic(
+        Transform::new(position, Quat::IDENTITY).expect("transform"),
+        mass,
+    )
+    .expect("valid dynamic body")
+}
+
+#[test]
+fn central_gravity_accelerates_dynamic_bodies_and_ignores_static_bodies() {
+    let mut world = PhysicsWorld::new();
+    let dynamic = world
+        .add_body(body_at(Vec3::Y * 10.0, 2.0))
+        .expect("dynamic body");
+    let static_body = world
+        .add_body(RigidBody::new_static(
+            Transform::new(Vec3::Y * 10.0, Quat::IDENTITY).expect("transform"),
+        ))
+        .expect("static body");
+    world.set_central_gravity(Some(
+        CentralGravity::new(Vec3::ZERO, 100.0).expect("valid gravity"),
+    ));
+
+    world.step(0.1).expect("gravity step");
+
+    let dynamic = world.body(dynamic).expect("dynamic body");
+    assert!((dynamic.state().linear_velocity().y + 0.1).abs() < 1.0e-12);
+    assert!((dynamic.state().transform().translation().y - 9.99).abs() < 1.0e-12);
+    assert_eq!(
+        world
+            .body(static_body)
+            .expect("static body")
+            .state()
+            .transform()
+            .translation(),
+        Vec3::Y * 10.0
+    );
+}
+
+#[test]
+fn central_gravity_survives_the_sharded_prediction_path() {
+    let mut world = PhysicsWorld::new();
+    let id = world
+        .add_body(body_at(Vec3::Y * 10.0, 1.0))
+        .expect("dynamic body");
+    world.set_central_gravity(Some(
+        CentralGravity::new(Vec3::ZERO, 100.0).expect("valid gravity"),
+    ));
+    let mut shards = vec![Vec::new(), Vec::new()];
+
+    world.fill_step_shards(&mut shards).expect("prepare shards");
+    for shard in &mut shards {
+        for step in shard {
+            step.integrate(0.1).expect("predict with gravity");
+        }
+    }
+    world
+        .commit_step_shards_with_workers(&shards, 2)
+        .expect("commit shards");
+
+    assert!((world.body(id).expect("body").state().linear_velocity().y + 0.1).abs() < 1.0e-12);
+}
+
+#[test]
+fn central_gravity_preserves_orbital_energy_over_a_fixed_step_arc() {
+    let mut world = PhysicsWorld::new();
+    let mut body = body_at(Vec3::X * 10.0, 1.0);
+    body.set_linear_velocity(Vec3::Y * 10.0_f64.sqrt())
+        .expect("finite orbital velocity");
+    let id = world.add_body(body).expect("orbiter");
+    world.set_central_gravity(Some(
+        CentralGravity::new(Vec3::ZERO, 100.0).expect("valid gravity"),
+    ));
+
+    for _ in 0..10_000 {
+        world.step(0.001).expect("orbital step");
+    }
+
+    let body = world.body(id).expect("orbiter");
+    let radius = body
+        .world_center_of_mass()
+        .expect("finite center")
+        .expect("dynamic center")
+        .length();
+    let speed = body.state().linear_velocity().length();
+    let energy = 0.5 * speed * speed - 100.0 / radius;
+    assert!((energy + 5.0).abs() < 1.0e-3, "specific energy: {energy}");
+}
+
+#[test]
+fn central_gravity_errors_are_reported_without_partial_body_changes() {
+    let mut world = PhysicsWorld::new();
+    let first = world
+        .add_body(body_at(Vec3::X * 10.0, 1.0))
+        .expect("first body");
+    let mut overflowing = body_at(Vec3::X * 1.0e308, 1.0);
+    overflowing
+        .set_linear_velocity(Vec3::X * f64::MAX)
+        .expect("finite velocity");
+    let second = world.add_body(overflowing).expect("overflow body");
+    world.set_central_gravity(Some(
+        CentralGravity::new(Vec3::ZERO, 1.0).expect("valid gravity"),
+    ));
+
+    assert!(matches!(
+        world.step(1.0),
+        Err(StepError::BodyIntegration {
+            body_id,
+            cause: IntegrationError::ArithmeticOverflow,
+        }) if body_id == second
+    ));
+    let first = world.body(first).expect("first body");
+    assert_eq!(first.state().linear_velocity(), Vec3::ZERO);
+    assert_eq!(first.forces().force(), Vec3::ZERO);
+
+    let mut at_center = PhysicsWorld::new();
+    let center_body = at_center
+        .add_body(body_at(Vec3::ZERO, 1.0))
+        .expect("center body");
+    at_center.set_central_gravity(Some(
+        CentralGravity::new(Vec3::ZERO, 1.0).expect("valid gravity"),
+    ));
+    assert_eq!(
+        at_center.step(0.1),
+        Err(StepError::Gravity {
+            body_id: center_body,
+            cause: GravityError::AtFieldCenter,
+        })
+    );
+    assert_eq!(
+        at_center
+            .body(center_body)
+            .expect("center body unchanged")
+            .state()
+            .linear_velocity(),
+        Vec3::ZERO
+    );
 }
 
 fn collider(radius: f64) -> Collider {

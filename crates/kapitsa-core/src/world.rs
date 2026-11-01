@@ -38,6 +38,7 @@ use crate::{
     },
     containers::DensePool,
     execution::{SequentialExecutor, StepExecutor},
+    gravity::{CentralGravity, GravityError},
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
     rigid_body::{BodyState, BodyType, CcdMode, RigidBody, predict, predict_from_state},
     shape::Shape,
@@ -80,6 +81,12 @@ impl ForceSource {
 }
 
 struct ForceSourceBodyUpdate {
+    id: BodyId,
+    original: RigidBody,
+    prepared: RigidBody,
+}
+
+struct GravityBodyUpdate {
     id: BodyId,
     original: RigidBody,
     prepared: RigidBody,
@@ -140,6 +147,8 @@ pub struct PhysicsWorld {
     force_sources: DensePool<ForceSource>,
     force_source_body_updates: Vec<ForceSourceBodyUpdate>,
     force_source_body_indices: Option<HashMap<BodyId, usize>>,
+    central_gravity: Option<CentralGravity>,
+    gravity_body_updates: Vec<GravityBodyUpdate>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
     query_index: Option<SpatialIndex>,
@@ -157,6 +166,7 @@ pub struct BodyStep {
     predicted: Option<BodyState>,
     dt: Option<f64>,
     error: Option<StepError>,
+    prepared: RigidBody,
 }
 
 impl BodyStep {
@@ -168,7 +178,7 @@ impl BodyStep {
         self.predicted = None;
         self.dt = None;
         self.error = None;
-        let predicted = match predict(&self.source, dt) {
+        let predicted = match predict(&self.prepared, dt) {
             Ok(predicted) => predicted,
             Err(cause) => {
                 let error = StepError::BodyIntegration {
@@ -194,6 +204,8 @@ impl PhysicsWorld {
             force_sources: DensePool::new(),
             force_source_body_updates: Vec::new(),
             force_source_body_indices: None,
+            central_gravity: None,
+            gravity_body_updates: Vec::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
             query_index: None,
@@ -205,6 +217,14 @@ impl PhysicsWorld {
 
     pub fn collision_config(&self) -> CollisionConfig {
         self.collision_system.config()
+    }
+
+    pub fn central_gravity(&self) -> Option<CentralGravity> {
+        self.central_gravity
+    }
+
+    pub fn set_central_gravity(&mut self, gravity: Option<CentralGravity>) {
+        self.central_gravity = gravity;
     }
 
     pub fn set_collision_config(&mut self, config: CollisionConfig) -> Result<(), CollisionError> {
@@ -854,11 +874,17 @@ impl PhysicsWorld {
         if let Err((source_id, cause)) = self.prepare_force_source_updates() {
             return Err(StepError::ForceSource { source_id, cause });
         }
+        if let Err(error) = self.prepare_gravity_updates() {
+            self.rollback_force_source_updates();
+            return Err(error);
+        }
 
         let result = self.step_prepared(dt, executor, worker_count);
         if result.is_err() {
+            self.rollback_gravity_updates();
             self.rollback_force_source_updates();
         } else {
+            self.clear_gravity_updates();
             self.clear_force_source_updates();
         }
         result
@@ -1034,6 +1060,110 @@ impl PhysicsWorld {
         if let Some(indices) = &mut self.force_source_body_indices {
             indices.clear();
         }
+    }
+
+    fn gravity_force_for_body(&self, body_id: BodyId, body: &RigidBody) -> Result<Vec3, StepError> {
+        let Some(gravity) = self.central_gravity else {
+            return Ok(Vec3::ZERO);
+        };
+        if body.physics().body_type() != BodyType::Dynamic {
+            return Ok(Vec3::ZERO);
+        }
+        let center = body
+            .world_center_of_mass()
+            .map_err(|_| StepError::Gravity {
+                body_id,
+                cause: GravityError::ArithmeticOverflow,
+            })?
+            .ok_or(StepError::Gravity {
+                body_id,
+                cause: GravityError::ArithmeticOverflow,
+            })?;
+        let acceleration = gravity
+            .acceleration_at(center)
+            .map_err(|cause| StepError::Gravity { body_id, cause })?;
+        let mass = body.physics().mass().ok_or(StepError::Gravity {
+            body_id,
+            cause: GravityError::ArithmeticOverflow,
+        })?;
+        acceleration
+            .checked_mul_scalar(mass.mass())
+            .ok_or(StepError::Gravity {
+                body_id,
+                cause: GravityError::ArithmeticOverflow,
+            })
+    }
+
+    fn prepare_gravity_updates(&mut self) -> Result<(), StepError> {
+        self.gravity_body_updates.clear();
+        if self.central_gravity.is_none() {
+            return Ok(());
+        }
+
+        for (dense_id, entry) in self.bodies.iter() {
+            let body_id = BodyId {
+                world: self.world_id,
+                dense: dense_id,
+            };
+            let force = match self.gravity_force_for_body(body_id, &entry.body) {
+                Ok(force) => force,
+                Err(error) => {
+                    self.gravity_body_updates.clear();
+                    return Err(error);
+                }
+            };
+            if force == Vec3::ZERO {
+                continue;
+            }
+            if self.gravity_body_updates.try_reserve(1).is_err() {
+                self.gravity_body_updates.clear();
+                return Err(StepError::Gravity {
+                    body_id,
+                    cause: GravityError::StorageCapacityExceeded,
+                });
+            }
+            let mut prepared = entry.body;
+            if prepared.apply_force(force).is_err() {
+                self.gravity_body_updates.clear();
+                return Err(StepError::Gravity {
+                    body_id,
+                    cause: GravityError::ArithmeticOverflow,
+                });
+            }
+            self.gravity_body_updates.push(GravityBodyUpdate {
+                id: body_id,
+                original: entry.body,
+                prepared,
+            });
+        }
+
+        for update in &self.gravity_body_updates {
+            if let Some(entry) = self
+                .bodies
+                .get_mut(update.id.dense)
+                .filter(|_| update.id.world == self.world_id)
+            {
+                entry.body = update.prepared;
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_gravity_updates(&mut self) {
+        for update in &self.gravity_body_updates {
+            if let Some(entry) = self
+                .bodies
+                .get_mut(update.id.dense)
+                .filter(|_| update.id.world == self.world_id)
+            {
+                entry.body = update.original;
+            }
+        }
+        self.clear_gravity_updates();
+    }
+
+    fn clear_gravity_updates(&mut self) {
+        self.gravity_body_updates.clear();
     }
 
     fn rollback_force_source_updates(&mut self) {
@@ -4166,15 +4296,27 @@ impl PhysicsWorld {
                 shard_index += 1;
                 shard_remaining = base_size + usize::from(shard_index < remainder);
             }
+            let body_id = BodyId {
+                world: self.world_id,
+                dense: dense_id,
+            };
+            let mut prepared = entry.body;
+            let gravity_force = self.gravity_force_for_body(body_id, &prepared)?;
+            if gravity_force != Vec3::ZERO {
+                prepared
+                    .apply_force(gravity_force)
+                    .map_err(|_| StepError::Gravity {
+                        body_id,
+                        cause: GravityError::ArithmeticOverflow,
+                    })?;
+            }
             shards[shard_index].push(BodyStep {
-                body_id: BodyId {
-                    world: self.world_id,
-                    dense: dense_id,
-                },
+                body_id,
                 source: entry.body,
                 predicted: None,
                 dt: None,
                 error: None,
+                prepared,
             });
             shard_remaining -= 1;
         }
@@ -4239,6 +4381,7 @@ impl PhysicsWorld {
 
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
+        self.prepare_gravity_updates()?;
         self.collision_system.begin_step();
         for step in shards.iter().flatten() {
             if let Some(state) = step.predicted {
@@ -4248,10 +4391,12 @@ impl PhysicsWorld {
         let worker_count = worker_count.max(1);
         if let Err(error) = self.prepare_collision_candidates(dt, worker_count, executor) {
             self.collision_system.abort_step();
+            self.rollback_gravity_updates();
             return Err(StepError::Collision(error));
         }
         if let Err(error) = self.process_collision_candidates(worker_count, executor) {
             self.collision_system.abort_step();
+            self.rollback_gravity_updates();
             return Err(StepError::Collision(error));
         }
 
@@ -4259,6 +4404,7 @@ impl PhysicsWorld {
         let commit_started = Instant::now();
         self.commit_predicted_states();
         self.collision_system.commit_step();
+        self.clear_gravity_updates();
         #[cfg(feature = "bench-internals")]
         self.collision_system
             .record_commit(commit_started.elapsed());

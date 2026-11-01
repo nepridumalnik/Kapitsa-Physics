@@ -5,9 +5,12 @@ pub mod collider;
 pub mod collision;
 pub mod containers;
 pub mod execution;
+pub mod gravity;
 pub mod mass;
 pub mod material;
 pub mod rigid_body;
 pub mod shape;
 pub mod transform;
 pub mod world;
+
+pub use gravity::{CentralGravity, GravityError};
