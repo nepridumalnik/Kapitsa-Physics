@@ -11,6 +11,8 @@ pub(crate) struct ConstraintRow {
     pub(crate) angular_b: Vec3,
     pub(crate) error: f64,
     pub(crate) target_velocity: f64,
+    /// Constant force along the constraint axis, in newtons or newton-meters.
+    pub(crate) force_bias: f64,
     pub(crate) position_enabled: bool,
     pub(crate) compliance: f64,
     /// Viscous damping in N·s/m or N·m·s/rad.
@@ -34,6 +36,7 @@ impl ConstraintRow {
             && self.angular_b.is_finite()
             && self.error.is_finite()
             && self.target_velocity.is_finite()
+            && self.force_bias.is_finite()
             && self.compliance.is_finite()
             && self.compliance >= 0.0
             && self.damping.is_finite()

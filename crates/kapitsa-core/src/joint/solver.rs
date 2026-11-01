@@ -26,6 +26,7 @@ struct RowSettings {
     position_enabled: bool,
     velocity_bias: bool,
     velocity_target: f64,
+    force_bias: f64,
     multiplier_bounds: Option<(f64, f64)>,
     impulse_bounds: Option<(f64, f64)>,
 }
@@ -644,16 +645,13 @@ fn append_spring_rows(
     let settings = row_settings(body_a, body_b, joint.common, dt);
     if joint.stiffness > 0.0 || joint.spring_damping > 0.0 {
         let mut spring_settings = settings;
-        spring_settings.common.compliance = if joint.stiffness > 0.0 {
-            joint.stiffness.recip()
-        } else {
-            0.0
-        };
-        if !spring_settings.common.compliance.is_finite() {
+        spring_settings.common.compliance = 0.0;
+        spring_settings.force_bias = joint.stiffness * (distance - joint.rest_length);
+        if !spring_settings.force_bias.is_finite() {
             return Err(CollisionError::ArithmeticOverflow);
         }
         spring_settings.common.damping = joint.spring_damping;
-        spring_settings.position_enabled = joint.stiffness > 0.0;
+        spring_settings.position_enabled = false;
         spring_settings.velocity_bias = false;
         push_linear_row(
             bodies,
@@ -1132,6 +1130,7 @@ fn row_settings(body_a: usize, body_b: usize, common: super::JointCommon, dt: f6
         position_enabled: true,
         velocity_bias: true,
         velocity_target: 0.0,
+        force_bias: 0.0,
         multiplier_bounds: None,
         impulse_bounds: None,
     }
@@ -1284,6 +1283,7 @@ fn push_linear_row(
         } else {
             settings.velocity_target
         },
+        force_bias: settings.force_bias,
         position_enabled: settings.position_enabled,
         compliance: settings.common.compliance,
         damping: settings.common.damping,
@@ -1320,6 +1320,7 @@ fn push_angular_row(
         } else {
             settings.velocity_target
         },
+        force_bias: settings.force_bias,
         position_enabled: settings.position_enabled,
         compliance: settings.common.compliance,
         damping: settings.common.damping,
@@ -1408,7 +1409,19 @@ fn solve_velocity_iteration(
         if !alpha.is_finite() {
             return Err(CollisionError::ArithmeticOverflow);
         }
-        let delta = if row.compliance == 0.0 && row.damping == 0.0 {
+        let delta = if row.force_bias != 0.0 {
+            // Integrate Hooke force and implicit viscous damping in this GS row.
+            let damping = row.damping * dt;
+            let spring_impulse = row.force_bias * dt;
+            if damping > 0.0 {
+                (-spring_impulse
+                    - damping * (velocity - row.target_velocity)
+                    - row.accumulated_impulse)
+                    / (1.0 + damping * effective_mass)
+            } else {
+                -spring_impulse - row.accumulated_impulse
+            }
+        } else if row.compliance == 0.0 && row.damping == 0.0 {
             speed_error / effective_mass
         } else if row.damping > 0.0 {
             let scaled_damping = row.damping * dt;
@@ -1628,6 +1641,7 @@ mod tests {
             angular_b: Vec3::ZERO,
             error,
             target_velocity: 0.0,
+            force_bias: 0.0,
             position_enabled: true,
             compliance: 0.0,
             damping: 0.0,
@@ -1668,6 +1682,7 @@ mod tests {
                 - bodies[0].state().transform().translation().x;
             workspace.push(ConstraintRow {
                 error: distance - 1.0,
+                force_bias: 0.0,
                 ..row
             });
             Ok(())
@@ -2013,6 +2028,36 @@ mod tests {
     }
 
     #[test]
+    fn hinge_position_drive_respects_angular_limit() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let mut hinge = super::super::HingeJoint::new(common);
+        hinge.angle_limit = Some(super::super::JointLimit::new(-0.2, 0.2));
+        hinge.drive = super::super::JointDrive {
+            enabled: true,
+            target_position: 1.0,
+            target_velocity: 0.0,
+            stiffness: 100_000.0,
+            damping: 0.0,
+            max_force: 1.0e8,
+        };
+        let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+
+        solve_joint(super::super::Joint::Hinge(hinge), &mut bodies);
+
+        let angle = relative_rotation_error(
+            bodies[0].state().transform().rotation(),
+            bodies[1].state().transform().rotation(),
+        )
+        .expect("hinge angle")
+        .z;
+        assert!(angle <= 0.2 + 1.0e-10, "hinge angle={angle}");
+        assert!(angle > 0.1, "drive did not approach its limit: {angle}");
+    }
+
+    #[test]
     fn slider_limit_brakes_outward_velocity_before_crossing() {
         let common = super::super::JointCommon::new(
             super::super::JointFrame::IDENTITY,
@@ -2108,12 +2153,12 @@ mod tests {
     }
 
     #[test]
-    fn spring_joint_applies_compliance_and_damping() {
+    fn spring_joint_applies_hooke_impulse_and_damping() {
         let common = super::super::JointCommon::new(
             super::super::JointFrame::IDENTITY,
             super::super::JointFrame::IDENTITY,
         );
-        let spring = super::super::SpringJoint::new(common, 1.0, 1.0e6, 0.0);
+        let spring = super::super::SpringJoint::new(common, 1.0, 100.0, 0.0);
         let mut bodies = [
             solver_body(Vec3::ZERO),
             solver_body(Vec3::new(2.0, 0.0, 0.0)),
@@ -2122,9 +2167,12 @@ mod tests {
         let distance = (bodies[1].state().transform().translation()
             - bodies[0].state().transform().translation())
         .length();
+        let relative_speed =
+            bodies[1].state().linear_velocity().x - bodies[0].state().linear_velocity().x;
+        assert_eq!(distance, 2.0);
         assert!(
-            (distance - (1.0 + 1.0 / 201.0)).abs() < 1.0e-10,
-            "spring distance={distance}"
+            (relative_speed + 2.0).abs() < 1.0e-10,
+            "speed={relative_speed}"
         );
 
         let damper = super::super::SpringJoint::new(common, 1.0, 0.0, 100.0);

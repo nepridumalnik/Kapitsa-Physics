@@ -1,6 +1,6 @@
 use super::{JointCommon, JointLimit};
 
-/// Applies a compliant distance constraint with optional hard distance bounds.
+/// Applies a Hooke spring and optional viscous damping with hard distance bounds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpringJoint {
     pub common: JointCommon,

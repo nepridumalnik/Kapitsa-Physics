@@ -175,6 +175,18 @@ residual penetration; exact zero penetration is not guaranteed. Bodies sleep
 only when explicitly put to sleep; the engine does not automatically put idle
 bodies to sleep. Relevant state changes and contacts wake sleeping bodies.
 
+## Joint constraints
+
+Joints share contact solver islands and the same iterative velocity and
+position passes. Fixed, hinge, slider, and other rigid joint rows use positional
+correction; `SpringJoint` applies its Hooke stiffness and viscous damping as
+forces in the velocity solver, so an undamped spring can oscillate and damping
+removes energy. Spring `stiffness` is in N/m and `spring_damping` in N·s/m.
+Break thresholds are measured from accumulated solver impulses divided by the
+step duration. `PhysicsWorld::joint_events()` exposes break events from the
+latest successful step; a failed step publishes neither body updates nor joint
+events.
+
 Set `RigidBody::set_ccd_mode(CcdMode::Continuous)` on bodies that need
 continuous collision detection. Swept broadphase bounds feed time-of-impact
 queries for the supported convex-convex and convex-surface pairings. The

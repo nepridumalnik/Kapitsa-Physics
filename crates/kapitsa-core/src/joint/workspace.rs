@@ -171,33 +171,48 @@ mod tests {
     use kapitsa_math::Vec3;
 
     #[test]
-    fn clear_reuses_row_capacity() {
+    fn clear_reuses_row_and_owner_capacity_for_many_joints() {
         let mut workspace = JointWorkspace::new();
-        workspace.push(ConstraintRow {
-            body_a: 0,
-            body_b: 1,
-            linear_a: -Vec3::X,
-            angular_a: Vec3::ZERO,
-            linear_b: Vec3::X,
-            angular_b: Vec3::ZERO,
-            error: 0.0,
-            target_velocity: 0.0,
-            position_enabled: true,
-            compliance: 0.0,
-            damping: 0.0,
-            min_multiplier: f64::NEG_INFINITY,
-            max_multiplier: f64::INFINITY,
-            min_impulse: f64::NEG_INFINITY,
-            max_impulse: f64::INFINITY,
-            accumulated_multiplier: 0.0,
-            accumulated_impulse: 0.0,
-        });
-        let capacity = workspace.rows.capacity();
-        assert!(capacity > 0);
+        let add_rows = |workspace: &mut JointWorkspace| {
+            for joint_index in 0..32 {
+                workspace.set_joint_index(joint_index);
+                workspace.push(ConstraintRow {
+                    body_a: 0,
+                    body_b: 1,
+                    linear_a: -Vec3::X,
+                    angular_a: Vec3::ZERO,
+                    linear_b: Vec3::X,
+                    angular_b: Vec3::ZERO,
+                    error: 0.0,
+                    target_velocity: 0.0,
+                    force_bias: 0.0,
+                    position_enabled: true,
+                    compliance: 0.0,
+                    damping: 0.0,
+                    min_multiplier: f64::NEG_INFINITY,
+                    max_multiplier: f64::INFINITY,
+                    min_impulse: f64::NEG_INFINITY,
+                    max_impulse: f64::INFINITY,
+                    accumulated_multiplier: 0.0,
+                    accumulated_impulse: 0.0,
+                });
+            }
+        };
+        add_rows(&mut workspace);
+        let row_capacity = workspace.rows.capacity();
+        let owner_capacity = workspace.row_joint_indices.capacity();
+        assert!(row_capacity >= 32);
+        assert!(owner_capacity >= 32);
 
         workspace.clear();
 
         assert!(workspace.rows.is_empty());
-        assert_eq!(workspace.rows.capacity(), capacity);
+        assert!(workspace.row_joint_indices.is_empty());
+        assert_eq!(workspace.rows.capacity(), row_capacity);
+        assert_eq!(workspace.row_joint_indices.capacity(), owner_capacity);
+
+        add_rows(&mut workspace);
+        assert_eq!(workspace.rows.capacity(), row_capacity);
+        assert_eq!(workspace.row_joint_indices.capacity(), owner_capacity);
     }
 }

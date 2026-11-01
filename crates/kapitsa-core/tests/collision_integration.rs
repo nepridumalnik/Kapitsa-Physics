@@ -2,7 +2,7 @@ use kapitsa_core::{
     collider::{Collider, CollisionMode},
     collision::{CollisionEventKind, CollisionPair},
     execution::{ExecutionError, SequentialExecutor, StepExecutor},
-    joint::{FixedJoint, Joint, JointCommon, JointFrame},
+    joint::{FixedJoint, Joint, JointCommon, JointFrame, SpringJoint},
     mass::MassProperties,
     material::PhysicsMaterial,
     rigid_body::{CcdMode, RigidBody},
@@ -436,6 +436,172 @@ fn joint_only_world_solves_connected_bodies_without_contacts() {
         .transform()
         .translation();
     assert!((position_b - position_a).length() < 1.0e-10);
+}
+
+#[test]
+fn unconstrained_body_preserves_kinetic_energy_without_external_effects() {
+    let mut world = PhysicsWorld::new();
+    let mut body = dynamic(Vec3::ZERO, Vec3::new(3.0, -2.0, 1.0));
+    body.set_angular_velocity(Vec3::new(0.5, -1.0, 2.0))
+        .expect("angular velocity");
+    let body_id = world.add_body(body).expect("free body");
+
+    let initial = *world.body(body_id).expect("body").state();
+    let initial_energy = 0.5
+        * (initial.linear_velocity().length_squared()
+            + initial.angular_velocity().length_squared());
+    for _ in 0..120 {
+        world.step(1.0 / 120.0).expect("free-body step");
+    }
+
+    let final_state = world.body(body_id).expect("body").state();
+    let final_energy = 0.5
+        * (final_state.linear_velocity().length_squared()
+            + final_state.angular_velocity().length_squared());
+    assert!((final_energy - initial_energy).abs() < 1.0e-12);
+    assert_eq!(final_state.linear_velocity(), initial.linear_velocity());
+    assert_eq!(final_state.angular_velocity(), initial.angular_velocity());
+}
+
+#[test]
+fn fixed_joint_transmits_momentum_and_preserves_relative_transform() {
+    let mut world = PhysicsWorld::new();
+    let mut moving_body = dynamic(Vec3::ZERO, Vec3::X);
+    moving_body
+        .set_angular_velocity(Vec3::Z)
+        .expect("angular velocity");
+    let body_a = world.add_body(moving_body).expect("moving body");
+    let body_b = world
+        .add_body(dynamic(Vec3::ZERO, Vec3::ZERO))
+        .expect("stationary body");
+    let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    world
+        .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+        .expect("fixed joint");
+
+    for _ in 0..120 {
+        world.step(1.0 / 120.0).expect("fixed-joint step");
+    }
+
+    let state_a = world.body(body_a).expect("body A").state();
+    let state_b = world.body(body_b).expect("body B").state();
+    let relative_position = state_b.transform().translation() - state_a.transform().translation();
+    assert!(relative_position.length() < 1.0e-9);
+    assert!((state_b.linear_velocity() - state_a.linear_velocity()).length() < 1.0e-9);
+    assert!((state_a.linear_velocity().x + state_b.linear_velocity().x - 1.0).abs() < 1.0e-9);
+    assert!((state_b.angular_velocity() - state_a.angular_velocity()).length() < 1.0e-9);
+    assert!((state_a.angular_velocity().z + state_b.angular_velocity().z - 1.0).abs() < 1.0e-9);
+}
+
+#[test]
+fn long_fixed_joint_chain_stays_finite_and_reproduces_identical_runs() {
+    fn make_chain() -> (PhysicsWorld, Vec<kapitsa_core::world::BodyId>) {
+        let mut world = PhysicsWorld::new();
+        let bodies = (0..24)
+            .map(|index| {
+                let velocity = if index == 23 {
+                    Vec3::Y * 0.1
+                } else {
+                    Vec3::ZERO
+                };
+                world
+                    .add_body(dynamic(Vec3::X * index as f64, velocity))
+                    .expect("chain body")
+            })
+            .collect::<Vec<_>>();
+        let common = JointCommon::new(
+            JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+            JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+        );
+        for pair in bodies.windows(2) {
+            world
+                .add_joint(pair[0], pair[1], Joint::Fixed(FixedJoint::new(common)))
+                .expect("chain joint");
+        }
+        (world, bodies)
+    }
+
+    let (mut first, first_bodies) = make_chain();
+    let (mut second, second_bodies) = make_chain();
+    for _ in 0..60 {
+        first.step(0.01).expect("first chain step");
+        second.step(0.01).expect("second chain step");
+        for (first_id, second_id) in first_bodies.iter().zip(&second_bodies) {
+            assert_eq!(
+                first.body(*first_id).expect("first body").state(),
+                second.body(*second_id).expect("second body").state()
+            );
+        }
+    }
+
+    let positions = first_bodies
+        .iter()
+        .map(|id| {
+            let state = first.body(*id).expect("chain body").state();
+            assert!(state.transform().translation().is_finite());
+            assert!(state.linear_velocity().is_finite());
+            assert!(state.angular_velocity().is_finite());
+            state.transform().translation()
+        })
+        .collect::<Vec<_>>();
+    for pair in positions.windows(2) {
+        let distance = (pair[1] - pair[0]).length();
+        assert!((distance - 1.0).abs() < 0.1, "link distance={distance}");
+    }
+}
+
+#[test]
+fn spring_oscillates_and_damping_reduces_motion() {
+    fn simulate(damping: f64) -> (f64, f64, f64, f64, f64) {
+        let mut world = PhysicsWorld::new();
+        let anchor = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("spring anchor");
+        let moving = world
+            .add_body(dynamic(Vec3::X * 2.0, Vec3::ZERO))
+            .expect("spring body");
+        let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        world
+            .add_joint(
+                anchor,
+                moving,
+                Joint::Spring(SpringJoint::new(common, 1.0, 400.0, damping)),
+            )
+            .expect("spring joint");
+
+        let mut minimum_distance = f64::INFINITY;
+        let mut maximum_distance = 0.0_f64;
+        let mut peak_speed = 0.0_f64;
+        for _ in 0..1200 {
+            world.step(0.005).expect("spring step");
+            let state = world.body(moving).expect("spring body").state();
+            let distance = state.transform().translation().length();
+            minimum_distance = minimum_distance.min(distance);
+            maximum_distance = maximum_distance.max(distance);
+            peak_speed = peak_speed.max(state.linear_velocity().length());
+        }
+        let final_state = world.body(moving).expect("spring body").state();
+        (
+            minimum_distance,
+            maximum_distance,
+            final_state.transform().translation().length(),
+            final_state.linear_velocity().length(),
+            peak_speed,
+        )
+    }
+
+    let undamped = simulate(0.0);
+    assert!(undamped.0 < 0.9, "minimum distance={}", undamped.0);
+    assert!(undamped.1 > 1.1, "maximum distance={}", undamped.1);
+
+    let damped = simulate(40.0);
+    assert!(damped.2 < 1.1, "final distance={}", damped.2);
+    assert!(
+        damped.3 < undamped.4 * 0.1,
+        "damped final speed={} undamped peak={}",
+        damped.3,
+        undamped.4
+    );
 }
 
 #[test]
