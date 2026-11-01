@@ -3,6 +3,8 @@ use kapitsa_math::Vec3;
 /// Scalar constraint row with generalized Jacobians for both connected bodies.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ConstraintRow {
+    /// Stable within its owning joint, independent of which other rows are active.
+    pub(crate) key: u8,
     pub(crate) body_a: usize,
     pub(crate) body_b: usize,
     pub(crate) linear_a: Vec3,

@@ -97,7 +97,7 @@ impl JointSolver {
         joint_index: usize,
         dt: f64,
     ) -> Result<(), CollisionError> {
-        workspace.begin_joint_prepare(joint_index);
+        workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
         solve_position_rows(workspace.prepared_rows_mut(), bodies, dt)?;
         workspace.finish_joint_prepare()
@@ -110,7 +110,7 @@ impl JointSolver {
         joint_index: usize,
         dt: f64,
     ) -> Result<(), CollisionError> {
-        workspace.begin_joint_prepare(joint_index);
+        workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
         solve_velocity_rows(workspace.prepared_rows_mut(), bodies, dt)?;
         workspace.finish_joint_prepare()
@@ -138,7 +138,7 @@ pub(crate) fn prepare_joint_rows(
     dt: f64,
 ) -> Result<(), CollisionError> {
     for (joint_index, constraint) in joints.iter().enumerate() {
-        workspace.set_joint_index(joint_index);
+        workspace.set_joint_index(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, *constraint, dt)?;
     }
     Ok(())
@@ -255,7 +255,7 @@ fn append_fixed_rows(
     let position_error = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    for local_axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+    for (axis_index, local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
         let axis = rotation_a
             .rotate_vector(local_axis)
             .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -269,18 +269,26 @@ fn append_fixed_rows(
             [anchor_a, anchor_b],
             axis,
             error,
+            axis_index as u8,
             bilateral_bounds(),
         )?;
     }
     let rotation_error = relative_rotation_error(rotation_a, rotation_b)?;
-    for local_axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+    for (axis_index, local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
         let axis = rotation_a
             .rotate_vector(local_axis)
             .ok_or(CollisionError::ArithmeticOverflow)?;
         let error = rotation_error
             .checked_dot(local_axis)
             .ok_or(CollisionError::ArithmeticOverflow)?;
-        push_angular_row(workspace, settings, axis, error, bilateral_bounds())?;
+        push_angular_row(
+            workspace,
+            settings,
+            axis,
+            error,
+            axis_index as u8 + 3,
+            bilateral_bounds(),
+        )?;
     }
     Ok(())
 }
@@ -299,7 +307,7 @@ fn append_ball_rows(
     let position_error = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+    for (axis_index, axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
         let error = position_error
             .checked_dot(axis)
             .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -310,6 +318,7 @@ fn append_ball_rows(
             [anchor_a, anchor_b],
             axis,
             error,
+            axis_index as u8,
             bilateral_bounds(),
         )?;
     }
@@ -350,6 +359,7 @@ fn append_ball_angular_limits(
                 settings,
                 axis,
                 angle - limit,
+                3,
                 (f64::NEG_INFINITY, 0.0),
             )?;
         }
@@ -366,7 +376,7 @@ fn append_ball_angular_limits(
         let axis = rotation_a
             .rotate_vector(Vec3::Z)
             .ok_or(CollisionError::ArithmeticOverflow)?;
-        push_angular_row(workspace, settings, axis, error, bounds)?;
+        push_angular_row(workspace, settings, axis, error, 4, bounds)?;
     }
     Ok(())
 }
@@ -413,6 +423,7 @@ fn append_distance_rows(
         [anchor_a, anchor_b],
         axis,
         error,
+        0,
         (lower, upper),
     )
 }
@@ -428,8 +439,10 @@ fn append_hinge_rows(
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
-    append_anchor_lock(bodies, workspace, settings, anchor_a, anchor_b, rotation_a)?;
-    append_axis_alignment(workspace, settings, rotation_a, rotation_b)?;
+    append_anchor_lock(
+        bodies, workspace, settings, anchor_a, anchor_b, rotation_a, 0,
+    )?;
+    append_axis_alignment(workspace, settings, rotation_a, rotation_b, 3)?;
 
     let angle = twist_angle(canonical_relative_rotation(rotation_a, rotation_b)?)?;
     if let Some(settings) = drive_settings(settings, joint.drive)? {
@@ -440,11 +453,12 @@ fn append_hinge_rows(
                 .rotate_vector(Vec3::Z)
                 .ok_or(CollisionError::ArithmeticOverflow)?,
             angle - joint.drive.target_position,
+            5,
             bilateral_bounds(),
         )?;
     }
     if let Some(limit) = joint.angle_limit {
-        append_angular_limit(bodies, workspace, settings, rotation_a, angle, limit)?;
+        append_angular_limit(bodies, workspace, settings, rotation_a, angle, limit, 6)?;
     }
     Ok(())
 }
@@ -471,8 +485,9 @@ fn append_slider_rows(
                 .rotate_vector(Vec3::Z)
                 .ok_or(CollisionError::ArithmeticOverflow)?,
         )?,
+        0,
     )?;
-    append_rotation_lock(workspace, settings, rotation_a, rotation_b)?;
+    append_rotation_lock(workspace, settings, rotation_a, rotation_b, 2)?;
 
     let axis = rotation_a
         .rotate_vector(Vec3::Z)
@@ -489,6 +504,7 @@ fn append_slider_rows(
             [anchor_a, anchor_b],
             axis,
             coordinate - joint.drive.target_position,
+            5,
             bilateral_bounds(),
         )?;
     }
@@ -501,6 +517,7 @@ fn append_slider_rows(
             axis,
             coordinate,
             limit,
+            6,
         )?;
     }
     Ok(())
@@ -527,8 +544,9 @@ fn append_cylindrical_rows(
         anchor_a,
         anchor_b,
         &perpendicular_basis(axis)?,
+        0,
     )?;
-    append_axis_alignment(workspace, settings, rotation_a, rotation_b)?;
+    append_axis_alignment(workspace, settings, rotation_a, rotation_b, 2)?;
 
     let coordinate = anchor_b
         .checked_sub(anchor_a)
@@ -542,6 +560,7 @@ fn append_cylindrical_rows(
             [anchor_a, anchor_b],
             axis,
             coordinate - joint.translation_drive.target_position,
+            4,
             bilateral_bounds(),
         )?;
     }
@@ -554,6 +573,7 @@ fn append_cylindrical_rows(
             axis,
             coordinate,
             limit,
+            5,
         )?;
     }
 
@@ -564,11 +584,12 @@ fn append_cylindrical_rows(
             drive,
             axis,
             angle - joint.angular_drive.target_position,
+            6,
             bilateral_bounds(),
         )?;
     }
     if let Some(limit) = joint.angle_limit {
-        append_angular_limit(bodies, workspace, settings, rotation_a, angle, limit)?;
+        append_angular_limit(bodies, workspace, settings, rotation_a, angle, limit, 7)?;
     }
     Ok(())
 }
@@ -602,9 +623,10 @@ fn append_planar_rows(
         delta
             .checked_dot(axes[2])
             .ok_or(CollisionError::ArithmeticOverflow)?,
+        0,
         bilateral_bounds(),
     )?;
-    append_axis_alignment(workspace, settings, rotation_a, rotation_b)?;
+    append_axis_alignment(workspace, settings, rotation_a, rotation_b, 1)?;
 
     for (axis_index, axis) in axes.iter().copied().take(2).enumerate() {
         let coordinate = delta
@@ -618,6 +640,7 @@ fn append_planar_rows(
                 [anchor_a, anchor_b],
                 axis,
                 coordinate - joint.translation_drives[axis_index].target_position,
+                3 + axis_index as u8,
                 bilateral_bounds(),
             )?;
         }
@@ -630,6 +653,7 @@ fn append_planar_rows(
                 axis,
                 coordinate,
                 limit,
+                5 + axis_index as u8,
             )?;
         }
     }
@@ -642,6 +666,7 @@ fn append_planar_rows(
             drive,
             axes[2],
             rotation_error.z - joint.rotation_drive.target_position,
+            7,
             bilateral_bounds(),
         )?;
     }
@@ -653,6 +678,7 @@ fn append_planar_rows(
             axes[2],
             twist_angle(relative)?,
             limit,
+            8,
         )?;
     }
     Ok(())
@@ -698,6 +724,7 @@ fn append_spring_rows(
             [anchor_a, anchor_b],
             axis,
             distance - joint.rest_length,
+            0,
             bilateral_bounds(),
         )?;
     }
@@ -710,6 +737,7 @@ fn append_spring_rows(
             axis,
             distance,
             limit,
+            1,
         )?;
     }
     Ok(())
@@ -726,7 +754,9 @@ fn append_cone_twist_rows(
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
-    append_anchor_lock(bodies, workspace, settings, anchor_a, anchor_b, rotation_a)?;
+    append_anchor_lock(
+        bodies, workspace, settings, anchor_a, anchor_b, rotation_a, 0,
+    )?;
     let relative = canonical_relative_rotation(rotation_a, rotation_b)?;
     let twist_length = relative.z.hypot(relative.w);
     let twist = if twist_length > f64::MIN_POSITIVE {
@@ -796,14 +826,16 @@ fn append_cone_twist_rows(
                 axis,
                 swing_radius,
                 super::JointLimit::new(0.0, boundary),
+                6,
             )?;
         }
     } else {
-        for ((limit, local_axis), axis) in joint
+        for (axis_index, ((limit, local_axis), axis)) in joint
             .swing_limit
             .into_iter()
             .zip([Vec3::X, Vec3::Y])
             .zip(axes.into_iter().take(2))
+            .enumerate()
         {
             append_angular_axis_limit(
                 bodies,
@@ -814,6 +846,7 @@ fn append_cone_twist_rows(
                     .checked_dot(local_axis)
                     .ok_or(CollisionError::ArithmeticOverflow)?,
                 super::JointLimit::new(-limit, limit),
+                3 + axis_index as u8,
             )?;
         }
     }
@@ -824,6 +857,7 @@ fn append_cone_twist_rows(
         axes[2],
         twist_angle(relative)?,
         joint.twist_limit,
+        5,
     )
 }
 
@@ -858,6 +892,7 @@ fn append_d6_rows(
                 [anchor_a, anchor_b],
                 axis,
                 coordinate,
+                axis_index as u8,
                 bilateral_bounds(),
             )?,
             super::JointMotion::Limited(limit) => append_linear_limit(
@@ -868,6 +903,7 @@ fn append_d6_rows(
                 axis,
                 coordinate,
                 limit,
+                3 + axis_index as u8,
             )?,
             super::JointMotion::Free => {}
         }
@@ -882,6 +918,7 @@ fn append_d6_rows(
                 [anchor_a, anchor_b],
                 axis,
                 coordinate - joint.linear_drives[axis_index].target_position,
+                6 + axis_index as u8,
                 bilateral_bounds(),
             )?;
         }
@@ -896,6 +933,7 @@ fn append_d6_rows(
                 settings,
                 angular_axis,
                 angular_coordinate,
+                9 + axis_index as u8,
                 bilateral_bounds(),
             )?,
             super::JointMotion::Limited(limit) => append_angular_axis_limit(
@@ -905,6 +943,7 @@ fn append_d6_rows(
                 angular_axis,
                 angular_coordinate,
                 limit,
+                12 + axis_index as u8,
             )?,
             super::JointMotion::Free => {}
         }
@@ -917,6 +956,7 @@ fn append_d6_rows(
                 drive,
                 angular_axis,
                 angular_coordinate - joint.angular_drives[axis_index].target_position,
+                15 + axis_index as u8,
                 bilateral_bounds(),
             )?;
         }
@@ -931,6 +971,7 @@ fn append_anchor_lock(
     anchor_a: Vec3,
     anchor_b: Vec3,
     frame_rotation: Quat,
+    first_key: u8,
 ) -> Result<(), CollisionError> {
     let axes = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| frame_rotation.rotate_vector(axis));
     let axes = [
@@ -938,7 +979,9 @@ fn append_anchor_lock(
         axes[1].ok_or(CollisionError::ArithmeticOverflow)?,
         axes[2].ok_or(CollisionError::ArithmeticOverflow)?,
     ];
-    append_linear_axes(bodies, workspace, settings, anchor_a, anchor_b, &axes)
+    append_linear_axes(
+        bodies, workspace, settings, anchor_a, anchor_b, &axes, first_key,
+    )
 }
 
 fn append_linear_axes(
@@ -948,11 +991,12 @@ fn append_linear_axes(
     anchor_a: Vec3,
     anchor_b: Vec3,
     axes: &[Vec3],
+    first_key: u8,
 ) -> Result<(), CollisionError> {
     let delta = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    for axis in axes.iter().copied() {
+    for (axis_index, axis) in axes.iter().copied().enumerate() {
         let error = delta
             .checked_dot(axis)
             .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -963,6 +1007,7 @@ fn append_linear_axes(
             [anchor_a, anchor_b],
             axis,
             error,
+            first_key + axis_index as u8,
             bilateral_bounds(),
         )?;
     }
@@ -974,9 +1019,10 @@ fn append_rotation_lock(
     settings: RowSettings,
     rotation_a: Quat,
     rotation_b: Quat,
+    first_key: u8,
 ) -> Result<(), CollisionError> {
     let error = relative_rotation_error(rotation_a, rotation_b)?;
-    for local_axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+    for (axis_index, local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
         let axis = rotation_a
             .rotate_vector(local_axis)
             .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -987,6 +1033,7 @@ fn append_rotation_lock(
             error
                 .checked_dot(local_axis)
                 .ok_or(CollisionError::ArithmeticOverflow)?,
+            first_key + axis_index as u8,
             bilateral_bounds(),
         )?;
     }
@@ -998,6 +1045,7 @@ fn append_axis_alignment(
     settings: RowSettings,
     rotation_a: Quat,
     rotation_b: Quat,
+    first_key: u8,
 ) -> Result<(), CollisionError> {
     let axis_a = rotation_a
         .rotate_vector(Vec3::Z)
@@ -1024,12 +1072,19 @@ fn append_axis_alignment(
         Vec3::ZERO
     };
     let (tangent_a, tangent_b) = crate::collision::solver::tangent_basis(axis_a)?;
-    for axis in [tangent_a, tangent_b] {
+    for (axis_index, axis) in [tangent_a, tangent_b].into_iter().enumerate() {
         let component = error
             .checked_dot(axis)
             .ok_or(CollisionError::ArithmeticOverflow)?;
         if component != 0.0 {
-            push_angular_row(workspace, settings, axis, component, bilateral_bounds())?;
+            push_angular_row(
+                workspace,
+                settings,
+                axis,
+                component,
+                first_key + axis_index as u8,
+                bilateral_bounds(),
+            )?;
         }
     }
     Ok(())
@@ -1043,6 +1098,7 @@ fn append_linear_limit(
     axis: Vec3,
     coordinate: f64,
     limit: super::JointLimit,
+    key: u8,
 ) -> Result<(), CollisionError> {
     let mut row_settings = settings;
     let active = if let Some(violation) = limit_error(coordinate, limit) {
@@ -1083,6 +1139,7 @@ fn append_linear_limit(
             anchors,
             axis,
             error,
+            key,
             bounds,
         )?;
     }
@@ -1096,11 +1153,12 @@ fn append_angular_limit(
     rotation_a: Quat,
     angle: f64,
     limit: super::JointLimit,
+    key: u8,
 ) -> Result<(), CollisionError> {
     let axis = rotation_a
         .rotate_vector(Vec3::Z)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    append_angular_axis_limit(bodies, workspace, settings, axis, angle, limit)
+    append_angular_axis_limit(bodies, workspace, settings, axis, angle, limit, key)
 }
 
 fn append_angular_axis_limit(
@@ -1110,6 +1168,7 @@ fn append_angular_axis_limit(
     axis: Vec3,
     angle: f64,
     limit: super::JointLimit,
+    key: u8,
 ) -> Result<(), CollisionError> {
     let mut row_settings = settings;
     let active = if let Some(violation) = limit_error(angle, limit) {
@@ -1144,7 +1203,7 @@ fn append_angular_axis_limit(
         }
     };
     if let Some((error, bounds)) = active {
-        push_angular_row(workspace, row_settings, axis, error, bounds)?;
+        push_angular_row(workspace, row_settings, axis, error, key, bounds)?;
     }
     Ok(())
 }
@@ -1280,6 +1339,7 @@ fn push_linear_row(
     anchors: [Vec3; 2],
     axis: Vec3,
     error: f64,
+    key: u8,
     bounds: (f64, f64),
 ) -> Result<(), CollisionError> {
     if !axis.is_finite() || !error.is_finite() || !settings.dt.is_finite() || settings.dt <= 0.0 {
@@ -1309,6 +1369,7 @@ fn push_linear_row(
         .checked_cross(axis)
         .ok_or(CollisionError::ArithmeticOverflow)?;
     workspace.push(ConstraintRow {
+        key,
         body_a: settings.body_a,
         body_b: settings.body_b,
         linear_a: -axis,
@@ -1340,12 +1401,14 @@ fn push_angular_row(
     settings: RowSettings,
     axis: Vec3,
     error: f64,
+    key: u8,
     bounds: (f64, f64),
 ) -> Result<(), CollisionError> {
     if !axis.is_finite() || !error.is_finite() || !settings.dt.is_finite() || settings.dt <= 0.0 {
         return Err(CollisionError::ArithmeticOverflow);
     }
     workspace.push(ConstraintRow {
+        key,
         body_a: settings.body_a,
         body_b: settings.body_b,
         linear_a: Vec3::ZERO,
@@ -1608,7 +1671,12 @@ fn map_constraint_error(error: constraint::ConstraintError) -> CollisionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{mass::MassProperties, rigid_body::RigidBody, transform::Transform};
+    use crate::{
+        joint::{D6Joint, Joint, JointCommon, JointDrive, JointFrame, JointLimit, JointMotion},
+        mass::MassProperties,
+        rigid_body::RigidBody,
+        transform::Transform,
+    };
     use kapitsa_math::{Quat, Vec3};
 
     fn solver_body(position: Vec3) -> SolverBody {
@@ -1681,6 +1749,7 @@ mod tests {
 
     fn anchor_row(error: f64) -> ConstraintRow {
         ConstraintRow {
+            key: 0,
             body_a: 0,
             body_b: 1,
             linear_a: -Vec3::X,
@@ -1717,6 +1786,104 @@ mod tests {
             - bodies[0].state().transform().translation().x;
         assert!((distance - 1.0).abs() < 1.0e-12, "distance={distance}");
         assert_eq!(workspace.rows().len(), 1);
+    }
+
+    #[test]
+    fn d6_limit_drive_enable_and_dt_changes_keep_multiplier_identity() {
+        let bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::X * 2.0)];
+        let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        let mut joint = D6Joint::new(common);
+        let mut constraint = JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: Joint::D6(joint),
+        };
+        let mut workspace = JointWorkspace::new();
+
+        JointSolver::prepare(&mut workspace, &bodies, &[constraint], 0.01).unwrap();
+        workspace
+            .rows_mut()
+            .iter_mut()
+            .find(|row| row.key == 0)
+            .unwrap()
+            .accumulated_multiplier = 3.0;
+        workspace
+            .rows_mut()
+            .iter_mut()
+            .find(|row| row.key == 0)
+            .unwrap()
+            .accumulated_impulse = 4.0;
+
+        joint.linear_motion[0] = JointMotion::Limited(JointLimit::new(-0.5, 0.5));
+        constraint.joint = Joint::D6(joint);
+        JointSolver::prepare(&mut workspace, &bodies, &[constraint], 0.01).unwrap();
+        let limit_row = workspace.rows().iter().find(|row| row.key == 3).unwrap();
+        assert!(limit_row.position_enabled);
+        assert_eq!(limit_row.accumulated_multiplier, 0.0);
+        assert_eq!(limit_row.accumulated_impulse, 0.0);
+        workspace
+            .rows_mut()
+            .iter_mut()
+            .find(|row| row.key == 3)
+            .unwrap()
+            .accumulated_multiplier = 5.0;
+        workspace
+            .rows_mut()
+            .iter_mut()
+            .find(|row| row.key == 3)
+            .unwrap()
+            .accumulated_impulse = 7.0;
+
+        joint.linear_motion[0] = JointMotion::Free;
+        joint.linear_drives[0] = JointDrive {
+            enabled: true,
+            target_position: 0.0,
+            target_velocity: 0.0,
+            stiffness: 1.0,
+            damping: 0.0,
+            max_force: 100.0,
+        };
+        constraint.joint = Joint::D6(joint);
+        JointSolver::prepare(&mut workspace, &bodies, &[constraint], 0.01).unwrap();
+        let drive_row = workspace.rows().iter().find(|row| row.key == 6).unwrap();
+        assert_eq!(drive_row.accumulated_multiplier, 0.0);
+        assert_eq!(drive_row.accumulated_impulse, 0.0);
+
+        workspace
+            .rows_mut()
+            .iter_mut()
+            .find(|row| row.key == 6)
+            .unwrap()
+            .accumulated_multiplier = 11.0;
+        workspace
+            .rows_mut()
+            .iter_mut()
+            .find(|row| row.key == 6)
+            .unwrap()
+            .accumulated_impulse = 13.0;
+        JointSolver::prepare(&mut workspace, &bodies, &[constraint], 0.01).unwrap();
+        let drive_row = workspace.rows().iter().find(|row| row.key == 6).unwrap();
+        assert_eq!(drive_row.accumulated_multiplier, 11.0);
+        assert_eq!(drive_row.accumulated_impulse, 13.0);
+
+        JointSolver::begin_step(&mut workspace);
+        JointSolver::prepare(&mut workspace, &bodies, &[constraint], 0.02).unwrap();
+        let drive_row = workspace.rows().iter().find(|row| row.key == 6).unwrap();
+        assert_eq!(drive_row.accumulated_multiplier, 0.0);
+        assert_eq!(drive_row.accumulated_impulse, 0.0);
+
+        joint.common.enabled = false;
+        constraint.joint = Joint::D6(joint);
+        JointSolver::prepare(&mut workspace, &bodies, &[constraint], 0.02).unwrap();
+        assert!(workspace.rows().is_empty());
+
+        joint.common.enabled = true;
+        constraint.joint = Joint::D6(joint);
+        JointSolver::prepare(&mut workspace, &bodies, &[constraint], 0.02).unwrap();
+        let drive_row = workspace.rows().iter().find(|row| row.key == 6).unwrap();
+        assert_eq!(drive_row.accumulated_multiplier, 0.0);
+        assert_eq!(drive_row.accumulated_impulse, 0.0);
     }
 
     #[test]
