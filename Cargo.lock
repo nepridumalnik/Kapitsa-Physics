@@ -110,6 +110,8 @@ name = "kapitsa"
 version = "0.1.0"
 dependencies = [
  "kapitsa-core",
+ "rayon",
+ "tokio",
 ]
 
 [[package]]
