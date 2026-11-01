@@ -480,7 +480,7 @@ fn report_ccd_worker_scaling_for(
             ccd_samples.sort_unstable();
             let median = samples[SAMPLES / 2];
             println!(
-                "{body_count:4} bodies x{worker_count}: step={:.3}/{:.3}/{:.3} ms | ccd={:.3}/{:.3}/{:.3} ms | islands={} candidates={} toi={} resweeps={} fallback={} scratch={} KiB",
+                "{body_count:4} bodies x{worker_count}: step={:.3}/{:.3}/{:.3} ms | ccd={:.3}/{:.3}/{:.3} ms | islands={} parallel={} tasks={} candidates={} toi={} resweeps={} fallback={} scratch={} KiB",
                 millis(samples[0].0),
                 millis(median.0),
                 millis(samples[SAMPLES - 1].0),
@@ -488,6 +488,8 @@ fn report_ccd_worker_scaling_for(
                 millis(ccd_samples[SAMPLES / 2]),
                 millis(ccd_samples[SAMPLES - 1]),
                 median.1.ccd_island_count,
+                median.1.ccd_parallel_island_count,
+                median.1.worker_tasks_started,
                 median.1.ccd_initial_candidate_count,
                 median.1.ccd_toi_call_count,
                 median.1.ccd_resweep_count,

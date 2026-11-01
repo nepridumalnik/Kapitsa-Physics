@@ -252,6 +252,15 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_parallel_islands(&mut self, island_count: usize, task_count: usize) {
+        self.benchmark_metrics.ccd_parallel_island_count = self
+            .benchmark_metrics
+            .ccd_parallel_island_count
+            .saturating_add(island_count);
+        self.record_worker_tasks_started(task_count);
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_ccd_final_candidate_count(&mut self, count: usize) {
         self.benchmark_metrics.ccd_final_candidate_count = count;
     }
@@ -511,6 +520,24 @@ impl CollisionSystem {
                 .ccd_completed_bodies
                 .get_mut(*body)
                 .ok_or(CollisionError::InvalidContact)? = true;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn mark_ccd_island_incomplete(
+        &mut self,
+        island: usize,
+    ) -> Result<(), CollisionError> {
+        let bodies = self
+            .ccd_islands
+            .bodies(island)
+            .ok_or(CollisionError::InvalidContact)?;
+        for body in bodies {
+            *self
+                .context
+                .ccd_completed_bodies
+                .get_mut(*body)
+                .ok_or(CollisionError::InvalidContact)? = false;
         }
         Ok(())
     }
@@ -1038,6 +1065,29 @@ impl CollisionSystem {
         manifold: ContactManifold,
         material: SolverMaterial,
     ) -> Result<(BodyState, BodyState, ContactManifold), CollisionError> {
+        Self::solve_ccd_contact_with_workspace(
+            &mut self.ccd_solver,
+            body_a,
+            state_a,
+            body_b,
+            state_b,
+            manifold,
+            material,
+            self.config,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_ccd_contact_with_workspace(
+        workspace: &mut SolverWorkspace,
+        body_a: crate::rigid_body::RigidBody,
+        state_a: BodyState,
+        body_b: crate::rigid_body::RigidBody,
+        state_b: BodyState,
+        manifold: ContactManifold,
+        material: SolverMaterial,
+        config: CollisionConfig,
+    ) -> Result<(BodyState, BodyState, ContactManifold), CollisionError> {
         let mut bodies = [
             SolverBody::from_prediction(body_a, state_a),
             SolverBody::from_prediction(body_b, state_b),
@@ -1048,8 +1098,7 @@ impl CollisionSystem {
             manifold,
             material,
         }];
-        self.ccd_solver
-            .solve(&mut bodies, &mut manifolds, self.config)?;
+        workspace.solve(&mut bodies, &mut manifolds, config)?;
         Ok((bodies[0].state(), bodies[1].state(), manifolds[0].manifold))
     }
 

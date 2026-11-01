@@ -10,7 +10,7 @@ use super::{
     CollisionEvent, CollisionInteraction, CollisionPair, CollisionProxy,
     ccd::CcdCandidateToi,
     manifold::ContactManifold,
-    solver::{SolverBody, SolverManifold},
+    solver::{SolverBody, SolverManifold, SolverWorkspace},
 };
 
 #[derive(Clone, Copy)]
@@ -29,6 +29,19 @@ pub(crate) struct CcdIslandCandidateResult {
     pub(crate) pair: CollisionPair,
     pub(crate) toi: CcdCandidateToi,
     pub(crate) interaction: Option<CollisionInteraction>,
+    pub(crate) evaluated_now: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CcdIslandImpactResult {
+    pub(crate) pair: CollisionPair,
+    pub(crate) bodies: [(BodyId, usize, bool); 2],
+    pub(crate) impact_elapsed: f64,
+    pub(crate) solved_a: BodyState,
+    pub(crate) solved_b: BodyState,
+    pub(crate) interaction: CollisionInteraction,
+    #[cfg(feature = "bench-internals")]
+    pub(crate) solve_time: std::time::Duration,
 }
 
 /// Private, transaction-staged changes produced while evaluating one CCD island.
@@ -37,6 +50,10 @@ pub(crate) struct CcdIslandResult {
     pub(crate) bodies: Vec<CcdIslandBodyResult>,
     pub(crate) candidates: Vec<CcdIslandCandidateResult>,
     pub(crate) dependencies: Vec<CollisionPair>,
+    pub(crate) impact: Option<CcdIslandImpactResult>,
+    pub(crate) handled: bool,
+    pub(crate) work_cost: usize,
+    pub(crate) solver: SolverWorkspace,
 }
 
 impl CcdIslandResult {
@@ -44,6 +61,10 @@ impl CcdIslandResult {
         self.bodies.clear();
         self.candidates.clear();
         self.dependencies.clear();
+        self.impact = None;
+        self.handled = false;
+        self.work_cost = 0;
+        self.solver.clear();
     }
 
     #[cfg(feature = "bench-internals")]
@@ -53,6 +74,7 @@ impl CcdIslandResult {
         self.bodies.capacity() * size_of::<CcdIslandBodyResult>()
             + self.candidates.capacity() * size_of::<CcdIslandCandidateResult>()
             + self.dependencies.capacity() * size_of::<CollisionPair>()
+            + self.solver.retained_capacity_bytes()
     }
 }
 
@@ -77,6 +99,7 @@ pub(crate) struct StepContext {
     pub(crate) ccd_replay_pairs: Vec<super::CollisionPair>,
     pub(crate) ccd_deferred_candidates: Vec<usize>,
     pub(crate) ccd_island_results: Vec<CcdIslandResult>,
+    pub(crate) ccd_worker_chunks: Vec<usize>,
     #[cfg(feature = "bench-internals")]
     pub(crate) ccd_clipped_metrics: Vec<bool>,
     pub(crate) ccd_body_types: Vec<BodyType>,
@@ -121,6 +144,7 @@ impl StepContext {
             ccd_replay_pairs: Vec::new(),
             ccd_deferred_candidates: Vec::new(),
             ccd_island_results: Vec::new(),
+            ccd_worker_chunks: Vec::new(),
             #[cfg(feature = "bench-internals")]
             ccd_clipped_metrics: Vec::new(),
             ccd_body_types: Vec::new(),
@@ -165,6 +189,7 @@ impl StepContext {
         for result in &mut self.ccd_island_results {
             result.clear();
         }
+        self.ccd_worker_chunks.clear();
         #[cfg(feature = "bench-internals")]
         self.ccd_clipped_metrics.clear();
         self.ccd_body_types.clear();
@@ -219,6 +244,7 @@ impl StepContext {
             self.ccd_replay_pairs.capacity() * size_of::<super::CollisionPair>(),
             self.ccd_deferred_candidates.capacity() * size_of::<usize>(),
             self.ccd_island_results.capacity() * size_of::<CcdIslandResult>(),
+            self.ccd_worker_chunks.capacity() * size_of::<usize>(),
             self.ccd_clipped_metrics.capacity() * size_of::<bool>(),
             self.ccd_body_types.capacity() * size_of::<BodyType>(),
             self.ccd_continuous_bodies.capacity() * size_of::<bool>(),

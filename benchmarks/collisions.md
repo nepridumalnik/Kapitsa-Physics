@@ -682,3 +682,22 @@ the step and provides the output shape for isolated island execution. The impact
 resolver remains sequential in this stage. The expensive-island worker
 equivalence test passes, and the result buffers retain their capacity between
 steps.
+
+## CCD follow-up stage 6: parallel independent impacts
+
+Independent islands containing one candidate now evaluate and solve their
+first impact in bounded worker tasks. Cost-weighted contiguous ranges account
+for the shape pair's expected sweep cost. Each task owns its result and solver
+scratch; the coordinator applies staged body states and interactions in island
+order, then updates proxies and performs resweeps. A newly discovered bridge
+uses the existing localized replay path. Small scenes and islands with multiple
+candidates or an exhausted CCD budget retain the sequential resolver. The
+parallel-island metric reports how many island tasks used this path; the normal
+worker-task metric reports the number of tasks launched.
+
+Core equivalence tests compare the sequential `step()` API with 2 and 4 workers
+for independent fast bodies hitting a shared static wall. They compare body
+states and ordered collision events. Existing Tokio checks for independent
+islands, connected cascades, localized replay, and sequential/worker equivalence
+also pass. Scoped worker threads are still created for each parallel step here;
+stage 7 evaluates and replaces that execution model.

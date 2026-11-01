@@ -12,8 +12,8 @@ use crate::{
     containers::{DensePool, DensePoolError},
     mass::MassProperties,
     material::PhysicsMaterial,
-    rigid_body::{BodyType, IntegrationError, RigidBody},
-    shape::{BoneInfluence, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh},
+    rigid_body::{BodyType, CcdMode, IntegrationError, RigidBody},
+    shape::{BoneInfluence, Cuboid, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh},
     transform::Transform,
 };
 use std::{collections::HashSet, sync::atomic::AtomicU64};
@@ -26,6 +26,30 @@ fn dynamic_body() -> RigidBody {
 fn collider(radius: f64) -> Collider {
     let sphere = Sphere::new(radius).expect("valid sphere");
     Collider::new(Shape::Sphere(sphere), Transform::identity())
+}
+
+fn independent_wall_ccd_world() -> Result<PhysicsWorld, Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    world.add_collider(
+        wall_body,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 30.0, 5.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    for index in 0..8 {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(-5.0, f64::from(index) * 3.0, 0.0), Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::new(1000.0, 0.0, 0.0))?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body)?;
+        world.add_collider(body, collider(0.5))?;
+    }
+    Ok(world)
 }
 
 #[test]
@@ -1355,6 +1379,68 @@ fn step_shards_are_balanced_and_commit_the_same_states() -> Result<(), Box<dyn s
         assert_eq!(parallel_id.generation(), sequential_id.generation());
         assert_ne!(parallel_id, sequential_id);
         assert_eq!(parallel, sequential);
+    }
+    Ok(())
+}
+
+#[test]
+fn independent_single_pair_ccd_islands_resolve_across_workers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dt = 0.01;
+    let mut sequential = independent_wall_ccd_world()?;
+    sequential.step(dt)?;
+    let expected_impacts = sequential
+        .collision_events()
+        .iter()
+        .filter(|event| event.kind == crate::collision::CollisionEventKind::Impact)
+        .count();
+    assert!(
+        expected_impacts >= 4,
+        "fixture should contain independent impacts"
+    );
+
+    for workers in [2, 4] {
+        let mut world = independent_wall_ccd_world()?;
+        let mut shards = vec![Vec::new(); workers];
+        world.fill_step_shards(&mut shards)?;
+        for shard in &mut shards {
+            for step in shard {
+                step.integrate(dt)?;
+            }
+        }
+        world.commit_step_shards_with_workers(&shards, workers)?;
+
+        for ((_, actual), (_, expected)) in world.bodies().zip(sequential.bodies()) {
+            assert_eq!(
+                actual.state().transform().translation(),
+                expected.state().transform().translation()
+            );
+            assert_eq!(
+                actual.state().linear_velocity(),
+                expected.state().linear_velocity()
+            );
+        }
+        let actual_impacts = world
+            .collision_events()
+            .iter()
+            .filter(|event| event.kind == crate::collision::CollisionEventKind::Impact)
+            .count();
+        assert_eq!(actual_impacts, expected_impacts);
+        for (actual, expected) in world
+            .collision_events()
+            .iter()
+            .zip(sequential.collision_events())
+        {
+            assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.pair.a.dense.index(), expected.pair.a.dense.index());
+            assert_eq!(actual.pair.b.dense.index(), expected.pair.b.dense.index());
+            assert_eq!(actual.contact, expected.contact);
+        }
+        #[cfg(feature = "bench-internals")]
+        assert!(
+            world.collision_step_metrics().ccd_parallel_island_count >= workers,
+            "the CCD island resolver should launch work for this scene"
+        );
     }
     Ok(())
 }

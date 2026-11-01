@@ -27,13 +27,13 @@ use crate::{
     aabb::Aabb,
     collider::Collider,
     collision::{
-        CcdCandidateToi, CcdHit, CcdIslandBodyResult, CcdIslandCandidateResult, CcdIslandResult,
-        CcdLimitPolicy, CcdMotion, CollisionConfig, CollisionError, CollisionEvent,
-        CollisionInteraction, CollisionPair, CollisionSystem, ContactInfo, ContactManifold,
-        ContactPoint, NarrowPhase, OverlapHit, QueryError, QueryFilter, QueryScratch, QueryTarget,
-        Ray, RayHit, ShapeHit, SolverBody, SolverManifold, SolverMaterial, StepContext,
-        overlaps_shape_with_scratch, raycast_shape_with_scratch, spatial_index::SpatialIndex,
-        sweep_shape_with_scratch,
+        CcdCandidateToi, CcdHit, CcdIslandBodyResult, CcdIslandCandidateResult,
+        CcdIslandImpactResult, CcdIslandResult, CcdLimitPolicy, CcdMotion, CollisionConfig,
+        CollisionError, CollisionEvent, CollisionInteraction, CollisionPair, CollisionSystem,
+        ContactInfo, ContactManifold, ContactPoint, NarrowPhase, OverlapHit, QueryError,
+        QueryFilter, QueryScratch, QueryTarget, Ray, RayHit, ShapeHit, SolverBody, SolverManifold,
+        SolverMaterial, StepContext, overlaps_shape_with_scratch, raycast_shape_with_scratch,
+        spatial_index::SpatialIndex, sweep_shape_with_scratch,
     },
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
@@ -1090,6 +1090,12 @@ impl PhysicsWorld {
         #[cfg(feature = "bench-internals")]
         let ccd_execute_started = Instant::now();
         let time_tolerance = f64::EPSILON * dt.max(1.0) * 128.0;
+        self.resolve_single_candidate_ccd_islands_parallel(
+            dt,
+            worker_count,
+            time_tolerance,
+            &mut force_single_island,
+        )?;
         'passes: loop {
             let mut island_index = 0;
             while island_index < self.collision_system.ccd_island_count() {
@@ -1657,6 +1663,580 @@ impl PhysicsWorld {
             self.collision_system
                 .record_ccd_final_impact_count(impact_count);
         }
+        Ok(())
+    }
+
+    fn resolve_single_candidate_ccd_islands_parallel(
+        &mut self,
+        dt: f64,
+        worker_count: usize,
+        time_tolerance: f64,
+        force_single_island: &mut bool,
+    ) -> Result<(), CollisionError> {
+        const MIN_PARALLEL_ISLANDS: usize = 4;
+
+        let island_count = self.collision_system.ccd_island_count();
+        if worker_count <= 1 || island_count < MIN_PARALLEL_ISLANDS {
+            return Ok(());
+        }
+
+        {
+            let results = &mut self.collision_system.context.ccd_island_results;
+            if results.len() < island_count {
+                results
+                    .try_reserve(island_count - results.len())
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                results.resize_with(island_count, CcdIslandResult::default);
+            }
+            for result in results.iter_mut().take(island_count) {
+                result.clear();
+            }
+        }
+        let mut eligible_count = 0;
+        let mut total_cost = 0_usize;
+        for island in 0..island_count {
+            let candidates = self
+                .collision_system
+                .ccd_island_candidates(island)
+                .ok_or(CollisionError::InvalidContact)?;
+            let cost = if candidates.len() == 1 {
+                eligible_count += 1;
+                self.ccd_candidate_work_cost(candidates[0])?
+            } else {
+                0
+            };
+            total_cost = total_cost.saturating_add(cost);
+            self.collision_system.context.ccd_island_results[island].work_cost = cost;
+        }
+        if eligible_count < MIN_PARALLEL_ISLANDS {
+            return Ok(());
+        }
+
+        let active_workers = worker_count.min(eligible_count);
+        self.collision_system
+            .context
+            .ccd_worker_chunks
+            .try_reserve(active_workers)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        let mut chunk_sizes = std::mem::take(&mut self.collision_system.context.ccd_worker_chunks);
+        chunk_sizes.clear();
+        let mut start = 0;
+        let mut remaining_cost = total_cost;
+        for worker in 0..active_workers {
+            let workers_left = active_workers - worker;
+            let target = remaining_cost.div_ceil(workers_left).max(1);
+            let mut chunk_cost = 0;
+            let mut end = start;
+            while end < island_count
+                && (chunk_cost < target || chunk_cost == 0)
+                && island_count - end > workers_left - 1
+            {
+                chunk_cost = chunk_cost.saturating_add(
+                    self.collision_system.context.ccd_island_results[end].work_cost,
+                );
+                end += 1;
+            }
+            if worker + 1 == active_workers {
+                end = island_count;
+                chunk_cost = remaining_cost;
+            }
+            if end == start {
+                return Err(CollisionError::InvalidContact);
+            }
+            chunk_sizes.push(end - start);
+            start = end;
+            remaining_cost = remaining_cost.saturating_sub(chunk_cost);
+        }
+
+        let mut results = std::mem::take(&mut self.collision_system.context.ccd_island_results);
+        let shared_world = &*self;
+        let computed = std::thread::scope(|scope| {
+            let mut workers = Vec::new();
+            workers
+                .try_reserve(active_workers)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            let mut remaining = &mut results[..island_count];
+            let mut first_island = 0;
+            for chunk_size in chunk_sizes.iter().copied() {
+                let (chunk, tail) = remaining.split_at_mut(chunk_size);
+                let world = shared_world;
+                let chunk_start = first_island;
+                workers.push(scope.spawn(move || {
+                    let mut narrow_phase = NarrowPhase::new();
+                    for (offset, result) in chunk.iter_mut().enumerate() {
+                        let island = chunk_start + offset;
+                        let cost = result.work_cost;
+                        if cost == 0 {
+                            continue;
+                        }
+                        result.clear();
+                        result.work_cost = cost;
+                        world.prepare_single_candidate_ccd_island(
+                            island,
+                            dt,
+                            &mut narrow_phase,
+                            result,
+                        )?;
+                    }
+                    Ok::<_, CollisionError>(())
+                }));
+                remaining = tail;
+                first_island += chunk_size;
+            }
+            let mut result = Ok(());
+            for worker in workers {
+                match worker.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) if result.is_ok() => result = Err(error),
+                    Err(_) if result.is_ok() => result = Err(CollisionError::WorkerFailed),
+                    _ => {}
+                }
+            }
+            result
+        });
+        self.collision_system.context.ccd_island_results = results;
+        self.collision_system.context.ccd_worker_chunks = chunk_sizes;
+        computed?;
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_ccd_parallel_islands(eligible_count, active_workers);
+
+        let mut layout_changed = false;
+        for island in 0..island_count {
+            let weight = self.collision_system.context.ccd_island_results[island].work_cost;
+            if weight == 0 {
+                continue;
+            }
+            let candidate_count = self.collision_system.context.ccd_island_results[island]
+                .candidates
+                .len();
+            for index in 0..candidate_count {
+                let candidate =
+                    self.collision_system.context.ccd_island_results[island].candidates[index];
+                let previous =
+                    self.collision_system.context.ccd_candidate_active[candidate.candidate];
+                self.collision_system.context.ccd_toi_cache[candidate.candidate] = candidate.toi;
+                self.collision_system
+                    .set_ccd_candidate_active(candidate.candidate, candidate.toi.hit.is_some())?;
+                layout_changed |= previous != candidate.toi.hit.is_some();
+                if let Some(interaction) = candidate.interaction {
+                    upsert_interaction(
+                        &mut self.collision_system.context.interactions,
+                        &mut self.collision_system.context.interaction_indices,
+                        interaction,
+                    )?;
+                }
+                #[cfg(feature = "bench-internals")]
+                if candidate.evaluated_now {
+                    self.collision_system
+                        .record_ccd_toi_evaluation(candidate.pair);
+                }
+                #[cfg(not(feature = "bench-internals"))]
+                let _ = candidate.evaluated_now;
+            }
+        }
+        if layout_changed {
+            self.collision_system.build_ccd_islands(false)?;
+        }
+
+        for island in 0..island_count {
+            let weight = self.collision_system.context.ccd_island_results[island].work_cost;
+            if weight == 0 || !self.collision_system.context.ccd_island_results[island].handled {
+                continue;
+            }
+            let result = &self.collision_system.context.ccd_island_results[island];
+            for body in &result.bodies {
+                if let Some(completed) = self
+                    .collision_system
+                    .context
+                    .ccd_completed_bodies
+                    .get_mut(body.prediction)
+                {
+                    *completed = true;
+                }
+            }
+            let Some(impact) = result.impact else {
+                continue;
+            };
+
+            #[cfg(feature = "bench-internals")]
+            let commit_started = Instant::now();
+            upsert_interaction(
+                &mut self.collision_system.context.interactions,
+                &mut self.collision_system.context.interaction_indices,
+                impact.interaction,
+            )?;
+            for ((body_id, prediction, dynamic), solved) in [
+                (impact.bodies[0], impact.solved_a),
+                (impact.bodies[1], impact.solved_b),
+            ] {
+                if !dynamic {
+                    continue;
+                }
+                self.collision_system.context.ccd_states[prediction] = solved;
+                self.collision_system.context.ccd_elapsed[prediction] = impact.impact_elapsed;
+                let remaining_after_impact = (dt - impact.impact_elapsed).max(0.0);
+                self.collision_system.context.predicted_states[prediction].1 =
+                    if remaining_after_impact <= f64::EPSILON * dt.max(1.0) {
+                        solved
+                    } else {
+                        let mut body = self
+                            .bodies
+                            .get(body_id.dense)
+                            .filter(|_| body_id.world == self.world_id)
+                            .map(|entry| entry.body)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        body.set_state_preserving_forces(solved);
+                        predict(&body, remaining_after_impact)
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?
+                    };
+            }
+            for (body_id, prediction, _) in impact.bodies {
+                let body = self
+                    .bodies
+                    .get(body_id.dense)
+                    .filter(|_| body_id.world == self.world_id)
+                    .map(|entry| entry.body)
+                    .ok_or(CollisionError::InvalidContact)?;
+                if body.physics().body_type() == BodyType::Dynamic
+                    && body.ccd_mode() == CcdMode::Continuous
+                {
+                    self.collision_system.context.ccd_impact_counts[prediction] += 1;
+                }
+            }
+            self.mark_ccd_pair_processed(impact.pair, impact.impact_elapsed, time_tolerance)?;
+            #[cfg(feature = "bench-internals")]
+            {
+                self.collision_system.record_ccd_impact();
+                self.collision_system
+                    .record_ccd_contact_resolution(impact.solve_time);
+                self.collision_system
+                    .record_ccd_island_commit(commit_started.elapsed());
+            }
+
+            if dt - impact.impact_elapsed <= f64::EPSILON * dt.max(1.0) {
+                continue;
+            }
+            let island_index = impact
+                .bodies
+                .iter()
+                .filter(|body| body.2)
+                .find_map(|body| self.collision_system.ccd_body_island(body.1))
+                .ok_or(CollisionError::InvalidContact)?;
+            let previous_candidate_count = self.collision_system.ccd_candidate_count();
+            if self.resweep_ccd_after_impact(
+                island_index,
+                impact.bodies,
+                impact.impact_elapsed,
+                dt,
+                time_tolerance,
+                force_single_island,
+            )? {
+                return Ok(());
+            }
+            let current_island = impact
+                .bodies
+                .iter()
+                .filter(|body| body.2)
+                .find_map(|body| self.collision_system.ccd_body_island(body.1));
+            if current_island.is_some_and(|current| {
+                self.collision_system
+                    .ccd_island_candidates(current)
+                    .is_some_and(|candidates| {
+                        self.collision_system.ccd_candidate_count() > previous_candidate_count
+                            || candidates.len() > 1
+                    })
+            }) {
+                let current_island = current_island.ok_or(CollisionError::InvalidContact)?;
+                self.collision_system
+                    .mark_ccd_island_incomplete(current_island)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ccd_candidate_work_cost(&self, candidate: usize) -> Result<usize, CollisionError> {
+        let pair = self
+            .collision_system
+            .ccd_candidate_pair(candidate)
+            .ok_or(CollisionError::InvalidContact)?;
+        let collider_a = self
+            .colliders
+            .get(pair.a.dense)
+            .filter(|_| pair.a.world == self.world_id)
+            .ok_or(CollisionError::InvalidContact)?;
+        let collider_b = self
+            .colliders
+            .get(pair.b.dense)
+            .filter(|_| pair.b.world == self.world_id)
+            .ok_or(CollisionError::InvalidContact)?;
+        let cost = match (collider_a.collider.shape(), collider_b.collider.shape()) {
+            (Shape::Sphere(_), Shape::Sphere(_)) => 1,
+            (Shape::Sphere(_), Shape::Cuboid(_)) | (Shape::Cuboid(_), Shape::Sphere(_)) => 2,
+            (Shape::TriangleMesh(_), _) | (_, Shape::TriangleMesh(_)) => 16,
+            (Shape::HeightField(_), _) | (_, Shape::HeightField(_)) => 12,
+            (Shape::LevelSet(_), _) | (_, Shape::LevelSet(_)) => 12,
+            _ => 8,
+        };
+        Ok(cost)
+    }
+
+    fn prepare_single_candidate_ccd_island(
+        &self,
+        island: usize,
+        dt: f64,
+        narrow_phase: &mut NarrowPhase,
+        result: &mut CcdIslandResult,
+    ) -> Result<(), CollisionError> {
+        let bodies = self
+            .collision_system
+            .ccd_island_bodies(island)
+            .ok_or(CollisionError::InvalidContact)?;
+        result
+            .bodies
+            .try_reserve(bodies.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for prediction in bodies.iter().copied() {
+            let context = &self.collision_system.context;
+            result.bodies.push(CcdIslandBodyResult {
+                prediction,
+                ccd_state: *context
+                    .ccd_states
+                    .get(prediction)
+                    .ok_or(CollisionError::InvalidContact)?,
+                predicted_state: context
+                    .predicted_states
+                    .get(prediction)
+                    .map(|(_, state)| *state)
+                    .ok_or(CollisionError::InvalidContact)?,
+                elapsed: *context
+                    .ccd_elapsed
+                    .get(prediction)
+                    .ok_or(CollisionError::InvalidContact)?,
+                impact_count: *context
+                    .ccd_impact_counts
+                    .get(prediction)
+                    .ok_or(CollisionError::InvalidContact)?,
+                clipped: context
+                    .ccd_clipped_bodies
+                    .get(prediction)
+                    .copied()
+                    .ok_or(CollisionError::InvalidContact)?,
+            });
+        }
+
+        let candidates = self
+            .collision_system
+            .ccd_island_candidates(island)
+            .ok_or(CollisionError::InvalidContact)?;
+        let [candidate] = candidates else {
+            return Ok(());
+        };
+        let pair = self
+            .collision_system
+            .ccd_candidate_pair(*candidate)
+            .ok_or(CollisionError::InvalidContact)?;
+        let cached = self
+            .collision_system
+            .context
+            .ccd_toi_cache
+            .get(*candidate)
+            .copied()
+            .ok_or(CollisionError::InvalidContact)?;
+        let evaluated_now = !cached.evaluated;
+        let (toi, interaction) = if !evaluated_now {
+            (cached, None)
+        } else {
+            self.evaluate_ccd_candidate(pair, 0.0, dt, narrow_phase)?
+        };
+        result
+            .candidates
+            .try_reserve(1)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        result.candidates.push(CcdIslandCandidateResult {
+            candidate: *candidate,
+            pair,
+            toi,
+            interaction,
+            evaluated_now,
+        });
+        if let Some(interaction) = interaction
+            && interaction.sensor
+        {
+            result.handled = true;
+            return Ok(());
+        }
+        let Some(hit) = toi.hit else {
+            result.handled = true;
+            return Ok(());
+        };
+
+        let (body_a_id, body_b_id) = {
+            let collider_a = self
+                .colliders
+                .get(pair.a.dense)
+                .filter(|_| pair.a.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_b = self
+                .colliders
+                .get(pair.b.dense)
+                .filter(|_| pair.b.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            (collider_a.body, collider_b.body)
+        };
+        let prediction_a = Self::predicted_body_index(
+            &self.collision_system.context.body_indices,
+            self.world_id,
+            body_a_id,
+        )?;
+        let prediction_b = Self::predicted_body_index(
+            &self.collision_system.context.body_indices,
+            self.world_id,
+            body_b_id,
+        )?;
+        let (body_a, body_b) = (
+            self.bodies
+                .get(body_a_id.dense)
+                .filter(|_| body_a_id.world == self.world_id)
+                .map(|entry| entry.body)
+                .ok_or(CollisionError::InvalidContact)?,
+            self.bodies
+                .get(body_b_id.dense)
+                .filter(|_| body_b_id.world == self.world_id)
+                .map(|entry| entry.body)
+                .ok_or(CollisionError::InvalidContact)?,
+        );
+        let exhausted = [(body_a, prediction_a), (body_b, prediction_b)]
+            .into_iter()
+            .any(|(body, prediction)| {
+                body.physics().body_type() == BodyType::Dynamic
+                    && body.ccd_mode() == CcdMode::Continuous
+                    && self.collision_system.context.ccd_impact_counts[prediction]
+                        >= self.collision_system.config().max_ccd_impacts
+            });
+        if exhausted
+            || self.collision_system.context.ccd_clipped_bodies[prediction_a]
+            || self.collision_system.context.ccd_clipped_bodies[prediction_b]
+        {
+            return Ok(());
+        }
+
+        let impact_elapsed = toi.impact_time;
+        let state_a = self.body_state_at_ccd(body_a_id, prediction_a, impact_elapsed, dt)?;
+        let state_b = self.body_state_at_ccd(body_b_id, prediction_b, impact_elapsed, dt)?;
+        let separation = hit
+            .point_b
+            .checked_sub(hit.point_a)
+            .and_then(|delta| delta.checked_dot(hit.normal))
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let contact = ContactPoint::from_world(
+            &state_a.transform(),
+            &state_b.transform(),
+            hit.point_a,
+            hit.point_b,
+            hit.normal,
+            (-separation).max(0.0),
+            0,
+        )?;
+        let contact_position = hit
+            .point_a
+            .checked_add(hit.point_b)
+            .and_then(|point| point.checked_mul_scalar(0.5))
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let mut manifold = ContactManifold::new(pair);
+        manifold.insert(contact, contact_position)?;
+        let (mode_a, mode_b, material_a, material_b) = {
+            let collider_a = self
+                .colliders
+                .get(pair.a.dense)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_b = self
+                .colliders
+                .get(pair.b.dense)
+                .ok_or(CollisionError::InvalidContact)?;
+            (
+                collider_a.collider.mode(),
+                collider_b.collider.mode(),
+                collider_a.collider.material(),
+                collider_b.collider.material(),
+            )
+        };
+        if mode_a == crate::collider::CollisionMode::Sensor
+            || mode_b == crate::collider::CollisionMode::Sensor
+        {
+            return Err(CollisionError::InvalidContact);
+        }
+        let material = self.combined_solver_material(material_a, material_b)?;
+        #[cfg(feature = "bench-internals")]
+        let solve_started = Instant::now();
+        let (solved_a, solved_b, solved_manifold) =
+            CollisionSystem::solve_ccd_contact_with_workspace(
+                &mut result.solver,
+                body_a,
+                state_a,
+                body_b,
+                state_b,
+                manifold,
+                material,
+                self.collision_system.config(),
+            )?;
+        #[cfg(feature = "bench-internals")]
+        let solve_time = solve_started.elapsed();
+        let mut normal_impulse = 0.0;
+        let mut impulse_delta = 0.0;
+        for point in solved_manifold.points() {
+            normal_impulse += point.normal_impulse;
+            impulse_delta += point.normal_impulse_delta;
+        }
+        if !normal_impulse.is_finite() || !impulse_delta.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        if impulse_delta <= 0.0 {
+            return Err(CollisionError::NonConvergent);
+        }
+        let solved_point = solved_manifold
+            .points()
+            .first()
+            .ok_or(CollisionError::InvalidContact)?;
+        let point_a = solved_a.transform().transform_point(solved_point.local_a);
+        let point_b = solved_b.transform().transform_point(solved_point.local_b);
+        let point = point_a
+            .checked_add(point_b)
+            .and_then(|sum| sum.checked_mul_scalar(0.5))
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        result.impact = Some(CcdIslandImpactResult {
+            pair,
+            bodies: [
+                (
+                    body_a_id,
+                    prediction_a,
+                    body_a.physics().body_type() == BodyType::Dynamic,
+                ),
+                (
+                    body_b_id,
+                    prediction_b,
+                    body_b.physics().body_type() == BodyType::Dynamic,
+                ),
+            ],
+            impact_elapsed,
+            solved_a,
+            solved_b,
+            interaction: CollisionInteraction {
+                pair,
+                sensor: false,
+                transient: false,
+                contact: Some(ContactInfo {
+                    point,
+                    normal: solved_point.normal,
+                    penetration: solved_point.penetration,
+                    normal_impulse,
+                }),
+                impact: true,
+            },
+            #[cfg(feature = "bench-internals")]
+            solve_time,
+        });
+        result.handled = true;
         Ok(())
     }
 
@@ -2238,6 +2818,7 @@ impl PhysicsWorld {
                                 pair,
                                 toi,
                                 interaction,
+                                evaluated_now: true,
                             });
                         }
                     }

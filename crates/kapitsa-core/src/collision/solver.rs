@@ -110,6 +110,10 @@ impl SolverWorkspace {
         Self { points: Vec::new() }
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.points.clear();
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         self.points.capacity() * std::mem::size_of::<SolverPoint>()

@@ -110,6 +110,8 @@ pub struct CollisionStepMetrics {
     pub ccd_replayed_island_count: usize,
     /// Worker tasks launched by collision preparation or solving.
     pub worker_tasks_started: usize,
+    /// Independent CCD islands evaluated through the parallel impact path.
+    pub ccd_parallel_island_count: usize,
     /// Number of new pairs found during selective resweeps.
     pub ccd_new_candidate_count: usize,
     /// Number of full sequential restarts after a cross-island dependency.
@@ -177,6 +179,7 @@ impl CollisionStepMetrics {
         ccd_local_replay_count: 0,
         ccd_replayed_island_count: 0,
         worker_tasks_started: 0,
+        ccd_parallel_island_count: 0,
         ccd_new_candidate_count: 0,
         ccd_global_fallback_count: 0,
         ccd_invalidated_toi_count: 0,
@@ -203,7 +206,8 @@ pub(crate) use manifold::{ContactManifold, ContactPoint};
 pub(crate) use narrow_phase::NarrowPhase;
 pub(crate) use solver::{SolverBody, SolverManifold, SolverMaterial};
 pub(crate) use step::{
-    CcdIslandBodyResult, CcdIslandCandidateResult, CcdIslandResult, StepContext,
+    CcdIslandBodyResult, CcdIslandCandidateResult, CcdIslandImpactResult, CcdIslandResult,
+    StepContext,
 };
 pub(crate) use system::CollisionSystem;
 
