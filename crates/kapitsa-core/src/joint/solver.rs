@@ -23,6 +23,7 @@ struct RowSettings {
     common: super::JointCommon,
     dt: f64,
     position_enabled: bool,
+    velocity_bias: bool,
     velocity_target: f64,
     multiplier_bounds: Option<(f64, f64)>,
     impulse_bounds: Option<(f64, f64)>,
@@ -120,10 +121,38 @@ pub(crate) fn prepare_joint_rows(
                 joint,
                 dt,
             )?,
-            super::Joint::Planar(_)
-            | super::Joint::Spring(_)
-            | super::Joint::ConeTwist(_)
-            | super::Joint::D6(_) => {}
+            super::Joint::Planar(joint) => append_planar_rows(
+                bodies,
+                workspace,
+                constraint.body_a,
+                constraint.body_b,
+                joint,
+                dt,
+            )?,
+            super::Joint::D6(joint) => append_d6_rows(
+                bodies,
+                workspace,
+                constraint.body_a,
+                constraint.body_b,
+                joint,
+                dt,
+            )?,
+            super::Joint::Spring(joint) => append_spring_rows(
+                bodies,
+                workspace,
+                constraint.body_a,
+                constraint.body_b,
+                joint,
+                dt,
+            )?,
+            super::Joint::ConeTwist(joint) => append_cone_twist_rows(
+                bodies,
+                workspace,
+                constraint.body_a,
+                constraint.body_b,
+                joint,
+                dt,
+            )?,
         }
     }
     Ok(())
@@ -461,6 +490,360 @@ fn append_cylindrical_rows(
     Ok(())
 }
 
+fn append_planar_rows(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    body_a: usize,
+    body_b: usize,
+    joint: super::PlanarJoint,
+    dt: f64,
+) -> Result<(), CollisionError> {
+    let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
+    let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
+    let settings = row_settings(body_a, body_b, joint.common, dt);
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| rotation_a.rotate_vector(axis));
+    let axes = [
+        axes[0].ok_or(CollisionError::ArithmeticOverflow)?,
+        axes[1].ok_or(CollisionError::ArithmeticOverflow)?,
+        axes[2].ok_or(CollisionError::ArithmeticOverflow)?,
+    ];
+    let delta = anchor_b
+        .checked_sub(anchor_a)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    push_linear_row(
+        bodies,
+        workspace,
+        settings,
+        [anchor_a, anchor_b],
+        axes[2],
+        delta
+            .checked_dot(axes[2])
+            .ok_or(CollisionError::ArithmeticOverflow)?,
+        bilateral_bounds(),
+    )?;
+    append_axis_alignment(workspace, settings, rotation_a, rotation_b)?;
+
+    for (axis_index, axis) in axes.iter().copied().take(2).enumerate() {
+        let coordinate = delta
+            .checked_dot(axis)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        if let Some(drive) = drive_settings(settings, joint.translation_drives[axis_index])? {
+            push_linear_row(
+                bodies,
+                workspace,
+                drive,
+                [anchor_a, anchor_b],
+                axis,
+                coordinate - joint.translation_drives[axis_index].target_position,
+                bilateral_bounds(),
+            )?;
+        }
+        if let Some(limit) = joint.translation_limits[axis_index] {
+            append_linear_limit(
+                bodies,
+                workspace,
+                settings,
+                [anchor_a, anchor_b],
+                axis,
+                coordinate,
+                limit,
+            )?;
+        }
+    }
+
+    let relative = canonical_relative_rotation(rotation_a, rotation_b)?;
+    let rotation_error = relative_rotation_error(rotation_a, rotation_b)?;
+    if let Some(drive) = drive_settings(settings, joint.rotation_drive)? {
+        push_angular_row(
+            workspace,
+            drive,
+            axes[2],
+            rotation_error.z - joint.rotation_drive.target_position,
+            bilateral_bounds(),
+        )?;
+    }
+    if let Some(limit) = joint.rotation_limit {
+        append_angular_axis_limit(
+            bodies,
+            workspace,
+            settings,
+            axes[2],
+            twist_angle(relative)?,
+            limit,
+        )?;
+    }
+    Ok(())
+}
+
+fn append_spring_rows(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    body_a: usize,
+    body_b: usize,
+    joint: super::SpringJoint,
+    dt: f64,
+) -> Result<(), CollisionError> {
+    let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
+    let (anchor_b, _) = world_frame(bodies, body_b, joint.common.frame_b)?;
+    let delta = anchor_b
+        .checked_sub(anchor_a)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let distance = delta
+        .checked_length()
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let axis = match delta.try_normalize() {
+        Some(axis) => axis,
+        None => rotation_a
+            .rotate_vector(Vec3::X)
+            .ok_or(CollisionError::ArithmeticOverflow)?,
+    };
+    let settings = row_settings(body_a, body_b, joint.common, dt);
+    if joint.stiffness > 0.0 || joint.spring_damping > 0.0 {
+        let mut spring_settings = settings;
+        spring_settings.common.compliance = if joint.stiffness > 0.0 {
+            joint.stiffness.recip()
+        } else {
+            0.0
+        };
+        if !spring_settings.common.compliance.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        spring_settings.common.damping = joint.spring_damping;
+        spring_settings.position_enabled = joint.stiffness > 0.0;
+        spring_settings.velocity_bias = false;
+        push_linear_row(
+            bodies,
+            workspace,
+            spring_settings,
+            [anchor_a, anchor_b],
+            axis,
+            distance - joint.rest_length,
+            bilateral_bounds(),
+        )?;
+    }
+    if let Some(limit) = joint.distance_limit {
+        append_linear_limit(
+            bodies,
+            workspace,
+            settings,
+            [anchor_a, anchor_b],
+            axis,
+            distance,
+            limit,
+        )?;
+    }
+    Ok(())
+}
+
+fn append_cone_twist_rows(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    body_a: usize,
+    body_b: usize,
+    joint: super::ConeTwistJoint,
+    dt: f64,
+) -> Result<(), CollisionError> {
+    let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
+    let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
+    let settings = row_settings(body_a, body_b, joint.common, dt);
+    append_anchor_lock(bodies, workspace, settings, anchor_a, anchor_b, rotation_a)?;
+    let relative = canonical_relative_rotation(rotation_a, rotation_b)?;
+    let twist_length = relative.z.hypot(relative.w);
+    let twist = if twist_length > f64::MIN_POSITIVE {
+        Quat::new(
+            0.0,
+            0.0,
+            relative.z / twist_length,
+            relative.w / twist_length,
+        )
+    } else {
+        Quat::IDENTITY
+    };
+    let swing = (relative * twist.conjugate())
+        .try_normalize()
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let swing_error = relative_rotation_error(Quat::IDENTITY, swing)?;
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| rotation_a.rotate_vector(axis));
+    let axes = [
+        axes[0].ok_or(CollisionError::ArithmeticOverflow)?,
+        axes[1].ok_or(CollisionError::ArithmeticOverflow)?,
+        axes[2].ok_or(CollisionError::ArithmeticOverflow)?,
+    ];
+    let swing_radius = swing_error.x.hypot(swing_error.y);
+    let (swing_x_limit, swing_y_limit) = (joint.swing_limit[0], joint.swing_limit[1]);
+    if swing_x_limit > 0.0 && swing_y_limit > 0.0 {
+        let angular_velocity = bodies
+            .get(body_b)
+            .ok_or(CollisionError::InvalidContact)?
+            .state()
+            .angular_velocity()
+            .checked_sub(
+                bodies
+                    .get(body_a)
+                    .ok_or(CollisionError::InvalidContact)?
+                    .state()
+                    .angular_velocity(),
+            )
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let local_velocity = rotation_a
+            .conjugate()
+            .rotate_vector(angular_velocity)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let predicted = Vec3::new(
+            swing_error.x + local_velocity.x * dt,
+            swing_error.y + local_velocity.y * dt,
+            0.0,
+        );
+        let direction_source = if swing_radius > f64::MIN_POSITIVE {
+            Vec3::new(swing_error.x, swing_error.y, 0.0)
+        } else {
+            predicted
+        };
+        if let Some(direction) = direction_source.try_normalize() {
+            let boundary = 1.0
+                / ((direction.x / swing_x_limit).powi(2) + (direction.y / swing_y_limit).powi(2))
+                    .sqrt();
+            if !boundary.is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+            let axis = rotation_a
+                .rotate_vector(direction)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            append_angular_axis_limit(
+                bodies,
+                workspace,
+                settings,
+                axis,
+                swing_radius,
+                super::JointLimit::new(0.0, boundary),
+            )?;
+        }
+    } else {
+        for ((limit, local_axis), axis) in joint
+            .swing_limit
+            .into_iter()
+            .zip([Vec3::X, Vec3::Y])
+            .zip(axes.into_iter().take(2))
+        {
+            append_angular_axis_limit(
+                bodies,
+                workspace,
+                settings,
+                axis,
+                swing_error
+                    .checked_dot(local_axis)
+                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                super::JointLimit::new(-limit, limit),
+            )?;
+        }
+    }
+    append_angular_axis_limit(
+        bodies,
+        workspace,
+        settings,
+        axes[2],
+        twist_angle(relative)?,
+        joint.twist_limit,
+    )
+}
+
+fn append_d6_rows(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    body_a: usize,
+    body_b: usize,
+    joint: super::D6Joint,
+    dt: f64,
+) -> Result<(), CollisionError> {
+    let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
+    let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
+    let settings = row_settings(body_a, body_b, joint.common, dt);
+    let delta = anchor_b
+        .checked_sub(anchor_a)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let rotation_error = relative_rotation_error(rotation_a, rotation_b)?;
+
+    for (axis_index, local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
+        let axis = rotation_a
+            .rotate_vector(local_axis)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let coordinate = delta
+            .checked_dot(axis)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        match joint.linear_motion[axis_index] {
+            super::JointMotion::Locked => push_linear_row(
+                bodies,
+                workspace,
+                settings,
+                [anchor_a, anchor_b],
+                axis,
+                coordinate,
+                bilateral_bounds(),
+            )?,
+            super::JointMotion::Limited(limit) => append_linear_limit(
+                bodies,
+                workspace,
+                settings,
+                [anchor_a, anchor_b],
+                axis,
+                coordinate,
+                limit,
+            )?,
+            super::JointMotion::Free => {}
+        }
+
+        if !matches!(joint.linear_motion[axis_index], super::JointMotion::Locked)
+            && let Some(drive) = drive_settings(settings, joint.linear_drives[axis_index])?
+        {
+            push_linear_row(
+                bodies,
+                workspace,
+                drive,
+                [anchor_a, anchor_b],
+                axis,
+                coordinate - joint.linear_drives[axis_index].target_position,
+                bilateral_bounds(),
+            )?;
+        }
+
+        let angular_axis = axis;
+        let angular_coordinate = rotation_error
+            .checked_dot(local_axis)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        match joint.angular_motion[axis_index] {
+            super::JointMotion::Locked => push_angular_row(
+                workspace,
+                settings,
+                angular_axis,
+                angular_coordinate,
+                bilateral_bounds(),
+            )?,
+            super::JointMotion::Limited(limit) => append_angular_axis_limit(
+                bodies,
+                workspace,
+                settings,
+                angular_axis,
+                angular_coordinate,
+                limit,
+            )?,
+            super::JointMotion::Free => {}
+        }
+
+        if !matches!(joint.angular_motion[axis_index], super::JointMotion::Locked)
+            && let Some(drive) = drive_settings(settings, joint.angular_drives[axis_index])?
+        {
+            push_angular_row(
+                workspace,
+                drive,
+                angular_axis,
+                angular_coordinate - joint.angular_drives[axis_index].target_position,
+                bilateral_bounds(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn append_anchor_lock(
     bodies: &[SolverBody],
     workspace: &mut JointWorkspace,
@@ -637,6 +1020,17 @@ fn append_angular_limit(
     let axis = rotation_a
         .rotate_vector(Vec3::Z)
         .ok_or(CollisionError::ArithmeticOverflow)?;
+    append_angular_axis_limit(bodies, workspace, settings, axis, angle, limit)
+}
+
+fn append_angular_axis_limit(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    settings: RowSettings,
+    axis: Vec3,
+    angle: f64,
+    limit: super::JointLimit,
+) -> Result<(), CollisionError> {
     let mut row_settings = settings;
     let active = if let Some(violation) = limit_error(angle, limit) {
         Some(violation)
@@ -692,6 +1086,7 @@ fn row_settings(body_a: usize, body_b: usize, common: super::JointCommon, dt: f6
         common,
         dt,
         position_enabled: true,
+        velocity_bias: true,
         velocity_target: 0.0,
         multiplier_bounds: None,
         impulse_bounds: None,
@@ -726,6 +1121,7 @@ fn drive_settings(
     settings.common.compliance = compliance;
     settings.common.damping = drive.damping;
     settings.position_enabled = drive.stiffness > 0.0;
+    settings.velocity_bias = drive.stiffness > 0.0;
     settings.velocity_target = drive.target_velocity;
     settings.multiplier_bounds = Some((-max_multiplier, max_multiplier));
     settings.impulse_bounds = Some((-max_impulse, max_impulse));
@@ -839,7 +1235,11 @@ fn push_linear_row(
         linear_b: axis,
         angular_b,
         error,
-        target_velocity: -error * (0.2 / settings.dt) + settings.velocity_target,
+        target_velocity: if settings.velocity_bias {
+            -error * (0.2 / settings.dt) + settings.velocity_target
+        } else {
+            settings.velocity_target
+        },
         position_enabled: settings.position_enabled,
         compliance: settings.common.compliance,
         damping: settings.common.damping,
@@ -871,7 +1271,11 @@ fn push_angular_row(
         linear_b: Vec3::ZERO,
         angular_b: axis,
         error,
-        target_velocity: -error * (0.2 / settings.dt) + settings.velocity_target,
+        target_velocity: if settings.velocity_bias {
+            -error * (0.2 / settings.dt) + settings.velocity_target
+        } else {
+            settings.velocity_target
+        },
         position_enabled: settings.position_enabled,
         compliance: settings.common.compliance,
         damping: settings.common.damping,
@@ -1590,5 +1994,220 @@ mod tests {
             relative_speed <= 100.0 + 1.0e-10,
             "relative speed={relative_speed}"
         );
+    }
+
+    #[test]
+    fn planar_joint_locks_normal_and_swing_but_keeps_in_plane_motion() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let mut joint = super::super::PlanarJoint::new(common);
+        joint.translation_limits = [
+            Some(super::super::JointLimit::new(-0.5, 0.5)),
+            Some(super::super::JointLimit::new(-1.0, 1.0)),
+        ];
+        let tilt = Quat::from_axis_angle(Vec3::X, 0.4).expect("tilt");
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_rotation(Vec3::new(2.0, 3.0, 4.0), tilt),
+        ];
+
+        solve_joint(super::super::Joint::Planar(joint), &mut bodies);
+
+        let delta = bodies[1].state().transform().translation()
+            - bodies[0].state().transform().translation();
+        let frame_rotation = bodies[0].state().transform().rotation();
+        let normal = frame_rotation
+            .rotate_vector(Vec3::Z)
+            .expect("planar normal");
+        let x_axis = frame_rotation.rotate_vector(Vec3::X).expect("plane x");
+        let y_axis = frame_rotation.rotate_vector(Vec3::Y).expect("plane y");
+        assert!(delta.dot(normal).abs() < 1.0e-10);
+        assert!(delta.dot(x_axis).abs() <= 0.5 + 1.0e-10);
+        assert!(delta.dot(y_axis).abs() <= 1.0 + 1.0e-10);
+        let rotation_error = relative_rotation_error(
+            bodies[0].state().transform().rotation(),
+            bodies[1].state().transform().rotation(),
+        )
+        .expect("rotation error");
+        assert!(rotation_error.x.abs() < 1.0e-10);
+        assert!(rotation_error.y.abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn spring_joint_applies_compliance_and_damping() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let spring = super::super::SpringJoint::new(common, 1.0, 1.0e6, 0.0);
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body(Vec3::new(2.0, 0.0, 0.0)),
+        ];
+        solve_joint(super::super::Joint::Spring(spring), &mut bodies);
+        let distance = (bodies[1].state().transform().translation()
+            - bodies[0].state().transform().translation())
+        .length();
+        assert!(
+            (distance - (1.0 + 1.0 / 201.0)).abs() < 1.0e-10,
+            "spring distance={distance}"
+        );
+
+        let damper = super::super::SpringJoint::new(common, 1.0, 0.0, 100.0);
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_velocities(
+                Vec3::X,
+                Quat::IDENTITY,
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::ZERO,
+            ),
+        ];
+        solve_joint(super::super::Joint::Spring(damper), &mut bodies);
+        let relative_speed =
+            bodies[1].state().linear_velocity().x - bodies[0].state().linear_velocity().x;
+        assert!(
+            relative_speed.abs() < 0.002,
+            "damped speed={relative_speed}"
+        );
+    }
+
+    #[test]
+    fn cone_twist_joint_enforces_independent_swing_and_twist_limits() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let joint = super::super::ConeTwistJoint::new(
+            common,
+            [0.2, 0.3],
+            super::super::JointLimit::new(-0.1, 0.1),
+        );
+        let swing = Quat::from_axis_angle(Vec3::X, 0.6).expect("swing");
+        let mut swing_bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_rotation(Vec3::ZERO, swing),
+        ];
+        solve_joint(super::super::Joint::ConeTwist(joint), &mut swing_bodies);
+        let swing_error = relative_rotation_error(
+            swing_bodies[0].state().transform().rotation(),
+            swing_bodies[1].state().transform().rotation(),
+        )
+        .expect("swing error");
+        assert!(
+            (swing_error.x - 0.2).abs() < 1.0e-10,
+            "swing={swing_error:?}"
+        );
+
+        let twist = Quat::from_axis_angle(Vec3::Z, 0.6).expect("twist");
+        let mut twist_bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_rotation(Vec3::ZERO, twist),
+        ];
+        solve_joint(super::super::Joint::ConeTwist(joint), &mut twist_bodies);
+        let twist_error = relative_rotation_error(
+            twist_bodies[0].state().transform().rotation(),
+            twist_bodies[1].state().transform().rotation(),
+        )
+        .expect("twist error");
+        assert!(
+            (twist_error.z - 0.1).abs() < 1.0e-10,
+            "twist={twist_error:?}"
+        );
+
+        let diagonal = Vec3::new(1.0, 1.0, 0.0)
+            .try_normalize()
+            .expect("diagonal swing axis");
+        let swing = Quat::from_axis_angle(diagonal, 0.6).expect("diagonal swing");
+        let mut diagonal_bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_rotation(Vec3::ZERO, swing),
+        ];
+        solve_joint(super::super::Joint::ConeTwist(joint), &mut diagonal_bodies);
+        let diagonal_error = relative_rotation_error(
+            diagonal_bodies[0].state().transform().rotation(),
+            diagonal_bodies[1].state().transform().rotation(),
+        )
+        .expect("diagonal swing error");
+        let expected_radius = 1.0
+            / ((diagonal.x / joint.swing_limit[0]).powi(2)
+                + (diagonal.y / joint.swing_limit[1]).powi(2))
+            .sqrt();
+        assert!(
+            (diagonal_error.x.hypot(diagonal_error.y) - expected_radius).abs() < 1.0e-10,
+            "diagonal swing={diagonal_error:?}, boundary={expected_radius}"
+        );
+    }
+
+    #[test]
+    fn d6_joint_applies_free_limited_and_locked_axes() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let mut joint = super::super::D6Joint::new(common);
+        joint.linear_motion = [
+            super::super::JointMotion::Free,
+            super::super::JointMotion::Limited(super::super::JointLimit::new(-1.0, 1.0)),
+            super::super::JointMotion::Locked,
+        ];
+        joint.angular_motion = [
+            super::super::JointMotion::Free,
+            super::super::JointMotion::Limited(super::super::JointLimit::new(-0.2, 0.2)),
+            super::super::JointMotion::Locked,
+        ];
+        let rotation = Quat::from_axis_angle(Vec3::Y, 0.5).expect("rotation");
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_rotation(Vec3::new(3.0, 2.0, 4.0), rotation),
+        ];
+
+        solve_joint(super::super::Joint::D6(joint), &mut bodies);
+
+        let delta = bodies[1].state().transform().translation()
+            - bodies[0].state().transform().translation();
+        let frame_rotation = bodies[0].state().transform().rotation();
+        let local_delta = frame_rotation
+            .conjugate()
+            .rotate_vector(delta)
+            .expect("joint frame delta");
+        assert!(local_delta.x > 2.5, "free x={}", local_delta.x);
+        assert!((-1.0 - 1.0e-10..=1.0 + 1.0e-10).contains(&local_delta.y));
+        assert!(local_delta.z.abs() < 1.0e-10, "locked z={}", local_delta.z);
+        let rotation_error = relative_rotation_error(
+            bodies[0].state().transform().rotation(),
+            bodies[1].state().transform().rotation(),
+        )
+        .expect("rotation error");
+        assert!(rotation_error.x.abs() < 1.0e-10);
+        assert!(rotation_error.y.abs() <= 0.2 + 1.0e-10);
+        assert!(rotation_error.z.abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn d6_drive_targets_a_free_axis() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let mut joint = super::super::D6Joint::new(common);
+        joint.linear_motion[0] = super::super::JointMotion::Free;
+        joint.linear_drives[0] = super::super::JointDrive {
+            enabled: true,
+            target_position: 1.0,
+            target_velocity: 0.0,
+            stiffness: 1.0e6,
+            damping: 0.0,
+            max_force: 1.0e8,
+        };
+        let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+
+        solve_joint(super::super::Joint::D6(joint), &mut bodies);
+
+        let separation = bodies[1].state().transform().translation().x
+            - bodies[0].state().transform().translation().x;
+        assert!(separation > 0.99, "driven separation={separation}");
     }
 }
