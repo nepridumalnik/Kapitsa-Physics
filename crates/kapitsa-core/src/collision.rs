@@ -1,6 +1,7 @@
 mod broad_phase;
 mod cache;
 mod ccd;
+mod ccd_island;
 mod config;
 mod contact;
 mod epa;
@@ -24,6 +25,7 @@ mod system;
 use std::time::Duration;
 
 pub(crate) use ccd::{CcdHit, CcdMotion, swept_bounds_motion};
+pub(crate) use ccd_island::CcdIslandLayout;
 pub use config::CollisionConfig;
 pub use contact::CollisionPair;
 pub use error::{CollisionError, QueryError};
@@ -80,6 +82,8 @@ pub struct CollisionStepMetrics {
     pub ccd_candidate_refresh_count: usize,
     /// Number of solver islands built for the step.
     pub island_count: usize,
+    /// Number of independent CCD islands built for the step.
+    pub ccd_island_count: usize,
     /// Approximate retained capacity of collision scratch buffers.
     pub retained_scratch_bytes: usize,
     /// Highest sampled retained scratch capacity during the last step.
@@ -121,6 +125,7 @@ impl CollisionStepMetrics {
         ccd_broad_phase_build_count: 0,
         ccd_candidate_refresh_count: 0,
         island_count: 0,
+        ccd_island_count: 0,
         retained_scratch_bytes: 0,
         peak_scratch_bytes: 0,
         committed_query_index_bytes: 0,

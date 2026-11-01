@@ -962,6 +962,8 @@ impl PhysicsWorld {
             context.ccd_states.clear();
             context.ccd_elapsed.clear();
             context.ccd_impact_counts.clear();
+            context.ccd_body_types.clear();
+            context.ccd_continuous_bodies.clear();
             context
                 .ccd_states
                 .try_reserve(prediction_count)
@@ -972,6 +974,14 @@ impl PhysicsWorld {
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
             context
                 .ccd_impact_counts
+                .try_reserve(prediction_count)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            context
+                .ccd_body_types
+                .try_reserve(prediction_count)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            context
+                .ccd_continuous_bodies
                 .try_reserve(prediction_count)
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
         }
@@ -987,7 +997,52 @@ impl PhysicsWorld {
             context.ccd_states.push(*body.state());
             context.ccd_elapsed.push(0.0);
             context.ccd_impact_counts.push(0);
+            context.ccd_body_types.push(body.physics().body_type());
+            context.ccd_continuous_bodies.push(
+                body.physics().body_type() == BodyType::Dynamic
+                    && body.ccd_mode() == CcdMode::Continuous,
+            );
         }
+        let candidate_count = self.collision_system.candidate_count();
+        {
+            let context = &mut self.collision_system.context;
+            context.ccd_candidate_bodies.clear();
+            context
+                .ccd_candidate_bodies
+                .try_reserve(candidate_count)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        }
+        for candidate_index in 0..candidate_count {
+            let pair = self
+                .collision_system
+                .candidate(candidate_index)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_a = self
+                .colliders
+                .get(pair.a.dense)
+                .filter(|_| pair.a.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_b = self
+                .colliders
+                .get(pair.b.dense)
+                .filter(|_| pair.b.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            let body_a = Self::predicted_body_index(
+                &self.collision_system.context.body_indices,
+                self.world_id,
+                collider_a.body,
+            )?;
+            let body_b = Self::predicted_body_index(
+                &self.collision_system.context.body_indices,
+                self.world_id,
+                collider_b.body,
+            )?;
+            self.collision_system
+                .context
+                .ccd_candidate_bodies
+                .push((body_a, body_b));
+        }
+        self.collision_system.build_ccd_islands()?;
         self.collision_system.context.ccd_processed_pairs.clear();
         self.collision_system.context.ccd_processed_time = 0.0;
         #[cfg(feature = "bench-internals")]

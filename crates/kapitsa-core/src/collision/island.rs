@@ -162,7 +162,7 @@ impl IslandLayout {
     }
 }
 
-fn find(parents: &mut [usize], mut body: usize) -> Result<usize, CollisionError> {
+pub(super) fn find(parents: &mut [usize], mut body: usize) -> Result<usize, CollisionError> {
     let mut root = body;
     loop {
         let parent = *parents.get(root).ok_or(CollisionError::InvalidContact)?;
@@ -181,7 +181,11 @@ fn find(parents: &mut [usize], mut body: usize) -> Result<usize, CollisionError>
     Ok(root)
 }
 
-fn union(parents: &mut [usize], left: usize, right: usize) -> Result<(), CollisionError> {
+pub(super) fn union(
+    parents: &mut [usize],
+    left: usize,
+    right: usize,
+) -> Result<(), CollisionError> {
     let root_left = find(parents, left)?;
     let root_right = find(parents, right)?;
     if root_left == root_right {

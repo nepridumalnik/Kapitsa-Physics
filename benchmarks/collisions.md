@@ -422,3 +422,10 @@ later in this step; pairs skipped by the existing processed-pair rule are not
 counted. The 5,405 repeated evaluations identify the global rescanning cost
 that the next stages target. The retained-scratch estimate includes the
 benchmark-only set used to count repeats.
+
+The stage 2 graph builder produced 64 CCD islands for the same scene, while
+the existing global CCD solver still processed them together. Its median full
+step was 144.215 ms and median CCD phase 143.986 ms; these ranges overlap the
+stage 1 run, so this is not a performance change. The graph tests cover a
+dynamic chain, repeated colliders on one body, shared kinematic and static
+surfaces, empty candidate sets, and stable island ordering.

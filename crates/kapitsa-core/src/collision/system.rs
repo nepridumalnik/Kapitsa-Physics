@@ -29,6 +29,7 @@ pub(crate) struct CollisionSystem {
     lifecycle_staged: bool,
     narrow_phase: NarrowPhase,
     islands: IslandLayout,
+    ccd_islands: super::CcdIslandLayout,
     solver_islands: Vec<SolverIsland>,
     ccd_solver: SolverWorkspace,
     cache_staged: bool,
@@ -51,6 +52,7 @@ impl CollisionSystem {
             lifecycle_staged: false,
             narrow_phase: NarrowPhase::new(),
             islands: IslandLayout::new(),
+            ccd_islands: super::CcdIslandLayout::new(),
             solver_islands: Vec::new(),
             ccd_solver: SolverWorkspace::new(),
             cache_staged: false,
@@ -180,6 +182,13 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_island_build(&mut self, elapsed: std::time::Duration, count: usize) {
+        self.benchmark_metrics.ccd_island_count = count;
+        self.benchmark_metrics.island_build += elapsed;
+        self.record_peak_scratch();
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_solver(&mut self, elapsed: std::time::Duration) {
         self.benchmark_metrics.solver += elapsed;
         self.record_peak_scratch();
@@ -214,6 +223,7 @@ impl CollisionSystem {
             + self.broad_phase.retained_capacity_bytes()
             + self.narrow_phase.retained_capacity_bytes()
             + self.islands.retained_capacity_bytes()
+            + self.ccd_islands.retained_capacity_bytes()
             + self.ccd_solver.retained_capacity_bytes()
             + self
                 .solver_islands
@@ -275,6 +285,36 @@ impl CollisionSystem {
 
     pub(crate) fn candidate(&self, index: usize) -> Option<CollisionPair> {
         self.broad_phase.candidates().get(index).copied()
+    }
+
+    pub(crate) fn build_ccd_islands(&mut self) -> Result<(), CollisionError> {
+        #[cfg(feature = "bench-internals")]
+        let started = std::time::Instant::now();
+        self.ccd_islands.build(
+            &self.context.ccd_body_types,
+            &self.context.ccd_continuous_bodies,
+            &self.context.ccd_candidate_bodies,
+        )?;
+        let island_count = self.ccd_island_count();
+        for island in 0..island_count {
+            if self
+                .ccd_island_candidates(island)
+                .is_none_or(<[usize]>::is_empty)
+            {
+                return Err(CollisionError::InvalidContact);
+            }
+        }
+        #[cfg(feature = "bench-internals")]
+        self.record_ccd_island_build(started.elapsed(), island_count);
+        Ok(())
+    }
+
+    pub(crate) fn ccd_island_count(&self) -> usize {
+        self.ccd_islands.island_count()
+    }
+
+    pub(crate) fn ccd_island_candidates(&self, island: usize) -> Option<&[usize]> {
+        self.ccd_islands.candidates(island)
     }
 
     #[allow(clippy::too_many_arguments)]
