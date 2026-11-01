@@ -1,108 +1,145 @@
-# Joint stress and rocket flight results
+# Joint solver stability and rocket flight
 
 ## Environment and reproduction
 
 - Windows 11, `x86_64-pc-windows-msvc`
 - AMD Ryzen 9 7900X3D, 12 cores / 24 logical processors
-- Rust `rustc 1.98.0 (88d9e12ae 2026-08-18)`, Cargo `1.98.0`
-- Optimized Release profile
+- Rust `1.98.0`, optimized Release profile
 
-The joint stress harness reports min / median / max wall time, solver phase
-times, retained and peak scratch capacity, and logical capacity growth. Normal
-step scenes use one warm-up and three measured steps. The destructive mass
-break case measures three separate first steps. Worker counts are 1, 2, 4,
-and 8.
+The joint harness uses three warm-up steps and ten measured samples for steady
+scenes, with worker counts 1, 2, 4, and 8. It reports wall and process CPU
+time, solver phase timing, counted allocations, retained scratch, island and
+contact counts, and maximum anchor/frame error. The Windows process CPU clock
+is quantized at roughly 15.6 ms, so its values are coarse for short scenes.
+Mass-break results measure the first step on fresh worlds; separation reports
+joint removal and the subsequent detached step separately.
 
 ```powershell
 cargo bench -p kapitsa-core --features bench-internals --bench joint_stress
+cargo test -p kapitsa --lib modular_rocket_remains_bounded_and_reproducible_through_adaptive_warp -- --test-threads=1
 cargo test -p kapitsa --release --lib --features bench-internals benchmark_rocket_flight_headless -- --ignored --nocapture --test-threads=1
 cargo test -p kapitsa --release --lib --features bench-internals benchmark_rocket_flight_runtime_mission -- --ignored --nocapture --test-threads=1
 ```
 
-The branching fixture exposed diverging joint errors. The recorded run includes
-the rows below, but only workers 1 and 2 were recorded for the final
-mass-separation scenario; workers 4 and 8 are missing. The benchmark does not
-install an allocator counter, so its scratch and capacity figures are not
-total allocation counts.
+## Solver findings
 
-## Joint and collision stress
+The original branching failure came from preparing every joint row from one
+shared body pose, then applying those rows after other constraints had already
+changed bodies in the same island. Connector transforms, effective masses,
+and Jacobians therefore became stale during Gauss-Seidel solving. The fixed
+joint also had a Baumgarte velocity bias on top of position projection; in a
+large fixed tree that correction added energy. Kapitsa now refreshes and solves
+each joint immediately in ordered passes, and fixed joints rely on position
+projection plus the velocity lock.
 
-Times are median milliseconds per step unless otherwise noted. Scratch is the
-retained workspace capacity after the measured step.
+Constraint warm starts are matched by `JointId` and a compact semantic row key.
+This prevents a limit or drive row from inheriting a multiplier from a
+different degree of freedom. Multipliers reset at physical step boundaries and
+persist only through the iterations where the row identity remains valid.
 
-| Scene, 14,400 bodies | Workers | Median ms | Retained scratch MiB | Result |
-|---|---:|---:|---:|---|
-| Fixed-joint chain, 14,399 joints, 1 island | 1 | 328.380 | 57.43 | Anchor error remained 0.01 m |
-| Fixed-joint chain, 14,399 joints, 1 island | 8 | 327.476 | 57.43 | Little scaling for one connected island |
-| Independent pairs, 7,200 joints / islands | 1 | 200.261 | 52.30 | Final anchor error 3.64e-12 m |
-| Independent pairs, 7,200 joints / islands | 4 | 76.636 | 52.30 | 2.61x faster than one worker |
-| Independent pairs, 7,200 joints / islands | 8 | 43.286 | 52.30 | 4.63x faster than one worker |
-| Dense vertical contacts, 14,400 candidates and contacts, 1 island | 1 | 261.585 | 68.46 | Solver iterations 160.816 ms; narrow phase 3.537 ms |
-| Mass joint break, 7,200 break events | 1 | 165.534 | 55.19 | First step; scratch grew by 57,870,144 logical bytes |
-| Mass joint break, 7,200 break events | 4 | 65.049 | 55.19 | First step |
-| Mass joint break, 7,200 break events | 8 | 39.374 | 55.19 | First step |
+The Chaos comparison followed the update/apply pattern in its
+[`PBDJointContainerSolver`](https://github.com/nepridumalnik/UnrealEngine/blob/260bb2e1c5610b31c63a36206eedd289409c5f11/Engine/Source/Runtime/Experimental/Chaos/Private/Chaos/Joint/PBDJointContainerSolver.cpp)
+and the sequential Gauss-Seidel solvers
+([`PBDJointSolverGaussSeidel`](https://github.com/nepridumalnik/UnrealEngine/blob/260bb2e1c5610b31c63a36206eedd289409c5f11/Engine/Source/Runtime/Experimental/Chaos/Private/Chaos/Joint/PBDJointSolverGaussSeidel.cpp),
+[`PBDJointCachedSolverGaussSeidel`](https://github.com/nepridumalnik/UnrealEngine/blob/260bb2e1c5610b31c63a36206eedd289409c5f11/Engine/Source/Runtime/Experimental/Chaos/Private/Chaos/Joint/PBDJointCachedSolverGaussSeidel.cpp)).
+Kapitsa keeps its joint/contact island and its tested phase ordering; it does not
+copy Chaos implementation code. The inspected Chaos version has optional
+projection and late-iteration shock propagation, including a documented
+reverse-order limitation. The Kapitsa mass-ratio and branching fixtures pass
+without either mechanism, so no extra public setting or solver pass was added.
+This is an implementation comparison, not a claim of equivalent performance
+or general stability.
 
-A fleet of 100 two-body rockets (100 joints and 100 islands) measured 0.712 ms
-at four workers and 0.638 ms at eight workers. Removing 7,200 joints in the
-mass-separation fixture took 0.555 ms median at one worker; the subsequent
-detached step took 3.879 ms. That separation run was incomplete at workers 4
-and 8 when the stress run was stopped.
+## Release stress results
 
-### Branching joint correctness failure
+Times below are median wall milliseconds per step. The fixed-chain anchors now
+match their configured one-meter spacing. The branching assembly begins with a
+0.01 m anchor offset and 0.001 rad frame offset; the solver runs thirteen
+successive steps. The harness fails if the body states or the configured joint
+error bounds are invalid.
 
-The branching fixture starts with a 0.01 m anchor offset and 0.001 rad frame
-offset. At 144 bodies, its final maximum anchor error reached `1.64e20 m`; at
-14,400 bodies it reached `1.94e44 m` after a step. This is a correctness
-failure, so the branching timing numbers are not useful as valid solver
-performance results. The connected chain and independent-pair fixtures do not
-show this explosion. `SolverWorkspace::solve_with_joints()` prepares the joint
-rows for an iteration before solving those rows; this is a lead for a solver
-investigation, not a confirmed root cause. No solver algorithm was changed in
-this benchmark stage.
+| Scene, 14,400 bodies | Workers | Median ms | Retained scratch | Final anchor / frame error |
+|---|---:|---:|---:|---:|
+| Fixed-joint chain, 14,399 joints, 1 island | 1 | 302.608 | 51.06 MiB | 0 m / 0 rad |
+| Fixed-joint chain, 14,399 joints, 1 island | 8 | 303.844 | 51.06 MiB | 0 m / 0 rad |
+| Branching fixed-joint assembly, 14,399 joints, 1 island | 1 | 385.536 | 51.06 MiB | 0.000456 m / 0.0000456 rad |
+| Branching fixed-joint assembly, 14,399 joints, 1 island | 8 | 383.445 | 51.06 MiB | 0.000456 m / 0.0000456 rad |
+| Independent pairs, 7,200 joints / islands | 1 | 189.707 | 62.41 MiB | 3.64e-12 m / 5.42e-20 rad |
+| Independent pairs, 7,200 joints / islands | 4 | 73.162 | 62.41 MiB | 3.64e-12 m / 5.42e-20 rad |
+| Independent pairs, 7,200 joints / islands | 8 | 42.087 | 62.41 MiB | 3.64e-12 m / 5.42e-20 rad |
+| Dense vertical contact stack, 14,400 contacts, 1 island | 1 | 261.743 | 68.46 MiB | n/a |
 
-The independent-pair measurements show that many independent islands scale
-across workers on this host. The chain and contact stack each form one large
-island and do not gain from extra workers. The retained scratch figures show
-workspace size, not the fraction of step time spent preparing that workspace.
+For the 14,400-body chain at one worker, wall min/median/p95/max was
+302.129/302.608/304.325/304.325 ms and process CPU min/median/p95/max was
+296.875/296.875/312.500/312.500 ms. Independent pairs at eight workers took
+39.883/42.087/42.915/42.915 ms wall; process CPU reported
+203.125/265.625/281.250/281.250 ms. CPU samples can exceed wall time because
+they sum work across threads, and their clock quantization limits precision.
 
-## Rocket mission
+The 100 two-body rocket fleet (100 joints and islands) measured 0.699 ms at
+four workers and 0.658 ms at eight. The 14,400-element first-step break case
+reported 7,200 break events, 173.502 ms at one worker and 67.773 ms at four.
+It used 79,274 allocations / 81,912,856 requested bytes and retained 65.30
+MiB of scratch. Removing 7,200 joints took 0.408 ms at one worker; its
+detached step took 3.832 ms. The eight-worker separation medians were 0.655 ms
+and 4.451 ms, respectively.
 
-The CLI and OpenGL viewer now use the same mission fixture and flight runner,
-including the attached two-stage fixed joint, fuel mass updates, separation,
-engine cutoff, and stage impacts. The Release headless benchmark completed a
-14.108 s simulated mission in 17.381 ms median across five samples after
-warm-up (1,693 steps, approximately 812x simulated time per wall second).
-Maximum altitude was 150.465 m, maximum speed 54.084 m/s, and measured energy
-drift was 0.00000192%. Both stages impacted; two impact events were observed.
+### Comparison with the pre-optimization run
 
-After one second of warm-up, the allocation sample over 1,573 steps averaged
-0.021 allocation calls and 39.6 requested bytes per step (maximum 25 calls and
-32,648 bytes in a step). Setup retained 717,441 bytes, with 37,212 peak extra
-live bytes. The requested-byte p95 was zero, so the per-step maximum is an
-outlier rather than a typical cost.
+The comparison checkout was `bed9e9e`; both runs used the same revised harness
+and 10-sample settings. On the aligned chain, one-worker median time changed
+from 290.620 ms to 302.608 ms (+4.1%); the eight-worker result changed from
+290.786 ms to 303.844 ms (+4.5%). The sequential refresh has a measurable cost
+on one large connected island. Independent pairs improved from 202.788 ms to
+189.707 ms at one worker (-6.5%), 76.032 ms to 73.162 ms at four workers
+(-3.8%), and 43.106 ms to 42.087 ms at eight workers (-2.4%).
 
-The full runtime mission benchmark at 1x warp completed 13.917 simulated
-seconds in 14,071.864 ms median and emitted 15 snapshots. A separate runtime
-CLI run requested 1,000x warp and completed 13.950 simulated seconds in about
-53 ms wall time (about 263x observed), with both terminal bodies removed.
+The pre-optimization branching run is not a valid timing baseline: after the
+same repeated workload its 14,400-body error grew to `2.714e148 m` and `0.425
+rad`. The corrected run ends at `4.56e-4 m` and `4.56e-5 rad`, within the
+benchmark bounds of 0.002 m and 0.0002 rad. Its timing is reported as a
+correctness result, not as a speed comparison.
 
-The generated GIF is [`target/rocket-flight-full.gif`](../target/rocket-flight-full.gif):
-320 x 180 pixels, 335 frames, 157,078 bytes. It was decoded after generation
-to verify its dimensions and frame count. The target directory is ignored by
-Git, so the GIF is a local artifact and is not part of the commit.
+The hot-path changes remove per-row joint-ID storage, avoid rebuilding owner
+metadata during sequential updates, and copy equal-sized row sets in place.
+The first-step break case uses about 3% less retained scratch than the
+pre-fast-path implementation on the corrected branch. Against `bed9e9e`,
+first-step break scratch is higher (65.30 vs 55.19 MiB). These figures are
+workspace capacity, not process RSS. No performance parity with Chaos is
+claimed.
 
-## Validation
+## Modular rocket regression
 
-The following passed for the mission refactor and tests:
+`modular_rocket_remains_bounded_and_reproducible_through_adaptive_warp` builds
+120 dynamic parts as two 60-part binary fixed-joint trees. Part masses vary;
+both stage roots change fuel mass, engines apply force away from the root
+center of mass, and the inter-stage joint is removed at a fixed simulation
+time. A plane collider exercises pad contact in the same connected solver
+island. The fixture compares a 5 ms fixed reference with adaptive 1x, 10x, and
+100x target steps over 0.5 simulated seconds.
 
-```powershell
-cargo fmt --all -- --check
-cargo check --workspace --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-cargo doc --workspace --all-features --no-deps
-```
+Each warp run requires finite states, a remaining two-tree joint count,
+completed fuel updates and stage separation, surface contact, anchor error
+below 0.03 m, frame error below 0.1 rad, per-part position error below 0.5 m,
+and velocity error below 2.5 m/s against the reference. The 100x run is repeated
+with identical inputs and all 120 part states must match exactly. These are
+regression tolerances for this short test, not a formal adaptive-integrator
+error guarantee.
 
-The expanded joint benchmark also passed formatting and targeted Clippy. The
-recorded stress run is incomplete for workers 4 and 8 in the final
-mass-separation case, as noted above.
+This fixture is evidence for a 120-part assembly over this event sequence. It
+does not establish stability for 500-part vehicles, dense colliders on every
+part, long missions, or arbitrary joint graphs. The scene uses root colliders
+for the pad-contact path and deliberately omits detailed aerodynamic forces.
+
+## Existing rocket mission and visual demo
+
+The CLI and OpenGL viewer continue to use the shared two-stage mission fixture,
+including fuel-mass updates, stage separation, engine cutoff, and stage
+impacts. The headless Release mission previously completed 14.108 simulated
+seconds in 17.381 ms median across five samples (1,693 steps, about 812x
+simulated time per wall second). Maximum altitude was 150.465 m, maximum speed
+54.084 m/s, and measured energy drift was 0.00000192%. Both stages impacted
+and two impact events were observed.
+
+The existing GIF remains at [`target/rocket-flight-full.gif`](../target/rocket-flight-full.gif)
+as an ignored local artifact; no rendering dependency was added to core crates.

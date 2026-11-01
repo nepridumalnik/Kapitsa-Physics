@@ -1090,6 +1090,7 @@ fn append_axis_alignment(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // Keep limit inputs explicit at the solver call sites.
 fn append_linear_limit(
     bodies: &[SolverBody],
     workspace: &mut JointWorkspace,
@@ -1332,6 +1333,7 @@ fn bilateral_bounds() -> (f64, f64) {
     (f64::NEG_INFINITY, f64::INFINITY)
 }
 
+#[allow(clippy::too_many_arguments)] // Keep row geometry explicit in the hot path.
 fn push_linear_row(
     bodies: &[SolverBody],
     workspace: &mut JointWorkspace,

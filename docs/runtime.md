@@ -133,3 +133,6 @@ For collision pipeline and worker measurements, see
 [`benchmarks/collisions.md`](../benchmarks/collisions.md). The historical CCD
 optimization details remain in the
 [`CCD optimization report`](reviews/ccd-final-optimization-report.md).
+For joint row identity, sequential constraint updates, and modular rocket
+regression results, see [`Joint constraint solving`](joints.md) and its linked
+stress measurements.
