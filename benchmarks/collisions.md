@@ -458,33 +458,124 @@ TOI search. The sphere–cuboid specialization solves linear translation against
 the rounded box analytically and uses conservative advancement with exact
 point-to-box distance for sampled nonlinear sphere paths; rotation of the
 cuboid still uses GJK. On the same
-64-impact scene, median step time was 0.656 ms, CCD was 0.513 ms, and TOI
-search was 0.045 ms. This reduced the CCD phase by 72% and full-step time by
-68% relative to the pre-specialization measurement. The benchmark wall was
-extended to contain the entire grid, so all 64 spheres produce impacts.
+64-impact scene, the final Release run measured 0.677 ms median step time,
+0.539 ms CCD, and 0.069 ms TOI search. This reduced the CCD phase by 71% and
+full-step time by 67% relative to the pre-specialization measurement. The
+benchmark wall contains the entire grid, so all 64 spheres produce impacts.
 
-The sphere workload is now cheap enough that scoped workers do not improve it:
-at 64 spheres, 1/2/4 workers measured 0.661/0.662/0.662 ms per step. Parallel
-TOI preparation is therefore skipped for analytic sphere pairs. For
-GJK-heavy independent cuboid islands, the measured cutoff is 256 candidates:
+The sphere workload is now cheap enough that scoped workers provide no stable
+gain: at 64 spheres, 1/2/4 workers measured 0.694/0.681/0.688 ms per step, but
+the sample ranges overlap. Parallel TOI preparation is therefore skipped for
+analytic sphere pairs. For GJK-heavy independent cuboid islands, preparation
+starts at 256 candidates:
 
 | Cuboid bodies | Workers | Step median | CCD median |
 |---:|---:|---:|---:|
-| 64 | 1 / 2 / 4 | 1.021 / 0.999 / 0.993 ms | 0.852 / 0.833 / 0.832 ms |
-| 128 | 1 / 2 / 4 | 2.007 / 2.020 / 2.003 ms | 1.670 / 1.677 / 1.659 ms |
-| 256 | 1 / 2 / 4 | 4.082 / 3.953 / 3.836 ms | 3.388 / 3.240 / 3.110 ms |
-| 512 | 1 / 2 / 4 | 8.401 / 8.102 / 7.502 ms | 6.953 / 6.587 / 5.994 ms |
+| 64 | 1 / 2 / 4 | 0.988 / 0.984 / 1.001 ms | 0.818 / 0.821 / 0.827 ms |
+| 128 | 1 / 2 / 4 | 2.022 / 2.022 / 1.991 ms | 1.683 / 1.672 / 1.665 ms |
+| 256 | 1 / 2 / 4 | 4.058 / 4.018 / 3.835 ms | 3.351 / 3.276 / 3.099 ms |
+| 512 | 1 / 2 / 4 | 8.459 / 7.815 / 7.736 ms | 6.998 / 6.345 / 6.236 ms |
 
-At 256 candidates, four workers reduced median step time by 6%; at 512, by
-11%. The 64 and 128 cases showed no stable gain. This cutoff is for candidate
-TOI preparation only; island impact resolution remains ordered so trajectory
-changes and cross-island contacts retain deterministic handling. The worker
-benchmarks use static shared walls and separate dynamic islands. Their retained
-scratch estimates were 683 KiB at 256 candidates and 1,364 KiB at 512; parallel
-preparation returned the same estimate as the sequential path.
+At 256 candidates, four workers reduced median step time by 5.5%, although the
+sample ranges overlap. At 512, the median step improved by 8.5% and the ranges do
+not overlap. The 64 and 128 cases showed no stable gain. This cutoff is for
+candidate TOI preparation only; island impact resolution remains ordered so
+trajectory changes and cross-island contacts retain deterministic handling.
+The worker benchmarks use static shared walls and separate dynamic islands.
+Their retained scratch estimates were 683 KiB at 256 candidates and 1,364 KiB
+at 512; parallel preparation returned the same estimate as the sequential
+path.
 
 The specialized solver tests face, edge, corner and tangential contact,
 near-misses, fixed rotated boxes, translating pairs, initial overlap, and
 reversed pair order. Rotating box motion continues through the general GJK
-path. The exact table and broad validation results will be consolidated in
-the final CCD refactor report.
+path.
+
+## CCD Chaos refactor, final stage 9 measurements
+
+The final Release run used one warm-up and five independently built worlds per
+scene on the same machine. The 64-impact baseline comparison above uses the
+same 1/60-second step, sphere layout, static wall, and benchmark instrumentation
+as stage 1. The final stage 1 source measured 146.847 ms full step and
+146.563 ms CCD; the final implementation measured 0.677 ms and 0.539 ms.
+That is a 217x reduction in full-step median and a 272x reduction in CCD
+median. Candidate evaluations fell from 5,560 (5,405 repeated) to 64 (zero
+repeated), broadphase builds from 65 to 1, and CCD refreshes from 64 to zero.
+Both runs resolved 64 impacts. Retained CCD scratch fell from about 234 KiB to
+171 KiB. The separately quoted historical 126.093 ms CCD result is not the
+stage 1 source baseline; the final 0.539 ms result is about 234x faster than
+that reference.
+
+| Scene | Step min / median / max | CCD min / median / max | CCD islands | Initial / final candidates | TOI calls / repeats | Resweeps | Impacts | New pairs | Retained scratch |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 64 fast spheres vs. wall | 0.667 / 0.677 / 0.704 ms | 0.534 / 0.539 / 0.541 ms | 64 | 64 / 64 | 64 / 0 | 64 | 64 | 0 | 171 KiB |
+| 64 fast bodies, no impacts | 0.488 / 0.498 / 0.535 ms | 0.307 / 0.314 / 0.325 ms | 1 | 531 / 531 | 531 / 0 | 0 | 0 | 0 | 623 KiB |
+| 64-body swept chain, one large island | 0.133 / 0.135 / 0.155 ms | 0.055 / 0.057 / 0.058 ms | 1 | 64 / 64 | 67 / 3 | 2 | 2 | 0 | 144 KiB |
+| One sphere, sequential wall bounces | 0.058 / 0.058 / 0.058 ms | 0.055 / 0.055 / 0.055 ms | 1 | 2 / 2 | 8 / 6 | 6 | 6 | 0 | 8 KiB |
+| Rebound discovers a new pair | 0.029 / 0.029 / 0.031 ms | 0.025 / 0.025 / 0.027 ms | 1 | 1 / 2 | 4 / 2 | 3 | 3 | 1 | 8 KiB |
+
+The 64-body chain forms one island from overlapping swept candidate bounds; only
+the leading body reaches the wall. The no-impact scene forms one island from
+531 conservative broadphase candidates and performs no contact resolution.
+These cases measure both the cost of large candidate groups and the cost of
+non-contacting fast motion. The sequential-bounce case reaches six actual
+impacts in a single step. The rebound case begins with one candidate, discovers
+the previously absent static-target pair after trajectory change, and resolves
+all three impacts.
+
+The following tables show step and CCD min/median/max by worker count.
+Each reported island count and initial candidate count equals the body count;
+resweeps and impacts also equal it. Repeated TOIs, new pairs, and fallbacks are
+zero. Retained scratch was 44 / 171 / 342 / 683 KiB for sphere counts 16 / 64 /
+128 / 256, and 171 / 342 / 683 / 1,364 KiB for cuboid counts 64 / 128 / 256 /
+512. Parallel TOI preparation returned the same retained-scratch estimate.
+
+| Sphere bodies vs. wall | Workers | Step min / median / max (ms) | CCD min / median / max (ms) |
+|---:|---:|---:|---:|
+| 16 | 1 | 0.165 / 0.169 / 0.170 | 0.133 / 0.134 / 0.137 |
+| 16 | 2 | 0.164 / 0.165 / 0.167 | 0.132 / 0.133 / 0.133 |
+| 16 | 4 | 0.164 / 0.164 / 0.168 | 0.132 / 0.133 / 0.136 |
+| 64 | 1 | 0.687 / 0.694 / 0.714 | 0.538 / 0.549 / 0.553 |
+| 64 | 2 | 0.672 / 0.681 / 0.686 | 0.537 / 0.541 / 0.549 |
+| 64 | 4 | 0.680 / 0.688 / 0.708 | 0.540 / 0.547 / 0.553 |
+| 128 | 1 | 1.397 / 1.422 / 1.440 | 1.107 / 1.110 / 1.139 |
+| 128 | 2 | 1.394 / 1.399 / 1.419 | 1.095 / 1.097 / 1.105 |
+| 128 | 4 | 1.395 / 1.404 / 1.443 | 1.107 / 1.116 / 1.118 |
+| 256 | 1 | 2.858 / 2.878 / 2.942 | 2.245 / 2.282 / 2.297 |
+| 256 | 2 | 2.849 / 2.895 / 2.934 | 2.243 / 2.273 / 2.310 |
+| 256 | 4 | 2.853 / 2.914 / 2.929 | 2.260 / 2.276 / 2.295 |
+
+The sphere path scales close to proportionally from 64 to 256 bodies: a 4x
+increase in body count produced 4.15x step time and 4.16x CCD time at one
+worker. Differences between worker counts overlap sample ranges, so the sphere
+workload has no established parallel speedup.
+
+| Cuboid bodies vs. wall (GJK) | Workers | Step min / median / max (ms) | CCD min / median / max (ms) |
+|---:|---:|---:|---:|
+| 64 | 1 | 0.977 / 0.988 / 0.994 | 0.815 / 0.818 / 0.829 |
+| 64 | 2 | 0.971 / 0.984 / 1.008 | 0.815 / 0.821 / 0.823 |
+| 64 | 4 | 0.976 / 1.001 / 1.008 | 0.818 / 0.827 / 0.840 |
+| 128 | 1 | 2.005 / 2.022 / 2.065 | 1.656 / 1.683 / 1.714 |
+| 128 | 2 | 2.001 / 2.022 / 2.066 | 1.666 / 1.672 / 1.681 |
+| 128 | 4 | 1.987 / 1.991 / 2.057 | 1.647 / 1.665 / 1.680 |
+| 256 | 1 | 4.041 / 4.058 / 4.109 | 3.340 / 3.351 / 3.385 |
+| 256 | 2 | 3.805 / 4.018 / 4.189 | 3.115 / 3.276 / 3.453 |
+| 256 | 4 | 3.820 / 3.835 / 3.987 | 3.081 / 3.099 / 3.241 |
+| 512 | 1 | 8.384 / 8.459 / 8.531 | 6.957 / 6.998 / 7.058 |
+| 512 | 2 | 7.750 / 7.815 / 8.104 | 6.266 / 6.345 / 6.594 |
+| 512 | 4 | 7.684 / 7.736 / 7.853 | 6.190 / 6.236 / 6.309 |
+
+Doubling GJK-heavy candidates from 64 to 512 increased one-worker CCD time by
+8.56x, close to the 8x candidate increase. Four workers reduced the median
+step by 5.5% at 256 candidates (ranges overlap) and by 8.5% at 512 (ranges do
+not overlap); the 512-candidate CCD median improved by 10.9%. The measured
+cutoff stays at 256 candidates; below it, scoped worker overhead outweighs
+preparation gains. No-contact 20,000-body full-step
+time was 26.641 ms median with about 16,420 KiB retained scratch. The current
+1,000 raycasts against 20,000 static colliders took 0.772 ms median. The
+existing same-machine sweep comparison remains 240.198 ms baseline to
+245.160 ms final for 1,000 sweeps against a 20,000-triangle mesh (+2.1%).
+
+The final refactor review, architecture limitations, implementation size,
+commit list, and validation matrix are in
+[`docs/reviews/ccd-chaos-refactoring-report.md`](../docs/reviews/ccd-chaos-refactoring-report.md).

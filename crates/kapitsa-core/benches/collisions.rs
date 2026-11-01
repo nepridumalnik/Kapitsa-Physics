@@ -8,8 +8,9 @@ use kapitsa_core::{
     collider::Collider,
     collision::{CollisionStepMetrics, QueryFilter, Ray},
     mass::MassProperties,
+    material::PhysicsMaterial,
     rigid_body::{CcdMode, RigidBody},
-    shape::{Cuboid, HeightField, LevelSet, Shape, Sphere, TriangleMesh},
+    shape::{Cuboid, HeightField, LevelSet, Plane, Shape, Sphere, TriangleMesh},
     transform::Transform,
     world::PhysicsWorld,
 };
@@ -43,6 +44,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("HeightField + colliders", height_field_scene),
         ("LevelSet + colliders", level_set_scene),
         ("CCD fast bodies", ccd_scene),
+        ("CCD fast no-contact candidates", ccd_no_contact_scene),
+        ("CCD one large island", ccd_large_island_scene),
+        ("CCD sequential wall bounces", ccd_sequence_scene),
+        ("CCD rebound creates pair", ccd_rebound_scene),
     ] {
         report_world(name, build)?;
     }
@@ -233,6 +238,130 @@ fn ccd_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     Ok(world)
 }
 
+fn ccd_no_contact_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = mass()?;
+    for index in 0..64 {
+        let x = -5.0 - index as f64 * 2.0;
+        add_sphere_with_velocity(
+            &mut world,
+            Vec3::new(x, 0.0, 0.0),
+            Vec3::new(1000.0, 0.0, 0.0),
+            mass,
+            true,
+        )?;
+    }
+    Ok(world)
+}
+
+fn ccd_large_island_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 0.5, 1.0)?)?;
+    let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let wall = world.add_collider(
+        wall,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 2.0, 2.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    world.set_collider_material(wall, Some(material))?;
+
+    let mass = mass()?;
+    for index in 0..64 {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(
+                Vec3::new(-5.0 - index as f64 * 17.0, 0.0, 0.0),
+                Quat::IDENTITY,
+            )?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::new(1000.0, 0.0, 0.0))?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body)?;
+        let collider = world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?;
+        world.set_collider_material(collider, Some(material))?;
+    }
+    Ok(world)
+}
+
+fn ccd_sequence_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    add_bench_plane(&mut world, Vec3::X, -1.0, material)?;
+    add_bench_plane(&mut world, -Vec3::X, -1.0, material)?;
+
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass()?)?;
+    body.set_linear_velocity(Vec3::new(600.0, 0.0, 0.0))?;
+    body.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(body)?;
+    let collider = world.add_collider(
+        body,
+        Collider::new(Shape::Sphere(Sphere::new(0.2)?), Transform::identity()),
+    )?;
+    world.set_collider_material(collider, Some(material))?;
+    Ok(world)
+}
+
+fn ccd_rebound_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let wall = world.add_collider(
+        wall_body,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    world.set_collider_material(wall, Some(material))?;
+
+    let target_body = world.add_body(RigidBody::new_static(Transform::new(
+        Vec3::new(15.0, 0.0, 0.0),
+        Quat::IDENTITY,
+    )?))?;
+    let target = world.add_collider(
+        target_body,
+        Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+    )?;
+    world.set_collider_material(target, Some(material))?;
+
+    let mut body = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY)?,
+        mass()?,
+    )?;
+    body.set_linear_velocity(Vec3::new(-2000.0, 0.0, 0.0))?;
+    body.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(body)?;
+    let collider = world.add_collider(
+        body,
+        Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+    )?;
+    world.set_collider_material(collider, Some(material))?;
+    Ok(world)
+}
+
+fn add_bench_plane(
+    world: &mut PhysicsWorld,
+    normal: Vec3,
+    distance: f64,
+    material: kapitsa_core::material::MaterialId,
+) -> Result<(), Box<dyn Error>> {
+    let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let collider = world.add_collider(
+        body,
+        Collider::new(
+            Shape::Plane(Plane::from_vec(normal, distance)?),
+            Transform::identity(),
+        ),
+    )?;
+    world.set_collider_material(collider, Some(material))?;
+    Ok(())
+}
+
 fn ccd_box_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     let mut world = PhysicsWorld::new();
     let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
@@ -289,13 +418,20 @@ fn report_ccd_worker_scaling_for(
                 samples.push(run_ccd_shards_with(body_count, worker_count, scene)?);
             }
             samples.sort_unstable_by_key(|sample| sample.0);
+            let mut ccd_samples = samples
+                .iter()
+                .map(|sample| sample.1.ccd)
+                .collect::<Vec<_>>();
+            ccd_samples.sort_unstable();
             let median = samples[SAMPLES / 2];
             println!(
-                "{body_count:4} bodies x{worker_count}: step={:.3}/{:.3}/{:.3} ms | ccd={:.3} ms islands={} candidates={} toi={} resweeps={} fallback={} scratch={} KiB",
+                "{body_count:4} bodies x{worker_count}: step={:.3}/{:.3}/{:.3} ms | ccd={:.3}/{:.3}/{:.3} ms | islands={} candidates={} toi={} resweeps={} fallback={} scratch={} KiB",
                 millis(samples[0].0),
                 millis(median.0),
                 millis(samples[SAMPLES - 1].0),
-                millis(median.1.ccd),
+                millis(ccd_samples[0]),
+                millis(ccd_samples[SAMPLES / 2]),
+                millis(ccd_samples[SAMPLES - 1]),
                 median.1.ccd_island_count,
                 median.1.ccd_initial_candidate_count,
                 median.1.ccd_toi_call_count,
@@ -413,13 +549,18 @@ fn report_world(
     let median = &samples[SAMPLES / 2];
     let min = samples.first().ok_or("missing benchmark sample")?;
     let max = samples.last().ok_or("missing benchmark sample")?;
+    let mut ccd_samples = samples
+        .iter()
+        .map(|sample| sample.metrics.ccd)
+        .collect::<Vec<_>>();
+    ccd_samples.sort_unstable();
     let high_water = samples
         .iter()
         .map(|sample| sample.metrics.retained_scratch_bytes)
         .max()
         .unwrap_or(0);
     println!(
-        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} solver_islands={} ccd_islands={} ccd_impacts={} ccd_clipped={} | CCD initial={} final={} toi_calls={} repeated={} broad_builds={} refreshes={} resweeps={} new_pairs={} fallback={} invalidated={} | ccd={:.3} search={:.3} refresh={:.3} resolve={:.3} ms | index={:.3} broad={:.3} narrow={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
+        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} solver_islands={} ccd_islands={} ccd_impacts={} ccd_clipped={} | CCD initial={} final={} toi_calls={} repeated={} broad_builds={} refreshes={} resweeps={} new_pairs={} fallback={} invalidated={} | ccd={:.3}/{:.3}/{:.3} ms min/median/max search={:.3} refresh={:.3} resolve={:.3} ms | index={:.3} broad={:.3} narrow={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
         millis(min.elapsed),
         millis(median.elapsed),
         millis(max.elapsed),
@@ -439,7 +580,9 @@ fn report_world(
         median.metrics.ccd_new_candidate_count,
         median.metrics.ccd_global_fallback_count,
         median.metrics.ccd_invalidated_toi_count,
-        millis(median.metrics.ccd),
+        millis(ccd_samples[0]),
+        millis(ccd_samples[SAMPLES / 2]),
+        millis(ccd_samples[SAMPLES - 1]),
         millis(median.metrics.ccd_toi_search),
         millis(median.metrics.ccd_candidate_refresh),
         millis(median.metrics.ccd_contact_resolution),
