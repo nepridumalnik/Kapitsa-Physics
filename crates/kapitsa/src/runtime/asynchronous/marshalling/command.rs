@@ -722,6 +722,12 @@ pub(crate) fn apply_command(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "bench-internals")]
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::collections::HashMap;
+    use std::hint::black_box;
+    use std::time::{Duration, Instant};
+
     use kapitsa_core::{
         collider::{Collider, CollisionFilter, CollisionMode},
         collision::{QueryError, QueryFilter, Ray},
@@ -735,7 +741,304 @@ mod tests {
     use kapitsa_math::{Mat3, Quat, Vec3};
 
     use super::super::PhysicsClientError;
-    use super::{PhysicsCommand, PhysicsCommandResult, apply_command, apply_command_batch};
+    use super::{
+        PhysicsCommand, PhysicsCommandResult, StagedForceSource, apply_command, apply_command_batch,
+    };
+
+    #[cfg(feature = "bench-internals")]
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[cfg(feature = "bench-internals")]
+    static TRACK_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+    #[cfg(feature = "bench-internals")]
+    static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "bench-internals")]
+    static ALLOCATION_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(feature = "bench-internals")]
+    struct TrackingAllocator;
+
+    #[cfg(feature = "bench-internals")]
+    unsafe impl GlobalAlloc for TrackingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() && TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+                ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+                ALLOCATION_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            pointer
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let pointer = unsafe { System.alloc_zeroed(layout) };
+            if !pointer.is_null() && TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+                ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+                ALLOCATION_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            pointer
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            let new_pointer = unsafe { System.realloc(pointer, layout, size) };
+            if !new_pointer.is_null() && TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+                ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+                ALLOCATION_BYTES.fetch_add(size, Ordering::Relaxed);
+            }
+            new_pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(pointer, layout) };
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[global_allocator]
+    static TEST_ALLOCATOR: TrackingAllocator = TrackingAllocator;
+
+    #[cfg(feature = "bench-internals")]
+    struct AllocationTracking;
+
+    #[cfg(feature = "bench-internals")]
+    impl AllocationTracking {
+        fn start() -> Self {
+            ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+            ALLOCATION_BYTES.store(0, Ordering::Relaxed);
+            TRACK_ALLOCATIONS.store(true, Ordering::Relaxed);
+            Self
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    impl Drop for AllocationTracking {
+        fn drop(&mut self) {
+            TRACK_ALLOCATIONS.store(false, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[derive(Clone, Copy)]
+    struct BatchAllocationStats {
+        count: usize,
+        bytes: usize,
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn tracked_batch_allocations(
+        world: &mut PhysicsWorld,
+        commands: &[PhysicsCommand],
+    ) -> BatchAllocationStats {
+        let tracking = AllocationTracking::start();
+        let result = apply_command_batch(world, commands);
+        drop(tracking);
+        result.expect("benchmark batch applies");
+        BatchAllocationStats {
+            count: ALLOCATION_COUNT.load(Ordering::Relaxed),
+            bytes: ALLOCATION_BYTES.load(Ordering::Relaxed),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum BatchScenario {
+        RepeatedBody,
+        DistinctBodies,
+        MixedBodiesAndSources,
+    }
+
+    impl BatchScenario {
+        const ALL: [Self; 3] = [
+            Self::RepeatedBody,
+            Self::DistinctBodies,
+            Self::MixedBodiesAndSources,
+        ];
+
+        fn name(self) -> &'static str {
+            match self {
+                Self::RepeatedBody => "same-body",
+                Self::DistinctBodies => "distinct-bodies",
+                Self::MixedBodiesAndSources => "mixed-body-source",
+            }
+        }
+    }
+
+    struct BatchCase {
+        world: PhysicsWorld,
+        commands: Vec<PhysicsCommand>,
+        staged_bodies: Vec<kapitsa_core::world::BodyId>,
+        staged_sources: Vec<kapitsa_core::world::ForceSourceId>,
+    }
+
+    fn batch_case(scenario: BatchScenario, command_count: usize) -> BatchCase {
+        let mut world = PhysicsWorld::new();
+        let mut commands = Vec::with_capacity(command_count);
+        let mut staged_bodies = Vec::new();
+        let mut staged_sources = Vec::new();
+
+        match scenario {
+            BatchScenario::RepeatedBody => {
+                let body = world.add_body(dynamic_body()).expect("body");
+                staged_bodies.push(body);
+                for index in 0..command_count {
+                    commands.push(PhysicsCommand::SetLinearVelocity {
+                        id: body,
+                        velocity: Vec3::new(index as f64 + 1.0, 0.0, 0.0),
+                    });
+                }
+            }
+            BatchScenario::DistinctBodies => {
+                for index in 0..command_count {
+                    let body = world.add_body(dynamic_body()).expect("body");
+                    staged_bodies.push(body);
+                    commands.push(PhysicsCommand::SetLinearVelocity {
+                        id: body,
+                        velocity: Vec3::new(index as f64 + 1.0, 0.0, 0.0),
+                    });
+                }
+            }
+            BatchScenario::MixedBodiesAndSources => {
+                let body = world.add_body(dynamic_body()).expect("body");
+                staged_bodies.push(body);
+                for index in 0..command_count / 2 {
+                    let source = world
+                        .add_force_source(body, Vec3::ZERO, Vec3::X)
+                        .expect("force source");
+                    staged_sources.push(source);
+                    commands.push(PhysicsCommand::SetLinearVelocity {
+                        id: body,
+                        velocity: Vec3::new(index as f64 + 1.0, 0.0, 0.0),
+                    });
+                    commands.push(PhysicsCommand::SetForceSource {
+                        id: source,
+                        local_point: Vec3::Y,
+                        local_force: Vec3::new(index as f64 + 2.0, 0.0, 0.0),
+                    });
+                }
+            }
+        }
+
+        BatchCase {
+            world,
+            commands,
+            staged_bodies,
+            staged_sources,
+        }
+    }
+
+    fn apply_batch(case: &mut BatchCase) {
+        apply_command_batch(&mut case.world, black_box(&case.commands))
+            .expect("benchmark batch applies");
+    }
+
+    fn staged_buffer_control(case: &BatchCase) {
+        let mut bodies = Vec::with_capacity(case.commands.len());
+        for id in &case.staged_bodies {
+            bodies.push((*id, *case.world.body(*id).expect("staged body")));
+        }
+
+        let mut sources = Vec::new();
+        for (command_index, id) in case.staged_sources.iter().copied().enumerate() {
+            let source = *case.world.force_source(id).expect("staged source");
+            sources.push(StagedForceSource {
+                id,
+                local_point: source.local_point(),
+                local_force: source.local_force(),
+                enabled: source.is_enabled(),
+                command_index,
+            });
+        }
+        black_box((&bodies, &sources));
+    }
+
+    fn average_ns(samples: &[f64]) -> (f64, f64, f64) {
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        (
+            sorted[0],
+            sorted[sorted.len() / 2],
+            sorted[sorted.len() - 1],
+        )
+    }
+
+    fn repeats_for(target: Duration, pilot: Duration) -> usize {
+        let target_ns = target.as_nanos().max(1);
+        let pilot_ns = pilot.as_nanos().max(1);
+        usize::try_from(target_ns.div_ceil(pilot_ns))
+            .unwrap_or(usize::MAX)
+            .clamp(1, 65_536)
+    }
+
+    fn calibrated_repeats(
+        scenario: BatchScenario,
+        command_count: usize,
+        target: Duration,
+        mut run: impl FnMut(&mut BatchCase),
+    ) -> usize {
+        const CALIBRATION_REPEATS: usize = 4;
+        let mut case = batch_case(scenario, command_count);
+        run(&mut case);
+        let started = Instant::now();
+        for _ in 0..CALIBRATION_REPEATS {
+            run(&mut case);
+        }
+        repeats_for(target, started.elapsed() / CALIBRATION_REPEATS as u32)
+    }
+
+    fn run_samples(
+        scenario: BatchScenario,
+        command_count: usize,
+        repeats: usize,
+        mut run: impl FnMut(&mut BatchCase),
+        mut verify: impl FnMut(&BatchCase),
+    ) -> (f64, f64, f64) {
+        const SAMPLES: usize = 5;
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let mut case = batch_case(scenario, command_count);
+            run(&mut case);
+            let started = Instant::now();
+            for _ in 0..repeats {
+                run(&mut case);
+            }
+            samples.push(started.elapsed().as_secs_f64() * 1.0e9 / repeats as f64);
+            verify(&case);
+        }
+        average_ns(&samples)
+    }
+
+    fn verify_batch_result(case: &BatchCase) {
+        let mut expected_bodies = HashMap::new();
+        let mut expected_sources = HashMap::new();
+        for command in &case.commands {
+            match command {
+                PhysicsCommand::SetLinearVelocity { id, velocity } => {
+                    expected_bodies.insert(*id, *velocity);
+                }
+                PhysicsCommand::SetForceSource {
+                    id,
+                    local_point,
+                    local_force,
+                } => {
+                    expected_sources.insert(*id, (*local_point, *local_force));
+                }
+                _ => panic!("unexpected command in benchmark batch"),
+            }
+        }
+        for (id, expected) in expected_bodies {
+            assert_eq!(
+                case.world
+                    .body(id)
+                    .expect("updated body")
+                    .state()
+                    .linear_velocity(),
+                expected
+            );
+        }
+        for (id, (expected_point, expected_force)) in expected_sources {
+            let source = case.world.force_source(id).expect("updated source");
+            assert_eq!(source.local_point(), expected_point);
+            assert_eq!(source.local_force(), expected_force);
+        }
+    }
 
     fn mass(value: f64) -> MassProperties {
         MassProperties::new(value, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass")
@@ -1207,5 +1510,74 @@ mod tests {
             world.body(body).expect("body").state().linear_velocity(),
             Vec3::ZERO
         );
+    }
+
+    #[test]
+    #[ignore = "Release benchmark; run with the command batch scaling filter"]
+    fn benchmark_apply_command_batch_scaling() {
+        const COMMAND_COUNTS: [usize; 7] = [128, 256, 512, 1_024, 2_048, 4_096, 8_192];
+        const TARGET_SAMPLE_TIME: Duration = Duration::from_millis(5);
+
+        println!(
+            "scenario,commands,repeats,min_us_per_batch,median_us_per_batch,max_us_per_batch,median_ns_per_command,temp_buffer_us,temp_buffer_share_pct"
+        );
+        for scenario in BatchScenario::ALL {
+            for command_count in COMMAND_COUNTS {
+                let repeats =
+                    calibrated_repeats(scenario, command_count, TARGET_SAMPLE_TIME, apply_batch);
+                let (min_ns, median_ns, max_ns) = run_samples(
+                    scenario,
+                    command_count,
+                    repeats,
+                    apply_batch,
+                    verify_batch_result,
+                );
+                let temp_buffer_repeats =
+                    calibrated_repeats(scenario, command_count, TARGET_SAMPLE_TIME, |case| {
+                        staged_buffer_control(case)
+                    });
+                let (_, temp_median_ns, _) = run_samples(
+                    scenario,
+                    command_count,
+                    temp_buffer_repeats,
+                    |case| staged_buffer_control(case),
+                    |_| {},
+                );
+
+                println!(
+                    "{},{command_count},{repeats},{:.3},{:.3},{:.3},{:.2},{:.3},{:.1}",
+                    scenario.name(),
+                    min_ns / 1_000.0,
+                    median_ns / 1_000.0,
+                    max_ns / 1_000.0,
+                    median_ns / command_count as f64,
+                    temp_median_ns / 1_000.0,
+                    temp_median_ns * 100.0 / median_ns,
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "allocation counts; run separately with bench-internals"]
+    fn benchmark_apply_command_batch_allocations() {
+        const COMMAND_COUNTS: [usize; 7] = [128, 256, 512, 1_024, 2_048, 4_096, 8_192];
+
+        println!("scenario,commands,allocations_per_batch,requested_bytes_per_batch");
+        for scenario in BatchScenario::ALL {
+            for command_count in COMMAND_COUNTS {
+                let mut case = batch_case(scenario, command_count);
+                apply_batch(&mut case);
+                let allocations = tracked_batch_allocations(&mut case.world, &case.commands);
+                verify_batch_result(&case);
+                println!(
+                    "{},{command_count},{},{}",
+                    scenario.name(),
+                    allocations.count,
+                    allocations.bytes,
+                );
+            }
+        }
     }
 }

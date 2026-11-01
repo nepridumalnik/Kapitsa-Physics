@@ -906,3 +906,118 @@ cargo bench -p kapitsa-core --features bench-internals --bench collision_storage
 cargo bench -p kapitsa --bench collisions
 cargo bench -p kapitsa --bench parallel_step
 ```
+
+## Command batch scaling baseline
+
+Measured on 2026-11-01 from `feat/collisions` at source HEAD
+`262befda4a4a4e6c5a00b9de10088a2c42fb2521`. The host was an AMD Ryzen 9
+7900X3D, `rustc 1.98.0` (`x86_64-pc-windows-msvc`), with Cargo's default
+Release profile (`cargo test --release`, optimized; no workspace profile
+override). Each point has five samples on independently constructed worlds.
+Each sample warms the batch once, then averages enough repeated calls to target
+about 5 ms; the reported min / median / max are across those five sample
+averages. World, bodies, force sources, and commands are prepared before timing.
+The batch result is checked after each sample, and `black_box` is applied to
+the command slice. The production batch limit remains 128; larger batches are
+passed directly to the crate-private `apply_command_batch` test harness.
+
+The same-body case sends only `SetLinearVelocity` commands to one body. The
+distinct-body case gives every command its own body. The mixed case alternates
+one repeated body's velocity update with an update to a different persistent
+force source, so half the commands update bodies and half update unique
+sources. The force-source results therefore include the cost of staging and
+searching unique sources as their count grows.
+
+Times are microseconds per batch. `Growth` is the median-time multiple versus
+the previous command count. `Buffer control` is a separately measured estimate
+of scratch-vector allocation, population with staged values, and drop time;
+its percentage is relative to the batch median. It omits command scanning,
+linear searches, and command application, so treat it as a comparison rather
+than an exact additive phase split.
+
+### One repeated body
+
+| Commands | Min / median / max us | ns / command | Growth | Buffer control us / share |
+|---:|---:|---:|---:|---:|
+| 128 | 0.499 / 0.511 / 0.700 | 3.99 | — | 0.093 / 18.3% |
+| 256 | 0.929 / 0.948 / 0.978 | 3.70 | 1.86x | 0.094 / 9.9% |
+| 512 | 1.732 / 1.764 / 1.838 | 3.45 | 1.86x | 0.093 / 5.3% |
+| 1,024 | 3.441 / 3.474 / 3.582 | 3.39 | 1.97x | 0.097 / 2.8% |
+| 2,048 | 6.682 / 6.830 / 7.091 | 3.34 | 1.97x | 0.109 / 1.6% |
+| 4,096 | 20.140 / 21.265 / 24.957 | 5.19 | 3.11x | 6.822 / 32.1% |
+| 8,192 | 37.100 / 37.875 / 38.208 | 4.62 | 1.78x | 8.916 / 23.5% |
+
+Through 2,048 commands, doubling the batch nearly doubles time and holds work
+per command near 3.3–4.0 ns. The batch stages one body, so every repeated-body
+lookup scans only that one staged entry. At 4,096 commands the reserved body
+buffer crosses 1 MiB; the buffer control rises from about 0.1 us to 6.8 us,
+which coincides with the timing jump. This suggests a large-allocation cost,
+though the control is not an allocator profiler.
+
+### A different body per command
+
+| Commands | Min / median / max us | ns / command | Growth | Buffer control us / share |
+|---:|---:|---:|---:|---:|
+| 128 | 11.065 / 12.768 / 21.186 | 99.75 | — | 3.613 / 28.3% |
+| 256 | 20.714 / 28.489 / 32.769 | 111.29 | 2.23x | 4.635 / 16.3% |
+| 512 | 64.481 / 67.601 / 94.545 | 132.03 | 2.37x | 8.165 / 12.1% |
+| 1,024 | 245.652 / 261.819 / 281.519 | 255.68 | 3.87x | 15.111 / 5.8% |
+| 2,048 | 959.340 / 982.460 / 1,012.080 | 479.72 | 3.75x | 31.972 / 3.3% |
+| 4,096 | 3,974.300 / 4,031.150 / 4,816.000 | 984.17 | 4.10x | 256.806 / 6.4% |
+| 8,192 | 15,604.000 / 15,860.400 / 16,700.000 | 1,936.08 | 3.93x | 493.391 / 3.1% |
+
+From 1,024 commands onward, each doubling costs about 3.8–4.1x. This is the
+quadratic growth expected from searching the staged-body vector from the
+beginning for each new body. Buffer preparation grows roughly with the number
+of staged bodies, while the search dominates at large sizes.
+
+### Repeated body and unique force sources
+
+| Commands | Min / median / max us | ns / command | Growth | Buffer control us / share |
+|---:|---:|---:|---:|---:|
+| 128 | 2.341 / 2.538 / 2.581 | 19.83 | — | 0.885 / 34.9% |
+| 256 | 6.807 / 6.947 / 7.559 | 27.14 | 2.74x | 1.514 / 21.8% |
+| 512 | 19.889 / 20.349 / 22.066 | 39.74 | 2.93x | 3.689 / 18.1% |
+| 1,024 | 63.936 / 66.664 / 73.931 | 65.10 | 3.28x | 7.211 / 10.8% |
+| 2,048 | 257.000 / 272.389 / 297.884 | 133.00 | 4.09x | 13.259 / 4.9% |
+| 4,096 | 1,006.360 / 1,064.220 / 1,117.000 | 259.82 | 3.91x | 25.738 / 2.4% |
+| 8,192 | 3,843.600 / 3,961.150 / 4,234.100 | 483.54 | 3.72x | 40.136 / 1.0% |
+
+At 8,192 commands the batch updates 4,096 unique sources. Its near-fourfold
+growth at larger sizes shows that unique-source staging and its linear search
+also become quadratic; body lookups remain against the one repeated body.
+The mixed timings include both source lookup and source commit, so this setup
+does not isolate the commit operation alone. Buffer preparation is about 1%
+of the largest mixed batch, down from 35% at 128 commands.
+
+### Allocation counts
+
+The test-only allocator wrapper counted allocations and requested bytes during
+`apply_command_batch` alone. It records allocator request sizes, including
+reallocation sizes; it does not measure peak live memory or process RSS.
+
+| Commands | One body / distinct bodies: allocations, bytes | Mixed: allocations, bytes |
+|---:|---:|---:|
+| 128 | 1, 38,912 | 6, 48,832 |
+| 256 | 1, 77,824 | 7, 97,984 |
+| 512 | 1, 155,648 | 8, 196,288 |
+| 1,024 | 1, 311,296 | 9, 392,896 |
+| 2,048 | 1, 622,592 | 10, 786,112 |
+| 4,096 | 1, 1,245,184 | 11, 1,572,544 |
+| 8,192 | 1, 2,490,368 | 12, 3,145,408 |
+
+Both body-only cases request `304 * command_count` bytes in one allocation:
+the body staging vector reserves command-count capacity even when it stages
+only one body. The mixed case adds geometric growth of the force-source staging
+vector, visible in the allocation count and requested bytes.
+
+Run the timing and allocation harnesses separately with:
+
+```powershell
+cargo test -p kapitsa --release --lib benchmark_apply_command_batch_scaling -- --ignored --nocapture
+cargo test -p kapitsa --release --lib --features bench-internals benchmark_apply_command_batch_allocations -- --ignored --nocapture
+```
+
+Both harnesses live in the private command module's unit tests. The allocation
+feature only enables the test-binary allocator wrapper; neither harness adds a
+production export or changes the public 128-command limit.
