@@ -88,6 +88,16 @@ field center, non-finite input, or an unrepresentable acceleration fails the
 step atomically with a typed gravity cause. `PhysicsWorld` also exposes
 `set_central_gravity` for synchronous world stepping.
 
+`Simulation::set_time_multiplier()` changes scheduler pacing while the
+simulation is running. It accepts finite non-negative values; zero pauses
+simulation-time accumulation. The fixed step remains `1 / tick_rate`, while
+elapsed wall time is scaled before entering the accumulator. Catch-up remains
+bounded by `max_catch_up_steps`, and remaining simulated-time debt is reported
+in metrics. `requested_time_multiplier` records the requested value;
+`actual_time_multiplier` estimates simulated seconds per wall second over the
+latest completed-step interval. High requested values can exceed available CPU
+and are not guaranteed to be achieved.
+
 `apply_impulse` changes velocity immediately at the next command boundary;
 `apply_force` adds a one-step force that is cleared after a successful step. A
 persistent `ForceSource` applies its body-local force at its body-local point on

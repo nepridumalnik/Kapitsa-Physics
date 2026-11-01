@@ -35,6 +35,11 @@ struct ServiceTaskOutput {
     result: Result<(), SimulationError>,
 }
 
+struct RuntimeControl {
+    stop: watch::Receiver<bool>,
+    time_multiplier: watch::Receiver<f64>,
+}
+
 #[derive(Clone)]
 struct SimulationEvents {
     collisions: broadcast::Sender<CollisionEventBatch>,
@@ -77,6 +82,7 @@ pub struct Simulation {
     stop: Option<watch::Sender<bool>>,
     command_tx: watch::Sender<Option<mpsc::Sender<CommandRequest>>>,
     command_rx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
+    time_multiplier_tx: watch::Sender<f64>,
     snapshot_tx: watch::Sender<Arc<PhysicsSnapshot>>,
     snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
     collision_events_tx: broadcast::Sender<CollisionEventBatch>,
@@ -95,6 +101,7 @@ pub enum SimulationError {
     InvalidConfig(ConfigError),
     MissingRuntime,
     SimulationTimeOverflow,
+    InvalidTimeMultiplier,
     AlreadyRunning,
     TaskRequiresStop,
     Physics(kapitsa_core::world::StepError),
@@ -113,6 +120,9 @@ impl std::fmt::Display for SimulationError {
             }
             Self::SimulationTimeOverflow => {
                 formatter.write_str("simulation time accumulator overflowed")
+            }
+            Self::InvalidTimeMultiplier => {
+                formatter.write_str("time multiplier must be finite and non-negative")
             }
             Self::AlreadyRunning => formatter.write_str("simulation is already running"),
             Self::TaskRequiresStop => {
@@ -174,6 +184,7 @@ impl Simulation {
         ));
         let (metrics_tx, metrics_rx) = watch::channel(simulation.metrics().clone());
         let (command_tx, command_rx) = watch::channel(None);
+        let (time_multiplier_tx, _) = watch::channel(1.0);
         let (snapshot_tx, snapshot_rx) = watch::channel(initial_snapshot);
         let (collision_events_tx, _) = broadcast::channel(COLLISION_EVENT_BATCH_CAPACITY);
         let (batch_results_tx, _) = broadcast::channel(PHYSICS_BATCH_RESULT_CAPACITY);
@@ -184,6 +195,7 @@ impl Simulation {
             stop: None,
             command_tx,
             command_rx,
+            time_multiplier_tx,
             snapshot_tx,
             snapshot_rx,
             collision_events_tx,
@@ -229,7 +241,10 @@ impl Simulation {
         self.command_tx.send_replace(Some(command_sender));
         let mut simulation = simulation;
         simulation.set_runtime_status(SimulationState::Running, Duration::ZERO);
-        self.metrics_tx.send_replace(simulation.metrics().clone());
+        let mut initial_metrics = simulation.metrics().clone();
+        initial_metrics.requested_time_multiplier = *self.time_multiplier_tx.borrow();
+        initial_metrics.actual_time_multiplier = 0.0;
+        self.metrics_tx.send_replace(initial_metrics);
 
         let metrics_tx = self.metrics_tx.clone();
         let command_state_tx = self.command_tx.clone();
@@ -240,12 +255,16 @@ impl Simulation {
         };
         let mut simulation_time = self.simulation_time;
         let buffer_pool = Arc::clone(&self.buffer_pool);
+        let time_multiplier = self.time_multiplier_tx.subscribe();
         self.stop = Some(stop_tx);
         self.task = Some(self.runtime.spawn(async move {
             let result = run_simulation(
                 &mut simulation,
                 CommandQueue::new(command_receiver, buffer_pool),
-                stop_rx,
+                RuntimeControl {
+                    stop: stop_rx,
+                    time_multiplier,
+                },
                 &metrics_tx,
                 &snapshot_tx,
                 &events,
@@ -259,7 +278,13 @@ impl Simulation {
                 SimulationState::Error
             };
             simulation.set_runtime_status(state, Duration::ZERO);
-            metrics_tx.send_replace(simulation.metrics().clone());
+            metrics_tx.send_modify(|metrics| {
+                let requested_multiplier = metrics.requested_time_multiplier;
+                let actual_multiplier = metrics.actual_time_multiplier;
+                *metrics = simulation.metrics().clone();
+                metrics.requested_time_multiplier = requested_multiplier;
+                metrics.actual_time_multiplier = actual_multiplier;
+            });
             ServiceTaskOutput {
                 simulation,
                 simulation_time,
@@ -304,6 +329,22 @@ impl Simulation {
         self.metrics_rx.borrow().clone()
     }
 
+    /// Changes scheduler time scaling without changing the fixed physics step.
+    ///
+    /// Zero pauses simulated-time accumulation; positive values request that
+    /// many simulated seconds per wall second. Achieved scaling is reported in
+    /// [`SimulationMetrics::actual_time_multiplier`].
+    pub fn set_time_multiplier(&self, multiplier: f64) -> Result<(), SimulationError> {
+        if !multiplier.is_finite() || multiplier < 0.0 {
+            return Err(SimulationError::InvalidTimeMultiplier);
+        }
+        self.time_multiplier_tx.send_replace(multiplier);
+        self.metrics_tx.send_modify(|metrics| {
+            metrics.requested_time_multiplier = multiplier;
+        });
+        Ok(())
+    }
+
     pub fn client(&self) -> PhysicsClient {
         PhysicsClient::new(
             self.command_rx.clone(),
@@ -332,7 +373,7 @@ fn stopping(stop: &watch::Receiver<bool>) -> bool {
 async fn run_simulation(
     simulation: &mut StepRunner,
     mut commands: CommandQueue,
-    stop: watch::Receiver<bool>,
+    controls: RuntimeControl,
     metrics: &watch::Sender<SimulationMetrics>,
     snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
     events: &SimulationEvents,
@@ -341,7 +382,7 @@ async fn run_simulation(
     let result = run_simulation_loop(
         simulation,
         &mut commands,
-        stop,
+        controls,
         metrics,
         snapshots,
         events,
@@ -362,34 +403,68 @@ async fn run_simulation(
 async fn run_simulation_loop(
     simulation: &mut StepRunner,
     commands: &mut CommandQueue,
-    mut stop: watch::Receiver<bool>,
+    controls: RuntimeControl,
     metrics: &watch::Sender<SimulationMetrics>,
     snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
     events: &SimulationEvents,
     simulation_time: &mut Duration,
 ) -> Result<(), SimulationError> {
+    let RuntimeControl {
+        mut stop,
+        mut time_multiplier,
+    } = controls;
     let step_duration = simulation.config().step_budget();
     let max_catch_up_steps = simulation.config().max_catch_up_steps;
     let mut previous = Instant::now();
+    let mut last_step_completed_at = previous;
+    let mut current_multiplier = *time_multiplier.borrow_and_update();
+    let mut time_updates_open = true;
+    let mut actual_multiplier = 0.0;
     let mut accumulator = Duration::ZERO;
     let mut reusable_snapshot = None;
 
     loop {
-        let delay = step_duration.saturating_sub(accumulator);
+        let remaining = step_duration.saturating_sub(accumulator);
+        let mut step_deadline_reached = false;
         tokio::select! {
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
                     break;
                 }
             }
-            _ = tokio::time::sleep(delay) => {}
+            changed = time_multiplier.changed(), if time_updates_open => {
+                let now = Instant::now();
+                add_scaled_elapsed(
+                    &mut accumulator,
+                    now.duration_since(previous),
+                    current_multiplier,
+                )?;
+                previous = now;
+                match changed {
+                    Ok(()) => {
+                        current_multiplier = *time_multiplier.borrow_and_update();
+                        last_step_completed_at = now;
+                    }
+                    Err(_) => time_updates_open = false,
+                }
+            }
+            _ = wait_for_scaled_step(remaining, current_multiplier) => {
+                step_deadline_reached = true;
+            }
         }
         if stopping(&stop) {
             break;
         }
 
         let now = Instant::now();
-        add_elapsed(&mut accumulator, now.duration_since(previous))?;
+        add_scaled_elapsed(
+            &mut accumulator,
+            now.duration_since(previous),
+            current_multiplier,
+        )?;
+        if step_deadline_reached {
+            accumulator = accumulator.max(step_duration);
+        }
         previous = now;
 
         for _ in 0..max_catch_up_steps {
@@ -443,11 +518,25 @@ async fn run_simulation_loop(
 
             accumulator = accumulator.saturating_sub(step_duration);
             let completed_at = Instant::now();
-            add_elapsed(&mut accumulator, completed_at.duration_since(previous))?;
+            let step_wall_interval = completed_at.duration_since(last_step_completed_at);
+            if !step_wall_interval.is_zero() {
+                actual_multiplier = step_duration.as_secs_f64() / step_wall_interval.as_secs_f64();
+            }
+            last_step_completed_at = completed_at;
+            add_scaled_elapsed(
+                &mut accumulator,
+                completed_at.duration_since(previous),
+                current_multiplier,
+            )?;
             previous = completed_at;
             let debt = accumulator.saturating_sub(step_duration);
             simulation.set_runtime_status(SimulationState::Running, debt);
-            metrics.send_replace(simulation.metrics().clone());
+            publish_runtime_metrics(
+                simulation,
+                metrics,
+                *time_multiplier.borrow(),
+                actual_multiplier,
+            );
         }
 
         if stopping(&stop) {
@@ -611,6 +700,45 @@ fn add_elapsed(accumulator: &mut Duration, elapsed: Duration) -> Result<(), Simu
     Ok(())
 }
 
+fn add_scaled_elapsed(
+    accumulator: &mut Duration,
+    elapsed: Duration,
+    multiplier: f64,
+) -> Result<(), SimulationError> {
+    let scaled_seconds = elapsed.as_secs_f64() * multiplier;
+    let scaled = Duration::try_from_secs_f64(scaled_seconds)
+        .map_err(|_| SimulationError::SimulationTimeOverflow)?;
+    add_elapsed(accumulator, scaled)
+}
+
+async fn wait_for_scaled_step(remaining: Duration, multiplier: f64) {
+    if multiplier == 0.0 {
+        std::future::pending::<()>().await;
+    } else {
+        tokio::time::sleep(scaled_step_delay(remaining, multiplier)).await;
+    }
+}
+
+fn scaled_step_delay(remaining: Duration, multiplier: f64) -> Duration {
+    let seconds = remaining.as_secs_f64() / multiplier;
+    match Duration::try_from_secs_f64(seconds) {
+        Ok(delay) => delay,
+        Err(_) => Duration::from_secs(86_400),
+    }
+}
+
+fn publish_runtime_metrics(
+    simulation: &StepRunner,
+    metrics: &watch::Sender<SimulationMetrics>,
+    requested_multiplier: f64,
+    actual_multiplier: f64,
+) {
+    let mut snapshot = simulation.metrics().clone();
+    snapshot.requested_time_multiplier = requested_multiplier;
+    snapshot.actual_time_multiplier = actual_multiplier;
+    metrics.send_replace(snapshot);
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -639,7 +767,7 @@ mod tests {
         PhysicsClientError, SimulationConfig, SimulationError, SimulationState, WorkerConfig,
     };
 
-    use super::{PhysicsBatchError, Simulation};
+    use super::{PhysicsBatchError, Simulation, wait_for_scaled_step};
 
     fn dynamic_body() -> RigidBody {
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass");
@@ -1103,6 +1231,80 @@ mod tests {
                 < 0.0
         );
         simulation.stop().await.expect("stop");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn time_multiplier_changes_scheduler_without_changing_fixed_dt() {
+        let mut simulation = Simulation::new_from_config(config(100)).expect("simulation");
+        let client = simulation.client();
+        for multiplier in [0.1, 1.0, 10.0, 100.0, 1_000.0] {
+            simulation
+                .set_time_multiplier(multiplier)
+                .expect("finite non-negative multiplier");
+            assert_eq!(simulation.metrics().requested_time_multiplier, multiplier);
+        }
+        for multiplier in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            assert!(matches!(
+                simulation.set_time_multiplier(multiplier),
+                Err(SimulationError::InvalidTimeMultiplier)
+            ));
+        }
+        simulation
+            .set_time_multiplier(0.0)
+            .expect("pause simulation");
+        simulation.start().expect("start");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(simulation.metrics().total_steps, 0);
+
+        simulation.set_time_multiplier(1.0).expect("resume at 1x");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let first_step = simulation.metrics().total_steps;
+        assert!(first_step >= 1);
+        assert_eq!(simulation.metrics().step_budget, Duration::from_millis(10));
+
+        simulation.set_time_multiplier(10.0).expect("switch to 10x");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let metrics = simulation.metrics();
+        assert!(metrics.total_steps > first_step);
+        assert_eq!(metrics.requested_time_multiplier, 10.0);
+        assert_eq!(metrics.step_budget, Duration::from_millis(10));
+        assert_eq!(
+            client.snapshot().simulation_time(),
+            Duration::from_millis(10 * client.snapshot().step())
+        );
+        assert!(metrics.actual_time_multiplier.is_finite());
+        simulation.stop().await.expect("stop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scaled_scheduler_wait_uses_the_tokio_clock() {
+        let start = tokio::time::Instant::now();
+        let mut wait = Box::pin(wait_for_scaled_step(Duration::from_millis(100), 10.0));
+        assert!(matches!(poll_once(wait.as_mut()), Poll::Pending));
+        tokio::time::advance(Duration::from_millis(9)).await;
+        assert!(matches!(poll_once(wait.as_mut()), Poll::Pending));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        wait.await;
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            Duration::from_millis(10)
+        );
+
+        let mut paused = Box::pin(wait_for_scaled_step(Duration::from_millis(10), 0.0));
+        assert!(matches!(poll_once(paused.as_mut()), Poll::Pending));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(matches!(poll_once(paused.as_mut()), Poll::Pending));
+    }
+
+    #[tokio::test]
+    async fn invalid_time_multiplier_is_rejected_without_changing_metrics() {
+        let simulation = Simulation::new().expect("simulation");
+        assert_eq!(simulation.metrics().requested_time_multiplier, 1.0);
+        assert!(matches!(
+            simulation.set_time_multiplier(-0.5),
+            Err(SimulationError::InvalidTimeMultiplier)
+        ));
+        assert_eq!(simulation.metrics().requested_time_multiplier, 1.0);
     }
 
     #[tokio::test]

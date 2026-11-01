@@ -51,6 +51,7 @@ impl<E: StepExecutor> StepEngine<E> {
         let metrics = SimulationMetrics {
             step_budget,
             active_workers: 1,
+            requested_time_multiplier: 1.0,
             ..SimulationMetrics::default()
         };
         Self {

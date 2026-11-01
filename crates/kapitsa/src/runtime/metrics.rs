@@ -33,6 +33,10 @@ pub struct SimulationMetrics {
     pub total_steps: u64,
     pub deadline_misses: u64,
     pub simulation_time_debt: Duration,
+    /// Time multiplier requested through `Simulation::set_time_multiplier`.
+    pub requested_time_multiplier: f64,
+    /// Simulated seconds per wall second measured over the most recent step interval.
+    pub actual_time_multiplier: f64,
 }
 
 /// Statistics for one completed manual `Simulation::step()` call.
