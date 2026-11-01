@@ -1,4 +1,4 @@
-use crate::{constraint, rigid_body::RigidBody};
+use crate::{constraint, joint::JointWorkspace, rigid_body::RigidBody};
 use kapitsa_math::Vec3;
 
 use super::{
@@ -74,6 +74,7 @@ pub(crate) struct SolverIsland {
     pub(crate) bodies: Vec<SolverBody>,
     pub(crate) manifolds: Vec<SolverManifold>,
     pub(crate) workspace: SolverWorkspace,
+    pub(crate) joint_workspace: JointWorkspace,
     pub(crate) worker_error: Option<CollisionError>,
 }
 
@@ -85,6 +86,7 @@ impl SolverIsland {
             bodies: Vec::new(),
             manifolds: Vec::new(),
             workspace: SolverWorkspace::new(),
+            joint_workspace: JointWorkspace::new(),
             worker_error: None,
         }
     }
@@ -94,6 +96,7 @@ impl SolverIsland {
         self.manifold_indices.clear();
         self.bodies.clear();
         self.manifolds.clear();
+        self.joint_workspace.clear();
         self.worker_error = None;
     }
 
@@ -106,6 +109,7 @@ impl SolverIsland {
             + self.bodies.capacity() * size_of::<SolverBody>()
             + self.manifolds.capacity() * size_of::<SolverManifold>()
             + self.workspace.retained_capacity_bytes()
+            + self.joint_workspace.retained_capacity_bytes()
     }
 }
 

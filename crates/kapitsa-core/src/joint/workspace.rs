@@ -23,6 +23,11 @@ impl JointWorkspace {
         }
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.rows.clear();
+        self.prepared_rows = 0;
+    }
+
     pub(crate) fn begin_prepare(&mut self) {
         self.prepared_rows = 0;
     }
@@ -53,5 +58,41 @@ impl JointWorkspace {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         self.rows.capacity() * std::mem::size_of::<ConstraintRow>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kapitsa_math::Vec3;
+
+    #[test]
+    fn clear_reuses_row_capacity() {
+        let mut workspace = JointWorkspace::new();
+        workspace.push(ConstraintRow {
+            body_a: 0,
+            body_b: 1,
+            linear_a: -Vec3::X,
+            angular_a: Vec3::ZERO,
+            linear_b: Vec3::X,
+            angular_b: Vec3::ZERO,
+            error: 0.0,
+            target_velocity: 0.0,
+            compliance: 0.0,
+            damping: 0.0,
+            min_multiplier: f64::NEG_INFINITY,
+            max_multiplier: f64::INFINITY,
+            min_impulse: f64::NEG_INFINITY,
+            max_impulse: f64::INFINITY,
+            accumulated_multiplier: 0.0,
+            accumulated_impulse: 0.0,
+        });
+        let capacity = workspace.rows.capacity();
+        assert!(capacity > 0);
+
+        workspace.clear();
+
+        assert!(workspace.rows.is_empty());
+        assert_eq!(workspace.rows.capacity(), capacity);
     }
 }

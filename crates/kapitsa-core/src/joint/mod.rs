@@ -28,6 +28,7 @@ pub use hinge::HingeJoint;
 pub use planar::PlanarJoint;
 pub use slider::SliderJoint;
 pub use spring::SpringJoint;
+pub(crate) use workspace::JointWorkspace;
 
 /// Statically dispatched constraint kinds supported by Kapitsa.
 // Inline Copy settings avoid per-joint heap allocations in the solver path.
