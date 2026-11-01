@@ -121,7 +121,7 @@ fn benchmark_rocket_flight_headless() -> Result<(), Box<dyn std::error::Error>> 
 
     println!("Headless fixed-step flight: five independent Release runs after one warm-up");
     println!(
-        "steps={} sim_s={:.3} mission_ms min/median/max={:.3}/{:.3}/{:.3} steps_per_s median={:.0}",
+        "steps={} sim_s={:.3} mission_ms min/median/max={:.3}/{:.3}/{:.3} sim_x median={:.0}",
         first.step_times.len(),
         first.simulation_seconds,
         mission_times[0].as_secs_f64() * 1.0e3,

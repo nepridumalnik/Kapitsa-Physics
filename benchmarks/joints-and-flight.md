@@ -70,10 +70,16 @@ workspace size, not the fraction of step time spent preparing that workspace.
 The CLI and OpenGL viewer now use the same mission fixture and flight runner,
 including the attached two-stage fixed joint, fuel mass updates, separation,
 engine cutoff, and stage impacts. The Release headless benchmark completed a
-14.108 s simulated mission in 17.626 ms median across five samples after
-warm-up (1,693 steps, 800 steps/s). Maximum altitude was 150.465 m, maximum
-speed 54.084 m/s, and measured energy drift was 0.00000192%. Both stages
-impacted; two impact events were observed.
+14.108 s simulated mission in 17.381 ms median across five samples after
+warm-up (1,693 steps, approximately 812x simulated time per wall second).
+Maximum altitude was 150.465 m, maximum speed 54.084 m/s, and measured energy
+drift was 0.00000192%. Both stages impacted; two impact events were observed.
+
+After one second of warm-up, the allocation sample over 1,573 steps averaged
+0.021 allocation calls and 39.6 requested bytes per step (maximum 25 calls and
+32,648 bytes in a step). Setup retained 717,441 bytes, with 37,212 peak extra
+live bytes. The requested-byte p95 was zero, so the per-step maximum is an
+outlier rather than a typical cost.
 
 The full runtime mission benchmark at 1x warp completed 13.917 simulated
 seconds in 14,071.864 ms median and emitted 15 snapshots. A separate runtime
