@@ -203,6 +203,7 @@ pub struct BodyStep {
     source: RigidBody,
     predicted: Option<BodyState>,
     dt: Option<f64>,
+    error: Option<StepError>,
 }
 
 impl BodyStep {
@@ -213,10 +214,18 @@ impl BodyStep {
     pub fn integrate(&mut self, dt: f64) -> Result<(), StepError> {
         self.predicted = None;
         self.dt = None;
-        let predicted = predict(&self.source, dt).map_err(|cause| StepError::BodyIntegration {
-            body_id: self.body_id,
-            cause,
-        })?;
+        self.error = None;
+        let predicted = match predict(&self.source, dt) {
+            Ok(predicted) => predicted,
+            Err(cause) => {
+                let error = StepError::BodyIntegration {
+                    body_id: self.body_id,
+                    cause,
+                };
+                self.error = Some(error);
+                return Err(error);
+            }
+        };
         self.predicted = Some(predicted);
         self.dt = Some(dt);
         Ok(())
@@ -3941,6 +3950,12 @@ impl PhysicsWorld {
 
         let base_size = self.body_count() / shards.len();
         let remainder = self.body_count() % shards.len();
+        for (index, shard) in shards.iter_mut().enumerate() {
+            let required = base_size + usize::from(index < remainder);
+            shard
+                .try_reserve(required)
+                .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+        }
         let mut shard_index = 0;
         let mut shard_remaining = base_size + usize::from(remainder > 0);
 
@@ -3957,6 +3972,7 @@ impl PhysicsWorld {
                 source: entry.body,
                 predicted: None,
                 dt: None,
+                error: None,
             });
             shard_remaining -= 1;
         }
@@ -3995,6 +4011,9 @@ impl PhysicsWorld {
             let Some(step) = steps.next() else {
                 return Err(StepError::InvalidStepResults);
             };
+            if let Some(error) = step.error {
+                return Err(error);
+            }
             if step.body_id
                 != (BodyId {
                     world: self.world_id,

@@ -7,6 +7,8 @@ mod engine;
 #[cfg(feature = "async")]
 pub mod executor;
 pub mod metrics;
+#[cfg(feature = "async")]
+mod planner;
 pub mod sync;
 
 #[cfg(feature = "async")]
@@ -15,3 +17,5 @@ pub use config::{ConfigError, SchedulerConfig, SimulationConfig};
 #[cfg(feature = "async")]
 pub use executor::{RayonExecutor, RayonPool, RayonPoolError};
 pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
+#[cfg(feature = "async")]
+pub use planner::{AdaptiveScheduler, AdaptiveStatus, WorkerConfig, WorkerConfigError};
