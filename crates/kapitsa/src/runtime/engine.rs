@@ -209,20 +209,8 @@ impl<E: StepExecutor> StepEngine<E> {
         }
         let buckets = &mut self.bucket_buffers[..bucket_count];
         let dt = self.config.fixed_step_seconds();
-        self.world.fill_step_shards(buckets)?;
-        self.executor
-            .for_each_chunk_mut(buckets, 1, |_, chunk| {
-                for shard in chunk {
-                    for step in shard {
-                        if step.integrate(dt).is_err() {
-                            break;
-                        }
-                    }
-                }
-            })
-            .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
         self.world
-            .commit_step_shards_with_executor(buckets, &self.executor, worker_count)
+            .step_with_shards(dt, buckets, &self.executor, worker_count)
     }
 }
 
@@ -235,5 +223,469 @@ fn average_duration(durations: &VecDeque<Duration>) -> Duration {
         Duration::ZERO
     } else {
         total.div_f64(durations.len() as f64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "bench-internals")]
+    use std::time::Instant;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use kapitsa_core::gravity::CentralGravity;
+    use kapitsa_core::{
+        execution::{ExecutionError, StepExecutor},
+        mass::MassProperties,
+        rigid_body::RigidBody,
+        transform::Transform,
+        world::{BodyId, ForceSourceId, PhysicsWorld},
+    };
+    use kapitsa_math::{Mat3, Quat, Vec3};
+    use tokio::runtime::Handle;
+
+    use super::StepEngine;
+    use crate::runtime::{
+        SimulationConfig,
+        executor::{RayonExecutor, RayonPool},
+    };
+
+    struct CountingExecutor {
+        inner: RayonExecutor,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl StepExecutor for CountingExecutor {
+        fn for_each_chunk_mut<T, F>(
+            &self,
+            values: &mut [T],
+            chunk_size: usize,
+            operation: F,
+        ) -> Result<(), ExecutionError>
+        where
+            T: Send,
+            F: Fn(usize, &mut [T]) + Send + Sync,
+        {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.for_each_chunk_mut(values, chunk_size, operation)
+        }
+
+        fn for_each_chunk_layout_mut<T, F>(
+            &self,
+            values: &mut [T],
+            chunk_sizes: &[usize],
+            operation: F,
+        ) -> Result<(), ExecutionError>
+        where
+            T: Send,
+            F: Fn(usize, &mut [T]) + Send + Sync,
+        {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner
+                .for_each_chunk_layout_mut(values, chunk_sizes, operation)
+        }
+    }
+
+    fn world_with_force_sources() -> (PhysicsWorld, Vec<BodyId>) {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+        let bodies = (0..4)
+            .map(|index| {
+                world
+                    .add_body(
+                        RigidBody::new_dynamic(
+                            Transform::new(Vec3::X * (index as f64 * 4.0), Quat::IDENTITY)
+                                .expect("transform"),
+                            mass,
+                        )
+                        .expect("body"),
+                    )
+                    .expect("body id")
+            })
+            .collect::<Vec<_>>();
+        world
+            .add_force_source(bodies[0], Vec3::ZERO, Vec3::X * 1.0e16)
+            .expect("first force source");
+        world
+            .add_force_source(bodies[0], Vec3::ZERO, Vec3::X * -1.0e16)
+            .expect("second force source");
+        world
+            .add_force_source(bodies[0], Vec3::ZERO, Vec3::X)
+            .expect("third force source");
+        world
+            .add_force_source(bodies[0], Vec3::Y, Vec3::X * 2.0)
+            .expect("offset force source");
+        world
+            .add_force_source(bodies[1], Vec3::ZERO, Vec3::Y * 0.25)
+            .expect("source on second body");
+        (world, bodies)
+    }
+
+    fn world_with_one_force_source() -> (PhysicsWorld, Vec<BodyId>, ForceSourceId) {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+        let bodies = (0..4)
+            .map(|index| {
+                world
+                    .add_body(
+                        RigidBody::new_dynamic(
+                            Transform::new(Vec3::X * (index as f64 * 4.0), Quat::IDENTITY)
+                                .expect("transform"),
+                            mass,
+                        )
+                        .expect("body"),
+                    )
+                    .expect("body id")
+            })
+            .collect::<Vec<_>>();
+        let source = world
+            .add_force_source(bodies[0], Vec3::ZERO, Vec3::X * 2.0)
+            .expect("force source");
+        (world, bodies, source)
+    }
+
+    fn assert_vec3_bits_eq(actual: Vec3, expected: Vec3) {
+        assert_eq!(actual.x.to_bits(), expected.x.to_bits());
+        assert_eq!(actual.y.to_bits(), expected.y.to_bits());
+        assert_eq!(actual.z.to_bits(), expected.z.to_bits());
+    }
+
+    fn assert_quat_bits_eq(actual: Quat, expected: Quat) {
+        assert_eq!(actual.x.to_bits(), expected.x.to_bits());
+        assert_eq!(actual.y.to_bits(), expected.y.to_bits());
+        assert_eq!(actual.z.to_bits(), expected.z.to_bits());
+        assert_eq!(actual.w.to_bits(), expected.w.to_bits());
+    }
+
+    fn assert_states_match(
+        actual: &PhysicsWorld,
+        actual_bodies: &[BodyId],
+        expected: &PhysicsWorld,
+        expected_bodies: &[BodyId],
+    ) {
+        for (actual_id, expected_id) in actual_bodies.iter().zip(expected_bodies) {
+            let actual = actual.body(*actual_id).expect("actual body");
+            let expected = expected.body(*expected_id).expect("expected body");
+            assert_vec3_bits_eq(
+                actual.state().transform().translation(),
+                expected.state().transform().translation(),
+            );
+            assert_quat_bits_eq(
+                actual.state().transform().rotation(),
+                expected.state().transform().rotation(),
+            );
+            assert_vec3_bits_eq(
+                actual.state().linear_velocity(),
+                expected.state().linear_velocity(),
+            );
+            assert_vec3_bits_eq(
+                actual.state().angular_velocity(),
+                expected.state().angular_velocity(),
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharded_step_matches_sequential_with_multiple_sources_and_torque() {
+        let (mut sequential_world, sequential_bodies) = world_with_force_sources();
+        let (sharded_world, sharded_bodies) = world_with_force_sources();
+        let config = SimulationConfig {
+            tick_rate: 10,
+            ..SimulationConfig::default()
+        };
+        sequential_world
+            .step(config.fixed_step_seconds())
+            .expect("sequential step");
+
+        let mut pool = RayonPool::new(&Handle::current(), 4).expect("Rayon pool");
+        let executor_calls = Arc::new(AtomicUsize::new(0));
+        let executor = CountingExecutor {
+            inner: pool.executor().expect("Rayon executor"),
+            calls: Arc::clone(&executor_calls),
+        };
+        let mut engine = StepEngine::new(sharded_world, config, executor).expect("step engine");
+        engine.set_parallelism(4, Some(4));
+        engine.step(Duration::ZERO).expect("sharded step");
+        let sharded_world = engine.into_world();
+        pool.shutdown().await.expect("Rayon pool shutdown");
+
+        assert!(executor_calls.load(Ordering::Relaxed) > 0);
+        assert_states_match(
+            &sharded_world,
+            &sharded_bodies,
+            &sequential_world,
+            &sequential_bodies,
+        );
+        assert_ne!(
+            sharded_world
+                .body(sharded_bodies[0])
+                .expect("body")
+                .state()
+                .angular_velocity(),
+            Vec3::ZERO
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharded_step_matches_sequential_with_gravity_and_force_sources() {
+        let (mut sequential_world, sequential_bodies) = world_with_force_sources();
+        let (sharded_world, sharded_bodies) = world_with_force_sources();
+        let gravity =
+            CentralGravity::new(Vec3::new(-100.0, 0.0, 0.0), 10_000.0).expect("gravity field");
+        sequential_world.set_central_gravity(Some(gravity));
+        let config = SimulationConfig {
+            tick_rate: 10,
+            central_gravity: Some(gravity),
+            ..SimulationConfig::default()
+        };
+        sequential_world
+            .step(config.fixed_step_seconds())
+            .expect("sequential step");
+
+        let mut pool = RayonPool::new(&Handle::current(), 4).expect("Rayon pool");
+        let executor = pool.executor().expect("Rayon executor");
+        let mut engine = StepEngine::new(sharded_world, config, executor).expect("step engine");
+        engine.set_parallelism(4, Some(4));
+        engine.step(Duration::ZERO).expect("sharded step");
+        let sharded_world = engine.into_world();
+        pool.shutdown().await.expect("Rayon pool shutdown");
+
+        assert_states_match(
+            &sharded_world,
+            &sharded_bodies,
+            &sequential_world,
+            &sequential_bodies,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn force_source_enable_and_active_body_path_switch_match_sequential_steps() {
+        let (mut sequential_world, sequential_bodies, sequential_source) =
+            world_with_one_force_source();
+        let (sharded_world, sharded_bodies, sharded_source) = world_with_one_force_source();
+        let config = SimulationConfig {
+            tick_rate: 10,
+            ..SimulationConfig::default()
+        };
+        let mut pool = RayonPool::new(&Handle::current(), 4).expect("Rayon pool");
+        let executor = pool.executor().expect("Rayon executor");
+        let mut engine =
+            StepEngine::new(sharded_world, config.clone(), executor).expect("step engine");
+        engine.set_parallelism(4, Some(4));
+
+        sequential_world
+            .set_force_source_enabled(sequential_source, false)
+            .expect("disable sequential source");
+        engine
+            .world_mut()
+            .set_force_source_enabled(sharded_source, false)
+            .expect("disable sharded source");
+        sequential_world
+            .step(config.fixed_step_seconds())
+            .expect("disabled sequential step");
+        engine.step(Duration::ZERO).expect("disabled runtime step");
+        assert_states_match(
+            engine.world(),
+            &sharded_bodies,
+            &sequential_world,
+            &sequential_bodies,
+        );
+        assert_eq!(
+            engine
+                .world()
+                .body(sharded_bodies[0])
+                .expect("body")
+                .state()
+                .linear_velocity(),
+            Vec3::ZERO
+        );
+
+        sequential_world
+            .set_force_source_enabled(sequential_source, true)
+            .expect("enable sequential source");
+        engine
+            .world_mut()
+            .set_force_source_enabled(sharded_source, true)
+            .expect("enable sharded source");
+        sequential_world
+            .step(config.fixed_step_seconds())
+            .expect("enabled sequential step");
+        engine.step(Duration::ZERO).expect("enabled runtime step");
+        assert_states_match(
+            engine.world(),
+            &sharded_bodies,
+            &sequential_world,
+            &sequential_bodies,
+        );
+
+        for id in &sequential_bodies[2..] {
+            sequential_world
+                .body_mut(*id)
+                .expect("sequential body")
+                .sleep()
+                .expect("sleep body");
+        }
+        for id in &sharded_bodies[2..] {
+            engine
+                .world_mut()
+                .body_mut(*id)
+                .expect("sharded body")
+                .sleep()
+                .expect("sleep body");
+        }
+        sequential_world
+            .step(config.fixed_step_seconds())
+            .expect("ordinary runtime path");
+        engine.step(Duration::ZERO).expect("ordinary runtime path");
+        assert_states_match(
+            engine.world(),
+            &sharded_bodies,
+            &sequential_world,
+            &sequential_bodies,
+        );
+
+        sequential_world
+            .body_mut(sequential_bodies[2])
+            .expect("sequential body")
+            .set_linear_velocity(Vec3::Y * 0.1)
+            .expect("wake sequential body");
+        engine
+            .world_mut()
+            .body_mut(sharded_bodies[2])
+            .expect("sharded body")
+            .set_linear_velocity(Vec3::Y * 0.1)
+            .expect("wake sharded body");
+        sequential_world
+            .step(config.fixed_step_seconds())
+            .expect("sharded runtime path after wake");
+        engine
+            .step(Duration::ZERO)
+            .expect("sharded runtime path after wake");
+        assert_states_match(
+            engine.world(),
+            &sharded_bodies,
+            &sequential_world,
+            &sequential_bodies,
+        );
+
+        let _world = engine.into_world();
+        pool.shutdown().await.expect("Rayon pool shutdown");
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "Release sharded ForceSource scaling benchmark; run with bench-internals"]
+    async fn benchmark_sharded_force_source_scaling() -> Result<(), Box<dyn std::error::Error>> {
+        const SAMPLE_STEPS: usize = 32;
+        const WARMUP_STEPS: usize = 16;
+        let scenarios = [
+            ("1 source / 1 body", 1, 1, false, false),
+            ("0 sources / 4 body control", 4, 0, false, false),
+            ("0 sources / 128 body control", 128, 0, false, false),
+            ("128 sources / 128 bodies", 128, 128, false, false),
+            ("0 sources / 1024 body control", 1_024, 0, false, false),
+            ("1024 sources / 1024 bodies", 1_024, 1_024, false, false),
+            ("0 sources / 8192 body control", 8_192, 0, false, false),
+            ("8192 sources / 8192 bodies", 8_192, 8_192, false, false),
+            ("0 sources / one-target control", 4, 0, false, false),
+            ("8192 sources / one target", 4, 8_192, true, false),
+            (
+                "0 sources / 1024 body + gravity control",
+                1_024,
+                0,
+                false,
+                true,
+            ),
+            ("1024 sources / bodies + gravity", 1_024, 1_024, false, true),
+        ];
+        let mut pool = RayonPool::new(&Handle::current(), 4).expect("Rayon pool");
+        println!(
+            "Sharded persistent-force benchmark: 4 Rayon workers, 16 warm-up steps, 5 samples x {SAMPLE_STEPS} steps"
+        );
+
+        for (label, body_count, source_count, one_target, with_gravity) in scenarios {
+            let mut world = PhysicsWorld::new();
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let bodies = (0..body_count)
+                .map(|index| {
+                    world
+                        .add_body(
+                            RigidBody::new_dynamic(
+                                Transform::new(
+                                    Vec3::new(index as f64 * 4.0, 100.0, 0.0),
+                                    Quat::IDENTITY,
+                                )
+                                .expect("transform"),
+                                mass,
+                            )
+                            .expect("body"),
+                        )
+                        .expect("body id")
+                })
+                .collect::<Vec<_>>();
+            for source_index in 0..source_count {
+                let body_index = if one_target {
+                    0
+                } else {
+                    source_index % body_count
+                };
+                world.add_force_source(
+                    bodies[body_index],
+                    Vec3::Y * 0.01,
+                    Vec3::new(1.0e-6, 2.0e-6, -1.0e-6),
+                )?;
+            }
+
+            let config = SimulationConfig {
+                tick_rate: 120,
+                central_gravity: with_gravity
+                    .then(|| CentralGravity::new(Vec3::ZERO, 1_000.0).expect("valid gravity")),
+                ..SimulationConfig::default()
+            };
+            let executor = pool.executor().expect("Rayon executor");
+            let mut engine = StepEngine::new(world, config, executor)?;
+            engine.set_parallelism(4, Some(4));
+            for _ in 0..WARMUP_STEPS {
+                engine.step(Duration::ZERO)?;
+            }
+
+            let mut samples = Vec::with_capacity(5);
+            for _ in 0..5 {
+                let started = Instant::now();
+                for _ in 0..SAMPLE_STEPS {
+                    engine.step(Duration::ZERO)?;
+                }
+                samples.push(started.elapsed().as_secs_f64() * 1.0e6 / SAMPLE_STEPS as f64);
+            }
+            samples.sort_by(f64::total_cmp);
+
+            crate::runtime::asynchronous::marshalling::allocation_tracking::start();
+            for _ in 0..SAMPLE_STEPS {
+                engine.step(Duration::ZERO)?;
+            }
+            let (allocations, bytes) =
+                crate::runtime::asynchronous::marshalling::allocation_tracking::counts();
+            let (_, _, peak_extra, baseline_live) =
+                crate::runtime::asynchronous::marshalling::allocation_tracking::stop();
+            std::hint::black_box(engine.metrics().total_steps);
+
+            println!(
+                "{label}: min/median/max={:.3}/{:.3}/{:.3} us/step, allocs/step={:.3}, requested_bytes/step={:.1}, live/peak-extra={baseline_live}/{peak_extra} B",
+                samples[0],
+                samples[2],
+                samples[4],
+                allocations as f64 / SAMPLE_STEPS as f64,
+                bytes as f64 / SAMPLE_STEPS as f64,
+            );
+            drop(engine);
+        }
+
+        pool.shutdown().await?;
+        Ok(())
     }
 }

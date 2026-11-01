@@ -854,6 +854,7 @@ impl PhysicsWorld {
             Ok(result) => result,
             Err(_) => {
                 self.collision_system.abort_step();
+                self.rollback_gravity_updates();
                 self.rollback_force_source_updates();
                 Err(StepError::Collision(CollisionError::WorkerFailed))
             }
@@ -869,17 +870,23 @@ impl PhysicsWorld {
         if !dt.is_finite() || dt <= 0.0 {
             return Err(StepError::InvalidDeltaTime);
         }
+        self.with_force_source_updates(|world| {
+            world.prepare_gravity_updates()?;
+            world.step_prepared(dt, executor, worker_count)
+        })
+    }
+
+    fn with_force_source_updates<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, StepError>,
+    ) -> Result<T, StepError> {
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
         if let Err((source_id, cause)) = self.prepare_force_source_updates() {
             return Err(StepError::ForceSource { source_id, cause });
         }
-        if let Err(error) = self.prepare_gravity_updates() {
-            self.rollback_force_source_updates();
-            return Err(error);
-        }
 
-        let result = self.step_prepared(dt, executor, worker_count);
+        let result = operation(self);
         if result.is_err() {
             self.rollback_gravity_updates();
             self.rollback_force_source_updates();
@@ -888,6 +895,63 @@ impl PhysicsWorld {
             self.clear_force_source_updates();
         }
         result
+    }
+
+    /// Advances one full step through reusable prediction shards and the supplied executor.
+    ///
+    /// Unlike the low-level `fill_step_shards` and `commit_step_shards` pair, this method
+    /// prepares persistent force sources and rolls prepared force and gravity back on failure.
+    #[doc(hidden)]
+    pub fn step_with_shards<E: StepExecutor>(
+        &mut self,
+        dt: f64,
+        shards: &mut [Vec<BodyStep>],
+        executor: &E,
+        worker_count: usize,
+    ) -> Result<(), StepError> {
+        if self.body_count() == 0 {
+            return self.step_with_executor_inner(dt, executor, worker_count);
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.step_with_shards_inner(dt, shards, executor, worker_count)
+        }));
+        match result {
+            Ok(result) => result,
+            Err(_) => {
+                self.collision_system.abort_step();
+                self.rollback_gravity_updates();
+                self.rollback_force_source_updates();
+                Err(StepError::Collision(CollisionError::WorkerFailed))
+            }
+        }
+    }
+
+    fn step_with_shards_inner<E: StepExecutor>(
+        &mut self,
+        dt: f64,
+        shards: &mut [Vec<BodyStep>],
+        executor: &E,
+        worker_count: usize,
+    ) -> Result<(), StepError> {
+        if !dt.is_finite() || dt <= 0.0 {
+            return Err(StepError::InvalidDeltaTime);
+        }
+
+        self.with_force_source_updates(|world| {
+            world.fill_step_shards(shards)?;
+            executor
+                .for_each_chunk_mut(shards, 1, |_, chunk| {
+                    for shard in chunk {
+                        for step in shard {
+                            if step.integrate(dt).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                })
+                .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
+            world.commit_step_shards_with_executor(shards, executor, worker_count)
+        })
     }
 
     fn step_prepared<E: StepExecutor>(
@@ -4271,6 +4335,9 @@ impl PhysicsWorld {
     }
 
     /// Fills balanced, ordered body snapshots into reusable shard buffers.
+    ///
+    /// This low-level helper does not prepare persistent force sources. Use
+    /// [`Self::step_with_shards`] to execute a complete step.
     #[doc(hidden)]
     pub fn fill_step_shards(&self, shards: &mut [Vec<BodyStep>]) -> Result<(), StepError> {
         if shards.is_empty() {
@@ -4342,6 +4409,9 @@ impl PhysicsWorld {
     }
 
     /// Validates shard results and delegates independent collision work to an executor.
+    ///
+    /// This low-level commit helper does not prepare persistent force sources. Use
+    /// [`Self::step_with_shards`] to execute a complete step.
     #[doc(hidden)]
     pub fn commit_step_shards_with_executor<E: StepExecutor>(
         &mut self,

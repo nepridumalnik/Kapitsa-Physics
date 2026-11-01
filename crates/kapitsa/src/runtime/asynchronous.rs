@@ -376,7 +376,7 @@ mod tests {
         transform::Transform,
         world::{PhysicsWorld, StepError},
     };
-    use kapitsa_math::{Mat3, Vec3};
+    use kapitsa_math::{Mat3, Quat, Vec3};
     use tokio::{
         runtime::{Builder, Handle},
         sync::oneshot,
@@ -459,10 +459,40 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_step_keeps_the_world_and_in_flight_result() {
+    fn cancelling_sharded_force_source_step_keeps_the_world_and_in_flight_result() {
         let runtime = runtime();
         runtime.block_on(async {
-            let mut simulation = step_runner(world(), SimulationConfig::default());
+            let mut force_world = PhysicsWorld::new();
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)
+                .expect("valid mass properties");
+            let bodies = (0..4)
+                .map(|index| {
+                    force_world
+                        .add_body(
+                            RigidBody::new_dynamic(
+                                Transform::new(Vec3::X * (index as f64 * 4.0), Quat::IDENTITY)
+                                    .expect("valid transform"),
+                                mass,
+                            )
+                            .expect("dynamic body"),
+                        )
+                        .expect("body id")
+                })
+                .collect::<Vec<_>>();
+            force_world
+                .add_force_source(bodies[0], Vec3::ZERO, Vec3::Y)
+                .expect("force source");
+            let config = SimulationConfig {
+                workers: WorkerConfig {
+                    max_workers: NonZeroUsize::new(4),
+                    ..WorkerConfig::default()
+                },
+                ..SimulationConfig::default()
+            };
+            let mut simulation = step_runner(force_world, config);
+            simulation
+                .set_active_workers(4)
+                .expect("activate sharded step path");
             let (entered_tx, entered_rx) = oneshot::channel();
             let (release_tx, release_rx) = mpsc::channel();
             simulation.gate_next_step(entered_tx, release_rx);
@@ -486,11 +516,19 @@ mod tests {
                 .await
                 .expect("in-flight step should finish")
                 .expect("cancelled step should be recovered");
-            assert_eq!(stats.active_workers, 1);
+            assert_eq!(stats.active_workers, 4);
             assert_eq!(simulation.metrics().total_steps, 1);
 
             let world = simulation.shutdown().await.expect("clean shutdown");
             assert_eq!(world.body_count(), 4);
+            assert_eq!(
+                world
+                    .body(bodies[0])
+                    .expect("body")
+                    .state()
+                    .linear_velocity(),
+                Vec3::Y / 60.0
+            );
         });
     }
 

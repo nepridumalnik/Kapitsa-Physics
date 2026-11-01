@@ -1,8 +1,8 @@
 use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
 
 use super::{
-    BodyId, ColliderId, ForceSourceError, PhysicsWorld, StepError, WorldError, allocate_world_id,
-    upsert_interaction,
+    BodyId, BodyStep, ColliderId, ForceSourceError, ForceSourceId, PhysicsWorld, StepError,
+    WorldError, allocate_world_id, upsert_interaction,
 };
 use crate::{
     collider::{Collider, CollisionFilter, CollisionMode},
@@ -18,12 +18,15 @@ use crate::{
     shape::{BoneInfluence, Cuboid, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh},
     transform::Transform,
 };
-use std::{collections::HashSet, sync::atomic::AtomicU64};
+use std::{
+    collections::HashSet,
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+};
 
 #[cfg(feature = "bench-internals")]
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(feature = "bench-internals")]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
 #[cfg(feature = "bench-internals")]
 use std::time::Duration;
 
@@ -83,6 +86,87 @@ impl StepExecutor for ScopedThreadExecutor {
             }
         });
         Ok(())
+    }
+}
+
+struct FailingExecutor {
+    fail_on_call: usize,
+    calls: AtomicUsize,
+}
+
+impl FailingExecutor {
+    fn should_fail(&self) -> bool {
+        self.calls.fetch_add(1, Ordering::Relaxed) + 1 == self.fail_on_call
+    }
+}
+
+impl StepExecutor for FailingExecutor {
+    fn for_each_chunk_mut<T, F>(
+        &self,
+        values: &mut [T],
+        chunk_size: usize,
+        operation: F,
+    ) -> Result<(), ExecutionError>
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Send + Sync,
+    {
+        if self.should_fail() {
+            return Err(ExecutionError::InvalidChunkLayout);
+        }
+        ScopedThreadExecutor.for_each_chunk_mut(values, chunk_size, operation)
+    }
+
+    fn for_each_chunk_layout_mut<T, F>(
+        &self,
+        values: &mut [T],
+        chunk_sizes: &[usize],
+        operation: F,
+    ) -> Result<(), ExecutionError>
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Send + Sync,
+    {
+        if self.should_fail() {
+            return Err(ExecutionError::InvalidChunkLayout);
+        }
+        ScopedThreadExecutor.for_each_chunk_layout_mut(values, chunk_sizes, operation)
+    }
+}
+
+fn step_with_shards(world: &mut PhysicsWorld, dt: f64) -> Result<(), StepError> {
+    let mut shards: [Vec<BodyStep>; 4] = std::array::from_fn(|_| Vec::new());
+    world.step_with_shards(dt, &mut shards, &ScopedThreadExecutor, 4)
+}
+
+#[test]
+fn empty_world_can_complete_a_sharded_step() {
+    let mut world = PhysicsWorld::new();
+    let mut shards: [Vec<BodyStep>; 1] = std::array::from_fn(|_| Vec::new());
+
+    world
+        .step_with_shards(0.1, &mut shards, &ScopedThreadExecutor, 1)
+        .expect("empty world step");
+}
+
+fn shard_world_with_source() -> (PhysicsWorld, Vec<BodyId>, ForceSourceId) {
+    let mut world = PhysicsWorld::new();
+    let bodies = (0..4)
+        .map(|index| {
+            world
+                .add_body(body_at(Vec3::X * (index as f64 * 4.0), 1.0))
+                .expect("body")
+        })
+        .collect::<Vec<_>>();
+    let source = world
+        .add_force_source(bodies[0], Vec3::ZERO, Vec3::X)
+        .expect("force source");
+    (world, bodies, source)
+}
+
+fn assert_bodies_match(world: &PhysicsWorld, body_ids: &[BodyId], expected: &[RigidBody]) {
+    for (id, expected) in body_ids.iter().zip(expected) {
+        assert_eq!(world.body(*id), Some(expected));
     }
 }
 
@@ -1596,6 +1680,291 @@ fn indexed_force_source_step_failure_rolls_back_and_keeps_capacity() {
             .state()
             .linear_velocity(),
         Vec3::X * 1.0e-4
+    );
+}
+
+#[test]
+fn sharded_force_source_preparation_error_leaves_world_unchanged_and_can_retry() {
+    let (mut world, bodies, _) = shard_world_with_source();
+    let stale_body = world.add_body(dynamic_body()).expect("stale body");
+    assert!(world.remove_body(stale_body).is_some());
+    let invalid_source = world
+        .add_force_source(bodies[1], Vec3::ZERO, Vec3::Y)
+        .expect("source to corrupt for test");
+    world
+        .force_sources
+        .get_mut(invalid_source.dense)
+        .expect("force source")
+        .body = stale_body;
+    let originals = bodies
+        .iter()
+        .map(|id| *world.body(*id).expect("body"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        step_with_shards(&mut world, 0.1),
+        Err(StepError::ForceSource {
+            source_id: invalid_source,
+            cause: ForceSourceError::InvalidBodyId,
+        })
+    );
+    assert_bodies_match(&world, &bodies, &originals);
+    assert!(world.force_source_body_updates.is_empty());
+    assert!(
+        world
+            .force_source_body_indices
+            .as_ref()
+            .is_none_or(|indices| indices.is_empty())
+    );
+
+    world
+        .remove_force_source(invalid_source)
+        .expect("remove invalid source");
+    step_with_shards(&mut world, 0.1).expect("retry after preparation error");
+    assert_eq!(
+        world
+            .body(bodies[0])
+            .expect("body")
+            .state()
+            .linear_velocity(),
+        Vec3::X * 0.1
+    );
+}
+
+#[test]
+fn sharded_fill_error_rolls_back_force_sources_and_can_retry() {
+    let (mut world, bodies, _) = shard_world_with_source();
+    let originals = bodies
+        .iter()
+        .map(|id| *world.body(*id).expect("body"))
+        .collect::<Vec<_>>();
+    let mut no_shards: [Vec<BodyStep>; 0] = [];
+
+    assert_eq!(
+        world.step_with_shards(0.1, &mut no_shards, &ScopedThreadExecutor, 4),
+        Err(StepError::InvalidStepResults)
+    );
+    assert_bodies_match(&world, &bodies, &originals);
+    assert!(world.force_source_body_updates.is_empty());
+
+    step_with_shards(&mut world, 0.1).expect("retry after fill error");
+    assert_eq!(
+        world
+            .body(bodies[0])
+            .expect("body")
+            .state()
+            .linear_velocity(),
+        Vec3::X * 0.1
+    );
+}
+
+#[test]
+fn sharded_gravity_error_rolls_back_force_sources_and_can_retry() {
+    let (mut world, bodies, _) = shard_world_with_source();
+    world.set_central_gravity(Some(
+        CentralGravity::new(Vec3::ZERO, 1.0).expect("gravity field"),
+    ));
+    let originals = bodies
+        .iter()
+        .map(|id| *world.body(*id).expect("body"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        step_with_shards(&mut world, 0.1),
+        Err(StepError::Gravity {
+            body_id: bodies[0],
+            cause: GravityError::AtFieldCenter,
+        })
+    );
+    assert_bodies_match(&world, &bodies, &originals);
+    assert!(world.force_source_body_updates.is_empty());
+    assert!(world.gravity_body_updates.is_empty());
+
+    world.set_central_gravity(None);
+    step_with_shards(&mut world, 0.1).expect("retry after gravity error");
+    assert_eq!(
+        world
+            .body(bodies[0])
+            .expect("body")
+            .state()
+            .linear_velocity(),
+        Vec3::X * 0.1
+    );
+}
+
+#[test]
+fn sharded_collision_preparation_error_rolls_back_force_sources_and_can_retry() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let bodies = (0..4)
+        .map(|index| {
+            let position = if index == 3 {
+                Vec3::X * 1.0e308
+            } else {
+                Vec3::X * (index as f64 * 4.0)
+            };
+            world
+                .add_body(
+                    RigidBody::new_dynamic(
+                        Transform::new(position, Quat::IDENTITY).expect("transform"),
+                        mass,
+                    )
+                    .expect("body"),
+                )
+                .expect("body id")
+        })
+        .collect::<Vec<_>>();
+    let huge_collider = world
+        .add_collider(bodies[3], collider(1.0e308))
+        .expect("large collider");
+    world
+        .add_force_source(bodies[0], Vec3::ZERO, Vec3::X)
+        .expect("force source");
+    let originals = bodies
+        .iter()
+        .map(|id| *world.body(*id).expect("body"))
+        .collect::<Vec<_>>();
+
+    let error = step_with_shards(&mut world, 0.1).expect_err("invalid spatial bounds");
+    assert!(matches!(error, StepError::Collision(_)), "{error:?}");
+    assert_bodies_match(&world, &bodies, &originals);
+    assert!(world.force_source_body_updates.is_empty());
+    assert!(world.gravity_body_updates.is_empty());
+
+    world
+        .remove_collider(huge_collider)
+        .expect("remove collider");
+    step_with_shards(&mut world, 0.1).expect("retry after collision preparation error");
+    assert_eq!(
+        world
+            .body(bodies[0])
+            .expect("body")
+            .state()
+            .linear_velocity(),
+        Vec3::X * 0.1
+    );
+}
+
+#[test]
+fn sharded_integration_error_rolls_back_force_sources_and_can_retry() {
+    let (mut world, bodies, _) = shard_world_with_source();
+    let mut invalid = *world.body(bodies[3]).expect("last body");
+    invalid
+        .set_transform(Transform::new(Vec3::X * 1.0e308, Quat::IDENTITY).expect("finite transform"))
+        .expect("large position");
+    invalid
+        .set_linear_velocity(Vec3::X * 1.0e308)
+        .expect("finite velocity");
+    *world.body_mut(bodies[3]).expect("last body") = invalid;
+    let originals = bodies
+        .iter()
+        .map(|id| *world.body(*id).expect("body"))
+        .collect::<Vec<_>>();
+
+    assert!(matches!(
+        step_with_shards(&mut world, 1.0),
+        Err(StepError::BodyIntegration {
+            body_id,
+            cause: IntegrationError::ArithmeticOverflow,
+        }) if body_id == bodies[3]
+    ));
+    assert_bodies_match(&world, &bodies, &originals);
+    assert!(world.force_source_body_updates.is_empty());
+    assert!(world.gravity_body_updates.is_empty());
+
+    let body = world.body_mut(bodies[3]).expect("last body");
+    body.set_transform(Transform::identity())
+        .expect("reset transform");
+    body.set_linear_velocity(Vec3::ZERO)
+        .expect("reset velocity");
+    step_with_shards(&mut world, 0.1).expect("retry after integration error");
+    assert_eq!(
+        world
+            .body(bodies[0])
+            .expect("body")
+            .state()
+            .linear_velocity(),
+        Vec3::X * 0.1
+    );
+}
+
+#[test]
+fn sharded_executor_error_rolls_back_force_sources_and_can_retry() {
+    let (mut world, bodies, _) = shard_world_with_source();
+    world
+        .body_mut(bodies[0])
+        .expect("body")
+        .apply_force(Vec3::Y * 0.5)
+        .expect("user force before step");
+    let originals = bodies
+        .iter()
+        .map(|id| *world.body(*id).expect("body"))
+        .collect::<Vec<_>>();
+    let mut shards: [Vec<BodyStep>; 4] = std::array::from_fn(|_| Vec::new());
+    let failing_executor = FailingExecutor {
+        fail_on_call: 1,
+        calls: AtomicUsize::new(0),
+    };
+
+    assert_eq!(
+        world.step_with_shards(0.1, &mut shards, &failing_executor, 4),
+        Err(StepError::Collision(CollisionError::WorkerFailed))
+    );
+    assert_bodies_match(&world, &bodies, &originals);
+    assert!(world.force_source_body_updates.is_empty());
+    assert!(world.gravity_body_updates.is_empty());
+
+    step_with_shards(&mut world, 0.1).expect("retry after executor error");
+    assert_eq!(
+        world
+            .body(bodies[0])
+            .expect("body")
+            .state()
+            .linear_velocity(),
+        Vec3::new(0.1, 0.05, 0.0)
+    );
+}
+
+#[test]
+fn sharded_collision_solver_error_rolls_back_force_sources_and_can_retry() {
+    let mut world = PhysicsWorld::new();
+    let mut bodies = Vec::new();
+    for center in [Vec3::ZERO, Vec3::X * 1.5, Vec3::X * 5.0, Vec3::X * 6.5] {
+        let body = world.add_body(body_at(center, 1.0)).expect("body");
+        world.add_collider(body, collider(1.0)).expect("collider");
+        bodies.push(body);
+    }
+    world
+        .add_force_source(bodies[0], Vec3::ZERO, Vec3::X)
+        .expect("force source");
+    let originals = bodies
+        .iter()
+        .map(|id| *world.body(*id).expect("body"))
+        .collect::<Vec<_>>();
+    let mut shards: [Vec<BodyStep>; 4] = std::array::from_fn(|_| Vec::new());
+    let failing_executor = FailingExecutor {
+        fail_on_call: 2,
+        calls: AtomicUsize::new(0),
+    };
+
+    assert_eq!(
+        world.step_with_shards(0.1, &mut shards, &failing_executor, 4),
+        Err(StepError::Collision(CollisionError::WorkerFailed))
+    );
+    assert_eq!(failing_executor.calls.load(Ordering::Relaxed), 2);
+    assert_bodies_match(&world, &bodies, &originals);
+    assert!(world.force_source_body_updates.is_empty());
+    assert!(world.gravity_body_updates.is_empty());
+
+    step_with_shards(&mut world, 0.1).expect("retry after collision solver error");
+    assert!(
+        world
+            .body(bodies[0])
+            .expect("body")
+            .state()
+            .linear_velocity()
+            .x
+            > 0.0
     );
 }
 
