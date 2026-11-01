@@ -3,7 +3,8 @@ use std::fmt;
 use kapitsa_core::collision::CollisionEvent;
 use tokio::sync::{broadcast, mpsc, watch};
 
-use super::command::CommandRequest;
+use super::PhysicsClientError;
+use super::command::{BatchId, CommandRequest};
 
 /// Collision events committed by one physics step.
 #[derive(Clone, Debug, PartialEq)]
@@ -55,6 +56,103 @@ impl fmt::Display for CollisionEventStreamError {
 }
 
 impl std::error::Error for CollisionEventStreamError {}
+
+/// A batch failure. `command_index` is `None` when the simulation stopped before
+/// applying the batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysicsBatchError {
+    pub command_index: Option<usize>,
+    pub error: PhysicsClientError,
+}
+
+/// Outcome of an accepted command buffer at its physics-step boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysicsBatchResult {
+    pub batch_id: BatchId,
+    pub step: u64,
+    pub result: Result<(), PhysicsBatchError>,
+}
+
+/// Failure returned while receiving command-buffer results.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhysicsBatchResultStreamError {
+    Lagged { missed_results: u64 },
+    NotRunning,
+    ChannelClosed,
+}
+
+impl fmt::Display for PhysicsBatchResultStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lagged { missed_results } => {
+                write!(
+                    formatter,
+                    "physics batch result stream missed {missed_results} results"
+                )
+            }
+            Self::NotRunning => formatter.write_str("physics simulation is not running"),
+            Self::ChannelClosed => formatter.write_str("physics batch result channel is closed"),
+        }
+    }
+}
+
+impl std::error::Error for PhysicsBatchResultStreamError {}
+
+/// Subscription to bounded command-buffer execution results.
+pub struct PhysicsBatchResults {
+    receiver: broadcast::Receiver<PhysicsBatchResult>,
+    running: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
+}
+
+impl PhysicsBatchResults {
+    pub(crate) fn new(
+        receiver: broadcast::Receiver<PhysicsBatchResult>,
+        running: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
+    ) -> Self {
+        Self { receiver, running }
+    }
+
+    /// Waits for the next result and reports any results lost to channel lag.
+    pub async fn next_result(
+        &mut self,
+    ) -> Result<PhysicsBatchResult, PhysicsBatchResultStreamError> {
+        loop {
+            if self.running.borrow().is_none() {
+                return match self.receiver.try_recv() {
+                    Ok(result) => Ok(result),
+                    Err(broadcast::error::TryRecvError::Lagged(missed_results)) => {
+                        Err(PhysicsBatchResultStreamError::Lagged { missed_results })
+                    }
+                    Err(broadcast::error::TryRecvError::Empty) => {
+                        Err(PhysicsBatchResultStreamError::NotRunning)
+                    }
+                    Err(broadcast::error::TryRecvError::Closed) => {
+                        Err(PhysicsBatchResultStreamError::ChannelClosed)
+                    }
+                };
+            }
+            tokio::select! {
+                result = self.receiver.recv() => match result {
+                    Ok(result) => return Ok(result),
+                    Err(broadcast::error::RecvError::Lagged(missed_results)) => {
+                        return Err(PhysicsBatchResultStreamError::Lagged { missed_results });
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(PhysicsBatchResultStreamError::ChannelClosed);
+                    }
+                },
+                changed = self.running.changed() => {
+                    if changed.is_err() {
+                        return Err(PhysicsBatchResultStreamError::ChannelClosed);
+                    }
+                    if self.running.borrow().is_none() {
+                        return Err(PhysicsBatchResultStreamError::NotRunning);
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Subscription to bounded collision event batches.
 pub struct CollisionEvents {
@@ -118,7 +216,11 @@ impl CollisionEvents {
 mod tests {
     use tokio::sync::{broadcast, mpsc, watch};
 
-    use super::{CollisionEventBatch, CollisionEventStreamError, CollisionEvents};
+    use super::{
+        CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsBatchResult,
+        PhysicsBatchResultStreamError, PhysicsBatchResults,
+    };
+    use crate::runtime::asynchronous::marshalling::BatchId;
 
     type RunningState = Option<mpsc::Sender<super::CommandRequest>>;
 
@@ -162,5 +264,29 @@ mod tests {
             .send(CollisionEventBatch::new(7, Vec::new()))
             .unwrap();
         assert_eq!(subscription.next_batch().await.unwrap().step(), 7);
+    }
+
+    #[tokio::test]
+    async fn batch_results_report_lag_and_can_continue_receiving() {
+        let (results, receiver) = broadcast::channel(1);
+        let (_running_tx, running_rx) = running_state();
+        let mut subscription = PhysicsBatchResults::new(receiver, running_rx);
+        for id in 1..=3 {
+            results
+                .send(PhysicsBatchResult {
+                    batch_id: BatchId::new(id),
+                    step: id,
+                    result: Ok(()),
+                })
+                .expect("subscriber exists");
+        }
+
+        assert_eq!(
+            subscription.next_result().await,
+            Err(PhysicsBatchResultStreamError::Lagged { missed_results: 2 })
+        );
+        let result = subscription.next_result().await.expect("latest result");
+        assert_eq!(result.batch_id.get(), 3);
+        assert_eq!(result.step, 3);
     }
 }

@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use kapitsa_core::{
     collider::{Collider, CollisionFilter, CollisionMode},
@@ -15,8 +18,9 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::PhysicsClientError;
 use super::{
-    CollisionEventBatch, CollisionEvents, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot,
-    command::CommandRequest,
+    CollisionEventBatch, CollisionEvents, PhysicsBatchResult, PhysicsBatchResults, PhysicsCommand,
+    PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSnapshot, PhysicsSubmitError,
+    command::{BatchId, CommandRequest},
 };
 
 /// Thread-safe handle for submitting physics commands and reading snapshots.
@@ -25,6 +29,8 @@ pub struct PhysicsClient {
     command_tx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
     snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
     collision_events: broadcast::Sender<CollisionEventBatch>,
+    batch_results: broadcast::Sender<PhysicsBatchResult>,
+    batch_id_sequence: Arc<AtomicU64>,
 }
 
 impl PhysicsClient {
@@ -32,11 +38,70 @@ impl PhysicsClient {
         command_tx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
         snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
         collision_events: broadcast::Sender<CollisionEventBatch>,
+        batch_results: broadcast::Sender<PhysicsBatchResult>,
+        batch_id_sequence: Arc<AtomicU64>,
     ) -> Self {
         Self {
             command_tx,
             snapshot_rx,
             collision_events,
+            batch_results,
+            batch_id_sequence,
+        }
+    }
+
+    /// Creates an empty command buffer for nonblocking submission.
+    pub fn commands(&self) -> PhysicsCommandBuffer {
+        PhysicsCommandBuffer::new()
+    }
+
+    /// Attempts to enqueue a complete command buffer without waiting.
+    ///
+    /// On failure, the returned error retains the buffer so it can be retried.
+    /// Success means the buffer was accepted into the bounded queue.
+    pub fn try_submit(&self, buffer: PhysicsCommandBuffer) -> Result<BatchId, PhysicsSubmitError> {
+        if buffer.is_empty() {
+            return Err(PhysicsSubmitError::EmptyBuffer(buffer));
+        }
+        if buffer.len() > PhysicsCommandBuffer::MAX_COMMANDS {
+            return Err(PhysicsSubmitError::TooManyCommands {
+                buffer,
+                max_commands: PhysicsCommandBuffer::MAX_COMMANDS,
+            });
+        }
+        let sender = match self.command_tx.borrow().clone() {
+            Some(sender) => sender,
+            None => return Err(PhysicsSubmitError::NotRunning(buffer)),
+        };
+        let id = match self.batch_id_sequence.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |next| next.checked_add(1),
+        ) {
+            Ok(id) => BatchId::new(id),
+            Err(_) => return Err(PhysicsSubmitError::BatchIdExhausted(buffer)),
+        };
+
+        let request = CommandRequest::Batch {
+            id,
+            commands: buffer.commands,
+        };
+        match sender.try_send(request) {
+            Ok(()) => Ok(id),
+            Err(mpsc::error::TrySendError::Full(CommandRequest::Batch { commands, .. })) => {
+                Err(PhysicsSubmitError::QueueFull(PhysicsCommandBuffer {
+                    commands,
+                }))
+            }
+            Err(mpsc::error::TrySendError::Closed(CommandRequest::Batch { commands, .. })) => {
+                Err(PhysicsSubmitError::ChannelClosed(PhysicsCommandBuffer {
+                    commands,
+                }))
+            }
+            Err(mpsc::error::TrySendError::Full(CommandRequest::Single { .. }))
+            | Err(mpsc::error::TrySendError::Closed(CommandRequest::Single { .. })) => Err(
+                PhysicsSubmitError::ChannelClosed(PhysicsCommandBuffer::new()),
+            ),
         }
     }
 
@@ -55,7 +120,7 @@ impl PhysicsClient {
             .ok_or(PhysicsClientError::NotRunning)?;
         let (reply, response) = oneshot::channel();
         sender
-            .send(CommandRequest { command, reply })
+            .send(CommandRequest::Single { command, reply })
             .await
             .map_err(|_| PhysicsClientError::ChannelClosed)?;
         response
@@ -337,6 +402,11 @@ impl PhysicsClient {
         CollisionEvents::new(self.collision_events.subscribe(), self.command_tx.clone())
     }
 
+    /// Subscribes to bounded asynchronous command-buffer results.
+    pub fn subscribe_batch_results(&self) -> PhysicsBatchResults {
+        PhysicsBatchResults::new(self.batch_results.subscribe(), self.command_tx.clone())
+    }
+
     /// Returns an `Arc` to the latest published snapshot without waiting.
     pub fn snapshot(&self) -> Arc<PhysicsSnapshot> {
         Arc::clone(&self.snapshot_rx.borrow())
@@ -392,7 +462,7 @@ mod tests {
     use std::{
         future::Future,
         pin::Pin,
-        sync::Arc,
+        sync::{Arc, atomic::AtomicU64},
         task::{Context, Poll, Waker},
         time::Duration,
     };
@@ -410,7 +480,8 @@ mod tests {
     use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
     use super::super::{
-        PhysicsClientError, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot,
+        PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
+        PhysicsSnapshot, PhysicsSubmitError,
         command::{CommandRequest, apply_command},
     };
     use super::PhysicsClient;
@@ -426,6 +497,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel(capacity);
         let (command_state_tx, command_state_rx) = watch::channel(Some(command_tx));
         let (collision_events, _) = broadcast::channel(4);
+        let (batch_results, _) = broadcast::channel(4);
         let initial = Arc::new(PhysicsSnapshot::from_world(
             &PhysicsWorld::new(),
             0,
@@ -433,7 +505,13 @@ mod tests {
         ));
         let (snapshot_tx, snapshot_rx) = watch::channel(initial);
         ClientHarness {
-            client: PhysicsClient::new(command_state_rx, snapshot_rx, collision_events),
+            client: PhysicsClient::new(
+                command_state_rx,
+                snapshot_rx,
+                collision_events,
+                batch_results,
+                Arc::new(AtomicU64::new(1)),
+            ),
             receiver: command_rx,
             _command_tx: command_state_tx,
             _snapshot_tx: snapshot_tx,
@@ -444,6 +522,18 @@ mod tests {
         PhysicsCommand::AddBody {
             body: RigidBody::new_static(Transform::identity()),
         }
+    }
+
+    fn take_single_request(
+        request: CommandRequest,
+    ) -> (
+        PhysicsCommand,
+        oneshot::Sender<Result<PhysicsCommandResult, PhysicsClientError>>,
+    ) {
+        let CommandRequest::Single { command, reply } = request else {
+            panic!("single command request expected");
+        };
+        (command, reply)
     }
 
     fn snapshot(step: u64) -> Arc<PhysicsSnapshot> {
@@ -478,8 +568,9 @@ mod tests {
         let server = tokio::spawn(async move {
             let request = receiver.recv().await.expect("request");
             let mut world = PhysicsWorld::new();
-            let result = apply_command(&mut world, request.command);
-            request.reply.send(result).expect("client is waiting");
+            let (command, reply) = take_single_request(request);
+            let result = apply_command(&mut world, command);
+            reply.send(result).expect("client is waiting");
             world.body_count()
         });
 
@@ -535,8 +626,9 @@ mod tests {
         let server = tokio::spawn(async move {
             for _ in 0..5 {
                 let request = receiver.recv().await.expect("configuration request");
-                let result = apply_command(&mut world, request.command);
-                request.reply.send(result).expect("client awaits response");
+                let (command, reply) = take_single_request(request);
+                let result = apply_command(&mut world, command);
+                reply.send(result).expect("client awaits response");
             }
             world
         });
@@ -603,8 +695,9 @@ mod tests {
                 .unwrap();
             for _ in 0..3 {
                 let request = receiver.recv().await.expect("query request");
-                let result = apply_command(&mut world, request.command);
-                request.reply.send(result).expect("client is waiting");
+                let (command, reply) = take_single_request(request);
+                let result = apply_command(&mut world, command);
+                reply.send(result).expect("client is waiting");
             }
         });
 
@@ -653,8 +746,8 @@ mod tests {
         } = running_client(1);
         let server = tokio::spawn(async move {
             let request = receiver.recv().await.expect("request");
-            request
-                .reply
+            let (_, reply) = take_single_request(request);
+            reply
                 .send(Err(PhysicsClientError::NotRunning))
                 .expect("client is waiting");
         });
@@ -680,7 +773,7 @@ mod tests {
             .expect("running sender")
             .clone();
         sender
-            .try_send(CommandRequest {
+            .try_send(CommandRequest::Single {
                 command: add_body(),
                 reply,
             })
@@ -688,16 +781,93 @@ mod tests {
 
         let task = tokio::spawn(async move { client.submit(add_body()).await });
         let first = receiver.recv().await.expect("first queued command");
-        assert!(matches!(first.command, PhysicsCommand::AddBody { .. }));
+        let (first_command, _) = take_single_request(first);
+        assert!(matches!(first_command, PhysicsCommand::AddBody { .. }));
         let second = receiver.recv().await.expect("backpressured command");
-        second
-            .reply
+        let (_, second_reply) = take_single_request(second);
+        second_reply
             .send(Ok(PhysicsCommandResult::Done))
             .expect("submit still waiting");
         assert!(matches!(
             task.await.expect("submit task"),
             Ok(PhysicsCommandResult::Done)
         ));
+    }
+
+    #[tokio::test]
+    async fn nonblocking_submit_preserves_a_full_queue_buffer_for_retry() {
+        let ClientHarness {
+            client,
+            mut receiver,
+            ..
+        } = running_client(1);
+        let (reply, _response) = oneshot::channel();
+        let sender = client
+            .command_tx
+            .borrow()
+            .as_ref()
+            .expect("running sender")
+            .clone();
+        sender
+            .try_send(CommandRequest::Single {
+                command: add_body(),
+                reply,
+            })
+            .expect("fill bounded queue");
+
+        let mut world = PhysicsWorld::new();
+        let body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("body ID");
+        let mut buffer = PhysicsCommandBuffer::with_capacity(2);
+        buffer.set_linear_velocity(body, Vec3::X);
+        buffer.apply_impulse(body, Vec3::Y);
+
+        let error = client.try_submit(buffer).expect_err("queue is full");
+        let PhysicsSubmitError::QueueFull(buffer) = error else {
+            panic!("expected QueueFull");
+        };
+        assert_eq!(buffer.len(), 2);
+
+        let _ = take_single_request(receiver.recv().await.expect("queued command"));
+        let id = client.try_submit(buffer).expect("retry accepted");
+        let Some(CommandRequest::Batch {
+            id: queued_id,
+            commands,
+        }) = receiver.try_recv().ok()
+        else {
+            panic!("batch must be one queue message");
+        };
+        assert_eq!(queued_id, id);
+        assert_eq!(commands.len(), 2);
+    }
+
+    #[test]
+    fn oversized_buffer_is_rejected_without_losing_commands() {
+        let harness = running_client(1);
+        let mut world = PhysicsWorld::new();
+        let body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("body");
+        let mut buffer =
+            PhysicsCommandBuffer::with_capacity(PhysicsCommandBuffer::MAX_COMMANDS + 1);
+        for _ in 0..=PhysicsCommandBuffer::MAX_COMMANDS {
+            buffer.set_linear_velocity(body, Vec3::X);
+        }
+
+        let error = harness
+            .client
+            .try_submit(buffer)
+            .expect_err("oversized buffers are rejected");
+        let PhysicsSubmitError::TooManyCommands {
+            buffer,
+            max_commands,
+        } = error
+        else {
+            panic!("expected command count error");
+        };
+        assert_eq!(max_commands, PhysicsCommandBuffer::MAX_COMMANDS);
+        assert_eq!(buffer.len(), max_commands + 1);
     }
 
     #[tokio::test]
@@ -734,7 +904,7 @@ mod tests {
             .borrow()
             .as_ref()
             .expect("running sender")
-            .try_send(CommandRequest {
+            .try_send(CommandRequest::Single {
                 command: add_body(),
                 reply,
             })
@@ -763,8 +933,9 @@ mod tests {
                 .expect_err("client future cancelled")
                 .is_cancelled()
         );
-        assert!(matches!(request.command, PhysicsCommand::AddBody { .. }));
-        assert!(request.reply.send(Ok(PhysicsCommandResult::Done)).is_err());
+        let (command, reply) = take_single_request(request);
+        assert!(matches!(command, PhysicsCommand::AddBody { .. }));
+        assert!(reply.send(Ok(PhysicsCommandResult::Done)).is_err());
     }
 
     #[tokio::test]
@@ -777,7 +948,14 @@ mod tests {
         ));
         let (_snapshot_tx, snapshot_rx) = watch::channel(initial);
         let (collision_events, _) = broadcast::channel(4);
-        let client = PhysicsClient::new(state_rx, snapshot_rx, collision_events);
+        let (batch_results, _) = broadcast::channel(4);
+        let client = PhysicsClient::new(
+            state_rx,
+            snapshot_rx,
+            collision_events,
+            batch_results,
+            Arc::new(AtomicU64::new(1)),
+        );
         assert!(matches!(
             client.submit(add_body()).await,
             Err(PhysicsClientError::NotRunning)

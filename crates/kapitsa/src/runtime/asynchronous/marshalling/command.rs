@@ -12,6 +12,21 @@ use kapitsa_math::{Affine3, Vec3};
 use tokio::sync::oneshot;
 
 use super::PhysicsClientError;
+use super::events::PhysicsBatchError;
+
+/// Correlates an accepted command buffer with its asynchronous result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BatchId(u64);
+
+impl BatchId {
+    pub(crate) fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
 
 /// An operation applied to the simulation world at a physics-step boundary.
 pub enum PhysicsCommand {
@@ -93,6 +108,155 @@ pub enum PhysicsCommand {
     },
 }
 
+/// Ordered body mutations submitted together before a physics step.
+#[derive(Default)]
+pub struct PhysicsCommandBuffer {
+    pub(crate) commands: Vec<PhysicsCommand>,
+}
+
+impl std::fmt::Debug for PhysicsCommandBuffer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PhysicsCommandBuffer")
+            .field("command_count", &self.commands.len())
+            .finish()
+    }
+}
+
+impl PhysicsCommandBuffer {
+    /// Maximum number of commands accepted in one atomic batch.
+    pub const MAX_COMMANDS: usize = 128;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            commands: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        self.commands.reserve(additional);
+    }
+
+    pub fn len(&self) -> usize {
+        self.commands.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
+
+    pub fn set_transform(&mut self, id: BodyId, transform: Transform) {
+        self.commands
+            .push(PhysicsCommand::SetTransform { id, transform });
+    }
+
+    pub fn set_linear_velocity(&mut self, id: BodyId, velocity: Vec3) {
+        self.commands
+            .push(PhysicsCommand::SetLinearVelocity { id, velocity });
+    }
+
+    pub fn set_angular_velocity(&mut self, id: BodyId, velocity: Vec3) {
+        self.commands
+            .push(PhysicsCommand::SetAngularVelocity { id, velocity });
+    }
+
+    pub fn set_mass(&mut self, id: BodyId, mass: MassProperties) {
+        self.commands.push(PhysicsCommand::SetMass { id, mass });
+    }
+
+    pub fn set_ccd_mode(&mut self, id: BodyId, mode: CcdMode) {
+        self.commands.push(PhysicsCommand::SetCcdMode { id, mode });
+    }
+
+    pub fn sleep(&mut self, id: BodyId) {
+        self.commands.push(PhysicsCommand::Sleep { id });
+    }
+
+    pub fn wake_up(&mut self, id: BodyId) {
+        self.commands.push(PhysicsCommand::WakeUp { id });
+    }
+
+    pub fn apply_force(&mut self, id: BodyId, force: Vec3) {
+        self.commands.push(PhysicsCommand::ApplyForce { id, force });
+    }
+
+    pub fn apply_force_at_point(&mut self, id: BodyId, force: Vec3, point: Vec3) {
+        self.commands
+            .push(PhysicsCommand::ApplyForceAtPoint { id, force, point });
+    }
+
+    pub fn apply_torque(&mut self, id: BodyId, torque: Vec3) {
+        self.commands
+            .push(PhysicsCommand::ApplyTorque { id, torque });
+    }
+
+    pub fn apply_impulse(&mut self, id: BodyId, impulse: Vec3) {
+        self.commands
+            .push(PhysicsCommand::ApplyImpulse { id, impulse });
+    }
+
+    pub fn apply_impulse_at_point(&mut self, id: BodyId, impulse: Vec3, point: Vec3) {
+        self.commands
+            .push(PhysicsCommand::ApplyImpulseAtPoint { id, impulse, point });
+    }
+
+    pub fn clear_forces(&mut self, id: BodyId) {
+        self.commands.push(PhysicsCommand::ClearForces { id });
+    }
+}
+
+/// A synchronous failure while submitting a command buffer.
+#[derive(Debug)]
+pub enum PhysicsSubmitError {
+    EmptyBuffer(PhysicsCommandBuffer),
+    TooManyCommands {
+        buffer: PhysicsCommandBuffer,
+        max_commands: usize,
+    },
+    BatchIdExhausted(PhysicsCommandBuffer),
+    NotRunning(PhysicsCommandBuffer),
+    QueueFull(PhysicsCommandBuffer),
+    ChannelClosed(PhysicsCommandBuffer),
+}
+
+impl PhysicsSubmitError {
+    pub fn into_buffer(self) -> PhysicsCommandBuffer {
+        match self {
+            Self::EmptyBuffer(buffer)
+            | Self::BatchIdExhausted(buffer)
+            | Self::NotRunning(buffer)
+            | Self::QueueFull(buffer)
+            | Self::ChannelClosed(buffer) => buffer,
+            Self::TooManyCommands { buffer, .. } => buffer,
+        }
+    }
+}
+
+impl std::fmt::Display for PhysicsSubmitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::EmptyBuffer(_) => "physics command buffer is empty",
+            Self::TooManyCommands { max_commands, .. } => {
+                return write!(
+                    formatter,
+                    "physics command buffer exceeds the {max_commands}-command limit"
+                );
+            }
+            Self::BatchIdExhausted(_) => "physics batch identifier space is exhausted",
+            Self::NotRunning(_) => "physics simulation is not running",
+            Self::QueueFull(_) => "physics command queue is full",
+            Self::ChannelClosed(_) => "physics command channel is closed",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for PhysicsSubmitError {}
+
 /// Successful result returned by a physics command.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicsCommandResult {
@@ -110,9 +274,149 @@ pub enum PhysicsCommandResult {
     Overlaps(Vec<OverlapHit>),
 }
 
-pub(crate) struct CommandRequest {
-    pub command: PhysicsCommand,
-    pub reply: oneshot::Sender<Result<PhysicsCommandResult, PhysicsClientError>>,
+// Keep single-command requests inline so the existing async path adds no per-command allocation.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum CommandRequest {
+    Single {
+        command: PhysicsCommand,
+        reply: oneshot::Sender<Result<PhysicsCommandResult, PhysicsClientError>>,
+    },
+    Batch {
+        id: BatchId,
+        commands: Vec<PhysicsCommand>,
+    },
+}
+
+impl CommandRequest {
+    pub(crate) fn command_count(&self) -> usize {
+        match self {
+            Self::Single { .. } => 1,
+            Self::Batch { commands, .. } => commands.len(),
+        }
+    }
+}
+
+pub(crate) fn apply_body_batch(
+    world: &mut PhysicsWorld,
+    commands: &[PhysicsCommand],
+) -> Result<(), PhysicsBatchError> {
+    let mut updated_bodies = Vec::with_capacity(commands.len());
+
+    for (command_index, command) in commands.iter().enumerate() {
+        let Some(id) = body_command_id(command) else {
+            return Err(PhysicsBatchError {
+                command_index: Some(command_index),
+                error: PhysicsClientError::UnsupportedBatchCommand,
+            });
+        };
+
+        let body_index = match updated_bodies
+            .iter()
+            .position(|(updated_id, _)| *updated_id == id)
+        {
+            Some(index) => index,
+            None => {
+                let Some(body) = world.body(id).copied() else {
+                    return Err(PhysicsBatchError {
+                        command_index: Some(command_index),
+                        error: PhysicsClientError::World(WorldError::InvalidBodyId),
+                    });
+                };
+                updated_bodies.push((id, body));
+                updated_bodies.len() - 1
+            }
+        };
+
+        if let Err(error) = apply_body_command(&mut updated_bodies[body_index].1, command) {
+            return Err(PhysicsBatchError {
+                command_index: Some(command_index),
+                error,
+            });
+        }
+    }
+
+    // These commands cannot change world membership, so every ID validated above
+    // remains live until the staged body copies are committed.
+    for (id, body) in updated_bodies {
+        if let Some(target) = world.body_mut(id) {
+            *target = body;
+        }
+    }
+    Ok(())
+}
+
+fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
+    match command {
+        PhysicsCommand::SetTransform { id, .. }
+        | PhysicsCommand::SetLinearVelocity { id, .. }
+        | PhysicsCommand::SetAngularVelocity { id, .. }
+        | PhysicsCommand::SetMass { id, .. }
+        | PhysicsCommand::SetCcdMode { id, .. }
+        | PhysicsCommand::Sleep { id }
+        | PhysicsCommand::WakeUp { id }
+        | PhysicsCommand::ApplyForce { id, .. }
+        | PhysicsCommand::ApplyForceAtPoint { id, .. }
+        | PhysicsCommand::ApplyTorque { id, .. }
+        | PhysicsCommand::ApplyImpulse { id, .. }
+        | PhysicsCommand::ApplyImpulseAtPoint { id, .. }
+        | PhysicsCommand::ClearForces { id } => Some(*id),
+        PhysicsCommand::AddBody { .. }
+        | PhysicsCommand::RemoveBody { .. }
+        | PhysicsCommand::AddCollider { .. }
+        | PhysicsCommand::RemoveCollider { .. }
+        | PhysicsCommand::SetCollisionConfig { .. }
+        | PhysicsCommand::SetColliderFilter { .. }
+        | PhysicsCommand::SetColliderMode { .. }
+        | PhysicsCommand::SetSkinPose { .. }
+        | PhysicsCommand::SetColliderMaterial { .. }
+        | PhysicsCommand::Raycast { .. }
+        | PhysicsCommand::Sweep { .. }
+        | PhysicsCommand::Overlaps { .. } => None,
+    }
+}
+
+fn apply_body_command(
+    body: &mut RigidBody,
+    command: &PhysicsCommand,
+) -> Result<(), PhysicsClientError> {
+    match command {
+        PhysicsCommand::SetTransform { transform, .. } => body.set_transform(*transform)?,
+        PhysicsCommand::SetLinearVelocity { velocity, .. } => {
+            body.set_linear_velocity(*velocity)?;
+        }
+        PhysicsCommand::SetAngularVelocity { velocity, .. } => {
+            body.set_angular_velocity(*velocity)?;
+        }
+        PhysicsCommand::SetMass { mass, .. } => body.set_mass(*mass)?,
+        PhysicsCommand::SetCcdMode { mode, .. } => body.set_ccd_mode(*mode),
+        PhysicsCommand::Sleep { .. } => body.sleep()?,
+        PhysicsCommand::WakeUp { .. } => body.wake_up(),
+        PhysicsCommand::ApplyForce { force, .. } => body.apply_force(*force)?,
+        PhysicsCommand::ApplyForceAtPoint { force, point, .. } => {
+            body.apply_force_at_point(*force, *point)?;
+        }
+        PhysicsCommand::ApplyTorque { torque, .. } => body.apply_torque(*torque)?,
+        PhysicsCommand::ApplyImpulse { impulse, .. } => body.apply_impulse(*impulse)?,
+        PhysicsCommand::ApplyImpulseAtPoint { impulse, point, .. } => {
+            body.apply_impulse_at_point(*impulse, *point)?;
+        }
+        PhysicsCommand::ClearForces { .. } => body.clear_forces(),
+        PhysicsCommand::AddBody { .. }
+        | PhysicsCommand::RemoveBody { .. }
+        | PhysicsCommand::AddCollider { .. }
+        | PhysicsCommand::RemoveCollider { .. }
+        | PhysicsCommand::SetCollisionConfig { .. }
+        | PhysicsCommand::SetColliderFilter { .. }
+        | PhysicsCommand::SetColliderMode { .. }
+        | PhysicsCommand::SetSkinPose { .. }
+        | PhysicsCommand::SetColliderMaterial { .. }
+        | PhysicsCommand::Raycast { .. }
+        | PhysicsCommand::Sweep { .. }
+        | PhysicsCommand::Overlaps { .. } => {
+            return Err(PhysicsClientError::UnsupportedBatchCommand);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn apply_command(
@@ -289,7 +593,7 @@ mod tests {
     use kapitsa_math::{Mat3, Quat, Vec3};
 
     use super::super::PhysicsClientError;
-    use super::{PhysicsCommand, PhysicsCommandResult, apply_command};
+    use super::{PhysicsCommand, PhysicsCommandResult, apply_body_batch, apply_command};
 
     fn mass(value: f64) -> MassProperties {
         MassProperties::new(value, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass")
@@ -622,6 +926,64 @@ mod tests {
         assert_eq!(
             Ray::new(Vec3::ZERO, Vec3::ZERO, 1.0),
             Err(QueryError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn body_batch_preserves_order_and_applies_impulse_with_updated_mass() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(dynamic_body()).expect("body");
+        let commands = [
+            PhysicsCommand::SetMass {
+                id: body,
+                mass: mass(2.0),
+            },
+            PhysicsCommand::ApplyImpulse {
+                id: body,
+                impulse: Vec3::new(10.0, 0.0, 0.0),
+            },
+        ];
+
+        apply_body_batch(&mut world, &commands).expect("atomic batch");
+
+        assert_eq!(
+            world.body(body).expect("body").state().linear_velocity(),
+            Vec3::new(5.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn failed_body_batch_does_not_commit_earlier_body_changes() {
+        let mut world = PhysicsWorld::new();
+        let dynamic = world.add_body(dynamic_body()).expect("dynamic body");
+        let static_body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("static body");
+        let commands = [
+            PhysicsCommand::SetLinearVelocity {
+                id: dynamic,
+                velocity: Vec3::X,
+            },
+            PhysicsCommand::SetMass {
+                id: static_body,
+                mass: mass(2.0),
+            },
+        ];
+
+        let error = apply_body_batch(&mut world, &commands).expect_err("static mass rejected");
+
+        assert_eq!(error.command_index, Some(1));
+        assert_eq!(
+            error.error,
+            PhysicsClientError::Body(BodyError::BodyMustBeDynamic)
+        );
+        assert_eq!(
+            world
+                .body(dynamic)
+                .expect("dynamic body")
+                .state()
+                .linear_velocity(),
+            Vec3::ZERO
         );
     }
 }

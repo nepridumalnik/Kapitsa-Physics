@@ -96,6 +96,101 @@ async fn commands_steps_snapshots_remove_and_recreate_bodies() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_buffers_are_ordered_atomic_and_report_step_results() {
+    let mut simulation = simulation();
+    let mut client = simulation.client();
+    let mut results = client.subscribe_batch_results();
+    simulation.start().expect("start");
+
+    let dynamic = client.add_body(dynamic_body()).await.expect("dynamic body");
+    let fixed = client
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .await
+        .expect("static body");
+    let mut commands = client.commands();
+    commands.set_mass(
+        dynamic,
+        MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass"),
+    );
+    commands.apply_impulse(dynamic, Vec3::X * 10.0);
+    let accepted_id = client.try_submit(commands).expect("nonblocking submit");
+    let applied = tokio::time::timeout(Duration::from_secs(5), results.next_result())
+        .await
+        .expect("batch result timeout")
+        .expect("batch result");
+    assert_eq!(applied.batch_id, accepted_id);
+    assert!(applied.step > 0);
+    assert_eq!(applied.result, Ok(()));
+
+    let snapshot = next_snapshot(&mut client).await;
+    assert_eq!(
+        snapshot
+            .body(dynamic)
+            .expect("dynamic body")
+            .linear_velocity(),
+        Vec3::X * 5.0
+    );
+
+    let mut invalid = client.commands();
+    invalid.set_linear_velocity(dynamic, Vec3::ZERO);
+    invalid.set_mass(
+        fixed,
+        MassProperties::new(3.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass"),
+    );
+    let rejected_id = client.try_submit(invalid).expect("queued for validation");
+    let rejected = tokio::time::timeout(Duration::from_secs(5), results.next_result())
+        .await
+        .expect("batch result timeout")
+        .expect("batch result");
+    assert_eq!(rejected.batch_id, rejected_id);
+    assert_eq!(
+        rejected.result,
+        Err(kapitsa::PhysicsBatchError {
+            command_index: Some(1),
+            error: PhysicsClientError::Body(kapitsa::rigid_body::BodyError::BodyMustBeDynamic),
+        })
+    );
+
+    let unchanged = next_snapshot(&mut client).await;
+    assert_eq!(
+        unchanged
+            .body(dynamic)
+            .expect("dynamic body")
+            .linear_velocity(),
+        Vec3::X * 5.0
+    );
+    simulation.stop().await.expect("stop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_publishes_results_for_accepted_but_unapplied_batches() {
+    let mut simulation = Simulation::new_from_config(SimulationConfig {
+        tick_rate: 2,
+        ..SimulationConfig::default()
+    })
+    .expect("simulation");
+    let client = simulation.client();
+    let mut results = client.subscribe_batch_results();
+    simulation.start().expect("start");
+
+    let body = client.add_body(dynamic_body()).await.expect("body");
+    let mut commands = client.commands();
+    commands.apply_impulse(body, Vec3::X);
+    let batch_id = client.try_submit(commands).expect("accepted batch");
+    simulation.stop().await.expect("stop");
+
+    let result = results.next_result().await.expect("stopped batch result");
+    assert_eq!(result.batch_id, batch_id);
+    assert_eq!(
+        result.result,
+        Err(kapitsa::PhysicsBatchError {
+            command_index: None,
+            error: PhysicsClientError::NotRunning,
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cloned_clients_do_not_lose_concurrent_body_commands() {
     let mut simulation = simulation();
     let mut reader = simulation.client();

@@ -4,9 +4,14 @@ mod events;
 mod snapshot;
 
 pub use client::PhysicsClient;
-pub(crate) use command::{CommandRequest, apply_command};
-pub use command::{PhysicsCommand, PhysicsCommandResult};
-pub use events::{CollisionEventBatch, CollisionEventStreamError, CollisionEvents};
+pub use command::{
+    BatchId, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSubmitError,
+};
+pub(crate) use command::{CommandRequest, apply_body_batch, apply_command};
+pub use events::{
+    CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsBatchError,
+    PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults,
+};
 pub use snapshot::PhysicsSnapshot;
 
 use std::fmt;
@@ -14,13 +19,14 @@ use std::fmt;
 use kapitsa_core::{collision::QueryError, rigid_body::BodyError, world::WorldError};
 
 /// Failure returned while submitting or applying a physics command.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhysicsClientError {
     NotRunning,
     ChannelClosed,
     World(WorldError),
     Body(BodyError),
     Query(QueryError),
+    UnsupportedBatchCommand,
     UnexpectedResult,
 }
 
@@ -32,6 +38,9 @@ impl fmt::Display for PhysicsClientError {
             Self::World(error) => write!(formatter, "physics world command failed: {error}"),
             Self::Body(error) => write!(formatter, "rigid body command failed: {error}"),
             Self::Query(error) => write!(formatter, "physics query failed: {error}"),
+            Self::UnsupportedBatchCommand => {
+                formatter.write_str("command cannot be used in an atomic body batch")
+            }
             Self::UnexpectedResult => {
                 formatter.write_str("physics command returned an unexpected result")
             }
@@ -45,7 +54,10 @@ impl std::error::Error for PhysicsClientError {
             Self::World(error) => Some(error),
             Self::Body(error) => Some(error),
             Self::Query(error) => Some(error),
-            Self::NotRunning | Self::ChannelClosed | Self::UnexpectedResult => None,
+            Self::NotRunning
+            | Self::ChannelClosed
+            | Self::UnsupportedBatchCommand
+            | Self::UnexpectedResult => None,
         }
     }
 }

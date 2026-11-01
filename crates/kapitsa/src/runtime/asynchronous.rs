@@ -22,8 +22,10 @@ pub mod marshalling;
 mod service;
 
 pub use marshalling::{
-    CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsClient,
-    PhysicsClientError, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot,
+    BatchId, CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsBatchError,
+    PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
+    PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
+    PhysicsSnapshot, PhysicsSubmitError,
 };
 pub use service::{Simulation, SimulationError};
 

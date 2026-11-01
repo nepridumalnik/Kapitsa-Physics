@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 use kapitsa_core::world::PhysicsWorld;
 use tokio::{
@@ -11,8 +14,8 @@ use tokio::{
 use super::{
     StepRunner, StepRunnerError,
     marshalling::{
-        CollisionEventBatch, CommandRequest, PhysicsClient, PhysicsClientError, PhysicsSnapshot,
-        apply_command,
+        CollisionEventBatch, CommandRequest, PhysicsBatchError, PhysicsBatchResult, PhysicsClient,
+        PhysicsClientError, PhysicsSnapshot, apply_body_batch, apply_command,
     },
 };
 use crate::runtime::{ConfigError, SimulationConfig, SimulationMetrics, SimulationState};
@@ -20,11 +23,23 @@ use crate::runtime::{ConfigError, SimulationConfig, SimulationMetrics, Simulatio
 const COMMAND_QUEUE_CAPACITY: usize = 1024;
 const MAX_COMMANDS_PER_STEP: usize = 1024;
 const COLLISION_EVENT_BATCH_CAPACITY: usize = 64;
+const PHYSICS_BATCH_RESULT_CAPACITY: usize = 256;
 
 struct ServiceTaskOutput {
     simulation: StepRunner,
     simulation_time: Duration,
     result: Result<(), SimulationError>,
+}
+
+#[derive(Clone)]
+struct SimulationEvents {
+    collisions: broadcast::Sender<CollisionEventBatch>,
+    batch_results: broadcast::Sender<PhysicsBatchResult>,
+}
+
+struct CommandQueue {
+    receiver: mpsc::Receiver<CommandRequest>,
+    pending: Option<CommandRequest>,
 }
 
 /// Owns a clock-driven physics simulation and exposes its client API.
@@ -37,6 +52,8 @@ pub struct Simulation {
     snapshot_tx: watch::Sender<Arc<PhysicsSnapshot>>,
     snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
     collision_events_tx: broadcast::Sender<CollisionEventBatch>,
+    batch_results_tx: broadcast::Sender<PhysicsBatchResult>,
+    batch_id_sequence: Arc<AtomicU64>,
     simulation_time: Duration,
     metrics_tx: watch::Sender<SimulationMetrics>,
     metrics_rx: watch::Receiver<SimulationMetrics>,
@@ -130,6 +147,7 @@ impl Simulation {
         let (command_tx, command_rx) = watch::channel(None);
         let (snapshot_tx, snapshot_rx) = watch::channel(initial_snapshot);
         let (collision_events_tx, _) = broadcast::channel(COLLISION_EVENT_BATCH_CAPACITY);
+        let (batch_results_tx, _) = broadcast::channel(PHYSICS_BATCH_RESULT_CAPACITY);
         Ok(Self {
             simulation: Some(simulation),
             task: None,
@@ -139,6 +157,8 @@ impl Simulation {
             snapshot_tx,
             snapshot_rx,
             collision_events_tx,
+            batch_results_tx,
+            batch_id_sequence: Arc::new(AtomicU64::new(1)),
             simulation_time: Duration::ZERO,
             metrics_tx,
             metrics_rx,
@@ -183,7 +203,10 @@ impl Simulation {
         let metrics_tx = self.metrics_tx.clone();
         let command_state_tx = self.command_tx.clone();
         let snapshot_tx = self.snapshot_tx.clone();
-        let collision_events_tx = self.collision_events_tx.clone();
+        let events = SimulationEvents {
+            collisions: self.collision_events_tx.clone(),
+            batch_results: self.batch_results_tx.clone(),
+        };
         let mut simulation_time = self.simulation_time;
         self.stop = Some(stop_tx);
         self.task = Some(self.runtime.spawn(async move {
@@ -193,7 +216,7 @@ impl Simulation {
                 stop_rx,
                 &metrics_tx,
                 &snapshot_tx,
-                &collision_events_tx,
+                &events,
                 &mut simulation_time,
             )
             .await;
@@ -254,6 +277,8 @@ impl Simulation {
             self.command_rx.clone(),
             self.snapshot_rx.clone(),
             self.collision_events_tx.clone(),
+            self.batch_results_tx.clone(),
+            Arc::clone(&self.batch_id_sequence),
         )
     }
 }
@@ -273,36 +298,45 @@ fn stopping(stop: &watch::Receiver<bool>) -> bool {
 
 async fn run_simulation(
     simulation: &mut StepRunner,
-    mut commands: mpsc::Receiver<CommandRequest>,
+    commands: mpsc::Receiver<CommandRequest>,
     stop: watch::Receiver<bool>,
     metrics: &watch::Sender<SimulationMetrics>,
     snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
-    collision_events: &broadcast::Sender<CollisionEventBatch>,
+    events: &SimulationEvents,
     simulation_time: &mut Duration,
 ) -> Result<(), SimulationError> {
+    let mut commands = CommandQueue {
+        receiver: commands,
+        pending: None,
+    };
     let result = run_simulation_loop(
         simulation,
         &mut commands,
         stop,
         metrics,
         snapshots,
-        collision_events,
+        events,
         simulation_time,
     )
     .await;
-    while let Ok(request) = commands.try_recv() {
-        let _ = request.reply.send(Err(PhysicsClientError::NotRunning));
+    commands.receiver.close();
+    let stopped_at_step = simulation.metrics().total_steps;
+    if let Some(request) = commands.pending.take() {
+        reject_request(request, stopped_at_step, events);
+    }
+    while let Ok(request) = commands.receiver.try_recv() {
+        reject_request(request, stopped_at_step, events);
     }
     result
 }
 
 async fn run_simulation_loop(
     simulation: &mut StepRunner,
-    commands: &mut mpsc::Receiver<CommandRequest>,
+    commands: &mut CommandQueue,
     mut stop: watch::Receiver<bool>,
     metrics: &watch::Sender<SimulationMetrics>,
     snapshots: &watch::Sender<Arc<PhysicsSnapshot>>,
-    collision_events: &broadcast::Sender<CollisionEventBatch>,
+    events: &SimulationEvents,
     simulation_time: &mut Duration,
 ) -> Result<(), SimulationError> {
     let step_duration = simulation.config().step_budget();
@@ -336,7 +370,7 @@ async fn run_simulation_loop(
             let next_simulation_time = simulation_time
                 .checked_add(step_duration)
                 .ok_or(SimulationError::SimulationTimeOverflow)?;
-            apply_queued_commands(simulation, commands)?;
+            apply_queued_commands(simulation, commands, events)?;
             simulation.step().await?;
             *simulation_time = next_simulation_time;
 
@@ -348,7 +382,7 @@ async fn run_simulation_loop(
             );
             let previous_snapshot = snapshots.send_replace(Arc::new(snapshot));
             PhysicsSnapshot::recycle(previous_snapshot, &mut reusable_snapshot);
-            if collision_events.receiver_count() > 0 {
+            if events.collisions.receiver_count() > 0 {
                 let batch = CollisionEventBatch::new(
                     simulation.metrics().total_steps,
                     simulation
@@ -357,7 +391,7 @@ async fn run_simulation_loop(
                         .collision_events()
                         .to_vec(),
                 );
-                let _ = collision_events.send(batch);
+                let _ = events.collisions.send(batch);
             }
 
             accumulator = accumulator.saturating_sub(step_duration);
@@ -382,20 +416,62 @@ async fn run_simulation_loop(
 
 fn apply_queued_commands(
     simulation: &mut StepRunner,
-    commands: &mut mpsc::Receiver<CommandRequest>,
+    commands: &mut CommandQueue,
+    events: &SimulationEvents,
 ) -> Result<(), SimulationError> {
+    let step = simulation.metrics().total_steps.saturating_add(1);
     let world = simulation.world_mut().map_err(SimulationError::from)?;
-    for _ in 0..MAX_COMMANDS_PER_STEP {
-        let request = match commands.try_recv() {
-            Ok(request) => request,
-            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
-                break;
-            }
+    let mut processed_commands = 0;
+    while processed_commands < MAX_COMMANDS_PER_STEP {
+        let request = match commands.pending.take() {
+            Some(request) => request,
+            None => match commands.receiver.try_recv() {
+                Ok(request) => request,
+                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                    break;
+                }
+            },
         };
-        let result = apply_command(world, request.command);
-        let _ = request.reply.send(result);
+        let command_count = request.command_count();
+        if command_count > MAX_COMMANDS_PER_STEP - processed_commands {
+            commands.pending = Some(request);
+            break;
+        }
+        match request {
+            CommandRequest::Single { command, reply } => {
+                let result = apply_command(world, command);
+                let _ = reply.send(result);
+            }
+            CommandRequest::Batch { id, commands } => {
+                let result = apply_body_batch(world, &commands);
+                let _ = events.batch_results.send(PhysicsBatchResult {
+                    batch_id: id,
+                    step,
+                    result,
+                });
+            }
+        }
+        processed_commands += command_count;
     }
     Ok(())
+}
+
+fn reject_request(request: CommandRequest, step: u64, events: &SimulationEvents) {
+    match request {
+        CommandRequest::Single { reply, .. } => {
+            let _ = reply.send(Err(PhysicsClientError::NotRunning));
+        }
+        CommandRequest::Batch { id, .. } => {
+            let _ = events.batch_results.send(PhysicsBatchResult {
+                batch_id: id,
+                step,
+                result: Err(PhysicsBatchError {
+                    command_index: None,
+                    error: PhysicsClientError::NotRunning,
+                }),
+            });
+        }
+    }
 }
 
 fn add_elapsed(accumulator: &mut Duration, elapsed: Duration) -> Result<(), SimulationError> {
