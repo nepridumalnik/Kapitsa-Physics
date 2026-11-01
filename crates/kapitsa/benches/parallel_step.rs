@@ -91,11 +91,11 @@ fn validate_layout(length: usize, chunk_sizes: &[usize]) -> Result<(), Execution
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!(
-        "Kapitsa core parallel-step benchmark; steps={STEPS}, samples={SAMPLES}, statistic=median"
+        "Kapitsa core parallel-step benchmark; steps={STEPS}, warmups=1, samples={SAMPLES}, statistics=min/median/max"
     );
     for body_count in BODY_COUNTS {
-        let mut medians = Vec::with_capacity(3);
-        for workers in [1, 2, 4] {
+        let mut samples_by_worker = Vec::with_capacity(4);
+        for workers in [1, 2, 4, 8] {
             let elapsed = sample(|| {
                 let mut world = make_world(body_count, false)?;
                 let executor = executor(workers)?;
@@ -105,20 +105,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 Ok(started.elapsed().div_f64(STEPS as f64))
             })?;
-            medians.push(elapsed);
+            samples_by_worker.push(elapsed);
         }
         println!("\n{body_count} dynamic bodies");
-        for (workers, elapsed) in [1, 2, 4].into_iter().zip(medians.iter().copied()) {
+        let baseline = samples_by_worker[0].1;
+        for (workers, (min, median, max)) in [1, 2, 4, 8]
+            .into_iter()
+            .zip(samples_by_worker.iter().copied())
+        {
             println!(
-                "workers={workers} median={:8.3} ms speedup={:.2}x",
-                millis(elapsed),
-                medians[0].as_secs_f64() / elapsed.as_secs_f64(),
+                "workers={workers} step={:8.3}/{:8.3}/{:8.3} ms min/median/max speedup={:.2}x",
+                millis(min),
+                millis(median),
+                millis(max),
+                baseline.as_secs_f64() / median.as_secs_f64(),
             );
         }
     }
 
-    let mut medians = Vec::with_capacity(3);
-    for workers in [1, 2, 4] {
+    let mut samples_by_worker = Vec::with_capacity(4);
+    for workers in [1, 2, 4, 8] {
         let elapsed = sample(|| {
             let mut world = collision_world()?;
             let executor = executor(workers)?;
@@ -128,14 +134,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Ok(started.elapsed().div_f64(STEPS as f64))
         })?;
-        medians.push(elapsed);
+        samples_by_worker.push(elapsed);
     }
     println!("\n4,096 dynamic bodies / 2,048 two-body contact islands");
-    for (workers, elapsed) in [1, 2, 4].into_iter().zip(medians.iter().copied()) {
+    let baseline = samples_by_worker[0].1;
+    for (workers, (min, median, max)) in [1, 2, 4, 8]
+        .into_iter()
+        .zip(samples_by_worker.iter().copied())
+    {
         println!(
-            "workers={workers} median={:8.3} ms speedup={:.2}x",
-            millis(elapsed),
-            medians[0].as_secs_f64() / elapsed.as_secs_f64(),
+            "workers={workers} step={:8.3}/{:8.3}/{:8.3} ms min/median/max speedup={:.2}x",
+            millis(min),
+            millis(median),
+            millis(max),
+            baseline.as_secs_f64() / median.as_secs_f64(),
         );
     }
     Ok(())
@@ -187,17 +199,19 @@ fn collision_world() -> Result<PhysicsWorld, Box<dyn Error>> {
     Ok(world)
 }
 
-fn sample(run: impl Fn() -> Result<Duration, Box<dyn Error>>) -> Result<Duration, Box<dyn Error>> {
+fn sample(
+    run: impl Fn() -> Result<Duration, Box<dyn Error>>,
+) -> Result<(Duration, Duration, Duration), Box<dyn Error>> {
     black_box(run()?);
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         samples.push(run()?);
     }
     samples.sort_unstable();
-    samples
-        .get(SAMPLES / 2)
-        .copied()
-        .ok_or_else(|| "missing benchmark sample".into())
+    let min = *samples.first().ok_or("missing benchmark sample")?;
+    let median = samples[SAMPLES / 2];
+    let max = *samples.last().ok_or("missing benchmark sample")?;
+    Ok((min, black_box(median), max))
 }
 
 fn millis(duration: Duration) -> f64 {

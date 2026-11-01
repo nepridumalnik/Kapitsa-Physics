@@ -7,6 +7,7 @@ use std::{
 use kapitsa_core::{
     collider::Collider,
     collision::{CollisionStepMetrics, QueryFilter, Ray},
+    joint::{FixedJoint, Joint, JointCommon, JointFrame},
     mass::MassProperties,
     material::PhysicsMaterial,
     rigid_body::{CcdMode, RigidBody},
@@ -69,6 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     report_ccd_worker_scaling()?;
     report_ccd_gjk_worker_scaling()?;
+    report_joint_worker_scaling()?;
     report_queries()?;
     Ok(())
 }
@@ -461,6 +463,117 @@ fn report_ccd_worker_scaling() -> Result<(), Box<dyn Error>> {
 fn report_ccd_gjk_worker_scaling() -> Result<(), Box<dyn Error>> {
     println!("\nIndependent GJK-heavy CCD islands by worker count");
     report_ccd_worker_scaling_for(&[8, 16, 64, 128, 256, 512, 1_024], ccd_box_scene_of)
+}
+
+fn report_joint_worker_scaling() -> Result<(), Box<dyn Error>> {
+    println!("\nJoint solver scaling by worker count; one step/sample");
+    for (name, build) in [
+        (
+            "2,048 independent fixed-joint islands",
+            independent_joint_islands as fn() -> _,
+        ),
+        ("512 bodies, one fixed-joint chain", fixed_joint_chain),
+    ] {
+        let mut results = Vec::with_capacity(4);
+        for worker_count in [1, 2, 4, 8] {
+            for _ in 0..WARMUP_RUNS {
+                run_joint_step(build, worker_count)?;
+            }
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for _ in 0..SAMPLES {
+                samples.push(run_joint_step(build, worker_count)?);
+            }
+            samples.sort_unstable_by_key(|sample| sample.0);
+            results.push((worker_count, samples));
+        }
+
+        let baseline = results
+            .first()
+            .and_then(|(_, samples)| samples.get(SAMPLES / 2))
+            .ok_or("missing joint benchmark sample")?
+            .0;
+        println!("{name}");
+        for (worker_count, samples) in results {
+            let min = samples.first().ok_or("missing joint benchmark sample")?;
+            let median = samples
+                .get(SAMPLES / 2)
+                .ok_or("missing joint benchmark sample")?;
+            let max = samples.last().ok_or("missing joint benchmark sample")?;
+            println!(
+                "  x{worker_count}: step={:.3}/{:.3}/{:.3} ms solver={:.3} ms prepare/iterations/writeback={:.3}/{:.3}/{:.3} ms islands={} speedup={:.2}x scratch={} KiB",
+                millis(min.0),
+                millis(median.0),
+                millis(max.0),
+                millis(median.1.solver),
+                millis(median.1.solver_prepare),
+                millis(median.1.solver_iterations),
+                millis(median.1.solver_writeback),
+                median.1.island_count,
+                baseline.as_secs_f64() / median.0.as_secs_f64(),
+                median.1.retained_scratch_bytes / 1024,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_joint_step(
+    build: fn() -> Result<PhysicsWorld, Box<dyn Error>>,
+    worker_count: usize,
+) -> Result<(Duration, CollisionStepMetrics), Box<dyn Error>> {
+    let mut world = build()?;
+    let started = Instant::now();
+    world.step_with_executor(DT, &ScopedThreadExecutor, worker_count)?;
+    Ok((started.elapsed(), world.collision_step_metrics()))
+}
+
+fn independent_joint_islands() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = mass()?;
+    let common = JointCommon::new(
+        JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+        JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+    );
+    for pair in 0..2_048 {
+        let position = Vec3::X * (pair as f64 * 3.0);
+        let body_a = world.add_body(RigidBody::new_dynamic(
+            Transform::new(position, Quat::IDENTITY)?,
+            mass,
+        )?)?;
+        let mut body_b =
+            RigidBody::new_dynamic(Transform::new(position + Vec3::X, Quat::IDENTITY)?, mass)?;
+        body_b.set_linear_velocity(Vec3::Y * 0.1)?;
+        let body_b = world.add_body(body_b)?;
+        world.add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))?;
+    }
+    Ok(world)
+}
+
+fn fixed_joint_chain() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = mass()?;
+    let mut bodies = Vec::with_capacity(512);
+    for index in 0..512 {
+        let velocity = if index == 511 {
+            Vec3::Y * 0.1
+        } else {
+            Vec3::ZERO
+        };
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::X * index as f64, Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(velocity)?;
+        bodies.push(world.add_body(body)?);
+    }
+    let common = JointCommon::new(
+        JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+        JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+    );
+    for pair in bodies.windows(2) {
+        world.add_joint(pair[0], pair[1], Joint::Fixed(FixedJoint::new(common)))?;
+    }
+    Ok(world)
 }
 
 fn report_ccd_worker_scaling_for(

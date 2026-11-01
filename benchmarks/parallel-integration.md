@@ -224,3 +224,60 @@ unavailable while readers held frames.
 These are single-machine microbenchmark results. The retained-Arc memory row
 describes the current snapshot only; reader-held historical snapshots add their
 own memory until those `Arc`s are dropped.
+
+## Joint island worker scaling, stage 3
+
+The release benchmark compares the persistent-force source `f80ca9c` with the
+post-joint source `5562210`. It was run three times per source on an AMD Ryzen
+9 7900X3D, Windows MSVC target, `rustc 1.98.0` / `cargo 1.98.0`, using Cargo's
+optimized `bench` profile. Scene construction and Rayon thread-pool creation
+are outside the timed region; each sample averages 12 steps, with one warm-up
+and five measured samples. Cells show the median step time from each run in
+milliseconds. The bracketed range is the minimum and maximum of those three
+run medians, not a confidence interval.
+
+### All-dynamic worlds without contacts
+
+| Bodies | Workers | P1 run medians (range), ms | Post-joint run medians (range), ms |
+|---:|---:|---:|---:|
+| 256 | 1 | 0.081, 0.082, 0.082 (0.081–0.082) | 0.081, 0.081, 0.080 (0.080–0.081) |
+| 4,096 | 1 | 1.297, 1.286, 1.297 (1.286–1.297) | 1.302, 1.290, 1.271 (1.271–1.302) |
+| 20,000 | 1 | 6.363, 6.291, 6.345 (6.291–6.363) | 6.433, 6.325, 6.262 (6.262–6.433) |
+
+The 256-body medians remain stable, and the 4,096- and 20,000-body run ranges
+overlap. The observed differences do not establish a no-joint regression.
+
+### 2,048 independent contact islands
+
+This scene has 4,096 Dynamic bodies in 2,048 two-body contact islands.
+
+| Workers | P1 run medians (range), ms | Post-joint run medians (range), ms |
+|---:|---:|---:|
+| 1 | 30.042, 29.884, 29.625 (29.625–30.042) | 29.397, 29.517, 29.832 (29.397–29.832) |
+| 2 | 23.196, 23.198, 23.257 (23.196–23.257) | 23.887, 23.687, 23.480 (23.480–23.887) |
+| 4 | 15.715, 15.850, 15.710 (15.710–15.850) | 16.511, 16.398, 15.765 (15.765–16.511) |
+| 8 | 12.189, 11.991, 12.314 (11.991–12.314) | 12.196, 12.055, 11.769 (11.769–12.196) |
+
+At one and eight workers the P1 and post-joint run ranges overlap. The two- and
+four-worker post-joint medians skew upward, but run-to-run spread overlaps at
+four workers and the effect was not consistent across repeats. This is not
+enough evidence to classify a confirmed regression or justify a performance
+fix commit.
+
+### Joint-only scenes
+
+The joint-only scene benchmark is reported in
+[`collisions.md`](collisions.md#unified-contact-and-joint-solver-scaling-stage-3).
+Its 2,048 independent Fixed-joint islands scale from about 50 ms at one worker
+to 12 ms at eight workers. A single 512-body connected Fixed-joint chain stays
+near 10.3 ms across worker counts because it is one sequential island.
+
+Exact command:
+
+```powershell
+cargo bench -p kapitsa --bench parallel_step
+```
+
+The harness reuses the existing Rayon-based `StepExecutor` implementation; no
+dependency or runtime executor was added for these measurements. Timing results
+are local workload comparisons, not performance guarantees.

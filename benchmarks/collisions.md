@@ -1167,6 +1167,76 @@ Exact Release command:
 cargo test -p kapitsa --release --lib --features bench-internals benchmark_command_buffer_pool_full_cycle -- --ignored --nocapture
 ```
 
+## Unified contact and joint solver scaling, stage 3
+
+The joint implementation uses the existing `IslandLayout` union-find for both
+contact manifolds and enabled joint edges. Each `SolverIsland` owns its
+reusable contact and joint workspaces. Static and kinematic bodies are included
+as local support snapshots, do not join dynamic components, and are not written
+back. The mixed contact/joint, shared-static-support, rollback, and
+sequential-versus-parallel correctness cases are covered by
+`collision_integration` and island-layout tests.
+
+Release comparisons below use the pinned pre-refactor baseline `27b9f12`, the
+persistent-force fix `f80ca9c`, and the post-joint source `5562210`. They were
+run on 2026-11-01 with `rustc 1.98.0` / `cargo 1.98.0`, target
+`x86_64-pc-windows-msvc`, on an AMD Ryzen 9 7900X3D (24 logical processors;
+the reported instantaneous clock snapshot was 4,401 MHz). Cargo's optimized
+`bench` profile was used. Every collision row builds its scene outside the
+timed region and reports one warm-up followed by five samples. P1 and current
+values below list the medians from independent benchmark runs; the original
+baseline column retains its recorded five-sample median and range.
+
+| Workload | Baseline `27b9f12` median (range), ms | P1 `f80ca9c` run medians, ms | Post-joint `5562210` run medians, ms |
+|---|---:|---:|---:|
+| 256 Dynamic spheres, no contacts | 0.216 (0.201–0.241) | 0.192, 0.216 | 0.210, 0.201, 0.205 |
+| 4,096 Dynamic spheres, no contacts | 5.189 (5.156–5.208) | 4.483, 4.505 | 4.886, 4.382, 4.470 |
+| 20,000 Dynamic spheres, no contacts | 29.510 (28.257–30.860) | 26.398, 26.084 | 27.553, 26.416, 26.044 |
+| 20,000 bodies, 128 localized contacts | 32.208 (31.326–32.988) | 29.824, 29.645 | 30.402, 29.347, 29.479 |
+| 1,000 bodies, one 999-contact island | 19.356 (18.754–20.055) | 17.199, 17.027 | 17.344, 16.694, 16.598 |
+
+The repeated no-joint runs do not confirm a regression after joint integration:
+the post-joint medians overlap the P1 run-to-run spread at each size. They also
+remain at or below the historical baseline medians. Differences between
+repeated runs are large enough that these small changes should not be treated
+as causal gains.
+
+The dedicated joint benchmark uses `ScopedThreadExecutor` from the standard
+library, one warm-up, and five samples per worker count. The 2,048-island
+scene contains 4,096 Dynamic bodies and 2,048 independent Fixed joints. The
+chain contains 512 Dynamic bodies and 511 Fixed joints in one connected island.
+Each cell gives the full-step median from two independent runs; parentheses
+give the first run's min–max range.
+
+| Scene | x1 | x2 | x4 | x8 |
+|---|---:|---:|---:|---:|
+| 2,048 independent joint islands | 50.248 (49.450–51.363) / 48.424 | 34.328 (33.224–35.446) / 33.895 | 19.796 (19.354–20.506) / 19.298 | 12.153 (11.123–12.609) / 11.999 |
+| One 512-body joint chain | 10.290 (10.234–10.346) / 10.332 | 10.285 (10.228–10.298) / 10.368 | 10.266 (10.251–10.315) / 10.323 | 10.240 (10.208–10.405) / 10.335 |
+
+For independent islands, the first run improved from 50.248 ms at one worker
+to 12.153 ms at eight workers (4.13x); the repeat was 48.424 to 11.999 ms
+(4.04x). The single connected chain stayed around 10.3 ms at every worker
+count, as expected because one island is solved sequentially. The reported
+retained collision-system scratch was 15,000 KiB for 2,048 small islands and
+1,940 KiB for the chain. These totals include island, collision, and index
+buffers; they are capacity estimates, not solver-only or allocator measurements.
+The benchmark does not isolate per-island JointWorkspace bytes, so it cannot
+attribute the memory difference to joint rows alone.
+
+Exact Release commands:
+
+```powershell
+cargo bench -p kapitsa-core --features bench-internals --bench collisions
+cargo bench -p kapitsa --bench parallel_step
+```
+
+The parallel-step benchmark creates its worker pool before timing and measures
+12 steps per sample. The dedicated joint benchmark uses scoped threads and
+includes their per-step spawn/join overhead. See
+[`parallel-integration.md`](parallel-integration.md)
+for the three-run worker distributions. No collision or joint algorithm was
+changed as part of this performance audit.
+
 ## Persistent force-source staging index
 
 The force-source preparation path previously searched the staged body vector
