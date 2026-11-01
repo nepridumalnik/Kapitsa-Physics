@@ -88,6 +88,16 @@ impl<E: StepExecutor> StepEngine<E> {
     }
 
     #[cfg(feature = "async")]
+    pub(crate) fn set_runtime_status(
+        &mut self,
+        state: SimulationState,
+        simulation_time_debt: Duration,
+    ) {
+        self.metrics.state = state;
+        self.metrics.simulation_time_debt = simulation_time_debt;
+    }
+
+    #[cfg(feature = "async")]
     pub(crate) fn into_world(self) -> PhysicsWorld {
         self.world
     }

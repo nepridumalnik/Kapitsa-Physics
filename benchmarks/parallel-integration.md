@@ -1,6 +1,6 @@
 # Parallel Integration Benchmarks
 
-Measured with `cargo bench -p kapitsa-tokio --bench parallel_step` on
+Measured with `cargo bench -p kapitsa --features async --bench parallel_step` on
 2026-10-31. Each value is the median of five runs of 12 steps; world setup is
 excluded from timing. The benchmark compares synchronous stepping, the Tokio
 one-worker fast path, the previous static sharding layout, and dynamic buckets

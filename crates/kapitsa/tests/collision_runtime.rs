@@ -1,5 +1,10 @@
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
+use kapitsa::runtime::{
+    SimulationConfig, WorkerConfig,
+    asynchronous::{PhysicsService, Simulation},
+};
 use kapitsa_core::{
     collider::Collider,
     collision::{CollisionEvent, CollisionEventKind, QueryFilter, Ray},
@@ -11,7 +16,6 @@ use kapitsa_core::{
     world::PhysicsWorld,
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
-use kapitsa_tokio::{PhysicsController, PhysicsSimulation, SchedulerConfig};
 
 fn transform(position: Vec3) -> Transform {
     Transform::new(position, Quat::IDENTITY).expect("valid transform")
@@ -22,14 +26,32 @@ fn dynamic(position: Vec3) -> RigidBody {
     RigidBody::new_dynamic(transform(position), mass).expect("dynamic body")
 }
 
-fn config() -> SchedulerConfig {
-    SchedulerConfig {
-        target_hz: 60,
-        min_hz: 60,
-        max_workers: 1,
-        adaptive: false,
-        ..SchedulerConfig::default()
+fn config() -> SimulationConfig {
+    SimulationConfig {
+        tick_rate: 60,
+        max_catch_up_steps: 1,
+        ..SimulationConfig::default()
     }
+}
+
+fn worker_config(workers: usize) -> WorkerConfig {
+    WorkerConfig {
+        max_workers: NonZeroUsize::new(workers),
+        ..WorkerConfig::default()
+    }
+}
+
+fn service(world: PhysicsWorld, tick_rate: u32) -> PhysicsService {
+    PhysicsService::new_with_worker_config(
+        world,
+        SimulationConfig {
+            tick_rate,
+            max_catch_up_steps: 1,
+            ..SimulationConfig::default()
+        },
+        worker_config(1),
+    )
+    .expect("service")
 }
 
 fn collision_world() -> PhysicsWorld {
@@ -184,8 +206,7 @@ fn assert_event_near(
 
 #[tokio::test(start_paused = true)]
 async fn collision_batch_and_snapshot_identify_the_same_committed_step() {
-    let mut simulation =
-        PhysicsSimulation::with_config(collision_world(), config()).expect("simulation");
+    let mut simulation = service(collision_world(), 60);
     let client = simulation.client();
     let mut events = client.subscribe_collision_events();
     simulation.start().expect("start");
@@ -230,7 +251,7 @@ async fn client_commands_and_queries_work_while_simulation_is_running() {
             ),
         )
         .expect("static collider");
-    let mut simulation = PhysicsSimulation::with_config(world, config()).expect("simulation");
+    let mut simulation = service(world, 60);
     let client = simulation.client();
     simulation.start().expect("start");
 
@@ -275,26 +296,24 @@ async fn client_commands_and_queries_work_while_simulation_is_running() {
 
 #[tokio::test(start_paused = true)]
 async fn collision_results_match_world_and_controller_worker_counts() {
-    let step = config().target_hz;
+    let step = config().tick_rate;
     let dt = 1.0 / f64::from(step);
     let mut expected = collision_world();
     expected.step(dt).expect("sequential step");
 
     for workers in [1, 2, 4] {
-        let mut worker_config = config();
-        worker_config.max_workers = workers;
-        let mut controller =
-            PhysicsController::new(collision_world(), worker_config).expect("controller");
-        controller
+        let mut simulation =
+            Simulation::new_with_worker_config(collision_world(), config(), worker_config(workers))
+                .expect("simulation");
+        simulation
             .set_active_workers(workers)
             .expect("worker count");
-        let stats = controller.step().await.expect("controller step");
+        let stats = simulation.step().await.expect("simulation step");
         assert_eq!(stats.active_workers, workers);
-        assert_worlds_near(controller.world().expect("controller world"), &expected);
+        assert_worlds_near(simulation.world().expect("simulation world"), &expected);
     }
 
-    let mut simulation =
-        PhysicsSimulation::with_config(collision_world(), config()).expect("simulation");
+    let mut simulation = service(collision_world(), 60);
     simulation.start().expect("start");
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(17)).await;
@@ -316,22 +335,30 @@ async fn refreshed_ccd_candidates_match_sequential_and_tokio_steps() {
         .count();
     assert_eq!(expected_impacts, 2);
 
-    let mut worker_config = SchedulerConfig {
-        target_hz: 100,
-        min_hz: 100,
-        max_workers: 1,
-        adaptive: false,
-        ..SchedulerConfig::default()
-    };
-    let mut controller =
-        PhysicsController::new(ccd_rebound_world(), worker_config.clone()).expect("controller");
-    controller.step().await.expect("Tokio CCD step");
-    assert_worlds_near(controller.world().expect("controller world"), &expected);
+    let mut worker_config = worker_config(1);
+    let mut simulation = Simulation::new_with_worker_config(
+        ccd_rebound_world(),
+        SimulationConfig {
+            tick_rate: 100,
+            ..SimulationConfig::default()
+        },
+        worker_config.clone(),
+    )
+    .expect("simulation");
+    simulation.step().await.expect("async CCD step");
+    assert_worlds_near(simulation.world().expect("simulation world"), &expected);
 
-    worker_config.max_workers = 2;
-    let mut controller =
-        PhysicsController::new(ccd_rebound_world(), worker_config).expect("two-worker controller");
-    controller.set_active_workers(2).expect("worker count");
-    controller.step().await.expect("two-worker CCD step");
-    assert_worlds_near(controller.world().expect("controller world"), &expected);
+    worker_config.max_workers = NonZeroUsize::new(2);
+    let mut simulation = Simulation::new_with_worker_config(
+        ccd_rebound_world(),
+        SimulationConfig {
+            tick_rate: 100,
+            ..SimulationConfig::default()
+        },
+        worker_config,
+    )
+    .expect("two-worker simulation");
+    simulation.set_active_workers(2).expect("worker count");
+    simulation.step().await.expect("two-worker async CCD step");
+    assert_worlds_near(simulation.world().expect("simulation world"), &expected);
 }

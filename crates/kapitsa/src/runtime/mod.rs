@@ -12,7 +12,11 @@ mod planner;
 pub mod sync;
 
 #[cfg(feature = "async")]
-pub use asynchronous::{Simulation as AsyncSimulation, SimulationError as AsyncSimulationError};
+pub use asynchronous::{
+    CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsClient,
+    PhysicsClientError, PhysicsCommand, PhysicsCommandResult, PhysicsService, PhysicsServiceError,
+    PhysicsSnapshot, Simulation as AsyncSimulation, SimulationError as AsyncSimulationError,
+};
 pub use config::{ConfigError, SchedulerConfig, SimulationConfig};
 #[cfg(feature = "async")]
 pub use executor::{RayonExecutor, RayonPool, RayonPoolError};

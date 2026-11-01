@@ -1,31 +1,33 @@
 use std::{
     collections::HashSet,
     future::Future,
+    num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll, Waker},
     time::Duration,
 };
 
+use kapitsa::runtime::{
+    SimulationConfig, WorkerConfig,
+    asynchronous::{PhysicsClient, PhysicsClientError, PhysicsService, PhysicsSnapshot},
+};
 use kapitsa_core::{
     mass::MassProperties, rigid_body::RigidBody, transform::Transform, world::PhysicsWorld,
 };
 use kapitsa_math::{Mat3, Vec3};
-use kapitsa_tokio::{
-    PhysicsClientError, PhysicsSimulation, SchedulerConfig,
-    marshalling::{PhysicsClient, PhysicsSnapshot},
-};
 use tokio::task::JoinSet;
 
-fn simulation(world: PhysicsWorld) -> PhysicsSimulation {
-    PhysicsSimulation::with_config(
+fn simulation(world: PhysicsWorld) -> PhysicsService {
+    PhysicsService::new_with_worker_config(
         world,
-        SchedulerConfig {
-            target_hz: 10,
-            min_hz: 10,
-            max_workers: 1,
+        SimulationConfig {
+            tick_rate: 10,
             max_catch_up_steps: 2,
-            adaptive: false,
-            ..SchedulerConfig::default()
+            ..SimulationConfig::default()
+        },
+        WorkerConfig {
+            max_workers: NonZeroUsize::new(1),
+            ..WorkerConfig::default()
         },
     )
     .expect("valid simulation configuration")
@@ -48,7 +50,7 @@ async fn next_snapshot(client: &mut PhysicsClient) -> std::sync::Arc<PhysicsSnap
         .expect("simulation still running")
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commands_steps_snapshots_remove_and_recreate_bodies() {
     let mut simulation = simulation(PhysicsWorld::new());
     let mut client = simulation.client();
@@ -99,7 +101,7 @@ async fn commands_steps_snapshots_remove_and_recreate_bodies() {
     ));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cloned_clients_do_not_lose_concurrent_body_commands() {
     let mut simulation = simulation(PhysicsWorld::new());
     let mut reader = simulation.client();
@@ -138,7 +140,7 @@ async fn cloned_clients_do_not_lose_concurrent_body_commands() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_cancellation_applies_and_stop_discards_other_session_requests() {
     let mut simulation = simulation(PhysicsWorld::new());
     let mut client = simulation.client();
@@ -172,7 +174,7 @@ async fn queued_cancellation_applies_and_stop_discards_other_session_requests() 
     simulation.stop().await.expect("second stop");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn body_ids_remain_valid_across_simulation_restart() {
     let mut world = PhysicsWorld::new();
     let id = world
@@ -196,7 +198,7 @@ async fn body_ids_remain_valid_across_simulation_restart() {
     simulation.stop().await.expect("second stop");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_snapshots_stay_immutable_while_clients_receive_new_publications() {
     let mut world = PhysicsWorld::new();
     let mut body = RigidBody::new_kinematic(Transform::identity());
@@ -210,7 +212,7 @@ async fn held_snapshots_stay_immutable_while_clients_receive_new_publications() 
     let first_task = tokio::spawn(async move { first_reader.next_snapshot().await });
     let second_task = tokio::spawn(async move { second_reader.next_snapshot().await });
     tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let first = first_task
         .await
         .expect("first reader task")
@@ -227,7 +229,7 @@ async fn held_snapshots_stay_immutable_while_clients_receive_new_publications() 
         let mut reader = simulation.client();
         let task = tokio::spawn(async move { reader.next_snapshot().await });
         tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         let current = task.await.expect("reader task").expect("new snapshot");
         assert!(current.step() > held.step());
         assert!(

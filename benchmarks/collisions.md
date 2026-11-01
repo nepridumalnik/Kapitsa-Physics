@@ -81,7 +81,7 @@ cargo bench -p kapitsa-core --features bench-internals --bench collisions
 Run the Tokio worker comparison with:
 
 ```powershell
-cargo bench -p kapitsa-tokio --bench collisions
+cargo bench -p kapitsa --features async --bench collisions
 ```
 
 The `bench-internals` feature adds timings and retained-capacity estimates only to the core benchmark build. Default builds do not record timings. Phase durations are inclusive of the work named for that phase; small timer overhead applies to feature-enabled runs.

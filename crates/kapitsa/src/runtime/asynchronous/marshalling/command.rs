@@ -11,7 +11,7 @@ use kapitsa_core::{
 use kapitsa_math::{Affine3, Vec3};
 use tokio::sync::oneshot;
 
-use crate::PhysicsClientError;
+use super::PhysicsClientError;
 
 /// An operation applied to the simulation world at a physics-step boundary.
 pub enum PhysicsCommand {
@@ -288,8 +288,8 @@ mod tests {
     };
     use kapitsa_math::{Mat3, Quat, Vec3};
 
+    use super::super::PhysicsClientError;
     use super::{PhysicsCommand, PhysicsCommandResult, apply_command};
-    use crate::PhysicsClientError;
 
     fn mass(value: f64) -> MassProperties {
         MassProperties::new(value, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass")

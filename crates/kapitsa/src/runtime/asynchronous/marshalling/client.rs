@@ -13,11 +13,11 @@ use kapitsa_core::{
 use kapitsa_math::{Affine3, Vec3};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+use super::PhysicsClientError;
 use super::{
     CollisionEventBatch, CollisionEvents, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot,
     command::CommandRequest,
 };
-use crate::PhysicsClientError;
 
 /// Thread-safe handle for submitting physics commands and reading snapshots.
 #[derive(Clone)]
@@ -409,14 +409,11 @@ mod tests {
     use kapitsa_math::{Affine3, Vec3};
     use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-    use super::PhysicsClient;
-    use crate::{
-        PhysicsClientError,
-        marshalling::{
-            PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot,
-            command::{CommandRequest, apply_command},
-        },
+    use super::super::{
+        PhysicsClientError, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot,
+        command::{CommandRequest, apply_command},
     };
+    use super::PhysicsClient;
 
     struct ClientHarness {
         client: PhysicsClient,

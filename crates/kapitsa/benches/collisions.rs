@@ -1,9 +1,11 @@
 use std::{
     error::Error,
     hint::black_box,
+    num::NonZeroUsize,
     time::{Duration, Instant},
 };
 
+use kapitsa::runtime::{SimulationConfig, WorkerConfig, asynchronous::Simulation};
 use kapitsa_core::{
     collider::Collider,
     mass::MassProperties,
@@ -13,7 +15,6 @@ use kapitsa_core::{
     world::PhysicsWorld,
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
-use kapitsa_tokio::{PhysicsController, SchedulerConfig};
 use tokio::runtime::Builder;
 
 const SAMPLES: usize = 5;
@@ -24,7 +25,7 @@ const DT: f64 = 1.0 / 60.0;
 fn main() -> Result<(), Box<dyn Error>> {
     let runtime = Builder::new_current_thread().enable_time().build()?;
     println!(
-        "Kapitsa Tokio collision benchmark: warmups={WARMUP_RUNS}, samples={SAMPLES}, steps={STEPS}, statistics=min/median/max"
+        "Kapitsa async collision benchmark: warmups={WARMUP_RUNS}, samples={SAMPLES}, steps={STEPS}, statistics=min/median/max"
     );
 
     for body_count in [256, 4_096, 20_000] {
@@ -42,19 +43,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         for workers in [1, 2, 4] {
             let elapsed = sample(|| {
                 let world = collision_world(body_count)?;
-                let mut controller = PhysicsController::new(world, config(workers))?;
-                controller.set_active_workers(workers)?;
-                let started = Instant::now();
-                for _ in 0..STEPS {
-                    black_box(runtime.block_on(controller.step())?);
-                }
-                Ok(started.elapsed())
+                let mut simulation = Simulation::new_on_with_worker_config(
+                    world,
+                    config(),
+                    worker_config(workers),
+                    runtime.handle().clone(),
+                )?;
+                simulation.set_active_workers(workers)?;
+                runtime.block_on(async {
+                    let started = Instant::now();
+                    for _ in 0..STEPS {
+                        black_box(simulation.step().await?);
+                    }
+                    let elapsed = started.elapsed();
+                    simulation.shutdown().await?;
+                    Ok::<_, Box<dyn Error>>(elapsed)
+                })
             })?;
-            report(
-                &format!("PhysicsController x{workers}"),
-                elapsed,
-                sequential,
-            );
+            report(&format!("Async Simulation x{workers}"), elapsed, sequential);
         }
     }
     Ok(())
@@ -86,12 +92,17 @@ fn collision_world(body_count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     Ok(world)
 }
 
-fn config(workers: usize) -> SchedulerConfig {
-    SchedulerConfig {
-        max_workers: workers,
+fn config() -> SimulationConfig {
+    SimulationConfig {
         max_catch_up_steps: 1,
-        adaptive: false,
-        ..SchedulerConfig::default()
+        ..SimulationConfig::default()
+    }
+}
+
+fn worker_config(workers: usize) -> WorkerConfig {
+    WorkerConfig {
+        max_workers: NonZeroUsize::new(workers),
+        ..WorkerConfig::default()
     }
 }
 

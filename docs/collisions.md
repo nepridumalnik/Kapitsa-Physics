@@ -235,49 +235,15 @@ with a `CollisionError` such as `InvalidMaterial`, `UnsupportedGeometryPair`,
 `NonConvergent`, or `CcdLimitExceeded`. Query failures use the separate
 `QueryError` type. Errors are not converted to empty hits or ignored contacts.
 
-## Tokio integration
+## Runtime integration
 
-Use `PhysicsController` for explicit one-step-at-a-time control, or
-`PhysicsSimulation` for a background fixed-step loop on the application's
-Tokio runtime. The simulation task owns the world while running; do not share a
-world behind a mutex. Its `PhysicsClient` applies typed commands through one
-bounded FIFO queue at step boundaries. The queue holds up to 1,024 requests,
-and no more than 1,024 commands are applied in one step.
-
-Snapshots are immutable, nonblocking views and can skip intermediate steps.
-Collision events use a separate bounded stream of 64 step batches. Match the
-two channels by their shared `step` number; a slow event reader receives an
-explicit `Lagged { missed_batches }` error. Commands and query requests are
-serialized through the same FIFO path.
-
-```rust,ignore
-use std::error::Error;
-
-use kapitsa_core::world::PhysicsWorld;
-use kapitsa_tokio::PhysicsSimulation;
-
-async fn run(world: PhysicsWorld) -> Result<(), Box<dyn Error>> {
-    let mut simulation = PhysicsSimulation::new(world);
-    let client = simulation.client();
-    let mut events = client.subscribe_collision_events();
-    simulation.start()?; // call from within a Tokio runtime
-
-    let batch = events.next_batch().await?;
-    let snapshot = client.snapshot();
-    println!(
-        "events for step {}; latest snapshot {}",
-        batch.step(),
-        snapshot.step()
-    );
-
-    simulation.stop().await?;
-    Ok(())
-}
-```
-
-See `crates/kapitsa-tokio/README.md` for command, snapshot, cancellation,
-scheduling, and shutdown behavior. The measured collision pipeline and worker
-comparisons are in `benchmarks/collisions.md`.
+Use `kapitsa::runtime::asynchronous::Simulation` for manual one-step-at-a-time
+execution, or `PhysicsService` for a separate clock-driven loop with commands,
+snapshots, collision events, and catch-up. The service owns the world while
+running; clients communicate through a bounded FIFO queue at step boundaries.
+See [Simulation runtimes](runtime.md) for lifecycle, cancellation, and shutdown
+details. The measured collision pipeline and worker comparisons are in
+`benchmarks/collisions.md`.
 
 ## Scope
 

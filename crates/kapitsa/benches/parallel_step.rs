@@ -4,12 +4,17 @@ use std::{
     future::Future,
     hint::black_box,
     mem::size_of,
+    num::NonZeroUsize,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
     time::{Duration, Instant},
 };
 
+use kapitsa::runtime::{
+    SimulationConfig, WorkerConfig,
+    asynchronous::{PhysicsService, Simulation},
+};
 use kapitsa_core::{
     collider::Collider,
     mass::MassProperties,
@@ -19,26 +24,26 @@ use kapitsa_core::{
     world::{BodyId, BodyStep, PhysicsWorld, StepError},
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
-use kapitsa_tokio::{PhysicsClientError, PhysicsController, PhysicsSimulation, SchedulerConfig};
 use tokio::{
-    runtime::{Builder, Runtime},
+    runtime::{Builder, Handle, Runtime},
     sync::{broadcast, mpsc, watch},
 };
 
 #[allow(dead_code, unused_imports)]
 mod marshalling {
-    #[path = "../../src/marshalling/client.rs"]
+    #[path = "../../src/runtime/asynchronous/marshalling/client.rs"]
     mod client;
-    #[path = "../../src/marshalling/command.rs"]
+    #[path = "../../src/runtime/asynchronous/marshalling/command.rs"]
     mod command;
-    #[path = "../../src/marshalling/events.rs"]
+    #[path = "../../src/runtime/asynchronous/marshalling/events.rs"]
     mod events;
-    #[path = "../../src/marshalling/snapshot.rs"]
+    #[path = "../../src/runtime/asynchronous/marshalling/snapshot.rs"]
     mod snapshot;
 
     pub(crate) use client::PhysicsClient;
     pub(crate) use command::{PhysicsCommand, PhysicsCommandResult, apply_command};
     pub(crate) use events::{CollisionEventBatch, CollisionEvents};
+    pub(crate) use kapitsa::runtime::asynchronous::PhysicsClientError;
     pub(crate) use snapshot::PhysicsSnapshot;
 }
 
@@ -96,12 +101,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let fast_path = sample(SAMPLES, || {
                 let world = make_world(body_count, workload)?;
-                let mut controller = PhysicsController::new(world, config(1))?;
+                let mut simulation = new_simulation(world, 1, runtime.handle())?;
                 let started = Instant::now();
                 for _ in 0..STEPS {
-                    runtime.block_on(controller.step())?;
+                    runtime.block_on(simulation.step())?;
                 }
-                Ok(started.elapsed())
+                let elapsed = started.elapsed();
+                runtime.block_on(simulation.shutdown())?;
+                Ok(elapsed)
             })?;
             report("Tokio fast path", fast_path, sequential);
 
@@ -117,13 +124,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let dynamic_buckets = sample(SAMPLES, || {
                 let world = make_world(body_count, workload)?;
-                let mut controller = PhysicsController::new(world, config(2))?;
-                controller.set_active_workers(2)?;
+                let mut simulation = new_simulation(world, 2, runtime.handle())?;
+                simulation.set_active_workers(2)?;
                 let started = Instant::now();
                 for _ in 0..STEPS {
-                    runtime.block_on(controller.step())?;
+                    runtime.block_on(simulation.step())?;
                 }
-                Ok(started.elapsed())
+                let elapsed = started.elapsed();
+                runtime.block_on(simulation.shutdown())?;
+                Ok(elapsed)
             })?;
             report("dynamic buckets x2", dynamic_buckets, sequential);
         }
@@ -145,17 +154,19 @@ fn report_collision_worker_scaling(runtime: &Runtime) -> Result<(), Box<dyn Erro
     let mut medians = Vec::with_capacity(3);
     for workers in [1, 2, 4] {
         let elapsed = sample(SAMPLES, || {
-            let mut controller =
-                PhysicsController::new(collision_worker_world()?, config(workers))?;
-            controller.set_active_workers(workers)?;
+            let mut simulation =
+                new_simulation(collision_worker_world()?, workers, runtime.handle())?;
+            simulation.set_active_workers(workers)?;
             for _ in 0..WARMUP_STEPS {
-                black_box(runtime.block_on(controller.step())?);
+                black_box(runtime.block_on(simulation.step())?);
             }
             let started = Instant::now();
             for _ in 0..MEASURED_STEPS {
-                black_box(runtime.block_on(controller.step())?);
+                black_box(runtime.block_on(simulation.step())?);
             }
-            Ok(started.elapsed().div_f64(MEASURED_STEPS as f64))
+            let elapsed = started.elapsed().div_f64(MEASURED_STEPS as f64);
+            runtime.block_on(simulation.shutdown())?;
+            Ok(elapsed)
         })?;
         medians.push(elapsed);
     }
@@ -164,11 +175,7 @@ fn report_collision_worker_scaling(runtime: &Runtime) -> Result<(), Box<dyn Erro
         "\ncollision solver scaling: 4,096 dynamic / 2,048 two-body islands, {MEASURED_STEPS} steps/sample after {WARMUP_STEPS} warmups"
     );
     for (workers, elapsed) in [1, 2, 4].into_iter().zip(medians.iter().copied()) {
-        report(
-            &format!("PhysicsController x{workers}"),
-            elapsed,
-            medians[0],
-        );
+        report(&format!("Async Simulation x{workers}"), elapsed, medians[0]);
     }
     Ok(())
 }
@@ -493,7 +500,7 @@ async fn report_marshalling() -> Result<(), Box<dyn Error>> {
         let actual_commands = median_simulation(&mut simulation_commands_wall);
         let reads = median(&mut snapshot_reads);
         println!(
-            "\n{size}: {body_count} bodies | PhysicsController::step wall={:.2} ms | simulation API no commands={:.2} ms ({} steps, physics={:.2} ms), 100 ApplyForce/step={:.2} ms ({} steps, physics={:.2} ms)",
+            "\n{size}: {body_count} bodies | Async Simulation::step wall={:.2} ms | service API no commands={:.2} ms ({} steps, physics={:.2} ms), 100 ApplyForce/step={:.2} ms ({} steps, physics={:.2} ms)",
             millis(baseline),
             millis(actual_simulation.wall),
             actual_simulation.steps,
@@ -503,7 +510,7 @@ async fn report_marshalling() -> Result<(), Box<dyn Error>> {
             millis(actual_commands.physics),
         );
         println!(
-            "  isolated pipeline / {STEPS} steps: commands={:.3} ms, controller={:.2} ms, snapshot build={:.2} ms, watch publication={:.3} ms, total={:.2} ms",
+            "  isolated pipeline / {STEPS} steps: commands={:.3} ms, executor={:.2} ms, snapshot build={:.2} ms, watch publication={:.3} ms, total={:.2} ms",
             millis(commanded.commands),
             millis(commanded.physics),
             millis(commanded.snapshot_build),
@@ -511,7 +518,7 @@ async fn report_marshalling() -> Result<(), Box<dyn Error>> {
             millis(commanded.total),
         );
         println!(
-            "  no-command pipeline: controller={:.2} ms, snapshot build={:.2} ms, watch publication={:.3} ms, total={:.2} ms; 4 clients x 1,000 snapshot reads={:.3} ms",
+            "  no-command pipeline: executor={:.2} ms, snapshot build={:.2} ms, watch publication={:.3} ms, total={:.2} ms; 4 clients x 1,000 snapshot reads={:.3} ms",
             millis(plain.physics),
             millis(plain.snapshot_build),
             millis(plain.publication),
@@ -634,9 +641,9 @@ async fn snapshot_sample<S: SnapshotBench>(
     if scenario.sparse_start {
         retain_last_bodies(&mut world, scenario.starting_live)?;
     }
-    let mut controller = PhysicsController::new(world, config(1))?;
-    let initial = Arc::new(S::from_world(controller.world()?, 0, Duration::ZERO));
-    let initial_body = controller
+    let mut simulation = new_simulation_current(world, 1)?;
+    let initial = Arc::new(S::from_world(simulation.world()?, 0, Duration::ZERO));
+    let initial_body = simulation
         .world()?
         .bodies()
         .next()
@@ -645,17 +652,17 @@ async fn snapshot_sample<S: SnapshotBench>(
     let held_initial = scenario.retain_old_frames.then(|| Arc::clone(&initial));
     let (snapshot_tx, snapshot_rx) = watch::channel(initial);
     let mut reusable = if scenario.oscillate {
-        Some(S::from_world(controller.world()?, 0, Duration::ZERO))
+        Some(S::from_world(simulation.world()?, 0, Duration::ZERO))
     } else {
         None
     };
 
     if scenario.shrink_before_measurement {
-        retain_last_bodies(controller.world_mut()?, scenario.target_live)?;
+        retain_last_bodies(simulation.world_mut()?, scenario.target_live)?;
     } else if scenario.target_live > scenario.starting_live {
-        grow_world(controller.world_mut()?, scenario.target_live)?;
+        grow_world(simulation.world_mut()?, scenario.target_live)?;
     }
-    let mut lookup_ids = controller
+    let mut lookup_ids = simulation
         .world()?
         .bodies()
         .map(|(id, _)| id)
@@ -668,11 +675,11 @@ async fn snapshot_sample<S: SnapshotBench>(
 
     for step_index in 0..STEPS {
         if scenario.oscillate {
-            oscillate_world(controller.world_mut()?, &mut lookup_ids)?;
+            oscillate_world(simulation.world_mut()?, &mut lookup_ids)?;
         }
 
         let step_started = Instant::now();
-        let stats = controller.step().await?;
+        let stats = simulation.step().await?;
         sample.physics += stats.step_duration;
         simulation_time = simulation_time
             .checked_add(dt)
@@ -682,8 +689,8 @@ async fn snapshot_sample<S: SnapshotBench>(
         sample.reused_buffers += usize::from(reused);
         let build_started = Instant::now();
         snapshot.rebuild(
-            controller.world()?,
-            controller.metrics().total_steps,
+            simulation.world()?,
+            simulation.metrics().total_steps,
             simulation_time,
         );
         sample.build += build_started.elapsed();
@@ -723,7 +730,7 @@ async fn snapshot_sample<S: SnapshotBench>(
         }
         sample.total += step_started.elapsed();
 
-        if snapshot_rx.borrow().step() != controller.metrics().total_steps {
+        if snapshot_rx.borrow().step() != simulation.metrics().total_steps {
             return Err("benchmark publication does not match the completed step".into());
         }
         if scenario.oscillate && lookup_ids.len() != if step_index % 2 == 0 { 180 } else { 220 } {
@@ -738,10 +745,11 @@ async fn snapshot_sample<S: SnapshotBench>(
         {
             return Err("retained benchmark snapshot was changed or lost".into());
         }
-        if controller.world()?.body_count() != scenario.target_live {
+        if simulation.world()?.body_count() != scenario.target_live {
             return Err("retained benchmark world did not shrink".into());
         }
     }
+    simulation.shutdown().await?;
     Ok(sample)
 }
 
@@ -808,12 +816,14 @@ fn report_snapshot_sample(scenario: &str, implementation: &str, sample: Snapshot
 
 async fn controller_sample(body_count: usize) -> Result<Duration, Box<dyn Error>> {
     let world = make_world(body_count, WORKLOADS[0])?;
-    let mut controller = PhysicsController::new(world, config(1))?;
+    let mut simulation = new_simulation_current(world, 1)?;
     let started = Instant::now();
     for _ in 0..STEPS {
-        black_box(controller.step().await?);
+        black_box(simulation.step().await?);
     }
-    Ok(started.elapsed())
+    let elapsed = started.elapsed();
+    simulation.shutdown().await?;
+    Ok(elapsed)
 }
 
 async fn pipeline_sample(
@@ -822,9 +832,9 @@ async fn pipeline_sample(
 ) -> Result<PhaseTimes, Box<dyn Error>> {
     let world = make_world(body_count, WORKLOADS[0])?;
     let ids = world.bodies().map(|(id, _)| id).collect::<Vec<_>>();
-    let mut controller = PhysicsController::new(world, config(1))?;
+    let mut simulation = new_simulation_current(world, 1)?;
     let initial = Arc::new(marshalling::PhysicsSnapshot::from_world(
-        controller.world()?,
+        simulation.world()?,
         0,
         Duration::ZERO,
     ));
@@ -845,13 +855,13 @@ async fn pipeline_sample(
             })
             .collect::<Vec<_>>();
         let phase = Instant::now();
-        let world = controller.world_mut()?;
+        let world = simulation.world_mut()?;
         for command in commands {
             black_box(marshalling::apply_command(world, command)?);
         }
         times.commands += phase.elapsed();
 
-        let stats = controller.step().await?;
+        let stats = simulation.step().await?;
         times.physics += stats.step_duration;
         simulation_time = simulation_time
             .checked_add(dt)
@@ -860,8 +870,8 @@ async fn pipeline_sample(
         let phase = Instant::now();
         let (mut snapshot, _) = marshalling::PhysicsSnapshot::take_reusable(&mut reusable);
         snapshot.rebuild(
-            controller.world()?,
-            controller.metrics().total_steps,
+            simulation.world()?,
+            simulation.metrics().total_steps,
             simulation_time,
         );
         times.snapshot_build += phase.elapsed();
@@ -872,6 +882,7 @@ async fn pipeline_sample(
         times.publication += phase.elapsed();
     }
     times.total = started.elapsed();
+    simulation.shutdown().await?;
     Ok(times)
 }
 
@@ -885,14 +896,14 @@ async fn simulation_sample(
         .take(commands_per_step)
         .map(|(id, _)| id)
         .collect::<Vec<_>>();
-    let mut simulation = PhysicsSimulation::with_config(
+    let mut simulation = PhysicsService::new_with_worker_config(
         world,
-        SchedulerConfig {
-            max_workers: 1,
+        SimulationConfig {
+            tick_rate: 60,
             max_catch_up_steps: 1,
-            adaptive: false,
-            ..SchedulerConfig::default()
+            ..SimulationConfig::default()
         },
+        worker_config(1),
     )?;
     let client = simulation.client();
     let mut reader = client.clone();
@@ -928,15 +939,17 @@ async fn simulation_sample(
         if metrics.total_steps != snapshot.step() {
             return Err("command batch was not applied in one physical step".into());
         }
-        physics += metrics.step_duration;
+        physics += metrics.last_step_duration;
         tokio::task::yield_now().await;
     }
     let elapsed = started.elapsed();
     simulation.stop().await?;
+    let steps = simulation.metrics().total_steps;
+    simulation.shutdown().await?;
     Ok(SimulationTimes {
         wall: elapsed,
         physics,
-        steps: simulation.metrics().total_steps,
+        steps,
     })
 }
 
@@ -996,13 +1009,42 @@ fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-fn config(workers: usize) -> SchedulerConfig {
-    SchedulerConfig {
-        max_workers: workers,
+fn config() -> SimulationConfig {
+    SimulationConfig {
         max_catch_up_steps: 1,
-        adaptive: false,
-        ..SchedulerConfig::default()
+        ..SimulationConfig::default()
     }
+}
+
+fn worker_config(workers: usize) -> WorkerConfig {
+    WorkerConfig {
+        max_workers: NonZeroUsize::new(workers),
+        ..WorkerConfig::default()
+    }
+}
+
+fn new_simulation(
+    world: PhysicsWorld,
+    workers: usize,
+    runtime: &Handle,
+) -> Result<Simulation, Box<dyn Error>> {
+    Ok(Simulation::new_on_with_worker_config(
+        world,
+        config(),
+        worker_config(workers),
+        runtime.clone(),
+    )?)
+}
+
+fn new_simulation_current(
+    world: PhysicsWorld,
+    workers: usize,
+) -> Result<Simulation, Box<dyn Error>> {
+    Ok(Simulation::new_with_worker_config(
+        world,
+        config(),
+        worker_config(workers),
+    )?)
 }
 
 fn make_world(body_count: usize, workload: Workload) -> Result<PhysicsWorld, Box<dyn Error>> {

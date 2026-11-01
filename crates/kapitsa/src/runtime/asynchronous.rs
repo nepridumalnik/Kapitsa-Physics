@@ -18,6 +18,15 @@ use super::{
     planner::{AdaptiveScheduler, WorkerConfig, WorkerConfigError},
 };
 
+pub mod marshalling;
+mod service;
+
+pub use marshalling::{
+    CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsClient,
+    PhysicsClientError, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot,
+};
+pub use service::{PhysicsService, PhysicsServiceError};
+
 enum EngineState {
     Available(Box<StepEngine<RayonExecutor>>),
     InFlight {
@@ -270,6 +279,17 @@ impl Simulation {
         match &self.state {
             EngineState::Available(engine) => engine.metrics(),
             EngineState::InFlight { .. } | EngineState::Lost => &self.last_metrics,
+        }
+    }
+
+    pub(crate) fn set_runtime_status(
+        &mut self,
+        state: super::metrics::SimulationState,
+        simulation_time_debt: Duration,
+    ) {
+        if let EngineState::Available(engine) = &mut self.state {
+            engine.set_runtime_status(state, simulation_time_debt);
+            self.last_metrics = engine.metrics().clone();
         }
     }
 
