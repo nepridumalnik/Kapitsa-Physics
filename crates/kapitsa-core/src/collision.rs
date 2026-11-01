@@ -15,7 +15,7 @@ mod manifold;
 pub(crate) mod mesh;
 mod narrow_phase;
 mod query;
-mod solver;
+pub(crate) mod solver;
 pub(crate) mod spatial_index;
 mod step;
 mod support;

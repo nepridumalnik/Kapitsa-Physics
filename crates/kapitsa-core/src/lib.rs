@@ -3,6 +3,7 @@
 pub mod aabb;
 pub mod collider;
 pub mod collision;
+mod constraint;
 pub mod containers;
 pub mod execution;
 pub mod gravity;

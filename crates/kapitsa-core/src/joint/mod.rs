@@ -8,8 +8,13 @@ mod error;
 mod fixed;
 mod hinge;
 mod planar;
+mod row;
 mod slider;
+#[allow(dead_code)] // Integrated into collision islands in the dedicated solver integration step.
+mod solver;
 mod spring;
+#[allow(dead_code)] // Used by the shared solver before island integration is wired in.
+mod workspace;
 
 pub use ball::BallJoint;
 pub use common::{JointCommon, JointDrive, JointFrame, JointLimit, JointMotion};

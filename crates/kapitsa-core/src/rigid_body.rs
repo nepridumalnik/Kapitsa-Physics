@@ -301,6 +301,23 @@ impl RigidBody {
             .checked_sub(center)
             .and_then(|offset| offset.checked_cross(impulse))
             .ok_or(BodyError::ArithmeticOverflow)?;
+        self.apply_constraint_impulse(impulse, angular_impulse)
+    }
+
+    pub(crate) fn apply_constraint_impulse(
+        &mut self,
+        linear_impulse: Vec3,
+        angular_impulse: Vec3,
+    ) -> Result<(), BodyError> {
+        self.ensure_dynamic()?;
+        if !linear_impulse.is_finite() || !angular_impulse.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+        if linear_impulse == Vec3::ZERO && angular_impulse == Vec3::ZERO {
+            return Ok(());
+        }
+
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
         let rotation = self.state.transform.rotation();
         let local_angular_impulse = rotation
             .conjugate()
@@ -310,7 +327,7 @@ impl RigidBody {
         let delta_angular_velocity = rotation
             .rotate_vector(local_delta_angular_velocity)
             .ok_or(BodyError::ArithmeticOverflow)?;
-        let delta_linear_velocity = impulse / mass.mass();
+        let delta_linear_velocity = linear_impulse / mass.mass();
         let next_linear_velocity = add_checked(self.state.linear_velocity, delta_linear_velocity)?;
         let next_angular_velocity =
             add_checked(self.state.angular_velocity, delta_angular_velocity)?;
@@ -343,6 +360,27 @@ impl RigidBody {
             .checked_sub(center)
             .and_then(|offset| offset.checked_cross(impulse))
             .ok_or(BodyError::ArithmeticOverflow)?;
+        self.apply_constraint_position_impulse(impulse, angular_impulse)
+    }
+
+    pub(crate) fn apply_constraint_position_impulse(
+        &mut self,
+        linear_impulse: Vec3,
+        angular_impulse: Vec3,
+    ) -> Result<(), BodyError> {
+        if self.physics.body_type != BodyType::Dynamic {
+            return Ok(());
+        }
+        if !linear_impulse.is_finite() || !angular_impulse.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+        if linear_impulse == Vec3::ZERO && angular_impulse == Vec3::ZERO {
+            return Ok(());
+        }
+
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
+        let center = world_center_of_mass_for(self.state.transform, Some(mass))?
+            .ok_or(BodyError::BodyMustBeDynamic)?;
         let rotation = self.state.transform.rotation();
         let local_angular_impulse = rotation
             .conjugate()
@@ -366,7 +404,7 @@ impl RigidBody {
             .filter(|rotation| rotation.is_normalized())
             .ok_or(BodyError::ArithmeticOverflow)?;
         let next_center = center
-            .checked_add(impulse / mass.mass())
+            .checked_add(linear_impulse / mass.mass())
             .ok_or(BodyError::ArithmeticOverflow)?;
         let next_translation = next_center
             .checked_sub(

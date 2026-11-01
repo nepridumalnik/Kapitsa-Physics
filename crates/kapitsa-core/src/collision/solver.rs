@@ -1,8 +1,5 @@
-use crate::{
-    mass::MassProperties,
-    rigid_body::{BodyType, RigidBody},
-};
-use kapitsa_math::{CholeskyError, Vec3};
+use crate::{constraint, rigid_body::RigidBody};
+use kapitsa_math::Vec3;
 
 use super::{
     CollisionConfig, CollisionError,
@@ -37,6 +34,10 @@ impl SolverBody {
 
     pub(crate) fn body(&self) -> &RigidBody {
         &self.body
+    }
+
+    pub(crate) fn body_mut(&mut self) -> &mut RigidBody {
+        &mut self.body
     }
 }
 
@@ -479,76 +480,15 @@ fn effective_cross_mass(
     measurement: Vec3,
     impulse: Vec3,
 ) -> Result<f64, CollisionError> {
-    let mut result = 0.0;
-    for (body, position) in [(body_a, position_a), (body_b, position_b)] {
-        if body.physics().body_type() != BodyType::Dynamic {
-            continue;
-        }
-        let mass = body
-            .physics()
-            .mass()
-            .ok_or(CollisionError::InvalidContact)?;
-        let inverse_mass = 1.0 / mass.mass();
-        let angular = angular_effective_term(body, mass, position, measurement, impulse)?;
-        let linear_term = inverse_mass
-            * measurement
-                .checked_dot(impulse)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
-        result += linear_term + angular;
-        if !result.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
-        }
-    }
-    Ok(result)
-}
-
-fn angular_effective_term(
-    body: &RigidBody,
-    mass: MassProperties,
-    position: Vec3,
-    measurement: Vec3,
-    impulse: Vec3,
-) -> Result<f64, CollisionError> {
-    let center = body
-        .world_center_of_mass()
-        .map_err(map_body_error)?
-        .unwrap_or(body.state().transform().translation());
-    let offset = position
-        .checked_sub(center)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    let torque = offset
-        .checked_cross(impulse)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    let response = inverse_inertia_world(body, mass, torque)?;
-    let angular_velocity = response
-        .checked_cross(offset)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    let term = measurement
-        .checked_dot(angular_velocity)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    if !term.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
-    }
-    Ok(term)
-}
-
-fn inverse_inertia_world(
-    body: &RigidBody,
-    mass: MassProperties,
-    impulse: Vec3,
-) -> Result<Vec3, CollisionError> {
-    let rotation = body.state().transform().rotation();
-    let local = rotation
-        .conjugate()
-        .rotate_vector(impulse)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    let local_response = mass
-        .inertia()
-        .solve_spd(local)
-        .map_err(map_cholesky_error)?;
-    rotation
-        .rotate_vector(local_response)
-        .ok_or(CollisionError::ArithmeticOverflow)
+    constraint::effective_cross_mass_at(
+        body_a,
+        body_b,
+        position_a,
+        position_b,
+        measurement,
+        impulse,
+    )
+    .map_err(map_constraint_error)
 }
 
 fn relative_velocity(
@@ -557,26 +497,8 @@ fn relative_velocity(
     position_a: Vec3,
     position_b: Vec3,
 ) -> Result<Vec3, CollisionError> {
-    let velocity_a = point_velocity(body_a, position_a)?;
-    let velocity_b = point_velocity(body_b, position_b)?;
-    velocity_b
-        .checked_sub(velocity_a)
-        .ok_or(CollisionError::ArithmeticOverflow)
-}
-
-fn point_velocity(body: &RigidBody, position: Vec3) -> Result<Vec3, CollisionError> {
-    let center = body
-        .world_center_of_mass()
-        .map_err(map_body_error)?
-        .unwrap_or(body.state().transform().translation());
-    let offset = position
-        .checked_sub(center)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    body.state()
-        .angular_velocity()
-        .checked_cross(offset)
-        .and_then(|angular| angular.checked_add(body.state().linear_velocity()))
-        .ok_or(CollisionError::ArithmeticOverflow)
+    constraint::relative_velocity_at(body_a, body_b, position_a, position_b)
+        .map_err(map_constraint_error)
 }
 
 fn apply_pair_impulse(
@@ -588,17 +510,8 @@ fn apply_pair_impulse(
     impulse: Vec3,
 ) -> Result<(), CollisionError> {
     let (a, b) = bodies_at_mut(bodies, body_a, body_b)?;
-    if a.body.physics().body_type() == BodyType::Dynamic {
-        a.body
-            .apply_impulse_at_point(-impulse, point_a)
-            .map_err(map_body_error)?;
-    }
-    if b.body.physics().body_type() == BodyType::Dynamic {
-        b.body
-            .apply_impulse_at_point(impulse, point_b)
-            .map_err(map_body_error)?;
-    }
-    Ok(())
+    constraint::apply_point_impulse_pair(&mut a.body, &mut b.body, point_a, point_b, impulse)
+        .map_err(map_constraint_error)
 }
 
 fn apply_pair_position_impulse(
@@ -610,12 +523,14 @@ fn apply_pair_position_impulse(
     impulse: Vec3,
 ) -> Result<(), CollisionError> {
     let (a, b) = bodies_at_mut(bodies, body_a, body_b)?;
-    a.body
-        .apply_position_impulse(-impulse, point_a)
-        .map_err(map_body_error)?;
-    b.body
-        .apply_position_impulse(impulse, point_b)
-        .map_err(map_body_error)
+    constraint::apply_point_position_impulse_pair(
+        &mut a.body,
+        &mut b.body,
+        point_a,
+        point_b,
+        impulse,
+    )
+    .map_err(map_constraint_error)
 }
 
 fn bodies_at(
@@ -724,26 +639,13 @@ fn validate_contact(contact: ContactPoint) -> Result<(), CollisionError> {
     Ok(())
 }
 
-fn map_body_error(error: crate::rigid_body::BodyError) -> CollisionError {
+fn map_constraint_error(error: crate::constraint::ConstraintError) -> CollisionError {
     match error {
-        crate::rigid_body::BodyError::ArithmeticOverflow
-        | crate::rigid_body::BodyError::NonFiniteValue => CollisionError::ArithmeticOverflow,
-        crate::rigid_body::BodyError::InvalidInertiaTensor => CollisionError::NonConvergent,
-        crate::rigid_body::BodyError::BodyMustBeDynamic
-        | crate::rigid_body::BodyError::StaticBodyCannotHaveVelocity => {
-            CollisionError::InvalidContact
-        }
-    }
-}
-
-fn map_cholesky_error(error: CholeskyError) -> CollisionError {
-    match error {
-        CholeskyError::NonFiniteInput | CholeskyError::ResultOutOfRange => {
+        crate::constraint::ConstraintError::InvalidMass => CollisionError::InvalidContact,
+        crate::constraint::ConstraintError::ArithmeticOverflow => {
             CollisionError::ArithmeticOverflow
         }
-        CholeskyError::NotSymmetric | CholeskyError::NotPositiveDefinite => {
-            CollisionError::NonConvergent
-        }
+        crate::constraint::ConstraintError::NonConvergent => CollisionError::NonConvergent,
     }
 }
 
