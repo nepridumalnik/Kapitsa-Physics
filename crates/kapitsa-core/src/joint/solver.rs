@@ -90,6 +90,32 @@ impl JointSolver {
         solve_velocity_iteration(workspace, bodies, dt)
     }
 
+    pub(crate) fn solve_position_joint(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        constraint: JointConstraint,
+        joint_index: usize,
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        workspace.begin_joint_prepare(joint_index);
+        prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+        solve_position_rows(workspace.prepared_rows_mut(), bodies, dt)?;
+        workspace.finish_joint_prepare()
+    }
+
+    pub(crate) fn solve_velocity_joint(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        constraint: JointConstraint,
+        joint_index: usize,
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        workspace.begin_joint_prepare(joint_index);
+        prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+        solve_velocity_rows(workspace.prepared_rows_mut(), bodies, dt)?;
+        workspace.finish_joint_prepare()
+    }
+
     fn prepare_iteration<F>(
         workspace: &mut JointWorkspace,
         bodies: &[SolverBody],
@@ -112,95 +138,104 @@ pub(crate) fn prepare_joint_rows(
     dt: f64,
 ) -> Result<(), CollisionError> {
     for (joint_index, constraint) in joints.iter().enumerate() {
-        if !constraint.joint.common().enabled {
-            continue;
-        }
         workspace.set_joint_index(joint_index);
-        solver_bodies_at(bodies, constraint.body_a, constraint.body_b)?;
-        match constraint.joint {
-            super::Joint::Fixed(joint) => append_fixed_rows(
-                bodies,
-                workspace,
-                constraint.body_a,
-                constraint.body_b,
-                joint,
-                dt,
-            )?,
-            super::Joint::Ball(joint) => append_ball_rows(
-                bodies,
-                workspace,
-                constraint.body_a,
-                constraint.body_b,
-                joint,
-                dt,
-            )?,
-            super::Joint::Distance(joint) => append_distance_rows(
-                bodies,
-                workspace,
-                constraint.body_a,
-                constraint.body_b,
-                joint,
-                dt,
-            )?,
-            super::Joint::Hinge(joint) => append_hinge_rows(
-                bodies,
-                workspace,
-                constraint.body_a,
-                constraint.body_b,
-                joint,
-                dt,
-            )?,
-            super::Joint::Slider(joint) => append_slider_rows(
-                bodies,
-                workspace,
-                constraint.body_a,
-                constraint.body_b,
-                joint,
-                dt,
-            )?,
-            super::Joint::Cylindrical(joint) => append_cylindrical_rows(
-                bodies,
-                workspace,
-                constraint.body_a,
-                constraint.body_b,
-                joint,
-                dt,
-            )?,
-            super::Joint::Planar(joint) => append_planar_rows(
-                bodies,
-                workspace,
-                constraint.body_a,
-                constraint.body_b,
-                joint,
-                dt,
-            )?,
-            super::Joint::D6(joint) => append_d6_rows(
-                bodies,
-                workspace,
-                constraint.body_a,
-                constraint.body_b,
-                joint,
-                dt,
-            )?,
-            super::Joint::Spring(joint) => append_spring_rows(
-                bodies,
-                workspace,
-                constraint.body_a,
-                constraint.body_b,
-                joint,
-                dt,
-            )?,
-            super::Joint::ConeTwist(joint) => append_cone_twist_rows(
-                bodies,
-                workspace,
-                constraint.body_a,
-                constraint.body_b,
-                joint,
-                dt,
-            )?,
-        }
+        prepare_joint_rows_for_constraint(bodies, workspace, *constraint, dt)?;
     }
     Ok(())
+}
+
+fn prepare_joint_rows_for_constraint(
+    bodies: &[SolverBody],
+    workspace: &mut JointWorkspace,
+    constraint: JointConstraint,
+    dt: f64,
+) -> Result<(), CollisionError> {
+    if !constraint.joint.common().enabled {
+        return Ok(());
+    }
+    solver_bodies_at(bodies, constraint.body_a, constraint.body_b)?;
+    match constraint.joint {
+        super::Joint::Fixed(joint) => append_fixed_rows(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint,
+            dt,
+        ),
+        super::Joint::Ball(joint) => append_ball_rows(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint,
+            dt,
+        ),
+        super::Joint::Distance(joint) => append_distance_rows(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint,
+            dt,
+        ),
+        super::Joint::Hinge(joint) => append_hinge_rows(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint,
+            dt,
+        ),
+        super::Joint::Slider(joint) => append_slider_rows(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint,
+            dt,
+        ),
+        super::Joint::Cylindrical(joint) => append_cylindrical_rows(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint,
+            dt,
+        ),
+        super::Joint::Planar(joint) => append_planar_rows(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint,
+            dt,
+        ),
+        super::Joint::D6(joint) => append_d6_rows(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint,
+            dt,
+        ),
+        super::Joint::Spring(joint) => append_spring_rows(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint,
+            dt,
+        ),
+        super::Joint::ConeTwist(joint) => append_cone_twist_rows(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint,
+            dt,
+        ),
+    }
 }
 
 fn append_fixed_rows(
@@ -213,7 +248,10 @@ fn append_fixed_rows(
 ) -> Result<(), CollisionError> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
-    let settings = row_settings(body_a, body_b, joint.common, dt);
+    let mut settings = row_settings(body_a, body_b, joint.common, dt);
+    // Fixed-joint position projection already corrects connector drift. A
+    // Baumgarte velocity target on the same error can add energy to large trees.
+    settings.velocity_bias = false;
     let position_error = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -1346,16 +1384,21 @@ fn solve_position_iteration(
     bodies: &mut [SolverBody],
     dt: f64,
 ) -> Result<(), CollisionError> {
+    solve_position_rows(workspace.rows_mut(), bodies, dt)
+}
+
+fn solve_position_rows(
+    rows: &mut [ConstraintRow],
+    bodies: &mut [SolverBody],
+    dt: f64,
+) -> Result<(), CollisionError> {
     let dt_squared = dt * dt;
     if !dt_squared.is_finite() || dt_squared <= 0.0 {
         return Err(CollisionError::ArithmeticOverflow);
     }
     let alpha_scale = dt_squared.recip();
-    for index in 0..workspace.rows().len() {
-        let row = *workspace
-            .rows()
-            .get(index)
-            .ok_or(CollisionError::InvalidContact)?;
+    for index in 0..rows.len() {
+        let row = *rows.get(index).ok_or(CollisionError::InvalidContact)?;
         if !row.is_valid(bodies.len()) {
             return Err(CollisionError::InvalidContact);
         }
@@ -1380,7 +1423,7 @@ fn solve_position_iteration(
         }
         if applied != 0.0 {
             apply_position_row(bodies, row, applied)?;
-            workspace.rows_mut()[index].accumulated_multiplier = next;
+            rows[index].accumulated_multiplier = next;
         }
     }
     Ok(())
@@ -1391,11 +1434,16 @@ fn solve_velocity_iteration(
     bodies: &mut [SolverBody],
     dt: f64,
 ) -> Result<(), CollisionError> {
-    for index in 0..workspace.rows().len() {
-        let row = *workspace
-            .rows()
-            .get(index)
-            .ok_or(CollisionError::InvalidContact)?;
+    solve_velocity_rows(workspace.rows_mut(), bodies, dt)
+}
+
+fn solve_velocity_rows(
+    rows: &mut [ConstraintRow],
+    bodies: &mut [SolverBody],
+    dt: f64,
+) -> Result<(), CollisionError> {
+    for index in 0..rows.len() {
+        let row = *rows.get(index).ok_or(CollisionError::InvalidContact)?;
         if !row.is_valid(bodies.len()) {
             return Err(CollisionError::InvalidContact);
         }
@@ -1439,7 +1487,7 @@ fn solve_velocity_iteration(
         }
         if applied != 0.0 {
             apply_velocity_row(bodies, row, applied)?;
-            workspace.rows_mut()[index].accumulated_impulse = next;
+            rows[index].accumulated_impulse = next;
         }
     }
     Ok(())

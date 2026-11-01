@@ -14,8 +14,12 @@ struct JointReaction {
 pub(crate) struct JointWorkspace {
     rows: Vec<ConstraintRow>,
     row_joint_indices: Vec<usize>,
+    preparing_rows: Vec<ConstraintRow>,
+    preparing_joint_indices: Vec<usize>,
     prepared_rows: usize,
     active_joint_index: usize,
+    previous_row_start: usize,
+    previous_row_end: usize,
     reactions: Vec<JointReaction>,
     break_events: Vec<JointBreakEvent>,
 }
@@ -25,8 +29,12 @@ impl JointWorkspace {
         Self {
             rows: Vec::new(),
             row_joint_indices: Vec::new(),
+            preparing_rows: Vec::new(),
+            preparing_joint_indices: Vec::new(),
             prepared_rows: 0,
             active_joint_index: 0,
+            previous_row_start: 0,
+            previous_row_end: 0,
             reactions: Vec::new(),
             break_events: Vec::new(),
         }
@@ -35,6 +43,8 @@ impl JointWorkspace {
     pub(crate) fn begin_step(&mut self) {
         self.prepared_rows = 0;
         self.active_joint_index = 0;
+        self.previous_row_start = 0;
+        self.previous_row_end = 0;
         self.reactions.clear();
         self.break_events.clear();
         for row in &mut self.rows {
@@ -46,32 +56,91 @@ impl JointWorkspace {
     pub(crate) fn clear(&mut self) {
         self.rows.clear();
         self.row_joint_indices.clear();
+        self.preparing_rows.clear();
+        self.preparing_joint_indices.clear();
         self.prepared_rows = 0;
         self.active_joint_index = 0;
+        self.previous_row_start = 0;
+        self.previous_row_end = 0;
         self.reactions.clear();
         self.break_events.clear();
     }
 
     pub(crate) fn begin_prepare(&mut self) {
         self.prepared_rows = 0;
+        self.active_joint_index = 0;
+        self.previous_row_start = 0;
+        self.previous_row_end = self.rows.len();
+        self.preparing_rows.clear();
+        self.preparing_joint_indices.clear();
     }
 
     pub(crate) fn push(&mut self, mut row: ConstraintRow) {
-        if let Some(previous) = self.rows.get(self.prepared_rows) {
+        if let Some(previous) = self
+            .rows
+            .get(self.previous_row_start + self.prepared_rows)
+            .filter(|_| self.previous_row_start + self.prepared_rows < self.previous_row_end)
+        {
             row.accumulated_multiplier = previous.accumulated_multiplier;
             row.accumulated_impulse = previous.accumulated_impulse;
-            self.rows[self.prepared_rows] = row;
-            self.row_joint_indices[self.prepared_rows] = self.active_joint_index;
-        } else {
-            self.rows.push(row);
-            self.row_joint_indices.push(self.active_joint_index);
         }
+        self.preparing_rows.push(row);
+        self.preparing_joint_indices.push(self.active_joint_index);
         self.prepared_rows += 1;
     }
 
     pub(crate) fn finish_prepare(&mut self) {
-        self.rows.truncate(self.prepared_rows);
-        self.row_joint_indices.truncate(self.prepared_rows);
+        std::mem::swap(&mut self.rows, &mut self.preparing_rows);
+        std::mem::swap(
+            &mut self.row_joint_indices,
+            &mut self.preparing_joint_indices,
+        );
+        self.preparing_rows.clear();
+        self.preparing_joint_indices.clear();
+    }
+
+    pub(crate) fn begin_joint_prepare(&mut self, joint_index: usize) {
+        let start = self
+            .row_joint_indices
+            .partition_point(|&owner| owner < joint_index);
+        let end = self
+            .row_joint_indices
+            .partition_point(|&owner| owner <= joint_index);
+        self.previous_row_start = start;
+        self.previous_row_end = end;
+        self.prepared_rows = 0;
+        self.active_joint_index = joint_index;
+        self.preparing_rows.clear();
+        self.preparing_joint_indices.clear();
+    }
+
+    pub(crate) fn prepared_rows_mut(&mut self) -> &mut [ConstraintRow] {
+        &mut self.preparing_rows
+    }
+
+    pub(crate) fn finish_joint_prepare(&mut self) -> Result<(), CollisionError> {
+        let new_count = self.preparing_rows.len();
+        let old_count = self.previous_row_end - self.previous_row_start;
+        if new_count > old_count {
+            let additional = new_count - old_count;
+            self.rows
+                .try_reserve(additional)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.row_joint_indices
+                .try_reserve(additional)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        }
+        self.rows.splice(
+            self.previous_row_start..self.previous_row_end,
+            self.preparing_rows.iter().copied(),
+        );
+        self.row_joint_indices.splice(
+            self.previous_row_start..self.previous_row_end,
+            std::iter::repeat(self.active_joint_index).take(new_count),
+        );
+        self.preparing_rows.clear();
+        self.preparing_joint_indices.clear();
+        Ok(())
     }
 
     pub(crate) fn rows(&self) -> &[ConstraintRow] {
@@ -160,6 +229,8 @@ impl JointWorkspace {
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         self.rows.capacity() * std::mem::size_of::<ConstraintRow>()
             + self.row_joint_indices.capacity() * std::mem::size_of::<usize>()
+            + self.preparing_rows.capacity() * std::mem::size_of::<ConstraintRow>()
+            + self.preparing_joint_indices.capacity() * std::mem::size_of::<usize>()
             + self.reactions.capacity() * std::mem::size_of::<JointReaction>()
             + self.break_events.capacity() * std::mem::size_of::<JointBreakEvent>()
     }
@@ -174,6 +245,7 @@ mod tests {
     fn clear_reuses_row_and_owner_capacity_for_many_joints() {
         let mut workspace = JointWorkspace::new();
         let add_rows = |workspace: &mut JointWorkspace| {
+            workspace.begin_prepare();
             for joint_index in 0..32 {
                 workspace.set_joint_index(joint_index);
                 workspace.push(ConstraintRow {
@@ -197,6 +269,7 @@ mod tests {
                     accumulated_impulse: 0.0,
                 });
             }
+            workspace.finish_prepare();
         };
         add_rows(&mut workspace);
         let row_capacity = workspace.rows.capacity();

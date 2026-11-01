@@ -14,6 +14,8 @@ mod slider;
 #[allow(dead_code)] // Integrated into collision islands in the dedicated solver integration step.
 mod solver;
 mod spring;
+#[cfg(test)]
+mod stability_tests;
 #[allow(dead_code)] // Used by the shared solver before island integration is wired in.
 mod workspace;
 

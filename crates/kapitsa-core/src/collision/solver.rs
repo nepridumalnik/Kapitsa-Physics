@@ -176,13 +176,15 @@ impl SolverWorkspace {
 
         for _ in 0..config.velocity_iterations {
             self.solve_velocity_iteration(bodies, manifolds)?;
-            JointSolver::prepare(joint_workspace, bodies, joints, dt)?;
-            JointSolver::solve_velocity_iteration(joint_workspace, bodies, dt)?;
+            for (joint_index, joint) in joints.iter().copied().enumerate() {
+                JointSolver::solve_velocity_joint(joint_workspace, bodies, joint, joint_index, dt)?;
+            }
         }
         for _ in 0..config.position_iterations {
             self.solve_position_iteration(bodies, manifolds, config)?;
-            JointSolver::prepare(joint_workspace, bodies, joints, dt)?;
-            JointSolver::solve_position_iteration(joint_workspace, bodies, dt)?;
+            for (joint_index, joint) in joints.iter().copied().enumerate() {
+                JointSolver::solve_position_joint(joint_workspace, bodies, joint, joint_index, dt)?;
+            }
         }
         joint_workspace.collect_break_events(joints, dt)?;
         Ok(())
