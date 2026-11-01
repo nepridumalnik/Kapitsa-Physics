@@ -341,6 +341,7 @@ impl Simulation {
         self.time_multiplier_tx.send_replace(multiplier);
         self.metrics_tx.send_modify(|metrics| {
             metrics.requested_time_multiplier = multiplier;
+            metrics.actual_time_multiplier = 0.0;
         });
         Ok(())
     }
@@ -416,10 +417,10 @@ async fn run_simulation_loop(
     let step_duration = simulation.config().step_budget();
     let max_catch_up_steps = simulation.config().max_catch_up_steps;
     let mut previous = Instant::now();
-    let mut last_step_completed_at = previous;
+    let mut multiplier_started_at = previous;
+    let mut multiplier_started_simulation_time = *simulation_time;
     let mut current_multiplier = *time_multiplier.borrow_and_update();
     let mut time_updates_open = true;
-    let mut actual_multiplier = 0.0;
     let mut accumulator = Duration::ZERO;
     let mut reusable_snapshot = None;
 
@@ -443,7 +444,8 @@ async fn run_simulation_loop(
                 match changed {
                     Ok(()) => {
                         current_multiplier = *time_multiplier.borrow_and_update();
-                        last_step_completed_at = now;
+                        multiplier_started_at = now;
+                        multiplier_started_simulation_time = *simulation_time;
                     }
                     Err(_) => time_updates_open = false,
                 }
@@ -518,11 +520,11 @@ async fn run_simulation_loop(
 
             accumulator = accumulator.saturating_sub(step_duration);
             let completed_at = Instant::now();
-            let step_wall_interval = completed_at.duration_since(last_step_completed_at);
-            if !step_wall_interval.is_zero() {
-                actual_multiplier = step_duration.as_secs_f64() / step_wall_interval.as_secs_f64();
-            }
-            last_step_completed_at = completed_at;
+            let actual_multiplier = measured_time_multiplier(
+                *simulation_time,
+                multiplier_started_simulation_time,
+                completed_at.duration_since(multiplier_started_at),
+            );
             add_scaled_elapsed(
                 &mut accumulator,
                 completed_at.duration_since(previous),
@@ -711,6 +713,21 @@ fn add_scaled_elapsed(
     add_elapsed(accumulator, scaled)
 }
 
+fn measured_time_multiplier(
+    simulation_time: Duration,
+    start_simulation_time: Duration,
+    wall_elapsed: Duration,
+) -> f64 {
+    if wall_elapsed.is_zero() {
+        0.0
+    } else {
+        simulation_time
+            .saturating_sub(start_simulation_time)
+            .as_secs_f64()
+            / wall_elapsed.as_secs_f64()
+    }
+}
+
 async fn wait_for_scaled_step(remaining: Duration, multiplier: f64) {
     if multiplier == 0.0 {
         std::future::pending::<()>().await;
@@ -767,7 +784,7 @@ mod tests {
         PhysicsClientError, SimulationConfig, SimulationError, SimulationState, WorkerConfig,
     };
 
-    use super::{PhysicsBatchError, Simulation, wait_for_scaled_step};
+    use super::{PhysicsBatchError, Simulation, measured_time_multiplier, wait_for_scaled_step};
 
     fn dynamic_body() -> RigidBody {
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass");
@@ -1296,6 +1313,26 @@ mod tests {
         assert!(matches!(poll_once(paused.as_mut()), Poll::Pending));
     }
 
+    #[test]
+    fn actual_time_multiplier_uses_elapsed_simulation_time_since_change() {
+        assert_eq!(
+            measured_time_multiplier(
+                Duration::from_secs(3),
+                Duration::from_secs(2),
+                Duration::from_millis(500),
+            ),
+            2.0,
+        );
+        assert_eq!(
+            measured_time_multiplier(
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+                Duration::ZERO
+            ),
+            0.0,
+        );
+    }
+
     #[tokio::test]
     async fn invalid_time_multiplier_is_rejected_without_changing_metrics() {
         let simulation = Simulation::new().expect("simulation");
@@ -1318,3 +1355,6 @@ mod tests {
         simulation.stop().await.expect("stop");
     }
 }
+
+#[cfg(all(test, feature = "bench-internals"))]
+mod benchmarks;

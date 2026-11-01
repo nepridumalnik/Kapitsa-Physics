@@ -785,7 +785,7 @@ pub(crate) fn apply_command(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[cfg(feature = "bench-internals")]
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::collections::HashMap;
@@ -823,6 +823,12 @@ mod tests {
     static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
     #[cfg(feature = "bench-internals")]
     static ALLOCATION_BYTES: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "bench-internals")]
+    static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "bench-internals")]
+    static BASE_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "bench-internals")]
+    static PEAK_EXTRA_BYTES: AtomicUsize = AtomicUsize::new(0);
 
     #[cfg(feature = "bench-internals")]
     struct TrackingAllocator;
@@ -831,34 +837,55 @@ mod tests {
     unsafe impl GlobalAlloc for TrackingAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             let pointer = unsafe { System.alloc(layout) };
-            if !pointer.is_null() && TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
-                ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
-                ALLOCATION_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            if !pointer.is_null() {
+                LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+                if TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+                    ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+                    ALLOCATION_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+                    record_peak_extra_bytes();
+                }
             }
             pointer
         }
 
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
             let pointer = unsafe { System.alloc_zeroed(layout) };
-            if !pointer.is_null() && TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
-                ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
-                ALLOCATION_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            if !pointer.is_null() {
+                LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+                if TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+                    ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+                    ALLOCATION_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+                    record_peak_extra_bytes();
+                }
             }
             pointer
         }
 
         unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
             let new_pointer = unsafe { System.realloc(pointer, layout, size) };
-            if !new_pointer.is_null() && TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
-                ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
-                ALLOCATION_BYTES.fetch_add(size, Ordering::Relaxed);
+            if !new_pointer.is_null() {
+                LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+                LIVE_BYTES.fetch_add(size, Ordering::Relaxed);
+                if TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+                    ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+                    ALLOCATION_BYTES.fetch_add(size, Ordering::Relaxed);
+                    record_peak_extra_bytes();
+                }
             }
             new_pointer
         }
 
         unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
             unsafe { System.dealloc(pointer, layout) };
+            LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
         }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn record_peak_extra_bytes() {
+        let live = LIVE_BYTES.load(Ordering::Relaxed);
+        let baseline = BASE_LIVE_BYTES.load(Ordering::Relaxed);
+        PEAK_EXTRA_BYTES.fetch_max(live.saturating_sub(baseline), Ordering::Relaxed);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -873,8 +900,46 @@ mod tests {
         fn start() -> Self {
             ALLOCATION_COUNT.store(0, Ordering::Relaxed);
             ALLOCATION_BYTES.store(0, Ordering::Relaxed);
+            BASE_LIVE_BYTES.store(LIVE_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
+            PEAK_EXTRA_BYTES.store(0, Ordering::Relaxed);
             TRACK_ALLOCATIONS.store(true, Ordering::Relaxed);
             Self
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) mod allocation_tracking {
+        pub(crate) fn start() {
+            super::ALLOCATION_COUNT.store(0, super::Ordering::Relaxed);
+            super::ALLOCATION_BYTES.store(0, super::Ordering::Relaxed);
+            super::BASE_LIVE_BYTES.store(
+                super::LIVE_BYTES.load(super::Ordering::Relaxed),
+                super::Ordering::Relaxed,
+            );
+            super::PEAK_EXTRA_BYTES.store(0, super::Ordering::Relaxed);
+            super::TRACK_ALLOCATIONS.store(true, super::Ordering::Relaxed);
+        }
+
+        pub(crate) fn stop() -> (usize, usize, usize, usize) {
+            super::TRACK_ALLOCATIONS.store(false, super::Ordering::Relaxed);
+            (
+                super::ALLOCATION_COUNT.load(super::Ordering::Relaxed),
+                super::ALLOCATION_BYTES.load(super::Ordering::Relaxed),
+                super::PEAK_EXTRA_BYTES.load(super::Ordering::Relaxed),
+                super::BASE_LIVE_BYTES.load(super::Ordering::Relaxed),
+            )
+        }
+
+        pub(crate) fn reset_counts() {
+            super::ALLOCATION_COUNT.store(0, super::Ordering::Relaxed);
+            super::ALLOCATION_BYTES.store(0, super::Ordering::Relaxed);
+        }
+
+        pub(crate) fn counts() -> (usize, usize) {
+            (
+                super::ALLOCATION_COUNT.load(super::Ordering::Relaxed),
+                super::ALLOCATION_BYTES.load(super::Ordering::Relaxed),
+            )
         }
     }
 

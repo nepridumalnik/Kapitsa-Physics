@@ -94,9 +94,10 @@ simulation-time accumulation. The fixed step remains `1 / tick_rate`, while
 elapsed wall time is scaled before entering the accumulator. Catch-up remains
 bounded by `max_catch_up_steps`, and remaining simulated-time debt is reported
 in metrics. `requested_time_multiplier` records the requested value;
-`actual_time_multiplier` estimates simulated seconds per wall second over the
-latest completed-step interval. High requested values can exceed available CPU
-and are not guaranteed to be achieved.
+`actual_time_multiplier` reports simulated seconds per wall second averaged
+since the most recent multiplier change. It resets to zero when the request
+changes and updates after completed steps. High requested values can exceed
+available CPU and are not guaranteed to be achieved.
 
 `apply_impulse` changes velocity immediately at the next command boundary;
 `apply_force` adds a one-step force that is cleared after a successful step. A

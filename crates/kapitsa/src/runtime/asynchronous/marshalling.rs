@@ -6,6 +6,8 @@ mod snapshot;
 
 pub(crate) use buffer_pool::CommandBufferPool;
 pub use client::PhysicsClient;
+#[cfg(all(test, feature = "bench-internals"))]
+pub(crate) use command::tests::allocation_tracking;
 pub use command::{
     BatchId, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSubmitError,
 };

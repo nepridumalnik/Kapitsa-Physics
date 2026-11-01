@@ -35,7 +35,7 @@ pub struct SimulationMetrics {
     pub simulation_time_debt: Duration,
     /// Time multiplier requested through `Simulation::set_time_multiplier`.
     pub requested_time_multiplier: f64,
-    /// Simulated seconds per wall second measured over the most recent step interval.
+    /// Simulated seconds per wall second measured since the latest multiplier change.
     pub actual_time_multiplier: f64,
 }
 

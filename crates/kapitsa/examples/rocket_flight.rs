@@ -5,7 +5,7 @@ mod mission;
 use std::{
     collections::VecDeque,
     io::{self, IsTerminal, Write},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use kapitsa::{
@@ -64,6 +64,8 @@ async fn main() -> MissionResult<()> {
         stage_two_engine,
     ) = setup(&physics).await?;
     let flight_start = physics.snapshot().simulation_time();
+    let mut previous_telemetry_time = flight_start;
+    let mut previous_telemetry_wall = Instant::now();
 
     let (telemetry_tx, telemetry_rx) = watch::channel(Telemetry {
         requested_warp: warp,
@@ -174,6 +176,19 @@ async fn main() -> MissionResult<()> {
                         .map(|state| state.transform().translation().length() - mission::PLANET_RADIUS)
                 };
                 let metrics = simulation.metrics();
+                let current_wall = Instant::now();
+                let wall_interval = current_wall.duration_since(previous_telemetry_wall);
+                let actual_warp = if wall_interval.is_zero() {
+                    0.0
+                } else {
+                    snapshot
+                        .simulation_time()
+                        .saturating_sub(previous_telemetry_time)
+                        .as_secs_f64()
+                        / wall_interval.as_secs_f64()
+                };
+                previous_telemetry_time = snapshot.simulation_time();
+                previous_telemetry_wall = current_wall;
                 let action = mission::action_at(seconds, separated);
                 let (phase, engine, thrust, fuel_fraction) = match action {
                     FlightAction::StageOnePowered => ("ASCENT", "S1", mission::STAGE_ONE_THRUST, (1.0 - seconds / mission::STAGE_ONE_BURN_END).clamp(0.0, 1.0)),
@@ -191,7 +206,7 @@ async fn main() -> MissionResult<()> {
                     thrust,
                     fuel_fraction,
                     requested_warp: metrics.requested_time_multiplier,
-                    actual_warp: metrics.actual_time_multiplier,
+                    actual_warp,
                     step: snapshot.step(),
                     step_cpu_us: metrics.last_step_duration.as_micros(),
                     stage_one_altitude: stage_altitude(stage_one_body),
@@ -407,18 +422,23 @@ mod tests {
     fn deterministic_flight_separates_and_destroys_both_stages()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut flight = HeadlessFlight::new()?;
+        let mut saw_stage_one = false;
+        let mut saw_separation = false;
         let mut saw_stage_two = false;
         let mut saw_coast = false;
         for _ in 0..(super::mission::MAX_FLIGHT_SECONDS / super::mission::STEP_SECONDS) as usize {
             match flight.step_once()? {
                 FlightAction::StageTwoPowered => saw_stage_two = true,
                 FlightAction::Coast => saw_coast = true,
-                FlightAction::StageOnePowered | FlightAction::Separate => {}
+                FlightAction::StageOnePowered => saw_stage_one = true,
+                FlightAction::Separate => saw_separation = true,
             }
             if flight.is_complete() {
                 break;
             }
         }
+        assert!(saw_stage_one, "first stage never ignited");
+        assert!(saw_separation, "stages never separated");
         assert!(saw_stage_two, "second stage never ignited");
         assert!(saw_coast, "flight never reached ballistic coast");
         assert!(

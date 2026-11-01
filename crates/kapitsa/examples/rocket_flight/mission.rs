@@ -159,7 +159,17 @@ pub struct HeadlessFlight {
     pub collision_count: u64,
     pub maximum_altitude: f64,
     pub maximum_speed: f64,
+    pub ballistic_energy_start: Option<f64>,
+    pub ballistic_reference: Option<FlightReference>,
     pub step: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlightReference {
+    pub simulation_seconds: f64,
+    pub position: Vec3,
+    pub velocity: Vec3,
+    pub specific_energy: f64,
 }
 
 impl HeadlessFlight {
@@ -198,12 +208,10 @@ impl HeadlessFlight {
             collision_count: 0,
             maximum_altitude: START_ALTITUDE,
             maximum_speed: 0.0,
+            ballistic_energy_start: None,
+            ballistic_reference: None,
             step: 0,
         })
-    }
-
-    pub fn action(&self) -> FlightAction {
-        action_at(self.step as f64 * STEP_SECONDS, self.separated)
     }
 
     pub fn is_complete(&self) -> bool {
@@ -227,8 +235,37 @@ impl HeadlessFlight {
         self.world.step(STEP_SECONDS)?;
         self.record_collisions();
         self.record_extrema();
+        self.record_ballistic_reference(action);
         self.step += 1;
         Ok(action)
+    }
+
+    fn record_ballistic_reference(&mut self, action: FlightAction) {
+        if action != FlightAction::Coast {
+            return;
+        }
+        let Some(body_id) = self.stage_two_body else {
+            return;
+        };
+        let Some(body) = self.world.body(body_id) else {
+            return;
+        };
+        let seconds = (self.step + 1) as f64 * STEP_SECONDS;
+        let position = body.state().transform().translation();
+        let velocity = body.state().linear_velocity();
+        let radius = position.length();
+        let specific_energy = 0.5 * velocity.length_squared() - PLANET_MU / radius;
+        if self.ballistic_energy_start.is_none() {
+            self.ballistic_energy_start = Some(specific_energy);
+        }
+        if seconds >= 8.0 && self.ballistic_reference.is_none() {
+            self.ballistic_reference = Some(FlightReference {
+                simulation_seconds: seconds,
+                position,
+                velocity,
+                specific_energy,
+            });
+        }
     }
 
     fn separate(&mut self) -> MissionResult<()> {
