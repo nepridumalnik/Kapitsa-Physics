@@ -123,3 +123,47 @@ warp is now limited by available compute rather than a 15 ms timer between
 catch-up batches. At 10x and 100x, the accumulated debt drained during the
 pause check. Fixed `dt` remains 1/120 s, and steps, snapshots, and simulation
 timestamps advance in their existing order.
+
+## Adaptive timestep accuracy and direct integration throughput
+
+Measured on the same AMD Ryzen 9 7900X3D host with `rustc 1.98.0`
+(`x86_64-pc-windows-msvc`) using the default optimized Release profile. Run:
+
+```powershell
+cargo test -p kapitsa --release --lib benchmark_adaptive_time_warp_orbit -- --ignored --nocapture --test-threads=1
+```
+
+The harness warms each path, then takes five independent timed samples. World
+setup is outside each timed interval. It integrates a one-body central-gravity
+orbit for 0.99999996 simulated seconds (120 truncated 1/120 s intervals) and
+compares the final state against a 100 µs fixed-step reference. The
+estimator-only row warms up, then calls the adaptive step selector 10,000
+times per sample. These are direct `PhysicsWorld` timings; they exclude the
+asynchronous runtime scheduler and snapshot publication.
+
+| Policy | Steps | Wall ms min / median / max | Sim s / wall s at median | µs / step | Position error m | Velocity error m/s |
+|---|---:|---:|---:|---:|---:|---:|
+| Fixed, 8.333333 ms | 120 | 0.046 / 0.046 / 0.047 | 21,551.72 | 0.387 | 0.504667 | 0.773039 |
+| Adaptive, requested 1x | 318 | 0.243 / 0.273 / 0.280 | 3,660.32 | 0.859 | 0.190242 | 0.297289 |
+| Adaptive, requested 10x | 318 | 0.212 / 0.213 / 0.231 | 4,703.67 | 0.669 | 0.190242 | 0.297289 |
+| Adaptive, requested 100x | 318 | 0.211 / 0.211 / 0.214 | 4,741.58 | 0.663 | 0.190242 | 0.297289 |
+| Adaptive, requested 1,000x | 318 | 0.210 / 0.211 / 0.214 | 4,743.83 | 0.663 | 0.190242 | 0.297289 |
+
+Adaptive energy drift was 0.009866% and angular-momentum drift was below the
+printed precision for all four warp values. The chooser cost on this one-body
+gravity world was 0.228 / 0.232 / 0.236 µs per decision (min / median / max).
+With the default 1% relative tolerance, gravity bounds the step to about
+3.14 ms, so requested warp does not increase the integration step size in this
+scenario. The adaptive path takes 2.65x as many steps as fixed 120 Hz and is
+about 4.6x slower per simulated second in this direct harness, while its final
+orbit position and velocity errors are about 62% lower. This is an explicit
+accuracy/throughput tradeoff; it does not indicate a regression in the fixed
+compatibility path.
+
+Automated tests also integrate the orbit, a damped spring, and a fixed-joint
+anchor pair at equal simulated time for 1x, 10x, 100x, and 1,000x requested
+warp. They compare against a 100 µs reference and verify repeatability for the
+same warp. The fixed-joint test checks anchor separation and relative
+orientation. These checks establish same-configuration reproducibility and
+bounded error for these fixtures; they do not claim bitwise equality across
+different warp factors.

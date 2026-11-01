@@ -122,7 +122,7 @@ fn estimate_acceleration_limit(
     characteristic_length: f64,
     limit: &mut f64,
 ) {
-    let error_fraction = adaptive.relative_error_tolerance.sqrt();
+    let error_fraction = adaptive.relative_error_tolerance;
     let mut max_acceleration: f64 = 0.0;
     let mut max_angular_acceleration: f64 = 0.0;
     let mut source_linear_acceleration = 0.0;
@@ -179,7 +179,7 @@ fn estimate_acceleration_limit(
                     .map_or(f64::INFINITY, vector_length);
                 cap(
                     limit,
-                    (adaptive.relative_error_tolerance * radius / acceleration).sqrt(),
+                    adaptive.relative_error_tolerance * (radius / acceleration).sqrt(),
                 );
             } else if gravity.gravitational_parameter() > 0.0 {
                 cap(limit, 0.0);
@@ -244,7 +244,7 @@ fn estimate_joint_limit(
     base_step: Duration,
     limit: &mut f64,
 ) {
-    let tolerance = adaptive.relative_error_tolerance.sqrt();
+    let tolerance = adaptive.relative_error_tolerance;
     for (_, body_a_id, body_b_id, joint) in world.joints() {
         let common = joint.common();
         if !common.enabled {
@@ -436,17 +436,20 @@ fn cap(limit: &mut f64, candidate: f64) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        hint::black_box,
+        time::{Duration, Instant},
+    };
 
     use kapitsa_core::{
         collider::Collider,
         gravity::CentralGravity,
-        joint::{Joint, JointCommon, JointFrame, SpringJoint},
+        joint::{FixedJoint, Joint, JointCommon, JointFrame, SpringJoint},
         mass::MassProperties,
         rigid_body::RigidBody,
         shape::{Shape, Sphere},
         transform::Transform,
-        world::PhysicsWorld,
+        world::{BodyId, PhysicsWorld},
     };
     use kapitsa_math::{Mat3, Quat, Vec3};
 
@@ -477,6 +480,178 @@ mod tests {
         let base = config.step_budget();
         let target = Duration::try_from_secs_f64(base.as_secs_f64() * warp).expect("target");
         choose_step(world, &config, target, accumulated, base)
+    }
+
+    fn orbit_world() -> (PhysicsWorld, BodyId) {
+        let mut world = PhysicsWorld::new();
+        world.set_central_gravity(Some(
+            CentralGravity::new(Vec3::ZERO, 10_000.0).expect("gravity"),
+        ));
+        let body = world
+            .add_body(dynamic_body(
+                Vec3::X * 10.0,
+                Vec3::Z * (10_000.0_f64 / 10.0).sqrt(),
+            ))
+            .expect("body");
+        (world, body)
+    }
+
+    fn spring_world() -> (PhysicsWorld, BodyId) {
+        let mut world = PhysicsWorld::new();
+        let fixed = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("fixed body");
+        let moving = world
+            .add_body(dynamic_body(Vec3::X * 1.2, Vec3::ZERO))
+            .expect("moving body");
+        let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        world
+            .add_joint(
+                fixed,
+                moving,
+                Joint::Spring(SpringJoint::new(common, 1.0, 400.0, 2.0)),
+            )
+            .expect("spring joint");
+        (world, moving)
+    }
+
+    fn fixed_joint_world() -> (PhysicsWorld, BodyId, BodyId, Vec3, Vec3) {
+        let mut world = PhysicsWorld::new();
+        let body_a = world
+            .add_body(dynamic_body(Vec3::ZERO, Vec3::ZERO))
+            .expect("body a");
+        let body_b = world
+            .add_body(dynamic_body(Vec3::X, Vec3::Y))
+            .expect("body b");
+        let anchor_a = Vec3::X * 0.5;
+        let anchor_b = Vec3::X * -0.5;
+        let common = JointCommon::new(
+            JointFrame::new(anchor_a, Quat::IDENTITY),
+            JointFrame::new(anchor_b, Quat::IDENTITY),
+        );
+        world
+            .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+            .expect("fixed joint");
+        (world, body_a, body_b, anchor_a, anchor_b)
+    }
+
+    fn orbit_state(warp: Option<f64>, end: Duration) -> (RigidBody, usize) {
+        let (mut world, body_id) = orbit_world();
+        let steps = integrate_orbit(&mut world, body_id, warp, end);
+        (*world.body(body_id).expect("orbit body"), steps)
+    }
+
+    fn integrate_orbit(
+        world: &mut PhysicsWorld,
+        body_id: BodyId,
+        warp: Option<f64>,
+        end: Duration,
+    ) -> usize {
+        let config = adaptive_config();
+        let base_step = config.step_budget();
+        let target_step = warp.map(|warp| {
+            Duration::try_from_secs_f64(base_step.as_secs_f64() * warp).expect("target step")
+        });
+        let reference_step = Duration::from_micros(100);
+        let mut simulation_time = Duration::ZERO;
+        let mut steps = 0;
+        while simulation_time < end {
+            let remaining = end.saturating_sub(simulation_time);
+            let step = if let Some(target_step) = target_step {
+                match choose_step(world, &config, target_step, remaining, base_step) {
+                    StepChoice::Step(step) => step,
+                    other => panic!("adaptive orbit did not progress: {other:?}"),
+                }
+            } else {
+                reference_step.min(remaining)
+            };
+            world.step(step.as_secs_f64()).expect("orbit step");
+            simulation_time += step;
+            steps += 1;
+        }
+        black_box(world.body(body_id).expect("orbit result"));
+        steps
+    }
+
+    fn integrate_fixed_orbit(
+        world: &mut PhysicsWorld,
+        body_id: BodyId,
+        fixed_step: Duration,
+        end: Duration,
+    ) -> usize {
+        let mut simulation_time = Duration::ZERO;
+        let mut steps = 0;
+        while simulation_time < end {
+            let step = fixed_step.min(end.saturating_sub(simulation_time));
+            world.step(step.as_secs_f64()).expect("fixed orbit step");
+            simulation_time += step;
+            steps += 1;
+        }
+        black_box(world.body(body_id).expect("fixed orbit result"));
+        steps
+    }
+
+    fn spring_state(warp: Option<f64>, end: Duration) -> (RigidBody, usize) {
+        let (mut world, body_id) = spring_world();
+        let config = adaptive_config();
+        let base_step = config.step_budget();
+        let target_step = warp.map(|warp| {
+            Duration::try_from_secs_f64(base_step.as_secs_f64() * warp).expect("target step")
+        });
+        let reference_step = Duration::from_micros(100);
+        let mut simulation_time = Duration::ZERO;
+        let mut steps = 0;
+        while simulation_time < end {
+            let remaining = end.saturating_sub(simulation_time);
+            let step = if let Some(target_step) = target_step {
+                match choose_step(&world, &config, target_step, remaining, base_step) {
+                    StepChoice::Step(step) => step,
+                    other => panic!("adaptive spring did not progress: {other:?}"),
+                }
+            } else {
+                reference_step.min(remaining)
+            };
+            world.step(step.as_secs_f64()).expect("spring step");
+            simulation_time += step;
+            steps += 1;
+        }
+        (*world.body(body_id).expect("moving body"), steps)
+    }
+
+    fn fixed_joint_state(
+        warp: Option<f64>,
+        end: Duration,
+    ) -> (RigidBody, RigidBody, Vec3, Vec3, usize) {
+        let (mut world, body_a, body_b, anchor_a, anchor_b) = fixed_joint_world();
+        let config = adaptive_config();
+        let base_step = config.step_budget();
+        let target_step = warp.map(|warp| {
+            Duration::try_from_secs_f64(base_step.as_secs_f64() * warp).expect("target step")
+        });
+        let reference_step = Duration::from_micros(100);
+        let mut simulation_time = Duration::ZERO;
+        let mut steps = 0;
+        while simulation_time < end {
+            let remaining = end.saturating_sub(simulation_time);
+            let step = if let Some(target_step) = target_step {
+                match choose_step(&world, &config, target_step, remaining, base_step) {
+                    StepChoice::Step(step) => step,
+                    other => panic!("adaptive fixed joint did not progress: {other:?}"),
+                }
+            } else {
+                reference_step.min(remaining)
+            };
+            world.step(step.as_secs_f64()).expect("fixed joint step");
+            simulation_time += step;
+            steps += 1;
+        }
+        (
+            *world.body(body_a).expect("body a"),
+            *world.body(body_b).expect("body b"),
+            anchor_a,
+            anchor_b,
+            steps,
+        )
     }
 
     #[test]
@@ -612,6 +787,229 @@ mod tests {
             other => panic!("unexpected step choice: {other:?}"),
         };
         assert!(persistent_force_step < Duration::from_millis(20));
+    }
+
+    #[test]
+    fn adaptive_warps_track_a_fine_fixed_orbit_at_the_same_simulation_time() {
+        let end = Duration::from_nanos(8_333_333 * 120);
+        let (reference, _) = orbit_state(None, end);
+        let reference_position = reference.state().transform().translation();
+        let reference_velocity = reference.state().linear_velocity();
+        let reference_radius = reference_position.length();
+        let reference_energy =
+            0.5 * reference_velocity.length_squared() - 10_000.0 / reference_radius;
+        let reference_momentum = reference_position.cross(reference_velocity).length();
+
+        for warp in [1.0, 10.0, 100.0, 1_000.0] {
+            let (body, steps) = orbit_state(Some(warp), end);
+            let position = body.state().transform().translation();
+            let velocity = body.state().linear_velocity();
+            let specific_energy = 0.5 * velocity.length_squared() - 10_000.0 / position.length();
+            let angular_momentum = position.cross(velocity).length();
+            let position_error = (position - reference_position).length();
+            let velocity_error = (velocity - reference_velocity).length();
+            let energy_drift = (specific_energy - reference_energy).abs() / reference_energy.abs();
+            let momentum_drift = (angular_momentum - reference_momentum).abs() / reference_momentum;
+            assert!(position_error < 0.25, "warp={warp}x: {position_error} m");
+            assert!(velocity_error < 0.4, "warp={warp}x: {velocity_error} m/s");
+            assert!(energy_drift < 0.0002, "warp={warp}x: {energy_drift}");
+            assert!(momentum_drift < 1.0e-10, "warp={warp}x: {momentum_drift}");
+            assert!(steps <= 400, "warp={warp}x: {steps} steps");
+
+            let (repeat, _) = orbit_state(Some(warp), end);
+            assert_eq!(
+                body.state().transform().translation(),
+                repeat.state().transform().translation(),
+                "same adaptive configuration must reproduce the position"
+            );
+            assert_eq!(
+                body.state().linear_velocity(),
+                repeat.state().linear_velocity()
+            );
+            assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
+            assert_eq!(
+                body.state().transform().rotation(),
+                Quat::IDENTITY,
+                "central gravity must not introduce rotation"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_warps_track_a_fine_fixed_spring_at_the_same_simulation_time() {
+        let end = Duration::from_millis(500);
+        let (reference, _) = spring_state(None, end);
+        let reference_position = reference.state().transform().translation();
+        let reference_velocity = reference.state().linear_velocity();
+        for warp in [1.0, 10.0, 100.0, 1_000.0] {
+            let (body, steps) = spring_state(Some(warp), end);
+            let (repeat, _) = spring_state(Some(warp), end);
+            let position = body.state().transform().translation();
+            let velocity = body.state().linear_velocity();
+            let position_error = (position - reference_position).length();
+            let velocity_error = (velocity - reference_velocity).length();
+            let anchor_delta = (position.length() - reference_position.length()).abs();
+            assert!(position_error < 0.02, "warp={warp}x: {position_error} m");
+            assert!(velocity_error < 0.04, "warp={warp}x: {velocity_error} m/s");
+            assert!(anchor_delta < 0.02, "warp={warp}x: {anchor_delta} m");
+            assert!(steps <= 150, "warp={warp}x: {steps} steps");
+            assert_eq!(position, repeat.state().transform().translation());
+            assert_eq!(velocity, repeat.state().linear_velocity());
+        }
+    }
+
+    #[test]
+    fn adaptive_warps_preserve_fixed_joint_anchors_at_the_same_simulation_time() {
+        let end = Duration::from_millis(500);
+        let (reference_a, reference_b, anchor_a, anchor_b, _) = fixed_joint_state(None, end);
+        let reference_anchor_a = reference_a.state().transform().transform_point(anchor_a);
+        let reference_anchor_b = reference_b.state().transform().transform_point(anchor_b);
+        let reference_gap = (reference_anchor_b - reference_anchor_a).length();
+        let reference_rotation = reference_b.state().transform().rotation();
+        for warp in [1.0, 10.0, 100.0, 1_000.0] {
+            let (body_a, body_b, anchor_a, anchor_b, steps) = fixed_joint_state(Some(warp), end);
+            let (repeat_a, repeat_b, _, _, _) = fixed_joint_state(Some(warp), end);
+            let world_anchor_a = body_a.state().transform().transform_point(anchor_a);
+            let world_anchor_b = body_b.state().transform().transform_point(anchor_b);
+            let gap = (world_anchor_b - world_anchor_a).length();
+            let rotation = body_b.state().transform().rotation();
+            let quaternion_dot = (rotation.x * reference_rotation.x
+                + rotation.y * reference_rotation.y
+                + rotation.z * reference_rotation.z
+                + rotation.w * reference_rotation.w)
+                .abs()
+                .min(1.0);
+            let rotation_error = 2.0 * quaternion_dot.acos();
+            assert!((gap - reference_gap).abs() < 0.01, "warp={warp}x: {gap} m");
+            assert!(gap < 0.02, "warp={warp}x: anchor gap {gap} m");
+            assert!(rotation_error < 0.02, "warp={warp}x: {rotation_error} rad");
+            assert!(steps <= 150, "warp={warp}x: {steps} steps");
+            assert_eq!(body_a.state(), repeat_a.state());
+            assert_eq!(body_b.state(), repeat_b.state());
+        }
+    }
+
+    #[test]
+    #[ignore = "Release adaptive Time Warp accuracy and scaling benchmark"]
+    fn benchmark_adaptive_time_warp_orbit() {
+        const SAMPLES: usize = 5;
+        let end = Duration::from_nanos(8_333_333 * 120);
+        let (reference, _) = orbit_state(None, end);
+        let reference_position = reference.state().transform().translation();
+        let reference_velocity = reference.state().linear_velocity();
+        let reference_energy =
+            0.5 * reference_velocity.length_squared() - 10_000.0 / reference_position.length();
+        let reference_momentum = reference_position.cross(reference_velocity).length();
+
+        let base_step = adaptive_config().step_budget();
+        let (mut fixed_warmup_world, fixed_warmup_body) = orbit_world();
+        black_box(integrate_fixed_orbit(
+            &mut fixed_warmup_world,
+            fixed_warmup_body,
+            base_step,
+            end,
+        ));
+        let mut fixed_samples = Vec::with_capacity(SAMPLES);
+        let mut fixed_state = None;
+        let mut fixed_steps = 0;
+        for _ in 0..SAMPLES {
+            let (mut world, body_id) = orbit_world();
+            let started = Instant::now();
+            fixed_steps = integrate_fixed_orbit(&mut world, body_id, base_step, end);
+            fixed_samples.push(started.elapsed());
+            fixed_state = world.body(body_id).copied();
+        }
+        fixed_samples.sort_unstable();
+        let fixed_median = fixed_samples[SAMPLES / 2];
+        let fixed_state = fixed_state.expect("fixed benchmark body");
+        println!(
+            "fixed orbit dt_ns={} steps={} wall_ms min/median/max={:.3}/{:.3}/{:.3} sim_s_per_wall_s={:.2} us_per_step={:.3} position_error_m={:.6} velocity_error_m_s={:.6}",
+            base_step.as_nanos(),
+            fixed_steps,
+            fixed_samples[0].as_secs_f64() * 1.0e3,
+            fixed_median.as_secs_f64() * 1.0e3,
+            fixed_samples[SAMPLES - 1].as_secs_f64() * 1.0e3,
+            end.as_secs_f64() / fixed_median.as_secs_f64(),
+            fixed_median.as_secs_f64() * 1.0e6 / fixed_steps as f64,
+            (fixed_state.state().transform().translation() - reference_position).length(),
+            (fixed_state.state().linear_velocity() - reference_velocity).length(),
+        );
+
+        let (estimator_world, _) = orbit_world();
+        let estimator_config = adaptive_config();
+        let estimator_base = estimator_config.step_budget();
+        let estimator_target = Duration::try_from_secs_f64(estimator_base.as_secs_f64() * 1_000.0)
+            .expect("estimator target");
+        for _ in 0..10_000 {
+            black_box(choose_step(
+                &estimator_world,
+                &estimator_config,
+                estimator_target,
+                end,
+                estimator_base,
+            ));
+        }
+        let mut estimator_samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            for _ in 0..10_000 {
+                black_box(choose_step(
+                    &estimator_world,
+                    &estimator_config,
+                    estimator_target,
+                    end,
+                    estimator_base,
+                ));
+            }
+            estimator_samples.push(started.elapsed().div_f64(10_000.0));
+        }
+        estimator_samples.sort_unstable();
+        println!(
+            "adaptive estimator on 1-body gravity world: min/median/max={:.3}/{:.3}/{:.3} us/choice",
+            estimator_samples[0].as_secs_f64() * 1.0e6,
+            estimator_samples[SAMPLES / 2].as_secs_f64() * 1.0e6,
+            estimator_samples[SAMPLES - 1].as_secs_f64() * 1.0e6,
+        );
+
+        for warp in [1.0, 10.0, 100.0, 1_000.0] {
+            let (mut warmup_world, warmup_body) = orbit_world();
+            black_box(integrate_orbit(
+                &mut warmup_world,
+                warmup_body,
+                Some(warp),
+                end,
+            ));
+
+            let mut samples = Vec::with_capacity(SAMPLES);
+            let mut last_state = None;
+            let mut steps = 0;
+            for _ in 0..SAMPLES {
+                let (mut world, body_id) = orbit_world();
+                let started = Instant::now();
+                steps = integrate_orbit(&mut world, body_id, Some(warp), end);
+                samples.push(started.elapsed());
+                last_state = world.body(body_id).copied();
+            }
+            samples.sort_unstable();
+            let median = samples[SAMPLES / 2];
+            let body = last_state.expect("benchmark body");
+            let position = body.state().transform().translation();
+            let velocity = body.state().linear_velocity();
+            let energy = 0.5 * velocity.length_squared() - 10_000.0 / position.length();
+            let momentum = position.cross(velocity).length();
+            println!(
+                "adaptive orbit warp={warp:.0}x steps={steps} wall_ms min/median/max={:.3}/{:.3}/{:.3} sim_s_per_wall_s={:.2} us_per_step={:.3} position_error_m={:.6} velocity_error_m_s={:.6} energy_drift_percent={:.6} angular_momentum_drift_percent={:.9}",
+                samples[0].as_secs_f64() * 1.0e3,
+                median.as_secs_f64() * 1.0e3,
+                samples[SAMPLES - 1].as_secs_f64() * 1.0e3,
+                end.as_secs_f64() / median.as_secs_f64(),
+                median.as_secs_f64() * 1.0e6 / steps as f64,
+                (position - reference_position).length(),
+                (velocity - reference_velocity).length(),
+                100.0 * (energy - reference_energy).abs() / reference_energy.abs(),
+                100.0 * (momentum - reference_momentum).abs() / reference_momentum,
+            );
+        }
     }
 
     #[test]
