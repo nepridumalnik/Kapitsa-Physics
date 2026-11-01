@@ -1,12 +1,15 @@
 use std::{
     collections::HashMap,
+    future::Future,
     hint::black_box,
     io,
     num::NonZeroUsize,
+    pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
+    task::{Context, Poll, Wake, Waker},
     time::{Duration, Instant},
 };
 
@@ -16,11 +19,17 @@ use kapitsa_core::{
     rigid_body::RigidBody,
     shape::{Shape, Sphere},
     transform::Transform,
-    world::BodyId,
+    world::{BodyId, PhysicsWorld},
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
+use tokio::sync::{broadcast, oneshot, watch};
 
-use super::{COMMAND_QUEUE_CAPACITY, PhysicsClient, Simulation};
+use super::{
+    COLLISION_EVENT_BATCH_CAPACITY, COMMAND_QUEUE_CAPACITY, CollisionEventBatch, CommandBufferPool,
+    CommandQueue, PHYSICS_BATCH_RESULT_CAPACITY, PhysicsClient, PhysicsSnapshot, Simulation,
+    SimulationEvents, apply_queued_commands, publish_command_results, publish_runtime_metrics,
+    wait_for_scaled_step,
+};
 use crate::runtime::{
     PhysicsBatchResults, PhysicsCommandBuffer, PhysicsSubmitError, SimulationConfig, WorkerConfig,
 };
@@ -568,6 +577,351 @@ fn benchmark_rocket_flight_runtime_scaling() -> Result<(), Box<dyn std::error::E
         }
         for sources in [0, 1, 10] {
             let report = runtime_fixture("persistent sources", 1_000, 1, 100, sources, 1.0).await?;
+            print_runtime_report(&report);
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    Ok(())
+}
+
+struct CountingWake {
+    downstream: Waker,
+    count: Arc<AtomicUsize>,
+}
+
+impl Wake for CountingWake {
+    fn wake(self: Arc<Self>) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.downstream.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.downstream.wake_by_ref();
+    }
+}
+
+struct CountWakes<F> {
+    future: Pin<Box<F>>,
+    count: Arc<AtomicUsize>,
+}
+
+impl<F> CountWakes<F> {
+    fn new(future: F, count: Arc<AtomicUsize>) -> Self {
+        Self {
+            future: Box::pin(future),
+            count,
+        }
+    }
+}
+
+impl<F: Future> Future for CountWakes<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_mut().get_mut();
+        let waker = Waker::from(Arc::new(CountingWake {
+            downstream: context.waker().clone(),
+            count: Arc::clone(&this.count),
+        }));
+        this.future.as_mut().poll(&mut Context::from_waker(&waker))
+    }
+}
+
+fn scheduler_benchmark_world(
+    body_count: usize,
+) -> Result<PhysicsWorld, Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    for index in 0..body_count {
+        let body = world.add_body(benchmark_body(index, true)?)?;
+        world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.35)?), Transform::identity()),
+        )?;
+    }
+    Ok(world)
+}
+
+fn duration_stats_us(samples: &[Duration]) -> (f64, f64, f64) {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let Some(min) = sorted.first() else {
+        return (0.0, 0.0, 0.0);
+    };
+    let median = sorted[sorted.len() / 2];
+    let max = sorted.last().copied().unwrap_or(*min);
+    (
+        min.as_secs_f64() * 1.0e6,
+        median.as_secs_f64() * 1.0e6,
+        max.as_secs_f64() * 1.0e6,
+    )
+}
+
+#[test]
+#[ignore = "Release Time Warp scheduler phase benchmark; run with bench-internals"]
+fn benchmark_time_warp_scheduler_overhead() -> Result<(), Box<dyn std::error::Error>> {
+    const BODY_COUNT: usize = 100;
+    const WARMUP_STEPS: usize = 32;
+    const SAMPLES: usize = 5;
+    const STEPS_PER_SAMPLE: usize = 128;
+    const SELECT_ITERATIONS: usize = 8;
+    const TIMER_WAITS_PER_SAMPLE: usize = 5;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        println!(
+            "Time Warp phases: Tokio workers=4, Rayon workers=4, bodies={BODY_COUNT}, warmup={WARMUP_STEPS}, samples={SAMPLES} x {STEPS_PER_SAMPLE}"
+        );
+
+        let mut ready_select_samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            for _ in 0..STEPS_PER_SAMPLE * 8 {
+                tokio::select! {
+                    _ = std::future::ready(()) => {}
+                }
+            }
+            ready_select_samples.push(started.elapsed().div_f64((STEPS_PER_SAMPLE * 8) as f64));
+        }
+        let (min, median, max) = duration_stats_us(&ready_select_samples);
+        println!("tokio::select! ready branch: {min:.3}/{median:.3}/{max:.3} us/iteration");
+
+        let mut direct_world = scheduler_benchmark_world(BODY_COUNT)?;
+        for _ in 0..WARMUP_STEPS {
+            black_box(direct_world.step(1.0 / 120.0)?);
+        }
+        let mut direct_samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            for _ in 0..STEPS_PER_SAMPLE {
+                black_box(direct_world.step(1.0 / 120.0)?);
+            }
+            direct_samples.push(started.elapsed().div_f64(STEPS_PER_SAMPLE as f64));
+        }
+        let (min, median, max) = duration_stats_us(&direct_samples);
+        println!("PhysicsWorld::step (100 bodies): {min:.3}/{median:.3}/{max:.3} us/step");
+
+        let mut simulation = Simulation::new_from_config(benchmark_config())?;
+        populate_runtime_world(&mut simulation, BODY_COUNT, BODY_COUNT, BODY_COUNT, 0)?;
+        let runner = simulation
+            .simulation
+            .as_mut()
+            .ok_or_else(|| io::Error::other("missing StepRunner"))?;
+        runner
+            .set_active_workers(4)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        for _ in 0..WARMUP_STEPS {
+            black_box(runner.step().await?);
+        }
+
+        let executor = runner
+            .dispatch
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| io::Error::other("missing Rayon executor"))?;
+        let mut dispatch_samples = Vec::with_capacity(SAMPLES * STEPS_PER_SAMPLE);
+        for _ in 0..SAMPLES {
+            for _ in 0..STEPS_PER_SAMPLE {
+                let (sender, receiver) = oneshot::channel();
+                let started = Instant::now();
+                executor.spawn(move || {
+                    let _ = sender.send(());
+                })?;
+                receiver.await?;
+                dispatch_samples.push(started.elapsed());
+            }
+        }
+        let (min, median, max) = duration_stats_us(&dispatch_samples);
+        println!("Rayon spawn + oneshot round trip: {min:.3}/{median:.3}/{max:.3} us/task");
+
+        let mut runner_wall_samples = Vec::with_capacity(SAMPLES);
+        let mut engine_samples = Vec::with_capacity(SAMPLES * STEPS_PER_SAMPLE);
+        let mut task_wait_samples = Vec::with_capacity(SAMPLES * STEPS_PER_SAMPLE);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            for _ in 0..STEPS_PER_SAMPLE {
+                let stats = black_box(runner.step().await?);
+                engine_samples.push(stats.step_duration);
+                task_wait_samples.push(stats.task_wait_duration);
+            }
+            runner_wall_samples.push(started.elapsed().div_f64(STEPS_PER_SAMPLE as f64));
+        }
+        let (min, median, max) = duration_stats_us(&runner_wall_samples);
+        println!("StepRunner::step total: {min:.3}/{median:.3}/{max:.3} us/step");
+        println!(
+            "StepRunner engine CPU p50/p95/p99={:.3}/{:.3}/{:.3} us; dispatch+wait p50/p95/p99={:.3}/{:.3}/{:.3} us",
+            duration_quantile_us(&engine_samples, 0.50),
+            duration_quantile_us(&engine_samples, 0.95),
+            duration_quantile_us(&engine_samples, 0.99),
+            duration_quantile_us(&task_wait_samples, 0.50),
+            duration_quantile_us(&task_wait_samples, 0.95),
+            duration_quantile_us(&task_wait_samples, 0.99),
+        );
+
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let (warp_tx, mut warp_rx) = watch::channel(1_000.0);
+        let _ = stop_rx.borrow_and_update();
+        let _ = warp_rx.borrow_and_update();
+        let mut select_samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            for _ in 0..SELECT_ITERATIONS {
+                tokio::select! {
+                    changed = stop_rx.changed() => {
+                        return Err(io::Error::other(format!("unexpected stop change: {changed:?}")).into());
+                    }
+                    changed = warp_rx.changed() => {
+                        return Err(io::Error::other(format!("unexpected warp change: {changed:?}")).into());
+                    }
+                    _ = wait_for_scaled_step(Duration::ZERO, 1_000.0) => {}
+                }
+            }
+            select_samples.push(started.elapsed().div_f64(SELECT_ITERATIONS as f64));
+        }
+        drop((stop_tx, warp_tx));
+        let (min, median, max) = duration_stats_us(&select_samples);
+        println!("select! + zero-delay scaled timer: {min:.3}/{median:.3}/{max:.3} us/iteration");
+
+        let mut yield_samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            for _ in 0..STEPS_PER_SAMPLE * 8 {
+                tokio::task::yield_now().await;
+            }
+            yield_samples.push(started.elapsed().div_f64((STEPS_PER_SAMPLE * 8) as f64));
+        }
+        let (min, median, max) = duration_stats_us(&yield_samples);
+        println!("yield_now: {min:.3}/{median:.3}/{max:.3} us/yield");
+
+        for warp in [1.0, 10.0, 100.0, 1_000.0] {
+            let mut wait_samples = Vec::with_capacity(SAMPLES * 32);
+            for _ in 0..SAMPLES {
+                let started = Instant::now();
+                for _ in 0..TIMER_WAITS_PER_SAMPLE {
+                    wait_for_scaled_step(Duration::from_millis(1), warp).await;
+                }
+                wait_samples.push(started.elapsed().div_f64(TIMER_WAITS_PER_SAMPLE as f64));
+            }
+            let (min, median, max) = duration_stats_us(&wait_samples);
+            let wake_count = Arc::new(AtomicUsize::new(0));
+            for _ in 0..TIMER_WAITS_PER_SAMPLE {
+                CountWakes::new(
+                    wait_for_scaled_step(Duration::from_millis(1), warp),
+                    Arc::clone(&wake_count),
+                )
+                .await;
+            }
+            println!(
+                "scaled timer remaining=1ms multiplier={warp:.0}x: {min:.3}/{median:.3}/{max:.3} us/wait; observed_wakes/wait={:.3}",
+                wake_count.load(Ordering::Relaxed) as f64 / TIMER_WAITS_PER_SAMPLE as f64,
+            );
+        }
+
+        let runner = simulation
+            .simulation
+            .as_mut()
+            .ok_or_else(|| io::Error::other("missing StepRunner"))?;
+        let world = runner
+            .world()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let mut snapshot = PhysicsSnapshot::from_world(world, 0, Duration::ZERO);
+        let mut snapshot_samples = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            let started = Instant::now();
+            for step in 0..STEPS_PER_SAMPLE {
+                snapshot.rebuild(world, (sample * STEPS_PER_SAMPLE + step) as u64, Duration::ZERO);
+                black_box(snapshot.len());
+            }
+            snapshot_samples.push(started.elapsed().div_f64(STEPS_PER_SAMPLE as f64));
+        }
+        let (min, median, max) = duration_stats_us(&snapshot_samples);
+        println!("snapshot rebuild (100 bodies): {min:.3}/{median:.3}/{max:.3} us/step");
+
+        let snapshot = Arc::new(PhysicsSnapshot::from_world(world, 0, Duration::ZERO));
+        let (snapshot_tx, snapshot_rx) = watch::channel(Arc::clone(&snapshot));
+        let mut publish_samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            for _ in 0..STEPS_PER_SAMPLE {
+                black_box(snapshot_tx.send_replace(Arc::clone(&snapshot)));
+            }
+            publish_samples.push(started.elapsed().div_f64(STEPS_PER_SAMPLE as f64));
+        }
+        drop(snapshot_rx);
+        let (min, median, max) = duration_stats_us(&publish_samples);
+        println!("watch snapshot publication: {min:.3}/{median:.3}/{max:.3} us/step");
+
+        let mut reusable_snapshot = None;
+        let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
+        let mut full_snapshot_samples = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            let started = Instant::now();
+            for step in 0..STEPS_PER_SAMPLE {
+                let sequence = (sample * STEPS_PER_SAMPLE + step + 1) as u64;
+                let (mut next, _) = PhysicsSnapshot::take_reusable(&mut reusable_snapshot);
+                next.rebuild(world, sequence, Duration::ZERO);
+                let previous = snapshot_tx.send_replace(Arc::new(next));
+                PhysicsSnapshot::recycle(previous, &mut reusable_snapshot);
+            }
+            full_snapshot_samples.push(started.elapsed().div_f64(STEPS_PER_SAMPLE as f64));
+        }
+        drop(snapshot_rx);
+        let (min, median, max) = duration_stats_us(&full_snapshot_samples);
+        println!("snapshot rebuild + Arc/watch publication: {min:.3}/{median:.3}/{max:.3} us/step");
+
+        let (collision_tx, mut collision_rx) = broadcast::channel(COLLISION_EVENT_BATCH_CAPACITY);
+        let mut event_samples = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            let started = Instant::now();
+            for step in 0..STEPS_PER_SAMPLE {
+                let sequence = (sample * STEPS_PER_SAMPLE + step + 1) as u64;
+                let batch = CollisionEventBatch::new(sequence, Vec::new());
+                let _ = black_box(collision_tx.send(batch));
+            }
+            event_samples.push(started.elapsed().div_f64(STEPS_PER_SAMPLE as f64));
+            while collision_rx.try_recv().is_ok() {}
+        }
+        let (min, median, max) = duration_stats_us(&event_samples);
+        println!("empty collision-event batch + broadcast: {min:.3}/{median:.3}/{max:.3} us/step");
+
+        let (metrics_tx, metrics_rx) = watch::channel(runner.metrics().clone());
+        let mut metrics_samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            for _ in 0..STEPS_PER_SAMPLE {
+                publish_runtime_metrics(runner, &metrics_tx, 1_000.0, 0.0);
+            }
+            metrics_samples.push(started.elapsed().div_f64(STEPS_PER_SAMPLE as f64));
+        }
+        drop(metrics_rx);
+        let (min, median, max) = duration_stats_us(&metrics_samples);
+        println!("metrics clone + watch publication: {min:.3}/{median:.3}/{max:.3} us/step");
+
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel(1);
+        let mut queue = CommandQueue::new(command_rx, Arc::new(CommandBufferPool::default()));
+        let events = SimulationEvents {
+            collisions: collision_tx,
+            batch_results: broadcast::channel(PHYSICS_BATCH_RESULT_CAPACITY).0,
+        };
+        let mut command_samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            for _ in 0..STEPS_PER_SAMPLE {
+                apply_queued_commands(runner, &mut queue)?;
+                publish_command_results(&mut queue, &events);
+            }
+            command_samples.push(started.elapsed().div_f64(STEPS_PER_SAMPLE as f64));
+        }
+        drop(command_tx);
+        let (min, median, max) = duration_stats_us(&command_samples);
+        println!("empty command poll + result drain: {min:.3}/{median:.3}/{max:.3} us/step");
+
+        drop(simulation);
+        for warp in [0.1, 1.0, 10.0, 100.0, 1_000.0] {
+            let report = runtime_fixture("time warp scheduler", 100, 100, 100, 0, warp).await?;
             print_runtime_report(&report);
         }
         Ok::<(), Box<dyn std::error::Error>>(())
