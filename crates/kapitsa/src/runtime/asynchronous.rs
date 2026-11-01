@@ -184,8 +184,12 @@ impl StepRunner {
     /// If this future is cancelled while work is running, the simulation retains
     /// the in-flight result. The next `step().await` waits for and reports it.
     async fn step(&mut self) -> Result<StepStats, StepRunnerError> {
+        self.step_with_dt(self.config.fixed_step_seconds()).await
+    }
+
+    async fn step_with_dt(&mut self, physics_dt: f64) -> Result<StepStats, StepRunnerError> {
         if matches!(self.state, EngineState::Available(_)) {
-            self.start_step()?;
+            self.start_step(physics_dt)?;
         }
         self.complete_step().await
     }
@@ -273,7 +277,7 @@ impl StepRunner {
         Ok(world)
     }
 
-    fn start_step(&mut self) -> Result<(), StepRunnerError> {
+    fn start_step(&mut self, physics_dt: f64) -> Result<(), StepRunnerError> {
         let state = mem::replace(&mut self.state, EngineState::Lost);
         let engine = match state {
             EngineState::Available(engine) => engine,
@@ -298,7 +302,9 @@ impl StepRunner {
                 }
 
                 let mut engine = engine;
-                let result = match catch_unwind(AssertUnwindSafe(|| engine.step(Duration::ZERO))) {
+                let result = match catch_unwind(AssertUnwindSafe(|| {
+                    engine.step_with_dt(Duration::ZERO, physics_dt)
+                })) {
                     Ok(result) => result,
                     Err(_) => Err(StepError::Collision(CollisionError::WorkerFailed)),
                 };

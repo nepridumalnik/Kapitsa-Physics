@@ -109,15 +109,25 @@ impl<E: StepExecutor> StepEngine<E> {
         self.world
     }
 
+    #[cfg(test)]
     pub(crate) fn step(&mut self, task_wait_duration: Duration) -> Result<StepStats, StepError> {
+        self.step_with_dt(task_wait_duration, self.config.fixed_step_seconds())
+    }
+
+    pub(crate) fn step_with_dt(
+        &mut self,
+        task_wait_duration: Duration,
+        physics_dt: f64,
+    ) -> Result<StepStats, StepError> {
+        let physics_step =
+            Duration::try_from_secs_f64(physics_dt).map_err(|_| StepError::InvalidDeltaTime)?;
         let started = Instant::now();
-        let result = self.run_step();
+        let result = self.run_step(physics_dt);
         let step_duration = started.elapsed();
         if let Err(error) = result {
             self.metrics.state = SimulationState::Error;
             return Err(error);
         }
-
         if self.recent_step_durations.len() == METRICS_WINDOW {
             self.recent_step_durations.pop_front();
         }
@@ -137,6 +147,7 @@ impl<E: StepExecutor> StepEngine<E> {
         let deadline_missed = step_duration > step_budget;
 
         self.metrics.state = SimulationState::Stopped;
+        self.metrics.last_physics_step = physics_step;
         self.metrics.last_step_duration = step_duration;
         self.metrics.task_wait_duration = task_wait_duration;
         self.metrics.average_step_duration = average_step_duration;
@@ -154,6 +165,7 @@ impl<E: StepExecutor> StepEngine<E> {
             .saturating_add(u64::from(deadline_missed));
 
         Ok(StepStats {
+            physics_step,
             step_duration,
             task_wait_duration,
             step_budget,
@@ -167,15 +179,13 @@ impl<E: StepExecutor> StepEngine<E> {
         })
     }
 
-    fn run_step(&mut self) -> Result<(), StepError> {
+    fn run_step(&mut self, physics_dt: f64) -> Result<(), StepError> {
         let body_count = self.world.body_count();
         let worker_count = self.active_workers.min(body_count).max(1);
         if worker_count <= 1 {
-            return self.world.step_with_executor(
-                self.config.fixed_step_seconds(),
-                &self.executor,
-                worker_count,
-            );
+            return self
+                .world
+                .step_with_executor(physics_dt, &self.executor, worker_count);
         }
 
         let mut active_bodies = 0;
@@ -189,11 +199,9 @@ impl<E: StepExecutor> StepEngine<E> {
             }
         }
         if active_bodies <= threshold {
-            return self.world.step_with_executor(
-                self.config.fixed_step_seconds(),
-                &self.executor,
-                worker_count,
-            );
+            return self
+                .world
+                .step_with_executor(physics_dt, &self.executor, worker_count);
         }
 
         let max_buckets = worker_count.saturating_mul(self.config.scheduler.max_batches_per_worker);
@@ -208,9 +216,8 @@ impl<E: StepExecutor> StepEngine<E> {
             self.bucket_buffers.resize_with(bucket_count, Vec::new);
         }
         let buckets = &mut self.bucket_buffers[..bucket_count];
-        let dt = self.config.fixed_step_seconds();
         self.world
-            .step_with_shards(dt, buckets, &self.executor, worker_count)
+            .step_with_shards(physics_dt, buckets, &self.executor, worker_count)
     }
 }
 

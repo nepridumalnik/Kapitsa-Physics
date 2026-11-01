@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-/// Measurements collected for one completed fixed physics step.
+/// Measurements collected for one completed physics step.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StepMeasurement {
     pub step_duration: Duration,
@@ -16,10 +16,12 @@ pub enum SimulationState {
     Error,
 }
 
-/// Snapshot of fixed-step timing, workload, and deadline metrics.
+/// Snapshot of simulation timing, workload, and deadline metrics.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SimulationMetrics {
     pub state: SimulationState,
+    /// Simulation-time interval integrated by the latest completed physics step.
+    pub last_physics_step: Duration,
     pub last_step_duration: Duration,
     pub task_wait_duration: Duration,
     pub average_step_duration: Duration,
@@ -32,7 +34,10 @@ pub struct SimulationMetrics {
     pub rayon_pool_size: Option<usize>,
     pub total_steps: u64,
     pub deadline_misses: u64,
+    /// Accumulated simulation time beyond one configured base interval.
     pub simulation_time_debt: Duration,
+    /// True when adaptive precision bounds are below the configured minimum step.
+    pub adaptive_step_limited: bool,
     /// Time multiplier requested through `Simulation::set_time_multiplier`.
     pub requested_time_multiplier: f64,
     /// Simulated seconds per wall second measured since the latest multiplier change.
@@ -42,6 +47,7 @@ pub struct SimulationMetrics {
 /// Statistics for one completed manual `Simulation::step()` call.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StepStats {
+    pub physics_step: Duration,
     pub step_duration: Duration,
     pub task_wait_duration: Duration,
     pub step_budget: Duration,

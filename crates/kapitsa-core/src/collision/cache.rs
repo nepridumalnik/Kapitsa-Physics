@@ -27,6 +27,8 @@ struct CachedImpulse {
 pub(crate) struct ContactCache {
     current: HashMap<ContactKey, CachedImpulse>,
     next: HashMap<ContactKey, CachedImpulse>,
+    current_dt: Option<f64>,
+    next_dt: Option<f64>,
 }
 
 impl ContactCache {
@@ -34,15 +36,22 @@ impl ContactCache {
         Self {
             current: HashMap::new(),
             next: HashMap::new(),
+            current_dt: None,
+            next_dt: None,
         }
     }
 
     pub(crate) fn warm_start_solver(
         &self,
         manifolds: &mut [SolverManifold],
+        dt: f64,
     ) -> Result<(), CollisionError> {
+        let impulse_scale = self.current_dt.map_or(1.0, |previous_dt| dt / previous_dt);
+        if !impulse_scale.is_finite() || impulse_scale <= 0.0 {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
         for manifold in manifolds {
-            self.warm_start_manifold(manifold)?;
+            self.warm_start_manifold(manifold, impulse_scale)?;
         }
         Ok(())
     }
@@ -50,6 +59,7 @@ impl ContactCache {
     fn warm_start_manifold(
         &self,
         solver_manifold: &mut SolverManifold,
+        impulse_scale: f64,
     ) -> Result<(), CollisionError> {
         let pair = solver_manifold.manifold.pair;
         for index in 0..solver_manifold.manifold.len() {
@@ -70,12 +80,18 @@ impl ContactCache {
                 continue;
             }
             let (tangent_a, tangent_b) = tangent_basis(normal)?;
-            let normal_component = cached
+            let normal_impulse = cached.normal_impulse * impulse_scale;
+            let tangent_world_cached = cached
                 .tangent_world
+                .checked_mul_scalar(impulse_scale)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            if !normal_impulse.is_finite() || normal_impulse < 0.0 {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+            let normal_component = tangent_world_cached
                 .checked_dot(normal)
                 .ok_or(CollisionError::ArithmeticOverflow)?;
-            let tangent_world = cached
-                .tangent_world
+            let tangent_world = tangent_world_cached
                 .checked_sub(
                     normal
                         .checked_mul_scalar(normal_component)
@@ -97,7 +113,7 @@ impl ContactCache {
             if !friction.is_finite() || friction < 0.0 {
                 return Err(CollisionError::InvalidMaterial);
             }
-            let limit = cached.normal_impulse * friction;
+            let limit = normal_impulse * friction;
             let magnitude = tangent_impulse[0].hypot(tangent_impulse[1]);
             if !limit.is_finite() || !magnitude.is_finite() {
                 return Err(CollisionError::ArithmeticOverflow);
@@ -107,14 +123,19 @@ impl ContactCache {
                 tangent_impulse[0] *= scale;
                 tangent_impulse[1] *= scale;
             }
-            contact.normal_impulse = cached.normal_impulse;
+            contact.normal_impulse = normal_impulse;
             contact.tangent_impulse = tangent_impulse;
         }
         Ok(())
     }
 
-    pub(crate) fn stage(&mut self, manifolds: &[ContactManifold]) -> Result<(), CollisionError> {
+    pub(crate) fn stage(
+        &mut self,
+        manifolds: &[ContactManifold],
+        dt: f64,
+    ) -> Result<(), CollisionError> {
         self.next.clear();
+        self.next_dt = None;
         let contact_count = manifolds.iter().try_fold(0_usize, |count, manifold| {
             count
                 .checked_add(manifold.len())
@@ -173,16 +194,19 @@ impl ContactCache {
                 );
             }
         }
+        self.next_dt = Some(dt);
         Ok(())
     }
 
     pub(crate) fn commit(&mut self) {
         std::mem::swap(&mut self.current, &mut self.next);
         self.next.clear();
+        self.current_dt = self.next_dt.take();
     }
 
     pub(crate) fn abort(&mut self) {
         self.next.clear();
+        self.next_dt = None;
     }
 
     pub(crate) fn invalidate_collider(&mut self, collider: crate::world::ColliderId) {
@@ -195,6 +219,8 @@ impl ContactCache {
     pub(crate) fn clear(&mut self) {
         self.current.clear();
         self.next.clear();
+        self.current_dt = None;
+        self.next_dt = None;
     }
 
     #[cfg(feature = "bench-internals")]

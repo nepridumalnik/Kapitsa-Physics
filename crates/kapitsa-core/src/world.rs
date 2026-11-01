@@ -898,6 +898,19 @@ impl PhysicsWorld {
             .flatten()
     }
 
+    /// Iterates over persistent force sources in dense storage order.
+    pub fn force_sources(&self) -> impl Iterator<Item = (ForceSourceId, &ForceSource)> {
+        self.force_sources.iter().map(|(dense, source)| {
+            (
+                ForceSourceId {
+                    world: self.world_id,
+                    dense,
+                },
+                source,
+            )
+        })
+    }
+
     /// Replaces the local application point and force vector of a source.
     pub fn set_force_source(
         &mut self,

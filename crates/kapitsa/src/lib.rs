@@ -78,11 +78,11 @@ pub use kapitsa_core::{
 };
 
 pub use runtime::{
-    BatchId, CollisionEventBatch, CollisionEventStreamError, CollisionEvents, ConfigError,
-    JointBreakEventBatch, JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError,
-    PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
-    PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
-    PhysicsSnapshot, PhysicsSubmitError, SchedulerConfig, Simulation, SimulationConfig,
-    SimulationError, SimulationMetrics, SimulationState, StepMeasurement, StepStats, WorkerConfig,
-    WorkerConfigError,
+    AdaptiveTimeStepConfig, BatchId, CollisionEventBatch, CollisionEventStreamError,
+    CollisionEvents, ConfigError, JointBreakEventBatch, JointBreakEventStreamError,
+    JointBreakEvents, PhysicsBatchError, PhysicsBatchResult, PhysicsBatchResultStreamError,
+    PhysicsBatchResults, PhysicsClient, PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer,
+    PhysicsCommandResult, PhysicsSnapshot, PhysicsSubmitError, SchedulerConfig, Simulation,
+    SimulationConfig, SimulationError, SimulationMetrics, SimulationState, StepMeasurement,
+    StepStats, TimeStepPolicy, WorkerConfig, WorkerConfigError,
 };

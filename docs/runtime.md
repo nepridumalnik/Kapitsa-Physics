@@ -91,11 +91,24 @@ step atomically with a typed gravity cause. `PhysicsWorld` also exposes
 `set_central_gravity` for synchronous world stepping.
 
 `Simulation::set_time_multiplier()` changes scheduler pacing while the
-simulation is running. It accepts finite non-negative values; zero pauses
-simulation-time accumulation. The fixed step remains `1 / tick_rate`, while
-elapsed wall time is scaled before entering the accumulator. Catch-up remains
-bounded by `max_catch_up_steps`, and remaining simulated-time debt is reported
-in metrics. `requested_time_multiplier` records the requested value;
+simulation is running. It accepts finite non-negative values; zero pauses new
+simulation-time accumulation. The default `TimeStepPolicy::Fixed` keeps the
+physics step at `1 / tick_rate` and scales elapsed wall time before it enters
+the accumulator. `TimeStepPolicy::Adaptive` uses the same accumulated time but
+chooses a world-wide physical substep from the configured maximum and bounds
+estimated from motion, forces, gravity, contacts, and joints. Adaptive bounds
+are safety estimates, not a formal global error guarantee. The minimum step
+prevents unbounded subdivision; if a physical bound falls below it, the runtime
+holds physics, reports `adaptive_step_limited`, and lowers achieved warp instead
+of silently advancing at a larger step. Commands can still change the world in
+this state, and their results remain pending until a later successful step is
+published.
+
+Catch-up remains bounded by `max_catch_up_steps` per scheduling turn.
+`last_physics_step` reports the most recent simulated-time interval, while
+`step_budget` remains the CPU budget derived from `1 / tick_rate`.
+`simulation_time_debt` reports accumulated time beyond one configured base
+interval. `requested_time_multiplier` records the requested value;
 `actual_time_multiplier` reports simulated seconds per wall second averaged
 since the most recent multiplier change. It resets to zero when the request
 changes and updates after completed steps. High requested values can exceed

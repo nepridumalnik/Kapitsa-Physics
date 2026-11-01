@@ -164,7 +164,7 @@ fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
         cached_contact.tangent_impulse = [0.05, 0.0];
         previous.insert(cached_contact, Vec3::ZERO).unwrap();
         let mut cache = ContactCache::new();
-        cache.stage(&[previous]).unwrap();
+        cache.stage(&[previous], 1.0).unwrap();
         cache.commit();
 
         let normal = kapitsa_math::Quat::from_axis_angle(Vec3::Z, 0.1)
@@ -205,7 +205,7 @@ fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
             },
         }];
         if warm_start {
-            cache.warm_start_solver(&mut manifolds).unwrap();
+            cache.warm_start_solver(&mut manifolds, 1.0).unwrap();
         }
         let initial_energy = kinetic_energy(bodies[1].body());
         SolverWorkspace::default()

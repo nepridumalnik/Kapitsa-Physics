@@ -1,5 +1,6 @@
 //! Simulation runtime configuration and execution APIs.
 
+mod adaptive_step;
 mod asynchronous;
 mod config;
 mod engine;
@@ -16,6 +17,8 @@ pub use asynchronous::{
     PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSnapshot,
     PhysicsSubmitError, Simulation, SimulationError,
 };
-pub use config::{ConfigError, SchedulerConfig, SimulationConfig};
+pub use config::{
+    AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, TimeStepPolicy,
+};
 pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
 pub use planner::{WorkerConfig, WorkerConfigError};

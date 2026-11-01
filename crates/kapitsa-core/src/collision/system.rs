@@ -863,7 +863,7 @@ impl CollisionSystem {
     ) -> Result<(), CollisionError> {
         self.context.joint_break_events.clear();
         if let Some(cache) = self.contact_cache.as_ref() {
-            cache.warm_start_solver(&mut self.context.solver_manifolds)?;
+            cache.warm_start_solver(&mut self.context.solver_manifolds, dt)?;
         }
         #[cfg(feature = "bench-internals")]
         let island_started = std::time::Instant::now();
@@ -1131,7 +1131,7 @@ impl CollisionSystem {
         if !self.context.manifolds.is_empty() || self.contact_cache.is_some() {
             self.contact_cache
                 .get_or_insert_with(ContactCache::new)
-                .stage(&self.context.manifolds)?;
+                .stage(&self.context.manifolds, dt)?;
             self.cache_staged = true;
         }
         #[cfg(feature = "bench-internals")]
