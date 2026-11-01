@@ -32,10 +32,11 @@ use crate::{
         CollisionError, CollisionEvent, CollisionInteraction, CollisionPair, CollisionSystem,
         ContactInfo, ContactManifold, ContactPoint, NarrowPhase, OverlapHit, QueryError,
         QueryFilter, QueryScratch, QueryTarget, Ray, RayHit, ShapeHit, SolverBody, SolverManifold,
-        SolverMaterial, StepContext, collision_worker_pool, overlaps_shape_with_scratch,
-        raycast_shape_with_scratch, spatial_index::SpatialIndex, sweep_shape_with_scratch,
+        SolverMaterial, StepContext, overlaps_shape_with_scratch, raycast_shape_with_scratch,
+        spatial_index::SpatialIndex, sweep_shape_with_scratch,
     },
     containers::DensePool,
+    execution::{SequentialExecutor, StepExecutor},
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
     rigid_body::{
         BodyState, BodyType, CcdMode, RigidBody, predict, predict_from_state, trajectory_bounds,
@@ -764,6 +765,16 @@ impl PhysicsWorld {
 
     /// Advances every body by one fixed timestep, atomically committing the results.
     pub fn step(&mut self, dt: f64) -> Result<(), StepError> {
+        self.step_with_executor(dt, &SequentialExecutor, 1)
+    }
+
+    /// Advances one step using the supplied statically dispatched task executor.
+    pub fn step_with_executor<E: StepExecutor>(
+        &mut self,
+        dt: f64,
+        executor: &E,
+        worker_count: usize,
+    ) -> Result<(), StepError> {
         if !dt.is_finite() || dt <= 0.0 {
             return Err(StepError::InvalidDeltaTime);
         }
@@ -785,11 +796,12 @@ impl PhysicsWorld {
             }
         }
 
-        if let Err(error) = self.prepare_collision_candidates(dt, 1) {
+        let worker_count = worker_count.max(1);
+        if let Err(error) = self.prepare_collision_candidates(dt, worker_count, executor) {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
-        if let Err(error) = self.process_collision_candidates(1) {
+        if let Err(error) = self.process_collision_candidates(worker_count, executor) {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
@@ -927,6 +939,7 @@ impl PhysicsWorld {
         &mut self,
         dt: f64,
         worker_count: usize,
+        executor: &impl StepExecutor,
     ) -> Result<(), CollisionError> {
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
@@ -944,7 +957,7 @@ impl PhysicsWorld {
 
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
-        self.process_continuous_collisions(dt, worker_count)?;
+        self.process_continuous_collisions(dt, worker_count, executor)?;
         #[cfg(feature = "bench-internals")]
         self.collision_system.record_ccd(started.elapsed());
         Ok(())
@@ -981,6 +994,7 @@ impl PhysicsWorld {
         &mut self,
         dt: f64,
         worker_count: usize,
+        executor: &impl StepExecutor,
     ) -> Result<(), CollisionError> {
         if dt <= 0.0 || self.collision_system.candidate_count() == 0 {
             return Ok(());
@@ -1081,7 +1095,7 @@ impl PhysicsWorld {
                 .try_reserve(candidate_count)
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
         }
-        self.precompute_ccd_tois_parallel(dt, worker_count)?;
+        self.precompute_ccd_tois_parallel(dt, worker_count, executor)?;
         self.collision_system.build_ccd_islands(false)?;
         #[cfg(feature = "bench-internals")]
         self.collision_system
@@ -1093,6 +1107,7 @@ impl PhysicsWorld {
         self.resolve_single_candidate_ccd_islands_parallel(
             dt,
             worker_count,
+            executor,
             time_tolerance,
             &mut force_single_island,
         )?;
@@ -1670,6 +1685,7 @@ impl PhysicsWorld {
         &mut self,
         dt: f64,
         worker_count: usize,
+        executor: &impl StepExecutor,
         time_tolerance: f64,
         force_single_island: &mut bool,
     ) -> Result<(), CollisionError> {
@@ -1712,7 +1728,6 @@ impl PhysicsWorld {
             return Ok(());
         }
 
-        let pool = collision_worker_pool()?;
         let active_workers = worker_count.min(eligible_count);
         self.collision_system
             .context
@@ -1752,42 +1767,35 @@ impl PhysicsWorld {
         let mut results = std::mem::take(&mut self.collision_system.context.ccd_island_results);
         let shared_world = &*self;
         let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pool.scope(|scope| {
-                let mut remaining = &mut results[..island_count];
-                let mut first_island = 0;
-                for chunk_size in chunk_sizes.iter().copied() {
-                    let (chunk, tail) = remaining.split_at_mut(chunk_size);
-                    let world = shared_world;
-                    let chunk_start = first_island;
-                    scope.spawn(move |_| {
-                        let mut narrow_phase = NarrowPhase::new();
-                        for (offset, result) in chunk.iter_mut().enumerate() {
-                            let island = chunk_start + offset;
-                            let cost = result.work_cost;
-                            if cost == 0 {
-                                continue;
-                            }
-                            result.clear();
-                            result.work_cost = cost;
-                            if let Err(error) = world.prepare_single_candidate_ccd_island(
-                                island,
-                                dt,
-                                &mut narrow_phase,
-                                result,
-                            ) {
-                                result.worker_error = Some(error);
-                                break;
-                            }
+            executor.for_each_chunk_layout_mut(
+                &mut results[..island_count],
+                &chunk_sizes,
+                |chunk_start, chunk| {
+                    let mut narrow_phase = NarrowPhase::new();
+                    for (offset, result) in chunk.iter_mut().enumerate() {
+                        let island = chunk_start + offset;
+                        let cost = result.work_cost;
+                        if cost == 0 {
+                            continue;
                         }
-                    });
-                    remaining = tail;
-                    first_island += chunk_size;
-                }
-            })
+                        result.clear();
+                        result.work_cost = cost;
+                        if let Err(error) = shared_world.prepare_single_candidate_ccd_island(
+                            island,
+                            dt,
+                            &mut narrow_phase,
+                            result,
+                        ) {
+                            result.worker_error = Some(error);
+                            break;
+                        }
+                    }
+                },
+            )
         }));
         self.collision_system.context.ccd_island_results = results;
         self.collision_system.context.ccd_worker_chunks = chunk_sizes;
-        if computed.is_err() {
+        if !matches!(computed, Ok(Ok(()))) {
             return Err(CollisionError::WorkerFailed);
         }
         if let Some(error) = self
@@ -2759,6 +2767,7 @@ impl PhysicsWorld {
         &mut self,
         dt: f64,
         worker_count: usize,
+        executor: &impl StepExecutor,
     ) -> Result<(), CollisionError> {
         let island_count = self.collision_system.ccd_island_count();
         if worker_count <= 1 || island_count <= 1 {
@@ -2770,8 +2779,6 @@ impl PhysicsWorld {
             return Ok(());
         }
         let worker_count = worker_count.min(island_count);
-        let pool = collision_worker_pool()?;
-
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
         let chunk_size = island_count.div_ceil(worker_count);
@@ -2795,30 +2802,31 @@ impl PhysicsWorld {
         debug_assert!(results.len() >= island_count);
         let shared_world = &*self;
         let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pool.scope(|scope| {
-                for (worker_index, island_results) in
-                    results[..island_count].chunks_mut(chunk_size).enumerate()
-                {
+            executor.for_each_chunk_mut(
+                &mut results[..island_count],
+                chunk_size,
+                |worker_index, island_results| {
                     let start = worker_index * chunk_size;
-                    let end = start + island_results.len();
-                    let world = shared_world;
-                    scope.spawn(move |_| {
-                        let mut narrow_phase = NarrowPhase::new();
-                        for (island, result) in (start..end).zip(island_results) {
-                            result.clear();
-                            if let Err(error) =
-                                world.precompute_ccd_island(island, dt, &mut narrow_phase, result)
-                            {
-                                result.worker_error = Some(error);
-                                break;
-                            }
+                    let mut narrow_phase = NarrowPhase::new();
+                    for (island, result) in
+                        (start..start + island_results.len()).zip(island_results)
+                    {
+                        result.clear();
+                        if let Err(error) = shared_world.precompute_ccd_island(
+                            island,
+                            dt,
+                            &mut narrow_phase,
+                            result,
+                        ) {
+                            result.worker_error = Some(error);
+                            break;
                         }
-                    });
-                }
-            })
+                    }
+                },
+            )
         }));
         self.collision_system.context.ccd_island_results = results;
-        if evaluated.is_err() {
+        if !matches!(evaluated, Ok(Ok(()))) {
             return Err(CollisionError::WorkerFailed);
         }
         if let Some(error) = self
@@ -3507,10 +3515,15 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn process_collision_candidates(&mut self, worker_count: usize) -> Result<(), CollisionError> {
+    fn process_collision_candidates(
+        &mut self,
+        worker_count: usize,
+        executor: &impl StepExecutor,
+    ) -> Result<(), CollisionError> {
         let candidate_count = self.collision_system.candidate_count();
         if candidate_count == 0 {
-            self.collision_system.solve_contacts(worker_count)?;
+            self.collision_system
+                .solve_contacts(worker_count, executor)?;
             self.stage_collision_events()?;
             return Ok(());
         }
@@ -3690,7 +3703,8 @@ impl PhysicsWorld {
                     material,
                 });
         }
-        self.collision_system.solve_contacts(worker_count)?;
+        self.collision_system
+            .solve_contacts(worker_count, executor)?;
 
         for manifold in self.collision_system.context.manifolds.iter().copied() {
             let collider_a = self
@@ -3937,11 +3951,24 @@ impl PhysicsWorld {
         self.commit_step_shards_with_workers(shards, shards.len().max(1))
     }
 
-    /// Validates shard results and uses the scheduler's worker count for parallel collision work.
+    /// Validates shard results using the built-in sequential executor.
+    ///
+    /// Use [`Self::commit_step_shards_with_executor`] to select another executor.
     #[doc(hidden)]
     pub fn commit_step_shards_with_workers(
         &mut self,
         shards: &[Vec<BodyStep>],
+        _worker_count: usize,
+    ) -> Result<(), StepError> {
+        self.commit_step_shards_with_executor(shards, &SequentialExecutor, 1)
+    }
+
+    /// Validates shard results and delegates independent collision work to an executor.
+    #[doc(hidden)]
+    pub fn commit_step_shards_with_executor<E: StepExecutor>(
+        &mut self,
+        shards: &[Vec<BodyStep>],
+        executor: &E,
         worker_count: usize,
     ) -> Result<(), StepError> {
         let mut steps = shards.iter().flatten();
@@ -3980,11 +4007,11 @@ impl PhysicsWorld {
             }
         }
         let worker_count = worker_count.max(1);
-        if let Err(error) = self.prepare_collision_candidates(dt, worker_count) {
+        if let Err(error) = self.prepare_collision_candidates(dt, worker_count, executor) {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
-        if let Err(error) = self.process_collision_candidates(worker_count) {
+        if let Err(error) = self.process_collision_candidates(worker_count, executor) {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }

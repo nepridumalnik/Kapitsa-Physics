@@ -4,7 +4,6 @@ use super::{
     broad_phase::BroadPhase,
     cache::ContactCache,
     ccd::{CcdHit, CcdMotion},
-    collision_worker_pool,
     island::IslandLayout,
     manifold::ContactManifold,
     mesh::TriangleBvh,
@@ -15,6 +14,7 @@ use super::{
 use crate::collider::CollisionMode;
 use crate::{
     aabb::Aabb,
+    execution::StepExecutor,
     rigid_body::BodyState,
     shape::Shape,
     transform::Transform,
@@ -851,7 +851,11 @@ impl CollisionSystem {
         result
     }
 
-    pub(crate) fn solve_contacts(&mut self, worker_count: usize) -> Result<(), CollisionError> {
+    pub(crate) fn solve_contacts(
+        &mut self,
+        worker_count: usize,
+        executor: &impl StepExecutor,
+    ) -> Result<(), CollisionError> {
         if let Some(cache) = self.contact_cache.as_ref() {
             cache.warm_start_solver(&mut self.context.solver_manifolds)?;
         }
@@ -963,26 +967,25 @@ impl CollisionSystem {
             let chunk_size = island_count.div_ceil(worker_count);
             #[cfg(feature = "bench-internals")]
             self.record_worker_tasks_started(island_count.div_ceil(chunk_size));
-            let pool = collision_worker_pool()?;
             let solved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                pool.scope(|scope| {
-                    for chunk in self.solver_islands[..island_count].chunks_mut(chunk_size) {
-                        scope.spawn(move |_| {
-                            for island in chunk {
-                                if let Err(error) = island.workspace.solve(
-                                    &mut island.bodies,
-                                    &mut island.manifolds,
-                                    config,
-                                ) {
-                                    island.worker_error = Some(error);
-                                    break;
-                                }
+                executor.for_each_chunk_mut(
+                    &mut self.solver_islands[..island_count],
+                    chunk_size,
+                    |_, chunk| {
+                        for island in chunk {
+                            if let Err(error) = island.workspace.solve(
+                                &mut island.bodies,
+                                &mut island.manifolds,
+                                config,
+                            ) {
+                                island.worker_error = Some(error);
+                                break;
                             }
-                        });
-                    }
-                })
+                        }
+                    },
+                )
             }));
-            if solved.is_err() {
+            if !matches!(solved, Ok(Ok(()))) {
                 return Err(CollisionError::WorkerFailed);
             }
             if let Some(error) = self

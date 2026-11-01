@@ -119,7 +119,6 @@ name = "kapitsa-core"
 version = "0.1.0"
 dependencies = [
  "kapitsa-math",
- "rayon",
  "rstest",
 ]
 
