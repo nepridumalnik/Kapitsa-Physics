@@ -425,13 +425,15 @@ async fn run_simulation_loop(
     let mut reusable_snapshot = None;
 
     loop {
+        let has_ready_step = accumulator >= step_duration;
         let remaining = step_duration.saturating_sub(accumulator);
-        let mut step_deadline_reached = false;
-        tokio::select! {
+        let step_deadline_reached = tokio::select! {
+            biased;
             changed = stop.changed() => {
                 if changed.is_err() || *stop.borrow() {
                     break;
                 }
+                false
             }
             changed = time_multiplier.changed(), if time_updates_open => {
                 let now = Instant::now();
@@ -449,11 +451,14 @@ async fn run_simulation_loop(
                     }
                     Err(_) => time_updates_open = false,
                 }
+                false
             }
-            _ = wait_for_scaled_step(remaining, current_multiplier) => {
-                step_deadline_reached = true;
-            }
-        }
+            deadline_reached = wait_for_scheduler_turn(
+                has_ready_step,
+                remaining,
+                current_multiplier,
+            ) => deadline_reached,
+        };
         if stopping(&stop) {
             break;
         }
@@ -543,9 +548,6 @@ async fn run_simulation_loop(
 
         if stopping(&stop) {
             break;
-        }
-        if accumulator >= step_duration {
-            tokio::task::yield_now().await;
         }
     }
 
@@ -736,6 +738,20 @@ async fn wait_for_scaled_step(remaining: Duration, multiplier: f64) {
     }
 }
 
+async fn wait_for_scheduler_turn(
+    has_ready_step: bool,
+    remaining: Duration,
+    multiplier: f64,
+) -> bool {
+    if has_ready_step {
+        tokio::task::yield_now().await;
+        false
+    } else {
+        wait_for_scaled_step(remaining, multiplier).await;
+        true
+    }
+}
+
 fn scaled_step_delay(remaining: Duration, multiplier: f64) -> Duration {
     let seconds = remaining.as_secs_f64() / multiplier;
     match Duration::try_from_secs_f64(seconds) {
@@ -784,7 +800,10 @@ mod tests {
         PhysicsClientError, SimulationConfig, SimulationError, SimulationState, WorkerConfig,
     };
 
-    use super::{PhysicsBatchError, Simulation, measured_time_multiplier, wait_for_scaled_step};
+    use super::{
+        PhysicsBatchError, Simulation, add_elapsed, add_scaled_elapsed, measured_time_multiplier,
+        wait_for_scaled_step, wait_for_scheduler_turn,
+    };
 
     fn dynamic_body() -> RigidBody {
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass");
@@ -1293,6 +1312,39 @@ mod tests {
         simulation.stop().await.expect("stop");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn high_warp_keeps_commands_and_shutdown_responsive_with_time_debt() {
+        let mut simulation = Simulation::new_from_config(config(120)).expect("simulation");
+        {
+            let world = simulation
+                .simulation
+                .as_mut()
+                .expect("runner")
+                .world_mut()
+                .expect("world");
+            for _ in 0..512 {
+                world.add_body(dynamic_body()).expect("body");
+            }
+        }
+        let client = simulation.client();
+        simulation.set_time_multiplier(1_000.0).expect("high warp");
+        simulation.start().expect("start");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(simulation.metrics().total_steps > 0);
+        assert!(!simulation.metrics().simulation_time_debt.is_zero());
+
+        let body = tokio::time::timeout(Duration::from_secs(2), client.add_body(dynamic_body()))
+            .await
+            .expect("command was not starved by accumulated debt")
+            .expect("body command applied");
+        assert!(client.snapshot().body(body).is_some());
+
+        tokio::time::timeout(Duration::from_secs(2), simulation.stop())
+            .await
+            .expect("shutdown was not responsive under high warp")
+            .expect("stop");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn scaled_scheduler_wait_uses_the_tokio_clock() {
         let start = tokio::time::Instant::now();
@@ -1311,6 +1363,38 @@ mod tests {
         assert!(matches!(poll_once(paused.as_mut()), Poll::Pending));
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(matches!(poll_once(paused.as_mut()), Poll::Pending));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scheduler_yields_without_timer_wait_when_step_debt_is_ready() {
+        let start = tokio::time::Instant::now();
+        assert!(!wait_for_scheduler_turn(true, Duration::from_secs(10), 1_000.0).await);
+        assert_eq!(tokio::time::Instant::now() - start, Duration::ZERO);
+
+        assert!(wait_for_scheduler_turn(false, Duration::from_secs(10), 1.0).await);
+        assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn large_time_debt_is_retained_and_duration_overflow_is_reported() {
+        let mut accumulator = Duration::ZERO;
+        add_scaled_elapsed(&mut accumulator, Duration::from_millis(125), 1_000.0)
+            .expect("large scaled duration remains representable");
+        assert_eq!(accumulator, Duration::from_millis(125_000));
+
+        let mut overflow = Duration::ZERO;
+        assert!(matches!(
+            add_scaled_elapsed(&mut overflow, Duration::from_secs(1), f64::MAX),
+            Err(SimulationError::SimulationTimeOverflow)
+        ));
+        assert_eq!(overflow, Duration::ZERO);
+
+        assert!(matches!(add_elapsed(&mut overflow, Duration::MAX), Ok(())));
+        assert!(matches!(
+            add_elapsed(&mut overflow, Duration::from_nanos(1)),
+            Err(SimulationError::SimulationTimeOverflow)
+        ));
+        assert_eq!(overflow, Duration::MAX);
     }
 
     #[test]

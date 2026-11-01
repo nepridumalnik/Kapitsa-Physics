@@ -1,8 +1,8 @@
 # Time Warp Scheduler Diagnostic
 
-This benchmark isolates scheduler and publication phases from physical
-integration, then repeats the existing end-to-end runtime scaling workload.
-It is diagnostic only; no scheduler behavior is changed by this stage.
+This report isolates scheduler and publication phases from physical
+integration, records the diagnosis of the original runtime, and compares the
+end-to-end workload before and after the scheduler fix.
 
 ## Environment and reproduction
 
@@ -26,7 +26,7 @@ part reuses the established 100-body benchmark fixture: 32 real-time warm-up
 steps and three 100 ms windows per requested multiplier. World, collider,
 snapshot, and original command setup stay outside the measured step intervals.
 
-## Isolated phase measurements
+## Baseline isolated phase measurements (before scheduler fix)
 
 Values are microseconds per operation, min / median / max unless marked as
 percentiles. The direct world and StepRunner rows use the same separated
@@ -55,7 +55,7 @@ timer wake callback per wait. This identifies a roughly 15 ms timer/wakeup
 round-trip on this machine; the `select!` macro itself and `yield_now()` are
 many orders of magnitude cheaper.
 
-## End-to-end Time Warp
+## Before scheduler fix: end-to-end Time Warp
 
 The scene has 100 active dynamic bodies and 100 separated colliders. `dt` stays
 at `1 / 120` second. Each measurement combines three 100 ms windows; results
@@ -95,3 +95,31 @@ Tokio timer floor. `StepRunner::step` engine time includes physics and its
 in-engine executor work; the separate spawn/oneshot measurement isolates only
 top-level Rayon task handoff. Empty-event publication does not represent a
 collision-heavy event batch.
+
+## Scheduler fix verification
+
+After the diagnosis, the loop was changed to wait on a scaled timer only while
+there is no complete physics step in the accumulator. When debt already
+contains a ready step, it yields through `tokio::select!`, keeping stop and
+multiplier changes ahead of the yield branch. `max_catch_up_steps` still
+bounds uninterrupted physics work. The timer microbench above remains slow;
+the backlog path no longer calls that timer.
+
+The same Release command was rerun with the same host and fixtures. Before /
+after achieved scaling and step throughput:
+
+| Requested warp | Before | After | Steps/s after | Peak debt after |
+|---:|---:|---:|---:|---:|
+| 0.1x | 0.15x | 0.15x | 18.5 | 0 ms |
+| 1x | 0.99x | 1.00x | 120.3 | 0 ms |
+| 10x | 4.14–4.17x | 9.62x | 1,155 | 49.350 ms |
+| 100x | 4.14x | 96.74x | 11,609 | 1.633 s |
+| 1,000x | 4.13x | 111.67x | 13,401 | 266.815 s |
+
+The 1,000x case did not settle within the post-measurement 100 ms pause check
+and retained the reported time debt. Its approximately 13.4k steps/s is
+consistent with the measured ~55 µs step CPU plus runtime overhead; achieved
+warp is now limited by available compute rather than a 15 ms timer between
+catch-up batches. At 10x and 100x, the accumulated debt drained during the
+pause check. Fixed `dt` remains 1/120 s, and steps, snapshots, and simulation
+timestamps advance in their existing order.
