@@ -1,14 +1,17 @@
 mod camera;
 mod flight;
+mod gif_export;
 mod renderer;
 
 use std::{
     error::Error,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
 use camera::Camera;
 use flight::{FlightConfig, run};
+use gif_export::{GifOptions, export};
 use glium::{backend::glutin::SimpleWindowBuilder, glutin::surface::WindowSurface, winit};
 use renderer::Renderer;
 use tokio::runtime::Builder;
@@ -30,6 +33,7 @@ struct Args {
     fps: u32,
     warp: f64,
     steps: u64,
+    gif: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -56,12 +60,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let event_loop = winit::event_loop::EventLoop::builder().build()?;
-    let (window, display) = SimpleWindowBuilder::new()
+    let visible = args.gif.is_none();
+    let attributes = Window::default_attributes()
         .with_title("Kapitsa two-stage rocket flight")
-        .with_inner_size(args.width, args.height)
+        .with_inner_size(winit::dpi::PhysicalSize::new(args.width, args.height))
+        .with_visible(visible);
+    let (window, display) = SimpleWindowBuilder::new()
+        .set_window_builder(attributes)
         .build(&event_loop);
     let renderer = Renderer::new(&display)?;
     let camera = Camera::for_frames(&frames, args.width, args.height);
+    if let Some(path) = &args.gif {
+        export(
+            &display,
+            &renderer,
+            &camera,
+            &frames,
+            GifOptions {
+                width: args.width,
+                height: args.height,
+                fps: args.fps,
+                output: path,
+            },
+        )?;
+        println!("wrote {} GIF frames to {}", frames.len(), path.display());
+        return Ok(());
+    }
     let mut viewer = Viewer {
         window,
         display,
@@ -151,6 +175,7 @@ fn arguments() -> Result<Args, Box<dyn Error>> {
         fps: DEFAULT_FPS,
         warp: DEFAULT_WARP,
         steps: DEFAULT_STEPS,
+        gif: None,
     };
     let mut options = std::env::args().skip(1);
     while let Some(option) = options.next() {
@@ -163,18 +188,24 @@ fn arguments() -> Result<Args, Box<dyn Error>> {
             "--fps" => args.fps = value.parse()?,
             "--warp" => args.warp = value.parse()?,
             "--steps" => args.steps = value.parse()?,
+            "--gif" => args.gif = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown option: {option}").into()),
         }
+    }
+    if args.gif.is_some() && args.fps > 100 {
+        return Err("GIF frame timing is limited to 100 fps by centisecond precision".into());
     }
     if args.width == 0
         || args.height == 0
         || args.fps == 0
         || args.fps > 120
         || args.steps == 0
+        || args.width > u32::from(u16::MAX)
+        || args.height > u32::from(u16::MAX)
         || !args.warp.is_finite()
         || args.warp <= 0.0
     {
-        return Err("width/height/steps and warp must be positive; fps must be in 1..=120".into());
+        return Err("width/height/steps and warp must be positive; GIF dimensions must be <=65535; fps must be in 1..=120".into());
     }
     Ok(args)
 }
