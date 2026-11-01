@@ -238,16 +238,22 @@ with a `CollisionError` such as `InvalidMaterial`, `UnsupportedGeometryPair`,
 ## Runtime integration
 
 The public `kapitsa::Simulation` owns the physics world and advances it on a
-fixed clock. Use its `PhysicsClient` for body and collider changes, snapshots,
-collision events, and spatial queries. Command buffers apply ordered changes
-at a step boundary without waiting in the game tick. See
+fixed clock. Use its `PhysicsClient` for body, collider, and joint changes,
+snapshots, collision and joint-break events, and spatial queries. Command
+buffers apply ordered changes at a step boundary without waiting in the game tick. See
 [Simulation runtime](runtime.md) for lifecycle and command examples. The
 measured collision pipeline and worker comparisons are in
 `benchmarks/collisions.md`.
 
 ## Scope
 
-This collision system does not add gravity, joints, or object destruction.
-Those remain separate physics systems. Numerical algorithms can return
+Joint constraints and contacts share one constraint graph and solver island.
+Connected dynamic bodies are solved together, while a shared static or
+kinematic support does not merge otherwise independent islands. Joint breaking
+is committed with the successful step and exposed through
+`PhysicsWorld::joint_events()`.
+
+This collision system does not add gravity or game-object destruction. Those
+remain separate physics systems. Numerical algorithms can return
 `NonConvergent` for geometry they cannot resolve within their iteration
 bounds; such errors abort the entire step.

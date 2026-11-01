@@ -120,6 +120,7 @@ pub(crate) struct StepContext {
     pub(crate) ccd_toi_seen_pairs: Option<HashSet<super::CollisionPair>>,
     pub(crate) solver_manifolds: Vec<SolverManifold>,
     pub(crate) joint_constraints: Vec<JointConstraint>,
+    pub(crate) joint_break_events: Vec<crate::joint::JointBreakEvent>,
     pub(crate) joint_collision_pairs: Vec<(BodyId, BodyId)>,
     pub(crate) interactions: Vec<CollisionInteraction>,
     /// Created on first use so the owning PhysicsWorld can remain const-constructible.
@@ -167,6 +168,7 @@ impl StepContext {
             ccd_toi_seen_pairs: None,
             solver_manifolds: Vec::new(),
             joint_constraints: Vec::new(),
+            joint_break_events: Vec::new(),
             joint_collision_pairs: Vec::new(),
             interactions: Vec::new(),
             interaction_indices: None,
@@ -218,6 +220,7 @@ impl StepContext {
         }
         self.solver_manifolds.clear();
         self.joint_constraints.clear();
+        self.joint_break_events.clear();
         self.joint_collision_pairs.clear();
         self.interactions.clear();
         if let Some(indices) = &mut self.interaction_indices {
@@ -279,6 +282,7 @@ impl StepContext {
             ccd_toi_seen_pairs,
             self.solver_manifolds.capacity() * size_of::<SolverManifold>(),
             self.joint_constraints.capacity() * size_of::<JointConstraint>(),
+            self.joint_break_events.capacity() * size_of::<crate::joint::JointBreakEvent>(),
             self.joint_collision_pairs.capacity() * size_of::<(BodyId, BodyId)>(),
             self.interactions.capacity() * size_of::<CollisionInteraction>(),
             self.interaction_indices.as_ref().map_or(0, |indices| {

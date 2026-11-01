@@ -11,6 +11,7 @@ pub(crate) struct JointSolver;
 
 #[derive(Clone, Copy)]
 pub(crate) struct JointConstraint {
+    pub(crate) id: crate::world::JointId,
     pub(crate) body_a: usize,
     pub(crate) body_b: usize,
     pub(crate) joint: super::Joint,
@@ -109,10 +110,11 @@ pub(crate) fn prepare_joint_rows(
     joints: &[JointConstraint],
     dt: f64,
 ) -> Result<(), CollisionError> {
-    for constraint in joints {
+    for (joint_index, constraint) in joints.iter().enumerate() {
         if !constraint.joint.common().enabled {
             continue;
         }
+        workspace.set_joint_index(joint_index);
         solver_bodies_at(bodies, constraint.body_a, constraint.body_b)?;
         match constraint.joint {
             super::Joint::Fixed(joint) => append_fixed_rows(
@@ -1577,6 +1579,7 @@ mod tests {
 
     fn solve_joint(joint: super::super::Joint, bodies: &mut [SolverBody]) {
         let constraints = [JointConstraint {
+            id: test_joint_id(),
             body_a: 0,
             body_b: 1,
             joint,
@@ -1586,6 +1589,33 @@ mod tests {
             prepare_joint_rows(bodies, workspace, &constraints, 0.01)
         };
         JointSolver::solve(&mut workspace, bodies, 0.01, 12, 8, prepare).expect("joint row solve");
+    }
+
+    fn test_joint_id() -> crate::world::JointId {
+        use crate::{
+            joint::{FixedJoint, Joint, JointCommon, JointFrame},
+            rigid_body::RigidBody,
+            transform::Transform,
+            world::PhysicsWorld,
+        };
+
+        let mut world = PhysicsWorld::new();
+        let a = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("static body");
+        let b = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("static body");
+        world
+            .add_joint(
+                a,
+                b,
+                Joint::Fixed(FixedJoint::new(JointCommon::new(
+                    JointFrame::IDENTITY,
+                    JointFrame::IDENTITY,
+                ))),
+            )
+            .expect("joint")
     }
 
     fn anchor_row(error: f64) -> ConstraintRow {

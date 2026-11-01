@@ -1,22 +1,42 @@
-use super::row::ConstraintRow;
+use super::{JointBreakEvent, row::ConstraintRow, solver::JointConstraint};
+use crate::collision::CollisionError;
+use kapitsa_math::Vec3;
+
+#[derive(Clone, Copy, Debug)]
+struct JointReaction {
+    id: crate::world::JointId,
+    force_impulse: Vec3,
+    torque_impulse: Vec3,
+}
 
 /// Reusable rows for one solver island, retained between physics steps.
 #[derive(Default)]
 pub(crate) struct JointWorkspace {
     rows: Vec<ConstraintRow>,
+    row_joint_indices: Vec<usize>,
     prepared_rows: usize,
+    active_joint_index: usize,
+    reactions: Vec<JointReaction>,
+    break_events: Vec<JointBreakEvent>,
 }
 
 impl JointWorkspace {
     pub(crate) const fn new() -> Self {
         Self {
             rows: Vec::new(),
+            row_joint_indices: Vec::new(),
             prepared_rows: 0,
+            active_joint_index: 0,
+            reactions: Vec::new(),
+            break_events: Vec::new(),
         }
     }
 
     pub(crate) fn begin_step(&mut self) {
         self.prepared_rows = 0;
+        self.active_joint_index = 0;
+        self.reactions.clear();
+        self.break_events.clear();
         for row in &mut self.rows {
             row.accumulated_multiplier = 0.0;
             row.accumulated_impulse = 0.0;
@@ -25,7 +45,11 @@ impl JointWorkspace {
 
     pub(crate) fn clear(&mut self) {
         self.rows.clear();
+        self.row_joint_indices.clear();
         self.prepared_rows = 0;
+        self.active_joint_index = 0;
+        self.reactions.clear();
+        self.break_events.clear();
     }
 
     pub(crate) fn begin_prepare(&mut self) {
@@ -37,14 +61,17 @@ impl JointWorkspace {
             row.accumulated_multiplier = previous.accumulated_multiplier;
             row.accumulated_impulse = previous.accumulated_impulse;
             self.rows[self.prepared_rows] = row;
+            self.row_joint_indices[self.prepared_rows] = self.active_joint_index;
         } else {
             self.rows.push(row);
+            self.row_joint_indices.push(self.active_joint_index);
         }
         self.prepared_rows += 1;
     }
 
     pub(crate) fn finish_prepare(&mut self) {
         self.rows.truncate(self.prepared_rows);
+        self.row_joint_indices.truncate(self.prepared_rows);
     }
 
     pub(crate) fn rows(&self) -> &[ConstraintRow] {
@@ -55,9 +82,86 @@ impl JointWorkspace {
         &mut self.rows
     }
 
+    pub(crate) fn set_joint_index(&mut self, index: usize) {
+        self.active_joint_index = index;
+    }
+
+    pub(crate) fn collect_break_events(
+        &mut self,
+        joints: &[JointConstraint],
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        self.break_events.clear();
+        if !joints.iter().any(|joint| {
+            let common = joint.joint.common();
+            common.enabled && (common.break_force.is_some() || common.break_torque.is_some())
+        }) {
+            return Ok(());
+        }
+
+        self.reactions.clear();
+        self.reactions
+            .try_reserve(joints.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        self.break_events
+            .try_reserve(joints.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        self.reactions
+            .extend(joints.iter().map(|joint| JointReaction {
+                id: joint.id,
+                force_impulse: Vec3::ZERO,
+                torque_impulse: Vec3::ZERO,
+            }));
+
+        for (row, joint_index) in self.rows.iter().zip(&self.row_joint_indices) {
+            let reaction = self
+                .reactions
+                .get_mut(*joint_index)
+                .ok_or(CollisionError::InvalidContact)?;
+            if row.linear_a != Vec3::ZERO || row.linear_b != Vec3::ZERO {
+                reaction.force_impulse += row.linear_a * row.accumulated_impulse;
+            } else {
+                reaction.torque_impulse += row.angular_a * row.accumulated_impulse;
+            }
+            if !reaction.force_impulse.is_finite() || !reaction.torque_impulse.is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+        }
+
+        for (joint, reaction) in joints.iter().zip(&self.reactions) {
+            let common = joint.joint.common();
+            if !common.enabled || (common.break_force.is_none() && common.break_torque.is_none()) {
+                continue;
+            }
+            let force = reaction.force_impulse.length() / dt;
+            let torque = reaction.torque_impulse.length() / dt;
+            if !force.is_finite() || !torque.is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+            if common
+                .break_force
+                .is_some_and(|threshold| force > threshold)
+                || common
+                    .break_torque
+                    .is_some_and(|threshold| torque > threshold)
+            {
+                self.break_events
+                    .push(JointBreakEvent::new(reaction.id, force, torque));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn break_events(&self) -> &[JointBreakEvent] {
+        &self.break_events
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         self.rows.capacity() * std::mem::size_of::<ConstraintRow>()
+            + self.row_joint_indices.capacity() * std::mem::size_of::<usize>()
+            + self.reactions.capacity() * std::mem::size_of::<JointReaction>()
+            + self.break_events.capacity() * std::mem::size_of::<JointBreakEvent>()
     }
 }
 

@@ -39,7 +39,7 @@ use crate::{
     containers::DensePool,
     execution::{SequentialExecutor, StepExecutor},
     gravity::{CentralGravity, GravityError},
-    joint::Joint,
+    joint::{Joint, JointBreakEvent},
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
     rigid_body::{BodyState, BodyType, CcdMode, RigidBody, predict, predict_from_state},
     shape::Shape,
@@ -159,6 +159,7 @@ pub struct PhysicsWorld {
     gravity_body_updates: Vec<GravityBodyUpdate>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
+    joint_events: Vec<JointBreakEvent>,
     query_index: Option<SpatialIndex>,
     query_index_dirty: bool,
     query_proxies: Vec<(ColliderId, Aabb)>,
@@ -217,6 +218,7 @@ impl PhysicsWorld {
             gravity_body_updates: Vec::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
+            joint_events: Vec::new(),
             query_index: None,
             query_index_dirty: false,
             query_proxies: Vec::new(),
@@ -242,6 +244,11 @@ impl PhysicsWorld {
 
     pub fn collision_events(&self) -> &[CollisionEvent] {
         self.collision_system.events()
+    }
+
+    /// Returns joint-break events committed by the latest successful step.
+    pub fn joint_events(&self) -> &[JointBreakEvent] {
+        &self.joint_events
     }
 
     pub fn raycast(&self, ray: Ray, filter: QueryFilter) -> Result<Option<RayHit>, QueryError> {
@@ -1095,15 +1102,40 @@ impl PhysicsWorld {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
+        if let Err(error) = self.prepare_joint_break_commit() {
+            self.collision_system.abort_step();
+            return Err(StepError::Collision(error));
+        }
 
         #[cfg(feature = "bench-internals")]
         let commit_started = Instant::now();
         self.commit_predicted_states();
+        self.commit_joint_breaks();
         self.collision_system.commit_step();
         #[cfg(feature = "bench-internals")]
         self.collision_system
             .record_commit(commit_started.elapsed());
         Ok(())
+    }
+
+    fn prepare_joint_break_commit(&mut self) -> Result<(), CollisionError> {
+        self.joint_events
+            .try_reserve(self.collision_system.joint_break_events().len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)
+    }
+
+    fn commit_joint_breaks(&mut self) {
+        let world_id = self.world_id;
+        let break_events = self.collision_system.joint_break_events();
+        let joints = &mut self.joints;
+        let committed_events = &mut self.joint_events;
+        committed_events.clear();
+        for event in break_events.iter().copied() {
+            let id = event.joint();
+            if id.world == world_id && joints.remove(id.dense).is_some() {
+                committed_events.push(event);
+            }
+        }
     }
 
     fn prepare_force_source_updates(&mut self) -> Result<(), (ForceSourceId, ForceSourceError)> {
@@ -1533,7 +1565,7 @@ impl PhysicsWorld {
         let bodies = &self.bodies;
         let joints = &self.joints;
         let context = &mut self.collision_system.context;
-        for (_, entry) in joints.iter() {
+        for (dense, entry) in joints.iter() {
             let (body_a_id, body_b_id, joint) = (entry.body_a, entry.body_b, entry.joint);
             if !joint.common().enabled {
                 continue;
@@ -1572,6 +1604,10 @@ impl PhysicsWorld {
             context
                 .joint_constraints
                 .push(crate::joint::JointConstraint {
+                    id: crate::world::JointId {
+                        world: world_id,
+                        dense,
+                    },
                     body_a,
                     body_b,
                     joint,
@@ -4705,10 +4741,16 @@ impl PhysicsWorld {
             self.rollback_gravity_updates();
             return Err(StepError::Collision(error));
         }
+        if let Err(error) = self.prepare_joint_break_commit() {
+            self.collision_system.abort_step();
+            self.rollback_gravity_updates();
+            return Err(StepError::Collision(error));
+        }
 
         #[cfg(feature = "bench-internals")]
         let commit_started = Instant::now();
         self.commit_predicted_states();
+        self.commit_joint_breaks();
         self.collision_system.commit_step();
         self.clear_gravity_updates();
         #[cfg(feature = "bench-internals")]

@@ -54,14 +54,16 @@ limit, scheduler, and worker settings. `start()` returns immediately.
 preserves the world so the same simulation can be started again.
 
 `PhysicsClient` is cloneable and thread-safe. Use awaited methods for structural
-operations such as adding or removing bodies, colliders, and force sources.
+operations such as adding or removing bodies, colliders, force sources, and
+joints. Joint creation is awaited so it can return a generational `JointId`.
 Successful world-changing calls complete only after their physics step succeeds
 and the corresponding snapshot has been published. Thus, after `add_body`
 returns, `snapshot().body(id)` is present; after `remove_body` returns, it is
 absent. `next_snapshot()` can still skip later intermediate publications.
 
 Use `PhysicsCommandBuffer` and `try_submit` for ordered changes during a
-synchronous game tick. `try_submit()` means only that the complete buffer was
+synchronous game tick. Existing joints can be updated, enabled, disabled, or
+removed in an atomic batch. `try_submit()` means only that the complete buffer was
 accepted into the bounded queue. A successful `PhysicsBatchResult` means the
 batch was applied atomically, its step completed, and that step's snapshot was
 published. The result's `step` identifies that publication; the latest snapshot
@@ -108,6 +110,11 @@ its force sources too.
 Snapshots are immutable and may skip intermediate steps. Collision events are
 published in bounded batches and report their committed step. Lagging event
 subscribers receive an explicit `CollisionEventStreamError::Lagged` result.
+Joint breaks are available from `PhysicsWorld::joint_events()` and through
+`PhysicsClient::subscribe_joint_break_events()`. A break event reports the joint
+ID and measured force/torque; the runtime publishes it only after the successful
+step snapshot. Break thresholds use newtons and newton-meters, derived from the
+joint's accumulated solver impulses divided by that step's `dt`.
 
 For collision pipeline and worker measurements, see
 [`benchmarks/collisions.md`](../benchmarks/collisions.md). The historical CCD

@@ -58,7 +58,18 @@ fn manifold(body_a: usize, body_b: usize) -> SolverManifold {
 fn joint(body_a: usize, body_b: usize, enabled: bool) -> JointConstraint {
     let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
     common.enabled = enabled;
+    let mut world = PhysicsWorld::new();
+    let first = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let second = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let id = world
+        .add_joint(first, second, Joint::Fixed(FixedJoint::new(common)))
+        .unwrap();
     JointConstraint {
+        id,
         body_a,
         body_b,
         joint: Joint::Fixed(FixedJoint::new(common)),

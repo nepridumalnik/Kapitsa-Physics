@@ -19,6 +19,10 @@ pub mod gravity {
     pub use kapitsa_core::gravity::{CentralGravity, GravityError};
 }
 
+pub mod joint {
+    pub use kapitsa_core::joint::*;
+}
+
 pub mod mass {
     pub use kapitsa_core::mass::{MassError, MassProperties};
 }
@@ -52,7 +56,8 @@ pub mod transform {
 
 pub mod world {
     pub use kapitsa_core::world::{
-        BodyId, ColliderId, ForceSource, ForceSourceError, ForceSourceId, StepError, WorldError,
+        BodyId, ColliderId, ForceSource, ForceSourceError, ForceSourceId, JointId, StepError,
+        WorldError,
     };
 }
 
@@ -63,18 +68,20 @@ pub use kapitsa_core::{
         CollisionPair, ContactInfo,
     },
     gravity::{CentralGravity, GravityError},
+    joint::{Joint, JointBreakEvent},
     mass::MassProperties,
     material::{MaterialId, PhysicsMaterial},
     rigid_body::{BodyState, CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
-    world::{BodyId, ColliderId, ForceSourceId, StepError, WorldError},
+    world::{BodyId, ColliderId, ForceSourceId, JointId, StepError, WorldError},
 };
 
 pub use runtime::{
     BatchId, CollisionEventBatch, CollisionEventStreamError, CollisionEvents, ConfigError,
-    PhysicsBatchError, PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults,
-    PhysicsClient, PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
+    JointBreakEventBatch, JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError,
+    PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
+    PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
     PhysicsSnapshot, PhysicsSubmitError, SchedulerConfig, Simulation, SimulationConfig,
     SimulationError, SimulationMetrics, SimulationState, StepMeasurement, StepStats, WorkerConfig,
     WorkerConfigError,

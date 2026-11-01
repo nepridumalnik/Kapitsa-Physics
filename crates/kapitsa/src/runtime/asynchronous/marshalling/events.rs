@@ -1,6 +1,6 @@
 use std::fmt;
 
-use kapitsa_core::collision::CollisionEvent;
+use kapitsa_core::{collision::CollisionEvent, joint::JointBreakEvent};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use super::PhysicsClientError;
@@ -56,6 +56,54 @@ impl fmt::Display for CollisionEventStreamError {
 }
 
 impl std::error::Error for CollisionEventStreamError {}
+
+/// Joint break events committed by one successful physics step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JointBreakEventBatch {
+    step: u64,
+    events: Vec<JointBreakEvent>,
+}
+
+impl JointBreakEventBatch {
+    pub(crate) fn new(step: u64, events: Vec<JointBreakEvent>) -> Self {
+        Self { step, events }
+    }
+
+    /// Returns the successful physics step associated with this batch.
+    pub fn step(&self) -> u64 {
+        self.step
+    }
+
+    /// Returns the joint breaks committed by this step.
+    pub fn events(&self) -> &[JointBreakEvent] {
+        &self.events
+    }
+}
+
+/// Failure returned while receiving joint break event batches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JointBreakEventStreamError {
+    Lagged { missed_batches: u64 },
+    NotRunning,
+    ChannelClosed,
+}
+
+impl fmt::Display for JointBreakEventStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Lagged { missed_batches } => {
+                write!(
+                    formatter,
+                    "joint event stream missed {missed_batches} batches"
+                )
+            }
+            Self::NotRunning => formatter.write_str("physics simulation is not running"),
+            Self::ChannelClosed => formatter.write_str("joint event channel is closed"),
+        }
+    }
+}
+
+impl std::error::Error for JointBreakEventStreamError {}
 
 /// A batch failure. `command_index` is `None` when the package was not rejected
 /// by an individual command, such as stopping before apply or a failed step
@@ -170,6 +218,60 @@ pub struct CollisionEvents {
     running: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
 }
 
+/// Subscription to bounded joint-break event batches.
+pub struct JointBreakEvents {
+    receiver: broadcast::Receiver<JointBreakEventBatch>,
+    running: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
+}
+
+impl JointBreakEvents {
+    pub(crate) fn new(
+        receiver: broadcast::Receiver<JointBreakEventBatch>,
+        running: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
+    ) -> Self {
+        Self { receiver, running }
+    }
+
+    /// Waits for the next committed joint-break batch and reports lost batches.
+    pub async fn next_batch(&mut self) -> Result<JointBreakEventBatch, JointBreakEventStreamError> {
+        loop {
+            if self.running.borrow().is_none() {
+                return match self.receiver.try_recv() {
+                    Ok(batch) => Ok(batch),
+                    Err(broadcast::error::TryRecvError::Lagged(missed_batches)) => {
+                        Err(JointBreakEventStreamError::Lagged { missed_batches })
+                    }
+                    Err(broadcast::error::TryRecvError::Empty) => {
+                        Err(JointBreakEventStreamError::NotRunning)
+                    }
+                    Err(broadcast::error::TryRecvError::Closed) => {
+                        Err(JointBreakEventStreamError::ChannelClosed)
+                    }
+                };
+            }
+            tokio::select! {
+                batch = self.receiver.recv() => match batch {
+                    Ok(batch) => return Ok(batch),
+                    Err(broadcast::error::RecvError::Lagged(missed_batches)) => {
+                        return Err(JointBreakEventStreamError::Lagged { missed_batches });
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(JointBreakEventStreamError::ChannelClosed);
+                    }
+                },
+                changed = self.running.changed() => {
+                    if changed.is_err() {
+                        return Err(JointBreakEventStreamError::ChannelClosed);
+                    }
+                    if self.running.borrow().is_none() {
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl CollisionEvents {
     pub(crate) fn new(
         receiver: broadcast::Receiver<CollisionEventBatch>,
@@ -232,7 +334,8 @@ mod tests {
     use tokio::sync::{broadcast, mpsc, watch};
 
     use super::{
-        CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsBatchResult,
+        CollisionEventBatch, CollisionEventStreamError, CollisionEvents, JointBreakEventBatch,
+        JointBreakEventStreamError, JointBreakEvents, PhysicsBatchResult,
         PhysicsBatchResultStreamError, PhysicsBatchResults,
     };
     use crate::runtime::asynchronous::marshalling::BatchId;
@@ -303,6 +406,24 @@ mod tests {
         let result = subscription.next_result().await.expect("latest result");
         assert_eq!(result.batch_id.get(), 3);
         assert_eq!(result.step, 3);
+    }
+
+    #[tokio::test]
+    async fn joint_break_stream_reports_lag_and_keeps_the_latest_step() {
+        let (events, receiver) = broadcast::channel(1);
+        let (_running_tx, running_rx) = running_state();
+        let mut subscription = JointBreakEvents::new(receiver, running_rx);
+        for step in 1..=3 {
+            events
+                .send(JointBreakEventBatch::new(step, Vec::new()))
+                .expect("subscriber exists");
+        }
+
+        assert_eq!(
+            subscription.next_batch().await,
+            Err(JointBreakEventStreamError::Lagged { missed_batches: 2 })
+        );
+        assert_eq!(subscription.next_batch().await.unwrap().step(), 3);
     }
 
     #[tokio::test]

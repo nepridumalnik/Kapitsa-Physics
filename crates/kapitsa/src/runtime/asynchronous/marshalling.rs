@@ -13,8 +13,9 @@ pub use command::{
 };
 pub(crate) use command::{BatchScratch, CommandRequest, apply_command, apply_command_batch};
 pub use events::{
-    CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsBatchError,
-    PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults,
+    CollisionEventBatch, CollisionEventStreamError, CollisionEvents, JointBreakEventBatch,
+    JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError, PhysicsBatchResult,
+    PhysicsBatchResultStreamError, PhysicsBatchResults,
 };
 pub use snapshot::PhysicsSnapshot;
 

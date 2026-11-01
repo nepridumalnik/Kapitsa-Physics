@@ -10,10 +10,11 @@ mod planner;
 mod sync;
 
 pub use asynchronous::{
-    BatchId, CollisionEventBatch, CollisionEventStreamError, CollisionEvents, PhysicsBatchError,
-    PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
-    PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
-    PhysicsSnapshot, PhysicsSubmitError, Simulation, SimulationError,
+    BatchId, CollisionEventBatch, CollisionEventStreamError, CollisionEvents, JointBreakEventBatch,
+    JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError, PhysicsBatchResult,
+    PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient, PhysicsClientError,
+    PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSnapshot,
+    PhysicsSubmitError, Simulation, SimulationError,
 };
 pub use config::{ConfigError, SchedulerConfig, SimulationConfig};
 pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};

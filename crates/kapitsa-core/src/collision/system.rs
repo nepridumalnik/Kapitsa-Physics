@@ -87,6 +87,10 @@ impl CollisionSystem {
         &self.events
     }
 
+    pub(crate) fn joint_break_events(&self) -> &[crate::joint::JointBreakEvent] {
+        &self.context.joint_break_events
+    }
+
     pub(crate) fn begin_step(&mut self) {
         self.context.clear();
         self.lifecycle_staged = false;
@@ -857,6 +861,7 @@ impl CollisionSystem {
         executor: &impl StepExecutor,
         dt: f64,
     ) -> Result<(), CollisionError> {
+        self.context.joint_break_events.clear();
         if let Some(cache) = self.contact_cache.as_ref() {
             cache.warm_start_solver(&mut self.context.solver_manifolds)?;
         }
@@ -1049,6 +1054,22 @@ impl CollisionSystem {
                 return Err(error);
             }
         }
+
+        for island in self.solver_islands.iter().take(island_count) {
+            self.context
+                .joint_break_events
+                .try_reserve(island.joint_workspace.break_events().len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.context
+                .joint_break_events
+                .extend_from_slice(island.joint_workspace.break_events());
+        }
+        self.context
+            .joint_break_events
+            .sort_unstable_by_key(|event| event.joint());
+        self.context
+            .joint_break_events
+            .dedup_by_key(|event| event.joint());
         #[cfg(feature = "bench-internals")]
         {
             self.benchmark_metrics.solver_iterations = iterations_started.elapsed();

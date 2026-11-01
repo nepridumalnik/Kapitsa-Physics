@@ -6,20 +6,22 @@ use std::sync::{
 use kapitsa_core::{
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{CollisionConfig, OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
+    joint::Joint,
     mass::MassProperties,
     material::MaterialId,
     rigid_body::{CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
-    world::{BodyId, ColliderId, ForceSourceId},
+    world::{BodyId, ColliderId, ForceSourceId, JointId},
 };
 use kapitsa_math::{Affine3, Vec3};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::PhysicsClientError;
 use super::{
-    CollisionEventBatch, CollisionEvents, PhysicsBatchResult, PhysicsBatchResults, PhysicsCommand,
-    PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSnapshot, PhysicsSubmitError,
+    CollisionEventBatch, CollisionEvents, JointBreakEventBatch, JointBreakEvents,
+    PhysicsBatchResult, PhysicsBatchResults, PhysicsCommand, PhysicsCommandBuffer,
+    PhysicsCommandResult, PhysicsSnapshot, PhysicsSubmitError,
     buffer_pool::CommandBufferPool,
     command::{BatchId, CommandRequest},
 };
@@ -30,6 +32,7 @@ pub struct PhysicsClient {
     command_tx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
     snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
     collision_events: broadcast::Sender<CollisionEventBatch>,
+    joint_break_events: broadcast::Sender<JointBreakEventBatch>,
     batch_results: broadcast::Sender<PhysicsBatchResult>,
     batch_id_sequence: Arc<AtomicU64>,
     buffer_pool: Arc<CommandBufferPool>,
@@ -40,6 +43,7 @@ impl PhysicsClient {
         command_tx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
         snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
         collision_events: broadcast::Sender<CollisionEventBatch>,
+        joint_break_events: broadcast::Sender<JointBreakEventBatch>,
         batch_results: broadcast::Sender<PhysicsBatchResult>,
         batch_id_sequence: Arc<AtomicU64>,
         buffer_pool: Arc<CommandBufferPool>,
@@ -48,6 +52,7 @@ impl PhysicsClient {
             command_tx,
             snapshot_rx,
             collision_events,
+            joint_break_events,
             batch_results,
             batch_id_sequence,
             buffer_pool,
@@ -138,6 +143,7 @@ impl PhysicsClient {
             PhysicsCommandResult::Done
             | PhysicsCommandResult::Collider(_)
             | PhysicsCommandResult::ForceSource(_)
+            | PhysicsCommandResult::Joint(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
@@ -163,6 +169,7 @@ impl PhysicsClient {
             PhysicsCommandResult::Done
             | PhysicsCommandResult::Body(_)
             | PhysicsCommandResult::ForceSource(_)
+            | PhysicsCommandResult::Joint(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
@@ -172,6 +179,57 @@ impl PhysicsClient {
     /// Removes a collider from the world.
     pub async fn remove_collider(&self, id: ColliderId) -> Result<(), PhysicsClientError> {
         expect_done(self.submit(PhysicsCommand::RemoveCollider { id }).await?)
+    }
+
+    /// Adds a joint and returns its ID after the step snapshot is published.
+    pub async fn add_joint(
+        &self,
+        body_a: BodyId,
+        body_b: BodyId,
+        joint: Joint,
+    ) -> Result<JointId, PhysicsClientError> {
+        match self
+            .submit(PhysicsCommand::AddJoint {
+                body_a,
+                body_b,
+                joint,
+            })
+            .await?
+        {
+            PhysicsCommandResult::Joint(id) => Ok(id),
+            PhysicsCommandResult::Done
+            | PhysicsCommandResult::Body(_)
+            | PhysicsCommandResult::Collider(_)
+            | PhysicsCommandResult::ForceSource(_)
+            | PhysicsCommandResult::Raycast(_)
+            | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
+        }
+    }
+
+    /// Removes a joint at a physics-step boundary.
+    pub async fn remove_joint(&self, id: JointId) -> Result<(), PhysicsClientError> {
+        expect_done(self.submit(PhysicsCommand::RemoveJoint { id }).await?)
+    }
+
+    /// Replaces a joint's settings at a physics-step boundary.
+    pub async fn update_joint(&self, id: JointId, joint: Joint) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::UpdateJoint { id, joint })
+                .await?,
+        )
+    }
+
+    /// Enables or disables a joint at a physics-step boundary.
+    pub async fn set_joint_enabled(
+        &self,
+        id: JointId,
+        enabled: bool,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetJointEnabled { id, enabled })
+                .await?,
+        )
     }
 
     /// Creates a persistent force source attached to a dynamic body.
@@ -196,6 +254,7 @@ impl PhysicsClient {
             PhysicsCommandResult::Done
             | PhysicsCommandResult::Body(_)
             | PhysicsCommandResult::Collider(_)
+            | PhysicsCommandResult::Joint(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
@@ -446,6 +505,11 @@ impl PhysicsClient {
         CollisionEvents::new(self.collision_events.subscribe(), self.command_tx.clone())
     }
 
+    /// Subscribes to joint breaks committed by successful physics steps.
+    pub fn subscribe_joint_break_events(&self) -> JointBreakEvents {
+        JointBreakEvents::new(self.joint_break_events.subscribe(), self.command_tx.clone())
+    }
+
     /// Subscribes to bounded asynchronous command-buffer results.
     pub fn subscribe_batch_results(&self) -> PhysicsBatchResults {
         PhysicsBatchResults::new(self.batch_results.subscribe(), self.command_tx.clone())
@@ -496,6 +560,7 @@ fn expect_done(result: PhysicsCommandResult) -> Result<(), PhysicsClientError> {
         PhysicsCommandResult::Body(_)
         | PhysicsCommandResult::Collider(_)
         | PhysicsCommandResult::ForceSource(_)
+        | PhysicsCommandResult::Joint(_)
         | PhysicsCommandResult::Raycast(_)
         | PhysicsCommandResult::Sweep(_)
         | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
@@ -544,6 +609,7 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel(capacity);
         let (command_state_tx, command_state_rx) = watch::channel(Some(command_tx));
         let (collision_events, _) = broadcast::channel(4);
+        let (joint_break_events, _) = broadcast::channel(4);
         let (batch_results, _) = broadcast::channel(4);
         let buffer_pool = Arc::new(CommandBufferPool::default());
         let initial = Arc::new(PhysicsSnapshot::from_world(
@@ -557,6 +623,7 @@ mod tests {
                 command_state_rx,
                 snapshot_rx,
                 collision_events,
+                joint_break_events,
                 batch_results,
                 Arc::new(AtomicU64::new(1)),
                 Arc::clone(&buffer_pool),
@@ -1077,11 +1144,13 @@ mod tests {
         ));
         let (_snapshot_tx, snapshot_rx) = watch::channel(initial);
         let (collision_events, _) = broadcast::channel(4);
+        let (joint_break_events, _) = broadcast::channel(4);
         let (batch_results, _) = broadcast::channel(4);
         let client = PhysicsClient::new(
             state_rx,
             snapshot_rx,
             collision_events,
+            joint_break_events,
             batch_results,
             Arc::new(AtomicU64::new(1)),
             Arc::new(CommandBufferPool::default()),

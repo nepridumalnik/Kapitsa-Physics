@@ -184,6 +184,7 @@ impl SolverWorkspace {
             JointSolver::prepare(joint_workspace, bodies, joints, dt)?;
             JointSolver::solve_position_iteration(joint_workspace, bodies, dt)?;
         }
+        joint_workspace.collect_break_events(joints, dt)?;
         Ok(())
     }
 

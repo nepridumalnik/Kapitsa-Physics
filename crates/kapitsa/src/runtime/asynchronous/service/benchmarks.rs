@@ -26,9 +26,9 @@ use tokio::sync::{broadcast, oneshot, watch};
 
 use super::{
     COLLISION_EVENT_BATCH_CAPACITY, COMMAND_QUEUE_CAPACITY, CollisionEventBatch, CommandBufferPool,
-    CommandQueue, PHYSICS_BATCH_RESULT_CAPACITY, PhysicsClient, PhysicsSnapshot, Simulation,
-    SimulationEvents, apply_queued_commands, publish_command_results, publish_runtime_metrics,
-    wait_for_scaled_step,
+    CommandQueue, JOINT_BREAK_EVENT_BATCH_CAPACITY, PHYSICS_BATCH_RESULT_CAPACITY, PhysicsClient,
+    PhysicsSnapshot, Simulation, SimulationEvents, apply_queued_commands, publish_command_results,
+    publish_runtime_metrics, wait_for_scaled_step,
 };
 use crate::runtime::{
     PhysicsBatchResults, PhysicsCommandBuffer, PhysicsSubmitError, SimulationConfig, WorkerConfig,
@@ -904,6 +904,7 @@ fn benchmark_time_warp_scheduler_overhead() -> Result<(), Box<dyn std::error::Er
         let mut queue = CommandQueue::new(command_rx, Arc::new(CommandBufferPool::default()));
         let events = SimulationEvents {
             collisions: collision_tx,
+            joint_breaks: broadcast::channel(JOINT_BREAK_EVENT_BATCH_CAPACITY).0,
             batch_results: broadcast::channel(PHYSICS_BATCH_RESULT_CAPACITY).0,
         };
         let mut command_samples = Vec::with_capacity(SAMPLES);

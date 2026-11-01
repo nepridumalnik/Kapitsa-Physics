@@ -439,6 +439,91 @@ fn joint_only_world_solves_connected_bodies_without_contacts() {
 }
 
 #[test]
+fn joint_break_force_uses_solver_impulse_divided_by_step_dt() {
+    let mut world = PhysicsWorld::new();
+    let body_a = world.add_body(dynamic(Vec3::ZERO, Vec3::ZERO)).unwrap();
+    let body_b = world.add_body(dynamic(Vec3::ZERO, Vec3::X * 10.0)).unwrap();
+    let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    common.break_force = Some(100.0);
+    let joint = world
+        .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+        .unwrap();
+
+    world.step(0.01).expect("breaking step");
+
+    assert_eq!(world.joint_count(), 0);
+    assert_eq!(world.joint_events().len(), 1);
+    let event = world.joint_events()[0];
+    assert_eq!(event.joint(), joint);
+    let impulse = world
+        .body(body_a)
+        .unwrap()
+        .state()
+        .linear_velocity()
+        .length();
+    assert!((event.force() - impulse / 0.01).abs() < 1.0e-8);
+    assert!(event.torque() < 1.0e-8);
+
+    world.step(0.01).expect("step after break");
+    assert!(world.joint_events().is_empty());
+}
+
+#[test]
+fn joint_break_torque_uses_angular_solver_impulse_divided_by_step_dt() {
+    let mut world = PhysicsWorld::new();
+    let body_a = dynamic(Vec3::ZERO, Vec3::ZERO);
+    let mut body_b = dynamic(Vec3::ZERO, Vec3::ZERO);
+    body_b
+        .set_angular_velocity(Vec3::Z * 10.0)
+        .expect("angular velocity");
+    let body_a = world.add_body(body_a).unwrap();
+    let body_b = world.add_body(body_b).unwrap();
+    let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    common.break_torque = Some(100.0);
+    let joint = world
+        .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+        .unwrap();
+
+    world.step(0.01).expect("breaking step");
+
+    assert_eq!(world.joint_count(), 0);
+    assert_eq!(world.joint_events().len(), 1);
+    let event = world.joint_events()[0];
+    assert_eq!(event.joint(), joint);
+    assert!(event.force() < 1.0e-8);
+    let angular_impulse = world
+        .body(body_a)
+        .unwrap()
+        .state()
+        .angular_velocity()
+        .length();
+    assert!((event.torque() - angular_impulse / 0.01).abs() < 1.0e-8);
+}
+
+#[test]
+fn disabled_joint_does_not_break_and_can_be_reenabled_before_breaking() {
+    let mut world = PhysicsWorld::new();
+    let body_a = world.add_body(dynamic(Vec3::ZERO, Vec3::ZERO)).unwrap();
+    let body_b = world.add_body(dynamic(Vec3::ZERO, Vec3::X * 10.0)).unwrap();
+    let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    common.break_force = Some(100.0);
+    common.enabled = false;
+    let joint = world
+        .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+        .unwrap();
+
+    world.step(0.01).expect("disabled joint step");
+    assert_eq!(world.joint_count(), 1);
+    assert!(world.joint_events().is_empty());
+
+    world.set_joint_enabled(joint, true).expect("enable joint");
+    world.step(0.01).expect("enabled joint step");
+    assert_eq!(world.joint_count(), 0);
+    assert_eq!(world.joint_events().len(), 1);
+    assert!(world.set_joint_enabled(joint, true).is_err());
+}
+
+#[test]
 fn contact_and_joint_constraints_solve_together_and_respect_collision_suppression() {
     let mut world = PhysicsWorld::new();
     let body_a = world.add_body(dynamic(Vec3::ZERO, Vec3::ZERO)).unwrap();
@@ -522,14 +607,17 @@ fn joint_solver_error_rolls_back_every_body_state() {
         .unwrap();
     let before_a = *world.body(body_a).unwrap().state();
     let before_b = *world.body(body_b).unwrap().state();
-    let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
-    world
+    let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    common.break_force = Some(1.0);
+    let joint = world
         .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
         .unwrap();
 
     assert!(world.step(0.01).is_err());
     assert_eq!(*world.body(body_a).unwrap().state(), before_a);
     assert_eq!(*world.body(body_b).unwrap().state(), before_b);
+    assert!(world.joint(joint).is_some());
+    assert!(world.joint_events().is_empty());
 }
 
 #[test]

@@ -17,8 +17,8 @@ use tokio::{
 use super::{
     StepRunner, StepRunnerError,
     marshalling::{
-        BatchScratch, CollisionEventBatch, CommandBufferPool, CommandRequest, PhysicsBatchError,
-        PhysicsBatchResult, PhysicsClient, PhysicsClientError, PhysicsCommand,
+        BatchScratch, CollisionEventBatch, CommandBufferPool, CommandRequest, JointBreakEventBatch,
+        PhysicsBatchError, PhysicsBatchResult, PhysicsClient, PhysicsClientError, PhysicsCommand,
         PhysicsCommandResult, PhysicsSnapshot, apply_command, apply_command_batch,
     },
 };
@@ -27,6 +27,7 @@ use crate::runtime::{ConfigError, SimulationConfig, SimulationMetrics, Simulatio
 const COMMAND_QUEUE_CAPACITY: usize = 1024;
 const MAX_COMMANDS_PER_STEP: usize = 1024;
 const COLLISION_EVENT_BATCH_CAPACITY: usize = 64;
+const JOINT_BREAK_EVENT_BATCH_CAPACITY: usize = 64;
 const PHYSICS_BATCH_RESULT_CAPACITY: usize = 256;
 
 struct ServiceTaskOutput {
@@ -43,6 +44,7 @@ struct RuntimeControl {
 #[derive(Clone)]
 struct SimulationEvents {
     collisions: broadcast::Sender<CollisionEventBatch>,
+    joint_breaks: broadcast::Sender<JointBreakEventBatch>,
     batch_results: broadcast::Sender<PhysicsBatchResult>,
 }
 
@@ -86,6 +88,7 @@ pub struct Simulation {
     snapshot_tx: watch::Sender<Arc<PhysicsSnapshot>>,
     snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
     collision_events_tx: broadcast::Sender<CollisionEventBatch>,
+    joint_break_events_tx: broadcast::Sender<JointBreakEventBatch>,
     batch_results_tx: broadcast::Sender<PhysicsBatchResult>,
     batch_id_sequence: Arc<AtomicU64>,
     buffer_pool: Arc<CommandBufferPool>,
@@ -187,6 +190,7 @@ impl Simulation {
         let (time_multiplier_tx, _) = watch::channel(1.0);
         let (snapshot_tx, snapshot_rx) = watch::channel(initial_snapshot);
         let (collision_events_tx, _) = broadcast::channel(COLLISION_EVENT_BATCH_CAPACITY);
+        let (joint_break_events_tx, _) = broadcast::channel(JOINT_BREAK_EVENT_BATCH_CAPACITY);
         let (batch_results_tx, _) = broadcast::channel(PHYSICS_BATCH_RESULT_CAPACITY);
         let buffer_pool = Arc::new(CommandBufferPool::default());
         Ok(Self {
@@ -199,6 +203,7 @@ impl Simulation {
             snapshot_tx,
             snapshot_rx,
             collision_events_tx,
+            joint_break_events_tx,
             batch_results_tx,
             batch_id_sequence: Arc::new(AtomicU64::new(1)),
             buffer_pool,
@@ -251,6 +256,7 @@ impl Simulation {
         let snapshot_tx = self.snapshot_tx.clone();
         let events = SimulationEvents {
             collisions: self.collision_events_tx.clone(),
+            joint_breaks: self.joint_break_events_tx.clone(),
             batch_results: self.batch_results_tx.clone(),
         };
         let mut simulation_time = self.simulation_time;
@@ -351,6 +357,7 @@ impl Simulation {
             self.command_rx.clone(),
             self.snapshot_rx.clone(),
             self.collision_events_tx.clone(),
+            self.joint_break_events_tx.clone(),
             self.batch_results_tx.clone(),
             Arc::clone(&self.batch_id_sequence),
             Arc::clone(&self.buffer_pool),
@@ -521,6 +528,19 @@ async fn run_simulation_loop(
                         .to_vec(),
                 );
                 let _ = events.collisions.send(batch);
+            }
+            if events.joint_breaks.receiver_count() > 0 {
+                let joint_events = simulation
+                    .world()
+                    .map_err(SimulationError::from)?
+                    .joint_events();
+                if !joint_events.is_empty() {
+                    let batch = JointBreakEventBatch::new(
+                        simulation.metrics().total_steps,
+                        joint_events.to_vec(),
+                    );
+                    let _ = events.joint_breaks.send(batch);
+                }
             }
 
             accumulator = accumulator.saturating_sub(step_duration);
@@ -787,11 +807,12 @@ mod tests {
         collider::Collider,
         collision::{QueryFilter, Ray},
         gravity::CentralGravity,
+        joint::{FixedJoint, Joint, JointCommon, JointFrame},
         mass::MassProperties,
         rigid_body::RigidBody,
         shape::{Shape, Sphere},
         transform::Transform,
-        world::StepError,
+        world::{StepError, WorldError},
     };
     use kapitsa_math::{Mat3, Vec3};
     use tokio::{sync::oneshot, time::sleep};
@@ -845,6 +866,50 @@ mod tests {
         sleep(Duration::from_millis(25)).await;
         simulation.stop().await.expect("second stop");
         assert!(simulation.metrics().total_steps > previous_steps);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_joint_commands_publish_break_events_after_the_snapshot() {
+        let mut simulation = Simulation::new_from_config(config(500)).expect("simulation");
+        let client = simulation.client();
+        let mut breaks = client.subscribe_joint_break_events();
+        let mut results = client.subscribe_batch_results();
+        simulation.start().expect("start");
+
+        let body_a = client.add_body(dynamic_body()).await.expect("body A");
+        let body_b = client.add_body(dynamic_body()).await.expect("body B");
+        let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        common.break_force = Some(100.0);
+        let joint = client
+            .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+            .await
+            .expect("joint");
+
+        let mut commands = client.commands();
+        commands.set_joint_enabled(joint, false);
+        commands.update_joint(joint, Joint::Fixed(FixedJoint::new(common)));
+        commands.set_joint_enabled(joint, true);
+        let batch_id = client.try_submit(commands).expect("joint batch accepted");
+        let batch = results.next_result().await.expect("joint batch result");
+        assert_eq!(batch.batch_id, batch_id);
+        assert_eq!(batch.result, Ok(()));
+
+        client
+            .set_linear_velocity(body_b, Vec3::X * 10.0)
+            .await
+            .expect("load joint");
+        let event_batch = tokio::time::timeout(Duration::from_secs(1), breaks.next_batch())
+            .await
+            .expect("break event arrives")
+            .expect("break event stream");
+        assert_eq!(event_batch.events().len(), 1);
+        assert_eq!(event_batch.events()[0].joint(), joint);
+        assert!(client.snapshot().step() >= event_batch.step());
+        assert!(matches!(
+            client.remove_joint(joint).await,
+            Err(PhysicsClientError::World(WorldError::InvalidJointId))
+        ));
+        simulation.stop().await.expect("stop");
     }
 
     #[tokio::test(start_paused = true)]

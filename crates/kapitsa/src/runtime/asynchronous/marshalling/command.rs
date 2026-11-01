@@ -3,13 +3,15 @@ use std::collections::HashMap;
 use kapitsa_core::{
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{CollisionConfig, OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
+    joint::Joint,
     mass::MassProperties,
     material::MaterialId,
     rigid_body::{CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
     world::{
-        BodyId, ColliderId, ForceSource, ForceSourceError, ForceSourceId, PhysicsWorld, WorldError,
+        BodyId, ColliderId, ForceSource, ForceSourceError, ForceSourceId, JointId, PhysicsWorld,
+        WorldError,
     },
 };
 use kapitsa_math::{Affine3, Vec3};
@@ -40,6 +42,18 @@ pub enum PhysicsCommand {
     RemoveBody { id: BodyId },
     /// Attaches a collider to a body and returns its new [`ColliderId`].
     AddCollider { body: BodyId, collider: Collider },
+    /// Creates a joint between two bodies and returns its new [`JointId`].
+    AddJoint {
+        body_a: BodyId,
+        body_b: BodyId,
+        joint: Joint,
+    },
+    /// Removes a joint.
+    RemoveJoint { id: JointId },
+    /// Replaces a joint's settings while retaining its ID and attached bodies.
+    UpdateJoint { id: JointId, joint: Joint },
+    /// Enables or disables a joint without changing its settings.
+    SetJointEnabled { id: JointId, enabled: bool },
     /// Removes a collider.
     RemoveCollider { id: ColliderId },
     /// Creates a persistent local-space force source and returns its ID.
@@ -242,6 +256,23 @@ impl PhysicsCommandBuffer {
         self.commands
             .push(PhysicsCommand::SetForceSourceEnabled { id, enabled });
     }
+
+    /// Removes a joint as part of this atomic batch.
+    pub fn remove_joint(&mut self, id: JointId) {
+        self.commands.push(PhysicsCommand::RemoveJoint { id });
+    }
+
+    /// Replaces a joint's settings as part of this atomic batch.
+    pub fn update_joint(&mut self, id: JointId, joint: Joint) {
+        self.commands
+            .push(PhysicsCommand::UpdateJoint { id, joint });
+    }
+
+    /// Enables or disables a joint as part of this atomic batch.
+    pub fn set_joint_enabled(&mut self, id: JointId, enabled: bool) {
+        self.commands
+            .push(PhysicsCommand::SetJointEnabled { id, enabled });
+    }
 }
 
 /// A synchronous failure while submitting a command buffer.
@@ -303,6 +334,8 @@ pub enum PhysicsCommandResult {
     Collider(ColliderId),
     /// A persistent force source was inserted.
     ForceSource(ForceSourceId),
+    /// A joint was inserted.
+    Joint(JointId),
     /// The result of a ray query.
     Raycast(Option<RayHit>),
     /// The result of a shape sweep.
@@ -341,6 +374,13 @@ struct StagedForceSource {
     command_index: usize,
 }
 
+struct StagedJoint {
+    id: JointId,
+    joint: Joint,
+    removed: bool,
+    command_index: usize,
+}
+
 // Bound small-set scans to avoid hashing overhead on repeated-target batches.
 const SMALL_STAGING_LINEAR_SEARCH_LIMIT: usize = 64;
 
@@ -350,6 +390,9 @@ pub(crate) struct BatchScratch {
     body_indices: HashMap<BodyId, usize>,
     updated_force_sources: Vec<StagedForceSource>,
     force_source_indices: HashMap<ForceSourceId, usize>,
+    updated_joints: Vec<StagedJoint>,
+    joint_indices: HashMap<JointId, usize>,
+    joint_removals: Vec<(JointId, usize)>,
 }
 
 impl BatchScratch {
@@ -358,6 +401,9 @@ impl BatchScratch {
         self.body_indices.clear();
         self.updated_force_sources.clear();
         self.force_source_indices.clear();
+        self.updated_joints.clear();
+        self.joint_indices.clear();
+        self.joint_removals.clear();
     }
 }
 
@@ -403,6 +449,46 @@ fn apply_command_batch_staged(
             source.enabled = *enabled;
             source.command_index = command_index;
             continue;
+        }
+        match command {
+            PhysicsCommand::UpdateJoint { id, joint } => {
+                let index = staged_joint_index(world, scratch, *id, command_index)?;
+                let staged = &mut scratch.updated_joints[index];
+                if staged.removed {
+                    return Err(invalid_joint_batch_command(command_index));
+                }
+                if let Err(error) = joint.validate() {
+                    return Err(PhysicsBatchError {
+                        command_index: Some(command_index),
+                        error: PhysicsClientError::World(WorldError::Joint(error)),
+                    });
+                }
+                staged.joint = *joint;
+                staged.command_index = command_index;
+                continue;
+            }
+            PhysicsCommand::SetJointEnabled { id, enabled } => {
+                let index = staged_joint_index(world, scratch, *id, command_index)?;
+                let staged = &mut scratch.updated_joints[index];
+                if staged.removed {
+                    return Err(invalid_joint_batch_command(command_index));
+                }
+                staged.joint.set_enabled(*enabled);
+                staged.command_index = command_index;
+                continue;
+            }
+            PhysicsCommand::RemoveJoint { id } => {
+                let index = staged_joint_index(world, scratch, *id, command_index)?;
+                let staged = &mut scratch.updated_joints[index];
+                if staged.removed {
+                    return Err(invalid_joint_batch_command(command_index));
+                }
+                staged.removed = true;
+                staged.command_index = command_index;
+                scratch.joint_removals.push((*id, command_index));
+                continue;
+            }
+            _ => {}
         }
 
         let Some(id) = body_command_id(command) else {
@@ -463,8 +549,25 @@ fn apply_command_batch_staged(
             })?;
     }
 
-    // These commands cannot change world membership, so every ID validated above
-    // remains live until the staged body copies are committed.
+    for (id, command_index) in &scratch.joint_removals {
+        world.remove_joint(*id).ok_or(PhysicsBatchError {
+            command_index: Some(*command_index),
+            error: PhysicsClientError::World(WorldError::InvalidJointId),
+        })?;
+    }
+    for joint in &scratch.updated_joints {
+        if !joint.removed {
+            world
+                .update_joint(joint.id, joint.joint)
+                .map_err(|error| PhysicsBatchError {
+                    command_index: Some(joint.command_index),
+                    error: PhysicsClientError::World(error),
+                })?;
+        }
+    }
+
+    // Batch commands do not change body membership, so each staged body ID
+    // remains live until the final copyback.
     for (id, body) in &scratch.updated_bodies {
         if let Some(target) = world.body_mut(*id) {
             *target = *body;
@@ -518,6 +621,51 @@ fn staged_force_source_index(
     Ok(index)
 }
 
+fn staged_joint_index(
+    world: &PhysicsWorld,
+    scratch: &mut BatchScratch,
+    id: JointId,
+    command_index: usize,
+) -> Result<usize, PhysicsBatchError> {
+    let index = if scratch.updated_joints.len() <= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
+        scratch
+            .updated_joints
+            .iter()
+            .position(|joint| joint.id == id)
+    } else {
+        scratch.joint_indices.get(&id).copied()
+    };
+    if let Some(index) = index {
+        return Ok(index);
+    }
+    let Some(joint) = world.joint(id).copied() else {
+        return Err(invalid_joint_batch_command(command_index));
+    };
+    let index = scratch.updated_joints.len();
+    if index >= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
+        if scratch.joint_indices.is_empty() {
+            for (existing_index, existing) in scratch.updated_joints.iter().enumerate() {
+                scratch.joint_indices.insert(existing.id, existing_index);
+            }
+        }
+        scratch.joint_indices.insert(id, index);
+    }
+    scratch.updated_joints.push(StagedJoint {
+        id,
+        joint,
+        removed: false,
+        command_index,
+    });
+    Ok(index)
+}
+
+fn invalid_joint_batch_command(command_index: usize) -> PhysicsBatchError {
+    PhysicsBatchError {
+        command_index: Some(command_index),
+        error: PhysicsClientError::World(WorldError::InvalidJointId),
+    }
+}
+
 fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
     match command {
         PhysicsCommand::SetTransform { id, .. }
@@ -537,6 +685,10 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::RemoveBody { .. }
         | PhysicsCommand::AddCollider { .. }
         | PhysicsCommand::RemoveCollider { .. }
+        | PhysicsCommand::AddJoint { .. }
+        | PhysicsCommand::RemoveJoint { .. }
+        | PhysicsCommand::UpdateJoint { .. }
+        | PhysicsCommand::SetJointEnabled { .. }
         | PhysicsCommand::AddForceSource { .. }
         | PhysicsCommand::RemoveForceSource { .. }
         | PhysicsCommand::SetForceSource { .. }
@@ -582,6 +734,10 @@ fn apply_body_command(
         | PhysicsCommand::RemoveBody { .. }
         | PhysicsCommand::AddCollider { .. }
         | PhysicsCommand::RemoveCollider { .. }
+        | PhysicsCommand::AddJoint { .. }
+        | PhysicsCommand::RemoveJoint { .. }
+        | PhysicsCommand::UpdateJoint { .. }
+        | PhysicsCommand::SetJointEnabled { .. }
         | PhysicsCommand::AddForceSource { .. }
         | PhysicsCommand::RemoveForceSource { .. }
         | PhysicsCommand::SetForceSource { .. }
@@ -612,6 +768,23 @@ pub(crate) fn apply_command(
         }
         PhysicsCommand::AddCollider { body, collider } => {
             PhysicsCommandResult::Collider(world.add_collider(body, collider)?)
+        }
+        PhysicsCommand::AddJoint {
+            body_a,
+            body_b,
+            joint,
+        } => PhysicsCommandResult::Joint(world.add_joint(body_a, body_b, joint)?),
+        PhysicsCommand::RemoveJoint { id } => {
+            world.remove_joint(id).ok_or(WorldError::InvalidJointId)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::UpdateJoint { id, joint } => {
+            world.update_joint(id, joint)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetJointEnabled { id, enabled } => {
+            world.set_joint_enabled(id, enabled)?;
+            PhysicsCommandResult::Done
         }
         PhysicsCommand::RemoveCollider { id } => {
             world
@@ -795,6 +968,7 @@ pub(crate) mod tests {
     use kapitsa_core::{
         collider::{Collider, CollisionFilter, CollisionMode},
         collision::{QueryError, QueryFilter, Ray},
+        joint::{FixedJoint, Joint, JointCommon, JointFrame},
         mass::MassProperties,
         material::{MaterialStorage, PhysicsMaterial},
         rigid_body::{BodyError, RigidBody},
@@ -1712,6 +1886,168 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn joint_batch_updates_enablement_and_removal_in_fifo_order() {
+        let mut world = PhysicsWorld::new();
+        let body_a = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("body A");
+        let body_b = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("body B");
+        let id = world
+            .add_joint(
+                body_a,
+                body_b,
+                Joint::Fixed(FixedJoint::new(JointCommon::new(
+                    JointFrame::IDENTITY,
+                    JointFrame::IDENTITY,
+                ))),
+            )
+            .expect("joint");
+        let mut replacement = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        replacement.break_force = Some(25.0);
+        let commands = [
+            PhysicsCommand::SetJointEnabled { id, enabled: false },
+            PhysicsCommand::UpdateJoint {
+                id,
+                joint: Joint::Fixed(FixedJoint::new(replacement)),
+            },
+            PhysicsCommand::SetJointEnabled { id, enabled: false },
+        ];
+
+        apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
+            .expect("atomic joint batch");
+
+        let joint = world.joint(id).expect("live joint");
+        assert!(!joint.common().enabled);
+        assert_eq!(joint.common().break_force, Some(25.0));
+
+        let remove = [PhysicsCommand::RemoveJoint { id }];
+        apply_command_batch(&mut world, &remove, &mut BatchScratch::default())
+            .expect("joint removal batch");
+        assert_eq!(world.joint_count(), 0);
+        assert!(world.remove_joint(id).is_none());
+    }
+
+    #[test]
+    fn joint_batch_preserves_fifo_order_for_dense_pool_removals() {
+        let mut world = PhysicsWorld::new();
+        let body_a = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("body A");
+        let body_b = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("body B");
+        let make_joint = || {
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            )))
+        };
+        let ids = (0..5)
+            .map(|_| {
+                world
+                    .add_joint(body_a, body_b, make_joint())
+                    .expect("joint")
+            })
+            .collect::<Vec<_>>();
+        let commands = [
+            PhysicsCommand::SetJointEnabled {
+                id: ids[0],
+                enabled: false,
+            },
+            PhysicsCommand::SetJointEnabled {
+                id: ids[2],
+                enabled: false,
+            },
+            PhysicsCommand::RemoveJoint { id: ids[2] },
+            PhysicsCommand::RemoveJoint { id: ids[0] },
+        ];
+
+        apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
+            .expect("atomic FIFO batch");
+
+        let remaining = world.joints().map(|(id, _, _, _)| id).collect::<Vec<_>>();
+        assert_eq!(remaining, [ids[3], ids[1], ids[4]]);
+    }
+
+    #[test]
+    fn failed_joint_batch_leaves_joint_and_body_unchanged() {
+        let mut world = PhysicsWorld::new();
+        let dynamic = world.add_body(dynamic_body()).expect("dynamic body");
+        let fixed = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("static body");
+        let id = world
+            .add_joint(
+                dynamic,
+                fixed,
+                Joint::Fixed(FixedJoint::new(JointCommon::new(
+                    JointFrame::IDENTITY,
+                    JointFrame::IDENTITY,
+                ))),
+            )
+            .expect("joint");
+        let commands = [
+            PhysicsCommand::SetJointEnabled { id, enabled: false },
+            PhysicsCommand::SetLinearVelocity {
+                id: fixed,
+                velocity: Vec3::X,
+            },
+        ];
+
+        let error = apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
+            .expect_err("static velocity mutation is invalid");
+
+        assert_eq!(error.command_index, Some(1));
+        assert!(world.joint(id).expect("unchanged joint").common().enabled);
+        assert_eq!(
+            world
+                .body(dynamic)
+                .expect("dynamic body")
+                .state()
+                .linear_velocity(),
+            Vec3::ZERO
+        );
+    }
+
+    #[test]
+    fn single_joint_command_returns_its_id_and_stale_joint_ids_are_rejected() {
+        let mut world = PhysicsWorld::new();
+        let body_a = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("body A");
+        let body_b = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("body B");
+        let joint = Joint::Fixed(FixedJoint::new(JointCommon::new(
+            JointFrame::IDENTITY,
+            JointFrame::IDENTITY,
+        )));
+        let PhysicsCommandResult::Joint(id) = apply_command(
+            &mut world,
+            PhysicsCommand::AddJoint {
+                body_a,
+                body_b,
+                joint,
+            },
+        )
+        .expect("joint add") else {
+            panic!("add joint returns its ID");
+        };
+
+        world.remove_joint(id).expect("joint remove");
+        let result = apply_command(
+            &mut world,
+            PhysicsCommand::SetJointEnabled { id, enabled: true },
+        );
+        assert_eq!(
+            result,
+            Err(PhysicsClientError::World(WorldError::InvalidJointId))
+        );
+    }
+
+    #[test]
     fn failed_force_source_batch_does_not_commit_source_or_body_changes() {
         let mut world = PhysicsWorld::new();
         let body = world.add_body(dynamic_body()).expect("body");
@@ -1852,6 +2188,7 @@ pub(crate) mod tests {
         let (command_tx, receiver) = mpsc::channel(1);
         let (_state_tx, state_rx) = watch::channel(Some(command_tx));
         let (collision_events, _) = broadcast::channel(4);
+        let (joint_break_events, _) = broadcast::channel(4);
         let (batch_results, _) = broadcast::channel(4);
         let mut world = PhysicsWorld::new();
         let body = world.add_body(dynamic_body()).expect("body ID");
@@ -1865,6 +2202,7 @@ pub(crate) mod tests {
             state_rx,
             snapshot_rx,
             collision_events,
+            joint_break_events,
             batch_results,
             Arc::new(AtomicU64::new(1)),
             Arc::clone(&pool),
