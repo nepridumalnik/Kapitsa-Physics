@@ -78,10 +78,10 @@ Run the core phase benchmark with:
 cargo bench -p kapitsa-core --features bench-internals --bench collisions
 ```
 
-Run the Tokio worker comparison with:
+Run the `kapitsa` worker comparison with:
 
 ```powershell
-cargo bench -p kapitsa --features async --bench collisions
+cargo bench -p kapitsa --bench collisions
 ```
 
 The `bench-internals` feature adds timings and retained-capacity estimates only to the core benchmark build. Default builds do not record timings. Phase durations are inclusive of the work named for that phase; small timer overhead applies to feature-enabled runs.
@@ -823,16 +823,11 @@ optimization report](../docs/reviews/ccd-final-optimization-report.md) for
 algorithm details, transaction guarantees, workload limitations, and the
 complete validation record.
 
-## Unified simulation runtime, stage 10
+## Runtime benchmark comparisons
 
-The workspace now exposes `kapitsa::runtime::sync::Simulation` by default and
-`kapitsa::runtime::asynchronous::Simulation` behind the `async` feature. The
-shared core receives a statically dispatched `StepExecutor`. The async runtime
-owns a reusable fixed Rayon pool whose worker threads start through the host
-Tokio `Handle::spawn_blocking()`; `kapitsa-core` has no Tokio or Rayon
-dependency. `PhysicsService` retains the old clock-driven commands, snapshots,
-events, start/stop/restart, and catch-up API. See
-[`docs/runtime.md`](../docs/runtime.md) for API and lifecycle examples.
+The earlier measurements below predate the unified public facade and are kept
+for historical comparison. The current `kapitsa::Simulation` API and lifecycle
+are described in [`docs/runtime.md`](../docs/runtime.md).
 
 The earlier Stage 7 pool description is historical. Each async simulation now
 owns its pool unless it receives a shared host-owned executor; explicit
@@ -857,6 +852,29 @@ measurable change from runtime consolidation. The resweep count remains tied
 to changed body colliders, while index and broadphase work dominate the 20k
 static full step. The run also measured 31.860 ms for 20k separated dynamic
 bodies versus 32.293 ms before consolidation; these ranges overlap as well.
+
+### Unified API and persistent-force-source regression check
+
+Release comparison on 2026-11-01, AMD Ryzen 9 7900X3D, `rustc 1.98.0`.
+Both revisions used this benchmark with one warm-up and five samples. Stage 3
+is commit `5496401`; Stage 4 is commit `51ce104`. These scenes contain no force
+sources, so the comparison checks the added empty-source path against the
+previous CCD and collision pipeline.
+
+| Scenario | Stage 3 min / median / max ms | Stage 4 min / median / max ms |
+|---|---:|---:|
+| 20,000 separated Dynamic spheres | 26.573 / 27.160 / 27.307 | 27.044 / 27.854 / 28.153 |
+| 20,000 bodies, localized contacts | 30.150 / 30.605 / 30.670 | 30.192 / 31.773 / 32.137 |
+| 64 fast CCD bodies, total step | 0.692 / 0.694 / 0.718 | 0.682 / 0.697 / 0.705 |
+| 64 fast CCD bodies, CCD phase | 0.545 / 0.548 / 0.558 | 0.546 / 0.548 / 0.562 |
+| 20,000 statics + 64 CCD bodies, total step | 20.683 / 20.877 / 21.016 | 20.375 / 21.009 / 22.116 |
+| 20,000 statics + 64 CCD bodies, CCD phase | 0.171 / 0.180 / 0.192 | 0.183 / 0.188 / 0.196 |
+
+Every paired min/max range overlaps. The CCD phase median is unchanged for the
+fast-body case and 0.008 ms higher for the static-load case; the latter ranges
+overlap. No consistent regression is visible in these runs. With no configured
+sources, each step exits the new preparation path on an empty-pool check and
+does not walk bodies or allocate force-source scratch.
 
 ### Async runtime worker measurements
 
@@ -885,6 +903,6 @@ Run the unified-runtime comparisons with:
 ```powershell
 cargo bench -p kapitsa-core --features bench-internals --bench collisions
 cargo bench -p kapitsa-core --features bench-internals --bench collision_storage -- workers_4096
-cargo bench -p kapitsa --features async --bench collisions
-cargo bench -p kapitsa --features async --bench parallel_step
+cargo bench -p kapitsa --bench collisions
+cargo bench -p kapitsa --bench parallel_step
 ```

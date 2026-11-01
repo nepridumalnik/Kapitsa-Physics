@@ -1,82 +1,76 @@
-# Simulation runtimes
+# Simulation runtime
 
-The `kapitsa` crate always provides synchronous stepping. Tokio and Rayon are
-available only with the optional `async` feature:
+`kapitsa` exposes one clock-driven `Simulation`. The host application provides
+the Tokio runtime; Kapitsa creates its worker pool internally. Construction
+outside Tokio returns `SimulationError::MissingRuntime`.
 
-```toml
-kapitsa = { version = "0.1", features = ["async"] }
+```rust,no_run
+use std::error::Error;
+
+use kapitsa::math::{Mat3, Vec3};
+use kapitsa::{
+    MassProperties, RigidBody, Simulation, SimulationConfig, Transform,
+};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let mut simulation = Simulation::new_from_config(SimulationConfig::default())?;
+    let physics = simulation.client();
+    let mut results = physics.subscribe_batch_results();
+
+    simulation.start()?;
+
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let body = physics
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)
+        .await?;
+    let source = physics
+        .add_force_source(body, Vec3::ZERO, Vec3::X * 10.0)
+        .await?;
+
+    let mut commands = physics.commands();
+    commands.set_force_source(source, Vec3::ZERO, Vec3::Y * 10.0);
+    let batch_id = physics.try_submit(commands)?;
+    let result = results.next_result().await?;
+    if result.batch_id != batch_id {
+        return Err("received an unexpected command batch result".into());
+    }
+    result.result.map_err(|error| format!("batch rejected: {error:?}"))?;
+
+    if let Some(state) = physics.snapshot().body(body) {
+        println!("body velocity: {:?}", state.linear_velocity());
+    }
+
+    physics.remove_force_source(source).await?;
+    simulation.stop().await?;
+    Ok(())
+}
 ```
 
-## Manual stepping
+Use `Simulation::new()` for the default `SimulationConfig`, or
+`Simulation::new_from_config(config)` to set the fixed tick rate, catch-up
+limit, scheduler, and worker settings. `start()` returns immediately.
+`stop().await` stops scheduling steps, waits for active physics work, and
+preserves the world so the same simulation can be started again.
 
-Both runtime APIs advance exactly one fixed step per call. Manual stepping does
-not start a timer or perform catch-up work.
+`PhysicsClient` is cloneable and thread-safe. Use awaited methods for structural
+operations such as adding or removing bodies, colliders, and force sources.
+Use `PhysicsCommandBuffer` and `try_submit` for ordered changes during a
+synchronous game tick. A submitted buffer is applied atomically at a step
+boundary. Its `BatchId`, step number, typed result, and any lag in the bounded
+result stream are observable through `subscribe_batch_results()`.
 
-```rust,ignore
-use kapitsa::runtime::{SimulationConfig, sync::Simulation};
+`apply_impulse` changes velocity immediately at the next command boundary;
+`apply_force` adds a one-step force that is cleared after a successful step. A
+persistent `ForceSource` applies its body-local force at its body-local point on
+every step until it is updated, disabled, or removed. Deleting its body removes
+its force sources too.
 
-let mut simulation = Simulation::new(world, SimulationConfig::default())?;
-let stats = simulation.step()?;
-```
+Snapshots are immutable and may skip intermediate steps. Collision events are
+published in bounded batches and report their committed step. Lagging event
+subscribers receive an explicit `CollisionEventStreamError::Lagged` result.
 
-The async equivalent is `runtime::asynchronous::Simulation`; its `step().await`
-runs CPU work on a reusable Rayon pool whose workers use the host Tokio
-blocking pool. Cancelled step futures leave the in-flight step owned by the
-simulation; the next `step().await` collects that result.
-
-Async simulations are constructed inside a Tokio runtime with `new`, or with
-an explicit host `Handle` using `new_on`. Call `shutdown().await` to wait for
-worker exit and recover the world. `new_with_executor` allows multiple
-simulations to share a host-owned executor.
-
-`kapitsa-core` does not depend on Tokio or Rayon. It accepts a statically
-dispatched `StepExecutor`; CCD trajectory samples are stored as core data, so
-the collision path does not call a boxed or trait-object callback.
-
-`WorkerConfig` limits the fixed pool and controls adaptive active parallelism.
-The pool is created once; low or high load changes how many tasks a step may
-use, not the number of OS workers. `SimulationMetrics` reports step duration,
-budget use, active workers, pool size, deadline misses, and accumulated service
-time debt.
-
-## Clock-driven service
-
-Use `asynchronous::PhysicsService` when the application needs automatic
-fixed-rate stepping, catch-up, commands, snapshots, and collision events. This
-is a separate API from manual `Simulation::step()`:
-
-```rust,ignore
-use kapitsa::runtime::{SimulationConfig, asynchronous::PhysicsService};
-
-let mut service = PhysicsService::new(world, SimulationConfig::default())?;
-let client = service.client();
-service.start()?;
-
-// Client operations are queued FIFO and applied at the next step boundary.
-let body_id = client.add_body(body).await?;
-let snapshot = client.snapshot();
-
-service.stop().await?;
-let world = service.shutdown().await?;
-```
-
-`start()` and `stop().await` can be repeated; stopping waits for an active step
-to finish and leaves the worker pool available for restart. `shutdown()` stops
-the service, waits for Rayon workers to exit, and returns the world. Dropping a
-running service signals a best-effort stop; use `shutdown()` when orderly
-worker teardown is required.
-
-The command queue holds at most 1,024 requests and applies at most 1,024 at a
-step boundary. `PhysicsClient` supports body/collider edits, forces, impulses,
-and spatial queries. `PhysicsSnapshot` is an immutable view of body states;
-readers can skip intermediate snapshots. Collision event batches are bounded
-and identify their committed step. Lagging readers receive an explicit
-`CollisionEventStreamError::Lagged` result.
-
-Catch-up is only part of `PhysicsService`. `SimulationConfig::max_catch_up_steps`
-limits each service batch; remaining elapsed time is processed in later
-batches. The service reports the resulting simulation-time debt in metrics.
-
-The current CCD and runtime benchmark results are in
-[`benchmarks/collisions.md`](../benchmarks/collisions.md) and the
+For collision pipeline and worker measurements, see
+[`benchmarks/collisions.md`](../benchmarks/collisions.md). The historical CCD
+optimization details remain in the
 [`CCD optimization report`](reviews/ccd-final-optimization-report.md).

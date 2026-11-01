@@ -9,8 +9,8 @@ use std::{
 
 use kapitsa::math::{Mat3, Vec3};
 use kapitsa::{
-    MassProperties, PhysicsClient, PhysicsClientError, PhysicsSnapshot, RigidBody, Simulation,
-    SimulationConfig, Transform, WorkerConfig,
+    MassProperties, PhysicsClient, PhysicsClientError, PhysicsSnapshot, PhysicsSubmitError,
+    RigidBody, Simulation, SimulationConfig, Transform, WorkerConfig,
 };
 use tokio::task::JoinSet;
 
@@ -163,6 +163,61 @@ async fn command_buffers_are_ordered_atomic_and_report_step_results() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_short_command_batches_are_processed_in_fifo_order() {
+    const BATCH_COUNT: usize = 2_048;
+
+    let mut simulation = simulation();
+    let mut client = simulation.client();
+    simulation.start().expect("start");
+    let body = client.add_body(dynamic_body()).await.expect("body");
+
+    for index in 1..=BATCH_COUNT {
+        let expected = Vec3::X * index as f64;
+        let mut commands = client.commands();
+        commands.set_linear_velocity(body, expected);
+
+        loop {
+            match client.try_submit(commands) {
+                Ok(_) => break,
+                Err(PhysicsSubmitError::QueueFull(buffer)) => {
+                    commands = buffer;
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("command batch submission failed: {error}"),
+            }
+        }
+    }
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if client
+                .snapshot()
+                .body(body)
+                .is_some_and(|state| state.linear_velocity() == Vec3::X * BATCH_COUNT as f64)
+            {
+                break;
+            }
+            client
+                .next_snapshot()
+                .await
+                .expect("simulation remains running");
+        }
+    })
+    .await
+    .expect("all short batches are applied");
+
+    assert_eq!(
+        client
+            .snapshot()
+            .body(body)
+            .expect("body snapshot")
+            .linear_velocity(),
+        Vec3::X * BATCH_COUNT as f64
+    );
+    simulation.stop().await.expect("stop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_publishes_results_for_accepted_but_unapplied_batches() {
     let mut simulation = Simulation::new_from_config(SimulationConfig {
         tick_rate: 2,
@@ -255,6 +310,24 @@ async fn queued_cancellation_applies_and_stop_discards_other_session_requests() 
     assert!(restarted.simulation_time() > prior_snapshot.simulation_time());
     assert_eq!(restarted.len(), 1);
     simulation.stop().await.expect("second stop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_stop_wait_can_be_joined_and_restarted() {
+    let mut simulation = simulation();
+    let mut client = simulation.client();
+    simulation.start().expect("start");
+    assert!(next_snapshot(&mut client).await.step() > 0);
+
+    let mut stop = Box::pin(simulation.stop());
+    let _ = poll_once(stop.as_mut());
+    drop(stop);
+    simulation.stop().await.expect("finish cancelled stop");
+
+    let previous_step = simulation.metrics().total_steps;
+    simulation.start().expect("restart after cancelled stop");
+    assert!(next_snapshot(&mut client).await.step() > previous_step);
+    simulation.stop().await.expect("stop restarted simulation");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

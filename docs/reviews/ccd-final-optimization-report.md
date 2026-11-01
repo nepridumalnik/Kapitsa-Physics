@@ -1,5 +1,9 @@
 # CCD Final Optimization Report
 
+> Historical architecture and benchmark snapshot. Its API examples describe
+> the runtime before the unified public facade. See [`docs/runtime.md`](../runtime.md)
+> for the current integration API.
+
 - **Branch:** `feat/collisions`
 - **Starting commit:** `038e4d4a6c5147a0053b855758f26ea14e250fff`
 - **Benchmark machine:** AMD Ryzen 9 7900X3D, Windows MSVC, `rustc 1.98.0`

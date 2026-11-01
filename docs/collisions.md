@@ -237,12 +237,12 @@ with a `CollisionError` such as `InvalidMaterial`, `UnsupportedGeometryPair`,
 
 ## Runtime integration
 
-Use `kapitsa::runtime::asynchronous::Simulation` for manual one-step-at-a-time
-execution, or `PhysicsService` for a separate clock-driven loop with commands,
-snapshots, collision events, and catch-up. The service owns the world while
-running; clients communicate through a bounded FIFO queue at step boundaries.
-See [Simulation runtimes](runtime.md) for lifecycle, cancellation, and shutdown
-details. The measured collision pipeline and worker comparisons are in
+The public `kapitsa::Simulation` owns the physics world and advances it on a
+fixed clock. Use its `PhysicsClient` for body and collider changes, snapshots,
+collision events, and spatial queries. Command buffers apply ordered changes
+at a step boundary without waiting in the game tick. See
+[Simulation runtime](runtime.md) for lifecycle and command examples. The
+measured collision pipeline and worker comparisons are in
 `benchmarks/collisions.md`.
 
 ## Scope

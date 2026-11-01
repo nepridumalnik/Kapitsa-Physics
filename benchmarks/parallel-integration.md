@@ -1,6 +1,10 @@
 # Parallel Integration Benchmarks
 
-Measured with `cargo bench -p kapitsa --features async --bench parallel_step` on
+> Historical measurements from before the unified `kapitsa::Simulation` API.
+> The worker comparison still exercises the engine implementation; the public
+> integration example is in [`docs/runtime.md`](../docs/runtime.md).
+
+Measured with `cargo bench -p kapitsa --bench parallel_step` on
 2026-10-31. Each value is the median of five runs of 12 steps; world setup is
 excluded from timing. The benchmark compares synchronous stepping, the Tokio
 one-worker fast path, the previous static sharding layout, and dynamic buckets
