@@ -319,6 +319,78 @@ fn independent_ccd_islands_evaluate_only_their_own_candidates() {
 }
 
 #[test]
+fn expensive_independent_ccd_islands_match_across_worker_counts() {
+    let make_world = || {
+        let mut world = PhysicsWorld::new();
+        let wall = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .unwrap();
+        let columns = 16;
+        let wall_side = columns as f64 * 8.0 + 4.0;
+        world
+            .add_collider(
+                wall,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(0.1, wall_side, wall_side).unwrap()),
+                    Transform::identity(),
+                ),
+            )
+            .unwrap();
+        for index in 0..columns * columns {
+            let y = (index % columns) as f64 * 4.0;
+            let z = (index / columns) as f64 * 4.0;
+            let mut body = dynamic_body(Vec3::new(-5.0, y, z), Vec3::new(1000.0, 0.0, 0.0));
+            body.set_ccd_mode(CcdMode::Continuous);
+            let body = world.add_body(body).unwrap();
+            world
+                .add_collider(
+                    body,
+                    Collider::new(
+                        Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0).unwrap()),
+                        Transform::identity(),
+                    ),
+                )
+                .unwrap();
+        }
+        world
+    };
+    let dt = 1.0 / 60.0;
+    let mut expected = make_world();
+    expected.step(dt).unwrap();
+
+    for worker_count in [1, 2, 4] {
+        let mut actual = make_world();
+        let mut shards = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
+        actual.fill_step_shards(&mut shards).unwrap();
+        for shard in &mut shards {
+            for body_step in shard {
+                body_step.integrate(dt).unwrap();
+            }
+        }
+        actual
+            .commit_step_shards_with_workers(&shards, worker_count)
+            .unwrap();
+
+        for ((_, actual_body), (_, expected_body)) in actual.bodies().zip(expected.bodies()) {
+            assert_eq!(actual_body.state(), expected_body.state());
+        }
+        assert_eq!(
+            actual.collision_events().len(),
+            expected.collision_events().len()
+        );
+        for (actual, expected) in actual
+            .collision_events()
+            .iter()
+            .zip(expected.collision_events())
+        {
+            assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.sensor, expected.sensor);
+            assert_eq!(actual.contact, expected.contact);
+        }
+    }
+}
+
+#[test]
 fn continuous_rebound_refreshes_candidates_for_the_remaining_step() {
     let mut world = PhysicsWorld::new();
     let material = world
