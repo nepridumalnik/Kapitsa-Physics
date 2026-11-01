@@ -36,6 +36,7 @@ impl CcdIslandLayout {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn build(
         &mut self,
         body_types: &[BodyType],
@@ -43,7 +44,44 @@ impl CcdIslandLayout {
         candidate_bodies: &[(usize, usize)],
         force_single_island: bool,
     ) -> Result<(), CollisionError> {
+        self.build_inner(
+            body_types,
+            continuous_bodies,
+            candidate_bodies,
+            None,
+            force_single_island,
+        )
+    }
+
+    pub(crate) fn build_active(
+        &mut self,
+        body_types: &[BodyType],
+        continuous_bodies: &[bool],
+        candidate_bodies: &[(usize, usize)],
+        active_candidates: &[bool],
+        force_single_island: bool,
+    ) -> Result<(), CollisionError> {
+        self.build_inner(
+            body_types,
+            continuous_bodies,
+            candidate_bodies,
+            Some(active_candidates),
+            force_single_island,
+        )
+    }
+
+    fn build_inner(
+        &mut self,
+        body_types: &[BodyType],
+        continuous_bodies: &[bool],
+        candidate_bodies: &[(usize, usize)],
+        active_candidates: Option<&[bool]>,
+        force_single_island: bool,
+    ) -> Result<(), CollisionError> {
         if body_types.len() != continuous_bodies.len() {
+            return Err(CollisionError::InvalidContact);
+        }
+        if active_candidates.is_some_and(|active| active.len() != candidate_bodies.len()) {
             return Err(CollisionError::InvalidContact);
         }
 
@@ -62,7 +100,7 @@ impl CcdIslandLayout {
         self.candidate_islands.fill(None);
         self.island_count = 0;
 
-        for &(body_a, body_b) in candidate_bodies {
+        for (candidate_index, &(body_a, body_b)) in candidate_bodies.iter().enumerate() {
             let type_a = *body_types
                 .get(body_a)
                 .ok_or(CollisionError::InvalidContact)?;
@@ -75,7 +113,9 @@ impl CcdIslandLayout {
             {
                 return Err(CollisionError::InvalidContact);
             }
-            if !continuous_bodies[body_a] && !continuous_bodies[body_b] {
+            if !active_candidates.is_none_or(|active| active[candidate_index])
+                || (!continuous_bodies[body_a] && !continuous_bodies[body_b])
+            {
                 continue;
             }
 
@@ -108,7 +148,9 @@ impl CcdIslandLayout {
         }
 
         for (candidate_index, &(body_a, body_b)) in candidate_bodies.iter().enumerate() {
-            if !continuous_bodies[body_a] && !continuous_bodies[body_b] {
+            if !active_candidates.is_none_or(|active| active[candidate_index])
+                || (!continuous_bodies[body_a] && !continuous_bodies[body_b])
+            {
                 continue;
             }
             let island_a = (body_types[body_a] == BodyType::Dynamic)
@@ -172,11 +214,10 @@ impl CcdIslandLayout {
 
         resize_with_reserve(&mut self.body_candidate_offsets, body_types.len() + 1, 0)?;
         self.body_candidate_offsets.fill(0);
-        for (candidate_index, island_index) in self.candidate_islands.iter().enumerate() {
-            if island_index.is_none() {
+        for &(body_a, body_b) in candidate_bodies {
+            if !continuous_bodies[body_a] && !continuous_bodies[body_b] {
                 continue;
             }
-            let (body_a, body_b) = candidate_bodies[candidate_index];
             if body_types[body_a] == BodyType::Dynamic {
                 self.body_candidate_offsets[body_a + 1] = self.body_candidate_offsets[body_a + 1]
                     .checked_add(1)
@@ -201,11 +242,10 @@ impl CcdIslandLayout {
         resize_with_reserve(&mut self.write_offsets, body_types.len(), 0)?;
         self.write_offsets
             .copy_from_slice(&self.body_candidate_offsets[..body_types.len()]);
-        for (candidate_index, island_index) in self.candidate_islands.iter().enumerate() {
-            if island_index.is_none() {
+        for (candidate_index, &(body_a, body_b)) in candidate_bodies.iter().enumerate() {
+            if !continuous_bodies[body_a] && !continuous_bodies[body_b] {
                 continue;
             }
-            let (body_a, body_b) = candidate_bodies[candidate_index];
             for body in [body_a, body_b] {
                 if body_types[body] != BodyType::Dynamic {
                     continue;

@@ -46,6 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     ] {
         report_world(name, build)?;
     }
+    report_ccd_worker_scaling()?;
     report_queries()?;
     Ok(())
 }
@@ -201,19 +202,25 @@ fn level_set_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
 }
 
 fn ccd_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    ccd_scene_of(64)
+}
+
+fn ccd_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     let mut world = PhysicsWorld::new();
     let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let columns = (count as f64).sqrt().ceil() as usize;
+    let side = columns as f64 * 4.0 + 4.0;
     world.add_collider(
         wall,
         Collider::new(
-            Shape::Cuboid(kapitsa_core::shape::Cuboid::new(0.1, 200.0, 200.0)?),
+            Shape::Cuboid(kapitsa_core::shape::Cuboid::new(0.1, side, side)?),
             Transform::identity(),
         ),
     )?;
     let mass = mass()?;
-    for index in 0..64 {
-        let y = (index % 8) as f64 * 2.0;
-        let z = (index / 8) as f64 * 2.0;
+    for index in 0..count {
+        let y = (index % columns) as f64 * 2.0;
+        let z = (index / columns) as f64 * 2.0;
         add_sphere_with_velocity(
             &mut world,
             Vec3::new(-5.0, y, z),
@@ -223,6 +230,54 @@ fn ccd_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
         )?;
     }
     Ok(world)
+}
+
+fn report_ccd_worker_scaling() -> Result<(), Box<dyn Error>> {
+    println!("\nIndependent CCD islands by worker count");
+    for body_count in [1, 2, 4, 8, 16, 64, 128, 256] {
+        for worker_count in [1, 2, 4] {
+            for _ in 0..WARMUP_RUNS {
+                run_ccd_shards(body_count, worker_count)?;
+            }
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for _ in 0..SAMPLES {
+                samples.push(run_ccd_shards(body_count, worker_count)?);
+            }
+            samples.sort_unstable_by_key(|sample| sample.0);
+            let median = samples[SAMPLES / 2];
+            println!(
+                "{body_count:4} bodies x{worker_count}: step={:.3}/{:.3}/{:.3} ms | ccd={:.3} ms islands={} candidates={} toi={} resweeps={} fallback={} scratch={} KiB",
+                millis(samples[0].0),
+                millis(median.0),
+                millis(samples[SAMPLES - 1].0),
+                millis(median.1.ccd),
+                median.1.ccd_island_count,
+                median.1.ccd_initial_candidate_count,
+                median.1.ccd_toi_call_count,
+                median.1.ccd_resweep_count,
+                median.1.ccd_global_fallback_count,
+                median.1.retained_scratch_bytes / 1024,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_ccd_shards(
+    body_count: usize,
+    worker_count: usize,
+) -> Result<(Duration, CollisionStepMetrics), Box<dyn Error>> {
+    let mut world = ccd_scene_of(body_count)?;
+    let mut shards = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
+    world.fill_step_shards(&mut shards)?;
+    let started = Instant::now();
+    for shard in &mut shards {
+        for body in shard {
+            body.integrate(DT)?;
+        }
+    }
+    world.commit_step_shards(&shards)?;
+    Ok((started.elapsed(), world.collision_step_metrics()))
 }
 
 fn add_surface_movers(

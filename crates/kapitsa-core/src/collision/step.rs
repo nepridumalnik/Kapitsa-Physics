@@ -33,6 +33,7 @@ pub(crate) struct StepContext {
     pub(crate) ccd_candidate_bodies: Vec<(usize, usize)>,
     pub(crate) ccd_candidate_pairs: Vec<super::CollisionPair>,
     pub(crate) ccd_candidate_pair_set: Option<HashSet<super::CollisionPair>>,
+    pub(crate) ccd_candidate_active: Vec<bool>,
     pub(crate) ccd_toi_cache: Vec<CcdCandidateToi>,
     pub(crate) ccd_resweep_candidates: Vec<usize>,
     pub(crate) ccd_query_results: Vec<ColliderId>,
@@ -68,6 +69,7 @@ impl StepContext {
             ccd_candidate_bodies: Vec::new(),
             ccd_candidate_pairs: Vec::new(),
             ccd_candidate_pair_set: None,
+            ccd_candidate_active: Vec::new(),
             ccd_toi_cache: Vec::new(),
             ccd_resweep_candidates: Vec::new(),
             ccd_query_results: Vec::new(),
@@ -103,6 +105,7 @@ impl StepContext {
         if let Some(pairs) = &mut self.ccd_candidate_pair_set {
             pairs.clear();
         }
+        self.ccd_candidate_active.clear();
         self.ccd_toi_cache.clear();
         self.ccd_resweep_candidates.clear();
         self.ccd_query_results.clear();
@@ -148,6 +151,7 @@ impl StepContext {
             self.ccd_candidate_pair_set.as_ref().map_or(0, |pairs| {
                 pairs.capacity() * size_of::<(super::CollisionPair, ())>()
             }),
+            self.ccd_candidate_active.capacity() * size_of::<bool>(),
             self.ccd_toi_cache.capacity() * size_of::<CcdCandidateToi>(),
             self.ccd_resweep_candidates.capacity() * size_of::<usize>(),
             self.ccd_query_results.capacity() * size_of::<ColliderId>(),

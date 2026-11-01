@@ -27,11 +27,12 @@ use crate::{
     aabb::Aabb,
     collider::Collider,
     collision::{
-        CcdHit, CcdMotion, CollisionConfig, CollisionError, CollisionEvent, CollisionInteraction,
-        CollisionPair, CollisionSystem, ContactInfo, ContactManifold, ContactPoint, OverlapHit,
-        QueryError, QueryFilter, QueryScratch, QueryTarget, Ray, RayHit, ShapeHit, SolverBody,
-        SolverManifold, SolverMaterial, StepContext, overlaps_shape_with_scratch,
-        raycast_shape_with_scratch, spatial_index::SpatialIndex, sweep_shape_with_scratch,
+        CcdCandidateToi, CcdHit, CcdMotion, CollisionConfig, CollisionError, CollisionEvent,
+        CollisionInteraction, CollisionPair, CollisionSystem, ContactInfo, ContactManifold,
+        ContactPoint, NarrowPhase, OverlapHit, QueryError, QueryFilter, QueryScratch, QueryTarget,
+        Ray, RayHit, ShapeHit, SolverBody, SolverManifold, SolverMaterial, StepContext,
+        overlaps_shape_with_scratch, raycast_shape_with_scratch, spatial_index::SpatialIndex,
+        sweep_shape_with_scratch,
     },
     containers::DensePool,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
@@ -757,7 +758,7 @@ impl PhysicsWorld {
             }
         }
 
-        if let Err(error) = self.prepare_collision_candidates(dt) {
+        if let Err(error) = self.prepare_collision_candidates(dt, 1) {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
@@ -894,7 +895,11 @@ impl PhysicsWorld {
         }
     }
 
-    fn prepare_collision_candidates(&mut self, dt: f64) -> Result<(), CollisionError> {
+    fn prepare_collision_candidates(
+        &mut self,
+        dt: f64,
+        worker_count: usize,
+    ) -> Result<(), CollisionError> {
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
         self.stage_spatial_proxies(dt)?;
@@ -911,7 +916,7 @@ impl PhysicsWorld {
 
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
-        self.process_continuous_collisions(dt)?;
+        self.process_continuous_collisions(dt, worker_count)?;
         #[cfg(feature = "bench-internals")]
         self.collision_system.record_ccd(started.elapsed());
         Ok(())
@@ -944,7 +949,11 @@ impl PhysicsWorld {
         metrics
     }
 
-    fn process_continuous_collisions(&mut self, dt: f64) -> Result<(), CollisionError> {
+    fn process_continuous_collisions(
+        &mut self,
+        dt: f64,
+        worker_count: usize,
+    ) -> Result<(), CollisionError> {
         if dt <= 0.0 || self.collision_system.candidate_count() == 0 {
             return Ok(());
         }
@@ -1021,6 +1030,8 @@ impl PhysicsWorld {
                 .try_reserve(candidate_count)
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
         }
+        self.precompute_ccd_tois_parallel(dt, worker_count)?;
+        self.collision_system.build_ccd_islands(false)?;
 
         let time_tolerance = f64::EPSILON * dt.max(1.0) * 128.0;
         'passes: loop {
@@ -1272,6 +1283,8 @@ impl PhysicsWorld {
                         let impact_time = elapsed + remaining * hit.toi;
                         cached.impact_time = impact_time;
                         cached.hit = Some(hit);
+                        self.collision_system
+                            .set_ccd_candidate_active(candidate_index, true)?;
                         if earliest.is_none_or(|(current_pair, _, current_time)| {
                             impact_time < current_time
                                 || (impact_time == current_time && pair < current_pair)
@@ -1501,17 +1514,109 @@ impl PhysicsWorld {
                             body_b_dynamic,
                         )?;
                         let invalidated_count = self.collision_system.ccd_resweep_candidate_count();
-                        let (new_ccd_candidates, cross_island) = self.resweep_ccd_bodies(
+                        let new_ccd_candidates = self.resweep_ccd_bodies(
                             [
                                 (body_a_id, prediction_a, body_a_dynamic),
                                 (body_b_id, prediction_b, body_b_dynamic),
                             ],
                             impact_elapsed,
                             dt,
-                            force_single_island,
                             invalidated_count,
                         )?;
-                        if new_ccd_candidates > 0 {
+                        let reevaluate_count = self.collision_system.ccd_resweep_candidate_count();
+                        if reevaluate_count > 0 {
+                            self.collision_system.sort_ccd_resweep_candidates();
+                            let reevaluate_count =
+                                self.collision_system.ccd_resweep_candidate_count();
+                            let mut narrow_phase = NarrowPhase::new();
+                            let mut cross_island = false;
+                            let mut layout_changed = false;
+                            for index in 0..reevaluate_count {
+                                let candidate_index = self
+                                    .collision_system
+                                    .ccd_resweep_candidate(index)
+                                    .ok_or(CollisionError::InvalidContact)?;
+                                let candidate_pair = self
+                                    .collision_system
+                                    .ccd_candidate_pair(candidate_index)
+                                    .ok_or(CollisionError::InvalidContact)?;
+                                let (candidate_a, candidate_b) = self
+                                    .collision_system
+                                    .ccd_candidate_body_pair(candidate_index)
+                                    .ok_or(CollisionError::InvalidContact)?;
+                                let candidate_is_cross_island =
+                                    self.collision_system.context.ccd_body_types[candidate_a]
+                                        == BodyType::Dynamic
+                                        && self.collision_system.context.ccd_body_types
+                                            [candidate_b]
+                                            == BodyType::Dynamic
+                                        && self.collision_system.ccd_body_island(candidate_a)
+                                            != self.collision_system.ccd_body_island(candidate_b);
+                                let candidate_elapsed = impact_elapsed
+                                    .max(self.collision_system.context.ccd_elapsed[candidate_a])
+                                    .max(self.collision_system.context.ccd_elapsed[candidate_b]);
+                                if candidate_is_cross_island
+                                    && candidate_elapsed > impact_elapsed + time_tolerance
+                                {
+                                    cross_island = true;
+                                    continue;
+                                }
+                                if impact_elapsed
+                                    <= self.collision_system.context.ccd_processed_time
+                                        + time_tolerance
+                                    && self
+                                        .collision_system
+                                        .context
+                                        .ccd_processed_pairs
+                                        .contains(&candidate_pair)
+                                {
+                                    self.collision_system.context.ccd_toi_cache[candidate_index] =
+                                        CcdCandidateToi {
+                                            evaluated: true,
+                                            ..Default::default()
+                                        };
+                                    continue;
+                                }
+                                remove_transient_sensor_interaction(
+                                    &mut self.collision_system.context.interactions,
+                                    &mut self.collision_system.context.interaction_indices,
+                                    candidate_pair,
+                                )?;
+                                let (toi, interaction) = self.evaluate_ccd_candidate(
+                                    candidate_pair,
+                                    candidate_elapsed,
+                                    dt,
+                                    &mut narrow_phase,
+                                )?;
+                                self.collision_system.context.ccd_toi_cache[candidate_index] = toi;
+                                if toi.hit.is_some() {
+                                    layout_changed |=
+                                        !self.collision_system.context.ccd_candidate_active
+                                            [candidate_index];
+                                    self.collision_system
+                                        .set_ccd_candidate_active(candidate_index, true)?;
+                                    let dynamic_a = self.collision_system.context.ccd_body_types
+                                        [candidate_a]
+                                        == BodyType::Dynamic;
+                                    let dynamic_b = self.collision_system.context.ccd_body_types
+                                        [candidate_b]
+                                        == BodyType::Dynamic;
+                                    cross_island |= dynamic_a
+                                        && dynamic_b
+                                        && self.collision_system.ccd_body_island(candidate_a)
+                                            != self.collision_system.ccd_body_island(candidate_b);
+                                }
+                                if let Some(interaction) = interaction {
+                                    upsert_interaction(
+                                        &mut self.collision_system.context.interactions,
+                                        &mut self.collision_system.context.interaction_indices,
+                                        interaction,
+                                    )?;
+                                }
+                                #[cfg(feature = "bench-internals")]
+                                self.collision_system
+                                    .record_ccd_toi_evaluation(candidate_pair);
+                            }
                             if cross_island && !force_single_island {
                                 force_single_island = true;
                                 #[cfg(feature = "bench-internals")]
@@ -1520,8 +1625,10 @@ impl PhysicsWorld {
                                 restart_pass = true;
                                 break;
                             }
-                            self.collision_system
-                                .build_ccd_islands(force_single_island)?;
+                            if new_ccd_candidates > 0 || layout_changed {
+                                self.collision_system
+                                    .build_ccd_islands(force_single_island)?;
+                            }
                         }
                     }
                 }
@@ -1536,6 +1643,284 @@ impl PhysicsWorld {
         self.collision_system
             .record_ccd_final_candidate_count(self.collision_system.candidate_count());
         Ok(())
+    }
+
+    fn precompute_ccd_tois_parallel(
+        &mut self,
+        dt: f64,
+        worker_count: usize,
+    ) -> Result<(), CollisionError> {
+        let island_count = self.collision_system.ccd_island_count();
+        // Benchmarks show scoped-worker overhead outweighs CCD work below eight candidates.
+        const MIN_PARALLEL_CCD_CANDIDATES: usize = 8;
+        if self.collision_system.ccd_candidate_count() < MIN_PARALLEL_CCD_CANDIDATES {
+            return Ok(());
+        }
+        let worker_count = worker_count.min(island_count);
+        if worker_count <= 1 {
+            return Ok(());
+        }
+
+        #[cfg(feature = "bench-internals")]
+        let started = Instant::now();
+        let chunk_size = island_count.div_ceil(worker_count);
+        let shared_world = &*self;
+        let evaluated = std::thread::scope(|scope| {
+            let mut workers = Vec::new();
+            workers
+                .try_reserve(worker_count)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            for worker_index in 0..worker_count {
+                let start = worker_index * chunk_size;
+                let end = (start + chunk_size).min(island_count);
+                if start == end {
+                    continue;
+                }
+                let world = shared_world;
+                workers.push(scope.spawn(move || {
+                    let mut narrow_phase = NarrowPhase::new();
+                    let mut output = Vec::new();
+                    for island in start..end {
+                        let candidates = world
+                            .collision_system
+                            .ccd_island_candidates(island)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        output
+                            .try_reserve(candidates.len())
+                            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                        for candidate_index in candidates.iter().copied() {
+                            let pair = world
+                                .collision_system
+                                .ccd_candidate_pair(candidate_index)
+                                .ok_or(CollisionError::InvalidContact)?;
+                            let (toi, interaction) =
+                                world.evaluate_ccd_candidate(pair, 0.0, dt, &mut narrow_phase)?;
+                            output.push((candidate_index, pair, toi, interaction));
+                        }
+                    }
+                    Ok::<_, CollisionError>(output)
+                }));
+            }
+
+            let mut output = Vec::new();
+            for worker in workers {
+                let worker_output = worker.join().map_err(|_| CollisionError::NonConvergent)??;
+                output
+                    .try_reserve(worker_output.len())
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                output.extend(worker_output);
+            }
+            Ok::<_, CollisionError>(output)
+        })?;
+
+        let mut evaluated = evaluated;
+        evaluated.sort_unstable_by_key(|entry| entry.0);
+        for (candidate_index, pair, toi, interaction) in evaluated {
+            *self
+                .collision_system
+                .context
+                .ccd_toi_cache
+                .get_mut(candidate_index)
+                .ok_or(CollisionError::InvalidContact)? = toi;
+            self.collision_system
+                .set_ccd_candidate_active(candidate_index, toi.hit.is_some())?;
+            if let Some(interaction) = interaction {
+                upsert_interaction(
+                    &mut self.collision_system.context.interactions,
+                    &mut self.collision_system.context.interaction_indices,
+                    interaction,
+                )?;
+            }
+            #[cfg(feature = "bench-internals")]
+            {
+                let repeated = self
+                    .collision_system
+                    .context
+                    .ccd_toi_seen_pairs
+                    .as_mut()
+                    .is_some_and(|pairs| !pairs.insert(pair));
+                self.collision_system.record_ccd_toi_call();
+                if repeated {
+                    self.collision_system.record_ccd_repeated_toi_call();
+                }
+            }
+            #[cfg(not(feature = "bench-internals"))]
+            let _ = pair;
+        }
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_ccd_toi_search(started.elapsed());
+        Ok(())
+    }
+
+    fn evaluate_ccd_candidate(
+        &self,
+        pair: CollisionPair,
+        elapsed: f64,
+        dt: f64,
+        narrow_phase: &mut NarrowPhase,
+    ) -> Result<(CcdCandidateToi, Option<CollisionInteraction>), CollisionError> {
+        let (collider_a, collider_b) = {
+            let collider_a = self
+                .colliders
+                .get(pair.a.dense)
+                .filter(|_| pair.a.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            let collider_b = self
+                .colliders
+                .get(pair.b.dense)
+                .filter(|_| pair.b.world == self.world_id)
+                .ok_or(CollisionError::InvalidContact)?;
+            (collider_a, collider_b)
+        };
+        let body_a = self
+            .bodies
+            .get(collider_a.body.dense)
+            .filter(|_| collider_a.body.world == self.world_id)
+            .map(|entry| entry.body)
+            .ok_or(CollisionError::InvalidContact)?;
+        let body_b = self
+            .bodies
+            .get(collider_b.body.dense)
+            .filter(|_| collider_b.body.world == self.world_id)
+            .map(|entry| entry.body)
+            .ok_or(CollisionError::InvalidContact)?;
+        let mut cache = CcdCandidateToi {
+            evaluated: true,
+            ..Default::default()
+        };
+        if ![body_a, body_b].into_iter().any(|body| {
+            body.physics().body_type() == BodyType::Dynamic
+                && body.ccd_mode() == CcdMode::Continuous
+        }) {
+            return Ok((cache, None));
+        }
+
+        let prediction_a = Self::predicted_body_index(
+            &self.collision_system.context.body_indices,
+            self.world_id,
+            collider_a.body,
+        )?;
+        let prediction_b = Self::predicted_body_index(
+            &self.collision_system.context.body_indices,
+            self.world_id,
+            collider_b.body,
+        )?;
+        let state_a = self.body_state_at_ccd(collider_a.body, prediction_a, elapsed, dt)?;
+        let state_b = self.body_state_at_ccd(collider_b.body, prediction_b, elapsed, dt)?;
+        let end_state_a = self
+            .collision_system
+            .context
+            .predicted_states
+            .get(prediction_a)
+            .map(|(_, state)| *state)
+            .ok_or(CollisionError::InvalidContact)?;
+        let end_state_b = self
+            .collision_system
+            .context
+            .predicted_states
+            .get(prediction_b)
+            .map(|(_, state)| *state)
+            .ok_or(CollisionError::InvalidContact)?;
+        let start_transform_a = state_a
+            .transform()
+            .compose(&collider_a.collider.local_transform())
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        let start_transform_b = state_b
+            .transform()
+            .compose(&collider_b.collider.local_transform())
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        let end_transform_a = end_state_a
+            .transform()
+            .compose(&collider_a.collider.local_transform())
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        let end_transform_b = end_state_b
+            .transform()
+            .compose(&collider_b.collider.local_transform())
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        let trajectory_a = ColliderTrajectory {
+            body: body_a,
+            base_state: self.collision_system.context.ccd_states[prediction_a],
+            base_time: self.collision_system.context.ccd_elapsed[prediction_a],
+            sample_start_time: elapsed,
+            end_time: dt,
+            local_transform: collider_a.collider.local_transform(),
+        };
+        let trajectory_b = ColliderTrajectory {
+            body: body_b,
+            base_state: self.collision_system.context.ccd_states[prediction_b],
+            base_time: self.collision_system.context.ccd_elapsed[prediction_b],
+            sample_start_time: elapsed,
+            end_time: dt,
+            local_transform: collider_b.collider.local_transform(),
+        };
+        let (translation_bound_a, rotation_bound_a, linear_translation_a) =
+            trajectory_a.path_bounds(end_state_a)?;
+        let (translation_bound_b, rotation_bound_b, linear_translation_b) =
+            trajectory_b.path_bounds(end_state_b)?;
+        let sample_a = |amount| trajectory_a.transform_at(amount);
+        let sample_b = |amount| trajectory_b.transform_at(amount);
+        let motion_a = CcdMotion::trajectory(
+            start_transform_a,
+            end_transform_a,
+            translation_bound_a,
+            linear_translation_a,
+            rotation_bound_a,
+            &sample_a,
+        )?;
+        let motion_b = CcdMotion::trajectory(
+            start_transform_b,
+            end_transform_b,
+            translation_bound_b,
+            linear_translation_b,
+            rotation_bound_b,
+            &sample_b,
+        )?;
+        let sensor = collider_a.collider.mode() == crate::collider::CollisionMode::Sensor
+            || collider_b.collider.mode() == crate::collider::CollisionMode::Sensor;
+        let hit = narrow_phase.time_of_impact(
+            collider_a.collider.shape(),
+            &motion_a,
+            collider_a.collider.query_bvh(),
+            collider_a.collider.query_vertices(),
+            collider_b.collider.shape(),
+            &motion_b,
+            collider_b.collider.query_bvh(),
+            collider_b.collider.query_vertices(),
+            sensor,
+        )?;
+        let Some(hit) = hit else {
+            return Ok((cache, None));
+        };
+        if !hit.toi.is_finite() || !(0.0..=1.0).contains(&hit.toi) {
+            return Err(CollisionError::InvalidContact);
+        }
+        if sensor {
+            return Ok((
+                cache,
+                Some(CollisionInteraction {
+                    pair,
+                    sensor: true,
+                    transient: true,
+                    contact: None,
+                    impact: false,
+                }),
+            ));
+        }
+        if hit.toi <= f64::EPSILON * 128.0 {
+            let velocity_a = body_point_velocity(body_a, state_a, hit.point_a)?;
+            let velocity_b = body_point_velocity(body_b, state_b, hit.point_b)?;
+            let normal_speed = velocity_b
+                .checked_sub(velocity_a)
+                .and_then(|velocity| velocity.checked_dot(hit.normal))
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            if normal_speed >= 0.0 {
+                return Ok((cache, None));
+            }
+        }
+        cache.impact_time = elapsed + (dt - elapsed) * hit.toi;
+        cache.hit = Some(hit);
+        Ok((cache, None))
     }
 
     fn rebuild_ccd_candidate_bodies(&mut self) -> Result<(), CollisionError> {
@@ -1602,6 +1987,12 @@ impl PhysicsWorld {
             candidate_count,
             super::collision::CcdCandidateToi::default(),
         );
+        context.ccd_candidate_active.clear();
+        context
+            .ccd_candidate_active
+            .try_reserve(candidate_count)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        context.ccd_candidate_active.resize(candidate_count, true);
         context.ccd_resweep_candidates.clear();
         context.ccd_query_results.clear();
         Ok(())
@@ -1612,13 +2003,11 @@ impl PhysicsWorld {
         bodies: [(BodyId, usize, bool); 2],
         elapsed: f64,
         dt: f64,
-        force_single_island: bool,
         _invalidated_count: usize,
-    ) -> Result<(usize, bool), CollisionError> {
+    ) -> Result<usize, CollisionError> {
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
         let mut new_ccd_candidates = 0;
-        let mut cross_island = false;
         let proxy_count = self.collision_system.context.colliders.len();
 
         for (body_id, prediction_index, changed) in bodies {
@@ -1677,6 +2066,14 @@ impl PhysicsWorld {
                         .collision_system
                         .ccd_query_result(query_index)
                         .ok_or(CollisionError::InvalidContact)?;
+                    let other_proxy = self.collision_system.ccd_proxy(other_id)?;
+                    if bounds.is_some_and(|bounds| {
+                        other_proxy
+                            .bounds
+                            .is_some_and(|other_bounds| !bounds.intersects(&other_bounds))
+                    }) {
+                        continue;
+                    }
                     if !self
                         .collision_system
                         .ccd_pair_allowed(proxy.collider, other_id)?
@@ -1685,7 +2082,6 @@ impl PhysicsWorld {
                     }
                     let pair = CollisionPair::new(proxy.collider, other_id)
                         .ok_or(CollisionError::InvalidContact)?;
-                    let other_proxy = self.collision_system.ccd_proxy(other_id)?;
                     let other_prediction = Self::predicted_body_index(
                         &self.collision_system.context.body_indices,
                         self.world_id,
@@ -1696,16 +2092,12 @@ impl PhysicsWorld {
                     } else {
                         (other_prediction, prediction_index)
                     };
-                    let (added, is_ccd, joins_islands) = self.collision_system.add_ccd_candidate(
-                        pair,
-                        body_a,
-                        body_b,
-                        force_single_island,
-                    )?;
+                    let (added, is_ccd) = self
+                        .collision_system
+                        .add_ccd_candidate(pair, body_a, body_b)?;
                     if added && is_ccd {
                         new_ccd_candidates += 1;
                     }
-                    cross_island |= joins_islands;
                 }
             }
         }
@@ -1713,7 +2105,7 @@ impl PhysicsWorld {
         #[cfg(feature = "bench-internals")]
         self.collision_system
             .record_ccd_resweep(started.elapsed(), _invalidated_count);
-        Ok((new_ccd_candidates, cross_island))
+        Ok(new_ccd_candidates)
     }
 
     fn reset_ccd_pass(&mut self, dt: f64, force_single_island: bool) -> Result<(), CollisionError> {
@@ -1738,6 +2130,7 @@ impl PhysicsWorld {
             context.ccd_processed_pairs.clear();
             context.ccd_processed_time = 0.0;
             context.ccd_toi_cache.fill(Default::default());
+            context.ccd_candidate_active.fill(true);
             context.interactions.clear();
             context.colliders.clear();
             context.spatial_proxies.clear();
@@ -2276,6 +2669,16 @@ impl PhysicsWorld {
     /// Validates all shard results before committing any body state.
     #[doc(hidden)]
     pub fn commit_step_shards(&mut self, shards: &[Vec<BodyStep>]) -> Result<(), StepError> {
+        self.commit_step_shards_with_workers(shards, shards.len().max(1))
+    }
+
+    /// Validates shard results and uses the scheduler's worker count for parallel collision work.
+    #[doc(hidden)]
+    pub fn commit_step_shards_with_workers(
+        &mut self,
+        shards: &[Vec<BodyStep>],
+        worker_count: usize,
+    ) -> Result<(), StepError> {
         let mut steps = shards.iter().flatten();
         let mut step_dt = None;
         for (dense_id, entry) in self.bodies.iter() {
@@ -2311,11 +2714,12 @@ impl PhysicsWorld {
                 self.collision_system.stage_prediction(step.body_id, state);
             }
         }
-        if let Err(error) = self.prepare_collision_candidates(dt) {
+        let worker_count = worker_count.max(1);
+        if let Err(error) = self.prepare_collision_candidates(dt, worker_count) {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
-        if let Err(error) = self.process_collision_candidates(shards.len().max(1)) {
+        if let Err(error) = self.process_collision_candidates(worker_count) {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
@@ -2678,6 +3082,37 @@ fn upsert_interaction(
     let index = interactions.len();
     interactions.push(interaction);
     indices.insert(interaction.pair, index);
+    Ok(())
+}
+
+fn remove_transient_sensor_interaction(
+    interactions: &mut Vec<CollisionInteraction>,
+    indices: &mut Option<HashMap<CollisionPair, usize>>,
+    pair: CollisionPair,
+) -> Result<(), CollisionError> {
+    let Some(index) = indices
+        .as_ref()
+        .and_then(|indices| indices.get(&pair).copied())
+    else {
+        return Ok(());
+    };
+    let interaction = interactions
+        .get(index)
+        .ok_or(CollisionError::InvalidContact)?;
+    if !interaction.sensor || !interaction.transient {
+        return Ok(());
+    }
+    interactions.remove(index);
+    let indices = indices.as_mut().ok_or(CollisionError::InvalidContact)?;
+    indices.clear();
+    indices
+        .try_reserve(interactions.len())
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    for (index, interaction) in interactions.iter().enumerate() {
+        if indices.insert(interaction.pair, index).is_some() {
+            return Err(CollisionError::InvalidContact);
+        }
+    }
     Ok(())
 }
 

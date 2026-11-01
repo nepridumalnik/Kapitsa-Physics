@@ -665,8 +665,9 @@ impl PhysicsController {
             return Err(error);
         }
 
+        let worker_count = self.active_workers.min(buffers.len()).max(1);
         let task = tokio::task::spawn_blocking(move || {
-            let result = world.commit_step_shards(&buffers);
+            let result = world.commit_step_shards_with_workers(&buffers, worker_count);
             let completed_at = Instant::now();
             CommitOutput {
                 outcome: StepOutcome {
@@ -778,10 +779,11 @@ mod tests {
     };
 
     use kapitsa_core::{
-        collider::Collider,
+        collider::{Collider, CollisionMode},
         mass::MassProperties,
-        rigid_body::RigidBody,
-        shape::{Plane, Shape, Sphere},
+        material::PhysicsMaterial,
+        rigid_body::{CcdMode, RigidBody},
+        shape::{Cuboid, Plane, Shape, Sphere},
         transform::Transform,
         world::PhysicsWorld,
     };
@@ -876,6 +878,128 @@ mod tests {
                     ),
                 )
                 .expect("sphere collider");
+        }
+        world
+    }
+
+    fn independent_ccd_world() -> PhysicsWorld {
+        let mut world = PhysicsWorld::new();
+        let wall = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("wall body");
+        world
+            .add_collider(
+                wall,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(0.1, 20.0, 20.0).expect("wall shape")),
+                    Transform::identity(),
+                ),
+            )
+            .expect("wall collider");
+        let mut sensor = Collider::new(
+            Shape::Cuboid(Cuboid::new(0.05, 20.0, 20.0).expect("sensor shape")),
+            Transform::new(Vec3::new(-2.0, 0.0, 0.0), Quat::IDENTITY).expect("sensor transform"),
+        );
+        sensor.set_mode(CollisionMode::Sensor);
+        world.add_collider(wall, sensor).expect("sensor collider");
+
+        let mass =
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
+        for index in 0..8 {
+            let y = (index % 4) as f64 * 2.0;
+            let z = (index / 4) as f64 * 2.0;
+            let mut body = RigidBody::new_dynamic(
+                Transform::new(Vec3::new(-5.0, y, z), Quat::IDENTITY).expect("transform"),
+                mass,
+            )
+            .expect("dynamic body");
+            body.set_linear_velocity(Vec3::new(1000.0, 0.0, 0.0))
+                .expect("finite velocity");
+            body.set_ccd_mode(CcdMode::Continuous);
+            let body = world.add_body(body).expect("body insertion");
+            world
+                .add_collider(
+                    body,
+                    Collider::new(
+                        Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                        Transform::identity(),
+                    ),
+                )
+                .expect("sphere collider");
+        }
+        world
+    }
+
+    fn connected_ccd_world() -> PhysicsWorld {
+        let mut world = PhysicsWorld::new();
+        let mass =
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
+        for (x, velocity) in [(-2.0, 200.0), (0.0, 0.0), (2.0, -200.0)] {
+            let mut body = RigidBody::new_dynamic(
+                Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY).expect("transform"),
+                mass,
+            )
+            .expect("dynamic body");
+            body.set_linear_velocity(Vec3::new(velocity, 0.0, 0.0))
+                .expect("finite velocity");
+            body.set_ccd_mode(CcdMode::Continuous);
+            let body = world.add_body(body).expect("body insertion");
+            world
+                .add_collider(
+                    body,
+                    Collider::new(
+                        Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                        Transform::identity(),
+                    ),
+                )
+                .expect("sphere collider");
+        }
+        world
+    }
+
+    fn rebound_cross_island_ccd_world() -> PhysicsWorld {
+        let mut world = PhysicsWorld::new();
+        let material = PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0).expect("material");
+        let material_id = world.add_material(material).expect("material insertion");
+        let wall_body = world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .expect("wall body");
+        let wall = world
+            .add_collider(
+                wall_body,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).expect("wall shape")),
+                    Transform::identity(),
+                ),
+            )
+            .expect("wall collider");
+        world
+            .set_collider_material(wall, Some(material_id))
+            .expect("wall material");
+
+        for (x, velocity) in [(5.0, -2000.0), (13.0, 0.0)] {
+            let mut body = RigidBody::new_dynamic(
+                Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY).expect("transform"),
+                MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)
+                    .expect("valid mass properties"),
+            )
+            .expect("dynamic body");
+            body.set_linear_velocity(Vec3::new(velocity, 0.0, 0.0))
+                .expect("finite velocity");
+            body.set_ccd_mode(CcdMode::Continuous);
+            let body = world.add_body(body).expect("body insertion");
+            let collider = world
+                .add_collider(
+                    body,
+                    Collider::new(
+                        Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                        Transform::identity(),
+                    ),
+                )
+                .expect("sphere collider");
+            world
+                .set_collider_material(collider, Some(material_id))
+                .expect("sphere material");
         }
         world
     }
@@ -1146,6 +1270,165 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn independent_ccd_islands_match_across_worker_counts() {
+        let runtime = runtime();
+        let config = config(1);
+        let dt = config.step_duration(config.target_hz).as_secs_f64();
+        let mut sequential = independent_ccd_world();
+        sequential.step(dt).expect("sequential CCD step");
+        assert!(
+            sequential
+                .collision_events()
+                .iter()
+                .any(|event| event.sensor),
+            "CCD sensor crossings should be staged"
+        );
+
+        for workers in [1, 2, 4] {
+            let mut controller = PhysicsController::new(independent_ccd_world(), config.clone())
+                .expect("controller");
+            controller
+                .set_active_workers(workers)
+                .expect("worker count within limit");
+            runtime
+                .block_on(controller.step())
+                .expect("parallel CCD step");
+            let parallel = controller.world().expect("world available");
+
+            for ((_, actual), (_, expected)) in parallel.bodies().zip(sequential.bodies()) {
+                assert_vec3_near(
+                    actual.state().transform().translation(),
+                    expected.state().transform().translation(),
+                );
+                assert_vec3_near(
+                    actual.state().linear_velocity(),
+                    expected.state().linear_velocity(),
+                );
+            }
+            assert_eq!(
+                parallel.collision_events().len(),
+                sequential.collision_events().len()
+            );
+            for (actual, expected) in parallel
+                .collision_events()
+                .iter()
+                .zip(sequential.collision_events())
+            {
+                assert_eq!(actual.kind, expected.kind);
+                assert_eq!(
+                    event_body_indices(parallel, actual),
+                    event_body_indices(&sequential, expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn connected_and_rescheduled_ccd_match_across_worker_counts() {
+        let runtime = runtime();
+        let mut config = config(1);
+        config.target_hz = 100;
+        for build in [
+            connected_ccd_world as fn() -> PhysicsWorld,
+            rebound_cross_island_ccd_world,
+        ] {
+            let mut sequential = build();
+            sequential.step(0.01).expect("sequential CCD step");
+            let impacts = sequential
+                .collision_events()
+                .iter()
+                .filter(|event| event.kind == kapitsa_core::collision::CollisionEventKind::Impact)
+                .count();
+            assert!(
+                impacts >= 2,
+                "test scene should resolve multiple CCD impacts"
+            );
+
+            for workers in [1, 2, 4] {
+                let mut controller =
+                    PhysicsController::new(build(), config.clone()).expect("controller");
+                controller
+                    .set_active_workers(workers)
+                    .expect("worker count within limit");
+                runtime
+                    .block_on(controller.step())
+                    .expect("scheduled CCD step");
+                let parallel = controller.world().expect("world available");
+
+                for ((_, actual), (_, expected)) in parallel.bodies().zip(sequential.bodies()) {
+                    assert_vec3_near(
+                        actual.state().transform().translation(),
+                        expected.state().transform().translation(),
+                    );
+                    assert_vec3_near(
+                        actual.state().linear_velocity(),
+                        expected.state().linear_velocity(),
+                    );
+                }
+                assert_eq!(
+                    parallel.collision_events().len(),
+                    sequential.collision_events().len()
+                );
+                for (actual, expected) in parallel
+                    .collision_events()
+                    .iter()
+                    .zip(sequential.collision_events())
+                {
+                    assert_eq!(actual.kind, expected.kind);
+                    assert_eq!(
+                        event_body_indices(parallel, actual),
+                        event_body_indices(&sequential, expected)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cancelling_a_ccd_step_before_commit_replays_the_same_transaction() {
+        let runtime = runtime();
+        let mut config = config(1);
+        config.target_hz = 100;
+        runtime.block_on(async {
+            let (entered, entered_rx) = tokio::sync::oneshot::channel();
+            let (_release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let mut controller =
+                PhysicsController::new(connected_ccd_world(), config.clone()).expect("controller");
+            controller
+                .set_active_workers(4)
+                .expect("worker count within limit");
+            controller.gate_step_boundary(StepBoundary::Integrated, entered, release_rx);
+
+            {
+                let mut step = Box::pin(controller.step());
+                tokio::select! {
+                    result = step.as_mut() => panic!("step passed the gate: {result:?}"),
+                    signal = entered_rx => signal.expect("integrated boundary reached"),
+                }
+            }
+
+            let mut expected = connected_ccd_world();
+            expected.step(0.01).expect("sequential CCD step");
+            controller.step().await.expect("replayed CCD step");
+            let actual = controller.world().expect("world available");
+            for ((_, actual_body), (_, expected_body)) in actual.bodies().zip(expected.bodies()) {
+                assert_vec3_near(
+                    actual_body.state().transform().translation(),
+                    expected_body.state().transform().translation(),
+                );
+                assert_vec3_near(
+                    actual_body.state().linear_velocity(),
+                    expected_body.state().linear_velocity(),
+                );
+            }
+            assert_eq!(
+                actual.collision_events().len(),
+                expected.collision_events().len()
+            );
+        });
     }
 
     #[test]

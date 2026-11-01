@@ -14,7 +14,7 @@ use super::{
 use crate::collider::CollisionMode;
 use crate::{
     aabb::Aabb,
-    rigid_body::{BodyState, BodyType},
+    rigid_body::BodyState,
     shape::Shape,
     transform::Transform,
     world::{BodyId, ColliderId},
@@ -175,6 +175,19 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_toi_evaluation(&mut self, pair: CollisionPair) {
+        let repeated = self
+            .context
+            .ccd_toi_seen_pairs
+            .as_mut()
+            .is_some_and(|pairs| !pairs.insert(pair));
+        self.record_ccd_toi_call();
+        if repeated {
+            self.record_ccd_repeated_toi_call();
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_ccd_repeated_toi_call(&mut self) {
         self.benchmark_metrics.ccd_repeated_toi_call_count = self
             .benchmark_metrics
@@ -319,10 +332,16 @@ impl CollisionSystem {
     ) -> Result<(), CollisionError> {
         #[cfg(feature = "bench-internals")]
         let started = std::time::Instant::now();
-        self.ccd_islands.build(
+        if self.context.ccd_toi_cache.len() != self.context.ccd_candidate_bodies.len()
+            || self.context.ccd_candidate_active.len() != self.context.ccd_candidate_bodies.len()
+        {
+            return Err(CollisionError::InvalidContact);
+        }
+        self.ccd_islands.build_active(
             &self.context.ccd_body_types,
             &self.context.ccd_continuous_bodies,
             &self.context.ccd_candidate_bodies,
+            &self.context.ccd_candidate_active,
             force_single_island,
         )?;
         let island_count = self.ccd_island_count();
@@ -345,6 +364,10 @@ impl CollisionSystem {
 
     pub(crate) fn ccd_island_candidates(&self, island: usize) -> Option<&[usize]> {
         self.ccd_islands.candidates(island)
+    }
+
+    pub(crate) fn ccd_body_island(&self, body: usize) -> Option<usize> {
+        self.ccd_islands.body_island(body)
     }
 
     pub(crate) fn invalidate_ccd_candidates(
@@ -387,8 +410,38 @@ impl CollisionSystem {
         self.context.ccd_resweep_candidates.len()
     }
 
+    pub(crate) fn set_ccd_candidate_active(
+        &mut self,
+        candidate: usize,
+        active: bool,
+    ) -> Result<(), CollisionError> {
+        *self
+            .context
+            .ccd_candidate_active
+            .get_mut(candidate)
+            .ok_or(CollisionError::InvalidContact)? = active;
+        Ok(())
+    }
+
+    pub(crate) fn sort_ccd_resweep_candidates(&mut self) {
+        self.context.ccd_resweep_candidates.sort_unstable();
+        self.context.ccd_resweep_candidates.dedup();
+    }
+
+    pub(crate) fn ccd_resweep_candidate(&self, index: usize) -> Option<usize> {
+        self.context.ccd_resweep_candidates.get(index).copied()
+    }
+
     pub(crate) fn ccd_candidate_pair(&self, index: usize) -> Option<CollisionPair> {
         self.context.ccd_candidate_pairs.get(index).copied()
+    }
+
+    pub(crate) fn ccd_candidate_count(&self) -> usize {
+        self.context.ccd_candidate_pairs.len()
+    }
+
+    pub(crate) fn ccd_candidate_body_pair(&self, index: usize) -> Option<(usize, usize)> {
+        self.context.ccd_candidate_bodies.get(index).copied()
     }
 
     pub(crate) fn ccd_query_result(&self, index: usize) -> Option<ColliderId> {
@@ -463,8 +516,7 @@ impl CollisionSystem {
         pair: CollisionPair,
         body_a: usize,
         body_b: usize,
-        force_single_island: bool,
-    ) -> Result<(bool, bool, bool), CollisionError> {
+    ) -> Result<(bool, bool), CollisionError> {
         let already_present = self
             .context
             .ccd_candidate_pair_set
@@ -472,7 +524,7 @@ impl CollisionSystem {
             .ok_or(CollisionError::InvalidContact)?
             .contains(&pair);
         if already_present {
-            return Ok((false, false, false));
+            return Ok((false, false));
         }
 
         let continuous_a = *self
@@ -486,15 +538,9 @@ impl CollisionSystem {
             .get(body_b)
             .ok_or(CollisionError::InvalidContact)?;
         let ccd_candidate = continuous_a || continuous_b;
-        let dynamic_a = self.context.ccd_body_types.get(body_a) == Some(&BodyType::Dynamic);
-        let dynamic_b = self.context.ccd_body_types.get(body_b) == Some(&BodyType::Dynamic);
-        let cross_island = ccd_candidate
-            && !force_single_island
-            && dynamic_a
-            && dynamic_b
-            && self.ccd_islands.body_island(body_a) != self.ccd_islands.body_island(body_b);
 
         if ccd_candidate {
+            let candidate_index = self.context.ccd_candidate_pairs.len();
             self.context
                 .ccd_candidate_pairs
                 .try_reserve(1)
@@ -507,11 +553,21 @@ impl CollisionSystem {
                 .ccd_toi_cache
                 .try_reserve(1)
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.context
+                .ccd_candidate_active
+                .try_reserve(1)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.context
+                .ccd_resweep_candidates
+                .try_reserve(1)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
             self.context.ccd_candidate_pairs.push(pair);
             self.context.ccd_candidate_bodies.push((body_a, body_b));
             self.context
                 .ccd_toi_cache
                 .push(super::CcdCandidateToi::default());
+            self.context.ccd_candidate_active.push(false);
+            self.context.ccd_resweep_candidates.push(candidate_index);
         }
         let candidate_set = self
             .context
@@ -530,7 +586,7 @@ impl CollisionSystem {
                 .ccd_new_candidate_count
                 .saturating_add(1);
         }
-        Ok((true, ccd_candidate, cross_island))
+        Ok((true, ccd_candidate))
     }
 
     #[allow(clippy::too_many_arguments)]

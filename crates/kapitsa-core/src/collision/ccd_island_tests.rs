@@ -69,6 +69,24 @@ fn shared_kinematic_surface_does_not_join_dynamic_islands() {
 }
 
 #[test]
+fn inactive_candidates_remain_resweep_neighbors_without_joining_islands() {
+    let body_types = [BodyType::Dynamic, BodyType::Dynamic, BodyType::Static];
+    let continuous = [true, true, false];
+    let candidates = [(0, 2), (1, 2), (0, 1)];
+    let active = [true, true, false];
+    let mut layout = CcdIslandLayout::new();
+
+    layout
+        .build_active(&body_types, &continuous, &candidates, &active, false)
+        .expect("build active CCD islands");
+
+    assert_eq!(layout.island_count(), 2);
+    assert_eq!(layout.candidate_island(2), None);
+    assert_eq!(layout.body_candidates(0), Some(&[0, 2][..]));
+    assert_eq!(layout.body_candidates(1), Some(&[1, 2][..]));
+}
+
+#[test]
 fn no_ccd_candidates_produce_no_islands() {
     let body_types = [BodyType::Dynamic, BodyType::Static];
     let continuous = [true, false];
