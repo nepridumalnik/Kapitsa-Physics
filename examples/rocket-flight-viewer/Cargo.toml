@@ -1,0 +1,11 @@
+[package]
+name = "rocket-flight-viewer"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+glium = "0.36"
+kapitsa = { path = "../../crates/kapitsa" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+winit = "0.30"
