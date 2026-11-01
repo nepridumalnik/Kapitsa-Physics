@@ -808,3 +808,20 @@ All four required Release benchmark commands completed. Full workspace Release
 tests, both Clippy commands, formatting check, and workspace documentation
 also passed; the final report records the exact validation commands and
 remaining performance limits.
+
+## Final conclusions
+
+The follow-up reduced 20k-static CCD resweep visits from a scene-wide scan to
+the changed body's live collider list and removed the global replay from the
+measured rebound/cascade cases. For a 1,024-island GJK-heavy workload, four
+workers reduced median step time from 17.499 ms to 10.459 ms. The 64-sphere
+analytic path stays sequential and remains within the same measurement range
+as the 038e4d4 baseline.
+
+The resolver parallelizes initial TOI work and the first impact for independent
+islands that each have one candidate. The coordinator performs resweeps in
+stable order; multi-candidate islands, later impacts, and discovered bridges
+continue through ordered resolution and localized replay. See the [final CCD
+optimization report](../docs/reviews/ccd-final-optimization-report.md) for
+algorithm details, transaction guarantees, workload limitations, and the
+complete validation record.
