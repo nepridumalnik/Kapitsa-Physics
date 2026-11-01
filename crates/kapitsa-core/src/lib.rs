@@ -6,6 +6,7 @@ pub mod collision;
 pub mod containers;
 pub mod execution;
 pub mod gravity;
+pub mod joint;
 pub mod mass;
 pub mod material;
 pub mod rigid_body;
