@@ -178,10 +178,16 @@ impl Simulation {
 
     /// Creates an empty simulation using the supplied configuration.
     pub fn new_from_config(config: SimulationConfig) -> Result<Self, SimulationError> {
+        Self::new_with_world(PhysicsWorld::new(), config)
+    }
+
+    pub(crate) fn new_with_world(
+        world: PhysicsWorld,
+        config: SimulationConfig,
+    ) -> Result<Self, SimulationError> {
         config.validate().map_err(SimulationError::InvalidConfig)?;
         let runtime = Handle::try_current().map_err(|_| SimulationError::MissingRuntime)?;
-        let simulation =
-            StepRunner::new_on_validated(PhysicsWorld::new(), config, runtime.clone())?;
+        let simulation = StepRunner::new_on_validated(world, config, runtime.clone())?;
         let world = simulation.world().map_err(SimulationError::from)?;
         let initial_snapshot = Arc::new(PhysicsSnapshot::from_world(
             world,

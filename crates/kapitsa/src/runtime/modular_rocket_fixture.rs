@@ -693,3 +693,246 @@ mod stability_tests {
             .sum()
     }
 }
+
+#[cfg(all(test, not(feature = "bench-internals")))]
+mod time_warp_tests {
+    use std::{
+        error::Error,
+        num::NonZeroUsize,
+        time::{Duration, Instant},
+    };
+
+    use kapitsa_core::transform::Transform;
+    use kapitsa_math::{Quat, Vec3};
+
+    use crate::runtime::{
+        AdaptiveTimeStepConfig, Simulation, SimulationConfig, TimeStepPolicy, WorkerConfig,
+    };
+
+    use super::ModularRocket;
+
+    const SAMPLE: Duration = Duration::from_millis(100);
+    const FIXED_STEP: Duration = Duration::from_nanos(8_333_333);
+    const ALTITUDE: f64 = 2_000.0;
+
+    #[derive(Debug, PartialEq)]
+    struct PartState {
+        position: Vec3,
+        rotation: Quat,
+        velocity: Vec3,
+    }
+
+    struct WarpSample {
+        requested: f64,
+        actual: f64,
+        elapsed_wall: Duration,
+        simulated_time: Duration,
+        max_time_debt: Duration,
+        ending_time_debt: Duration,
+        steps: u64,
+        average_step_cost: Duration,
+        max_step_cost: Duration,
+        adaptive_limited: bool,
+        states: Vec<PartState>,
+    }
+
+    #[test]
+    #[ignore = "clock-driven Time Warp study; run explicitly in release"]
+    fn adaptive_time_warp_reports_speed_debt_and_trajectory_accuracy() -> Result<(), Box<dyn Error>>
+    {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()?;
+        for part_count in [100, 200, 500, 1000] {
+            for warp in [1.0, 10.0, 100.0] {
+                let sample = runtime.block_on(run_warp_sample(part_count, warp))?;
+                report_accuracy(part_count, sample);
+            }
+        }
+        let safe_warp = runtime.block_on(run_warp_sample(100, 1_000.0))?;
+        report_accuracy(100, safe_warp);
+        Ok(())
+    }
+
+    async fn run_warp_sample(
+        part_count: usize,
+        requested_warp: f64,
+    ) -> Result<WarpSample, Box<dyn Error>> {
+        let rocket = free_flight_rocket(part_count)?;
+        let config = SimulationConfig {
+            tick_rate: 120,
+            max_catch_up_steps: 8,
+            time_step_policy: TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default()),
+            workers: WorkerConfig {
+                max_workers: NonZeroUsize::new(1),
+                ..WorkerConfig::default()
+            },
+            ..SimulationConfig::default()
+        };
+        let mut simulation = Simulation::new_with_world(rocket.world, config)?;
+        let client = simulation.client();
+        simulation.start()?;
+        simulation.set_time_multiplier(requested_warp)?;
+        let initial_time = client.snapshot().simulation_time();
+        let initial_metrics = simulation.metrics();
+        let started = Instant::now();
+        let deadline = started + SAMPLE;
+        let mut max_time_debt = Duration::ZERO;
+        let mut max_step_cost = Duration::ZERO;
+        let mut observed_steps = initial_metrics.total_steps;
+        let mut window = tokio::time::interval(Duration::from_millis(1));
+        window.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        while Instant::now() < deadline {
+            window.tick().await;
+            let metrics = simulation.metrics();
+            max_time_debt = max_time_debt.max(metrics.simulation_time_debt);
+            if metrics.total_steps != observed_steps {
+                observed_steps = metrics.total_steps;
+                max_step_cost = max_step_cost.max(metrics.last_step_duration);
+            }
+        }
+        let elapsed_wall = started.elapsed();
+        let sampled_metrics = simulation.metrics();
+        let sample_snapshot = client.snapshot();
+        let simulated_time = sample_snapshot
+            .simulation_time()
+            .saturating_sub(initial_time);
+        max_time_debt = max_time_debt.max(sampled_metrics.simulation_time_debt);
+        simulation.set_time_multiplier(0.0)?;
+        simulation.stop().await?;
+        let final_snapshot = client.snapshot();
+        let states = rocket
+            .parts
+            .iter()
+            .map(|&id| {
+                let state = final_snapshot
+                    .body(id)
+                    .ok_or_else(|| std::io::Error::other("runtime snapshot lost a rocket part"))?;
+                Ok(PartState {
+                    position: state.transform().translation(),
+                    rotation: state.transform().rotation(),
+                    velocity: state.linear_velocity(),
+                })
+            })
+            .collect::<Result<Vec<_>, std::io::Error>>()?;
+        let actual = simulated_time.as_secs_f64() / elapsed_wall.as_secs_f64();
+        Ok(WarpSample {
+            requested: requested_warp,
+            actual,
+            elapsed_wall,
+            simulated_time,
+            max_time_debt,
+            ending_time_debt: sampled_metrics.simulation_time_debt,
+            steps: sampled_metrics
+                .total_steps
+                .saturating_sub(initial_metrics.total_steps),
+            average_step_cost: sampled_metrics.average_step_duration,
+            max_step_cost,
+            adaptive_limited: sampled_metrics.adaptive_step_limited,
+            states,
+        })
+    }
+
+    fn free_flight_rocket(part_count: usize) -> Result<ModularRocket, Box<dyn Error>> {
+        let mut rocket = ModularRocket::new(part_count);
+        for &id in &rocket.parts {
+            let body = rocket.world.body(id).ok_or("rocket body is missing")?;
+            let transform = body.state().transform();
+            let elevated = Transform::new(
+                transform.translation() + Vec3::Y * ALTITUDE,
+                transform.rotation(),
+            )?;
+            rocket
+                .world
+                .body_mut(id)
+                .ok_or("rocket body is missing")?
+                .set_transform(elevated)?;
+        }
+        Ok(rocket)
+    }
+
+    fn fixed_reference(part_count: usize, simulated_time: Duration) -> Vec<PartState> {
+        let mut rocket = free_flight_rocket(part_count).expect("reference rocket");
+        let mut elapsed = Duration::ZERO;
+        while elapsed < simulated_time {
+            let step = FIXED_STEP.min(simulated_time.saturating_sub(elapsed));
+            rocket
+                .world
+                .step(step.as_secs_f64())
+                .expect("fine fixed reference step");
+            elapsed += step;
+        }
+        rocket
+            .parts
+            .iter()
+            .map(|&id| {
+                let body = rocket.world.body(id).expect("reference part");
+                PartState {
+                    position: body.state().transform().translation(),
+                    rotation: body.state().transform().rotation(),
+                    velocity: body.state().linear_velocity(),
+                }
+            })
+            .collect()
+    }
+
+    fn report_accuracy(part_count: usize, sample: WarpSample) {
+        let reference = fixed_reference(part_count, sample.simulated_time);
+        let (max_position_error, max_velocity_error) = sample.states.iter().zip(&reference).fold(
+            (0.0_f64, 0.0_f64),
+            |(position, velocity), (actual, expected)| {
+                (
+                    position.max((actual.position - expected.position).length()),
+                    velocity.max((actual.velocity - expected.velocity).length()),
+                )
+            },
+        );
+        let max_frame_error = sample
+            .states
+            .iter()
+            .zip(&reference)
+            .map(|(actual, expected)| {
+                let dot = (actual.rotation.x * expected.rotation.x
+                    + actual.rotation.y * expected.rotation.y
+                    + actual.rotation.z * expected.rotation.z
+                    + actual.rotation.w * expected.rotation.w)
+                    .abs()
+                    .min(1.0);
+                2.0 * dot.acos()
+            })
+            .fold(0.0_f64, f64::max);
+        let finite = sample.states.iter().all(|state| {
+            state.position.is_finite()
+                && state.rotation.is_normalized()
+                && state.velocity.is_finite()
+        });
+        let accuracy = if max_position_error < 0.5 && max_velocity_error < 2.5 {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        println!(
+            "warp parts={part_count} requested={}x achieved={:.2}x sim_ms={} wall_ms={} steps={} avg/max_step_ms={:.3}/{:.3} max_debt_ms={} end_debt_ms={} adaptive_limited={} finite={} accuracy={} max_error_m/m_s/rad={:.6e}/{:.6e}/{:.6e}",
+            sample.requested,
+            sample.actual,
+            sample.simulated_time.as_secs_f64() * 1.0e3,
+            sample.elapsed_wall.as_secs_f64() * 1.0e3,
+            sample.steps,
+            sample.average_step_cost.as_secs_f64() * 1.0e3,
+            sample.max_step_cost.as_secs_f64() * 1.0e3,
+            sample.max_time_debt.as_secs_f64() * 1.0e3,
+            sample.ending_time_debt.as_secs_f64() * 1.0e3,
+            sample.adaptive_limited,
+            finite,
+            accuracy,
+            max_position_error,
+            max_velocity_error,
+            max_frame_error,
+        );
+        assert!(
+            finite,
+            "Time Warp produced a non-finite state for {part_count} parts"
+        );
+    }
+}
