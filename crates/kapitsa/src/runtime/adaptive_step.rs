@@ -794,6 +794,26 @@ mod tests {
         use super::super::modular_rocket_fixture::{ModularRocket, rocket_part_mass};
 
         let mut rocket = ModularRocket::new(ROCKET_PARTS);
+        rocket
+            .world
+            .set_force_source(
+                rocket.lower_engine,
+                Vec3::new(-0.04, -0.2, 0.0),
+                Vec3::Y * 800.0,
+            )
+            .expect("booster engine thrust");
+        rocket
+            .world
+            .set_force_source(
+                rocket.upper_engine,
+                Vec3::new(-0.04, -0.2, 0.0),
+                Vec3::Y * 800.0,
+            )
+            .expect("upper-stage engine thrust");
+        rocket
+            .world
+            .set_force_source_enabled(rocket.lower_engine, true)
+            .expect("booster ignition");
         let config = adaptive_config();
         let base_step = config.step_budget();
         let minimum_step = match &config.time_step_policy {
