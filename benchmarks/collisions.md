@@ -671,3 +671,14 @@ successful retry. These scenarios report local replay and zero global fallback.
 The existing layout tests also verify that shared static and kinematic bodies
 do not merge otherwise independent dynamic islands. Final release timing for
 the rebound and cascade scenes is included in the stage 9 benchmark matrix.
+
+## CCD follow-up stage 5: island result staging
+
+Initial per-island TOI evaluation now writes a reusable private result containing
+the island's dynamic-body snapshot, candidate TOIs, and staged interactions.
+Workers read the shared world and use local narrow-phase scratch; the coordinator
+merges results by island and candidate order. This keeps staged data private to
+the step and provides the output shape for isolated island execution. The impact
+resolver remains sequential in this stage. The expensive-island worker
+equivalence test passes, and the result buffers retain their capacity between
+steps.

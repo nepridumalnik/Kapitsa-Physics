@@ -13,6 +13,49 @@ use super::{
     solver::{SolverBody, SolverManifold},
 };
 
+#[derive(Clone, Copy)]
+pub(crate) struct CcdIslandBodyResult {
+    pub(crate) prediction: usize,
+    pub(crate) ccd_state: BodyState,
+    pub(crate) predicted_state: BodyState,
+    pub(crate) elapsed: f64,
+    pub(crate) impact_count: u32,
+    pub(crate) clipped: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CcdIslandCandidateResult {
+    pub(crate) candidate: usize,
+    pub(crate) pair: CollisionPair,
+    pub(crate) toi: CcdCandidateToi,
+    pub(crate) interaction: Option<CollisionInteraction>,
+}
+
+/// Private, transaction-staged changes produced while evaluating one CCD island.
+#[derive(Default)]
+pub(crate) struct CcdIslandResult {
+    pub(crate) bodies: Vec<CcdIslandBodyResult>,
+    pub(crate) candidates: Vec<CcdIslandCandidateResult>,
+    pub(crate) dependencies: Vec<CollisionPair>,
+}
+
+impl CcdIslandResult {
+    pub(crate) fn clear(&mut self) {
+        self.bodies.clear();
+        self.candidates.clear();
+        self.dependencies.clear();
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn retained_capacity_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        self.bodies.capacity() * size_of::<CcdIslandBodyResult>()
+            + self.candidates.capacity() * size_of::<CcdIslandCandidateResult>()
+            + self.dependencies.capacity() * size_of::<CollisionPair>()
+    }
+}
+
 /// Scratch state for a transactional world step.
 pub(crate) struct StepContext {
     pub(crate) predicted_states: Vec<(BodyId, BodyState)>,
@@ -33,6 +76,7 @@ pub(crate) struct StepContext {
     pub(crate) ccd_replay_bodies: Vec<usize>,
     pub(crate) ccd_replay_pairs: Vec<super::CollisionPair>,
     pub(crate) ccd_deferred_candidates: Vec<usize>,
+    pub(crate) ccd_island_results: Vec<CcdIslandResult>,
     #[cfg(feature = "bench-internals")]
     pub(crate) ccd_clipped_metrics: Vec<bool>,
     pub(crate) ccd_body_types: Vec<BodyType>,
@@ -76,6 +120,7 @@ impl StepContext {
             ccd_replay_bodies: Vec::new(),
             ccd_replay_pairs: Vec::new(),
             ccd_deferred_candidates: Vec::new(),
+            ccd_island_results: Vec::new(),
             #[cfg(feature = "bench-internals")]
             ccd_clipped_metrics: Vec::new(),
             ccd_body_types: Vec::new(),
@@ -117,6 +162,9 @@ impl StepContext {
         self.ccd_replay_bodies.clear();
         self.ccd_replay_pairs.clear();
         self.ccd_deferred_candidates.clear();
+        for result in &mut self.ccd_island_results {
+            result.clear();
+        }
         #[cfg(feature = "bench-internals")]
         self.ccd_clipped_metrics.clear();
         self.ccd_body_types.clear();
@@ -170,6 +218,7 @@ impl StepContext {
             self.ccd_replay_bodies.capacity() * size_of::<usize>(),
             self.ccd_replay_pairs.capacity() * size_of::<super::CollisionPair>(),
             self.ccd_deferred_candidates.capacity() * size_of::<usize>(),
+            self.ccd_island_results.capacity() * size_of::<CcdIslandResult>(),
             self.ccd_clipped_metrics.capacity() * size_of::<bool>(),
             self.ccd_body_types.capacity() * size_of::<BodyType>(),
             self.ccd_continuous_bodies.capacity() * size_of::<bool>(),
@@ -193,5 +242,10 @@ impl StepContext {
         ]
         .into_iter()
         .fold(0_usize, usize::saturating_add)
+            + self
+                .ccd_island_results
+                .iter()
+                .map(CcdIslandResult::retained_capacity_bytes)
+                .fold(0_usize, usize::saturating_add)
     }
 }

@@ -202,7 +202,9 @@ pub(crate) use broad_phase::CollisionProxy;
 pub(crate) use manifold::{ContactManifold, ContactPoint};
 pub(crate) use narrow_phase::NarrowPhase;
 pub(crate) use solver::{SolverBody, SolverManifold, SolverMaterial};
-pub(crate) use step::StepContext;
+pub(crate) use step::{
+    CcdIslandBodyResult, CcdIslandCandidateResult, CcdIslandResult, StepContext,
+};
 pub(crate) use system::CollisionSystem;
 
 #[cfg(test)]
