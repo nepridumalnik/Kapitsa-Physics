@@ -104,10 +104,14 @@ impl PhysicsClient {
         }
     }
 
-    /// Queues a command and waits until it has been applied to the world.
+    /// Queues a command and waits for the next step to finish.
     ///
     /// Cancelling before the bounded send completes prevents enqueueing. Once
     /// enqueued, the command remains active even if this future is cancelled.
+    /// Successful world changes are acknowledged only after their step has
+    /// completed and its snapshot has been published. Spatial queries return
+    /// the value computed at their FIFO position before that step's integration;
+    /// a query result is still valid if that later integration fails.
     pub async fn submit(
         &self,
         command: PhysicsCommand,
@@ -127,7 +131,7 @@ impl PhysicsClient {
             .map_err(|_| PhysicsClientError::ChannelClosed)?
     }
 
-    /// Adds a body and returns its world-scoped ID after insertion.
+    /// Adds a body and returns its world-scoped ID after a snapshot includes it.
     pub async fn add_body(&self, body: RigidBody) -> Result<BodyId, PhysicsClientError> {
         match self.submit(PhysicsCommand::AddBody { body }).await? {
             PhysicsCommandResult::Body(id) => Ok(id),
@@ -140,7 +144,7 @@ impl PhysicsClient {
         }
     }
 
-    /// Removes a body and all colliders attached to it.
+    /// Removes a body and its colliders, then waits for a snapshot without it.
     pub async fn remove_body(&self, id: BodyId) -> Result<(), PhysicsClientError> {
         expect_done(self.submit(PhysicsCommand::RemoveBody { id }).await?)
     }
@@ -380,7 +384,8 @@ impl PhysicsClient {
         )
     }
 
-    /// Raycasts the latest world state at this request's FIFO position.
+    /// Raycasts the world at this request's FIFO position before integration.
+    /// The query result does not describe the following snapshot's state.
     pub async fn raycast(
         &self,
         ray: Ray,
@@ -392,7 +397,8 @@ impl PhysicsClient {
         }
     }
 
-    /// Sweeps a convex shape through the latest world state at this request's FIFO position.
+    /// Sweeps at this request's FIFO position before integration. The result
+    /// does not describe the following snapshot's state.
     pub async fn sweep(
         &self,
         shape: Shape,
@@ -414,7 +420,8 @@ impl PhysicsClient {
         }
     }
 
-    /// Returns all colliders overlapping a convex shape at this request's FIFO position.
+    /// Finds overlaps at this request's FIFO position before integration. The
+    /// result does not describe the following snapshot's state.
     pub async fn overlaps(
         &self,
         shape: Shape,

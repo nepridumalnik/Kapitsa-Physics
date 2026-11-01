@@ -1271,3 +1271,55 @@ measurements:
 ```powershell
 cargo test -p kapitsa-core --release --lib --features bench-internals benchmark_force_source_update_scaling -- --ignored --nocapture
 ```
+
+## Runtime command completion semantics
+
+Measured on 2026-11-01 on an AMD Ryzen 9 7900X3D, `x86_64-pc-windows-msvc`,
+with `rustc 1.98.0` / `cargo 1.98.0` and Cargo's default optimized Release
+profile. Baseline is commit `aaa8f8a` (batch results published after a
+successful step); the updated runtime defers both batch and single mutation
+completions until that step's snapshot is published. The benchmark uses a
+pre-created simulation and body, warms each request type 20 times, then records
+five samples of 20 sequential request/ack cycles. It reports per-sample mean
+acknowledgment latency and the min / median / max across those means. Submit CPU
+time is measured separately around the first poll of a single command or
+`try_submit()` for a 128-command batch. Allocations are counted in a separate
+post-warm 20-cycle run; counts include runtime, scheduler, and snapshot work.
+
+| Request | Ack mean min / median / max us, before → after | Median submit CPU ns, before → after | Median requests/s, before → after | Median commands/s, before → after | Allocations/request, before → after | Requested bytes/request, before → after |
+|---|---:|---:|---:|---:|---:|---:|
+| Single mutation | 7,668.710 / 7,786.450 / 7,886.120 → 14,702.200 / 15,407.310 / 15,504.435 | 1,900 → 2,100 | 128 → 65 | 128 → 65 | 4.05 → 7.05 | 540.0 → 844.0 |
+| 128-command batch | 15,364.420 / 15,493.785 / 15,558.340 → 14,731.990 / 15,470.975 / 15,633.030 | 650 → 655 | 65 → 65 | 8,257 → 8,270 | 6.00 → 5.70 | 608.0 → 577.6 |
+
+The sequential single-command acknowledgment now waits for publication of a
+step, so this workload completes about half as many requests per second. Its
+roughly 15 ms wall latency includes waiting for the runtime tick and Windows
+timer scheduling; it is not CPU processing time. The batch acknowledgment
+latency and throughput are effectively unchanged, and submit CPU remains below
+1 us per 128-command request. The allocation totals are whole-runtime
+measurements, not allocation counts for the deferred-result buffer alone. The
+single-command run also changes how requests overlap ticks because each call
+now waits for its step; the increase from 4.05 to 7.05 allocations/request
+cannot be attributed to one allocation site from this harness. The result
+buffer is allocated with capacity for `MAX_COMMANDS_PER_STEP` when the runtime
+command queue is created and drained without per-result heap objects.
+
+The direct 128-command `apply_command_batch()` Release benchmark showed no
+material CPU regression (before → after median): one-body 0.455 → 0.533 us,
+distinct bodies 7.179 → 7.392 us, and mixed body/source 2.019 → 2.031 us. The
+sample ranges overlap in all three cases. The warmed staging-allocation harness
+reported zero allocations / requested bytes both before and after, with the
+same retained capacities. The command-buffer full-cycle benchmark also stayed
+within noise: pooled median 1.975 → 1.946 us, 506,265 → 513,885 batches/s,
+and zero warmed allocations in both runs (the earlier pool report above records
+its original measurement series).
+
+Exact commands for the runtime completion, direct batch, staging-allocation,
+and pooled full-cycle measurements:
+
+```powershell
+cargo test -p kapitsa --release --test async_marshalling --features bench-internals benchmark_runtime_completion_latency -- --ignored --nocapture
+cargo test -p kapitsa --release --lib benchmark_apply_command_batch_scaling -- --ignored --nocapture
+cargo test -p kapitsa --release --lib --features bench-internals benchmark_apply_command_batch_allocations -- --ignored --nocapture
+cargo test -p kapitsa --release --lib --features bench-internals benchmark_command_buffer_pool_full_cycle -- --ignored --nocapture
+```

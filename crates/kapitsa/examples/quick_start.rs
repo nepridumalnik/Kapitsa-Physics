@@ -14,6 +14,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let body = physics
         .add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)
         .await?;
+    if physics.snapshot().body(body).is_none() {
+        return Err("body insertion completed before its snapshot was published".into());
+    }
     let source = physics
         .add_force_source(body, Vec3::ZERO, Vec3::X * 10.0)
         .await?;
@@ -28,6 +31,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     result
         .result
         .map_err(|error| format!("batch rejected: {error:?}"))?;
+    if physics.snapshot().step() < result.step {
+        return Err("batch completion preceded its snapshot publication".into());
+    }
 
     if let Some(state) = physics.snapshot().body(body) {
         println!("body velocity: {:?}", state.linear_velocity());

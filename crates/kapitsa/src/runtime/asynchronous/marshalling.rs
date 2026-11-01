@@ -24,7 +24,7 @@ use kapitsa_core::{
     world::{ForceSourceError, StepError, WorldError},
 };
 
-/// Failure returned while submitting or applying a physics command.
+/// Failure returned while submitting or completing a physics command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhysicsClientError {
     NotRunning,
@@ -33,7 +33,12 @@ pub enum PhysicsClientError {
     Body(BodyError),
     Query(QueryError),
     ForceSource(ForceSourceError),
-    StepFailedAfterApply { step: u64, cause: StepError },
+    /// The command changed the world, but the associated step failed before
+    /// publishing a snapshot. `step` is the failed step attempt.
+    StepFailedAfterApply {
+        step: u64,
+        cause: StepError,
+    },
     UnsupportedBatchCommand,
     UnexpectedResult,
 }

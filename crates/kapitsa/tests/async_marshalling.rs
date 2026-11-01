@@ -4,15 +4,92 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll, Waker},
-    time::Duration,
+    time::{Duration, Instant},
+};
+
+#[cfg(feature = "bench-internals")]
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use kapitsa::math::{Mat3, Vec3};
+use kapitsa::query::{QueryFilter, Ray};
+use kapitsa::shape::Sphere;
 use kapitsa::{
-    MassProperties, PhysicsClient, PhysicsClientError, PhysicsSnapshot, PhysicsSubmitError,
-    RigidBody, Simulation, SimulationConfig, Transform, WorkerConfig,
+    Collider, MassProperties, PhysicsClient, PhysicsClientError, PhysicsSnapshot,
+    PhysicsSubmitError, RigidBody, Shape, Simulation, SimulationConfig, Transform, WorkerConfig,
 };
 use tokio::task::JoinSet;
+
+#[cfg(feature = "bench-internals")]
+static TRACK_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "bench-internals")]
+static ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "bench-internals")]
+static ALLOCATION_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "bench-internals")]
+struct TrackingAllocator;
+
+#[cfg(feature = "bench-internals")]
+// SAFETY: all allocator operations delegate to the system allocator.
+unsafe impl GlobalAlloc for TrackingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() && TRACK_ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed) {
+            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOCATION_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        if !pointer.is_null() && TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOCATION_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        pointer
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        let pointer = unsafe { System.realloc(pointer, layout, size) };
+        if !pointer.is_null() && TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOCATION_BYTES.fetch_add(size, Ordering::Relaxed);
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[global_allocator]
+static TEST_ALLOCATOR: TrackingAllocator = TrackingAllocator;
+
+#[cfg(feature = "bench-internals")]
+struct AllocationTracking;
+
+#[cfg(feature = "bench-internals")]
+impl AllocationTracking {
+    fn start() -> Self {
+        ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+        ALLOCATION_BYTES.store(0, Ordering::Relaxed);
+        TRACK_ALLOCATIONS.store(true, Ordering::Relaxed);
+        Self
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+impl Drop for AllocationTracking {
+    fn drop(&mut self) {
+        TRACK_ALLOCATIONS.store(false, Ordering::Relaxed);
+    }
+}
 
 fn simulation() -> Simulation {
     Simulation::new_from_config(SimulationConfig {
@@ -60,6 +137,7 @@ async fn commands_steps_snapshots_remove_and_recreate_bodies() {
         .await
         .expect("add body timeout")
         .expect("add body");
+    assert!(client.snapshot().body(id).is_some());
     let created = next_snapshot(&mut client).await;
     assert!(created.body(id).is_some());
     assert_eq!(created.len(), 1);
@@ -73,6 +151,7 @@ async fn commands_steps_snapshots_remove_and_recreate_bodies() {
     let retained = accelerated.clone();
 
     client.remove_body(id).await.expect("remove body");
+    assert!(client.snapshot().body(id).is_none());
     let removed = next_snapshot(&mut client).await;
     assert!(removed.body(id).is_none());
     assert!(retained.body(id).is_some());
@@ -158,6 +237,89 @@ async fn command_buffers_are_ordered_atomic_and_report_step_results() {
             .expect("dynamic body")
             .linear_velocity(),
         Vec3::X * 5.0
+    );
+    simulation.stop().await.expect("stop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn single_commands_and_batches_keep_fifo_order_and_snapshot_completion() {
+    let mut simulation = simulation();
+    let client = simulation.client();
+    let mut results = client.subscribe_batch_results();
+    simulation.start().expect("start");
+    let body = client.add_body(dynamic_body()).await.expect("body");
+
+    let mut first = Box::pin(client.set_linear_velocity(body, Vec3::X));
+    assert!(matches!(poll_once(first.as_mut()), Poll::Pending));
+    let mut batch = client.commands();
+    batch.set_linear_velocity(body, Vec3::Y);
+    let batch_id = client.try_submit(batch).expect("batch accepted");
+    let mut last = Box::pin(client.set_linear_velocity(body, Vec3::Z));
+    assert!(matches!(poll_once(last.as_mut()), Poll::Pending));
+
+    let (first_result, batch_result, last_result) =
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(first.as_mut(), results.next_result(), last.as_mut())
+        })
+        .await
+        .expect("all command completions arrive");
+    first_result.expect("first single command");
+    last_result.expect("last single command");
+    let batch_result = batch_result.expect("batch result");
+    assert_eq!(batch_result.batch_id, batch_id);
+    assert_eq!(batch_result.result, Ok(()));
+    let snapshot = client.snapshot();
+    assert!(snapshot.step() >= batch_result.step);
+    assert_eq!(
+        snapshot
+            .body(body)
+            .expect("body snapshot")
+            .linear_velocity(),
+        Vec3::Z
+    );
+    simulation.stop().await.expect("stop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spatial_query_observes_fifo_state_before_integration() {
+    let mut simulation = simulation();
+    let client = simulation.client();
+    simulation.start().expect("start");
+    let body = client.add_body(dynamic_body()).await.expect("body");
+    client
+        .add_collider(
+            body,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                Transform::identity(),
+            ),
+        )
+        .await
+        .expect("collider");
+
+    let mut velocity = Box::pin(client.set_linear_velocity(body, Vec3::X * 100.0));
+    assert!(matches!(poll_once(velocity.as_mut()), Poll::Pending));
+    let ray = Ray::new(Vec3::new(0.0, 0.0, -2.0), Vec3::Z, 5.0).expect("ray");
+    let mut query = Box::pin(client.raycast(ray, QueryFilter::default()));
+    assert!(matches!(poll_once(query.as_mut()), Poll::Pending));
+
+    let (velocity_result, hit) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(velocity.as_mut(), query.as_mut())
+    })
+    .await
+    .expect("mutation and query complete");
+    velocity_result.expect("velocity command");
+    let hit = hit.expect("query succeeds").expect("pre-step sphere hit");
+    assert!((hit.distance - 1.5).abs() < 1.0e-10);
+    assert!(
+        client
+            .snapshot()
+            .body(body)
+            .expect("published body")
+            .transform()
+            .translation()
+            .x
+            > 5.0
     );
     simulation.stop().await.expect("stop");
 }
@@ -440,4 +602,177 @@ async fn held_snapshots_stay_immutable_while_clients_receive_new_publications() 
     );
     assert!(simulation.metrics().total_steps >= 4);
     simulation.stop().await.expect("stop");
+}
+
+#[cfg(feature = "bench-internals")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "Release end-to-end command completion latency and allocation benchmark"]
+async fn benchmark_runtime_completion_latency() {
+    const WARMUP: usize = 20;
+    const CYCLES_PER_SAMPLE: usize = 20;
+    const SAMPLE_COUNT: usize = 5;
+
+    let mut simulation = Simulation::new_from_config(SimulationConfig {
+        tick_rate: 1_000,
+        max_catch_up_steps: 2,
+        workers: WorkerConfig {
+            max_workers: NonZeroUsize::new(1),
+            ..WorkerConfig::default()
+        },
+        ..SimulationConfig::default()
+    })
+    .expect("valid simulation configuration");
+    let client = simulation.client();
+    let mut results = client.subscribe_batch_results();
+    simulation.start().expect("start");
+    let body = client.add_body(dynamic_body()).await.expect("body");
+
+    for index in 0..WARMUP {
+        client
+            .set_linear_velocity(body, Vec3::X * index as f64)
+            .await
+            .expect("warm single command");
+    }
+    for index in 0..WARMUP {
+        let mut buffer = client.commands();
+        for command in 0..128 {
+            buffer.set_linear_velocity(body, Vec3::new((index * 128 + command) as f64, 1.0, 0.0));
+        }
+        let id = client.try_submit(buffer).expect("warm batch submit");
+        let result = results.next_result().await.expect("warm batch result");
+        assert_eq!(result.batch_id, id);
+        assert!(result.result.is_ok());
+    }
+
+    let mut single_ack_means = Vec::with_capacity(SAMPLE_COUNT);
+    let mut single_submit_means = Vec::with_capacity(SAMPLE_COUNT);
+    let mut single_throughputs = Vec::with_capacity(SAMPLE_COUNT);
+    for sample in 0..SAMPLE_COUNT {
+        let sample_started = Instant::now();
+        let mut ack_total = 0.0;
+        let mut submit_total = 0.0;
+        for cycle in 0..CYCLES_PER_SAMPLE {
+            let mut request = std::pin::pin!(client.set_linear_velocity(
+                body,
+                Vec3::new((sample * CYCLES_PER_SAMPLE + cycle) as f64, 0.0, 0.0),
+            ));
+            let started = Instant::now();
+            let submit_started = Instant::now();
+            let first_poll = poll_once(request.as_mut());
+            submit_total += submit_started.elapsed().as_nanos() as f64;
+            match first_poll {
+                Poll::Ready(result) => result.expect("single command"),
+                Poll::Pending => request.as_mut().await.expect("single command"),
+            }
+            ack_total += started.elapsed().as_secs_f64() * 1_000_000.0;
+        }
+        single_ack_means.push(ack_total / CYCLES_PER_SAMPLE as f64);
+        single_submit_means.push(submit_total / CYCLES_PER_SAMPLE as f64);
+        single_throughputs.push(CYCLES_PER_SAMPLE as f64 / sample_started.elapsed().as_secs_f64());
+    }
+
+    let mut batch_ack_means = Vec::with_capacity(SAMPLE_COUNT);
+    let mut batch_submit_means = Vec::with_capacity(SAMPLE_COUNT);
+    let mut batch_throughputs = Vec::with_capacity(SAMPLE_COUNT);
+    for sample in 0..SAMPLE_COUNT {
+        let sample_started = Instant::now();
+        let mut ack_total = 0.0;
+        let mut submit_total = 0.0;
+        for cycle in 0..CYCLES_PER_SAMPLE {
+            let mut buffer = client.commands();
+            for command in 0..128 {
+                buffer.set_linear_velocity(
+                    body,
+                    Vec3::new(
+                        (sample * CYCLES_PER_SAMPLE + cycle * 128 + command) as f64,
+                        1.0,
+                        0.0,
+                    ),
+                );
+            }
+            let started = Instant::now();
+            let submit_started = Instant::now();
+            let id = client.try_submit(buffer).expect("batch submit");
+            submit_total += submit_started.elapsed().as_nanos() as f64;
+            let result = results.next_result().await.expect("batch result");
+            ack_total += started.elapsed().as_secs_f64() * 1_000_000.0;
+            assert_eq!(result.batch_id, id);
+            assert!(result.result.is_ok());
+            assert!(client.snapshot().step() >= result.step);
+        }
+        batch_ack_means.push(ack_total / CYCLES_PER_SAMPLE as f64);
+        batch_submit_means.push(submit_total / CYCLES_PER_SAMPLE as f64);
+        batch_throughputs.push(CYCLES_PER_SAMPLE as f64 / sample_started.elapsed().as_secs_f64());
+    }
+
+    let tracking = AllocationTracking::start();
+    for cycle in 0..CYCLES_PER_SAMPLE {
+        client
+            .set_linear_velocity(body, Vec3::X * cycle as f64)
+            .await
+            .expect("tracked single command");
+    }
+    drop(tracking);
+    let single_allocations = ALLOCATION_COUNT.load(Ordering::Relaxed);
+    let single_bytes = ALLOCATION_BYTES.load(Ordering::Relaxed);
+
+    let tracking = AllocationTracking::start();
+    for cycle in 0..CYCLES_PER_SAMPLE {
+        let mut buffer = client.commands();
+        for command in 0..128 {
+            buffer.set_linear_velocity(body, Vec3::new((cycle * 128 + command) as f64, 1.0, 0.0));
+        }
+        let id = client.try_submit(buffer).expect("tracked batch submit");
+        let result = results.next_result().await.expect("tracked batch result");
+        assert_eq!(result.batch_id, id);
+        assert!(result.result.is_ok());
+    }
+    drop(tracking);
+    let batch_allocations = ALLOCATION_COUNT.load(Ordering::Relaxed);
+    let batch_bytes = ALLOCATION_BYTES.load(Ordering::Relaxed);
+
+    println!(
+        "mode,commands_per_request,samples,min_mean_ack_us,median_mean_ack_us,max_mean_ack_us,median_submit_cpu_ns,median_requests_per_second,median_commands_per_second,allocations_per_request,requested_bytes_per_request"
+    );
+    for (mode, commands, ack, submit, throughput, allocations, bytes) in [
+        (
+            "single",
+            1,
+            single_ack_means,
+            single_submit_means,
+            single_throughputs,
+            single_allocations,
+            single_bytes,
+        ),
+        (
+            "batch",
+            128,
+            batch_ack_means,
+            batch_submit_means,
+            batch_throughputs,
+            batch_allocations,
+            batch_bytes,
+        ),
+    ] {
+        let (min_ack, median_ack, max_ack) = min_median_max(ack);
+        let (_, median_submit, _) = min_median_max(submit);
+        let (_, median_throughput, _) = min_median_max(throughput);
+        println!(
+            "{mode},{commands},{SAMPLE_COUNT},{min_ack:.3},{median_ack:.3},{max_ack:.3},{median_submit:.1},{median_throughput:.0},{:.0},{:.3},{:.1}",
+            median_throughput * commands as f64,
+            allocations as f64 / CYCLES_PER_SAMPLE as f64,
+            bytes as f64 / CYCLES_PER_SAMPLE as f64,
+        );
+    }
+    simulation.stop().await.expect("stop");
+}
+
+#[cfg(feature = "bench-internals")]
+fn min_median_max(mut values: Vec<f64>) -> (f64, f64, f64) {
+    values.sort_by(f64::total_cmp);
+    (
+        values[0],
+        values[values.len() / 2],
+        values[values.len() - 1],
+    )
 }

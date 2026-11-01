@@ -55,10 +55,30 @@ preserves the world so the same simulation can be started again.
 
 `PhysicsClient` is cloneable and thread-safe. Use awaited methods for structural
 operations such as adding or removing bodies, colliders, and force sources.
+Successful world-changing calls complete only after their physics step succeeds
+and the corresponding snapshot has been published. Thus, after `add_body`
+returns, `snapshot().body(id)` is present; after `remove_body` returns, it is
+absent. `next_snapshot()` can still skip later intermediate publications.
+
 Use `PhysicsCommandBuffer` and `try_submit` for ordered changes during a
-synchronous game tick. A submitted buffer is applied atomically at a step
-boundary. Its `BatchId`, step number, typed result, and any lag in the bounded
-result stream are observable through `subscribe_batch_results()`.
+synchronous game tick. `try_submit()` means only that the complete buffer was
+accepted into the bounded queue. A successful `PhysicsBatchResult` means the
+batch was applied atomically, its step completed, and that step's snapshot was
+published. The result's `step` identifies that publication; the latest snapshot
+may have a greater step because snapshots can skip intermediate steps.
+
+Command validation failures preserve the original error and command index, and
+the batch makes no partial changes. `PhysicsClientError::StepFailedAfterApply`
+means the command or batch did change the world, but the following physical step
+failed; it includes the failed attempt number and `StepError` cause. Those
+changes are not automatically rolled back, and no snapshot for the failed step
+is published. `NotRunning` means the request was not applied before stopping.
+
+Raycast, sweep, and overlap requests run at their FIFO position before the
+following integration. Their result is computed once from the world at that
+point, then delivered when that step attempt finishes. A query result is a read
+of that earlier state, not a claim about the published post-step snapshot; a
+query error remains distinct from a later integration error.
 
 `apply_impulse` changes velocity immediately at the next command boundary;
 `apply_force` adds a one-step force that is cleared after a successful step. A

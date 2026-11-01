@@ -57,15 +57,19 @@ impl fmt::Display for CollisionEventStreamError {
 
 impl std::error::Error for CollisionEventStreamError {}
 
-/// A batch failure. `command_index` is `None` when the simulation stopped before
-/// applying the batch.
+/// A batch failure. `command_index` is `None` when the package was not rejected
+/// by an individual command, such as stopping before apply or a failed step
+/// after successful apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysicsBatchError {
     pub command_index: Option<usize>,
     pub error: PhysicsClientError,
 }
 
-/// Outcome of an accepted command buffer at its physics-step boundary.
+/// Outcome of an accepted command buffer after its step boundary.
+///
+/// An `Ok(())` result guarantees that the snapshot for `step` has already been
+/// published. The latest snapshot may have advanced beyond this step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysicsBatchResult {
     pub batch_id: BatchId,
@@ -220,6 +224,11 @@ impl CollisionEvents {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+
     use tokio::sync::{broadcast, mpsc, watch};
 
     use super::{
@@ -294,5 +303,26 @@ mod tests {
         let result = subscription.next_result().await.expect("latest result");
         assert_eq!(result.batch_id.get(), 3);
         assert_eq!(result.step, 3);
+    }
+
+    #[tokio::test]
+    async fn stop_does_not_hide_a_result_published_at_the_same_time() {
+        let (results, receiver) = broadcast::channel(4);
+        let (running_tx, running_rx) = running_state();
+        let mut subscription = PhysicsBatchResults::new(receiver, running_rx);
+        let mut next = Box::pin(subscription.next_result());
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(next.as_mut().poll(&mut context), Poll::Pending));
+
+        let expected = PhysicsBatchResult {
+            batch_id: BatchId::new(1),
+            step: 7,
+            result: Ok(()),
+        };
+        results.send(expected).expect("subscriber exists");
+        running_tx.send_replace(None);
+
+        assert_eq!(next.await, Ok(expected));
     }
 }
