@@ -1,5 +1,6 @@
 use crate::{
     aabb::Aabb,
+    rigid_body::{BodyState, BodyType, RigidBody, predict_from_state, trajectory_bounds},
     shape::{HeightField, LevelSet, Plane, Shape, Triangle, TriangleMesh},
     transform::Transform,
 };
@@ -15,6 +16,117 @@ use super::{
 };
 
 const MAX_CCD_ITERATIONS: usize = 64;
+
+#[derive(Clone, Copy)]
+pub(crate) struct CcdTrajectory {
+    body: RigidBody,
+    base_state: BodyState,
+    base_time: f64,
+    sample_start_time: f64,
+    end_time: f64,
+    local_transform: Transform,
+    frozen: bool,
+}
+
+impl CcdTrajectory {
+    pub(crate) fn new(
+        body: RigidBody,
+        base_state: BodyState,
+        base_time: f64,
+        sample_start_time: f64,
+        end_time: f64,
+        local_transform: Transform,
+        frozen: bool,
+    ) -> Self {
+        Self {
+            body,
+            base_state,
+            base_time,
+            sample_start_time,
+            end_time,
+            local_transform,
+            frozen,
+        }
+    }
+
+    pub(crate) fn transform_at(&self, amount: f64) -> Result<Transform, CollisionError> {
+        if self.frozen {
+            return self
+                .base_state
+                .transform()
+                .compose(&self.local_transform)
+                .map_err(|_| CollisionError::ArithmeticOverflow);
+        }
+        let sample_time =
+            self.sample_start_time + (self.end_time - self.sample_start_time) * amount;
+        let duration = sample_time - self.base_time;
+        let state = if duration == 0.0 {
+            self.base_state
+        } else {
+            predict_from_state(&self.body, self.base_state, duration)
+                .map_err(|_| CollisionError::ArithmeticOverflow)?
+        };
+        state
+            .transform()
+            .compose(&self.local_transform)
+            .map_err(|_| CollisionError::ArithmeticOverflow)
+    }
+
+    pub(crate) fn path_bounds(&self, end: BodyState) -> Result<(f64, f64, bool), CollisionError> {
+        if self.frozen {
+            return Ok((0.0, 0.0, true));
+        }
+        let base_duration = self.end_time - self.base_time;
+        if base_duration <= 0.0 {
+            return Err(CollisionError::InvalidContact);
+        }
+        let bounds = trajectory_bounds(&self.body, self.base_state, end, base_duration)
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        let linear_origin = self.has_linear_collider_origin(end);
+        let segment_ratio = (self.end_time - self.sample_start_time) / base_duration;
+        if !segment_ratio.is_finite() || segment_ratio < 0.0 || segment_ratio > 1.0 {
+            return Err(CollisionError::InvalidContact);
+        }
+        let local_offset = self
+            .local_transform
+            .translation()
+            .checked_length()
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let rotation = bounds.rotation * segment_ratio;
+        let translation = (bounds.translation + local_offset * bounds.rotation) * segment_ratio;
+        if !translation.is_finite() || !rotation.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        Ok((translation, rotation, linear_origin))
+    }
+
+    pub(crate) fn has_linear_collider_origin(&self, end: BodyState) -> bool {
+        if self.frozen
+            || self.base_state.is_sleeping()
+            || self.body.physics().body_type() == BodyType::Static
+        {
+            return true;
+        }
+        if self.base_state.linear_velocity() != end.linear_velocity() {
+            return false;
+        }
+        if self.base_state.angular_velocity() == Vec3::ZERO && end.angular_velocity() == Vec3::ZERO
+        {
+            return true;
+        }
+        let center_of_mass = self
+            .body
+            .physics()
+            .mass()
+            .map_or(Vec3::ZERO, |mass| mass.center_of_mass());
+        center_of_mass == Vec3::ZERO
+            && self.local_transform.translation() == kapitsa_math::Vec3::ZERO
+    }
+
+    pub(crate) fn local_transform(&self) -> Transform {
+        self.local_transform
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CcdHit {
@@ -42,16 +154,16 @@ impl Default for CcdCandidateToi {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct CcdMotion<'a> {
+pub(crate) struct CcdMotion {
     start: Transform,
     end: Transform,
     translation_bound: f64,
     linear_translation: bool,
     rotation_bound: f64,
-    sample: Option<&'a dyn Fn(f64) -> Result<Transform, CollisionError>>,
+    trajectory: Option<CcdTrajectory>,
 }
 
-impl CcdMotion<'_> {
+impl CcdMotion {
     pub(crate) fn linear(start: Transform, end: Transform) -> Result<Self, CollisionError> {
         Ok(Self {
             start,
@@ -59,18 +171,18 @@ impl CcdMotion<'_> {
             translation_bound: translation_delta(start, end)?.length(),
             linear_translation: true,
             rotation_bound: rotation_angle(start.rotation(), end.rotation())?,
-            sample: None,
+            trajectory: None,
         })
     }
 
-    pub(crate) fn trajectory<'a>(
+    pub(crate) fn trajectory(
         start: Transform,
         end: Transform,
         translation_bound: f64,
         linear_translation: bool,
         rotation_bound: f64,
-        sample: &'a dyn Fn(f64) -> Result<Transform, CollisionError>,
-    ) -> Result<CcdMotion<'a>, CollisionError> {
+        trajectory: CcdTrajectory,
+    ) -> Result<CcdMotion, CollisionError> {
         if !translation_bound.is_finite()
             || translation_bound < 0.0
             || !rotation_bound.is_finite()
@@ -84,20 +196,20 @@ impl CcdMotion<'_> {
             translation_bound,
             linear_translation,
             rotation_bound,
-            sample: Some(sample),
+            trajectory: Some(trajectory),
         })
     }
 
     fn at(&self, amount: f64) -> Result<Transform, CollisionError> {
-        if let Some(sample) = self.sample {
-            sample(amount)
+        if let Some(trajectory) = self.trajectory {
+            trajectory.transform_at(amount)
         } else {
             interpolate(self.start, self.end, amount)
         }
     }
 
     fn is_linear(&self) -> bool {
-        self.sample.is_none()
+        self.trajectory.is_none()
     }
 }
 
@@ -117,9 +229,9 @@ pub(crate) fn convex_toi(
 
 pub(crate) fn convex_toi_motion(
     shape_a: &Shape,
-    motion_a: &CcdMotion<'_>,
+    motion_a: &CcdMotion,
     shape_b: &Shape,
-    motion_b: &CcdMotion<'_>,
+    motion_b: &CcdMotion,
 ) -> Result<Option<CcdHit>, CollisionError> {
     if !shape_a.is_convex() || !(shape_b.is_convex() || matches!(shape_b, Shape::Triangle(_))) {
         return Err(CollisionError::UnsupportedGeometryPair);
@@ -329,9 +441,9 @@ fn reverse_hit(hit: CcdHit) -> CcdHit {
 
 fn sphere_cuboid_toi(
     radius: f64,
-    sphere_motion: &CcdMotion<'_>,
+    sphere_motion: &CcdMotion,
     cuboid: &crate::shape::Cuboid,
-    cuboid_motion: &CcdMotion<'_>,
+    cuboid_motion: &CcdMotion,
 ) -> Result<Option<CcdHit>, CollisionError> {
     let inverse_start = cuboid_motion
         .start
@@ -460,9 +572,9 @@ fn sphere_cuboid_toi(
 
 fn sphere_cuboid_toi_sampled(
     radius: f64,
-    sphere_motion: &CcdMotion<'_>,
+    sphere_motion: &CcdMotion,
     cuboid: &crate::shape::Cuboid,
-    cuboid_motion: &CcdMotion<'_>,
+    cuboid_motion: &CcdMotion,
 ) -> Result<Option<CcdHit>, CollisionError> {
     let motion_bound = sphere_motion.translation_bound + cuboid_motion.translation_bound;
     let radius_squared = radius * radius;
@@ -617,8 +729,8 @@ fn sphere_cuboid_hit(
     toi: f64,
     (normal_local, point_local): (Vec3, Vec3),
     radius: f64,
-    sphere_motion: &CcdMotion<'_>,
-    cuboid_motion: &CcdMotion<'_>,
+    sphere_motion: &CcdMotion,
+    cuboid_motion: &CcdMotion,
 ) -> Result<CcdHit, CollisionError> {
     let sphere_transform = sphere_motion.at(toi)?;
     let cuboid_transform = cuboid_motion.at(toi)?;
@@ -672,9 +784,9 @@ pub(crate) fn plane_toi(
 
 pub(crate) fn plane_toi_motion(
     convex: &Shape,
-    convex_motion: &CcdMotion<'_>,
+    convex_motion: &CcdMotion,
     plane: &Plane,
-    plane_motion: &CcdMotion<'_>,
+    plane_motion: &CcdMotion,
     two_sided: bool,
     plane_is_a: bool,
 ) -> Result<Option<CcdHit>, CollisionError> {
@@ -780,11 +892,11 @@ pub(crate) fn triangle_mesh_toi(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn triangle_mesh_toi_motion(
     convex: &Shape,
-    convex_motion: &CcdMotion<'_>,
+    convex_motion: &CcdMotion,
     mesh: &TriangleMesh,
     deformed_vertices: Option<&[Vec3]>,
     bvh: &TriangleBvh,
-    mesh_motion: &CcdMotion<'_>,
+    mesh_motion: &CcdMotion,
     workspace: &mut MeshQueryWorkspace,
     candidates: &mut Vec<usize>,
 ) -> Result<Option<CcdHit>, CollisionError> {
@@ -828,9 +940,9 @@ pub(crate) fn height_field_toi(
 
 pub(crate) fn height_field_toi_motion(
     convex: &Shape,
-    convex_motion: &CcdMotion<'_>,
+    convex_motion: &CcdMotion,
     field: &HeightField,
-    field_motion: &CcdMotion<'_>,
+    field_motion: &CcdMotion,
     candidates: &mut Vec<HeightFieldTriangle>,
 ) -> Result<Option<CcdHit>, CollisionError> {
     let query_bounds = relative_swept_bounds(convex, convex_motion, field_motion)?;
@@ -861,9 +973,9 @@ pub(crate) fn level_set_toi(
 
 pub(crate) fn level_set_toi_motion(
     convex: &Shape,
-    convex_motion: &CcdMotion<'_>,
+    convex_motion: &CcdMotion,
     field: &LevelSet,
-    field_motion: &CcdMotion<'_>,
+    field_motion: &CcdMotion,
     candidates: &mut Vec<LevelSetCell>,
 ) -> Result<Option<CcdHit>, CollisionError> {
     let query_bounds = relative_swept_bounds(convex, convex_motion, field_motion)?;
@@ -1060,9 +1172,9 @@ fn point_aabb_distance(point: Vec3, bounds: Aabb) -> Result<f64, CollisionError>
 fn consider_triangle_toi(
     best: &mut Option<CcdHit>,
     convex: &Shape,
-    convex_motion: &CcdMotion<'_>,
+    convex_motion: &CcdMotion,
     triangle: Triangle,
-    triangle_motion: &CcdMotion<'_>,
+    triangle_motion: &CcdMotion,
 ) -> Result<(), CollisionError> {
     let triangle = Shape::Triangle(triangle);
     if let Some(hit) = convex_toi_motion(convex, convex_motion, &triangle, triangle_motion)?
@@ -1075,8 +1187,8 @@ fn consider_triangle_toi(
 
 fn relative_swept_bounds(
     convex: &Shape,
-    convex_motion: &CcdMotion<'_>,
-    target_motion: &CcdMotion<'_>,
+    convex_motion: &CcdMotion,
+    target_motion: &CcdMotion,
 ) -> Result<Aabb, CollisionError> {
     let inverse = target_motion
         .start
@@ -1153,7 +1265,7 @@ pub(crate) fn swept_bounds(
 
 pub(crate) fn swept_bounds_motion(
     bounds: Option<Aabb>,
-    motion: &CcdMotion<'_>,
+    motion: &CcdMotion,
 ) -> Result<Option<Aabb>, CollisionError> {
     if motion.is_linear() {
         return swept_bounds(bounds, motion.start, motion.end);

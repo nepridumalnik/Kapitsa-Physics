@@ -18,6 +18,65 @@ use crate::{
 };
 use std::{collections::HashSet, sync::atomic::AtomicU64};
 
+use crate::execution::{ExecutionError, StepExecutor};
+
+struct ScopedThreadExecutor;
+
+impl StepExecutor for ScopedThreadExecutor {
+    fn for_each_chunk_mut<T, F>(
+        &self,
+        values: &mut [T],
+        chunk_size: usize,
+        operation: F,
+    ) -> Result<(), ExecutionError>
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Send + Sync,
+    {
+        if chunk_size == 0 {
+            return Err(ExecutionError::InvalidChunkLayout);
+        }
+        std::thread::scope(|scope| {
+            for (index, chunk) in values.chunks_mut(chunk_size).enumerate() {
+                let operation = &operation;
+                scope.spawn(move || operation(index, chunk));
+            }
+        });
+        Ok(())
+    }
+
+    fn for_each_chunk_layout_mut<T, F>(
+        &self,
+        values: &mut [T],
+        chunk_sizes: &[usize],
+        operation: F,
+    ) -> Result<(), ExecutionError>
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Send + Sync,
+    {
+        let total = chunk_sizes.iter().try_fold(0_usize, |total, &size| {
+            (size > 0).then(|| total.checked_add(size)).flatten()
+        });
+        if total != Some(values.len()) {
+            return Err(ExecutionError::InvalidChunkLayout);
+        }
+
+        std::thread::scope(|scope| {
+            let mut remaining = values;
+            let mut start = 0;
+            for &chunk_size in chunk_sizes {
+                let (chunk, tail) = remaining.split_at_mut(chunk_size);
+                let operation = &operation;
+                scope.spawn(move || operation(start, chunk));
+                start += chunk_size;
+                remaining = tail;
+            }
+        });
+        Ok(())
+    }
+}
+
 fn dynamic_body() -> RigidBody {
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass properties");
     RigidBody::new_dynamic(Transform::identity(), mass).expect("valid dynamic body")
@@ -1283,15 +1342,8 @@ fn ccd_swept_bounds_cover_offset_com_rotation_arcs() {
         .expect("angular velocity");
     let start = *body.state();
     let end = crate::rigid_body::predict(&body, 1.0).expect("integrator endpoint");
-    let trajectory = super::ColliderTrajectory {
-        body,
-        base_state: start,
-        base_time: 0.0,
-        sample_start_time: 0.0,
-        end_time: 1.0,
-        local_transform: Transform::identity(),
-        frozen: false,
-    };
+    let trajectory =
+        super::CcdTrajectory::new(body, start, 0.0, 0.0, 1.0, Transform::identity(), false);
     let collider = Collider::new(
         Shape::Sphere(Sphere::new(0.1).expect("sphere")),
         Transform::identity(),
@@ -1450,7 +1502,7 @@ fn independent_single_pair_ccd_islands_resolve_across_workers()
                 step.integrate(dt)?;
             }
         }
-        world.commit_step_shards_with_workers(&shards, workers)?;
+        world.commit_step_shards_with_executor(&shards, &ScopedThreadExecutor, workers)?;
 
         for ((_, actual), (_, expected)) in world.bodies().zip(sequential.bodies()) {
             assert_eq!(
@@ -1511,7 +1563,7 @@ fn seeded_independent_ccd_stress_matches_across_worker_counts()
                 step.integrate(DT)?;
             }
         }
-        world.commit_step_shards_with_workers(&shards, workers)?;
+        world.commit_step_shards_with_executor(&shards, &ScopedThreadExecutor, workers)?;
 
         for ((_, actual), (_, expected)) in world.bodies().zip(sequential.bodies()) {
             assert!(actual.state().transform().translation().is_finite());
@@ -1631,7 +1683,7 @@ fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn
         }
     }
     assert_eq!(
-        world.commit_step_shards_with_workers(&shards, 4),
+        world.commit_step_shards_with_executor(&shards, &ScopedThreadExecutor, 4),
         Err(StepError::Collision(CollisionError::CcdLimitExceeded))
     );
 

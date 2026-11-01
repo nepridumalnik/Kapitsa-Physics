@@ -79,10 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let runtime = Builder::new_current_thread().enable_time().build()?;
     println!("kapitsa integration benchmark; steps={STEPS}, samples={SAMPLES}, statistic=median");
     if std::env::var_os("KAPITSA_MARSHALLING_ONLY").is_some() {
-        return runtime.block_on(async {
-            tokio::time::pause();
-            report_marshalling().await
-        });
+        return runtime.block_on(report_marshalling());
     }
 
     for (size, body_count) in BODY_COUNTS {
@@ -141,10 +138,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for workload in WORKLOADS {
         report_phases(&runtime, workload)?;
     }
-    runtime.block_on(async {
-        tokio::time::pause();
-        report_marshalling().await
-    })?;
+    runtime.block_on(report_marshalling())?;
     Ok(())
 }
 
@@ -474,7 +468,7 @@ impl SnapshotBench for LegacySnapshot {
 
 async fn report_marshalling() -> Result<(), Box<dyn Error>> {
     println!(
-        "\nphysics marshalling (dynamic bodies, {STEPS} steps, {SAMPLES} samples, median; Tokio timer paused)"
+        "\nphysics marshalling (dynamic bodies, {STEPS} steps, {SAMPLES} samples, median; Tokio timer active)"
     );
     for (size, body_count) in BODY_COUNTS {
         let mut controller_wall = Vec::with_capacity(SAMPLES);

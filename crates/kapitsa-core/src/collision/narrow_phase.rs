@@ -280,11 +280,11 @@ impl NarrowPhase {
     pub(crate) fn time_of_impact(
         &mut self,
         shape_a: &Shape,
-        motion_a: &CcdMotion<'_>,
+        motion_a: &CcdMotion,
         bvh_a: Option<&TriangleBvh>,
         vertices_a: Option<&[Vec3]>,
         shape_b: &Shape,
-        motion_b: &CcdMotion<'_>,
+        motion_b: &CcdMotion,
         bvh_b: Option<&TriangleBvh>,
         vertices_b: Option<&[Vec3]>,
         sensor: bool,

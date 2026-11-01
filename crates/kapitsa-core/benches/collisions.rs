@@ -16,6 +16,10 @@ use kapitsa_core::{
 };
 use kapitsa_math::{Mat3, Quat, Vec2, Vec3};
 
+#[path = "support/scoped_executor.rs"]
+mod scoped_executor;
+use scoped_executor::ScopedThreadExecutor;
+
 const SAMPLES: usize = 5;
 const WARMUP_RUNS: usize = 1;
 const DT: f64 = 1.0 / 60.0;
@@ -515,7 +519,7 @@ fn run_ccd_shards_with(
             body.integrate(DT)?;
         }
     }
-    world.commit_step_shards(&shards)?;
+    world.commit_step_shards_with_executor(&shards, &ScopedThreadExecutor, worker_count)?;
     Ok((started.elapsed(), world.collision_step_metrics()))
 }
 

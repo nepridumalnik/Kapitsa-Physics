@@ -29,6 +29,10 @@ an explicit host `Handle` using `new_on`. Call `shutdown().await` to wait for
 worker exit and recover the world. `new_with_executor` allows multiple
 simulations to share a host-owned executor.
 
+`kapitsa-core` does not depend on Tokio or Rayon. It accepts a statically
+dispatched `StepExecutor`; CCD trajectory samples are stored as core data, so
+the collision path does not call a boxed or trait-object callback.
+
 `WorkerConfig` limits the fixed pool and controls adaptive active parallelism.
 The pool is created once; low or high load changes how many tasks a step may
 use, not the number of OS workers. `SimulationMetrics` reports step duration,
@@ -72,3 +76,7 @@ and identify their committed step. Lagging readers receive an explicit
 Catch-up is only part of `PhysicsService`. `SimulationConfig::max_catch_up_steps`
 limits each service batch; remaining elapsed time is processed in later
 batches. The service reports the resulting simulation-time debt in metrics.
+
+The current CCD and runtime benchmark results are in
+[`benchmarks/collisions.md`](../benchmarks/collisions.md) and the
+[`CCD optimization report`](reviews/ccd-final-optimization-report.md).

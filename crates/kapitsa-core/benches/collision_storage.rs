@@ -15,6 +15,10 @@ use kapitsa_core::{
 };
 use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
 
+#[path = "support/scoped_executor.rs"]
+mod scoped_executor;
+use scoped_executor::ScopedThreadExecutor;
+
 const WARMUPS: usize = 1;
 const STEADY_STATE_WARMUPS: usize = 3;
 const SAMPLES: usize = 5;
@@ -137,7 +141,7 @@ fn report_solver_workers() -> Result<(), Box<dyn Error>> {
                     black_box(world.step(DT)?);
                 } else {
                     world.fill_step_shards(&mut shards)?;
-                    run_filled_shard_step(&mut world, &mut shards)?;
+                    run_filled_shard_step(&mut world, &mut shards, worker_count)?;
                 }
             }
             if worker_count > 1 {
@@ -147,7 +151,7 @@ fn report_solver_workers() -> Result<(), Box<dyn Error>> {
             if worker_count == 1 {
                 black_box(world.step(DT)?);
             } else {
-                run_filled_shard_step(&mut world, &mut shards)?;
+                run_filled_shard_step(&mut world, &mut shards, worker_count)?;
             }
             samples.push((started.elapsed(), world.collision_step_metrics()));
         }
@@ -524,12 +528,13 @@ fn run_worker_step(world: &mut PhysicsWorld, worker_count: usize) -> Result<(), 
     }
     let mut shards = vec![Vec::new(); worker_count];
     world.fill_step_shards(&mut shards)?;
-    run_filled_shard_step(world, &mut shards)
+    run_filled_shard_step(world, &mut shards, worker_count)
 }
 
 fn run_filled_shard_step(
     world: &mut PhysicsWorld,
     shards: &mut [Vec<BodyStep>],
+    worker_count: usize,
 ) -> Result<(), Box<dyn Error>> {
     std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
         let mut workers = Vec::with_capacity(shards.len());
@@ -548,7 +553,7 @@ fn run_filled_shard_step(
         }
         Ok(())
     })?;
-    world.commit_step_shards(shards)?;
+    world.commit_step_shards_with_executor(shards, &ScopedThreadExecutor, worker_count)?;
     Ok(())
 }
 

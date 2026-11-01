@@ -703,14 +703,11 @@ also pass.
 
 ## CCD follow-up stage 7: reusable collision executor
 
-CCD TOI preparation, independent impact resolution, and contact-island solving
-now use one lazily initialized Rayon pool shared by `kapitsa-core`. The sync
-`PhysicsWorld::step()` API remains sync and core still has no Tokio dependency.
-The Tokio controller continues to call the sync commit through its blocking
-task. Each scoped batch submits at most the configured active worker count, so
-changing that count changes active work without rebuilding the pool. Pool
-initialization failures and worker panics return `WorkerFailed`; task errors are
-collected before any staged result is committed.
+This section records the pre-unification executor. CCD phases then used one
+lazily initialized Rayon pool shared by `kapitsa-core`; Stage 10 moved pool
+ownership to the optional `kapitsa` async runtime. The measurements remain a
+historical scoped-thread versus pooled comparison, not the current pool
+lifecycle.
 
 The scoped-thread baseline and pooled executor were measured with the same
 Release harness on 2026-11-01. Each value is the median of five independently
@@ -825,3 +822,69 @@ continue through ordered resolution and localized replay. See the [final CCD
 optimization report](../docs/reviews/ccd-final-optimization-report.md) for
 algorithm details, transaction guarantees, workload limitations, and the
 complete validation record.
+
+## Unified simulation runtime, stage 10
+
+The workspace now exposes `kapitsa::runtime::sync::Simulation` by default and
+`kapitsa::runtime::asynchronous::Simulation` behind the `async` feature. The
+shared core receives a statically dispatched `StepExecutor`. The async runtime
+owns a reusable fixed Rayon pool whose worker threads start through the host
+Tokio `Handle::spawn_blocking()`; `kapitsa-core` has no Tokio or Rayon
+dependency. `PhysicsService` retains the old clock-driven commands, snapshots,
+events, start/stop/restart, and catch-up API. See
+[`docs/runtime.md`](../docs/runtime.md) for API and lifecycle examples.
+
+The earlier Stage 7 pool description is historical. Each async simulation now
+owns its pool unless it receives a shared host-owned executor; explicit
+`shutdown().await` waits for worker exit. CCD motion sampling stores a compact
+`CcdTrajectory` value, so the compute path has no `dyn Fn` callback.
+
+### Paired 20k-static CCD comparison
+
+The pre-runtime CCD commit (`ff32c76`) and the current runtime migration were
+measured in Release on the same machine with one warm-up and five samples per
+scene. The old commit ran in a temporary detached worktree, which was removed
+after the comparison. Step and CCD columns show min / median / max in ms.
+
+| Scene | Pre-runtime step | Current step | Pre-runtime CCD | Current CCD | Resweep visits / proxies updated |
+|---|---:|---:|---:|---:|---:|
+| 20k statics + 64 CCD bodies | 23.376 / 25.727 / 25.997 | 23.888 / 24.355 / 24.990 | 0.167 / 0.185 / 0.279 | 0.169 / 0.176 / 0.222 | 16 / 16 |
+| 20k statics + 128 CCD bodies | 23.191 / 24.328 / 25.514 | 23.886 / 25.046 / 25.418 | 0.333 / 0.391 / 0.569 | 0.396 / 0.451 / 0.470 | 32 / 32 |
+| 20k statics + 256 CCD bodies | 25.535 / 26.175 / 26.788 | 25.017 / 26.748 / 27.339 | 0.678 / 0.743 / 0.916 | 0.653 / 0.695 / 0.907 | 64 / 64 |
+
+All before/after step and CCD sample ranges overlap. These paired runs show no
+measurable change from runtime consolidation. The resweep count remains tied
+to changed body colliders, while index and broadphase work dominate the 20k
+static full step. The run also measured 31.860 ms for 20k separated dynamic
+bodies versus 32.293 ms before consolidation; these ranges overlap as well.
+
+### Async runtime worker measurements
+
+The `kapitsa` async collision benchmark now includes independent GJK CCD
+islands and times a single impact step per sample. World creation and pool
+creation are outside the timed region. These medians are milliseconds:
+
+| GJK CCD bodies | `PhysicsWorld::step` | Async x1 | Async x2 | Async x4 | x4 speedup |
+|---:|---:|---:|---:|---:|---:|
+| 256 | 4.029 | 4.086 | 3.003 | 2.036 | 1.98x |
+| 1,024 | 16.567 | 16.697 | 12.038 | 9.498 | 1.74x |
+
+For 1,024 bodies, the x1 range was 16.143–17.246 ms and the four-worker range
+was 9.248–9.629 ms. In the separate solver workload with 4,096 dynamic bodies
+and 2,048 two-body contact islands, 12-step medians were 30.58 / 22.78 / 16.02
+ms at x1 / x2 / x4. Four workers were 1.91x faster than one in that run. The
+broader `parallel_step` matrix still shows scheduling losses for small, mixed,
+and sleeping-heavy scenes.
+
+The updated worker benches use explicit scoped executors in core and the real
+Rayon/Tokio runtime in `kapitsa`. This matters because the compatibility
+`commit_step_shards_with_workers` API is intentionally sequential now.
+
+Run the unified-runtime comparisons with:
+
+```powershell
+cargo bench -p kapitsa-core --features bench-internals --bench collisions
+cargo bench -p kapitsa-core --features bench-internals --bench collision_storage -- workers_4096
+cargo bench -p kapitsa --features async --bench collisions
+cargo bench -p kapitsa --features async --bench parallel_step
+```

@@ -9,8 +9,8 @@ use kapitsa::runtime::{SimulationConfig, WorkerConfig, asynchronous::Simulation}
 use kapitsa_core::{
     collider::Collider,
     mass::MassProperties,
-    rigid_body::RigidBody,
-    shape::{Shape, Sphere},
+    rigid_body::{CcdMode, RigidBody},
+    shape::{Cuboid, Shape, Sphere},
     transform::Transform,
     world::PhysicsWorld,
 };
@@ -63,7 +63,84 @@ fn main() -> Result<(), Box<dyn Error>> {
             report(&format!("Async Simulation x{workers}"), elapsed, sequential);
         }
     }
+    report_gjk_ccd_scaling(&runtime)?;
     Ok(())
+}
+
+fn report_gjk_ccd_scaling(runtime: &tokio::runtime::Runtime) -> Result<(), Box<dyn Error>> {
+    println!("\nIndependent GJK CCD islands (one step/sample)");
+    for body_count in [256, 1_024] {
+        let sequential = sample(|| {
+            let mut world = gjk_ccd_world(body_count)?;
+            let started = Instant::now();
+            black_box(world.step(DT)?);
+            Ok(started.elapsed())
+        })?;
+        println!(
+            "{body_count} bodies, PhysicsWorld::step median={:.3} ms",
+            millis(sequential.1)
+        );
+
+        for workers in [1, 2, 4] {
+            let elapsed = sample(|| {
+                let world = gjk_ccd_world(body_count)?;
+                let mut simulation = Simulation::new_on_with_worker_config(
+                    world,
+                    config(),
+                    worker_config(workers),
+                    runtime.handle().clone(),
+                )?;
+                simulation.set_active_workers(workers)?;
+                runtime.block_on(async {
+                    let started = Instant::now();
+                    black_box(simulation.step().await?);
+                    let elapsed = started.elapsed();
+                    simulation.shutdown().await?;
+                    Ok::<_, Box<dyn Error>>(elapsed)
+                })
+            })?;
+            println!(
+                "  Async Simulation x{workers}: {:.3}/{:.3}/{:.3} ms min/median/max, speedup={:.2}x",
+                millis(elapsed.0),
+                millis(elapsed.1),
+                millis(elapsed.2),
+                sequential.1.as_secs_f64() / elapsed.1.as_secs_f64(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn gjk_ccd_world(body_count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let columns = (body_count as f64).sqrt().ceil() as usize;
+    let side = columns as f64 * 8.0 + 4.0;
+    world.add_collider(
+        wall,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, side, side)?),
+            Transform::identity(),
+        ),
+    )?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    for index in 0..body_count {
+        let y = (index % columns) as f64 * 4.0;
+        let z = (index / columns) as f64 * 4.0;
+        let mut body =
+            RigidBody::new_dynamic(Transform::new(Vec3::new(-5.0, y, z), Quat::IDENTITY)?, mass)?;
+        body.set_linear_velocity(Vec3::new(1_000.0, 0.0, 0.0))?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let id = world.add_body(body)?;
+        world.add_collider(
+            id,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            ),
+        )?;
+    }
+    Ok(world)
 }
 
 fn collision_world(body_count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
@@ -135,4 +212,8 @@ fn report(
         max.as_secs_f64() * 1_000.0,
         sequential.1.as_secs_f64() / median.as_secs_f64()
     );
+}
+
+fn millis(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
 }

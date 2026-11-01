@@ -37,17 +37,21 @@
 
 ## 3. CCD execution model
 
-`kapitsa-core` owns one lazily initialized process-wide Rayon 1.12.0 pool,
-sized from `available_parallelism`. Scoped tasks borrow the current step's
-world data safely; the pool is reused across steps. Each phase launches no more
-tasks than its active worker count. `PhysicsWorld::step()` remains synchronous
-and core remains independent of Tokio. `PhysicsController` still runs its
-synchronous world commit through Tokio's blocking task.
+The process-wide core pool described in the original Stage 9 report was
+replaced by the unified runtime. `kapitsa-core` now owns the generic
+`StepExecutor` contract and all collision algorithms, but no scheduler
+dependency. `PhysicsWorld::step()` and `runtime::sync::Simulation` execute
+sequentially. The optional `runtime::asynchronous::Simulation` owns a fixed
+Rayon pool; its `spawn_handler` starts workers with the host Tokio
+`Handle::spawn_blocking()`. Active task counts adapt without resizing that
+pool. `PhysicsService` adds clock-driven stepping, catch-up, commands,
+snapshots, and collision events around the manual-step API.
 
-The scoped-thread versus reused-pool comparison showed lower medians on the
-GJK-heavy cases tested, but the sample ranges overlapped. The pool is retained
-to meet the persistent-worker requirement without adding a custom executor;
-those measurements do not establish a general speedup attributable to Rayon.
+Pool workers are joined during explicit async shutdown before the world is
+returned. A host-owned executor can be shared across simulations. `CcdMotion`
+stores a copyable `CcdTrajectory` instead of a `dyn Fn`, removing the last
+trait-object callback from the CCD sampling path. Executor calls use static
+dispatch.
 
 ## 4. Impact-budget clipping
 
@@ -134,33 +138,35 @@ but still above the frame budget.
   It checks worker equivalence, event order, and finite states, but does not
   replace broader fuzzing or application-level profiling.
 
-## 9. Production source size
+## 9. Production source size before runtime consolidation
 
 Compared with `038e4d4`, production Rust files under `kapitsa-core/src` changed
 by **+1,982 / −404 lines**, a net increase of **1,578 lines**. Test files and
-benchmarks are excluded. `kapitsa-tokio` production source did not grow for
-this refactor. The largest change is in `world.rs`, which coordinates staged
-CCD execution and localized replay; the pool itself is isolated in a small
-executor module.
+benchmarks are excluded. This is the pre-consolidation count; `kapitsa-tokio`
+was later removed from the workspace and its service API moved under
+`kapitsa::runtime::asynchronous`. The largest CCD change remains in `world.rs`,
+which coordinates staged execution and localized replay.
 
-## 10. Validation and commits
+## 10. CCD follow-up validation and commits
 
 Validation passed:
 
 - `cargo fmt --all -- --check`
+- `cargo check --workspace`
+- `cargo check -p kapitsa --no-default-features`
+- `cargo check -p kapitsa --features async`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo clippy -p kapitsa-core --all-targets --features bench-internals -- -D warnings`
-- `cargo test --workspace --release` (including core, Tokio, integration, query,
-  simulation, marshalling, and doctests)
-- `cargo test -p kapitsa-core --features bench-internals` (479 unit tests, 16
-  integration/query/geometry tests, and doctests)
-- Targeted Tokio tests for independent islands, connected/rescheduled islands,
-  and cancellation before commit
+- `cargo test --workspace --release`
+- `cargo test -p kapitsa --no-default-features`
+- `cargo test -p kapitsa --features async` (64 unit and 10 integration tests)
+- `cargo test -p kapitsa-core --features bench-internals --release` (482 unit,
+  16 integration/query/geometry tests, and doctests)
 - `cargo doc --workspace --no-deps`
 - `cargo bench -p kapitsa-core --features bench-internals --bench collisions`
 - `cargo bench -p kapitsa-core --features bench-internals --bench collision_storage`
-- `cargo bench -p kapitsa-tokio --bench collisions`
-- `cargo bench -p kapitsa-tokio --bench parallel_step`
+- `cargo bench -p kapitsa-core --features bench-internals --bench collision_interactions`
+- `cargo bench -p kapitsa --features async --bench collisions`
+- `cargo bench -p kapitsa --features async --bench parallel_step`
 
 The first nine stage commits are:
 
@@ -176,5 +182,88 @@ The first nine stage commits are:
 | 8 | `c8a24190d84a471b71e656bd571cf5ac374059a5` | `test(ccd): cover parallel islands and localized replay` |
 | 9 | `ff32c763be17c6f0ae62f1a6c6abbe4b85e01aa3` | `bench(ccd): capture final benchmark matrix` |
 
-Stage 10 is committed as `bench(ccd): document final optimization results`.
-No push was performed.
+CCD follow-up Stage 10 is committed as `bench(ccd): document final optimization
+results`. No push was performed.
+
+## 11. Unified runtime architecture and validation
+
+The runtime migration keeps the workspace's three-layer dependency direction:
+
+- `kapitsa-math` contains math types and operations.
+- `kapitsa-core` contains `PhysicsWorld`, collision algorithms, and the generic
+  `StepExecutor` contract. It has no Tokio or Rayon dependency.
+- `kapitsa` provides `runtime::sync` by default and
+  `runtime::asynchronous` behind the optional `async` feature.
+
+Manual stepping has matching one-step APIs:
+
+```rust,ignore
+use kapitsa::runtime::{SimulationConfig, sync::Simulation};
+
+let mut simulation = Simulation::new(world, SimulationConfig::default())?;
+simulation.step()?;
+```
+
+```rust,ignore
+use kapitsa::runtime::{SimulationConfig, asynchronous::Simulation};
+
+let mut simulation = Simulation::new(world, SimulationConfig::default())?;
+simulation.step().await?;
+let world = simulation.shutdown().await?;
+```
+
+The async implementation creates a fixed Rayon pool using the host's Tokio
+`Handle` and `ThreadPoolBuilder::spawn_handler()`. Each Rayon worker runs inside
+`Handle::spawn_blocking()`; no Tokio runtime is constructed by Kapitsa. Pool
+creation happens once per owning simulation. Active worker counts change task
+batch sizes without resizing the pool. `shutdown().await` signals and joins all
+workers before returning the world. `new_with_executor` permits applications
+to share a separately owned pool.
+
+`PhysicsService` preserves the migrated `kapitsa-tokio` behavior: start,
+stop, restart, fixed-rate stepping, catch-up, bounded commands, snapshots,
+client queries, collision event streams, metrics, and simulation-time debt.
+It remains an optional clock-driven API beside manual `Simulation::step()`.
+
+### Runtime performance
+
+The pre-runtime CCD commit and current tree were run in Release on the same
+machine, each with one warm-up and five samples. Min / median / max are ms.
+Sample ranges overlap for each workload, so these measurements do not establish
+a runtime-consolidation regression or gain:
+
+| Workload | Pre-runtime step | Current step | Pre-runtime CCD | Current CCD |
+|---|---:|---:|---:|---:|
+| 20k static + 64 CCD bodies | 23.376 / 25.727 / 25.997 | 23.888 / 24.355 / 24.990 | 0.167 / 0.185 / 0.279 | 0.169 / 0.176 / 0.222 |
+| 20k static + 128 CCD bodies | 23.191 / 24.328 / 25.514 | 23.886 / 25.046 / 25.418 | 0.333 / 0.391 / 0.569 | 0.396 / 0.451 / 0.470 |
+| 20k static + 256 CCD bodies | 25.535 / 26.175 / 26.788 | 25.017 / 26.748 / 27.339 | 0.678 / 0.743 / 0.916 | 0.653 / 0.695 / 0.907 |
+
+Resweep visits and proxy updates remained 16 / 32 / 64 for the three static
+scenes. The async runtime's single-step GJK benchmark measured medians of
+4.029 ms (`PhysicsWorld::step`) versus 2.036 ms (x4) for 256 bodies, and
+16.567 ms versus 9.498 ms for 1,024 bodies. For 1,024 bodies, x1 ranged from
+16.143–17.246 ms and x4 from 9.248–9.629 ms. In the 4,096-body,
+2,048-contact-island solver benchmark, x1 / x2 / x4 medians were 30.58 /
+22.78 / 16.02 ms (1.91x at x4). Small, mixed, and sleeping-heavy scenes can
+lose time to scheduling, and large static scenes still exceed a 16.67 ms full
+step budget because indexing and broadphase dominate.
+
+### Runtime migration commits
+
+| Stage | Commit | Subject |
+|---:|---|---|
+| 1 | `42e286b` | `test(runtime): verify rayon workers on tokio blocking pool` |
+| 2 | `29bff89` | `refactor(runtime): establish unified crate and feature layout` |
+| 3 | `e9d3485` | `refactor(runtime): unify simulation configuration and metrics` |
+| 4 | `b333965` | `refactor(core): abstract step execution with static dispatch` |
+| 5 | `b76a127` | `feat(runtime): add built-in synchronous simulation` |
+| 6 | `a6004a1` | `feat(runtime): execute rayon workers through tokio` |
+| 7 | `904011c` | `feat(runtime): add asynchronous simulation` |
+| 8 | `fe9884e` | `refactor(runtime): adapt active parallelism from step metrics` |
+| 9 | `6a6188f` | `refactor(runtime): migrate tokio services into optional runtime` |
+| 10 | local commit | `bench(runtime): validate unified simulation execution` |
+
+The complete runtime API and benchmark matrix are documented in
+[`docs/runtime.md`](../runtime.md) and
+[`benchmarks/collisions.md`](../../benchmarks/collisions.md). No push was
+performed.

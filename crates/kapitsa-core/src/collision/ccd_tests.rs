@@ -1,8 +1,8 @@
 use crate::{
     collision::{
         ccd::{
-            CcdMotion, convex_toi, height_field_toi, level_set_toi, plane_toi, plane_toi_motion,
-            swept_bounds, triangle_mesh_toi,
+            CcdMotion, CcdTrajectory, convex_toi, height_field_toi, level_set_toi, plane_toi,
+            plane_toi_motion, swept_bounds, triangle_mesh_toi,
         },
         height_field::HeightFieldTriangle,
         mesh::{MeshQueryWorkspace, TriangleBvh},
@@ -418,13 +418,22 @@ fn rotational_ccd_follows_integrator_samples_across_multiple_turns() {
                 .map(|state| state.transform())
                 .map_err(|_| crate::collision::CollisionError::ArithmeticOverflow)
         };
+        let trajectory = CcdTrajectory::new(
+            body,
+            start_state,
+            0.0,
+            0.0,
+            1.0,
+            Transform::identity(),
+            false,
+        );
         let motion = CcdMotion::trajectory(
             start_state.transform(),
             end_state.transform(),
             bounds.translation,
             true,
             bounds.rotation,
-            &sample,
+            trajectory,
         )
         .expect("trajectory motion");
         let hit = plane_toi_motion(&rod, &motion, &plane, &target_motion, true, false)
