@@ -142,6 +142,75 @@ fn fixed_joint_stability_is_symmetric_for_body_order_and_static_connections() {
     }
 }
 
+#[test]
+fn fixed_joint_handles_mass_ratios_and_off_center_thrust() {
+    for ratio in [1.0, 100.0, 10_000.0] {
+        let mut world = PhysicsWorld::new();
+        let inertia_a = Mat3::from_diagonal(Vec3::new(0.4, 0.6, 0.9));
+        let inertia_b = Mat3::from_diagonal(Vec3::new(0.2, 0.35, 0.5) * ratio);
+        let body_a = world
+            .add_body(dynamic_body_with_properties(
+                Vec3::ZERO,
+                MassProperties::new(1.0, Vec3::ZERO, inertia_a).unwrap(),
+            ))
+            .unwrap();
+        let body_b = world
+            .add_body(dynamic_body_with_properties(
+                Vec3::X,
+                MassProperties::new(ratio, Vec3::ZERO, inertia_b).unwrap(),
+            ))
+            .unwrap();
+        let common = JointCommon::new(
+            JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+            JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+        );
+        world
+            .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+            .unwrap();
+
+        let force = Vec3::X * 100.0;
+        let local_point = Vec3::Y * 0.25;
+        let mut peak_energy = 0.0_f64;
+        for _ in 0..20 {
+            let point = world
+                .body(body_a)
+                .unwrap()
+                .state()
+                .transform()
+                .transform_point(local_point);
+            world
+                .body_mut(body_a)
+                .unwrap()
+                .apply_force_at_point(force, point)
+                .unwrap();
+            world.step(DT).unwrap();
+            peak_energy = peak_energy.max(kinetic_energy(&world));
+            assert_finite_body_states(&world);
+        }
+
+        let errors = max_joint_errors(&world);
+        assert!(errors.0 < 0.002, "mass ratio 1:{ratio}, anchors {errors:?}");
+        assert!(errors.1 < 0.0002, "mass ratio 1:{ratio}, frames {errors:?}");
+        assert!(
+            peak_energy < 2_000.0,
+            "mass ratio 1:{ratio}, energy {peak_energy}"
+        );
+
+        let momentum = [body_a, body_b]
+            .into_iter()
+            .map(|id| {
+                let body = world.body(id).unwrap();
+                body.physics().mass().unwrap().mass() * body.state().linear_velocity()
+            })
+            .fold(Vec3::ZERO, |sum, value| sum + value);
+        let expected_momentum = force * (DT * 20.0);
+        assert!(
+            (momentum - expected_momentum).length() < 1.0e-6,
+            "mass ratio 1:{ratio}, momentum {momentum:?} != {expected_momentum:?}"
+        );
+    }
+}
+
 fn two_body_world(reverse: bool, static_a: bool) -> PhysicsWorld {
     let mut world = PhysicsWorld::new();
     let rotation = Quat::from_axis_angle(Vec3::Z, 0.001).unwrap();
@@ -170,6 +239,11 @@ fn two_body_world(reverse: bool, static_a: bool) -> PhysicsWorld {
 fn dynamic_body(position: Vec3, rotation: Quat) -> RigidBody {
     let transform = Transform::new(position, rotation).unwrap();
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    RigidBody::new_dynamic(transform, mass).unwrap()
+}
+
+fn dynamic_body_with_properties(position: Vec3, mass: MassProperties) -> RigidBody {
+    let transform = Transform::new(position, Quat::IDENTITY).unwrap();
     RigidBody::new_dynamic(transform, mass).unwrap()
 }
 
