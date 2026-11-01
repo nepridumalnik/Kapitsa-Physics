@@ -3,6 +3,9 @@ mod flight;
 mod gif_export;
 mod renderer;
 
+#[cfg(test)]
+mod flight_tests;
+
 use std::{
     error::Error,
     path::PathBuf,

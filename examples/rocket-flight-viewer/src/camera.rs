@@ -1,14 +1,6 @@
-use kapitsa::{math::Vec3, rigid_body::BodyState};
+use kapitsa::math::Vec3;
 
-pub(crate) const PLANET_RADIUS: f64 = 6_371_000.0;
-
-#[derive(Clone, Copy)]
-pub(crate) struct SceneFrame {
-    pub(crate) step: u64,
-    pub(crate) simulation_time: f64,
-    pub(crate) stage_one: Option<BodyState>,
-    pub(crate) stage_two: Option<BodyState>,
-}
+pub(crate) use crate::flight::{PLANET_RADIUS, SceneFrame};
 
 pub(crate) struct Camera {
     half_width: f64,

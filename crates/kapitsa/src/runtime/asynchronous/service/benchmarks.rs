@@ -41,6 +41,10 @@ mod mission {
     ));
 }
 
+#[allow(clippy::duplicate_mod)] // The headless and runtime fixtures intentionally share this source.
+#[path = "../../../../../../examples/rocket-flight-viewer/src/flight.rs"]
+mod runtime_mission;
+
 #[derive(Clone)]
 struct FlightSample {
     elapsed: Duration,
@@ -182,6 +186,61 @@ fn benchmark_rocket_flight_headless() -> Result<(), Box<dyn std::error::Error>> 
         baseline_live_bytes,
         peak_extra_live_bytes,
         baseline_live_bytes + peak_extra_live_bytes,
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "Release shared runtime rocket mission benchmark"]
+fn benchmark_rocket_flight_runtime_mission() -> Result<(), Box<dyn std::error::Error>> {
+    use runtime_mission::{FlightConfig, run};
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(8)
+        .enable_all()
+        .build()?;
+    let run_once = || -> Result<(Duration, f64, usize), Box<dyn std::error::Error>> {
+        let started = Instant::now();
+        let frames = runtime.block_on(run(FlightConfig {
+            warp: 1.0,
+            maximum_steps: 4_200,
+            fps: 1,
+        }))?;
+        let first = frames
+            .first()
+            .ok_or("missing initial runtime mission frame")?;
+        let last = frames.last().ok_or("missing final runtime mission frame")?;
+        if first.stage_one.is_none()
+            || first.stage_two.is_none()
+            || last.stage_one.is_some()
+            || last.stage_two.is_some()
+            || last.simulation_time < 5.0
+        {
+            return Err("runtime mission did not complete both stage impacts".into());
+        }
+        Ok((started.elapsed(), last.simulation_time, frames.len()))
+    };
+
+    let _warmup = run_once()
+        .map_err(|error| io::Error::other(format!("runtime mission warmup failed: {error}")))?;
+    let mut samples = Vec::with_capacity(3);
+    for index in 0..3 {
+        samples.push(run_once().map_err(|error| {
+            io::Error::other(format!(
+                "runtime mission sample {} failed: {error}",
+                index + 1
+            ))
+        })?);
+    }
+    samples.sort_unstable_by_key(|sample| sample.0);
+    let median = samples[1];
+    println!(
+        "shared runtime rocket mission: warp=1x wall_ms_min/median/max={:.3}/{:.3}/{:.3}, simulated_s={:.3}, snapshots={}",
+        samples[0].0.as_secs_f64() * 1.0e3,
+        median.0.as_secs_f64() * 1.0e3,
+        samples[2].0.as_secs_f64() * 1.0e3,
+        median.1,
+        median.2,
     );
     Ok(())
 }

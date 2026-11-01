@@ -1,31 +1,29 @@
 use std::{error::Error, io, time::Duration};
 
-use crate::camera::{PLANET_RADIUS, SceneFrame};
+#[path = "../../../crates/kapitsa/examples/rocket_flight/mission_spec.rs"]
+#[allow(dead_code)]
+mod spec;
+
 use kapitsa::{
-    AdaptiveTimeStepConfig, BodyId, ColliderId, ForceSourceId, JointId, PhysicsBatchResults,
-    PhysicsClient, PhysicsCommandBuffer, PhysicsSnapshot, Simulation, SimulationConfig,
-    TimeStepPolicy, Transform,
-    collider::Collider,
+    BodyId, ColliderId, ForceSourceId, JointId, PhysicsBatchResults, PhysicsClient,
+    PhysicsCommandBuffer, PhysicsSnapshot, Simulation, SimulationConfig, TimeStepPolicy,
     collision::{CollisionEventKind, CollisionPair},
-    gravity::CentralGravity,
-    joint::{FixedJoint, Joint, JointCommon, JointFrame},
-    mass::MassProperties,
-    math::{Mat3, Quat, Vec3},
-    rigid_body::RigidBody,
-    shape::{Cuboid, Shape, Sphere},
+    math::Vec3,
+    rigid_body::BodyState,
 };
 
-const TICK_RATE: u32 = 120;
-const PLANET_MU: f64 = 3.986_004_418e14;
-const STAGE_ONE_MASS: f64 = 12_500.0;
-const STAGE_TWO_MASS: f64 = 8_000.0;
-const STAGE_ONE_THRUST: f64 = 300_000.0;
-const STAGE_TWO_THRUST: f64 = 140_000.0;
-pub(crate) const STAGE_ONE_BURN_END: f64 = 2.0;
-pub(crate) const STAGE_TWO_BURN_END: f64 = 5.0;
-const SEPARATION_IMPULSE: f64 = 16_000.0;
-const STAGE_HALF_HEIGHT: f64 = 2.0;
+#[allow(unused_imports)]
+pub(crate) use spec::{PLANET_RADIUS, STAGE_ONE_BURN_END, STAGE_TWO_BURN_END};
+#[allow(dead_code)]
 pub(crate) const FLAME_END: f64 = 2.5;
+
+#[derive(Clone, Copy)]
+pub(crate) struct SceneFrame {
+    pub(crate) step: u64,
+    pub(crate) simulation_time: f64,
+    pub(crate) stage_one: Option<BodyState>,
+    pub(crate) stage_two: Option<BodyState>,
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct FlightConfig {
@@ -105,16 +103,16 @@ fn scene_frame(
 
 fn frame_step(frame_index: u64, fps: u32) -> u64 {
     frame_index
-        .saturating_mul(u64::from(TICK_RATE))
+        .saturating_mul(u64::from(spec::TICK_RATE))
         .div_ceil(u64::from(fps))
 }
 
 pub(crate) async fn run(config: FlightConfig) -> Result<Vec<SceneFrame>, Box<dyn Error>> {
     let physics_config = SimulationConfig {
-        tick_rate: TICK_RATE,
+        tick_rate: spec::TICK_RATE,
         max_catch_up_steps: 1,
-        central_gravity: Some(CentralGravity::new(Vec3::ZERO, PLANET_MU)?),
-        time_step_policy: TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default()),
+        central_gravity: Some(spec::gravity()?),
+        time_step_policy: TimeStepPolicy::Fixed,
         ..SimulationConfig::default()
     };
     let mut simulation = Simulation::new_from_config(physics_config)?;
@@ -130,8 +128,8 @@ pub(crate) async fn run(config: FlightConfig) -> Result<Vec<SceneFrame>, Box<dyn
         let mut initial_batch = physics.commands();
         initial_batch.set_force_source(
             engine_one,
-            Vec3::Y * -STAGE_HALF_HEIGHT,
-            Vec3::Y * STAGE_ONE_THRUST,
+            spec::engine_point(),
+            Vec3::Y * spec::thrust(spec::Stage::One),
         );
         submit_batch(&physics, &mut results, initial_batch).await?;
 
@@ -164,6 +162,7 @@ pub(crate) async fn run(config: FlightConfig) -> Result<Vec<SceneFrame>, Box<dyn
         let mut stage_two_cutoff = false;
         let mut stage_one_hit = false;
         let mut stage_two_hit = false;
+        let mut next_mass_update = 0.1;
 
         while snapshot.step() < deadline_step && !(stage_one_hit && stage_two_hit) {
             tokio::select! {
@@ -174,29 +173,69 @@ pub(crate) async fn run(config: FlightConfig) -> Result<Vec<SceneFrame>, Box<dyn
                     if !separated && elapsed >= STAGE_ONE_BURN_END {
                         let lower = snapshot.body(stage_one).copied().ok_or_else(|| io::Error::other("lower stage is absent before separation"))?;
                         let upper = snapshot.body(stage_two).copied().ok_or_else(|| io::Error::other("upper stage is absent before separation"))?;
-                        let direction = upper.transform().rotation()
-                            .rotate_vector(Vec3::Y)
-                            .ok_or_else(|| io::Error::other("invalid rocket orientation"))?;
+                        let (lower_velocity, upper_velocity) = spec::separation_velocities(lower, upper)?;
                         let mut batch = physics.commands();
                         batch.remove_joint(joint);
-                        batch.set_linear_velocity(stage_one, lower.linear_velocity() - direction * (SEPARATION_IMPULSE / STAGE_ONE_MASS));
-                        batch.set_linear_velocity(stage_two, upper.linear_velocity() + direction * (SEPARATION_IMPULSE / STAGE_TWO_MASS));
+                        batch.set_linear_velocity(stage_one, lower_velocity);
+                        batch.set_linear_velocity(stage_two, upper_velocity);
+                        batch.set_mass(
+                            stage_one,
+                            spec::mass_properties(
+                                spec::Stage::One,
+                                spec::stage_mass(
+                                    spec::Stage::One,
+                                    spec::burn_duration(spec::Stage::One),
+                                ),
+                            )?,
+                        );
                         batch.set_force_source_enabled(engine_one, false);
-                        batch.set_force_source(engine_two, Vec3::Y * -STAGE_HALF_HEIGHT, Vec3::Y * STAGE_TWO_THRUST);
+                        batch.set_force_source(
+                            engine_two,
+                            spec::engine_point(),
+                            Vec3::Y * spec::thrust(spec::Stage::Two),
+                        );
                         submit_batch(&physics, &mut results, batch).await?;
                         physics.remove_force_source(engine_one).await?;
                         snapshot = physics.snapshot();
                         receive_frames(&mut frame_rx, &mut frames)?;
                         separated = true;
+                        next_mass_update = STAGE_ONE_BURN_END + 0.1;
+                    } else if !separated && elapsed >= next_mass_update {
+                        let mass = spec::stage_mass(spec::Stage::One, elapsed);
+                        let mut batch = physics.commands();
+                        batch.set_mass(stage_one, spec::mass_properties(spec::Stage::One, mass)?);
+                        submit_batch(&physics, &mut results, batch).await?;
+                        snapshot = physics.snapshot();
+                        receive_frames(&mut frame_rx, &mut frames)?;
+                        next_mass_update += 0.1;
                     }
                     let elapsed = snapshot.simulation_time().saturating_sub(flight_start).as_secs_f64();
                     if separated && !stage_two_cutoff && elapsed >= STAGE_TWO_BURN_END {
                         let mut batch = physics.commands();
+                        batch.set_mass(
+                            stage_two,
+                            spec::mass_properties(
+                                spec::Stage::Two,
+                                spec::stage_mass(
+                                    spec::Stage::Two,
+                                    spec::burn_duration(spec::Stage::Two),
+                                ),
+                            )?,
+                        );
                         batch.set_force_source_enabled(engine_two, false);
                         submit_batch(&physics, &mut results, batch).await?;
                         snapshot = physics.snapshot();
                         receive_frames(&mut frame_rx, &mut frames)?;
                         stage_two_cutoff = true;
+                    } else if separated && !stage_two_cutoff && elapsed >= next_mass_update {
+                        let burn_time = elapsed - STAGE_ONE_BURN_END;
+                        let mass = spec::stage_mass(spec::Stage::Two, burn_time);
+                        let mut batch = physics.commands();
+                        batch.set_mass(stage_two, spec::mass_properties(spec::Stage::Two, mass)?);
+                        submit_batch(&physics, &mut results, batch).await?;
+                        snapshot = physics.snapshot();
+                        receive_frames(&mut frame_rx, &mut frames)?;
+                        next_mass_update += 0.1;
                     }
                 }
                 event = collisions.next_batch() => {
@@ -262,54 +301,24 @@ async fn setup(
     ),
     Box<dyn Error>,
 > {
-    let planet = physics
-        .add_body(RigidBody::new_static(Transform::identity()))
-        .await?;
+    let planet = physics.add_body(spec::planet_body()).await?;
     let planet_collider = physics
-        .add_collider(
-            planet,
-            Collider::new(
-                Shape::Sphere(Sphere::new(PLANET_RADIUS)?),
-                Transform::identity(),
-            ),
-        )
+        .add_collider(planet, spec::planet_collider()?)
         .await?;
     let lower = physics
-        .add_body(stage_body(Vec3::Y * (PLANET_RADIUS + 3.0), STAGE_ONE_MASS)?)
+        .add_body(spec::stage_body(spec::Stage::One)?)
         .await?;
     let upper = physics
-        .add_body(stage_body(Vec3::Y * (PLANET_RADIUS + 7.0), STAGE_TWO_MASS)?)
+        .add_body(spec::stage_body(spec::Stage::Two)?)
         .await?;
-    let lower_collider = physics
-        .add_collider(
-            lower,
-            Collider::new(
-                Shape::Cuboid(Cuboid::new(1.2, 2.0, 1.2)?),
-                Transform::identity(),
-            ),
-        )
-        .await?;
-    let upper_collider = physics
-        .add_collider(
-            upper,
-            Collider::new(
-                Shape::Cuboid(Cuboid::new(1.2, 2.0, 1.2)?),
-                Transform::identity(),
-            ),
-        )
-        .await?;
-    let common = JointCommon::new(
-        JointFrame::new(Vec3::Y * STAGE_HALF_HEIGHT, Quat::IDENTITY),
-        JointFrame::new(Vec3::Y * -STAGE_HALF_HEIGHT, Quat::IDENTITY),
-    );
-    let joint = physics
-        .add_joint(lower, upper, Joint::Fixed(FixedJoint::new(common)))
-        .await?;
+    let lower_collider = physics.add_collider(lower, spec::stage_collider()?).await?;
+    let upper_collider = physics.add_collider(upper, spec::stage_collider()?).await?;
+    let joint = physics.add_joint(lower, upper, spec::fixed_joint()).await?;
     let engine_one = physics
-        .add_force_source(lower, Vec3::Y * -STAGE_HALF_HEIGHT, Vec3::ZERO)
+        .add_force_source(lower, spec::engine_point(), Vec3::ZERO)
         .await?;
     let engine_two = physics
-        .add_force_source(upper, Vec3::Y * -STAGE_HALF_HEIGHT, Vec3::ZERO)
+        .add_force_source(upper, spec::engine_point(), Vec3::ZERO)
         .await?;
     Ok((
         planet_collider,
@@ -321,18 +330,6 @@ async fn setup(
         engine_one,
         engine_two,
     ))
-}
-
-fn stage_body(position: Vec3, mass: f64) -> Result<RigidBody, Box<dyn Error>> {
-    let properties = MassProperties::new(
-        mass,
-        Vec3::ZERO,
-        Mat3::from_diagonal(Vec3::new(1.0e5, 1.0e5, 1.0e5)),
-    )?;
-    Ok(RigidBody::new_dynamic(
-        Transform::new(position, Quat::IDENTITY)?,
-        properties,
-    )?)
 }
 
 async fn submit_batch(
@@ -363,30 +360,4 @@ fn receive_frames(
 
 fn pair_contains(pair: CollisionPair, collider: ColliderId) -> bool {
     pair.a == collider || pair.b == collider
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{FlightConfig, run};
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn records_physics_snapshots_on_the_requested_step_schedule() {
-        let frames = run(FlightConfig {
-            warp: 1.0,
-            maximum_steps: 24,
-            fps: 24,
-        })
-        .await
-        .expect("flight snapshots");
-
-        assert!(frames.len() >= 5);
-        assert!(frames[0].stage_one.is_some());
-        assert!(frames[0].stage_two.is_some());
-        assert!(frames.last().expect("last frame").step - frames[0].step <= 24);
-        assert!(
-            frames
-                .windows(2)
-                .all(|pair| pair[1].step > pair[0].step && pair[1].step - pair[0].step <= 5)
-        );
-    }
 }

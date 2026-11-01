@@ -1,5 +1,8 @@
 mod runtime;
 
+#[cfg(test)]
+extern crate self as kapitsa;
+
 pub mod aabb {
     pub use kapitsa_core::aabb::{Aabb, AabbError};
 }
