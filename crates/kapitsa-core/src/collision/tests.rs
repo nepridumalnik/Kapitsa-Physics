@@ -952,6 +952,116 @@ fn continuous_pure_rotation_detects_a_full_turn_between_equal_endpoint_poses() {
 }
 
 #[test]
+fn continuous_rotation_with_offset_center_of_mass_sweeps_the_collider_arc() {
+    let mut world = PhysicsWorld::new();
+    let arc_radius = 5.0;
+    let target_center = Vec3::new(
+        arc_radius * (1.0 - std::f64::consts::FRAC_1_SQRT_2),
+        -arc_radius * std::f64::consts::FRAC_1_SQRT_2,
+        0.0,
+    );
+    let target_body = world
+        .add_body(RigidBody::new_static(
+            Transform::new(target_center, Quat::IDENTITY).unwrap(),
+        ))
+        .unwrap();
+    let target = world
+        .add_collider(
+            target_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.5, 0.5, 0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    let mass = MassProperties::new(1.0, Vec3::X * arc_radius, Mat3::IDENTITY).unwrap();
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass).unwrap();
+    body.set_angular_velocity(Vec3::Z * std::f64::consts::FRAC_PI_2)
+        .unwrap();
+    body.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(body).unwrap();
+    let collider = world
+        .add_collider(
+            body,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(1.0).unwrap();
+
+    let pair = CollisionPair::new(target, collider).unwrap();
+    assert!(
+        world
+            .collision_events()
+            .iter()
+            .any(|event| { event.kind == CollisionEventKind::Impact && event.pair == pair })
+    );
+    let state = world.body(body).unwrap().state();
+    assert!(state.transform().translation().is_finite());
+    assert!(state.angular_velocity().is_finite());
+}
+
+#[test]
+fn continuous_dynamic_body_responds_to_a_moving_kinematic_cuboid() {
+    let mut world = PhysicsWorld::new();
+    let mut kinematic =
+        RigidBody::new_kinematic(Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY).unwrap());
+    kinematic
+        .set_linear_velocity(Vec3::new(-1000.0, 0.0, 0.0))
+        .unwrap();
+    let kinematic = world.add_body(kinematic).unwrap();
+    let wall = world
+        .add_collider(
+            kinematic,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 2.0, 2.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    let mut dynamic = dynamic_body(Vec3::ZERO, Vec3::ZERO);
+    dynamic.set_ccd_mode(CcdMode::Continuous);
+    let dynamic = world.add_body(dynamic).unwrap();
+    let sphere = world
+        .add_collider(
+            dynamic,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    world.step(0.01).unwrap();
+
+    let pair = CollisionPair::new(wall, sphere).unwrap();
+    assert!(
+        world
+            .collision_events()
+            .iter()
+            .any(|event| { event.kind == CollisionEventKind::Impact && event.pair == pair })
+    );
+    assert_eq!(
+        world
+            .body(kinematic)
+            .unwrap()
+            .state()
+            .transform()
+            .translation()
+            .x,
+        -5.0
+    );
+    let state = world.body(dynamic).unwrap().state();
+    assert!(state.linear_velocity().x < 0.0);
+    assert!(state.transform().translation().is_finite());
+}
+
+#[test]
 fn continuous_capsule_does_not_tunnel_through_a_plane() {
     let mut world = PhysicsWorld::new();
     let plane = add_plane(&mut world, CollisionMode::Solid);

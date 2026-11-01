@@ -454,8 +454,10 @@ two TOI calls and no candidate refreshes.
 
 The Release `bench-internals` profile after stages 1–6 measured the 64-sphere
 wall case at about 2.05 ms per step, with a 1.858 ms CCD phase and 0.932 ms in
-TOI search. The sphere–cuboid specialization solves translation against the
-rounded box analytically; rotation of the cuboid still uses GJK. On the same
+TOI search. The sphere–cuboid specialization solves linear translation against
+the rounded box analytically and uses conservative advancement with exact
+point-to-box distance for sampled nonlinear sphere paths; rotation of the
+cuboid still uses GJK. On the same
 64-impact scene, median step time was 0.656 ms, CCD was 0.513 ms, and TOI
 search was 0.045 ms. This reduced the CCD phase by 72% and full-step time by
 68% relative to the pre-specialization measurement. The benchmark wall was

@@ -1835,14 +1835,8 @@ impl PhysicsWorld {
                 .get(pair.b.dense)
                 .filter(|_| pair.b.world == self.world_id)
                 .ok_or(CollisionError::InvalidContact)?;
-            let analytic_pair = matches!(
-                (collider_a.collider.shape(), collider_b.collider.shape()),
-                (Shape::Sphere(_), Shape::Sphere(_))
-                    | (Shape::Sphere(_), Shape::Cuboid(_))
-                    | (Shape::Cuboid(_), Shape::Sphere(_))
-            );
-            let mut rotational_motion = false;
-            for body_id in [collider_a.body, collider_b.body] {
+            let mut rotational_motion = [false; 2];
+            for (index, body_id) in [collider_a.body, collider_b.body].into_iter().enumerate() {
                 let body = self
                     .bodies
                     .get(body_id.dense)
@@ -1861,11 +1855,17 @@ impl PhysicsWorld {
                     .get(prediction)
                     .map(|(_, state)| *state)
                     .ok_or(CollisionError::InvalidContact)?;
-                rotational_motion |= body.state().angular_velocity() != Vec3::ZERO
+                rotational_motion[index] = body.state().angular_velocity() != Vec3::ZERO
                     || end_state.angular_velocity() != Vec3::ZERO
                     || body.state().transform().rotation() != end_state.transform().rotation();
             }
-            if !analytic_pair || rotational_motion {
+            let analytic_pair = match (collider_a.collider.shape(), collider_b.collider.shape()) {
+                (Shape::Sphere(_), Shape::Sphere(_)) => true,
+                (Shape::Sphere(_), Shape::Cuboid(_)) => !rotational_motion[1],
+                (Shape::Cuboid(_), Shape::Sphere(_)) => !rotational_motion[0],
+                _ => false,
+            };
+            if !analytic_pair {
                 count = count.saturating_add(1);
             }
         }

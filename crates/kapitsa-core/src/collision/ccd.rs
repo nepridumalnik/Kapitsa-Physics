@@ -137,21 +137,30 @@ pub(crate) fn convex_toi_motion(
             motion_b.end,
         );
     }
-    if motion_a.linear_translation
-        && motion_b.linear_translation
-        && motion_a.rotation_bound == 0.0
-        && motion_b.rotation_bound == 0.0
-    {
-        match (shape_a, shape_b) {
-            (Shape::Sphere(sphere), Shape::Cuboid(cuboid)) => {
-                return sphere_cuboid_toi(sphere.radius(), motion_a, cuboid, motion_b);
-            }
-            (Shape::Cuboid(cuboid), Shape::Sphere(sphere)) => {
-                return sphere_cuboid_toi(sphere.radius(), motion_b, cuboid, motion_a)
-                    .map(|hit| hit.map(reverse_hit));
-            }
-            _ => {}
+    match (shape_a, shape_b) {
+        (Shape::Sphere(sphere), Shape::Cuboid(cuboid))
+            if motion_b.rotation_bound == 0.0
+                && motion_a.linear_translation
+                && motion_b.linear_translation =>
+        {
+            return sphere_cuboid_toi(sphere.radius(), motion_a, cuboid, motion_b);
         }
+        (Shape::Sphere(sphere), Shape::Cuboid(cuboid)) if motion_b.rotation_bound == 0.0 => {
+            return sphere_cuboid_toi_sampled(sphere.radius(), motion_a, cuboid, motion_b);
+        }
+        (Shape::Cuboid(cuboid), Shape::Sphere(sphere))
+            if motion_a.rotation_bound == 0.0
+                && motion_a.linear_translation
+                && motion_b.linear_translation =>
+        {
+            return sphere_cuboid_toi(sphere.radius(), motion_b, cuboid, motion_a)
+                .map(|hit| hit.map(reverse_hit));
+        }
+        (Shape::Cuboid(cuboid), Shape::Sphere(sphere)) if motion_a.rotation_bound == 0.0 => {
+            return sphere_cuboid_toi_sampled(sphere.radius(), motion_b, cuboid, motion_a)
+                .map(|hit| hit.map(reverse_hit));
+        }
+        _ => {}
     }
     let radius_a = rotation_radius(shape_a)?;
     let radius_b = rotation_radius(shape_b)?;
@@ -449,6 +458,71 @@ fn sphere_cuboid_toi(
     Ok(None)
 }
 
+fn sphere_cuboid_toi_sampled(
+    radius: f64,
+    sphere_motion: &CcdMotion<'_>,
+    cuboid: &crate::shape::Cuboid,
+    cuboid_motion: &CcdMotion<'_>,
+) -> Result<Option<CcdHit>, CollisionError> {
+    let motion_bound = sphere_motion.translation_bound + cuboid_motion.translation_bound;
+    let radius_squared = radius * radius;
+    if !motion_bound.is_finite() || !radius.is_finite() || !radius_squared.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    let half = cuboid.half_extents();
+    let half = [half.x, half.y, half.z];
+    let mut toi = 0.0;
+    for _ in 0..MAX_CCD_ITERATIONS {
+        let sphere_transform = sphere_motion.at(toi)?;
+        let cuboid_transform = cuboid_motion.at(toi)?;
+        let inverse = cuboid_transform
+            .inverse()
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        let center = inverse.transform_point(sphere_transform.translation());
+        if !center.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        let center = [center.x, center.y, center.z];
+        let closest = [
+            center[0].clamp(-half[0], half[0]),
+            center[1].clamp(-half[1], half[1]),
+            center[2].clamp(-half[2], half[2]),
+        ];
+        let difference = Vec3::new(
+            center[0] - closest[0],
+            center[1] - closest[1],
+            center[2] - closest[2],
+        );
+        let distance_squared = difference
+            .checked_dot(difference)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let tolerance = distance_squared.max(radius_squared).max(1.0) * f64::EPSILON * 128.0;
+        if distance_squared <= radius_squared + tolerance {
+            let contact = sphere_cuboid_contact(center, half, radius_squared)?
+                .ok_or(CollisionError::InvalidContact)?;
+            return sphere_cuboid_hit(toi, contact, radius, sphere_motion, cuboid_motion).map(Some);
+        }
+        if motion_bound == 0.0 {
+            return Ok(None);
+        }
+        let distance = distance_squared.sqrt();
+        let advance = (distance - radius) / motion_bound;
+        if !advance.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        let remaining = 1.0 - toi;
+        if advance > remaining {
+            return Ok(None);
+        }
+        let next_toi = toi + advance;
+        if next_toi <= toi {
+            return Err(CollisionError::NonConvergent);
+        }
+        toi = next_toi.min(1.0);
+    }
+    Err(CollisionError::NonConvergent)
+}
+
 fn point_on_segment(
     start: [f64; 3],
     delta: [f64; 3],
@@ -546,33 +620,14 @@ fn sphere_cuboid_hit(
     sphere_motion: &CcdMotion<'_>,
     cuboid_motion: &CcdMotion<'_>,
 ) -> Result<CcdHit, CollisionError> {
-    let sphere_delta = translation_delta(sphere_motion.start, sphere_motion.end)?;
-    let sphere_center = sphere_motion
-        .start
-        .translation()
-        .checked_add(
-            sphere_delta
-                .checked_mul_scalar(toi)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
-        )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    let cuboid_delta = translation_delta(cuboid_motion.start, cuboid_motion.end)?;
-    let cuboid_translation = cuboid_motion
-        .start
-        .translation()
-        .checked_add(
-            cuboid_delta
-                .checked_mul_scalar(toi)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
-        )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    let cuboid_transform = Transform::new(cuboid_translation, cuboid_motion.start.rotation())
-        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+    let sphere_transform = sphere_motion.at(toi)?;
+    let cuboid_transform = cuboid_motion.at(toi)?;
     let normal = cuboid_transform
         .transform_vector(normal_local)
         .try_normalize()
         .ok_or(CollisionError::InvalidContact)?;
-    let point_a = sphere_center
+    let point_a = sphere_transform
+        .translation()
         .checked_add(
             normal
                 .checked_mul_scalar(radius)
