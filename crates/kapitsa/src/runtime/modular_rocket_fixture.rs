@@ -205,7 +205,7 @@ pub fn fixed_joint_for_offset(offset: Vec3) -> Joint {
     Joint::Fixed(FixedJoint::new(common))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "bench-internals")))]
 mod tests {
     use std::collections::{HashMap, VecDeque};
 
@@ -294,7 +294,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "bench-internals")))]
 mod stability_tests {
     use std::time::{Duration, Instant};
 

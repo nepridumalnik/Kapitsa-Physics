@@ -4211,7 +4211,12 @@ impl PhysicsWorld {
         Self::rebuild_body_indices(context)?;
         Self::prepare_solver_body_indices(context)?;
         if has_active_joints {
+            #[cfg(feature = "bench-internals")]
+            let joint_prepare_started = Instant::now();
             self.prepare_joint_constraints()?;
+            #[cfg(feature = "bench-internals")]
+            self.collision_system
+                .record_joint_constraint_prepare(joint_prepare_started.elapsed());
         }
 
         if candidate_count == 0 {

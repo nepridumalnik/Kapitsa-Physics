@@ -58,6 +58,8 @@ pub struct CollisionStepMetrics {
     pub narrow_phase: Duration,
     /// Time spent assigning contacts to deterministic islands.
     pub island_build: Duration,
+    /// Time spent materializing enabled joint constraints for the solver.
+    pub joint_constraint_prepare: Duration,
     /// Time spent preparing and solving contact constraints.
     pub solver: Duration,
     /// Time spent grouping bodies and manifolds into solver islands.
@@ -124,6 +126,12 @@ pub struct CollisionStepMetrics {
     pub island_count: usize,
     /// Number of independent CCD islands built for the step.
     pub ccd_island_count: usize,
+    /// Largest solver island body count for the step.
+    pub largest_island_body_count: usize,
+    /// Largest solver island joint count for the step.
+    pub largest_island_joint_count: usize,
+    /// Largest solver island contact-manifold count for the step.
+    pub largest_island_contact_count: usize,
     /// Approximate retained capacity of collision scratch buffers.
     pub retained_scratch_bytes: usize,
     /// Highest sampled retained scratch capacity during the last step.
@@ -153,6 +161,7 @@ impl CollisionStepMetrics {
         ccd_island_commit: Duration::ZERO,
         narrow_phase: Duration::ZERO,
         island_build: Duration::ZERO,
+        joint_constraint_prepare: Duration::ZERO,
         solver: Duration::ZERO,
         solver_prepare: Duration::ZERO,
         solver_iterations: Duration::ZERO,
@@ -186,6 +195,9 @@ impl CollisionStepMetrics {
         ccd_final_candidate_count: 0,
         island_count: 0,
         ccd_island_count: 0,
+        largest_island_body_count: 0,
+        largest_island_joint_count: 0,
+        largest_island_contact_count: 0,
         retained_scratch_bytes: 0,
         peak_scratch_bytes: 0,
         committed_query_index_bytes: 0,

@@ -333,6 +333,12 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_joint_constraint_prepare(&mut self, elapsed: std::time::Duration) {
+        self.benchmark_metrics.joint_constraint_prepare += elapsed;
+        self.record_peak_scratch();
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_ccd_island_build(&mut self, elapsed: std::time::Duration, count: usize) {
         self.benchmark_metrics.ccd_island_count = count;
         self.benchmark_metrics.island_build += elapsed;
@@ -1001,6 +1007,20 @@ impl CollisionSystem {
         #[cfg(feature = "bench-internals")]
         {
             self.benchmark_metrics.solver_prepare = prepare_started.elapsed();
+            for island in self.solver_islands.iter().take(island_count) {
+                self.benchmark_metrics.largest_island_body_count = self
+                    .benchmark_metrics
+                    .largest_island_body_count
+                    .max(island.body_indices.len());
+                self.benchmark_metrics.largest_island_joint_count = self
+                    .benchmark_metrics
+                    .largest_island_joint_count
+                    .max(island.joint_indices.len());
+                self.benchmark_metrics.largest_island_contact_count = self
+                    .benchmark_metrics
+                    .largest_island_contact_count
+                    .max(island.manifold_indices.len());
+            }
         }
         let config = self.config;
         #[cfg(feature = "bench-internals")]

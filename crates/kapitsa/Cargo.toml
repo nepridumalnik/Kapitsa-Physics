@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [features]
-bench-internals = []
+bench-internals = ["kapitsa-core/bench-internals"]
 
 [dependencies]
 kapitsa-core = { path = "../kapitsa-core" }
@@ -32,3 +32,8 @@ harness = false
 [[bench]]
 name = "parallel_step"
 harness = false
+
+[[bench]]
+name = "large_modular_rocket"
+harness = false
+required-features = ["bench-internals"]
