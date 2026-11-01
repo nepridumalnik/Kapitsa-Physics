@@ -14,6 +14,8 @@ pub(crate) struct CcdIslandLayout {
     candidate_offsets: Vec<usize>,
     candidate_indices: Vec<usize>,
     write_offsets: Vec<usize>,
+    body_candidate_offsets: Vec<usize>,
+    body_candidate_indices: Vec<usize>,
     island_count: usize,
 }
 
@@ -28,6 +30,8 @@ impl CcdIslandLayout {
             candidate_offsets: Vec::new(),
             candidate_indices: Vec::new(),
             write_offsets: Vec::new(),
+            body_candidate_offsets: Vec::new(),
+            body_candidate_indices: Vec::new(),
             island_count: 0,
         }
     }
@@ -37,6 +41,7 @@ impl CcdIslandLayout {
         body_types: &[BodyType],
         continuous_bodies: &[bool],
         candidate_bodies: &[(usize, usize)],
+        force_single_island: bool,
     ) -> Result<(), CollisionError> {
         if body_types.len() != continuous_bodies.len() {
             return Err(CollisionError::InvalidContact);
@@ -121,6 +126,17 @@ impl CcdIslandLayout {
             self.candidate_islands[candidate_index] = Some(island_index);
         }
 
+        if force_single_island && self.candidate_islands.iter().any(Option::is_some) {
+            self.island_count = 1;
+            for (body, body_type) in body_types.iter().copied().enumerate() {
+                self.body_islands[body] =
+                    (body_type == BodyType::Dynamic && self.connected[body]).then_some(0);
+            }
+            for island in self.candidate_islands.iter_mut().flatten() {
+                *island = 0;
+            }
+        }
+
         resize_with_reserve(&mut self.candidate_offsets, self.island_count + 1, 0)?;
         self.candidate_offsets.fill(0);
         for island_index in self.candidate_islands.iter().flatten().copied() {
@@ -153,6 +169,52 @@ impl CcdIslandLayout {
             self.candidate_indices[write_index] = candidate_index;
             self.write_offsets[island_index] += 1;
         }
+
+        resize_with_reserve(&mut self.body_candidate_offsets, body_types.len() + 1, 0)?;
+        self.body_candidate_offsets.fill(0);
+        for (candidate_index, island_index) in self.candidate_islands.iter().enumerate() {
+            if island_index.is_none() {
+                continue;
+            }
+            let (body_a, body_b) = candidate_bodies[candidate_index];
+            if body_types[body_a] == BodyType::Dynamic {
+                self.body_candidate_offsets[body_a + 1] = self.body_candidate_offsets[body_a + 1]
+                    .checked_add(1)
+                    .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+            }
+            if body_types[body_b] == BodyType::Dynamic {
+                self.body_candidate_offsets[body_b + 1] = self.body_candidate_offsets[body_b + 1]
+                    .checked_add(1)
+                    .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+            }
+        }
+        for body in 0..body_types.len() {
+            self.body_candidate_offsets[body + 1] = self.body_candidate_offsets[body + 1]
+                .checked_add(self.body_candidate_offsets[body])
+                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+        }
+        let body_candidate_count = *self
+            .body_candidate_offsets
+            .last()
+            .ok_or(CollisionError::InvalidContact)?;
+        resize_with_reserve(&mut self.body_candidate_indices, body_candidate_count, 0)?;
+        resize_with_reserve(&mut self.write_offsets, body_types.len(), 0)?;
+        self.write_offsets
+            .copy_from_slice(&self.body_candidate_offsets[..body_types.len()]);
+        for (candidate_index, island_index) in self.candidate_islands.iter().enumerate() {
+            if island_index.is_none() {
+                continue;
+            }
+            let (body_a, body_b) = candidate_bodies[candidate_index];
+            for body in [body_a, body_b] {
+                if body_types[body] != BodyType::Dynamic {
+                    continue;
+                }
+                let write_index = self.write_offsets[body];
+                self.body_candidate_indices[write_index] = candidate_index;
+                self.write_offsets[body] += 1;
+            }
+        }
         Ok(())
     }
 
@@ -171,6 +233,16 @@ impl CcdIslandLayout {
         self.candidate_indices.get(start..end)
     }
 
+    pub(crate) fn body_island(&self, body: usize) -> Option<usize> {
+        self.body_islands.get(body).copied().flatten()
+    }
+
+    pub(crate) fn body_candidates(&self, body: usize) -> Option<&[usize]> {
+        let start = *self.body_candidate_offsets.get(body)?;
+        let end = *self.body_candidate_offsets.get(body + 1)?;
+        self.body_candidate_indices.get(start..end)
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         use std::mem::size_of;
@@ -183,6 +255,8 @@ impl CcdIslandLayout {
             + self.candidate_offsets.capacity() * size_of::<usize>()
             + self.candidate_indices.capacity() * size_of::<usize>()
             + self.write_offsets.capacity() * size_of::<usize>()
+            + self.body_candidate_offsets.capacity() * size_of::<usize>()
+            + self.body_candidate_indices.capacity() * size_of::<usize>()
     }
 }
 

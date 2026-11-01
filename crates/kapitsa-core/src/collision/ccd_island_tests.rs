@@ -12,7 +12,7 @@ fn independent_dynamics_against_one_static_body_form_separate_islands() {
     let mut layout = CcdIslandLayout::new();
 
     layout
-        .build(&body_types, &continuous, &candidates)
+        .build(&body_types, &continuous, &candidates, false)
         .expect("build CCD islands");
 
     assert_eq!(layout.island_count(), 64);
@@ -30,7 +30,7 @@ fn connected_dynamic_chain_forms_one_island() {
     let mut layout = CcdIslandLayout::new();
 
     layout
-        .build(&body_types, &continuous, &candidates)
+        .build(&body_types, &continuous, &candidates, false)
         .expect("build CCD islands");
 
     assert_eq!(layout.island_count(), 1);
@@ -45,7 +45,7 @@ fn multiple_colliders_on_one_body_share_its_island() {
     let mut layout = CcdIslandLayout::new();
 
     layout
-        .build(&body_types, &continuous, &candidates)
+        .build(&body_types, &continuous, &candidates, false)
         .expect("build CCD islands");
 
     assert_eq!(layout.island_count(), 1);
@@ -60,7 +60,7 @@ fn shared_kinematic_surface_does_not_join_dynamic_islands() {
     let mut layout = CcdIslandLayout::new();
 
     layout
-        .build(&body_types, &continuous, &candidates)
+        .build(&body_types, &continuous, &candidates, false)
         .expect("build CCD islands");
 
     assert_eq!(layout.island_count(), 2);
@@ -75,7 +75,7 @@ fn no_ccd_candidates_produce_no_islands() {
     let mut layout = CcdIslandLayout::new();
 
     layout
-        .build(&body_types, &continuous, &[])
+        .build(&body_types, &continuous, &[], false)
         .expect("build empty CCD islands");
 
     assert_eq!(layout.island_count(), 0);
@@ -95,14 +95,14 @@ fn island_and_candidate_order_is_stable_across_builds() {
     let mut layout = CcdIslandLayout::new();
 
     layout
-        .build(&body_types, &continuous, &candidates)
+        .build(&body_types, &continuous, &candidates, false)
         .expect("first build");
     let first = (0..layout.island_count())
         .map(|island| layout.candidates(island).map(<[usize]>::to_vec))
         .collect::<Vec<_>>();
 
     layout
-        .build(&body_types, &continuous, &candidates)
+        .build(&body_types, &continuous, &candidates, false)
         .expect("second build");
     let second = (0..layout.island_count())
         .map(|island| layout.candidates(island).map(<[usize]>::to_vec))

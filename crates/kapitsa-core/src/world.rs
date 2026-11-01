@@ -1004,6 +1004,9 @@ impl PhysicsWorld {
             );
         }
         self.rebuild_ccd_candidate_bodies()?;
+        let mut force_single_island = false;
+        self.collision_system
+            .build_ccd_islands(force_single_island)?;
         self.collision_system.context.ccd_processed_pairs.clear();
         self.collision_system.context.ccd_processed_time = 0.0;
         #[cfg(feature = "bench-internals")]
@@ -1020,67 +1023,272 @@ impl PhysicsWorld {
         }
 
         let time_tolerance = f64::EPSILON * dt.max(1.0) * 128.0;
-        let mut island_index = 0;
-        let global_fallback = self.collision_system.ccd_island_count() <= 1;
-        while island_index < self.collision_system.ccd_island_count() {
-            self.collision_system.context.ccd_processed_pairs.clear();
-            self.collision_system.context.ccd_processed_time = 0.0;
-            let mut elapsed = 0.0;
-            loop {
-                let remaining = (dt - elapsed).max(0.0);
-                if remaining <= f64::EPSILON * dt.max(1.0) {
-                    break;
-                }
+        'passes: loop {
+            let mut island_index = 0;
+            let mut restart_pass = false;
+            while island_index < self.collision_system.ccd_island_count() {
+                self.collision_system.context.ccd_processed_pairs.clear();
+                self.collision_system.context.ccd_processed_time = 0.0;
+                let mut elapsed = 0.0;
+                loop {
+                    let remaining = (dt - elapsed).max(0.0);
+                    if remaining <= f64::EPSILON * dt.max(1.0) {
+                        break;
+                    }
 
-                let mut earliest: Option<(CollisionPair, CcdHit, f64)> = None;
-                let island_candidate_count = self
-                    .collision_system
-                    .ccd_island_candidates(island_index)
-                    .map(<[usize]>::len)
-                    .ok_or(CollisionError::InvalidContact)?;
-                #[cfg(feature = "bench-internals")]
-                let toi_search_started = Instant::now();
-                for island_candidate_index in 0..island_candidate_count {
-                    let candidate_index = self
+                    let mut earliest: Option<(CollisionPair, CcdHit, f64)> = None;
+                    let island_candidate_count = self
                         .collision_system
                         .ccd_island_candidates(island_index)
-                        .and_then(|candidates| candidates.get(island_candidate_index))
-                        .copied()
+                        .map(<[usize]>::len)
                         .ok_or(CollisionError::InvalidContact)?;
-                    let pair = self
-                        .collision_system
-                        .candidate(candidate_index)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    let cached = self
-                        .collision_system
-                        .context
-                        .ccd_toi_cache
-                        .get(candidate_index)
-                        .copied()
-                        .ok_or(CollisionError::InvalidContact)?;
-                    if cached.evaluated {
-                        if let Some(hit) = cached.hit
-                            && earliest.is_none_or(|(current_pair, _, current_time)| {
-                                cached.impact_time < current_time
-                                    || (cached.impact_time == current_time && pair < current_pair)
-                            })
-                        {
-                            earliest = Some((pair, hit, cached.impact_time));
+                    #[cfg(feature = "bench-internals")]
+                    let toi_search_started = Instant::now();
+                    for island_candidate_index in 0..island_candidate_count {
+                        let candidate_index = self
+                            .collision_system
+                            .ccd_island_candidates(island_index)
+                            .and_then(|candidates| candidates.get(island_candidate_index))
+                            .copied()
+                            .ok_or(CollisionError::InvalidContact)?;
+                        let pair = self
+                            .collision_system
+                            .ccd_candidate_pair(candidate_index)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        let cached = self
+                            .collision_system
+                            .context
+                            .ccd_toi_cache
+                            .get(candidate_index)
+                            .copied()
+                            .ok_or(CollisionError::InvalidContact)?;
+                        if cached.evaluated {
+                            if let Some(hit) = cached.hit
+                                && earliest.is_none_or(|(current_pair, _, current_time)| {
+                                    cached.impact_time < current_time
+                                        || (cached.impact_time == current_time
+                                            && pair < current_pair)
+                                })
+                            {
+                                earliest = Some((pair, hit, cached.impact_time));
+                            }
+                            continue;
                         }
-                        continue;
+                        let context = &self.collision_system.context;
+                        if elapsed <= context.ccd_processed_time + time_tolerance
+                            && context.ccd_processed_pairs.contains(&pair)
+                        {
+                            self.collision_system.context.ccd_toi_cache[candidate_index] =
+                                super::collision::CcdCandidateToi {
+                                    evaluated: true,
+                                    ..Default::default()
+                                };
+                            continue;
+                        }
+                        let (collider_a, collider_b) = {
+                            let collider_a = self
+                                .colliders
+                                .get(pair.a.dense)
+                                .filter(|_| pair.a.world == self.world_id)
+                                .ok_or(CollisionError::InvalidContact)?;
+                            let collider_b = self
+                                .colliders
+                                .get(pair.b.dense)
+                                .filter(|_| pair.b.world == self.world_id)
+                                .ok_or(CollisionError::InvalidContact)?;
+                            (collider_a, collider_b)
+                        };
+                        let body_a = self
+                            .bodies
+                            .get(collider_a.body.dense)
+                            .filter(|_| collider_a.body.world == self.world_id)
+                            .map(|entry| entry.body)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        let body_b = self
+                            .bodies
+                            .get(collider_b.body.dense)
+                            .filter(|_| collider_b.body.world == self.world_id)
+                            .map(|entry| entry.body)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        if ![body_a, body_b].into_iter().any(|body| {
+                            body.physics().body_type() == BodyType::Dynamic
+                                && body.ccd_mode() == CcdMode::Continuous
+                        }) {
+                            self.collision_system.context.ccd_toi_cache[candidate_index]
+                                .evaluated = true;
+                            continue;
+                        }
+
+                        let prediction_a = Self::predicted_body_index(
+                            &self.collision_system.context.body_indices,
+                            self.world_id,
+                            collider_a.body,
+                        )?;
+                        let prediction_b = Self::predicted_body_index(
+                            &self.collision_system.context.body_indices,
+                            self.world_id,
+                            collider_b.body,
+                        )?;
+                        let state_a =
+                            self.body_state_at_ccd(collider_a.body, prediction_a, elapsed, dt)?;
+                        let state_b =
+                            self.body_state_at_ccd(collider_b.body, prediction_b, elapsed, dt)?;
+                        let end_state_a = self
+                            .collision_system
+                            .context
+                            .predicted_states
+                            .get(prediction_a)
+                            .map(|(_, state)| *state)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        let end_state_b = self
+                            .collision_system
+                            .context
+                            .predicted_states
+                            .get(prediction_b)
+                            .map(|(_, state)| *state)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        let start_transform_a = state_a
+                            .transform()
+                            .compose(&collider_a.collider.local_transform())
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        let start_transform_b = state_b
+                            .transform()
+                            .compose(&collider_b.collider.local_transform())
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        let end_transform_a = end_state_a
+                            .transform()
+                            .compose(&collider_a.collider.local_transform())
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        let end_transform_b = end_state_b
+                            .transform()
+                            .compose(&collider_b.collider.local_transform())
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        let local_transform_a = collider_a.collider.local_transform();
+                        let local_transform_b = collider_b.collider.local_transform();
+                        let context = &self.collision_system.context;
+                        let trajectory_a = ColliderTrajectory {
+                            body: body_a,
+                            base_state: context.ccd_states[prediction_a],
+                            base_time: context.ccd_elapsed[prediction_a],
+                            sample_start_time: elapsed,
+                            end_time: dt,
+                            local_transform: local_transform_a,
+                        };
+                        let trajectory_b = ColliderTrajectory {
+                            body: body_b,
+                            base_state: context.ccd_states[prediction_b],
+                            base_time: context.ccd_elapsed[prediction_b],
+                            sample_start_time: elapsed,
+                            end_time: dt,
+                            local_transform: local_transform_b,
+                        };
+                        let (translation_bound_a, rotation_bound_a, linear_translation_a) =
+                            trajectory_a.path_bounds(end_state_a)?;
+                        let (translation_bound_b, rotation_bound_b, linear_translation_b) =
+                            trajectory_b.path_bounds(end_state_b)?;
+                        let sample_a = |amount| trajectory_a.transform_at(amount);
+                        let sample_b = |amount| trajectory_b.transform_at(amount);
+                        let motion_a = CcdMotion::trajectory(
+                            start_transform_a,
+                            end_transform_a,
+                            translation_bound_a,
+                            linear_translation_a,
+                            rotation_bound_a,
+                            &sample_a,
+                        )?;
+                        let motion_b = CcdMotion::trajectory(
+                            start_transform_b,
+                            end_transform_b,
+                            translation_bound_b,
+                            linear_translation_b,
+                            rotation_bound_b,
+                            &sample_b,
+                        )?;
+                        let sensor = collider_a.collider.mode()
+                            == crate::collider::CollisionMode::Sensor
+                            || collider_b.collider.mode() == crate::collider::CollisionMode::Sensor;
+                        #[cfg(feature = "bench-internals")]
+                        let repeated_toi_call = if let Some(seen_pairs) =
+                            &mut self.collision_system.context.ccd_toi_seen_pairs
+                        {
+                            !seen_pairs.insert(pair)
+                        } else {
+                            false
+                        };
+                        #[cfg(feature = "bench-internals")]
+                        if repeated_toi_call {
+                            self.collision_system.record_ccd_repeated_toi_call();
+                        }
+                        let hit = self.collision_system.time_of_impact(
+                            collider_a.collider.shape(),
+                            &motion_a,
+                            collider_a.collider.query_bvh(),
+                            collider_a.collider.query_vertices(),
+                            collider_b.collider.shape(),
+                            &motion_b,
+                            collider_b.collider.query_bvh(),
+                            collider_b.collider.query_vertices(),
+                            sensor,
+                        )?;
+                        let cached = self
+                            .collision_system
+                            .context
+                            .ccd_toi_cache
+                            .get_mut(candidate_index)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        cached.evaluated = true;
+                        cached.hit = None;
+                        let Some(hit) = hit else {
+                            continue;
+                        };
+                        if !hit.toi.is_finite() || !(0.0..=1.0).contains(&hit.toi) {
+                            return Err(CollisionError::InvalidContact);
+                        }
+                        if sensor {
+                            upsert_interaction(
+                                &mut self.collision_system.context.interactions,
+                                &mut self.collision_system.context.interaction_indices,
+                                CollisionInteraction {
+                                    pair,
+                                    sensor: true,
+                                    transient: true,
+                                    contact: None,
+                                    impact: false,
+                                },
+                            )?;
+                            continue;
+                        }
+                        if hit.toi <= f64::EPSILON * 128.0 {
+                            let velocity_a = body_point_velocity(body_a, state_a, hit.point_a)?;
+                            let velocity_b = body_point_velocity(body_b, state_b, hit.point_b)?;
+                            let normal_speed = velocity_b
+                                .checked_sub(velocity_a)
+                                .and_then(|velocity| velocity.checked_dot(hit.normal))
+                                .ok_or(CollisionError::ArithmeticOverflow)?;
+                            if normal_speed >= 0.0 {
+                                continue;
+                            }
+                        }
+                        let impact_time = elapsed + remaining * hit.toi;
+                        cached.impact_time = impact_time;
+                        cached.hit = Some(hit);
+                        if earliest.is_none_or(|(current_pair, _, current_time)| {
+                            impact_time < current_time
+                                || (impact_time == current_time && pair < current_pair)
+                        }) {
+                            earliest = Some((pair, hit, impact_time));
+                        }
                     }
-                    let context = &self.collision_system.context;
-                    if elapsed <= context.ccd_processed_time + time_tolerance
-                        && context.ccd_processed_pairs.contains(&pair)
-                    {
-                        self.collision_system.context.ccd_toi_cache[candidate_index] =
-                            super::collision::CcdCandidateToi {
-                                evaluated: true,
-                                ..Default::default()
-                            };
-                        continue;
-                    }
-                    let (collider_a, collider_b) = {
+
+                    #[cfg(feature = "bench-internals")]
+                    self.collision_system
+                        .record_ccd_toi_search(toi_search_started.elapsed());
+
+                    let Some((pair, hit, impact_elapsed)) = earliest else {
+                        break;
+                    };
+
+                    let (body_a_id, body_b_id) = {
                         let collider_a = self
                             .colliders
                             .get(pair.a.dense)
@@ -1091,445 +1299,242 @@ impl PhysicsWorld {
                             .get(pair.b.dense)
                             .filter(|_| pair.b.world == self.world_id)
                             .ok_or(CollisionError::InvalidContact)?;
-                        (collider_a, collider_b)
+                        (collider_a.body, collider_b.body)
                     };
-                    let body_a = self
-                        .bodies
-                        .get(collider_a.body.dense)
-                        .filter(|_| collider_a.body.world == self.world_id)
-                        .map(|entry| entry.body)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    let body_b = self
-                        .bodies
-                        .get(collider_b.body.dense)
-                        .filter(|_| collider_b.body.world == self.world_id)
-                        .map(|entry| entry.body)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    if ![body_a, body_b].into_iter().any(|body| {
-                        body.physics().body_type() == BodyType::Dynamic
-                            && body.ccd_mode() == CcdMode::Continuous
-                    }) {
-                        self.collision_system.context.ccd_toi_cache[candidate_index].evaluated =
-                            true;
-                        continue;
-                    }
-
                     let prediction_a = Self::predicted_body_index(
                         &self.collision_system.context.body_indices,
                         self.world_id,
-                        collider_a.body,
+                        body_a_id,
                     )?;
                     let prediction_b = Self::predicted_body_index(
                         &self.collision_system.context.body_indices,
                         self.world_id,
-                        collider_b.body,
+                        body_b_id,
                     )?;
-                    let state_a =
-                        self.body_state_at_ccd(collider_a.body, prediction_a, elapsed, dt)?;
-                    let state_b =
-                        self.body_state_at_ccd(collider_b.body, prediction_b, elapsed, dt)?;
-                    let end_state_a = self
-                        .collision_system
-                        .context
-                        .predicted_states
-                        .get(prediction_a)
-                        .map(|(_, state)| *state)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    let end_state_b = self
-                        .collision_system
-                        .context
-                        .predicted_states
-                        .get(prediction_b)
-                        .map(|(_, state)| *state)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    let start_transform_a = state_a
-                        .transform()
-                        .compose(&collider_a.collider.local_transform())
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
-                    let start_transform_b = state_b
-                        .transform()
-                        .compose(&collider_b.collider.local_transform())
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
-                    let end_transform_a = end_state_a
-                        .transform()
-                        .compose(&collider_a.collider.local_transform())
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
-                    let end_transform_b = end_state_b
-                        .transform()
-                        .compose(&collider_b.collider.local_transform())
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
-                    let local_transform_a = collider_a.collider.local_transform();
-                    let local_transform_b = collider_b.collider.local_transform();
-                    let context = &self.collision_system.context;
-                    let trajectory_a = ColliderTrajectory {
-                        body: body_a,
-                        base_state: context.ccd_states[prediction_a],
-                        base_time: context.ccd_elapsed[prediction_a],
-                        sample_start_time: elapsed,
-                        end_time: dt,
-                        local_transform: local_transform_a,
-                    };
-                    let trajectory_b = ColliderTrajectory {
-                        body: body_b,
-                        base_state: context.ccd_states[prediction_b],
-                        base_time: context.ccd_elapsed[prediction_b],
-                        sample_start_time: elapsed,
-                        end_time: dt,
-                        local_transform: local_transform_b,
-                    };
-                    let (translation_bound_a, rotation_bound_a, linear_translation_a) =
-                        trajectory_a.path_bounds(end_state_a)?;
-                    let (translation_bound_b, rotation_bound_b, linear_translation_b) =
-                        trajectory_b.path_bounds(end_state_b)?;
-                    let sample_a = |amount| trajectory_a.transform_at(amount);
-                    let sample_b = |amount| trajectory_b.transform_at(amount);
-                    let motion_a = CcdMotion::trajectory(
-                        start_transform_a,
-                        end_transform_a,
-                        translation_bound_a,
-                        linear_translation_a,
-                        rotation_bound_a,
-                        &sample_a,
-                    )?;
-                    let motion_b = CcdMotion::trajectory(
-                        start_transform_b,
-                        end_transform_b,
-                        translation_bound_b,
-                        linear_translation_b,
-                        rotation_bound_b,
-                        &sample_b,
-                    )?;
-                    let sensor = collider_a.collider.mode()
-                        == crate::collider::CollisionMode::Sensor
-                        || collider_b.collider.mode() == crate::collider::CollisionMode::Sensor;
-                    #[cfg(feature = "bench-internals")]
-                    let repeated_toi_call = if let Some(seen_pairs) =
-                        &mut self.collision_system.context.ccd_toi_seen_pairs
-                    {
-                        !seen_pairs.insert(pair)
-                    } else {
-                        false
-                    };
-                    #[cfg(feature = "bench-internals")]
-                    if repeated_toi_call {
-                        self.collision_system.record_ccd_repeated_toi_call();
+                    if impact_elapsed < elapsed {
+                        return Err(CollisionError::NonConvergent);
                     }
-                    let hit = self.collision_system.time_of_impact(
-                        collider_a.collider.shape(),
-                        &motion_a,
-                        collider_a.collider.query_bvh(),
-                        collider_a.collider.query_vertices(),
-                        collider_b.collider.shape(),
-                        &motion_b,
-                        collider_b.collider.query_bvh(),
-                        collider_b.collider.query_vertices(),
-                        sensor,
-                    )?;
-                    let cached = self
-                        .collision_system
-                        .context
-                        .ccd_toi_cache
-                        .get_mut(candidate_index)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    cached.evaluated = true;
-                    cached.hit = None;
-                    let Some(hit) = hit else {
-                        continue;
+                    let (body_a, body_b) = {
+                        (
+                            self.bodies
+                                .get(body_a_id.dense)
+                                .filter(|_| body_a_id.world == self.world_id)
+                                .map(|entry| entry.body)
+                                .ok_or(CollisionError::InvalidContact)?,
+                            self.bodies
+                                .get(body_b_id.dense)
+                                .filter(|_| body_b_id.world == self.world_id)
+                                .map(|entry| entry.body)
+                                .ok_or(CollisionError::InvalidContact)?,
+                        )
                     };
-                    if !hit.toi.is_finite() || !(0.0..=1.0).contains(&hit.toi) {
+                    #[cfg(feature = "bench-internals")]
+                    let contact_resolution_started = Instant::now();
+                    let state_a =
+                        self.body_state_at_ccd(body_a_id, prediction_a, impact_elapsed, dt)?;
+                    let state_b =
+                        self.body_state_at_ccd(body_b_id, prediction_b, impact_elapsed, dt)?;
+                    let body_transform_a = state_a.transform();
+                    let body_transform_b = state_b.transform();
+                    let separation = hit
+                        .point_b
+                        .checked_sub(hit.point_a)
+                        .and_then(|delta| delta.checked_dot(hit.normal))
+                        .ok_or(CollisionError::ArithmeticOverflow)?;
+                    let contact = ContactPoint::from_world(
+                        &body_transform_a,
+                        &body_transform_b,
+                        hit.point_a,
+                        hit.point_b,
+                        hit.normal,
+                        (-separation).max(0.0),
+                        0,
+                    )?;
+                    let contact_position = hit
+                        .point_a
+                        .checked_add(hit.point_b)
+                        .and_then(|point| point.checked_mul_scalar(0.5))
+                        .ok_or(CollisionError::ArithmeticOverflow)?;
+                    let mut manifold = ContactManifold::new(pair);
+                    manifold.insert(contact, contact_position)?;
+
+                    let (body_a, body_b, mode_a, mode_b, material_a, material_b) = {
+                        let collider_a = self
+                            .colliders
+                            .get(pair.a.dense)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        let collider_b = self
+                            .colliders
+                            .get(pair.b.dense)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        (
+                            body_a,
+                            body_b,
+                            collider_a.collider.mode(),
+                            collider_b.collider.mode(),
+                            collider_a.collider.material(),
+                            collider_b.collider.material(),
+                        )
+                    };
+                    if mode_a == crate::collider::CollisionMode::Sensor
+                        || mode_b == crate::collider::CollisionMode::Sensor
+                    {
                         return Err(CollisionError::InvalidContact);
                     }
-                    if sensor {
-                        upsert_interaction(
-                            &mut self.collision_system.context.interactions,
-                            &mut self.collision_system.context.interaction_indices,
-                            CollisionInteraction {
-                                pair,
-                                sensor: true,
-                                transient: true,
-                                contact: None,
-                                impact: false,
-                            },
-                        )?;
-                        continue;
+                    for (body, prediction) in [(body_a, prediction_a), (body_b, prediction_b)] {
+                        if body.physics().body_type() == BodyType::Dynamic
+                            && body.ccd_mode() == CcdMode::Continuous
+                        {
+                            let impacts =
+                                self.collision_system.context.ccd_impact_counts[prediction];
+                            if impacts >= self.collision_system.config().max_ccd_impacts {
+                                return Err(CollisionError::CcdLimitExceeded);
+                            }
+                        }
                     }
-                    if hit.toi <= f64::EPSILON * 128.0 {
-                        let velocity_a = body_point_velocity(body_a, state_a, hit.point_a)?;
-                        let velocity_b = body_point_velocity(body_b, state_b, hit.point_b)?;
-                        let normal_speed = velocity_b
-                            .checked_sub(velocity_a)
-                            .and_then(|velocity| velocity.checked_dot(hit.normal))
-                            .ok_or(CollisionError::ArithmeticOverflow)?;
-                        if normal_speed >= 0.0 {
+                    let material = self.combined_solver_material(material_a, material_b)?;
+                    let (solved_a, solved_b, solved_manifold) = self
+                        .collision_system
+                        .solve_ccd_contact(body_a, state_a, body_b, state_b, manifold, material)?;
+                    let mut normal_impulse = 0.0;
+                    let mut impulse_delta = 0.0;
+                    for point in solved_manifold.points() {
+                        normal_impulse += point.normal_impulse;
+                        impulse_delta += point.normal_impulse_delta;
+                    }
+                    if !normal_impulse.is_finite() || !impulse_delta.is_finite() {
+                        return Err(CollisionError::ArithmeticOverflow);
+                    }
+                    if impulse_delta <= 0.0 {
+                        return Err(CollisionError::NonConvergent);
+                    }
+                    let solved_point = solved_manifold
+                        .points()
+                        .first()
+                        .ok_or(CollisionError::InvalidContact)?;
+                    let point_a = solved_a.transform().transform_point(solved_point.local_a);
+                    let point_b = solved_b.transform().transform_point(solved_point.local_b);
+                    let point = point_a
+                        .checked_add(point_b)
+                        .and_then(|sum| sum.checked_mul_scalar(0.5))
+                        .ok_or(CollisionError::ArithmeticOverflow)?;
+                    upsert_interaction(
+                        &mut self.collision_system.context.interactions,
+                        &mut self.collision_system.context.interaction_indices,
+                        CollisionInteraction {
+                            pair,
+                            sensor: false,
+                            transient: false,
+                            contact: Some(ContactInfo {
+                                point,
+                                normal: solved_point.normal,
+                                penetration: solved_point.penetration,
+                                normal_impulse,
+                            }),
+                            impact: true,
+                        },
+                    )?;
+                    #[cfg(feature = "bench-internals")]
+                    {
+                        self.collision_system.record_ccd_impact();
+                        self.collision_system
+                            .record_ccd_contact_resolution(contact_resolution_started.elapsed());
+                    }
+                    let remaining_after_impact = (dt - impact_elapsed).max(0.0);
+                    for (body, prediction, solved) in [
+                        (body_a, prediction_a, solved_a),
+                        (body_b, prediction_b, solved_b),
+                    ] {
+                        if body.physics().body_type() != BodyType::Dynamic {
                             continue;
                         }
+                        self.collision_system.context.ccd_states[prediction] = solved;
+                        self.collision_system.context.ccd_elapsed[prediction] = impact_elapsed;
+                        self.collision_system.context.predicted_states[prediction].1 =
+                            if remaining_after_impact <= f64::EPSILON * dt.max(1.0) {
+                                solved
+                            } else {
+                                let mut body = body;
+                                body.set_state_preserving_forces(solved);
+                                predict(&body, remaining_after_impact)
+                                    .map_err(|_| CollisionError::ArithmeticOverflow)?
+                            };
                     }
-                    let impact_time = elapsed + remaining * hit.toi;
-                    cached.impact_time = impact_time;
-                    cached.hit = Some(hit);
-                    if earliest.is_none_or(|(current_pair, _, current_time)| {
-                        impact_time < current_time
-                            || (impact_time == current_time && pair < current_pair)
-                    }) {
-                        earliest = Some((pair, hit, impact_time));
-                    }
-                }
-
-                #[cfg(feature = "bench-internals")]
-                self.collision_system
-                    .record_ccd_toi_search(toi_search_started.elapsed());
-
-                let Some((pair, hit, impact_elapsed)) = earliest else {
-                    break;
-                };
-
-                let (body_a_id, body_b_id) = {
-                    let collider_a = self
-                        .colliders
-                        .get(pair.a.dense)
-                        .filter(|_| pair.a.world == self.world_id)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    let collider_b = self
-                        .colliders
-                        .get(pair.b.dense)
-                        .filter(|_| pair.b.world == self.world_id)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    (collider_a.body, collider_b.body)
-                };
-                let prediction_a = Self::predicted_body_index(
-                    &self.collision_system.context.body_indices,
-                    self.world_id,
-                    body_a_id,
-                )?;
-                let prediction_b = Self::predicted_body_index(
-                    &self.collision_system.context.body_indices,
-                    self.world_id,
-                    body_b_id,
-                )?;
-                if impact_elapsed < elapsed {
-                    return Err(CollisionError::NonConvergent);
-                }
-                let (body_a, body_b) = {
-                    (
-                        self.bodies
-                            .get(body_a_id.dense)
-                            .filter(|_| body_a_id.world == self.world_id)
-                            .map(|entry| entry.body)
-                            .ok_or(CollisionError::InvalidContact)?,
-                        self.bodies
-                            .get(body_b_id.dense)
-                            .filter(|_| body_b_id.world == self.world_id)
-                            .map(|entry| entry.body)
-                            .ok_or(CollisionError::InvalidContact)?,
-                    )
-                };
-                #[cfg(feature = "bench-internals")]
-                let contact_resolution_started = Instant::now();
-                let state_a =
-                    self.body_state_at_ccd(body_a_id, prediction_a, impact_elapsed, dt)?;
-                let state_b =
-                    self.body_state_at_ccd(body_b_id, prediction_b, impact_elapsed, dt)?;
-                let body_transform_a = state_a.transform();
-                let body_transform_b = state_b.transform();
-                let separation = hit
-                    .point_b
-                    .checked_sub(hit.point_a)
-                    .and_then(|delta| delta.checked_dot(hit.normal))
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
-                let contact = ContactPoint::from_world(
-                    &body_transform_a,
-                    &body_transform_b,
-                    hit.point_a,
-                    hit.point_b,
-                    hit.normal,
-                    (-separation).max(0.0),
-                    0,
-                )?;
-                let contact_position = hit
-                    .point_a
-                    .checked_add(hit.point_b)
-                    .and_then(|point| point.checked_mul_scalar(0.5))
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
-                let mut manifold = ContactManifold::new(pair);
-                manifold.insert(contact, contact_position)?;
-
-                let (body_a, body_b, mode_a, mode_b, material_a, material_b) = {
-                    let collider_a = self
-                        .colliders
-                        .get(pair.a.dense)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    let collider_b = self
-                        .colliders
-                        .get(pair.b.dense)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    (
-                        body_a,
-                        body_b,
-                        collider_a.collider.mode(),
-                        collider_b.collider.mode(),
-                        collider_a.collider.material(),
-                        collider_b.collider.material(),
-                    )
-                };
-                if mode_a == crate::collider::CollisionMode::Sensor
-                    || mode_b == crate::collider::CollisionMode::Sensor
-                {
-                    return Err(CollisionError::InvalidContact);
-                }
-                for (body, prediction) in [(body_a, prediction_a), (body_b, prediction_b)] {
-                    if body.physics().body_type() == BodyType::Dynamic
-                        && body.ccd_mode() == CcdMode::Continuous
+                    if body_a.physics().body_type() == BodyType::Dynamic
+                        && body_a.ccd_mode() == CcdMode::Continuous
                     {
-                        let impacts = self.collision_system.context.ccd_impact_counts[prediction];
-                        if impacts >= self.collision_system.config().max_ccd_impacts {
-                            return Err(CollisionError::CcdLimitExceeded);
+                        self.collision_system.context.ccd_impact_counts[prediction_a] += 1;
+                    }
+                    if body_b.physics().body_type() == BodyType::Dynamic
+                        && body_b.ccd_mode() == CcdMode::Continuous
+                    {
+                        self.collision_system.context.ccd_impact_counts[prediction_b] += 1;
+                    }
+                    let body_a_dynamic = body_a.physics().body_type() == BodyType::Dynamic;
+                    let body_b_dynamic = body_b.physics().body_type() == BodyType::Dynamic;
+                    if impact_elapsed
+                        > self.collision_system.context.ccd_processed_time + time_tolerance
+                    {
+                        self.collision_system.context.ccd_processed_pairs.clear();
+                        self.collision_system.context.ccd_processed_time = impact_elapsed;
+                    }
+                    if self
+                        .collision_system
+                        .context
+                        .ccd_processed_pairs
+                        .contains(&pair)
+                    {
+                        return Err(CollisionError::NonConvergent);
+                    }
+                    self.collision_system
+                        .context
+                        .ccd_processed_pairs
+                        .try_reserve(1)
+                        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    self.collision_system.context.ccd_processed_pairs.push(pair);
+                    elapsed = impact_elapsed;
+                    if remaining_after_impact > f64::EPSILON * dt.max(1.0) {
+                        self.collision_system.invalidate_ccd_candidates(
+                            prediction_a,
+                            body_a_dynamic,
+                            prediction_b,
+                            body_b_dynamic,
+                        )?;
+                        let invalidated_count = self.collision_system.ccd_resweep_candidate_count();
+                        let (new_ccd_candidates, cross_island) = self.resweep_ccd_bodies(
+                            [
+                                (body_a_id, prediction_a, body_a_dynamic),
+                                (body_b_id, prediction_b, body_b_dynamic),
+                            ],
+                            impact_elapsed,
+                            dt,
+                            force_single_island,
+                            invalidated_count,
+                        )?;
+                        if new_ccd_candidates > 0 {
+                            if cross_island && !force_single_island {
+                                force_single_island = true;
+                                #[cfg(feature = "bench-internals")]
+                                self.collision_system.record_ccd_global_fallback();
+                                self.reset_ccd_pass(dt, force_single_island)?;
+                                restart_pass = true;
+                                break;
+                            }
+                            self.collision_system
+                                .build_ccd_islands(force_single_island)?;
                         }
                     }
                 }
-                let material = self.combined_solver_material(material_a, material_b)?;
-                let (solved_a, solved_b, solved_manifold) = self
-                    .collision_system
-                    .solve_ccd_contact(body_a, state_a, body_b, state_b, manifold, material)?;
-                let mut normal_impulse = 0.0;
-                let mut impulse_delta = 0.0;
-                for point in solved_manifold.points() {
-                    normal_impulse += point.normal_impulse;
-                    impulse_delta += point.normal_impulse_delta;
+                if restart_pass {
+                    continue 'passes;
                 }
-                if !normal_impulse.is_finite() || !impulse_delta.is_finite() {
-                    return Err(CollisionError::ArithmeticOverflow);
-                }
-                if impulse_delta <= 0.0 {
-                    return Err(CollisionError::NonConvergent);
-                }
-                let solved_point = solved_manifold
-                    .points()
-                    .first()
-                    .ok_or(CollisionError::InvalidContact)?;
-                let point_a = solved_a.transform().transform_point(solved_point.local_a);
-                let point_b = solved_b.transform().transform_point(solved_point.local_b);
-                let point = point_a
-                    .checked_add(point_b)
-                    .and_then(|sum| sum.checked_mul_scalar(0.5))
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
-                upsert_interaction(
-                    &mut self.collision_system.context.interactions,
-                    &mut self.collision_system.context.interaction_indices,
-                    CollisionInteraction {
-                        pair,
-                        sensor: false,
-                        transient: false,
-                        contact: Some(ContactInfo {
-                            point,
-                            normal: solved_point.normal,
-                            penetration: solved_point.penetration,
-                            normal_impulse,
-                        }),
-                        impact: true,
-                    },
-                )?;
-                #[cfg(feature = "bench-internals")]
-                {
-                    self.collision_system.record_ccd_impact();
-                    self.collision_system
-                        .record_ccd_contact_resolution(contact_resolution_started.elapsed());
-                }
-                let remaining_after_impact = (dt - impact_elapsed).max(0.0);
-                for (body, prediction, solved) in [
-                    (body_a, prediction_a, solved_a),
-                    (body_b, prediction_b, solved_b),
-                ] {
-                    if body.physics().body_type() != BodyType::Dynamic {
-                        continue;
-                    }
-                    self.collision_system.context.ccd_states[prediction] = solved;
-                    self.collision_system.context.ccd_elapsed[prediction] = impact_elapsed;
-                    self.collision_system.context.predicted_states[prediction].1 =
-                        if remaining_after_impact <= f64::EPSILON * dt.max(1.0) {
-                            solved
-                        } else {
-                            let mut body = body;
-                            body.set_state_preserving_forces(solved);
-                            predict(&body, remaining_after_impact)
-                                .map_err(|_| CollisionError::ArithmeticOverflow)?
-                        };
-                }
-                if body_a.physics().body_type() == BodyType::Dynamic
-                    && body_a.ccd_mode() == CcdMode::Continuous
-                {
-                    self.collision_system.context.ccd_impact_counts[prediction_a] += 1;
-                }
-                if body_b.physics().body_type() == BodyType::Dynamic
-                    && body_b.ccd_mode() == CcdMode::Continuous
-                {
-                    self.collision_system.context.ccd_impact_counts[prediction_b] += 1;
-                }
-                let body_a_dynamic = body_a.physics().body_type() == BodyType::Dynamic;
-                let body_b_dynamic = body_b.physics().body_type() == BodyType::Dynamic;
-                for island_candidate_index in 0..island_candidate_count {
-                    let candidate_index = self
-                        .collision_system
-                        .ccd_island_candidates(island_index)
-                        .and_then(|candidates| candidates.get(island_candidate_index))
-                        .copied()
-                        .ok_or(CollisionError::InvalidContact)?;
-                    let (candidate_a, candidate_b) = *self
-                        .collision_system
-                        .context
-                        .ccd_candidate_bodies
-                        .get(candidate_index)
-                        .ok_or(CollisionError::InvalidContact)?;
-                    if (body_a_dynamic
-                        && (candidate_a == prediction_a || candidate_b == prediction_a))
-                        || (body_b_dynamic
-                            && (candidate_a == prediction_b || candidate_b == prediction_b))
-                    {
-                        let cache = self
-                            .collision_system
-                            .context
-                            .ccd_toi_cache
-                            .get_mut(candidate_index)
-                            .ok_or(CollisionError::InvalidContact)?;
-                        cache.evaluated = false;
-                        cache.hit = None;
-                    }
-                }
-                if impact_elapsed
-                    > self.collision_system.context.ccd_processed_time + time_tolerance
-                {
-                    self.collision_system.context.ccd_processed_pairs.clear();
-                    self.collision_system.context.ccd_processed_time = impact_elapsed;
-                }
-                if self
-                    .collision_system
-                    .context
-                    .ccd_processed_pairs
-                    .contains(&pair)
-                {
-                    return Err(CollisionError::NonConvergent);
-                }
-                self.collision_system
-                    .context
-                    .ccd_processed_pairs
-                    .try_reserve(1)
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-                self.collision_system.context.ccd_processed_pairs.push(pair);
-                elapsed = impact_elapsed;
-                if remaining_after_impact <= f64::EPSILON * dt.max(1.0) {
-                    break;
-                }
-                if global_fallback {
-                    #[cfg(feature = "bench-internals")]
-                    let refresh_started = Instant::now();
-                    self.refresh_ccd_candidates(elapsed, dt)?;
-                    self.rebuild_ccd_candidate_bodies()?;
-                    #[cfg(feature = "bench-internals")]
-                    self.collision_system
-                        .record_ccd_candidate_refresh(refresh_started.elapsed());
-                }
+                island_index += 1;
             }
-            island_index += 1;
+            break;
         }
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_ccd_final_candidate_count(self.collision_system.candidate_count());
         Ok(())
     }
 
@@ -1537,8 +1542,20 @@ impl PhysicsWorld {
         let candidate_count = self.collision_system.candidate_count();
         let context = &mut self.collision_system.context;
         context.ccd_candidate_bodies.clear();
+        context.ccd_candidate_pairs.clear();
         context
             .ccd_candidate_bodies
+            .try_reserve(candidate_count)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        context
+            .ccd_candidate_pairs
+            .try_reserve(candidate_count)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        let candidate_set = context
+            .ccd_candidate_pair_set
+            .get_or_insert_with(std::collections::HashSet::new);
+        candidate_set.clear();
+        candidate_set
             .try_reserve(candidate_count)
             .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
         for candidate_index in 0..candidate_count {
@@ -1566,13 +1583,17 @@ impl PhysicsWorld {
                 self.world_id,
                 collider_b.body,
             )?;
-            self.collision_system
-                .context
-                .ccd_candidate_bodies
-                .push((body_a, body_b));
+            let context = &mut self.collision_system.context;
+            context.ccd_candidate_pairs.push(pair);
+            context.ccd_candidate_bodies.push((body_a, body_b));
+            context
+                .ccd_candidate_pair_set
+                .as_mut()
+                .ok_or(CollisionError::InvalidContact)?
+                .insert(pair);
         }
-        self.collision_system.build_ccd_islands()?;
-        let cache = &mut self.collision_system.context.ccd_toi_cache;
+        let context = &mut self.collision_system.context;
+        let cache = &mut context.ccd_toi_cache;
         cache.clear();
         cache
             .try_reserve(candidate_count)
@@ -1581,25 +1602,35 @@ impl PhysicsWorld {
             candidate_count,
             super::collision::CcdCandidateToi::default(),
         );
+        context.ccd_resweep_candidates.clear();
+        context.ccd_query_results.clear();
         Ok(())
     }
 
-    fn refresh_ccd_candidates(&mut self, elapsed: f64, dt: f64) -> Result<(), CollisionError> {
+    fn resweep_ccd_bodies(
+        &mut self,
+        bodies: [(BodyId, usize, bool); 2],
+        elapsed: f64,
+        dt: f64,
+        force_single_island: bool,
+        _invalidated_count: usize,
+    ) -> Result<(usize, bool), CollisionError> {
+        #[cfg(feature = "bench-internals")]
+        let started = Instant::now();
+        let mut new_ccd_candidates = 0;
+        let mut cross_island = false;
         let proxy_count = self.collision_system.context.colliders.len();
-        self.collision_system.context.spatial_proxies.clear();
-        for proxy_index in 0..proxy_count {
-            let proxy = self
-                .collision_system
-                .context
-                .colliders
-                .get(proxy_index)
-                .copied()
+
+        for (body_id, prediction_index, changed) in bodies {
+            if !changed {
+                continue;
+            }
+            let body = self
+                .bodies
+                .get(body_id.dense)
+                .filter(|_| body_id.world == self.world_id)
+                .map(|entry| entry.body)
                 .ok_or(CollisionError::InvalidContact)?;
-            let prediction_index = Self::predicted_body_index(
-                &self.collision_system.context.body_indices,
-                self.world_id,
-                proxy.body,
-            )?;
             let end_state = self
                 .collision_system
                 .context
@@ -1607,76 +1638,117 @@ impl PhysicsWorld {
                 .get(prediction_index)
                 .map(|(_, state)| *state)
                 .ok_or(CollisionError::InvalidContact)?;
-            let collider_entry = self
-                .colliders
-                .get(proxy.collider.dense)
-                .filter(|_| proxy.collider.world == self.world_id)
-                .ok_or(CollisionError::InvalidContact)?;
-            if collider_entry.body != proxy.body {
-                return Err(CollisionError::InvalidContact);
-            }
-            let bounds = if proxy.body_type == BodyType::Static {
-                collider_entry
-                    .collider
-                    .world_bounds(&end_state.transform())
-                    .map_err(|_| CollisionError::GeometryBounds)?
-            } else {
-                let body = self
-                    .bodies
-                    .get(proxy.body.dense)
-                    .filter(|_| proxy.body.world == self.world_id)
-                    .map(|entry| entry.body)
+
+            for proxy_index in 0..proxy_count {
+                let proxy = self
+                    .collision_system
+                    .context
+                    .colliders
+                    .get(proxy_index)
+                    .copied()
                     .ok_or(CollisionError::InvalidContact)?;
-                let trajectory = ColliderTrajectory {
-                    body,
-                    base_state: self.collision_system.context.ccd_states[prediction_index],
-                    base_time: self.collision_system.context.ccd_elapsed[prediction_index],
-                    sample_start_time: elapsed,
-                    end_time: dt,
-                    local_transform: collider_entry.collider.local_transform(),
+                if proxy.body != body_id {
+                    continue;
+                }
+                let bounds = {
+                    let collider_entry = self
+                        .colliders
+                        .get(proxy.collider.dense)
+                        .filter(|_| proxy.collider.world == self.world_id)
+                        .ok_or(CollisionError::InvalidContact)?;
+                    if collider_entry.body != body_id {
+                        return Err(CollisionError::InvalidContact);
+                    }
+                    let trajectory = ColliderTrajectory {
+                        body,
+                        base_state: self.collision_system.context.ccd_states[prediction_index],
+                        base_time: self.collision_system.context.ccd_elapsed[prediction_index],
+                        sample_start_time: elapsed,
+                        end_time: dt,
+                        local_transform: collider_entry.collider.local_transform(),
+                    };
+                    swept_bounds_for_trajectory(&collider_entry.collider, &trajectory, end_state)?
                 };
-                swept_bounds_for_trajectory(&collider_entry.collider, &trajectory, end_state)?
-            };
-            self.collision_system
-                .context
-                .colliders
-                .get_mut(proxy_index)
-                .ok_or(CollisionError::InvalidContact)?
-                .bounds = bounds;
-            if let Some(bounds) = bounds {
-                self.collision_system
-                    .context
-                    .spatial_proxies
-                    .try_reserve(1)
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-                self.collision_system
-                    .context
-                    .spatial_proxies
-                    .push((proxy.collider, bounds));
+                let query_count = self
+                    .collision_system
+                    .prepare_ccd_resweep_proxy(proxy.collider, bounds)?;
+                for query_index in 0..query_count {
+                    let other_id = self
+                        .collision_system
+                        .ccd_query_result(query_index)
+                        .ok_or(CollisionError::InvalidContact)?;
+                    if !self
+                        .collision_system
+                        .ccd_pair_allowed(proxy.collider, other_id)?
+                    {
+                        continue;
+                    }
+                    let pair = CollisionPair::new(proxy.collider, other_id)
+                        .ok_or(CollisionError::InvalidContact)?;
+                    let other_proxy = self.collision_system.ccd_proxy(other_id)?;
+                    let other_prediction = Self::predicted_body_index(
+                        &self.collision_system.context.body_indices,
+                        self.world_id,
+                        other_proxy.body,
+                    )?;
+                    let (body_a, body_b) = if pair.a == proxy.collider {
+                        (prediction_index, other_prediction)
+                    } else {
+                        (other_prediction, prediction_index)
+                    };
+                    let (added, is_ccd, joins_islands) = self.collision_system.add_ccd_candidate(
+                        pair,
+                        body_a,
+                        body_b,
+                        force_single_island,
+                    )?;
+                    if added && is_ccd {
+                        new_ccd_candidates += 1;
+                    }
+                    cross_island |= joins_islands;
+                }
             }
         }
 
-        #[cfg(feature = "bench-internals")]
-        let started = Instant::now();
-        self.collision_system.synchronize_spatial_index()?;
         #[cfg(feature = "bench-internals")]
         self.collision_system
-            .record_spatial_index(started.elapsed());
+            .record_ccd_resweep(started.elapsed(), _invalidated_count);
+        Ok((new_ccd_candidates, cross_island))
+    }
 
-        #[cfg(feature = "bench-internals")]
-        let started = Instant::now();
-        self.collision_system.generate_candidates()?;
-        #[cfg(feature = "bench-internals")]
-        self.collision_system.record_broad_phase(started.elapsed());
-        #[cfg(feature = "bench-internals")]
-        let candidate_count = self.collision_system.candidate_count();
-        #[cfg(feature = "bench-internals")]
-        if let Some(seen_pairs) = &mut self.collision_system.context.ccd_toi_seen_pairs {
-            seen_pairs
-                .try_reserve(candidate_count)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    fn reset_ccd_pass(&mut self, dt: f64, force_single_island: bool) -> Result<(), CollisionError> {
+        let prediction_count = self.collision_system.context.predicted_states.len();
+        for prediction in 0..prediction_count {
+            let body_id = self.collision_system.context.predicted_states[prediction].0;
+            let body = self
+                .bodies
+                .get(body_id.dense)
+                .filter(|_| body_id.world == self.world_id)
+                .map(|entry| entry.body)
+                .ok_or(CollisionError::InvalidContact)?;
+            let end_state = predict(&body, dt).map_err(|_| CollisionError::ArithmeticOverflow)?;
+            let context = &mut self.collision_system.context;
+            context.predicted_states[prediction].1 = end_state;
+            context.ccd_states[prediction] = *body.state();
+            context.ccd_elapsed[prediction] = 0.0;
+            context.ccd_impact_counts[prediction] = 0;
         }
-        Ok(())
+        {
+            let context = &mut self.collision_system.context;
+            context.ccd_processed_pairs.clear();
+            context.ccd_processed_time = 0.0;
+            context.ccd_toi_cache.fill(Default::default());
+            context.interactions.clear();
+            context.colliders.clear();
+            context.spatial_proxies.clear();
+            if let Some(indices) = &mut context.interaction_indices {
+                indices.clear();
+            }
+        }
+
+        self.stage_spatial_proxies(dt)?;
+        self.collision_system.synchronize_spatial_index()?;
+        self.collision_system.build_ccd_islands(force_single_island)
     }
 
     fn body_state_at_ccd(

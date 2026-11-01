@@ -390,6 +390,89 @@ fn continuous_rebound_refreshes_candidates_for_the_remaining_step() {
     let state = world.body(dynamic).unwrap().state();
     assert!(state.transform().translation().x < 15.0);
     assert!(state.linear_velocity().x < 0.0);
+    #[cfg(feature = "bench-internals")]
+    {
+        let metrics = world.collision_step_metrics();
+        assert_eq!(metrics.ccd_initial_candidate_count, 1);
+        assert_eq!(metrics.ccd_final_candidate_count, 2);
+        assert_eq!(metrics.ccd_new_candidate_count, 1);
+        assert_eq!(metrics.ccd_global_fallback_count, 0);
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn continuous_rebound_reschedules_a_new_cross_island_pair() {
+    let mut world = PhysicsWorld::new();
+    let material = world
+        .add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0).unwrap())
+        .unwrap();
+
+    let wall_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let wall = world
+        .add_collider(
+            wall_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    let mut first = dynamic_body(Vec3::new(5.0, 0.0, 0.0), Vec3::new(-2000.0, 0.0, 0.0));
+    first.set_ccd_mode(CcdMode::Continuous);
+    let first = world.add_body(first).unwrap();
+    let first_collider = world
+        .add_collider(
+            first,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+
+    let mut second = dynamic_body(Vec3::new(13.0, 0.0, 0.0), Vec3::ZERO);
+    second.set_ccd_mode(CcdMode::Continuous);
+    let second = world.add_body(second).unwrap();
+    let second_collider = world
+        .add_collider(
+            second,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .unwrap();
+    for collider in [wall, first_collider, second_collider] {
+        world
+            .set_collider_material(collider, Some(material))
+            .unwrap();
+    }
+
+    world.step(0.01).unwrap();
+
+    let wall_pair = CollisionPair::new(wall, first_collider).unwrap();
+    let dynamic_pair = CollisionPair::new(first_collider, second_collider).unwrap();
+    for pair in [wall_pair, dynamic_pair] {
+        assert!(world.collision_events().iter().any(|event| {
+            event.kind == CollisionEventKind::Impact
+                && event.pair == pair
+                && event
+                    .contact
+                    .is_some_and(|contact| contact.normal_impulse > 0.0)
+        }));
+    }
+
+    let metrics = world.collision_step_metrics();
+    assert_eq!(metrics.ccd_initial_candidate_count, 1);
+    assert_eq!(metrics.ccd_final_candidate_count, 2);
+    assert_eq!(metrics.ccd_new_candidate_count, 1);
+    assert_eq!(metrics.ccd_global_fallback_count, 1);
+    assert_eq!(metrics.ccd_impact_count, 2);
+    assert_eq!(metrics.ccd_island_count, 1);
 }
 
 #[test]

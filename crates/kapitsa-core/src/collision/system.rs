@@ -12,7 +12,13 @@ use super::{
     spatial_index::SpatialIndex,
 };
 use crate::collider::CollisionMode;
-use crate::{rigid_body::BodyState, shape::Shape, transform::Transform, world::BodyId};
+use crate::{
+    aabb::Aabb,
+    rigid_body::{BodyState, BodyType},
+    shape::Shape,
+    transform::Transform,
+    world::{BodyId, ColliderId},
+};
 
 #[cfg(feature = "bench-internals")]
 use super::CollisionStepMetrics;
@@ -129,12 +135,32 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
-    pub(crate) fn record_ccd_candidate_refresh(&mut self, elapsed: std::time::Duration) {
+    pub(crate) fn record_ccd_resweep(
+        &mut self,
+        elapsed: std::time::Duration,
+        invalidated_count: usize,
+    ) {
         self.benchmark_metrics.ccd_candidate_refresh += elapsed;
-        self.benchmark_metrics.ccd_candidate_refresh_count = self
+        self.benchmark_metrics.ccd_resweep_count =
+            self.benchmark_metrics.ccd_resweep_count.saturating_add(1);
+        self.benchmark_metrics.ccd_invalidated_toi_count = self
             .benchmark_metrics
-            .ccd_candidate_refresh_count
+            .ccd_invalidated_toi_count
+            .saturating_add(invalidated_count);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_global_fallback(&mut self) {
+        self.benchmark_metrics.ccd_global_fallback_count = self
+            .benchmark_metrics
+            .ccd_global_fallback_count
             .saturating_add(1);
+        self.benchmark_metrics.ccd_impact_count = 0;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_ccd_final_candidate_count(&mut self, count: usize) {
+        self.benchmark_metrics.ccd_final_candidate_count = count;
     }
 
     #[cfg(feature = "bench-internals")]
@@ -287,13 +313,17 @@ impl CollisionSystem {
         self.broad_phase.candidates().get(index).copied()
     }
 
-    pub(crate) fn build_ccd_islands(&mut self) -> Result<(), CollisionError> {
+    pub(crate) fn build_ccd_islands(
+        &mut self,
+        force_single_island: bool,
+    ) -> Result<(), CollisionError> {
         #[cfg(feature = "bench-internals")]
         let started = std::time::Instant::now();
         self.ccd_islands.build(
             &self.context.ccd_body_types,
             &self.context.ccd_continuous_bodies,
             &self.context.ccd_candidate_bodies,
+            force_single_island,
         )?;
         let island_count = self.ccd_island_count();
         for island in 0..island_count {
@@ -315,6 +345,192 @@ impl CollisionSystem {
 
     pub(crate) fn ccd_island_candidates(&self, island: usize) -> Option<&[usize]> {
         self.ccd_islands.candidates(island)
+    }
+
+    pub(crate) fn invalidate_ccd_candidates(
+        &mut self,
+        body_a: usize,
+        body_a_changed: bool,
+        body_b: usize,
+        body_b_changed: bool,
+    ) -> Result<(), CollisionError> {
+        let context = &mut self.context;
+        context.ccd_resweep_candidates.clear();
+        for (body, changed) in [(body_a, body_a_changed), (body_b, body_b_changed)] {
+            if !changed {
+                continue;
+            }
+            let candidates = self
+                .ccd_islands
+                .body_candidates(body)
+                .ok_or(CollisionError::InvalidContact)?;
+            context
+                .ccd_resweep_candidates
+                .try_reserve(candidates.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            context.ccd_resweep_candidates.extend_from_slice(candidates);
+        }
+        context.ccd_resweep_candidates.sort_unstable();
+        context.ccd_resweep_candidates.dedup();
+        for candidate in context.ccd_resweep_candidates.iter().copied() {
+            let cache = context
+                .ccd_toi_cache
+                .get_mut(candidate)
+                .ok_or(CollisionError::InvalidContact)?;
+            cache.evaluated = false;
+            cache.hit = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ccd_resweep_candidate_count(&self) -> usize {
+        self.context.ccd_resweep_candidates.len()
+    }
+
+    pub(crate) fn ccd_candidate_pair(&self, index: usize) -> Option<CollisionPair> {
+        self.context.ccd_candidate_pairs.get(index).copied()
+    }
+
+    pub(crate) fn ccd_query_result(&self, index: usize) -> Option<ColliderId> {
+        self.context.ccd_query_results.get(index).copied()
+    }
+
+    pub(crate) fn ccd_pair_allowed(
+        &self,
+        collider_a: ColliderId,
+        collider_b: ColliderId,
+    ) -> Result<bool, CollisionError> {
+        let proxy_a = self.ccd_proxy(collider_a)?;
+        let proxy_b = self.ccd_proxy(collider_b)?;
+        Ok(BroadPhase::allows_pair(&proxy_a, &proxy_b))
+    }
+
+    pub(crate) fn ccd_proxy(
+        &self,
+        collider: ColliderId,
+    ) -> Result<super::CollisionProxy, CollisionError> {
+        let index = self
+            .broad_phase
+            .proxy_index(collider)
+            .ok_or(CollisionError::InvalidContact)?;
+        self.context
+            .colliders
+            .get(index)
+            .copied()
+            .ok_or(CollisionError::InvalidContact)
+    }
+
+    pub(crate) fn prepare_ccd_resweep_proxy(
+        &mut self,
+        collider: ColliderId,
+        bounds: Option<Aabb>,
+    ) -> Result<usize, CollisionError> {
+        let proxy_index = self
+            .broad_phase
+            .proxy_index(collider)
+            .ok_or(CollisionError::InvalidContact)?;
+        self.context
+            .colliders
+            .get_mut(proxy_index)
+            .ok_or(CollisionError::InvalidContact)?
+            .bounds = bounds;
+
+        let (spatial_index, context) = (&mut self.spatial_index, &mut self.context);
+        context.ccd_query_results.clear();
+        if let Some(bounds) = bounds {
+            let index = spatial_index.get_or_insert_with(SpatialIndex::new);
+            index.update(collider, bounds)?;
+            index.query(bounds, &mut context.ccd_query_results)?;
+            for proxy in context
+                .colliders
+                .iter()
+                .filter(|proxy| proxy.bounds.is_none())
+            {
+                context
+                    .ccd_query_results
+                    .try_reserve(1)
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                context.ccd_query_results.push(proxy.collider);
+            }
+        } else if let Some(index) = spatial_index.as_mut() {
+            index.remove(collider)?;
+        }
+        Ok(context.ccd_query_results.len())
+    }
+
+    pub(crate) fn add_ccd_candidate(
+        &mut self,
+        pair: CollisionPair,
+        body_a: usize,
+        body_b: usize,
+        force_single_island: bool,
+    ) -> Result<(bool, bool, bool), CollisionError> {
+        let already_present = self
+            .context
+            .ccd_candidate_pair_set
+            .as_ref()
+            .ok_or(CollisionError::InvalidContact)?
+            .contains(&pair);
+        if already_present {
+            return Ok((false, false, false));
+        }
+
+        let continuous_a = *self
+            .context
+            .ccd_continuous_bodies
+            .get(body_a)
+            .ok_or(CollisionError::InvalidContact)?;
+        let continuous_b = *self
+            .context
+            .ccd_continuous_bodies
+            .get(body_b)
+            .ok_or(CollisionError::InvalidContact)?;
+        let ccd_candidate = continuous_a || continuous_b;
+        let dynamic_a = self.context.ccd_body_types.get(body_a) == Some(&BodyType::Dynamic);
+        let dynamic_b = self.context.ccd_body_types.get(body_b) == Some(&BodyType::Dynamic);
+        let cross_island = ccd_candidate
+            && !force_single_island
+            && dynamic_a
+            && dynamic_b
+            && self.ccd_islands.body_island(body_a) != self.ccd_islands.body_island(body_b);
+
+        if ccd_candidate {
+            self.context
+                .ccd_candidate_pairs
+                .try_reserve(1)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.context
+                .ccd_candidate_bodies
+                .try_reserve(1)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.context
+                .ccd_toi_cache
+                .try_reserve(1)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.context.ccd_candidate_pairs.push(pair);
+            self.context.ccd_candidate_bodies.push((body_a, body_b));
+            self.context
+                .ccd_toi_cache
+                .push(super::CcdCandidateToi::default());
+        }
+        let candidate_set = self
+            .context
+            .ccd_candidate_pair_set
+            .as_mut()
+            .ok_or(CollisionError::InvalidContact)?;
+        candidate_set
+            .try_reserve(1)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        candidate_set.insert(pair);
+        self.broad_phase.add_candidate(pair)?;
+        #[cfg(feature = "bench-internals")]
+        {
+            self.benchmark_metrics.ccd_new_candidate_count = self
+                .benchmark_metrics
+                .ccd_new_candidate_count
+                .saturating_add(1);
+        }
+        Ok((true, ccd_candidate, cross_island))
     }
 
     #[allow(clippy::too_many_arguments)]

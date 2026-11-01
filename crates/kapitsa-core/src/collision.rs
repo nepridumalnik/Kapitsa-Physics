@@ -80,6 +80,16 @@ pub struct CollisionStepMetrics {
     pub ccd_broad_phase_build_count: usize,
     /// Number of full CCD candidate refreshes after impacts.
     pub ccd_candidate_refresh_count: usize,
+    /// Number of changed-body selective resweeps.
+    pub ccd_resweep_count: usize,
+    /// Number of new pairs found during selective resweeps.
+    pub ccd_new_candidate_count: usize,
+    /// Number of full sequential restarts after a cross-island dependency.
+    pub ccd_global_fallback_count: usize,
+    /// Number of TOI entries invalidated by changed bodies.
+    pub ccd_invalidated_toi_count: usize,
+    /// Number of broadphase pairs after CCD resweeps complete.
+    pub ccd_final_candidate_count: usize,
     /// Number of solver islands built for the step.
     pub island_count: usize,
     /// Number of independent CCD islands built for the step.
@@ -124,6 +134,11 @@ impl CollisionStepMetrics {
         ccd_repeated_toi_call_count: 0,
         ccd_broad_phase_build_count: 0,
         ccd_candidate_refresh_count: 0,
+        ccd_resweep_count: 0,
+        ccd_new_candidate_count: 0,
+        ccd_global_fallback_count: 0,
+        ccd_invalidated_toi_count: 0,
+        ccd_final_candidate_count: 0,
         island_count: 0,
         ccd_island_count: 0,
         retained_scratch_bytes: 0,

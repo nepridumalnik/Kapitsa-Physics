@@ -101,6 +101,22 @@ impl BroadPhase {
         &self.candidates
     }
 
+    pub(crate) fn proxy_index(&self, collider: ColliderId) -> Option<usize> {
+        self.lookup.as_ref()?.get(&collider).copied()
+    }
+
+    pub(crate) fn add_candidate(&mut self, pair: CollisionPair) -> Result<bool, CollisionError> {
+        let position = match self.candidates.binary_search(&pair) {
+            Ok(_) => return Ok(false),
+            Err(position) => position,
+        };
+        self.candidates
+            .try_reserve(1)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        self.candidates.insert(position, pair);
+        Ok(true)
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         use std::mem::size_of;
@@ -111,7 +127,7 @@ impl BroadPhase {
             + self.candidates.capacity() * size_of::<CollisionPair>()
     }
 
-    fn allows_pair(a: &CollisionProxy, b: &CollisionProxy) -> bool {
+    pub(crate) fn allows_pair(a: &CollisionProxy, b: &CollisionProxy) -> bool {
         if a.collider == b.collider || a.body == b.body || !a.filter.allows(&b.filter) {
             return false;
         }

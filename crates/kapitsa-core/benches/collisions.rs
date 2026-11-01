@@ -318,7 +318,7 @@ fn report_world(
         .max()
         .unwrap_or(0);
     println!(
-        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} solver_islands={} ccd_islands={} ccd_impacts={} | CCD initial={} toi_calls={} repeated={} broad_builds={} refreshes={} | ccd={:.3} search={:.3} refresh={:.3} resolve={:.3} ms | index={:.3} broad={:.3} narrow={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
+        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} solver_islands={} ccd_islands={} ccd_impacts={} | CCD initial={} final={} toi_calls={} repeated={} broad_builds={} refreshes={} resweeps={} new_pairs={} fallback={} invalidated={} | ccd={:.3} search={:.3} refresh={:.3} resolve={:.3} ms | index={:.3} broad={:.3} narrow={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
         millis(min.elapsed),
         millis(median.elapsed),
         millis(max.elapsed),
@@ -328,10 +328,15 @@ fn report_world(
         median.metrics.ccd_island_count,
         median.metrics.ccd_impact_count,
         median.metrics.ccd_initial_candidate_count,
+        median.metrics.ccd_final_candidate_count,
         median.metrics.ccd_toi_call_count,
         median.metrics.ccd_repeated_toi_call_count,
         median.metrics.ccd_broad_phase_build_count,
         median.metrics.ccd_candidate_refresh_count,
+        median.metrics.ccd_resweep_count,
+        median.metrics.ccd_new_candidate_count,
+        median.metrics.ccd_global_fallback_count,
+        median.metrics.ccd_invalidated_toi_count,
         millis(median.metrics.ccd),
         millis(median.metrics.ccd_toi_search),
         millis(median.metrics.ccd_candidate_refresh),
