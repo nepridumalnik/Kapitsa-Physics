@@ -27,3 +27,8 @@ required-features = ["bench-internals"]
 name = "collision_interactions"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "joint_stress"
+harness = false
+required-features = ["bench-internals"]
