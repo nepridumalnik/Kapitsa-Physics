@@ -425,7 +425,7 @@ mod tests {
         assert_vec3_close(predicted.angular_velocity(), Vec3::Z);
         assert_vec3_close(
             predicted.transform.transform_vector(Vec3::X),
-            rotation_z(0.5)
+            rotation_z(0.25)
                 .rotate_vector(Vec3::X)
                 .expect("rotated vector"),
         );
@@ -438,12 +438,22 @@ mod tests {
         body.apply_torque(Vec3::new(1.0, -2.0, 0.0))
             .expect("finite torque");
 
-        let predicted = predict(&body, 0.25).expect("finite prediction");
-        let expected = inertia
+        let expected_acceleration = inertia
             .solve_spd(Vec3::new(1.0, -2.0, 0.0))
-            .expect("valid SPD solve")
-            * 0.25;
-        assert_vec3_close(predicted.angular_velocity(), expected);
+            .expect("valid SPD solve");
+        let acceleration_error = |dt| {
+            let response = predict(&body, dt)
+                .expect("finite prediction")
+                .angular_velocity()
+                / dt;
+            (response - expected_acceleration).length()
+        };
+        let coarse_error = acceleration_error(0.25);
+        let fine_error = acceleration_error(0.125);
+
+        assert!(expected_acceleration.x > 0.0);
+        assert!(expected_acceleration.y < 0.0);
+        assert!(fine_error < coarse_error * 0.35);
     }
 
     #[test]

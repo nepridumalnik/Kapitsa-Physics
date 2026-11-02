@@ -15,7 +15,7 @@ use super::{
     support::{support_pair, support_world},
 };
 
-const MAX_CCD_ITERATIONS: usize = 64;
+const MAX_CCD_ITERATIONS: usize = 80;
 
 #[derive(Clone, Copy)]
 pub(crate) struct CcdTrajectory {

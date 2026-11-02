@@ -231,3 +231,11 @@ This rejects simply raising the adaptive cap as a production solution: the exist
 
 - Compared with the original `1e083a5` strict-run medians (`843 / 1,729 / 4,533 / 9,061 ms`), this accurate configuration is `2.69x / 3.46x / 6.48x / 9.36x` slower. The original configuration fails the unchanged Joint and energy limits, so it is a timing baseline rather than an accuracy-valid winner. The larger cost comes from the 16 outer passes plus per-pass PCG; performance reduction is still open.
 - The strict-test helper accepts `KAPITSA_ROCKET_OUTER_VELOCITY_SWEEPS` for this controlled comparison. Its default remains unchanged. This is a benchmark-internals PCG result, not a production-default change. Full workspace validation, the Release large-rocket p50/p95 comparison, production policy, final report, and PR update remain open.
+
+## 2026-11-03 — midpoint integrator and rotational CCD regressions
+
+- Updated the constant-torque expectation to use the midpoint angular velocity for orientation. For isotropic inertia, zero initial angular velocity, torque `2 N·m`, and `dt=0.5 s`, the final angular speed is `1 rad/s` while the integrated angle is `0.25 rad`.
+- Reworked the full-inertia test to verify convergence of measured angular acceleration toward `I⁻¹τ` under timestep halving. A finite-step constant-inertia expectation was invalid once the body rotates during the midpoint evaluation.
+- Aligned the rotating CCD fixture's initial angular speed with its requested total midpoint rotation and changed the trajectory comparison to a roundoff-scaled pose check because composing an identity collider transform introduces a few ulps.
+- The rotational plane CCD test exhausted its 64-step conservative-advancement limit on the midpoint path. Raising the bound to 80 makes the unchanged TOI tolerance converge for quarter-turn through two-turn cases; the test still compares against a 20,000-sample trajectory reference.
+- The full serial workspace suite passed after these updates. This CCD follow-up does not change the solver acceptance tolerances or rocket fixture thresholds.

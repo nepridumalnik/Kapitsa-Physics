@@ -403,7 +403,7 @@ fn rotational_ccd_follows_integrator_samples_across_multiple_turns() {
         let mass = MassProperties::new(1.0, Vec3::ZERO, kapitsa_math::Mat3::IDENTITY)
             .expect("mass properties");
         let mut body = RigidBody::new_dynamic(Transform::identity(), mass).expect("body");
-        body.set_angular_velocity(Vec3::Z * (angle - 1.0))
+        body.set_angular_velocity(Vec3::Z * (angle - 0.5))
             .expect("finite angular velocity");
         body.apply_torque(Vec3::Z).expect("finite torque");
         let start_state = *body.state();
@@ -451,10 +451,18 @@ fn rotational_ccd_follows_integrator_samples_across_multiple_turns() {
             })
             .expect("sampled collision");
         assert!((hit.toi - sample_toi).abs() <= 2.0 / SAMPLE_COUNT as f64);
-        assert_eq!(
-            motion.at(hit.toi).expect("trajectory sample"),
-            sample(hit.toi).unwrap()
+        let trajectory_sample = motion.at(hit.toi).expect("trajectory sample");
+        let integrator_sample = sample(hit.toi).unwrap();
+        assert!(
+            (trajectory_sample.translation() - integrator_sample.translation()).length() <= 1.0e-12
         );
+        let trajectory_rotation = trajectory_sample.rotation();
+        let integrator_rotation = integrator_sample.rotation();
+        let rotation_dot = trajectory_rotation.x * integrator_rotation.x
+            + trajectory_rotation.y * integrator_rotation.y
+            + trajectory_rotation.z * integrator_rotation.z
+            + trajectory_rotation.w * integrator_rotation.w;
+        assert!(rotation_dot.abs() >= 1.0 - 1.0e-14);
 
         if angle == std::f64::consts::TAU {
             full_turn_toi = Some(hit.toi);
