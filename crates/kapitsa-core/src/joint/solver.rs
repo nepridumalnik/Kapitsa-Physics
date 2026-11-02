@@ -69,7 +69,9 @@ impl JointResidual {
 
 fn projected_kkt_residual(gradient: f64, multiplier: f64, lower: f64, upper: f64) -> f64 {
     if lower == upper {
-        gradient.abs()
+        // With a fixed multiplier every gradient is balanced by the bound
+        // reactions; only a multiplier outside that fixed value is infeasible.
+        (multiplier - lower).abs()
     } else if multiplier <= lower {
         (-gradient).max(0.0)
     } else if multiplier >= upper {
@@ -4390,6 +4392,8 @@ mod residual_tests {
             1.0
         );
         assert_eq!(projected_kkt_residual(-2.0, 0.0, -1.0, 1.0), 2.0);
-        assert_eq!(projected_kkt_residual(2.0, 0.0, 1.0, 1.0), 2.0);
+        assert_eq!(projected_kkt_residual(2.0, 1.0, 1.0, 1.0), 0.0);
+        assert_eq!(projected_kkt_residual(-2.0, 1.0, 1.0, 1.0), 0.0);
+        assert_eq!(projected_kkt_residual(2.0, 0.0, 1.0, 1.0), 1.0);
     }
 }
