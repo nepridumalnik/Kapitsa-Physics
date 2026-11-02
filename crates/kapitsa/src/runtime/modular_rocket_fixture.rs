@@ -341,6 +341,9 @@ mod stability_tests {
     #[test]
     #[ignore = "full 1/120 s modular rocket scale and repeatability test; run explicitly in release"]
     fn fixed_step_rockets_report_stability_and_reproducibility_at_all_sizes() {
+        // Reporting is opt-in; ordinary verification must fail on violated limits.
+        let report_only = std::env::var_os("KAPITSA_ROCKET_REPORT_ONLY").is_some();
+        let mut all_stable = true;
         for part_count in [100, 200, 500, 1000] {
             let first = run_fixed_scenario(part_count);
             let repeated = run_fixed_scenario(part_count);
@@ -364,6 +367,7 @@ mod stability_tests {
                 && first.max_frame_error < 0.1
                 && first.rms_frame_error < 0.03
                 && first.max_coast_energy_drift < 0.1;
+            all_stable &= numerical_stability;
             println!(
                 "parts={part_count} joints={} elapsed_ms={} completed_ticks={} scenario={} numerical_stability={} step_failure={:?} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% upper_root_max_y={:.3}m omega={:.3}rad_s separation_dp={:.3e} contacts(begin/end/impact)={}/{}/{} breaks={}",
                 part_count - 1,
@@ -390,6 +394,10 @@ mod stability_tests {
                 first.joint_break_events,
             );
         }
+        assert!(
+            report_only || all_stable,
+            "rocket stability criteria failed"
+        );
     }
 
     fn run_fixed_scenario(part_count: usize) -> StabilityRun {
