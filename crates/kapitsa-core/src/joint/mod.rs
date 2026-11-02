@@ -37,6 +37,8 @@ pub use planar::PlanarJoint;
 pub use slider::SliderJoint;
 pub(crate) use solver::{JointConstraint, JointSolver};
 pub use spring::SpringJoint;
+#[cfg(test)]
+pub(crate) use workspace::JointSolverCall;
 pub(crate) use workspace::JointWorkspace;
 
 /// Statically dispatched constraint kinds supported by Kapitsa.

@@ -32,6 +32,24 @@ pub(crate) struct JointWorkspace {
     metrics: super::diagnostics::JointSolverMetrics,
     #[cfg(feature = "bench-internals")]
     residual: super::diagnostics::JointResidual,
+    #[cfg(test)]
+    solver_calls: Vec<JointSolverCall>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JointSolverCall {
+    AllRowsPrepared,
+    JointRowsPrepared(usize),
+    JointRowsCommitted(usize),
+    PositionSweep {
+        preparing_rows: bool,
+        row_count: usize,
+    },
+    VelocitySweep {
+        preparing_rows: bool,
+        row_count: usize,
+    },
 }
 
 impl JointWorkspace {
@@ -56,6 +74,8 @@ impl JointWorkspace {
             metrics: super::diagnostics::JointSolverMetrics::ZERO,
             #[cfg(feature = "bench-internals")]
             residual: super::diagnostics::JointResidual::ZERO,
+            #[cfg(test)]
+            solver_calls: Vec::new(),
         }
     }
 
@@ -68,6 +88,8 @@ impl JointWorkspace {
         self.previous_row_end = 0;
         self.reactions.clear();
         self.break_events.clear();
+        #[cfg(test)]
+        self.solver_calls.clear();
         #[cfg(feature = "bench-internals")]
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
@@ -94,6 +116,8 @@ impl JointWorkspace {
         self.previous_row_end = 0;
         self.reactions.clear();
         self.break_events.clear();
+        #[cfg(test)]
+        self.solver_calls.clear();
         #[cfg(feature = "bench-internals")]
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
@@ -181,10 +205,6 @@ impl JointWorkspace {
         self.preparing_joint_ids.clear();
     }
 
-    pub(crate) fn prepared_rows_mut(&mut self) -> &mut [ConstraintRow] {
-        &mut self.preparing_rows
-    }
-
     pub(crate) fn ensure_solver_mass_slots(
         &mut self,
         body_count: usize,
@@ -211,6 +231,25 @@ impl JointWorkspace {
             &mut self.rows
         };
         (rows, &mut self.solver_mass_slots)
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn solver_rows_len(&self, preparing_rows: bool) -> usize {
+        if preparing_rows {
+            self.preparing_rows.len()
+        } else {
+            self.rows.len()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_solver_call(&mut self, call: JointSolverCall) {
+        self.solver_calls.push(call);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn solver_calls(&self) -> &[JointSolverCall] {
+        &self.solver_calls
     }
 
     pub(crate) fn finish_joint_prepare(&mut self) -> Result<(), CollisionError> {

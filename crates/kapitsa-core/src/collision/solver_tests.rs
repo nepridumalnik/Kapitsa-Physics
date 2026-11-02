@@ -6,6 +6,10 @@ use crate::{
         manifold::{ContactManifold, ContactPoint},
         solver::{SolverBody, SolverManifold, SolverMaterial, SolverWorkspace},
     },
+    joint::{
+        FixedJoint, Joint, JointCommon, JointConstraint, JointFrame, JointSolverCall,
+        JointSolverOptions, JointSolverStep, JointWorkspace,
+    },
     mass::MassProperties,
     rigid_body::RigidBody,
     shape::{Shape, Sphere},
@@ -224,6 +228,90 @@ fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
     assert!(warm_final <= warm_initial + 1.0e-8);
     assert!(cold_final <= cold_initial + 1.0e-8);
     assert!(warm_final <= cold_final + 1.0e-5);
+}
+
+#[test]
+fn solve_with_joints_prepares_each_joint_before_one_sweep_in_phase_order() {
+    let mut id_world = PhysicsWorld::new();
+    let id_a = id_world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let id_b = id_world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let joint_id = id_world
+        .add_joint(
+            id_a,
+            id_b,
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .unwrap();
+    let joint = JointConstraint {
+        id: joint_id,
+        body_a: 0,
+        body_b: 1,
+        joint: Joint::Fixed(FixedJoint::new(JointCommon::new(
+            JointFrame::IDENTITY,
+            JointFrame::IDENTITY,
+        ))),
+    };
+    let bodies = [
+        dynamic_body(Vec3::ZERO),
+        dynamic_body(Vec3::new(1.5, 0.0, 0.0)),
+    ];
+    let mut solver_bodies = bodies
+        .into_iter()
+        .map(|body| {
+            let state = *body.state();
+            SolverBody::from_prediction(body, state)
+        })
+        .collect::<Vec<_>>();
+    let mut manifolds = Vec::new();
+    let mut solver = SolverWorkspace::new();
+    let mut joint_workspace = JointWorkspace::new();
+    let config = super::CollisionConfig {
+        velocity_iterations: 2,
+        position_iterations: 1,
+        ..super::CollisionConfig::default()
+    };
+
+    solver
+        .solve_with_joints(
+            &mut solver_bodies,
+            &mut manifolds,
+            &mut joint_workspace,
+            &[joint],
+            config,
+            JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy()),
+        )
+        .unwrap();
+
+    assert_eq!(
+        joint_workspace.solver_calls(),
+        [
+            JointSolverCall::JointRowsPrepared(0),
+            JointSolverCall::VelocitySweep {
+                preparing_rows: true,
+                row_count: 6,
+            },
+            JointSolverCall::JointRowsCommitted(0),
+            JointSolverCall::JointRowsPrepared(0),
+            JointSolverCall::VelocitySweep {
+                preparing_rows: true,
+                row_count: 6,
+            },
+            JointSolverCall::JointRowsCommitted(0),
+            JointSolverCall::JointRowsPrepared(0),
+            JointSolverCall::PositionSweep {
+                preparing_rows: true,
+                row_count: 6,
+            },
+            JointSolverCall::JointRowsCommitted(0),
+        ]
+    );
 }
 
 fn kinetic_energy(body: &RigidBody) -> f64 {

@@ -2,6 +2,8 @@
 use super::diagnostics::{JointResidual, projected_kkt_residual};
 #[cfg(feature = "bench-internals")]
 use super::row::RowDimension;
+#[cfg(test)]
+use super::workspace::JointSolverCall;
 use super::{JointSolverOptions, row::ConstraintRow, workspace::JointWorkspace};
 use crate::{
     collision::{CollisionError, solver::SolverBody},
@@ -34,6 +36,18 @@ struct RowSettings {
     force_bias: f64,
     multiplier_bounds: Option<(f64, f64)>,
     impulse_bounds: Option<(f64, f64)>,
+}
+
+#[derive(Clone, Copy)]
+enum JointRowBuffer {
+    Current,
+    Preparing,
+}
+
+impl JointRowBuffer {
+    const fn is_preparing(self) -> bool {
+        matches!(self, Self::Preparing)
+    }
 }
 
 #[derive(Default)]
@@ -151,13 +165,7 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
-        solve_position_iteration(workspace, bodies, dt, options)?;
-        #[cfg(feature = "bench-internals")]
-        {
-            let row_count = workspace.rows().len();
-            workspace.record_scalar_rows_solved(row_count);
-        }
-        Ok(())
+        Self::position_sweep(workspace, bodies, dt, options, JointRowBuffer::Current)
     }
 
     pub(crate) fn solve_velocity_iteration(
@@ -166,13 +174,7 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
-        solve_velocity_iteration(workspace, bodies, dt, options)?;
-        #[cfg(feature = "bench-internals")]
-        {
-            let row_count = workspace.rows().len();
-            workspace.record_scalar_rows_solved(row_count);
-        }
-        Ok(())
+        Self::velocity_sweep(workspace, bodies, dt, options, JointRowBuffer::Current)
     }
 
     pub(crate) fn solve_position_joint(
@@ -185,21 +187,13 @@ impl JointSolver {
     ) -> Result<(), CollisionError> {
         workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
-        #[cfg(feature = "bench-internals")]
-        let row_count = workspace.prepared_rows_mut().len();
-        if options.mass_cache() {
-            workspace.ensure_solver_mass_slots(bodies.len())?;
-        }
-        let mut cache_stats = SolverMassCacheStats::default();
-        let result = {
-            let (rows, slots) = workspace.solver_buffers_mut(true);
-            solve_position_rows(rows, slots, bodies, dt, options, &mut cache_stats)
-        };
-        record_solver_mass_cache_stats(workspace, cache_stats);
-        result?;
-        #[cfg(feature = "bench-internals")]
-        workspace.record_scalar_rows_solved(row_count);
-        workspace.finish_joint_prepare()
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::JointRowsPrepared(joint_index));
+        Self::position_sweep(workspace, bodies, dt, options, JointRowBuffer::Preparing)?;
+        workspace.finish_joint_prepare()?;
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::JointRowsCommitted(joint_index));
+        Ok(())
     }
 
     pub(crate) fn solve_velocity_joint(
@@ -212,21 +206,71 @@ impl JointSolver {
     ) -> Result<(), CollisionError> {
         workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
-        #[cfg(feature = "bench-internals")]
-        let row_count = workspace.prepared_rows_mut().len();
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::JointRowsPrepared(joint_index));
+        Self::velocity_sweep(workspace, bodies, dt, options, JointRowBuffer::Preparing)?;
+        workspace.finish_joint_prepare()?;
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::JointRowsCommitted(joint_index));
+        Ok(())
+    }
+
+    fn position_sweep(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        dt: f64,
+        options: JointSolverOptions,
+        row_buffer: JointRowBuffer,
+    ) -> Result<(), CollisionError> {
         if options.mass_cache() {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
+        #[cfg(any(test, feature = "bench-internals"))]
+        let row_count = workspace.solver_rows_len(row_buffer.is_preparing());
         let mut cache_stats = SolverMassCacheStats::default();
         let result = {
-            let (rows, slots) = workspace.solver_buffers_mut(true);
+            let (rows, slots) = workspace.solver_buffers_mut(row_buffer.is_preparing());
+            solve_position_rows(rows, slots, bodies, dt, options, &mut cache_stats)
+        };
+        record_solver_mass_cache_stats(workspace, cache_stats);
+        result?;
+        #[cfg(feature = "bench-internals")]
+        workspace.record_scalar_rows_solved(row_count);
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::PositionSweep {
+            preparing_rows: row_buffer.is_preparing(),
+            row_count,
+        });
+        Ok(())
+    }
+
+    fn velocity_sweep(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        dt: f64,
+        options: JointSolverOptions,
+        row_buffer: JointRowBuffer,
+    ) -> Result<(), CollisionError> {
+        if options.mass_cache() {
+            workspace.ensure_solver_mass_slots(bodies.len())?;
+        }
+        #[cfg(any(test, feature = "bench-internals"))]
+        let row_count = workspace.solver_rows_len(row_buffer.is_preparing());
+        let mut cache_stats = SolverMassCacheStats::default();
+        let result = {
+            let (rows, slots) = workspace.solver_buffers_mut(row_buffer.is_preparing());
             solve_velocity_rows(rows, slots, bodies, dt, options, &mut cache_stats)
         };
         record_solver_mass_cache_stats(workspace, cache_stats);
         result?;
         #[cfg(feature = "bench-internals")]
         workspace.record_scalar_rows_solved(row_count);
-        workspace.finish_joint_prepare()
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::VelocitySweep {
+            preparing_rows: row_buffer.is_preparing(),
+            row_count,
+        });
+        Ok(())
     }
 
     fn prepare_iteration<F>(
@@ -240,6 +284,8 @@ impl JointSolver {
         workspace.begin_prepare();
         prepare_rows(bodies, workspace)?;
         workspace.finish_prepare();
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::AllRowsPrepared);
         Ok(())
     }
 
@@ -2011,6 +2057,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "bench-internals")]
     use crate::joint::row::RowDimension;
+    use crate::joint::workspace::JointSolverCall;
     use crate::{
         joint::{D6Joint, Joint, JointCommon, JointDrive, JointFrame, JointLimit, JointMotion},
         mass::MassProperties,
@@ -2085,6 +2132,58 @@ mod tests {
                 ))),
             )
             .expect("joint")
+    }
+
+    #[test]
+    fn solve_prepares_once_before_each_sweep_and_sweeps_each_row_once() {
+        let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::X * 1.5)];
+        let constraints = [JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: super::super::Joint::Fixed(super::super::FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        }];
+        let mut workspace = JointWorkspace::new();
+        let prepare = |bodies: &[SolverBody], workspace: &mut JointWorkspace| {
+            prepare_joint_rows(bodies, workspace, &constraints, 0.01)
+        };
+
+        JointSolver::solve(&mut workspace, &mut bodies, 0.01, 2, 3, prepare)
+            .expect("solve fixed joint");
+
+        assert_eq!(
+            workspace.solver_calls(),
+            [
+                JointSolverCall::AllRowsPrepared,
+                JointSolverCall::PositionSweep {
+                    preparing_rows: false,
+                    row_count: 6,
+                },
+                JointSolverCall::AllRowsPrepared,
+                JointSolverCall::PositionSweep {
+                    preparing_rows: false,
+                    row_count: 6,
+                },
+                JointSolverCall::AllRowsPrepared,
+                JointSolverCall::VelocitySweep {
+                    preparing_rows: false,
+                    row_count: 6,
+                },
+                JointSolverCall::AllRowsPrepared,
+                JointSolverCall::VelocitySweep {
+                    preparing_rows: false,
+                    row_count: 6,
+                },
+                JointSolverCall::AllRowsPrepared,
+                JointSolverCall::VelocitySweep {
+                    preparing_rows: false,
+                    row_count: 6,
+                },
+            ]
+        );
     }
 
     #[cfg(feature = "bench-internals")]
