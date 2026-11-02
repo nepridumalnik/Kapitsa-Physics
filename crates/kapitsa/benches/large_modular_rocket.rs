@@ -265,7 +265,7 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
         .sum::<f64>()
         / samples.len() as f64;
     println!(
-        "phase={phase} parts={parts} joints={} workers={workers} step_ms_min/p50/p95/p99/max={:.4}/{:.4}/{:.4}/{:.4}/{:.4} sim_x={:.2} allocs_p50/p95={}/{} bytes_p50/p95={}/{} retained_kib={} peak_scratch_kib={} growth_bytes={} joint_prepare_us={:.2} solver_prepare_us={:.2} solver_iterations_us={:.2} joint_rows_prepared={} scalar_rows_solved={} inverse_inertia_updates={} block_rows_solved={} warm_starts={} color_batches={} max_colors_per_island={} joint_sweeps_pos/vel={}/{} collision_us={:.2} island_build_us={:.2} islands={} largest_island_bodies/joints/contacts={}/{}/{} candidates/contacts={}/{}",
+        "phase={phase} parts={parts} joints={} workers={workers} step_ms_min/p50/p95/p99/max={:.4}/{:.4}/{:.4}/{:.4}/{:.4} sim_x={:.2} allocs_p50/p95={}/{} bytes_p50/p95={}/{} retained_kib={} peak_scratch_kib={} growth_bytes={} joint_prepare_us_p50/p95={:.2}/{:.2} solver_prepare_us_p50/p95={:.2}/{:.2} solver_iterations_ms_p50/p95={:.4}/{:.4} joint_rows_prepared={} scalar_rows_solved={} inverse_inertia_updates={} block_rows_solved={} warm_starts={} color_batches={} max_colors_per_island={} joint_sweeps_pos/vel={}/{} collision_us={:.2} island_build_us={:.2} islands={} largest_island_bodies/joints/contacts={}/{}/{} candidates/contacts={}/{}",
         parts - 1,
         milliseconds(min.elapsed),
         milliseconds(p50.elapsed),
@@ -280,9 +280,24 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
         metrics.retained_scratch_bytes / 1024,
         metrics.peak_scratch_bytes / 1024,
         metrics.logical_capacity_growth_bytes,
-        micros(metrics.joint_constraint_prepare),
-        micros(metrics.solver_prepare),
-        micros(metrics.solver_iterations),
+        micros(sample_duration_quantile(samples, 0.50, |sample| {
+            sample.metrics.collision.joint_constraint_prepare
+        })),
+        micros(sample_duration_quantile(samples, 0.95, |sample| {
+            sample.metrics.collision.joint_constraint_prepare
+        })),
+        micros(sample_duration_quantile(samples, 0.50, |sample| {
+            sample.metrics.collision.solver_prepare
+        })),
+        micros(sample_duration_quantile(samples, 0.95, |sample| {
+            sample.metrics.collision.solver_prepare
+        })),
+        milliseconds(sample_duration_quantile(samples, 0.50, |sample| {
+            sample.metrics.collision.solver_iterations
+        })),
+        milliseconds(sample_duration_quantile(samples, 0.95, |sample| {
+            sample.metrics.collision.solver_iterations
+        })),
         joint_metrics.prepared_rows,
         joint_metrics.scalar_rows_solved,
         joint_metrics.inverse_inertia_updates,
@@ -359,6 +374,17 @@ fn duration_quantile(values: &[Duration], percentile: f64) -> f64 {
     values.sort_unstable();
     let index = ((values.len() - 1) as f64 * percentile).round() as usize;
     values[index].as_secs_f64() * 1.0e6
+}
+
+fn sample_duration_quantile(
+    samples: &[TimedSample],
+    percentile: f64,
+    value: impl Fn(&TimedSample) -> Duration,
+) -> Duration {
+    let mut values = samples.iter().map(value).collect::<Vec<_>>();
+    values.sort_unstable();
+    let index = ((values.len() - 1) as f64 * percentile).round() as usize;
+    values[index]
 }
 
 fn milliseconds(duration: Duration) -> f64 {
