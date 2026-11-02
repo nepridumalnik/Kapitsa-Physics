@@ -126,6 +126,25 @@ fn warm_start_impulses_scale_with_timestep_and_staged_dt_is_transactional() {
 }
 
 #[test]
+fn warm_start_discards_impulses_after_large_timestep_changes() {
+    let pair = pair();
+    let mut cache = ContactCache::new();
+    cache
+        .stage(&[manifold(pair, Vec3::Y, 7, 2.0)], 1.0)
+        .unwrap();
+    cache.commit();
+    for dt in [0.49, 2.01, f64::MAX] {
+        let mut regenerated = solver_manifold(manifold(pair, Vec3::Y, 7, 0.0), 0.5, 0.5);
+        cache
+            .warm_start_solver(std::slice::from_mut(&mut regenerated), dt)
+            .unwrap();
+        let contact = regenerated.manifold.points().first().unwrap();
+        assert_eq!(contact.normal_impulse, 0.0);
+        assert_eq!(contact.tangent_impulse, [0.0; 2]);
+    }
+}
+
+#[test]
 fn cache_rejects_changed_normals_and_drops_absent_features_on_commit() {
     let pair = pair();
     let mut cache = ContactCache::new();
