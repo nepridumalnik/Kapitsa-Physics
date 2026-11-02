@@ -451,7 +451,7 @@ impl JointWorkspace {
     pub(crate) fn collect_break_events(
         &mut self,
         joints: &[JointConstraint],
-        bodies: &[crate::collision::solver::SolverBody],
+        bodies: &[crate::constraint::SolverBody],
         dt: f64,
         mode: ReactionMode,
     ) -> Result<(), CollisionError> {
@@ -556,7 +556,7 @@ impl JointWorkspace {
 
 fn reaction_for_joint(
     joint: JointConstraint,
-    bodies: &[crate::collision::solver::SolverBody],
+    bodies: &[crate::constraint::SolverBody],
 ) -> Result<Option<JointReaction>, CollisionError> {
     let body_a = bodies
         .get(joint.body_a)
@@ -619,7 +619,7 @@ mod tests {
     use super::*;
     use crate::joint::row::RowDimension;
     use crate::{
-        collision::solver::SolverBody,
+        constraint::SolverBody,
         joint::{FixedJoint, Joint, JointCommon, JointFrame},
         mass::MassProperties,
         rigid_body::RigidBody,

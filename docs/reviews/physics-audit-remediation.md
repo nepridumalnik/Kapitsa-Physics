@@ -54,7 +54,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S44 | Транзакционная основа TGS | BLOCKED — existing CCD/forces/cache/rollback blocker; see temporal-substeps-blocker-report.md |
 | S45 | Temporal Gauss–Seidel | BLOCKED — depends on S44 and numerical validation |
 | S46 | On-Rails propagation | NOT AUDITED |
-| S47 | Разделение общих solver-примитивов | NOT AUDITED |
+| S47 | Разделение общих solver-примитивов | MITIGATED — staged SolverBody moved into common constraint module; joint code still uses collision errors and tangent basis |
 | S48 | Разделение внутренних модулей | NOT AUDITED |
 | S49 | Публичная конфигурация и feature gates | NOT AUDITED |
 | S50 | Аудит аллокаций и оставшихся hot paths | NOT AUDITED |

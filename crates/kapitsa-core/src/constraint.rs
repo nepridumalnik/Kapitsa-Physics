@@ -5,6 +5,33 @@ use crate::{
     rigid_body::{BodyType, RigidBody, solver_mass::SolverMass},
 };
 
+/// A staged body shared by the contact and joint solvers.
+pub(crate) struct SolverBody {
+    pub(crate) body: RigidBody,
+}
+
+impl SolverBody {
+    pub(crate) fn state(&self) -> crate::rigid_body::BodyState {
+        *self.body.state()
+    }
+
+    pub(crate) fn from_prediction(
+        mut body: RigidBody,
+        state: crate::rigid_body::BodyState,
+    ) -> Self {
+        body.commit_integrated_state(state);
+        Self { body }
+    }
+
+    pub(crate) fn body(&self) -> &RigidBody {
+        &self.body
+    }
+
+    pub(crate) fn body_mut(&mut self) -> &mut RigidBody {
+        &mut self.body
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConstraintError {
     InvalidMass,

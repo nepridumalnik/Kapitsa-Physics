@@ -8,8 +8,8 @@ use super::{
     workspace::JointWorkspace,
 };
 use crate::{
-    collision::{CollisionError, solver::SolverBody},
-    constraint,
+    collision::CollisionError,
+    constraint::{self, SolverBody},
     rigid_body::solver_mass::{SolverMass, SolverMassCacheStatus, SolverMassSlot},
     transform::Transform,
 };
