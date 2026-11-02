@@ -161,7 +161,7 @@ impl SolverWorkspace {
         joint_workspace: &mut JointWorkspace,
         joints: &[JointConstraint],
         config: CollisionConfig,
-        joint_solver_step: JointSolverStep,
+        joint_solver_step: JointSolverStep<'_>,
     ) -> Result<(), CollisionError> {
         if joints.is_empty() {
             return self.solve(bodies, manifolds, config);
@@ -176,7 +176,7 @@ impl SolverWorkspace {
         self.warm_start(bodies, manifolds)?;
         JointSolver::begin_step(joint_workspace);
 
-        for _ in 0..config.velocity_iterations {
+        for velocity_iteration in 0..config.velocity_iterations {
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_velocity_iteration();
             self.solve_velocity_iteration(bodies, manifolds)?;
@@ -186,8 +186,8 @@ impl SolverWorkspace {
                     bodies,
                     joint,
                     joint_index,
-                    dt,
-                    joint_solver_options,
+                    joint_solver_step,
+                    velocity_iteration == 0,
                 )?;
             }
             #[cfg(feature = "bench-internals")]

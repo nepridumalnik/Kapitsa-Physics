@@ -823,6 +823,7 @@ impl PhysicsWorld {
             .get_mut(id.dense)
             .ok_or(WorldError::InvalidJointId)?;
         entry.joint = joint;
+        self.collision_system.invalidate_joint_warm_start(id);
         Ok(())
     }
 
@@ -836,6 +837,9 @@ impl PhysicsWorld {
             .ok_or(WorldError::InvalidJointId)?
             .joint
             .set_enabled(enabled);
+        if !enabled {
+            self.collision_system.invalidate_joint_warm_start(id);
+        }
         Ok(())
     }
 
@@ -844,7 +848,11 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return None;
         }
-        self.joints.remove(id.dense).map(|entry| entry.joint)
+        let removed = self.joints.remove(id.dense).map(|entry| entry.joint);
+        if removed.is_some() {
+            self.collision_system.invalidate_joint_warm_start(id);
+        }
+        removed
     }
 
     pub fn joint_count(&self) -> usize {
@@ -1647,6 +1655,13 @@ impl PhysicsWorld {
     pub fn set_joint_mass_cache_for_bench(&mut self, enabled: bool) {
         self.collision_system
             .set_joint_mass_cache_for_bench(enabled);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn set_joint_warm_start_for_bench(&mut self, enabled: bool) {
+        self.collision_system
+            .set_joint_warm_start_for_bench(enabled);
     }
 
     #[cfg(feature = "bench-internals")]

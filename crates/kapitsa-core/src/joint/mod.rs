@@ -19,6 +19,7 @@ mod solver;
 mod spring;
 #[cfg(test)]
 mod stability_tests;
+mod warm_start;
 #[allow(dead_code)] // Used by the shared solver before island integration is wired in.
 mod workspace;
 
@@ -37,6 +38,9 @@ pub use planar::PlanarJoint;
 pub use slider::SliderJoint;
 pub(crate) use solver::{JointConstraint, JointSolver};
 pub use spring::SpringJoint;
+pub(crate) use warm_start::JointImpulseCache;
+#[cfg(feature = "bench-internals")]
+pub(crate) use warm_start::WarmStartConfig;
 #[cfg(test)]
 pub(crate) use workspace::JointSolverCall;
 pub(crate) use workspace::JointWorkspace;

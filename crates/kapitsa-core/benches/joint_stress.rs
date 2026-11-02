@@ -28,6 +28,7 @@ const SIZES: [usize; 3] = [144, 1_440, 14_400];
 const WARMUPS: usize = 3;
 const SAMPLES: usize = 10;
 const MASS_CACHE_SAMPLES: usize = 301;
+const WARM_START_SAMPLES: usize = 301;
 const DT: f64 = 1.0 / 120.0;
 const WORKERS: [usize; 4] = [1, 2, 4, 8];
 
@@ -227,6 +228,10 @@ fn allocation_percentile<T>(
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    if std::env::args().any(|argument| argument == "--warm-start-only") {
+        report_warm_start_comparison(1_440, disturbed_fixed_chain)?;
+        return Ok(());
+    }
     if std::env::args().any(|argument| argument == "--mass-cache-only") {
         report_mass_cache_comparison(1_440, fixed_chain)?;
         return Ok(());
@@ -243,6 +248,43 @@ fn main() -> Result<(), Box<dyn Error>> {
         report("dense vertical contact stack", size, dense_contact_stack)?;
         report_first_step("mass joint break", size, mass_break)?;
         report_mass_separation(size)?;
+    }
+    Ok(())
+}
+
+fn report_warm_start_comparison(
+    size: usize,
+    build: fn(usize) -> Result<PhysicsWorld, Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    for enabled in [false, true] {
+        let mut world = build(size)?;
+        world.set_joint_warm_start_for_bench(enabled);
+        for _ in 0..WARMUPS {
+            world.step_with_executor(DT, &ScopedThreadExecutor, 1)?;
+        }
+
+        let mut samples = Vec::with_capacity(WARM_START_SAMPLES);
+        for _ in 0..WARM_START_SAMPLES {
+            let (result, timing) =
+                measure(|| world.step_with_executor(DT, &ScopedThreadExecutor, 1));
+            result?;
+            samples.push((timing, world.physics_step_metrics().joints));
+        }
+        let frame_errors = max_joint_frame_errors(&world)?;
+        validate_bodies(&world)?;
+        samples.sort_unstable_by_key(|sample| sample.0.elapsed);
+        let median = &samples[WARM_START_SAMPLES / 2];
+        let p99 = &samples[percentile_index(WARM_START_SAMPLES, 99)];
+        println!(
+            "disturbed fixed-joint warm-start comparison size={size} enabled={enabled}: p50_ms={:.3} p99_ms={:.3} allocs_p50/p99={}/{} warm_rows={} final_anchor_error_m/rad={:.6e}/{:.6e}",
+            milliseconds(median.0.elapsed),
+            milliseconds(p99.0.elapsed),
+            allocation_percentile(&samples, |sample| sample.0.allocations, 50),
+            allocation_percentile(&samples, |sample| sample.0.allocations, 99),
+            median.1.velocity_warm_starts,
+            frame_errors.0,
+            frame_errors.1,
+        );
     }
     Ok(())
 }
@@ -490,6 +532,23 @@ fn fixed_chain(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     let mut bodies = Vec::with_capacity(count);
     for index in 0..count {
         bodies.push(world.add_body(dynamic_body(Vec3::X * index as f64)?)?);
+    }
+    let common = fixed_joint_frames();
+    for pair in bodies.windows(2) {
+        world.add_joint(pair[0], pair[1], Joint::Fixed(FixedJoint::new(common)))?;
+    }
+    Ok(world)
+}
+
+fn disturbed_fixed_chain(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mut bodies = Vec::with_capacity(count);
+    for index in 0..count {
+        let mut body = dynamic_body(Vec3::X * index as f64)?;
+        if index + 1 == count {
+            body.set_linear_velocity(Vec3::Y * 0.1)?;
+        }
+        bodies.push(world.add_body(body)?);
     }
     let common = fixed_joint_frames();
     for pair in bodies.windows(2) {

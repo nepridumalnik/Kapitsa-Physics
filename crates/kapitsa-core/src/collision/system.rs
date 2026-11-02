@@ -39,6 +39,7 @@ pub(crate) struct CollisionSystem {
     ccd_islands: super::CcdIslandLayout,
     solver_islands: Vec<SolverIsland>,
     joint_solver_options: crate::joint::JointSolverOptions,
+    joint_impulse_cache: crate::joint::JointImpulseCache,
     ccd_solver: SolverWorkspace,
     cache_staged: bool,
     #[cfg(feature = "bench-internals")]
@@ -67,6 +68,7 @@ impl CollisionSystem {
             ccd_islands: super::CcdIslandLayout::new(),
             solver_islands: Vec::new(),
             joint_solver_options: crate::joint::JointSolverOptions::legacy(),
+            joint_impulse_cache: crate::joint::JointImpulseCache::new(),
             ccd_solver: SolverWorkspace::new(),
             cache_staged: false,
             #[cfg(feature = "bench-internals")]
@@ -93,9 +95,23 @@ impl CollisionSystem {
         Ok(())
     }
 
+    pub(crate) fn invalidate_joint_warm_start(&mut self, joint: crate::world::JointId) {
+        self.joint_impulse_cache.invalidate(joint);
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn set_joint_mass_cache_for_bench(&mut self, enabled: bool) {
-        self.joint_solver_options = crate::joint::JointSolverOptions::with_mass_cache(enabled);
+        self.joint_solver_options = self.joint_solver_options.with_mass_cache(enabled);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_warm_start_for_bench(&mut self, enabled: bool) {
+        let config = if enabled {
+            crate::joint::WarmStartConfig::enabled()
+        } else {
+            crate::joint::WarmStartConfig::default()
+        };
+        self.joint_solver_options = self.joint_solver_options.with_warm_start(config);
     }
 
     pub(crate) fn events(&self) -> &[CollisionEvent] {
@@ -110,6 +126,7 @@ impl CollisionSystem {
         self.context.clear();
         self.lifecycle_staged = false;
         self.cache_staged = false;
+        self.joint_impulse_cache.begin_stage();
         #[cfg(feature = "bench-internals")]
         {
             self.benchmark_capacity_before_bytes = self.retained_scratch_bytes();
@@ -1050,7 +1067,14 @@ impl CollisionSystem {
             }
         }
         let config = self.config;
-        let joint_solver_step = crate::joint::JointSolverStep::new(dt, self.joint_solver_options);
+        #[cfg(feature = "bench-internals")]
+        if worker_count > 1 && island_count > 1 {
+            let worker_count = worker_count.min(island_count);
+            let chunk_size = island_count.div_ceil(worker_count);
+            self.record_worker_tasks_started(island_count.div_ceil(chunk_size));
+        }
+        let joint_solver_step = crate::joint::JointSolverStep::new(dt, self.joint_solver_options)
+            .with_impulse_cache(&self.joint_impulse_cache);
         #[cfg(feature = "bench-internals")]
         let iterations_started = std::time::Instant::now();
         if worker_count <= 1 || island_count <= 1 {
@@ -1067,8 +1091,6 @@ impl CollisionSystem {
         } else {
             let worker_count = worker_count.min(island_count);
             let chunk_size = island_count.div_ceil(worker_count);
-            #[cfg(feature = "bench-internals")]
-            self.record_worker_tasks_started(island_count.div_ceil(chunk_size));
             let solved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 executor.for_each_chunk_mut(
                     &mut self.solver_islands[..island_count],
@@ -1114,6 +1136,15 @@ impl CollisionSystem {
             self.context
                 .joint_break_events
                 .extend_from_slice(island.joint_workspace.break_events());
+        }
+        if self.joint_solver_options.warm_start().enabled {
+            for island in self.solver_islands.iter().take(island_count) {
+                island.joint_workspace.stage_impulses(
+                    &mut self.joint_impulse_cache,
+                    &island.joints,
+                    dt,
+                )?;
+            }
         }
         self.context
             .joint_break_events
@@ -1262,6 +1293,7 @@ impl CollisionSystem {
             cache.abort();
         }
         self.lifecycle.abort();
+        self.joint_impulse_cache.abort();
         self.lifecycle_staged = false;
         self.cache_staged = false;
         #[cfg(feature = "bench-internals")]
@@ -1285,6 +1317,7 @@ impl CollisionSystem {
             }
             self.cache_staged = false;
         }
+        self.joint_impulse_cache.commit();
         #[cfg(feature = "bench-internals")]
         {
             self.step_metrics_committed = true;

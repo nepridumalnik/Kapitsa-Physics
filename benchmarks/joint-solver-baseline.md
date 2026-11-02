@@ -68,3 +68,20 @@ cargo bench -p kapitsa-core --features bench-internals --bench joint_stress -- -
 | 2 | Mass cache | 28.275 / 45.311 ms | 0 / 0 | 189,948 / 0 | 0 | 0 / 0 |
 
 Across these two runs, the cache reduced p50 by 31.3–31.8% and p99 by 11.5–20.1%; all 301 steady samples per mode allocated no heap memory. The unchanged-pose chain had no mass or orientation invalidations after warm-up, so those paths are covered by focused tests. These timings do not establish a general flight or contact-scene speedup.
+
+## Stage 05 persistent velocity warm start
+
+The warm-start comparison uses the same deterministic 1,440-body fixed-joint chain in both modes, with a `0.1 m/s` initial velocity on the final body to produce nonzero joint impulses. Each mode runs 3 warm-up steps and 301 measured one-worker steps at `1/120 s`; each row below is a separate Release benchmark process. The p50 step records 3,496–3,561 applied cached row impulses. Reproduce with:
+
+```powershell
+cargo bench -p kapitsa-core --features bench-internals --bench joint_stress -- --warm-start-only
+```
+
+| Run | Mode | Step p50 / p99 | Applied warm rows per p50 step | Steady allocations p50 / p99 | Final anchor / frame error |
+|---:|---|---:|---:|---:|---:|
+| 1 | Legacy | 55.012 / 60.047 ms | 0 | 0 / 0 | 1.141202e-4 m / 2.251161e-4 rad |
+| 1 | Warm start | 55.945 / 60.216 ms | 3,496 | 0 / 0 | 1.141202e-4 m / 2.251161e-4 rad |
+| 2 | Legacy | 54.667 / 59.819 ms | 0 | 0 / 0 | 1.141202e-4 m / 2.251161e-4 rad |
+| 2 | Warm start | 56.188 / 64.965 ms | 3,561 | 0 / 0 | 1.141202e-4 m / 2.251161e-4 rad |
+
+Warm start was 1.7–2.8% slower at p50 and 0.3–8.6% slower at p99 in this fixed-iteration workload. It did not change the final geometry errors. The feature remains opt-in and has no demonstrated speedup here; the benchmark confirms actual reuse and zero measured steady allocations after warm-up.

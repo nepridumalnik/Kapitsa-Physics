@@ -1,4 +1,6 @@
-use super::{JointBreakEvent, row::ConstraintRow, solver::JointConstraint};
+use super::{
+    JointBreakEvent, row::ConstraintRow, solver::JointConstraint, warm_start::JointImpulseCache,
+};
 use crate::collision::CollisionError;
 use crate::rigid_body::solver_mass::SolverMassSlot;
 use kapitsa_math::Vec3;
@@ -233,6 +235,37 @@ impl JointWorkspace {
         (rows, &mut self.solver_mass_slots)
     }
 
+    pub(crate) fn stage_impulses(
+        &self,
+        cache: &mut JointImpulseCache,
+        joints: &[JointConstraint],
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        let mut row_start = 0;
+        for (joint_index, joint) in joints.iter().copied().enumerate() {
+            if self
+                .row_joint_indices
+                .get(row_start)
+                .is_some_and(|owner| *owner < joint_index)
+            {
+                return Err(CollisionError::InvalidContact);
+            }
+            let row_end = self
+                .row_joint_indices
+                .partition_point(|owner| *owner <= joint_index);
+            let rows = self
+                .rows
+                .get(row_start..row_end)
+                .ok_or(CollisionError::InvalidContact)?;
+            cache.stage_joint(joint.id, joint.joint, dt, rows)?;
+            row_start = row_end;
+        }
+        if row_start != self.rows.len() {
+            return Err(CollisionError::InvalidContact);
+        }
+        Ok(())
+    }
+
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn solver_rows_len(&self, preparing_rows: bool) -> usize {
         if preparing_rows {
@@ -345,6 +378,14 @@ impl JointWorkspace {
             .metrics
             .inverse_inertia_updates
             .saturating_add(inverse_inertia_updates);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_velocity_warm_starts(&mut self, count: usize) {
+        self.metrics.velocity_warm_starts = self
+            .metrics
+            .velocity_warm_starts
+            .saturating_add(count as u64);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -489,7 +530,6 @@ fn set_joint_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "bench-internals")]
     use crate::joint::row::RowDimension;
     use crate::{
         joint::{FixedJoint, Joint, JointCommon, JointFrame},
@@ -522,7 +562,6 @@ mod tests {
     fn row(key: u8) -> ConstraintRow {
         ConstraintRow {
             key,
-            #[cfg(feature = "bench-internals")]
             dimension: RowDimension::Linear,
             body_a: 0,
             body_b: 1,
@@ -555,7 +594,6 @@ mod tests {
                 workspace.set_joint_index(joint_index, joint_id);
                 workspace.push(ConstraintRow {
                     key: joint_index as u8,
-                    #[cfg(feature = "bench-internals")]
                     dimension: RowDimension::Linear,
                     body_a: 0,
                     body_b: 1,

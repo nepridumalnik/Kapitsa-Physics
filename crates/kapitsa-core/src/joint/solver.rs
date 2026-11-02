@@ -1,10 +1,14 @@
 #[cfg(feature = "bench-internals")]
 use super::diagnostics::{JointResidual, projected_kkt_residual};
-#[cfg(feature = "bench-internals")]
 use super::row::RowDimension;
 #[cfg(test)]
 use super::workspace::JointSolverCall;
-use super::{JointSolverOptions, row::ConstraintRow, workspace::JointWorkspace};
+use super::{
+    JointSolverOptions, JointSolverStep,
+    row::ConstraintRow,
+    warm_start::{JointImpulseCache, WarmStartConfig},
+    workspace::JointWorkspace,
+};
 use crate::{
     collision::{CollisionError, solver::SolverBody},
     constraint,
@@ -121,7 +125,12 @@ impl JointSolver {
     where
         F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), CollisionError>,
     {
-        if !dt.is_finite() || dt <= 0.0 || position_iterations == 0 || velocity_iterations == 0 {
+        if !dt.is_finite()
+            || dt <= 0.0
+            || position_iterations == 0
+            || velocity_iterations == 0
+            || options.warm_start().enabled
+        {
             return Err(CollisionError::InvalidConfig);
         }
         workspace.begin_step();
@@ -201,13 +210,26 @@ impl JointSolver {
         bodies: &mut [SolverBody],
         constraint: JointConstraint,
         joint_index: usize,
-        dt: f64,
-        options: JointSolverOptions,
+        step: JointSolverStep<'_>,
+        first_velocity_iteration: bool,
     ) -> Result<(), CollisionError> {
+        let dt = step.dt();
+        let options = step.options();
         workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
         #[cfg(test)]
         workspace.record_solver_call(JointSolverCall::JointRowsPrepared(joint_index));
+        if first_velocity_iteration && options.warm_start().enabled {
+            let warm_start_cache = step.impulse_cache().ok_or(CollisionError::InvalidConfig)?;
+            apply_warm_start(
+                workspace,
+                bodies,
+                constraint,
+                dt,
+                options.warm_start(),
+                warm_start_cache,
+            )?;
+        }
         Self::velocity_sweep(workspace, bodies, dt, options, JointRowBuffer::Preparing)?;
         workspace.finish_joint_prepare()?;
         #[cfg(test)]
@@ -303,6 +325,48 @@ impl JointSolver {
         workspace.set_residual(residual);
         Ok(())
     }
+}
+
+fn apply_warm_start(
+    workspace: &mut JointWorkspace,
+    bodies: &mut [SolverBody],
+    constraint: JointConstraint,
+    dt: f64,
+    config: WarmStartConfig,
+    cache: &JointImpulseCache,
+) -> Result<(), CollisionError> {
+    if !config.validate() || !dt.is_finite() || dt <= 0.0 {
+        return Err(CollisionError::InvalidConfig);
+    }
+    let mut applied_count = 0;
+    {
+        let (rows, _) = workspace.solver_buffers_mut(true);
+        for index in 0..rows.len() {
+            let row = *rows.get(index).ok_or(CollisionError::InvalidContact)?;
+            if !row.is_valid(bodies.len()) {
+                return Err(CollisionError::InvalidContact);
+            }
+            let Some(impulse) = cache.lookup(constraint.id, constraint.joint, row, dt, config)
+            else {
+                continue;
+            };
+            let next = (row.accumulated_impulse + impulse).clamp(row.min_impulse, row.max_impulse);
+            let applied = next - row.accumulated_impulse;
+            if !next.is_finite() || !applied.is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+            if applied != 0.0 {
+                apply_velocity_row(bodies, row, applied, None)?;
+                applied_count += 1;
+            }
+            rows[index].accumulated_impulse = next;
+        }
+    }
+    #[cfg(feature = "bench-internals")]
+    workspace.record_velocity_warm_starts(applied_count);
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = applied_count;
+    Ok(())
 }
 
 #[cfg(feature = "bench-internals")]
@@ -1639,7 +1703,6 @@ fn push_linear_row(
         .ok_or(CollisionError::ArithmeticOverflow)?;
     workspace.push(ConstraintRow {
         key,
-        #[cfg(feature = "bench-internals")]
         dimension: RowDimension::Linear,
         body_a: settings.body_a,
         body_b: settings.body_b,
@@ -1680,7 +1743,6 @@ fn push_angular_row(
     }
     workspace.push(ConstraintRow {
         key,
-        #[cfg(feature = "bench-internals")]
         dimension: RowDimension::Angular,
         body_a: settings.body_a,
         body_b: settings.body_b,
@@ -2211,7 +2273,7 @@ mod tests {
             0.01,
             2,
             2,
-            JointSolverOptions::with_mass_cache(true),
+            JointSolverOptions::legacy().with_mass_cache(true),
             prepare,
         )
         .expect("solve fixed joint");
@@ -2226,7 +2288,6 @@ mod tests {
     fn anchor_row(error: f64) -> ConstraintRow {
         ConstraintRow {
             key: 0,
-            #[cfg(feature = "bench-internals")]
             dimension: RowDimension::Linear,
             body_a: 0,
             body_b: 1,

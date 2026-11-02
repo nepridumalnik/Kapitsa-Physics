@@ -266,6 +266,66 @@ fn joint_mass_cache_is_opt_in_through_the_internal_benchmark_setting() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
+fn joint_warm_start_uses_committed_impulses_once_and_clears_disabled_joints() {
+    let mut world = PhysicsWorld::new();
+    let body_a = world
+        .add_body(body_at(Vec3::ZERO, 1.0))
+        .expect("first body");
+    let mut second_body = body_at(Vec3::X * 1.5, 1.0);
+    second_body
+        .set_linear_velocity(Vec3::X)
+        .expect("finite initial velocity");
+    let body_b = world.add_body(second_body).expect("second body");
+    let joint = world
+        .add_joint(
+            body_a,
+            body_b,
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .expect("fixed joint");
+    world.set_joint_warm_start_for_bench(true);
+
+    world.step(1.0 / 60.0).expect("seed joint impulses");
+    assert_eq!(world.physics_step_metrics().joints.velocity_warm_starts, 0);
+
+    world.step(1.0 / 60.0).expect("warm-start joint impulses");
+    let warm_starts = world.physics_step_metrics().joints.velocity_warm_starts;
+    assert!(warm_starts > 0);
+    assert!(
+        warm_starts <= 6,
+        "warm starts applied more than once: {warm_starts}"
+    );
+
+    world
+        .update_joint(
+            joint,
+            Joint::Ball(crate::joint::BallJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .expect("replace fixed joint with ball joint");
+    world.step(1.0 / 60.0).expect("step with replacement joint");
+    assert_eq!(world.physics_step_metrics().joints.velocity_warm_starts, 0);
+
+    world
+        .set_joint_enabled(joint, false)
+        .expect("disable fixed joint");
+    world.step(1.0 / 60.0).expect("step with disabled joint");
+    assert_eq!(world.physics_step_metrics().joints.velocity_warm_starts, 0);
+
+    world
+        .set_joint_enabled(joint, true)
+        .expect("enable fixed joint");
+    world.step(1.0 / 60.0).expect("reseed enabled joint");
+    assert_eq!(world.physics_step_metrics().joints.velocity_warm_starts, 0);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 fn joint_mass_cache_matches_legacy_for_anisotropic_fixed_joint() {
     fn make_world() -> PhysicsWorld {
         let mut world = PhysicsWorld::new();
