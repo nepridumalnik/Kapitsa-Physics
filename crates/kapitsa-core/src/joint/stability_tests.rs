@@ -319,7 +319,11 @@ fn fixed_joint_chain_and_branch_sizes_report_residual_by_step() {
 fn diagnose_free_asymmetric_fixed_joint_velocity_projection_work() {
     for count in [2, 100] {
         for dt in [DT, DT * 0.5] {
-            for (label, pcg_iterations) in [("scalar", None), ("global_pcg", Some(64))] {
+            for (label, pcg_iterations) in [
+                ("scalar", None),
+                ("global_pcg", Some(64)),
+                ("global_block_jacobi_pcg", Some(64)),
+            ] {
                 let mut world = PhysicsWorld::new();
                 let mut bodies = Vec::with_capacity(count);
                 let mut centers = Vec::with_capacity(count);
@@ -360,7 +364,11 @@ fn diagnose_free_asymmetric_fixed_joint_velocity_projection_work() {
                     body.set_angular_velocity(initial_angular_velocity).unwrap();
                 }
                 if let Some(iterations) = pcg_iterations {
-                    world.set_joint_global_velocity_pcg_for_bench(iterations, true);
+                    if label == "global_block_jacobi_pcg" {
+                        world.set_joint_global_velocity_block_pcg_for_bench(iterations);
+                    } else {
+                        world.set_joint_global_velocity_pcg_for_bench(iterations, true);
+                    }
                 }
 
                 let initial_energy = physical_kinetic_energy(&world);
@@ -667,13 +675,21 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
     }
 
     for (name, branching) in [("chain_100", false), ("branch_100", true)] {
-        for incomplete_cholesky_preconditioner in [false, true] {
+        for preconditioner in ["diagonal", "ic0", "block_jacobi"] {
             for max_pcg_iterations in [64, 128, 256] {
                 let mut world = loaded_fixed_joint_graph(100, branching, 8, false, false);
-                world.set_joint_global_velocity_pcg_for_bench(
-                    max_pcg_iterations,
-                    incomplete_cholesky_preconditioner,
-                );
+                match preconditioner {
+                    "diagonal" => {
+                        world.set_joint_global_velocity_pcg_for_bench(max_pcg_iterations, false)
+                    }
+                    "ic0" => {
+                        world.set_joint_global_velocity_pcg_for_bench(max_pcg_iterations, true)
+                    }
+                    "block_jacobi" => {
+                        world.set_joint_global_velocity_block_pcg_for_bench(max_pcg_iterations)
+                    }
+                    _ => unreachable!(),
+                }
                 let first_body = world.bodies().next().unwrap().0;
                 let force = world
                     .bodies()
@@ -700,7 +716,7 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
                 world.step(DT).unwrap();
                 let second = world.physics_step_metrics().joints;
                 println!(
-                    "graph={name} solver=global_pcg incomplete_cholesky_preconditioner={incomplete_cholesky_preconditioner} max_iterations={max_pcg_iterations} actual_iterations={} elapsed_us={} velocity_residual={:.6e}m/s/{:.6e}rad/s next_predicted_anchor={:.6e}m",
+                    "graph={name} solver=global_pcg preconditioner={preconditioner} max_iterations={max_pcg_iterations} actual_iterations={} elapsed_us={} velocity_residual={:.6e}m/s/{:.6e}rad/s next_predicted_anchor={:.6e}m",
                     first.velocity_pcg_iterations,
                     started.elapsed().as_micros(),
                     first.post_velocity_linear_residual_mps,

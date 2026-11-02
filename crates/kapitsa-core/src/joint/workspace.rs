@@ -260,8 +260,16 @@ impl JointWorkspace {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn velocity_pcg_rows_and_scratch_mut(
         &mut self,
-    ) -> (&mut [ConstraintRow], &mut super::solver::VelocityPcgScratch) {
-        (&mut self.rows, &mut self.velocity_pcg_scratch)
+    ) -> (
+        &mut [ConstraintRow],
+        &[usize],
+        &mut super::solver::VelocityPcgScratch,
+    ) {
+        (
+            &mut self.rows,
+            &self.row_joint_indices,
+            &mut self.velocity_pcg_scratch,
+        )
     }
 
     #[cfg(feature = "bench-internals")]

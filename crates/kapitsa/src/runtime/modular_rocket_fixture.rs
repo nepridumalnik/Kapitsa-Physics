@@ -349,6 +349,7 @@ mod stability_tests {
         coast_energy_reference_scale_j: f64,
         coast_energy_final_components: (f64, f64, f64),
         max_altitude: f64,
+        upper_root_final_velocity: Vec3,
         max_angular_speed: f64,
         separation_momentum_error: f64,
         surface_begins: usize,
@@ -430,6 +431,9 @@ mod stability_tests {
         let position_pcg_cap = std::env::var("KAPITSA_ROCKET_POSITION_PCG_CAP")
             .ok()
             .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"));
+        let velocity_pcg_preconditioner =
+            std::env::var("KAPITSA_ROCKET_VELOCITY_PCG_PRECONDITIONER")
+                .unwrap_or_else(|_| "ic0".to_owned());
         let mut all_stable = true;
         for part_count in [100, 200, 500, 1000] {
             let first = run_fixed_scenario_with_pcg(part_count, velocity_pcg_cap, position_pcg_cap);
@@ -460,7 +464,10 @@ mod stability_tests {
                 "parts={part_count} solver={} joints={} elapsed_ms={} completed_ticks={} scenario={} numerical_stability={} step_failure={:?} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} collision_free_coast_drift={:+.6e}% energy_reference_scale={:.6e}J coast_samples={} upper_coast_contacts={} first_upper_coast_contact={:?} coast_energy_start(T/R/U)={:.6e}/{:.6e}/{:.6e}J final(T/R/U)={:.6e}/{:.6e}/{:.6e}J upper_root_max_y={:.3}m omega={:.3}rad_s separation_dp={:.3e} contacts(begin/end/impact)={}/{}/{} breaks={}",
                 match (velocity_pcg_cap, position_pcg_cap) {
                     (None, None) => "scalar".to_owned(),
-                    (velocity, position) => format!("global_pcg_v{velocity:?}_p{position:?}"),
+                    (velocity, position) => format!(
+                        "global_pcg_{}_v{velocity:?}_p{position:?}",
+                        velocity_pcg_preconditioner
+                    ),
                 },
                 part_count - 1,
                 first.elapsed.as_millis(),
@@ -852,6 +859,9 @@ mod stability_tests {
             .ok()
             .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"))
             .unwrap_or(64);
+        let velocity_pcg_preconditioner =
+            std::env::var("KAPITSA_ROCKET_VELOCITY_PCG_PRECONDITIONER")
+                .unwrap_or_else(|_| "ic0".to_owned());
         for part_count in part_counts {
             let run = run_scenario(
                 part_count,
@@ -869,7 +879,7 @@ mod stability_tests {
                     .total_cmp(&right.post_joint_anchor_error_m)
             });
             println!(
-                "parts={part_count} solver=global_velocity_position_pcg_ic0 caps={velocity_cap}/{position_cap} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} peak_tick={:?} peak_pre_velocity={:.6e}m peak_post_position={:.6e}m peak_velocity_pcg_iterations={} peak_position_pcg_iterations={} max_altitude={:.3}m failure={:?}",
+                "parts={part_count} solver=global_velocity_position_pcg_{velocity_pcg_preconditioner} caps={velocity_cap}/{position_cap} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} peak_tick={:?} peak_pre_velocity={:.6e}m peak_post_position={:.6e}m peak_velocity_pcg_iterations={} peak_position_pcg_iterations={} max_altitude={:.3}m failure={:?}",
                 run.elapsed.as_millis(),
                 run.completed_ticks,
                 run.max_anchor_error,
@@ -925,6 +935,19 @@ mod stability_tests {
     #[test]
     #[ignore = "Release isolated coast energy check after stage separation"]
     fn diagnose_rocket_global_constraint_pcg_isolated_coast() {
+        let part_count = std::env::var("KAPITSA_ROCKET_DIAGNOSTIC_PARTS")
+            .ok()
+            .map(|value| value.parse::<usize>().expect("valid rocket part count"))
+            .unwrap_or(500);
+        let velocity_cap = std::env::var("KAPITSA_ROCKET_VELOCITY_PCG_CAP")
+            .ok()
+            .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"))
+            .unwrap_or(64);
+        let position_cap = std::env::var("KAPITSA_ROCKET_POSITION_PCG_CAP")
+            .ok()
+            .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"))
+            .unwrap_or(64);
+        let selected_mode = std::env::var("KAPITSA_ROCKET_DIAGNOSTIC_MODE").ok();
         for (mode, label) in [
             (
                 ScenarioMode::StagedThrustWithoutGravityOrContact,
@@ -939,19 +962,25 @@ mod stability_tests {
                 "staged_thrust_with_gravity_contacts_and_fuel",
             ),
         ] {
+            if selected_mode
+                .as_deref()
+                .is_some_and(|selected| selected != label)
+            {
+                continue;
+            }
             let run = run_scenario(
-                500,
+                part_count,
                 false,
                 mode,
                 false,
                 None,
                 false,
-                Some(64),
+                Some(velocity_cap),
                 None,
-                Some(64),
+                Some(position_cap),
             );
             println!(
-                "parts=500 mode={label} solver=global_velocity_position_pcg_ic0 elapsed_ms={} ticks={} joints_after_separation={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% surface_contacts(begin/end/impact)={}/{}/{} other_contact_events={} separation_dp={:.3e} failure={:?}",
+                "parts={part_count} mode={label} solver=global_velocity_position_pcg caps={velocity_cap}/{position_cap} elapsed_ms={} ticks={} joints_after_separation={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad max_altitude={:.3}m upper_root_final_vy={:.6e}m/s coast_energy_drift={:.4}% surface_contacts(begin/end/impact)={}/{}/{} other_contact_events={} separation_dp={:.3e} failure={:?}",
                 run.elapsed.as_millis(),
                 run.completed_ticks,
                 run.joints_after_separation,
@@ -959,6 +988,8 @@ mod stability_tests {
                 run.rms_anchor_error,
                 run.max_frame_error,
                 run.rms_frame_error,
+                run.max_altitude,
+                run.upper_root_final_velocity.y,
                 run.max_coast_energy_drift * 100.0,
                 run.surface_begins,
                 run.surface_ends,
@@ -968,7 +999,7 @@ mod stability_tests {
                 run.step_failure,
             );
             assert_eq!(run.completed_ticks, TICKS);
-            assert_eq!(run.joints_after_separation, 498);
+            assert_eq!(run.joints_after_separation, part_count - 2);
             assert_eq!(
                 run.surface_begins + run.surface_ends + run.surface_impacts,
                 0
@@ -1424,9 +1455,21 @@ mod stability_tests {
         assert!(!adaptive, "adaptive comparison requires bench-internals");
         #[cfg(feature = "bench-internals")]
         if let Some(max_iterations) = global_velocity_pcg_iterations {
-            rocket
-                .world
-                .set_joint_global_velocity_pcg_for_bench(max_iterations, true);
+            match std::env::var("KAPITSA_ROCKET_VELOCITY_PCG_PRECONDITIONER")
+                .as_deref()
+                .unwrap_or("ic0")
+            {
+                "ic0" => rocket
+                    .world
+                    .set_joint_global_velocity_pcg_for_bench(max_iterations, true),
+                "diagonal" => rocket
+                    .world
+                    .set_joint_global_velocity_pcg_for_bench(max_iterations, false),
+                "block_jacobi" => rocket
+                    .world
+                    .set_joint_global_velocity_block_pcg_for_bench(max_iterations),
+                other => panic!("unknown velocity PCG preconditioner: {other}"),
+            }
         }
         #[cfg(feature = "bench-internals")]
         if let Some(relaxation) = velocity_relaxation {
@@ -1534,6 +1577,7 @@ mod stability_tests {
         let mut coast_energy_final_components = (0.0, 0.0, 0.0);
         let mut max_altitude: f64 = 0.0;
         let mut max_angular_speed: f64 = 0.0;
+        let trace_flight = std::env::var_os("KAPITSA_ROCKET_TRACE_FLIGHT").is_some();
         let mut separation_momentum_error = 0.0;
         let mut surface_begins = 0;
         let mut surface_ends = 0;
@@ -1772,6 +1816,18 @@ mod stability_tests {
                 );
                 if id == rocket.upper_root {
                     max_altitude = max_altitude.max(position.y);
+                    if trace_flight
+                        && matches!(
+                            tick,
+                            11 | 12 | 23 | 24 | 53 | 54 | 55 | 71 | 72 | 89 | 90 | 120 | 179
+                        )
+                    {
+                        println!(
+                            "flight_trace tick={tick} y={:.6} vy={:.6}m/s",
+                            position.y,
+                            state.linear_velocity().y,
+                        );
+                    }
                 }
                 max_angular_speed = max_angular_speed.max(state.angular_velocity().length());
             }
@@ -1862,6 +1918,12 @@ mod stability_tests {
             coast_energy_reference_scale_j: coast_energy_reference_scale.unwrap_or_default(),
             coast_energy_final_components,
             max_altitude,
+            upper_root_final_velocity: rocket
+                .world
+                .body(rocket.upper_root)
+                .expect("upper root")
+                .state()
+                .linear_velocity(),
             max_angular_speed,
             separation_momentum_error,
             surface_begins,

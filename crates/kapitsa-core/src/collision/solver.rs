@@ -341,6 +341,8 @@ impl SolverWorkspace {
                     }
                     let incomplete_cholesky_preconditioner =
                         joint_solver_options.global_velocity_pcg_incomplete_cholesky();
+                    let block_jacobi_preconditioner =
+                        joint_solver_options.global_velocity_pcg_block_jacobi();
                     let pcg_iterations = JointSolver::solve_velocity_pcg(
                         joint_workspace,
                         bodies,
@@ -348,6 +350,7 @@ impl SolverWorkspace {
                         dt,
                         pcg_max_iterations,
                         incomplete_cholesky_preconditioner,
+                        block_jacobi_preconditioner,
                     )?;
                     #[cfg(feature = "bench-internals")]
                     if pcg_iterations.is_some() {

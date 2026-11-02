@@ -1741,6 +1741,13 @@ impl PhysicsWorld {
 
     #[cfg(feature = "bench-internals")]
     #[doc(hidden)]
+    pub fn set_joint_global_velocity_block_pcg_for_bench(&mut self, max_iterations: u32) {
+        self.collision_system
+            .set_joint_global_velocity_block_pcg_for_bench(max_iterations);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
     pub fn set_joint_velocity_relaxation_for_bench(&mut self, relaxation: f64) {
         self.collision_system
             .set_joint_velocity_relaxation_for_bench(relaxation);

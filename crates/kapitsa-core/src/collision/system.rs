@@ -185,6 +185,13 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_global_velocity_block_pcg_for_bench(&mut self, max_iterations: u32) {
+        self.joint_solver_options = self
+            .joint_solver_options
+            .with_global_velocity_pcg_block_jacobi(max_iterations);
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn set_joint_velocity_relaxation_for_bench(&mut self, relaxation: f64) {
         assert!(relaxation.is_finite() && relaxation > 0.0 && relaxation < 2.0);
         self.joint_solver_options = self

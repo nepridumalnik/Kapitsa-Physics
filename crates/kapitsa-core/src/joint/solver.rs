@@ -142,6 +142,7 @@ pub(crate) struct VelocityPcgScratch {
     system_prepared: bool,
     unavailable: bool,
     uses_incomplete_cholesky: bool,
+    uses_block_jacobi: bool,
     masses: Vec<SolverMass>,
     residual: Vec<f64>,
     diagonal: Vec<f64>,
@@ -154,6 +155,7 @@ pub(crate) struct VelocityPcgScratch {
     row_terms_by_body: Vec<Vec<VelocityRowTerm>>,
     lower_pattern: Vec<Vec<(usize, f64)>>,
     preconditioner: IncompleteCholeskyPreconditioner,
+    block_jacobi: Vec<VelocityBlockFactor>,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -164,6 +166,7 @@ impl VelocityPcgScratch {
             system_prepared: false,
             unavailable: false,
             uses_incomplete_cholesky: false,
+            uses_block_jacobi: false,
             masses: Vec::new(),
             residual: Vec::new(),
             diagonal: Vec::new(),
@@ -176,6 +179,7 @@ impl VelocityPcgScratch {
             row_terms_by_body: Vec::new(),
             lower_pattern: Vec::new(),
             preconditioner: IncompleteCholeskyPreconditioner::new(),
+            block_jacobi: Vec::new(),
         }
     }
 
@@ -184,6 +188,7 @@ impl VelocityPcgScratch {
         self.system_prepared = false;
         self.unavailable = false;
         self.uses_incomplete_cholesky = false;
+        self.uses_block_jacobi = false;
     }
 }
 
@@ -392,6 +397,7 @@ impl JointSolver {
         dt: f64,
         max_iterations: u32,
         incomplete_cholesky_preconditioner: bool,
+        block_jacobi_preconditioner: bool,
     ) -> Result<Option<usize>, CollisionError> {
         if !workspace.velocity_pcg_rows_prepared() {
             Self::prepare(workspace, bodies, joints, dt)?;
@@ -403,13 +409,15 @@ impl JointSolver {
             velocity_mps: 1.0e-4,
             angular_velocity_radps: 1.0e-4,
         };
-        let (rows, scratch) = workspace.velocity_pcg_rows_and_scratch_mut();
+        let (rows, row_joint_indices, scratch) = workspace.velocity_pcg_rows_and_scratch_mut();
         let iterations = solve_velocity_pcg_prepared(
             rows,
+            row_joint_indices,
             bodies,
             max_iterations as usize,
             tolerance,
             incomplete_cholesky_preconditioner,
+            block_jacobi_preconditioner,
             scratch,
         )?;
         if let Some(iterations) = iterations {
@@ -1187,12 +1195,15 @@ fn solve_position_pcg_prepared(
 }
 
 #[cfg(feature = "bench-internals")]
+#[allow(clippy::too_many_arguments)]
 fn solve_velocity_pcg_prepared(
     rows: &mut [ConstraintRow],
+    row_joint_indices: &[usize],
     bodies: &mut [SolverBody],
     max_iterations: usize,
     tolerance: super::JointTolerance,
     incomplete_cholesky_preconditioner: bool,
+    block_jacobi_preconditioner: bool,
     scratch: &mut VelocityPcgScratch,
 ) -> Result<Option<usize>, CollisionError> {
     if rows.is_empty() {
@@ -1257,6 +1268,22 @@ fn solve_velocity_pcg_prepared(
     }
     if !scratch.system_prepared {
         scratch.uses_incomplete_cholesky = incomplete_cholesky_preconditioner;
+        scratch.uses_block_jacobi = block_jacobi_preconditioner;
+        if incomplete_cholesky_preconditioner && block_jacobi_preconditioner {
+            scratch.unavailable = true;
+            return Ok(None);
+        }
+        if block_jacobi_preconditioner
+            && !build_velocity_block_jacobi_preconditioner(
+                rows,
+                row_joint_indices,
+                &scratch.masses,
+                &mut scratch.block_jacobi,
+            )?
+        {
+            scratch.unavailable = true;
+            return Ok(None);
+        }
         if incomplete_cholesky_preconditioner
             && !build_incomplete_cholesky_preconditioner_into(
                 rows,
@@ -1285,10 +1312,11 @@ fn solve_velocity_pcg_prepared(
     resize_f64_buffer(&mut scratch.preconditioned, rows.len())?;
     resize_f64_buffer(&mut scratch.direction, rows.len())?;
     resize_f64_buffer(&mut scratch.product, rows.len())?;
-    apply_velocity_preconditioner(
+    apply_velocity_pcg_preconditioner(
         &scratch.residual,
         &scratch.diagonal,
         preconditioner,
+        scratch.uses_block_jacobi.then_some(&scratch.block_jacobi),
         &mut scratch.preconditioned,
     )?;
     scratch.direction.copy_from_slice(&scratch.preconditioned);
@@ -1329,10 +1357,11 @@ fn solve_velocity_pcg_prepared(
             break;
         }
 
-        apply_velocity_preconditioner(
+        apply_velocity_pcg_preconditioner(
             &scratch.residual,
             &scratch.diagonal,
             preconditioner,
+            scratch.uses_block_jacobi.then_some(&scratch.block_jacobi),
             &mut scratch.preconditioned,
         )?;
         let next_residual_product =
@@ -1400,6 +1429,138 @@ struct VelocityRowTerm {
     row: usize,
     linear: Vec3,
     angular: Vec3,
+}
+
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy)]
+struct VelocityBlockFactor {
+    start: usize,
+    len: usize,
+    lower: [f64; 36],
+}
+
+#[cfg(feature = "bench-internals")]
+fn build_velocity_block_jacobi_preconditioner(
+    rows: &[ConstraintRow],
+    row_joint_indices: &[usize],
+    masses: &[SolverMass],
+    blocks: &mut Vec<VelocityBlockFactor>,
+) -> Result<bool, CollisionError> {
+    if row_joint_indices.len() != rows.len() {
+        return Ok(false);
+    }
+    let block_count = row_joint_indices
+        .iter()
+        .enumerate()
+        .filter(|(index, owner)| *index == 0 || row_joint_indices[*index - 1] != **owner)
+        .count();
+    if block_count > blocks.capacity() {
+        blocks
+            .try_reserve_exact(block_count - blocks.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    }
+    blocks.clear();
+    let mut start = 0;
+    while start < rows.len() {
+        let owner = row_joint_indices[start];
+        let end = row_joint_indices[start..]
+            .iter()
+            .position(|candidate| *candidate != owner)
+            .map_or(rows.len(), |offset| start + offset);
+        let len = end - start;
+        if len == 0 || len > 6 {
+            return Ok(false);
+        }
+        let mut block = VelocityBlockFactor {
+            start,
+            len,
+            lower: [0.0; 36],
+        };
+        for row in 0..len {
+            let row_i = rows[start + row];
+            for column in 0..=row {
+                let row_j = rows[start + column];
+                if row_i.body_a != row_j.body_a || row_i.body_b != row_j.body_b {
+                    return Ok(false);
+                }
+                let mass_a = *masses
+                    .get(row_i.body_a)
+                    .ok_or(CollisionError::InvalidContact)?;
+                let mass_b = *masses
+                    .get(row_i.body_b)
+                    .ok_or(CollisionError::InvalidContact)?;
+                let mut value = mass_a.cross(
+                    row_i.linear_a,
+                    row_i.angular_a,
+                    row_j.linear_a,
+                    row_j.angular_a,
+                )? + mass_b.cross(
+                    row_i.linear_b,
+                    row_i.angular_b,
+                    row_j.linear_b,
+                    row_j.angular_b,
+                )?;
+                for previous in 0..column {
+                    value -= block.lower[row * 6 + previous] * block.lower[column * 6 + previous];
+                }
+                if !value.is_finite() {
+                    return Err(CollisionError::ArithmeticOverflow);
+                }
+                if row == column {
+                    if value <= f64::MIN_POSITIVE {
+                        return Ok(false);
+                    }
+                    block.lower[row * 6 + column] = value.sqrt();
+                } else {
+                    let factor = value / block.lower[column * 6 + column];
+                    if !factor.is_finite() {
+                        return Ok(false);
+                    }
+                    block.lower[row * 6 + column] = factor;
+                }
+            }
+        }
+        blocks.push(block);
+        start = end;
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "bench-internals")]
+fn apply_velocity_pcg_preconditioner(
+    residual: &[f64],
+    diagonal: &[f64],
+    incomplete_cholesky: Option<&IncompleteCholeskyPreconditioner>,
+    block_jacobi: Option<&[VelocityBlockFactor]>,
+    output: &mut [f64],
+) -> Result<(), CollisionError> {
+    if let Some(blocks) = block_jacobi {
+        if residual.len() != output.len() {
+            return Err(CollisionError::InvalidContact);
+        }
+        for block in blocks {
+            for row in 0..block.len {
+                let mut value = residual[block.start + row];
+                for column in 0..row {
+                    value -= block.lower[row * 6 + column] * output[block.start + column];
+                }
+                output[block.start + row] = value / block.lower[row * 6 + row];
+            }
+            for row in (0..block.len).rev() {
+                let mut value = output[block.start + row];
+                for lower_row in row + 1..block.len {
+                    value -= block.lower[lower_row * 6 + row] * output[block.start + lower_row];
+                }
+                output[block.start + row] = value / block.lower[row * 6 + row];
+                if !output[block.start + row].is_finite() {
+                    return Err(CollisionError::ArithmeticOverflow);
+                }
+            }
+        }
+        Ok(())
+    } else {
+        apply_velocity_preconditioner(residual, diagonal, incomplete_cholesky, output)
+    }
 }
 
 #[cfg(feature = "bench-internals")]

@@ -89,6 +89,8 @@ pub(crate) struct JointSolverOptions {
     #[cfg(feature = "bench-internals")]
     global_velocity_pcg_incomplete_cholesky: bool,
     #[cfg(feature = "bench-internals")]
+    global_velocity_pcg_block_jacobi: bool,
+    #[cfg(feature = "bench-internals")]
     global_position_pcg_max_iterations: u32,
     #[cfg(feature = "bench-internals")]
     global_position_pcg_incomplete_cholesky: bool,
@@ -109,6 +111,8 @@ impl JointSolverOptions {
             global_velocity_pcg_max_iterations: 0,
             #[cfg(feature = "bench-internals")]
             global_velocity_pcg_incomplete_cholesky: false,
+            #[cfg(feature = "bench-internals")]
+            global_velocity_pcg_block_jacobi: false,
             #[cfg(feature = "bench-internals")]
             global_position_pcg_max_iterations: 0,
             #[cfg(feature = "bench-internals")]
@@ -191,6 +195,15 @@ impl JointSolverOptions {
     ) -> Self {
         self.global_velocity_pcg_max_iterations = max;
         self.global_velocity_pcg_incomplete_cholesky = incomplete_cholesky_preconditioner;
+        self.global_velocity_pcg_block_jacobi = false;
+        self
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn with_global_velocity_pcg_block_jacobi(mut self, max: u32) -> Self {
+        self.global_velocity_pcg_max_iterations = max;
+        self.global_velocity_pcg_incomplete_cholesky = false;
+        self.global_velocity_pcg_block_jacobi = true;
         self
     }
 
@@ -202,6 +215,11 @@ impl JointSolverOptions {
     #[cfg(feature = "bench-internals")]
     pub(crate) const fn global_velocity_pcg_incomplete_cholesky(self) -> bool {
         self.global_velocity_pcg_incomplete_cholesky
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn global_velocity_pcg_block_jacobi(self) -> bool {
+        self.global_velocity_pcg_block_jacobi
     }
 
     #[cfg(feature = "bench-internals")]
