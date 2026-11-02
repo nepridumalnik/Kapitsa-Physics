@@ -349,6 +349,8 @@ mod stability_tests {
         max_coast_energy_drift: f64,
         max_coast_energy_drift_tick: Option<usize>,
         final_coast_energy_signed_drift: f64,
+        #[cfg(feature = "bench-internals")]
+        legacy_surface_reference_max_drift: f64,
         coast_energy_start_components: (f64, f64, f64),
         coast_energy_reference_scale_j: f64,
         coast_energy_final_components: (f64, f64, f64),
@@ -1153,10 +1155,11 @@ mod stability_tests {
             Some(64),
         );
         println!(
-            "parts=500 mode=full solver=global_velocity_position_pcg_ic0 elapsed_ms={} ticks={} energy_drift_max={:.4}% at_tick={:?} final_signed={:+.4}% start_energy(T/R/U)={:.6e}/{:.6e}/{:.6e}J final_energy(T/R/U)={:.6e}/{:.6e}/{:.6e}J anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad surface_contacts={}/{}/{} post_cutoff_surface_events={} post_cutoff_upper_surface_events={} upper_contact_ticks={:?} other_contact_events={} altitude_max={:.3}m failure={:?}",
+            "parts=500 mode=full solver=global_velocity_position_pcg_ic0 elapsed_ms={} ticks={} physical_energy_drift_max={:.9e}% legacy_surface_reference_drift_max={:.9e}% at_tick={:?} final_signed={:+.9e}% start_energy(T/R/U)={:.6e}/{:.6e}/{:.6e}J final_energy(T/R/U)={:.6e}/{:.6e}/{:.6e}J anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad surface_contacts={}/{}/{} post_cutoff_surface_events={} post_cutoff_upper_surface_events={} upper_contact_ticks={:?} other_contact_events={} altitude_max={:.3}m failure={:?}",
             run.elapsed.as_millis(),
             run.completed_ticks,
             run.max_coast_energy_drift * 100.0,
+            run.legacy_surface_reference_max_drift * 100.0,
             run.max_coast_energy_drift_tick,
             run.final_coast_energy_signed_drift * 100.0,
             run.coast_energy_start_components.0,
@@ -1874,6 +1877,10 @@ mod stability_tests {
         let mut max_coast_energy_drift_tick = None;
         let mut final_coast_energy_signed_drift: f64 = 0.0;
         let mut coast_energy_start = None;
+        #[cfg(feature = "bench-internals")]
+        let mut legacy_surface_reference_start = None;
+        #[cfg(feature = "bench-internals")]
+        let mut legacy_surface_reference_max_drift: f64 = 0.0;
         let mut coast_energy_start_components = None;
         let mut coast_energy_reference_scale = None;
         let mut coast_energy_final_components = (0.0, 0.0, 0.0);
@@ -2163,6 +2170,34 @@ mod stability_tests {
                 });
                 let signed_drift = (energy - initial) / reference_scale.max(1.0);
                 let drift = signed_drift.abs();
+                #[cfg(feature = "bench-internals")]
+                {
+                    let surface_reference_offset =
+                        rocket.world.central_gravity().map_or(0.0, |gravity| {
+                            let coast_mass = energy_parts
+                                .iter()
+                                .map(|id| {
+                                    rocket
+                                        .world
+                                        .body(*id)
+                                        .expect("coast energy body")
+                                        .physics()
+                                        .mass()
+                                        .expect("coast energy mass")
+                                        .mass()
+                                })
+                                .sum::<f64>();
+                            gravity.gravitational_parameter() * coast_mass
+                                / gravity.center().length()
+                        });
+                    let surface_reference_energy = energy + surface_reference_offset;
+                    let surface_reference_initial =
+                        *legacy_surface_reference_start.get_or_insert(surface_reference_energy);
+                    legacy_surface_reference_max_drift = legacy_surface_reference_max_drift.max(
+                        (surface_reference_energy - surface_reference_initial).abs()
+                            / surface_reference_initial.abs().max(1.0),
+                    );
+                }
                 coast_energy_trace.push((tick, energy));
                 final_coast_energy_signed_drift = signed_drift;
                 coast_energy_final_components = components;
@@ -2231,6 +2266,8 @@ mod stability_tests {
             max_coast_energy_drift,
             max_coast_energy_drift_tick,
             final_coast_energy_signed_drift,
+            #[cfg(feature = "bench-internals")]
+            legacy_surface_reference_max_drift,
             coast_energy_start_components: coast_energy_start_components.unwrap_or_default(),
             coast_energy_reference_scale_j: coast_energy_reference_scale.unwrap_or_default(),
             coast_energy_final_components,
