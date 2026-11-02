@@ -47,7 +47,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S37 | Adaptive timestep без повторных SPD solve | NOT AUDITED |
 | S38 | Уменьшение затрат query API | NOT AUDITED |
 | S39 | Эффективные snapshots | NOT AUDITED |
-| S40 | Буферизация событий | NOT AUDITED |
+| S40 | Буферизация событий | MITIGATED — event batches share nonempty immutable buffers across broadcast subscribers; initial publication still copies world events |
 | S41 | Graph Coloring внутри solver islands | NOT AUDITED |
 | S42 | Rigid Clusters / Compound Bodies | NOT AUDITED |
 | S43 | Featherstone ABA | BLOCKED — mathematical and numerical validation required before integration |
