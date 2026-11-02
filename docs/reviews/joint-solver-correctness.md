@@ -30,3 +30,7 @@ The 3×3 block solver is present behind non-default controls and retains a scala
 ## FixedJoint point basis correction
 
 The three translational rows now project `d` onto world X/Y/Z instead of frame-A axes. The Jacobian remains `(-e, -(r_a × e), e, r_b × e)`; `e` is constant, so it is the derivative of the projected position error. All three components still constrain the same world-space vector, and angular rows retain their existing basis. No dynamic validation has been run; the effect on finite-iteration behavior and the rocket scenario is unknown.
+
+## Block preparation
+
+The experimental Block3 assembly evaluates the six independent entries of the symmetric `J M^-1 J^T` matrix and mirrors them, instead of evaluating nine entries independently. This reduces repeated cross-mass evaluations and avoids numerical asymmetry in the assembled matrix. The solver still checks positive definiteness and retains its existing scalar fallback. This does not establish the conditioning, finite-angle angular Jacobian or production suitability of the block path; no speedup is claimed without measurement.
