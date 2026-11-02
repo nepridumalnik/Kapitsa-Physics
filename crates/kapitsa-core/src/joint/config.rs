@@ -1,9 +1,46 @@
 /// Internal joint-solver strategy selection. Public physics configuration
 /// stays stable while individual solver strategies are validated.
 use super::JointImpulseCache;
-use super::diagnostics::{IterationRange, JointTolerance};
 use super::reaction::ReactionMode;
 use super::warm_start::WarmStartConfig;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct JointTolerance {
+    pub(crate) linear_m: f64,
+    pub(crate) angular_rad: f64,
+    pub(crate) velocity_mps: f64,
+    pub(crate) angular_velocity_radps: f64,
+}
+
+impl JointTolerance {
+    pub(crate) fn validate(self) -> bool {
+        [
+            self.linear_m,
+            self.angular_rad,
+            self.velocity_mps,
+            self.angular_velocity_radps,
+        ]
+        .into_iter()
+        .all(|value| value.is_finite() && value > 0.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IterationRange {
+    pub(crate) min: u32,
+    pub(crate) max: u32,
+}
+
+impl IterationRange {
+    #[allow(dead_code)]
+    pub(crate) const fn new(min: u32, max: u32) -> Self {
+        Self { min, max }
+    }
+
+    pub(crate) const fn is_valid(self) -> bool {
+        self.min > 0 && self.min <= self.max
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum JointProjection {
@@ -141,6 +178,29 @@ impl<'a> JointSolverStep<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adaptive_iteration_ranges_and_tolerances_validate() {
+        assert!(IterationRange::new(2, 8).is_valid());
+        assert!(IterationRange::new(1, 1).is_valid());
+        assert!(!IterationRange::new(0, 1).is_valid());
+        assert!(!IterationRange::new(4, 3).is_valid());
+
+        let tolerance = JointTolerance {
+            linear_m: 1.0e-3,
+            angular_rad: 1.0e-3,
+            velocity_mps: 1.0e-2,
+            angular_velocity_radps: 1.0e-2,
+        };
+        assert!(tolerance.validate());
+        assert!(
+            !JointTolerance {
+                linear_m: f64::NAN,
+                ..tolerance
+            }
+            .validate()
+        );
+    }
 
     #[test]
     fn legacy_solver_options_use_velocity_only_reactions() {

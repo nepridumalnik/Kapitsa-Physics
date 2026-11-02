@@ -1,133 +1,34 @@
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(dead_code)]
-pub(crate) struct JointTolerance {
-    pub(crate) linear_m: f64,
-    pub(crate) angular_rad: f64,
-    pub(crate) velocity_mps: f64,
-    pub(crate) angular_velocity_radps: f64,
-}
-
-#[allow(dead_code)]
-impl JointTolerance {
-    pub(crate) fn validate(self) -> bool {
-        [
-            self.linear_m,
-            self.angular_rad,
-            self.velocity_mps,
-            self.angular_velocity_radps,
-        ]
-        .into_iter()
-        .all(|value| value.is_finite() && value > 0.0)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct JointResidual {
-    pub(crate) max_linear_m: f64,
-    pub(crate) max_angular_rad: f64,
-    pub(crate) max_velocity_mps: f64,
-    pub(crate) max_angular_velocity_radps: f64,
-}
-
-impl JointResidual {
-    pub(crate) const ZERO: Self = Self {
-        max_linear_m: 0.0,
-        max_angular_rad: 0.0,
-        max_velocity_mps: 0.0,
-        max_angular_velocity_radps: 0.0,
-    };
-
-    pub(crate) fn is_valid(self) -> bool {
-        [
-            self.max_linear_m,
-            self.max_angular_rad,
-            self.max_velocity_mps,
-            self.max_angular_velocity_radps,
-        ]
-        .into_iter()
-        .all(|value| value.is_finite() && value >= 0.0)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn converged(self, tolerance: JointTolerance) -> bool {
-        self.is_valid()
-            && tolerance.validate()
-            && self.max_linear_m <= tolerance.linear_m
-            && self.max_angular_rad <= tolerance.angular_rad
-            && self.max_velocity_mps <= tolerance.velocity_mps
-            && self.max_angular_velocity_radps <= tolerance.angular_velocity_radps
-    }
-
-    pub(crate) fn position_converged(self, tolerance: JointTolerance) -> bool {
-        self.is_valid()
-            && tolerance.validate()
-            && self.max_linear_m <= tolerance.linear_m
-            && self.max_angular_rad <= tolerance.angular_rad
-    }
-
-    pub(crate) fn velocity_converged(self, tolerance: JointTolerance) -> bool {
-        self.is_valid()
-            && tolerance.validate()
-            && self.max_velocity_mps <= tolerance.velocity_mps
-            && self.max_angular_velocity_radps <= tolerance.angular_velocity_radps
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct IterationRange {
-    pub(crate) min: u32,
-    pub(crate) max: u32,
-}
-
-#[allow(dead_code)]
-impl IterationRange {
-    pub(crate) const fn new(min: u32, max: u32) -> Self {
-        Self { min, max }
-    }
-
-    pub(crate) const fn is_valid(self) -> bool {
-        self.min > 0 && self.min <= self.max
-    }
-}
-
-/// Project a scalar constraint gradient onto its active multiplier bounds.
-pub(super) fn projected_kkt_residual(
-    gradient: f64,
-    multiplier: f64,
-    lower: f64,
-    upper: f64,
-) -> f64 {
-    if lower == upper {
-        gradient.abs()
-    } else if multiplier <= lower {
-        (-gradient).max(0.0)
-    } else if multiplier >= upper {
-        gradient.max(0.0)
-    } else {
-        gradient.abs()
-    }
-}
+//! Benchmark-only work counters owned by the joint solver.
 
 /// Work performed by the joint solver during one physics step.
-#[cfg(feature = "bench-internals")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JointSolverMetrics {
+    /// Number of scalar constraint rows prepared.
     pub prepared_rows: u64,
+    /// Number of cached inverse inertia tensors recomputed.
     pub inverse_inertia_updates: u64,
+    /// Solver mass cache hits retained for the joint stress benchmark.
     pub solver_mass_cache_hits: u64,
+    /// Solver mass cache misses retained for the joint stress benchmark.
     pub solver_mass_cache_misses: u64,
+    /// Number of scalar constraint rows processed by the solver.
     pub scalar_rows_solved: u64,
+    /// Number of rows processed by the block solver.
     pub block_rows_solved: u64,
+    /// Number of rows that used scalar fallback from a block group.
     pub block_fallback_rows: u64,
+    /// Number of cached velocity impulses actually applied.
     pub velocity_warm_starts: u64,
+    /// Graph-color batches actually executed; zero if no colored pass runs.
     pub color_batches_processed: u64,
+    /// Maximum graph colors used by an island; zero if no colored pass runs.
     pub max_colors_per_island: u32,
+    /// Number of position constraint sweeps actually executed.
     pub position_sweeps: u64,
+    /// Number of velocity constraint sweeps actually executed.
     pub velocity_sweeps: u64,
 }
 
-#[cfg(feature = "bench-internals")]
 impl JointSolverMetrics {
     pub(crate) const ZERO: Self = Self {
         prepared_rows: 0,
@@ -176,7 +77,7 @@ impl JointSolverMetrics {
     }
 }
 
-#[cfg(all(test, feature = "bench-internals"))]
+#[cfg(test)]
 mod metrics_tests {
     use super::JointSolverMetrics;
 
@@ -241,28 +142,44 @@ mod metrics_tests {
     fn joint_solver_metrics_saturates() {
         let mut metrics = JointSolverMetrics {
             prepared_rows: u64::MAX,
+            inverse_inertia_updates: u64::MAX,
             solver_mass_cache_hits: u64::MAX,
             solver_mass_cache_misses: u64::MAX,
             scalar_rows_solved: u64::MAX,
+            block_rows_solved: u64::MAX,
+            block_fallback_rows: u64::MAX,
+            velocity_warm_starts: u64::MAX,
             color_batches_processed: u64::MAX,
             max_colors_per_island: u32::MAX,
-            ..JointSolverMetrics::default()
+            position_sweeps: u64::MAX,
+            velocity_sweeps: u64::MAX,
         };
         metrics.accumulate(JointSolverMetrics {
             prepared_rows: 1,
+            inverse_inertia_updates: 1,
             solver_mass_cache_hits: 1,
             solver_mass_cache_misses: 1,
             scalar_rows_solved: 1,
+            block_rows_solved: 1,
+            block_fallback_rows: 1,
+            velocity_warm_starts: 1,
             color_batches_processed: 1,
             max_colors_per_island: 1,
-            ..JointSolverMetrics::default()
+            position_sweeps: 1,
+            velocity_sweeps: 1,
         });
         assert_eq!(metrics.prepared_rows, u64::MAX);
+        assert_eq!(metrics.inverse_inertia_updates, u64::MAX);
         assert_eq!(metrics.solver_mass_cache_hits, u64::MAX);
         assert_eq!(metrics.solver_mass_cache_misses, u64::MAX);
         assert_eq!(metrics.scalar_rows_solved, u64::MAX);
+        assert_eq!(metrics.block_rows_solved, u64::MAX);
+        assert_eq!(metrics.block_fallback_rows, u64::MAX);
+        assert_eq!(metrics.velocity_warm_starts, u64::MAX);
         assert_eq!(metrics.color_batches_processed, u64::MAX);
         assert_eq!(metrics.max_colors_per_island, u32::MAX);
+        assert_eq!(metrics.position_sweeps, u64::MAX);
+        assert_eq!(metrics.velocity_sweeps, u64::MAX);
     }
 
     #[test]
@@ -299,115 +216,5 @@ mod metrics_tests {
             reverse.accumulate(island);
         }
         assert_eq!(forward, reverse);
-    }
-}
-
-#[cfg(test)]
-mod residual_tests {
-    use super::{IterationRange, JointResidual, JointTolerance, projected_kkt_residual};
-
-    #[test]
-    fn tolerances_and_iteration_ranges_reject_invalid_values() {
-        assert!(
-            JointTolerance {
-                linear_m: 1.0e-3,
-                angular_rad: 1.0e-3,
-                velocity_mps: 1.0e-2,
-                angular_velocity_radps: 1.0e-2,
-            }
-            .validate()
-        );
-        assert!(
-            !JointTolerance {
-                linear_m: 0.0,
-                angular_rad: 1.0,
-                velocity_mps: 1.0,
-                angular_velocity_radps: 1.0,
-            }
-            .validate()
-        );
-        assert!(
-            !JointTolerance {
-                linear_m: f64::NAN,
-                angular_rad: 1.0,
-                velocity_mps: 1.0,
-                angular_velocity_radps: 1.0,
-            }
-            .validate()
-        );
-        assert!(IterationRange::new(2, 8).is_valid());
-        assert!(IterationRange::new(1, 1).is_valid());
-        assert!(!IterationRange::new(0, 1).is_valid());
-        assert!(!IterationRange::new(4, 3).is_valid());
-    }
-
-    #[test]
-    fn convergence_rejects_non_finite_residuals_and_keeps_units_independent() {
-        let tolerance = JointTolerance {
-            linear_m: 1.0e-3,
-            angular_rad: 1.0e-2,
-            velocity_mps: 1.0e-2,
-            angular_velocity_radps: 1.0e-1,
-        };
-        let residual = JointResidual {
-            max_linear_m: 5.0e-4,
-            max_angular_rad: 5.0e-3,
-            max_velocity_mps: 5.0e-3,
-            max_angular_velocity_radps: 5.0e-2,
-        };
-        assert!(residual.converged(tolerance));
-        assert!(
-            !JointResidual {
-                max_linear_m: 2.0e-3,
-                ..residual
-            }
-            .converged(tolerance)
-        );
-        assert!(
-            !JointResidual {
-                max_angular_velocity_radps: f64::INFINITY,
-                ..residual
-            }
-            .converged(tolerance)
-        );
-        assert!(residual.position_converged(tolerance));
-        assert!(residual.velocity_converged(tolerance));
-        assert!(
-            JointResidual {
-                max_velocity_mps: 1.0,
-                ..residual
-            }
-            .position_converged(tolerance)
-        );
-        assert!(
-            !JointResidual {
-                max_linear_m: 1.0,
-                ..residual
-            }
-            .position_converged(tolerance)
-        );
-        assert!(
-            !JointResidual {
-                max_velocity_mps: 1.0,
-                ..residual
-            }
-            .velocity_converged(tolerance)
-        );
-    }
-
-    #[test]
-    fn projected_residual_obeys_lower_upper_and_bilateral_kkt_conditions() {
-        assert_eq!(projected_kkt_residual(1.0, 0.0, 0.0, f64::INFINITY), 0.0);
-        assert_eq!(projected_kkt_residual(-1.0, 0.0, 0.0, f64::INFINITY), 1.0);
-        assert_eq!(
-            projected_kkt_residual(-1.0, 0.0, f64::NEG_INFINITY, 0.0),
-            0.0
-        );
-        assert_eq!(
-            projected_kkt_residual(1.0, 0.0, f64::NEG_INFINITY, 0.0),
-            1.0
-        );
-        assert_eq!(projected_kkt_residual(-2.0, 0.0, -1.0, 1.0), 2.0);
-        assert_eq!(projected_kkt_residual(2.0, 0.0, 1.0, 1.0), 2.0);
     }
 }

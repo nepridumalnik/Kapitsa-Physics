@@ -1,4 +1,3 @@
-use super::diagnostics::{JointResidual, projected_kkt_residual};
 use super::row::RowDimension;
 #[cfg(test)]
 use super::workspace::JointSolverCall;
@@ -15,6 +14,70 @@ use crate::{
     transform::Transform,
 };
 use kapitsa_math::{Quat, Vec3};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct JointResidual {
+    pub(crate) max_linear_m: f64,
+    pub(crate) max_angular_rad: f64,
+    pub(crate) max_velocity_mps: f64,
+    pub(crate) max_angular_velocity_radps: f64,
+}
+
+impl JointResidual {
+    pub(crate) const ZERO: Self = Self {
+        max_linear_m: 0.0,
+        max_angular_rad: 0.0,
+        max_velocity_mps: 0.0,
+        max_angular_velocity_radps: 0.0,
+    };
+
+    pub(crate) fn is_valid(self) -> bool {
+        [
+            self.max_linear_m,
+            self.max_angular_rad,
+            self.max_velocity_mps,
+            self.max_angular_velocity_radps,
+        ]
+        .into_iter()
+        .all(|value| value.is_finite() && value >= 0.0)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn converged(self, tolerance: super::JointTolerance) -> bool {
+        self.is_valid()
+            && tolerance.validate()
+            && self.max_linear_m <= tolerance.linear_m
+            && self.max_angular_rad <= tolerance.angular_rad
+            && self.max_velocity_mps <= tolerance.velocity_mps
+            && self.max_angular_velocity_radps <= tolerance.angular_velocity_radps
+    }
+
+    pub(crate) fn position_converged(self, tolerance: super::JointTolerance) -> bool {
+        self.is_valid()
+            && tolerance.validate()
+            && self.max_linear_m <= tolerance.linear_m
+            && self.max_angular_rad <= tolerance.angular_rad
+    }
+
+    pub(crate) fn velocity_converged(self, tolerance: super::JointTolerance) -> bool {
+        self.is_valid()
+            && tolerance.validate()
+            && self.max_velocity_mps <= tolerance.velocity_mps
+            && self.max_angular_velocity_radps <= tolerance.angular_velocity_radps
+    }
+}
+
+fn projected_kkt_residual(gradient: f64, multiplier: f64, lower: f64, upper: f64) -> f64 {
+    if lower == upper {
+        gradient.abs()
+    } else if multiplier <= lower {
+        (-gradient).max(0.0)
+    } else if multiplier >= upper {
+        gradient.max(0.0)
+    } else {
+        gradient.abs()
+    }
+}
 
 /// Shared sequential Gauss–Seidel/XPBD solver for prepared joint rows.
 pub(crate) struct JointSolver;
@@ -4252,5 +4315,81 @@ mod tests {
         let separation = bodies[1].state().transform().translation().x
             - bodies[0].state().transform().translation().x;
         assert!(separation > 0.99, "driven separation={separation}");
+    }
+}
+
+#[cfg(test)]
+mod residual_tests {
+    use super::{JointResidual, projected_kkt_residual};
+    use crate::joint::JointTolerance;
+
+    #[test]
+    fn convergence_rejects_non_finite_residuals_and_keeps_units_independent() {
+        let tolerance = JointTolerance {
+            linear_m: 1.0e-3,
+            angular_rad: 1.0e-2,
+            velocity_mps: 1.0e-2,
+            angular_velocity_radps: 1.0e-1,
+        };
+        let residual = JointResidual {
+            max_linear_m: 5.0e-4,
+            max_angular_rad: 5.0e-3,
+            max_velocity_mps: 5.0e-3,
+            max_angular_velocity_radps: 5.0e-2,
+        };
+        assert!(residual.converged(tolerance));
+        assert!(
+            !JointResidual {
+                max_linear_m: 2.0e-3,
+                ..residual
+            }
+            .converged(tolerance)
+        );
+        assert!(
+            !JointResidual {
+                max_angular_velocity_radps: f64::INFINITY,
+                ..residual
+            }
+            .converged(tolerance)
+        );
+        assert!(residual.position_converged(tolerance));
+        assert!(residual.velocity_converged(tolerance));
+        assert!(
+            JointResidual {
+                max_velocity_mps: 1.0,
+                ..residual
+            }
+            .position_converged(tolerance)
+        );
+        assert!(
+            !JointResidual {
+                max_linear_m: 1.0,
+                ..residual
+            }
+            .position_converged(tolerance)
+        );
+        assert!(
+            !JointResidual {
+                max_velocity_mps: 1.0,
+                ..residual
+            }
+            .velocity_converged(tolerance)
+        );
+    }
+
+    #[test]
+    fn projected_residual_obeys_lower_upper_and_bilateral_kkt_conditions() {
+        assert_eq!(projected_kkt_residual(1.0, 0.0, 0.0, f64::INFINITY), 0.0);
+        assert_eq!(projected_kkt_residual(-1.0, 0.0, 0.0, f64::INFINITY), 1.0);
+        assert_eq!(
+            projected_kkt_residual(-1.0, 0.0, f64::NEG_INFINITY, 0.0),
+            0.0
+        );
+        assert_eq!(
+            projected_kkt_residual(1.0, 0.0, f64::NEG_INFINITY, 0.0),
+            1.0
+        );
+        assert_eq!(projected_kkt_residual(-2.0, 0.0, -1.0, 1.0), 2.0);
+        assert_eq!(projected_kkt_residual(2.0, 0.0, 1.0, 1.0), 2.0);
     }
 }

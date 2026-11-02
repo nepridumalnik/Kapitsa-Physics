@@ -42,7 +42,7 @@ pub(crate) struct JointWorkspace {
     break_events: Vec<JointBreakEvent>,
     #[cfg(feature = "bench-internals")]
     metrics: super::diagnostics::JointSolverMetrics,
-    residual: super::diagnostics::JointResidual,
+    residual: super::solver::JointResidual,
     #[cfg(test)]
     solver_calls: Vec<JointSolverCall>,
 }
@@ -83,7 +83,7 @@ impl JointWorkspace {
             break_events: Vec::new(),
             #[cfg(feature = "bench-internals")]
             metrics: super::diagnostics::JointSolverMetrics::ZERO,
-            residual: super::diagnostics::JointResidual::ZERO,
+            residual: super::solver::JointResidual::ZERO,
             #[cfg(test)]
             solver_calls: Vec::new(),
         }
@@ -104,7 +104,7 @@ impl JointWorkspace {
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
         }
-        self.residual = super::diagnostics::JointResidual::ZERO;
+        self.residual = super::solver::JointResidual::ZERO;
         for row in &mut self.rows {
             row.accumulated_multiplier = 0.0;
             row.accumulated_impulse = 0.0;
@@ -132,7 +132,7 @@ impl JointWorkspace {
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
         }
-        self.residual = super::diagnostics::JointResidual::ZERO;
+        self.residual = super::solver::JointResidual::ZERO;
     }
 
     pub(crate) fn begin_prepare(&mut self) {
@@ -417,11 +417,11 @@ impl JointWorkspace {
         self.metrics = metrics;
     }
 
-    pub(crate) fn set_residual(&mut self, residual: super::diagnostics::JointResidual) {
+    pub(crate) fn set_residual(&mut self, residual: super::solver::JointResidual) {
         self.residual = residual;
     }
 
-    pub(crate) fn residual(&self) -> super::diagnostics::JointResidual {
+    pub(crate) fn residual(&self) -> super::solver::JointResidual {
         self.residual
     }
 
