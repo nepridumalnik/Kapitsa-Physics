@@ -371,6 +371,8 @@ mod stability_tests {
         first_frame_limit_tick: Option<usize>,
         velocity_pcg_converged_calls: u64,
         velocity_pcg_iteration_limit_calls: u64,
+        velocity_pcg_iterations: u64,
+        position_pcg_iterations: u64,
         velocity_pcg_linear_residual_mps: f64,
         velocity_pcg_angular_residual_radps: f64,
         #[cfg(feature = "bench-internals")]
@@ -435,14 +437,26 @@ mod stability_tests {
         let position_pcg_cap = std::env::var("KAPITSA_ROCKET_POSITION_PCG_CAP")
             .ok()
             .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"));
+        let outer_velocity_sweeps = std::env::var("KAPITSA_ROCKET_OUTER_VELOCITY_SWEEPS")
+            .ok()
+            .map(|value| value.parse::<u32>().expect("valid velocity sweep count"));
         let velocity_pcg_preconditioner =
             std::env::var("KAPITSA_ROCKET_VELOCITY_PCG_PRECONDITIONER")
                 .unwrap_or_else(|_| "ic0".to_owned());
         let mut all_stable = true;
         for part_count in [100, 200, 500, 1000] {
-            let first = run_fixed_scenario_with_pcg(part_count, velocity_pcg_cap, position_pcg_cap);
-            let repeated =
-                run_fixed_scenario_with_pcg(part_count, velocity_pcg_cap, position_pcg_cap);
+            let first = run_fixed_scenario_with_pcg(
+                part_count,
+                velocity_pcg_cap,
+                position_pcg_cap,
+                outer_velocity_sweeps,
+            );
+            let repeated = run_fixed_scenario_with_pcg(
+                part_count,
+                velocity_pcg_cap,
+                position_pcg_cap,
+                outer_velocity_sweeps,
+            );
             assert_eq!(first.states, repeated.states, "{part_count} part repeat");
             assert_eq!(first.completed_ticks, repeated.completed_ticks);
             assert_eq!(first.step_failure, repeated.step_failure);
@@ -465,7 +479,7 @@ mod stability_tests {
                 && first.max_coast_energy_drift < 0.1;
             all_stable &= numerical_stability;
             println!(
-                "parts={part_count} solver={} joints={} elapsed_ms={} completed_ticks={} scenario={} numerical_stability={} step_failure={:?} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} collision_free_coast_drift={:+.6e}% energy_reference_scale={:.6e}J coast_samples={} upper_coast_contacts={} first_upper_coast_contact={:?} coast_energy_start(T/R/U)={:.6e}/{:.6e}/{:.6e}J final(T/R/U)={:.6e}/{:.6e}/{:.6e}J upper_root_max_y={:.3}m omega={:.3}rad_s separation_dp={:.3e} contacts(begin/end/impact)={}/{}/{} breaks={} pcg_converged/iteration_limit={}/{} pcg_residual_peak={:.6e}m/s/{:.6e}rad/s",
+                "parts={part_count} solver={} outer_velocity_sweeps={outer_velocity_sweeps:?} joints={} elapsed_ms={} completed_ticks={} scenario={} numerical_stability={} step_failure={:?} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} collision_free_coast_drift={:+.6e}% energy_reference_scale={:.6e}J coast_samples={} upper_coast_contacts={} first_upper_coast_contact={:?} coast_energy_start(T/R/U)={:.6e}/{:.6e}/{:.6e}J final(T/R/U)={:.6e}/{:.6e}/{:.6e}J upper_root_max_y={:.3}m omega={:.3}rad_s separation_dp={:.3e} contacts(begin/end/impact)={}/{}/{} breaks={} pcg_converged/iteration_limit={}/{} velocity/position_pcg_iterations={}/{} pcg_residual_peak={:.6e}m/s/{:.6e}rad/s",
                 match (velocity_pcg_cap, position_pcg_cap) {
                     (None, None) => "scalar".to_owned(),
                     (velocity, position) => format!(
@@ -509,6 +523,8 @@ mod stability_tests {
                 first.joint_break_events,
                 first.velocity_pcg_converged_calls,
                 first.velocity_pcg_iteration_limit_calls,
+                first.velocity_pcg_iterations,
+                first.position_pcg_iterations,
                 first.velocity_pcg_linear_residual_mps,
                 first.velocity_pcg_angular_residual_radps,
             );
@@ -721,53 +737,144 @@ mod stability_tests {
 
     #[cfg(feature = "bench-internals")]
     #[test]
-    #[ignore = "Release comparison of global velocity PCG against the strict rocket fixture"]
-    fn diagnose_rocket_global_velocity_pcg() {
-        for part_count in [100, 200, 500, 1000] {
+    #[ignore = "Release screen for minimum global velocity PCG iterations on the strict rocket"]
+    fn diagnose_rocket_global_velocity_pcg_cap_sweep() {
+        for max_iterations in [24, 32, 48] {
+            for part_count in [100, 200, 500, 1000] {
+                let run = run_scenario(
+                    part_count,
+                    false,
+                    ScenarioMode::Full,
+                    false,
+                    None,
+                    false,
+                    Some(max_iterations),
+                    None,
+                    None,
+                );
+                let crossing = run.first_anchor_limit_tick.and_then(|tick| {
+                    run.solver_stage_trace
+                        .iter()
+                        .find(|sample| sample.tick == tick)
+                });
+                let peak = run.solver_stage_trace.iter().max_by(|left, right| {
+                    left.post_joint_anchor_error_m
+                        .total_cmp(&right.post_joint_anchor_error_m)
+                });
+                println!(
+                    "parts={part_count} solver=global_velocity_pcg_ic0 max_iterations={max_iterations} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} crossing_pre/post_velocity={:.6e}/{:.6e}m post_joint={:.6e}m velocity_residual={:.6e}/{:.6e}m/s/{:.6e}/{:.6e}rad/s pcg_iterations={} peak_tick={:?} peak_pre/post_velocity={:.6e}/{:.6e}m peak_after_position={:.6e}m peak_velocity_residual={:.6e}/{:.6e}m/s contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
+                    run.elapsed.as_millis(),
+                    run.completed_ticks,
+                    run.max_anchor_error,
+                    run.rms_anchor_error,
+                    run.max_frame_error,
+                    run.rms_frame_error,
+                    run.max_coast_energy_drift * 100.0,
+                    run.first_anchor_limit_tick,
+                    crossing.map_or(0.0, |sample| sample.pre_velocity_anchor_error_m),
+                    crossing.map_or(0.0, |sample| sample.post_velocity_anchor_error_m),
+                    crossing.map_or(0.0, |sample| sample.post_joint_anchor_error_m),
+                    crossing.map_or(0.0, |sample| sample.first_velocity_linear_residual_mps),
+                    crossing.map_or(0.0, |sample| sample.post_velocity_linear_residual_mps),
+                    crossing.map_or(0.0, |sample| sample.first_velocity_angular_residual_radps),
+                    crossing.map_or(0.0, |sample| sample.post_velocity_angular_residual_radps),
+                    crossing.map_or(0, |sample| sample.velocity_pcg_iterations),
+                    peak.map(|sample| sample.tick),
+                    peak.map_or(0.0, |sample| sample.pre_velocity_anchor_error_m),
+                    peak.map_or(0.0, |sample| sample.post_velocity_anchor_error_m),
+                    peak.map_or(0.0, |sample| sample.post_joint_anchor_error_m),
+                    peak.map_or(0.0, |sample| sample.post_velocity_linear_residual_mps),
+                    peak.map_or(0.0, |sample| sample.post_velocity_angular_residual_radps),
+                    run.surface_begins,
+                    run.surface_ends,
+                    run.surface_impacts,
+                    run.separation_momentum_error,
+                    run.step_failure,
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release check of contact/joint coupling versus outer velocity sweeps"]
+    fn diagnose_rocket_pcg_outer_velocity_sweeps() {
+        let part_count = std::env::var("KAPITSA_ROCKET_DIAGNOSTIC_PARTS")
+            .ok()
+            .map(|value| value.parse::<usize>().expect("valid rocket part count"))
+            .unwrap_or(1000);
+        let velocity_cap = std::env::var("KAPITSA_ROCKET_VELOCITY_PCG_CAP")
+            .ok()
+            .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"))
+            .unwrap_or(16);
+        let position_cap = std::env::var("KAPITSA_ROCKET_POSITION_PCG_CAP")
+            .ok()
+            .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"))
+            .unwrap_or(16);
+        for velocity_iterations in [16] {
             let run = run_scenario(
                 part_count,
                 false,
                 ScenarioMode::Full,
                 false,
-                None,
+                Some((velocity_iterations, 3)),
                 false,
-                Some(64),
+                Some(velocity_cap),
                 None,
-                None,
+                Some(position_cap),
             );
-            let crossing = run.first_anchor_limit_tick.and_then(|tick| {
-                run.solver_stage_trace
-                    .iter()
-                    .find(|sample| sample.tick == tick)
-            });
-            let peak = run.solver_stage_trace.iter().max_by(|left, right| {
-                left.post_joint_anchor_error_m
-                    .total_cmp(&right.post_joint_anchor_error_m)
-            });
             println!(
-                "parts={part_count} solver=global_velocity_pcg_ic0 max_iterations=64 elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} crossing_pre/post_velocity={:.6e}/{:.6e}m post_joint={:.6e}m velocity_residual={:.6e}/{:.6e}m/s/{:.6e}/{:.6e}rad/s pcg_iterations={} peak_tick={:?} peak_pre/post_velocity={:.6e}/{:.6e}m peak_after_position={:.6e}m peak_velocity_residual={:.6e}/{:.6e}m/s contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
+                "parts={part_count} solver=global_pcg caps={velocity_cap}/{position_cap} outer_velocity_sweeps={velocity_iterations} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad max_altitude={:.3}m upper_final_vy={:.6e}m/s pcg_converged/limit={}/{} pcg_iterations={}/{} contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
                 run.elapsed.as_millis(),
                 run.completed_ticks,
                 run.max_anchor_error,
                 run.rms_anchor_error,
                 run.max_frame_error,
                 run.rms_frame_error,
+                run.max_altitude,
+                run.upper_root_final_velocity.y,
+                run.velocity_pcg_converged_calls,
+                run.velocity_pcg_iteration_limit_calls,
+                run.velocity_pcg_iterations,
+                run.position_pcg_iterations,
+                run.surface_begins,
+                run.surface_ends,
+                run.surface_impacts,
+                run.separation_momentum_error,
+                run.step_failure,
+            );
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release screen for the minimum PCG cap with 16 outer velocity sweeps"]
+    fn diagnose_rocket_pcg_minimum_caps() {
+        for max_iterations in [1, 2, 3] {
+            let run = run_scenario(
+                1000,
+                false,
+                ScenarioMode::Full,
+                false,
+                Some((16, 3)),
+                false,
+                Some(max_iterations),
+                None,
+                Some(max_iterations),
+            );
+            println!(
+                "parts=1000 solver=global_pcg caps={max_iterations}/{max_iterations} outer_velocity_sweeps=16 elapsed_ms={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad max_altitude={:.3}m coast_energy_drift={:.4}% pcg_converged/limit={}/{} pcg_iterations={}/{} contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
+                run.elapsed.as_millis(),
+                run.max_anchor_error,
+                run.rms_anchor_error,
+                run.max_frame_error,
+                run.rms_frame_error,
+                run.max_altitude,
                 run.max_coast_energy_drift * 100.0,
-                run.first_anchor_limit_tick,
-                crossing.map_or(0.0, |sample| sample.pre_velocity_anchor_error_m),
-                crossing.map_or(0.0, |sample| sample.post_velocity_anchor_error_m),
-                crossing.map_or(0.0, |sample| sample.post_joint_anchor_error_m),
-                crossing.map_or(0.0, |sample| sample.first_velocity_linear_residual_mps),
-                crossing.map_or(0.0, |sample| sample.post_velocity_linear_residual_mps),
-                crossing.map_or(0.0, |sample| sample.first_velocity_angular_residual_radps),
-                crossing.map_or(0.0, |sample| sample.post_velocity_angular_residual_radps),
-                crossing.map_or(0, |sample| sample.velocity_pcg_iterations),
-                peak.map(|sample| sample.tick),
-                peak.map_or(0.0, |sample| sample.pre_velocity_anchor_error_m),
-                peak.map_or(0.0, |sample| sample.post_velocity_anchor_error_m),
-                peak.map_or(0.0, |sample| sample.post_joint_anchor_error_m),
-                peak.map_or(0.0, |sample| sample.post_velocity_linear_residual_mps),
-                peak.map_or(0.0, |sample| sample.post_velocity_angular_residual_radps),
+                run.velocity_pcg_converged_calls,
+                run.velocity_pcg_iteration_limit_calls,
+                run.velocity_pcg_iterations,
+                run.position_pcg_iterations,
                 run.surface_begins,
                 run.surface_ends,
                 run.surface_impacts,
@@ -887,7 +994,7 @@ mod stability_tests {
                     .total_cmp(&right.post_joint_anchor_error_m)
             });
             println!(
-                "parts={part_count} solver=global_velocity_position_pcg_{velocity_pcg_preconditioner} caps={velocity_cap}/{position_cap} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} peak_tick={:?} peak_pre_velocity={:.6e}m peak_post_position={:.6e}m peak_velocity_pcg_iterations={} peak_position_pcg_iterations={} pcg_converged/iteration_limit={}/{} pcg_residual_peak={:.6e}m/s/{:.6e}rad/s max_altitude={:.3}m failure={:?}",
+                "parts={part_count} solver=global_velocity_position_pcg_{velocity_pcg_preconditioner} caps={velocity_cap}/{position_cap} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} peak_tick={:?} peak_pre_velocity={:.6e}m peak_post_position={:.6e}m peak_velocity_pcg_iterations={} peak_position_pcg_iterations={} total_velocity/position_pcg_iterations={}/{} pcg_converged/iteration_limit={}/{} pcg_residual_peak={:.6e}m/s/{:.6e}rad/s max_altitude={:.3}m failure={:?}",
                 run.elapsed.as_millis(),
                 run.completed_ticks,
                 run.max_anchor_error,
@@ -901,6 +1008,8 @@ mod stability_tests {
                 peak.map_or(0.0, |sample| sample.post_joint_anchor_error_m),
                 peak.map_or(0, |sample| sample.velocity_pcg_iterations),
                 peak.map_or(0, |sample| sample.position_pcg_iterations),
+                run.velocity_pcg_iterations,
+                run.position_pcg_iterations,
                 run.velocity_pcg_converged_calls,
                 run.velocity_pcg_iteration_limit_calls,
                 run.velocity_pcg_linear_residual_mps,
@@ -1418,13 +1527,14 @@ mod stability_tests {
         part_count: usize,
         global_velocity_pcg_iterations: Option<u32>,
         global_position_pcg_iterations: Option<u32>,
+        outer_velocity_sweeps: Option<u32>,
     ) -> StabilityRun {
         run_scenario(
             part_count,
             false,
             ScenarioMode::Full,
             false,
-            None,
+            outer_velocity_sweeps.map(|velocity| (velocity, 3)),
             false,
             global_velocity_pcg_iterations,
             None,
@@ -1922,18 +2032,20 @@ mod stability_tests {
             .expect("upper stage mass")
             .mass();
         #[cfg(feature = "bench-internals")]
-        let pcg_summary =
-            energy_trace
-                .iter()
-                .fold((0_u64, 0_u64, 0.0_f64, 0.0_f64), |mut summary, metrics| {
-                    summary.0 += metrics.velocity_pcg_converged_calls;
-                    summary.1 += metrics.velocity_pcg_iteration_limit_calls;
-                    summary.2 = summary.2.max(metrics.velocity_pcg_linear_residual_mps);
-                    summary.3 = summary.3.max(metrics.velocity_pcg_angular_residual_radps);
-                    summary
-                });
+        let pcg_summary = energy_trace.iter().fold(
+            (0_u64, 0_u64, 0.0_f64, 0.0_f64, 0_u64, 0_u64),
+            |mut summary, metrics| {
+                summary.0 += metrics.velocity_pcg_converged_calls;
+                summary.1 += metrics.velocity_pcg_iteration_limit_calls;
+                summary.2 = summary.2.max(metrics.velocity_pcg_linear_residual_mps);
+                summary.3 = summary.3.max(metrics.velocity_pcg_angular_residual_radps);
+                summary.4 += metrics.velocity_pcg_iterations;
+                summary.5 += metrics.position_pcg_iterations;
+                summary
+            },
+        );
         #[cfg(not(feature = "bench-internals"))]
-        let pcg_summary = (0, 0, 0.0, 0.0);
+        let pcg_summary = (0, 0, 0.0, 0.0, 0, 0);
         let samples = joint_error_samples.max(1) as f64;
         StabilityRun {
             states,
@@ -1975,6 +2087,8 @@ mod stability_tests {
             first_frame_limit_tick,
             velocity_pcg_converged_calls: pcg_summary.0,
             velocity_pcg_iteration_limit_calls: pcg_summary.1,
+            velocity_pcg_iterations: pcg_summary.4,
+            position_pcg_iterations: pcg_summary.5,
             velocity_pcg_linear_residual_mps: pcg_summary.2,
             velocity_pcg_angular_residual_radps: pcg_summary.3,
             #[cfg(feature = "bench-internals")]

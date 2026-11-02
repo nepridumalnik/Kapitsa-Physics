@@ -398,6 +398,9 @@ impl JointSolverMetrics {
             self.velocity_pcg_iterations = self
                 .velocity_pcg_iterations
                 .saturating_add(other.velocity_pcg_iterations);
+            self.position_pcg_iterations = self
+                .position_pcg_iterations
+                .saturating_add(other.position_pcg_iterations);
             self.velocity_pcg_matrix_vector_time += other.velocity_pcg_matrix_vector_time;
             self.velocity_pcg_system_prepare_time += other.velocity_pcg_system_prepare_time;
             self.velocity_pcg_preconditioner_time += other.velocity_pcg_preconditioner_time;
@@ -555,15 +558,21 @@ mod metrics_tests {
         let mut metrics = JointSolverMetrics {
             color_batches_processed: 2,
             max_colors_per_island: 2,
+            #[cfg(feature = "bench-internals")]
+            position_pcg_iterations: 4,
             ..JointSolverMetrics::default()
         };
         metrics.accumulate(JointSolverMetrics {
             color_batches_processed: 3,
             max_colors_per_island: 3,
+            #[cfg(feature = "bench-internals")]
+            position_pcg_iterations: 5,
             ..JointSolverMetrics::default()
         });
         assert_eq!(metrics.color_batches_processed, 5);
         assert_eq!(metrics.max_colors_per_island, 3);
+        #[cfg(feature = "bench-internals")]
+        assert_eq!(metrics.position_pcg_iterations, 9);
     }
 
     #[test]
@@ -583,6 +592,8 @@ mod metrics_tests {
             velocity_sweeps: u64::MAX,
             #[cfg(feature = "bench-internals")]
             velocity_pcg_iterations: u64::MAX,
+            #[cfg(feature = "bench-internals")]
+            position_pcg_iterations: u64::MAX,
             #[cfg(feature = "bench-internals")]
             pre_velocity_anchor_error_m: f64::MAX,
             #[cfg(feature = "bench-internals")]
@@ -650,6 +661,7 @@ mod metrics_tests {
         assert_eq!(metrics.velocity_sweeps, u64::MAX);
         #[cfg(feature = "bench-internals")]
         {
+            assert_eq!(metrics.position_pcg_iterations, u64::MAX);
             assert_eq!(metrics.pre_velocity_anchor_error_m, f64::MAX);
             assert_eq!(metrics.pre_velocity_frame_error_rad, f64::MAX);
             assert_eq!(metrics.post_velocity_anchor_error_m, f64::MAX);
