@@ -901,19 +901,30 @@ fn merge_contact_manifold(
             let existing = *manifold
                 .point(index)
                 .ok_or(CollisionError::InvalidContact)?;
-            let existing_position = manifold
-                .world_point(index)
-                .ok_or(CollisionError::InvalidContact)?;
-            let distance = world_position
-                .checked_sub(existing_position)
+            let distance_a = point
+                .local_a
+                .checked_sub(existing.local_a)
                 .and_then(Vec3::checked_length)
                 .ok_or(CollisionError::ArithmeticOverflow)?;
-            let scale = world_position
+            let distance_b = point
+                .local_b
+                .checked_sub(existing.local_b)
+                .and_then(Vec3::checked_length)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let scale_a = point
+                .local_a
                 .abs()
                 .max_element()
-                .max(existing_position.abs().max_element())
+                .max(existing.local_a.abs().max_element())
                 .max(1.0);
-            if distance <= scale * f64::EPSILON * 512.0
+            let scale_b = point
+                .local_b
+                .abs()
+                .max_element()
+                .max(existing.local_b.abs().max_element())
+                .max(1.0);
+            if distance_a <= scale_a * f64::EPSILON * 512.0
+                && distance_b <= scale_b * f64::EPSILON * 512.0
                 && point.normal.dot(existing.normal) >= 0.995
             {
                 if point.penetration > existing.penetration {
