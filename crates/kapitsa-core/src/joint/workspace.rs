@@ -1,15 +1,25 @@
 use super::{
-    JointBreakEvent, row::ConstraintRow, solver::JointConstraint, warm_start::JointImpulseCache,
+    JointBreakEvent, ReactionMode, reaction::wrench_from_impulse, row::ConstraintRow,
+    solver::JointConstraint, warm_start::JointImpulseCache,
 };
 use crate::collision::CollisionError;
 use crate::rigid_body::solver_mass::SolverMassSlot;
+use crate::rigid_body::{BodyError, BodyType};
 use kapitsa_math::Vec3;
 
 #[derive(Clone, Copy, Debug)]
+enum ReactionSide {
+    A,
+    B,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct JointReaction {
-    id: crate::world::JointId,
     force_impulse: Vec3,
-    torque_impulse: Vec3,
+    torque_com_impulse: Vec3,
+    com_world: Vec3,
+    anchor_world: Vec3,
+    side: ReactionSide,
 }
 
 /// Reusable rows for one solver island, retained between physics steps.
@@ -28,7 +38,7 @@ pub(crate) struct JointWorkspace {
     sequential_joint_prepare: bool,
     previous_row_start: usize,
     previous_row_end: usize,
-    reactions: Vec<JointReaction>,
+    reactions: Vec<Option<JointReaction>>,
     break_events: Vec<JointBreakEvent>,
     #[cfg(feature = "bench-internals")]
     metrics: super::diagnostics::JointSolverMetrics,
@@ -434,7 +444,9 @@ impl JointWorkspace {
     pub(crate) fn collect_break_events(
         &mut self,
         joints: &[JointConstraint],
+        bodies: &[crate::collision::solver::SolverBody],
         dt: f64,
+        mode: ReactionMode,
     ) -> Result<(), CollisionError> {
         self.break_events.clear();
         if !joints.iter().any(|joint| {
@@ -442,6 +454,9 @@ impl JointWorkspace {
             common.enabled && (common.break_force.is_some() || common.break_torque.is_some())
         }) {
             return Ok(());
+        }
+        if mode != ReactionMode::VelocityOnly {
+            return Err(CollisionError::InvalidConfig);
         }
 
         self.reactions.clear();
@@ -451,35 +466,51 @@ impl JointWorkspace {
         self.break_events
             .try_reserve(joints.len())
             .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-        self.reactions
-            .extend(joints.iter().map(|joint| JointReaction {
-                id: joint.id,
-                force_impulse: Vec3::ZERO,
-                torque_impulse: Vec3::ZERO,
-            }));
+        for joint in joints {
+            let common = joint.joint.common();
+            let reaction = if common.enabled
+                && (common.break_force.is_some() || common.break_torque.is_some())
+            {
+                reaction_for_joint(*joint, bodies)?
+            } else {
+                None
+            };
+            self.reactions.push(reaction);
+        }
 
         for (row, joint_index) in self.rows.iter().zip(&self.row_joint_indices) {
-            let reaction = self
+            let Some(reaction) = self
                 .reactions
                 .get_mut(*joint_index)
-                .ok_or(CollisionError::InvalidContact)?;
-            if row.linear_a != Vec3::ZERO || row.linear_b != Vec3::ZERO {
-                reaction.force_impulse += row.linear_a * row.accumulated_impulse;
-            } else {
-                reaction.torque_impulse += row.angular_a * row.accumulated_impulse;
-            }
-            if !reaction.force_impulse.is_finite() || !reaction.torque_impulse.is_finite() {
+                .ok_or(CollisionError::InvalidContact)?
+            else {
+                continue;
+            };
+            let (linear_jacobian, angular_jacobian) = match reaction.side {
+                ReactionSide::A => (row.linear_a, row.angular_a),
+                ReactionSide::B => (row.linear_b, row.angular_b),
+            };
+            reaction.force_impulse += linear_jacobian * row.accumulated_impulse;
+            reaction.torque_com_impulse += angular_jacobian * row.accumulated_impulse;
+            if !reaction.force_impulse.is_finite() || !reaction.torque_com_impulse.is_finite() {
                 return Err(CollisionError::ArithmeticOverflow);
             }
         }
 
         for (joint, reaction) in joints.iter().zip(&self.reactions) {
             let common = joint.joint.common();
-            if !common.enabled || (common.break_force.is_none() && common.break_torque.is_none()) {
+            let Some(reaction) = reaction else {
                 continue;
-            }
-            let force = reaction.force_impulse.length() / dt;
-            let torque = reaction.torque_impulse.length() / dt;
+            };
+            let wrench = wrench_from_impulse(
+                reaction.force_impulse,
+                reaction.torque_com_impulse,
+                reaction.com_world,
+                reaction.anchor_world,
+                dt,
+            )?;
+            let force = wrench.force.length();
+            let torque = wrench.torque.length();
             if !force.is_finite() || !torque.is_finite() {
                 return Err(CollisionError::ArithmeticOverflow);
             }
@@ -491,7 +522,7 @@ impl JointWorkspace {
                     .is_some_and(|threshold| torque > threshold)
             {
                 self.break_events
-                    .push(JointBreakEvent::new(reaction.id, force, torque));
+                    .push(JointBreakEvent::new(joint.id, force, torque));
             }
         }
         Ok(())
@@ -511,9 +542,58 @@ impl JointWorkspace {
             + self.preparing_joint_indices.capacity() * std::mem::size_of::<usize>()
             + self.preparing_joint_ids.capacity()
                 * std::mem::size_of::<Option<crate::world::JointId>>()
-            + self.reactions.capacity() * std::mem::size_of::<JointReaction>()
+            + self.reactions.capacity() * std::mem::size_of::<Option<JointReaction>>()
             + self.break_events.capacity() * std::mem::size_of::<JointBreakEvent>()
     }
+}
+
+fn reaction_for_joint(
+    joint: JointConstraint,
+    bodies: &[crate::collision::solver::SolverBody],
+) -> Result<Option<JointReaction>, CollisionError> {
+    let body_a = bodies
+        .get(joint.body_a)
+        .ok_or(CollisionError::InvalidContact)?;
+    let body_b = bodies
+        .get(joint.body_b)
+        .ok_or(CollisionError::InvalidContact)?;
+    let side = if body_a.body().physics().body_type() == BodyType::Dynamic {
+        ReactionSide::A
+    } else if body_b.body().physics().body_type() == BodyType::Dynamic {
+        ReactionSide::B
+    } else {
+        return Ok(None);
+    };
+    let side_body = match side {
+        ReactionSide::A => body_a,
+        ReactionSide::B => body_b,
+    };
+    let com_world = side_body
+        .body()
+        .world_center_of_mass()
+        .map_err(|error| match error {
+            BodyError::ArithmeticOverflow => CollisionError::ArithmeticOverflow,
+            BodyError::BodyMustBeDynamic
+            | BodyError::StaticBodyCannotHaveVelocity
+            | BodyError::NonFiniteValue
+            | BodyError::InvalidInertiaTensor => CollisionError::InvalidContact,
+        })?
+        .unwrap_or_else(|| side_body.state().transform().translation());
+    let anchor_world = body_a
+        .state()
+        .transform()
+        .transform_point(joint.joint.common().frame_a.local_anchor);
+    if !com_world.is_finite() || !anchor_world.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+
+    Ok(Some(JointReaction {
+        force_impulse: Vec3::ZERO,
+        torque_com_impulse: Vec3::ZERO,
+        com_world,
+        anchor_world,
+        side,
+    }))
 }
 
 fn set_joint_id(
@@ -532,12 +612,14 @@ mod tests {
     use super::*;
     use crate::joint::row::RowDimension;
     use crate::{
+        collision::solver::SolverBody,
         joint::{FixedJoint, Joint, JointCommon, JointFrame},
+        mass::MassProperties,
         rigid_body::RigidBody,
         transform::Transform,
         world::PhysicsWorld,
     };
-    use kapitsa_math::Vec3;
+    use kapitsa_math::{Mat3, Vec3};
 
     fn test_joint_id() -> crate::world::JointId {
         let mut world = PhysicsWorld::new();
@@ -582,6 +664,233 @@ mod tests {
             accumulated_multiplier: 0.0,
             accumulated_impulse: 0.0,
         }
+    }
+
+    fn dynamic_solver_body(position: Vec3, local_com: Vec3) -> SolverBody {
+        let mass = MassProperties::new(1.0, local_com, Mat3::IDENTITY).expect("valid mass");
+        let body = RigidBody::new_dynamic(
+            Transform::new(position, kapitsa_math::Quat::IDENTITY).expect("transform"),
+            mass,
+        )
+        .expect("dynamic body");
+        let state = *body.state();
+        SolverBody::from_prediction(body, state)
+    }
+
+    fn static_solver_body(position: Vec3) -> SolverBody {
+        let body = RigidBody::new_static(
+            Transform::new(position, kapitsa_math::Quat::IDENTITY).expect("transform"),
+        );
+        let state = *body.state();
+        SolverBody::from_prediction(body, state)
+    }
+
+    fn reaction_constraint(common: JointCommon) -> JointConstraint {
+        JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: Joint::Fixed(FixedJoint::new(common)),
+        }
+    }
+
+    fn reaction_row(
+        dimension: RowDimension,
+        linear_a: Vec3,
+        angular_a: Vec3,
+        linear_b: Vec3,
+        angular_b: Vec3,
+        impulse: f64,
+    ) -> ConstraintRow {
+        ConstraintRow {
+            key: 0,
+            dimension,
+            body_a: 0,
+            body_b: 1,
+            linear_a,
+            angular_a,
+            linear_b,
+            angular_b,
+            error: 0.0,
+            target_velocity: 0.0,
+            force_bias: 0.0,
+            position_enabled: true,
+            compliance: 0.0,
+            damping: 0.0,
+            min_multiplier: f64::NEG_INFINITY,
+            max_multiplier: f64::INFINITY,
+            min_impulse: f64::NEG_INFINITY,
+            max_impulse: f64::INFINITY,
+            accumulated_multiplier: 1.0e12,
+            accumulated_impulse: impulse,
+        }
+    }
+
+    #[test]
+    fn break_reaction_sums_linear_and_angular_components_at_anchor() {
+        let mut common = JointCommon::new(
+            JointFrame::new(Vec3::Y, kapitsa_math::Quat::IDENTITY),
+            JointFrame::IDENTITY,
+        );
+        common.break_force = Some(0.1);
+        common.break_torque = Some(0.1);
+        let joints = [reaction_constraint(common)];
+        let bodies = [
+            dynamic_solver_body(Vec3::ZERO, Vec3::ZERO),
+            static_solver_body(Vec3::X),
+        ];
+        let mut workspace = JointWorkspace::new();
+        workspace.rows.push(reaction_row(
+            RowDimension::Linear,
+            Vec3::X,
+            Vec3::Z,
+            -Vec3::X,
+            -Vec3::Z,
+            2.0,
+        ));
+        workspace.rows.push(reaction_row(
+            RowDimension::Angular,
+            Vec3::Y,
+            Vec3::Y,
+            -Vec3::Y,
+            -Vec3::Y,
+            3.0,
+        ));
+        workspace.row_joint_indices.extend([0, 0]);
+
+        workspace
+            .collect_break_events(&joints, &bodies, 1.0, ReactionMode::VelocityOnly)
+            .expect("collect fixed-joint reaction");
+
+        let event = workspace.break_events().first().expect("break event");
+        assert!((event.force() - 13.0_f64.sqrt()).abs() <= 1.0e-12);
+        assert!((event.torque() - 5.0).abs() <= 1.0e-12);
+    }
+
+    #[test]
+    fn break_reaction_uses_dynamic_side_b_at_common_anchor() {
+        let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        common.break_force = Some(0.1);
+        common.break_torque = Some(0.1);
+        let joints = [reaction_constraint(common)];
+        let bodies = [
+            static_solver_body(Vec3::ZERO),
+            dynamic_solver_body(Vec3::ZERO, Vec3::Y),
+        ];
+        let mut workspace = JointWorkspace::new();
+        workspace.rows.push(reaction_row(
+            RowDimension::Linear,
+            Vec3::X,
+            Vec3::ZERO,
+            -Vec3::X,
+            -Vec3::new(0.0, 0.0, 2.5),
+            2.0,
+        ));
+        workspace.row_joint_indices.push(0);
+
+        workspace
+            .collect_break_events(&joints, &bodies, 1.0, ReactionMode::VelocityOnly)
+            .expect("collect side-B reaction");
+
+        let event = workspace.break_events().first().expect("break event");
+        assert!((event.force() - 2.0).abs() <= 1.0e-12);
+        assert!((event.torque() - 3.0).abs() <= 1.0e-12);
+    }
+
+    #[test]
+    fn break_threshold_is_strict_and_load_is_averaged_over_dt() {
+        let bodies = [
+            dynamic_solver_body(Vec3::ZERO, Vec3::ZERO),
+            static_solver_body(Vec3::X),
+        ];
+        let mut workspace = JointWorkspace::new();
+        workspace.rows.push(reaction_row(
+            RowDimension::Linear,
+            Vec3::X,
+            Vec3::ZERO,
+            -Vec3::X,
+            Vec3::ZERO,
+            2.0,
+        ));
+        workspace.row_joint_indices.push(0);
+
+        let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        common.break_force = Some(2.0);
+        let at_threshold = [reaction_constraint(common)];
+        workspace
+            .collect_break_events(&at_threshold, &bodies, 1.0, ReactionMode::VelocityOnly)
+            .expect("threshold equality");
+        assert!(workspace.break_events().is_empty());
+
+        common.break_force = Some(1.999);
+        let below_threshold = [reaction_constraint(common)];
+        workspace
+            .collect_break_events(&below_threshold, &bodies, 1.0, ReactionMode::VelocityOnly)
+            .expect("strict threshold crossing");
+        assert_eq!(workspace.break_events().len(), 1);
+        assert!((workspace.break_events()[0].force() - 2.0).abs() <= 1.0e-12);
+
+        common.break_force = Some(3.0);
+        let timestep_threshold = [reaction_constraint(common)];
+        workspace
+            .collect_break_events(
+                &timestep_threshold,
+                &bodies,
+                0.5,
+                ReactionMode::VelocityOnly,
+            )
+            .expect("shorter timestep load");
+        assert_eq!(workspace.break_events().len(), 1);
+        assert!((workspace.break_events()[0].force() - 4.0).abs() <= 1.0e-12);
+    }
+
+    #[test]
+    fn disabled_and_nondynamic_joints_do_not_break() {
+        let bodies = [static_solver_body(Vec3::ZERO), static_solver_body(Vec3::X)];
+        let mut workspace = JointWorkspace::new();
+        workspace.rows.push(reaction_row(
+            RowDimension::Linear,
+            Vec3::X,
+            Vec3::ZERO,
+            -Vec3::X,
+            Vec3::ZERO,
+            100.0,
+        ));
+        workspace.row_joint_indices.push(0);
+
+        let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        common.break_force = Some(0.1);
+        common.enabled = false;
+        let disabled = [reaction_constraint(common)];
+        workspace
+            .collect_break_events(&disabled, &bodies, 1.0, ReactionMode::VelocityOnly)
+            .expect("disabled joint");
+        assert!(workspace.break_events().is_empty());
+
+        common.enabled = true;
+        let nondynamic = [reaction_constraint(common)];
+        workspace
+            .collect_break_events(&nondynamic, &bodies, 1.0, ReactionMode::VelocityOnly)
+            .expect("joint with no dynamic side");
+        assert!(workspace.break_events().is_empty());
+    }
+
+    #[test]
+    fn constraint_estimate_reaction_mode_is_inactive() {
+        let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        common.break_force = Some(1.0);
+        let joints = [reaction_constraint(common)];
+        let bodies = [
+            dynamic_solver_body(Vec3::ZERO, Vec3::ZERO),
+            static_solver_body(Vec3::X),
+        ];
+        let mut workspace = JointWorkspace::new();
+
+        assert_eq!(
+            workspace.collect_break_events(&joints, &bodies, 1.0, ReactionMode::ConstraintEstimate),
+            Err(CollisionError::InvalidConfig)
+        );
+        assert!(workspace.break_events().is_empty());
     }
 
     #[test]

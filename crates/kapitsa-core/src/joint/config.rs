@@ -1,12 +1,14 @@
 /// Internal joint-solver strategy selection. Public physics configuration
 /// stays stable while individual solver strategies are validated.
 use super::JointImpulseCache;
+use super::reaction::ReactionMode;
 use super::warm_start::WarmStartConfig;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct JointSolverOptions {
     mass_cache: bool,
     warm_start: WarmStartConfig,
+    reaction_mode: ReactionMode,
 }
 
 impl JointSolverOptions {
@@ -14,6 +16,7 @@ impl JointSolverOptions {
         Self {
             mass_cache: false,
             warm_start: WarmStartConfig::disabled(),
+            reaction_mode: ReactionMode::VelocityOnly,
         }
     }
 
@@ -35,6 +38,10 @@ impl JointSolverOptions {
 
     pub(crate) const fn warm_start(self) -> WarmStartConfig {
         self.warm_start
+    }
+
+    pub(crate) const fn reaction_mode(self) -> ReactionMode {
+        self.reaction_mode
     }
 }
 
@@ -69,5 +76,18 @@ impl<'a> JointSolverStep<'a> {
 
     pub(crate) const fn impulse_cache(self) -> Option<&'a JointImpulseCache> {
         self.impulse_cache
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_solver_options_use_velocity_only_reactions() {
+        assert_eq!(
+            JointSolverOptions::legacy().reaction_mode(),
+            ReactionMode::VelocityOnly
+        );
     }
 }

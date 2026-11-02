@@ -210,7 +210,12 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
         }
-        joint_workspace.collect_break_events(joints, dt)?;
+        joint_workspace.collect_break_events(
+            joints,
+            bodies,
+            dt,
+            joint_solver_options.reaction_mode(),
+        )?;
         Ok(())
     }
 

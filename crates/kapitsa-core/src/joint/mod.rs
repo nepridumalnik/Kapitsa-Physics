@@ -12,6 +12,7 @@ mod event;
 mod fixed;
 mod hinge;
 mod planar;
+mod reaction;
 mod row;
 mod slider;
 #[allow(dead_code)] // Integrated into collision islands in the dedicated solver integration step.
@@ -35,6 +36,7 @@ pub use event::JointBreakEvent;
 pub use fixed::FixedJoint;
 pub use hinge::HingeJoint;
 pub use planar::PlanarJoint;
+pub(crate) use reaction::ReactionMode;
 pub use slider::SliderJoint;
 pub(crate) use solver::{JointConstraint, JointSolver};
 pub use spring::SpringJoint;
