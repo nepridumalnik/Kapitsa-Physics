@@ -2,6 +2,8 @@ pub mod error;
 mod forces;
 pub(crate) mod integrator;
 mod physics;
+#[allow(dead_code)] // This reference kernel is integrated by the next solver stage.
+pub(crate) mod solver_mass;
 mod state;
 
 pub use error::BodyError;
