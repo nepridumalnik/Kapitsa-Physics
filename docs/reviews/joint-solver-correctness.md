@@ -42,3 +42,24 @@ When experimental joint warm-start is enabled, exposing a body through `body_mut
 ## Singular twist coordinate
 
 `twist_angle` uses the quaternion's `(z, w)` projection. When both components vanish (a 180-degree swing perpendicular to the twist axis), the decomposition has no unique twist. It now reports `NonConvergent` rather than silently assigning zero. This is an observable change: a step reaching that singularity can fail and roll back. The ordinary angle remains wrapped to `[-π, π)`; multi-turn tracking is not implemented. Behavior near the singularity and all existing scenarios remain dynamically unverified in this pass.
+
+## Remaining phase assessment
+
+| Step | Result in this pass | Remaining work |
+|---|---|---|
+| 1: invariant audit | Audit and reference comparison recorded. | Rocket root cause remains unproven. |
+| 2: geometry/Jacobians | Fixed point rows use world axes; undefined twist is rejected. | SO(3) log Jacobian for finite angles and continuous multi-turn state are not implemented. |
+| 3: Fixed Block3 | Existing experimental block matrix uses six independent symmetric entries; checked row extraction no longer unwraps. | Full finite-angle angular block, compliance coverage and production enablement are not validated. |
+| 4: position/velocity | Existing split pose/velocity paths and FixedJoint's disabled velocity bias inspected. | Damping, spring, motor, restitution and energy interactions still require a complete derivation and dynamic checks. |
+| 5: convergence | Existing KKT handling and residual paths inspected. | Independently measure geometric error and report iteration-limit status; velocity residual must represent the damped/compliant equation actually solved. |
+| 6: preparation/mass | Reduced Block3 matrix assembly from nine cross-entry evaluations to six. | Repeated row preparation, cross-iteration factorization and row-key lookup remain; `splice` is still used when row counts change. Mass-cache correctness and performance need validation. |
+| 7: warm-start | Invalidate attached-joint cache on mutable body access and joint removal; clear it on strategy toggles. | Scan cost can be linear in all joints per mutation, and internal edits, rollback and physical response need dynamic validation. Warm-start stays disabled by default. |
+| 8: large islands | Existing executor and coloring reference inspected. | `StepExecutor` grants disjoint mutable chunks, not arbitrary pairs in a shared body slice. A safe per-color gather/solve/commit design must preserve joint/contact ordering, deterministic results and rollback; it is not implemented. |
+| 9: rigid assembly | Applicability and data requirements reviewed. | No compound/cluster shape, member identity, collider remapping or split lifecycle exists in the current `Shape`/world interfaces. Do not replace a set of live bodies and force sources with an incomplete surrogate. |
+| 10: integration | Legacy scalar default and transactional commit/abort retained; experimental strategies remain opt-in. | Full Block3, convergence, cache and intra-island strategies have not been integrated into production. |
+
+For a future rigid assembly, mass must be `M = Σm_i`, center `c = Σm_i c_i / M`, and inertia about that center must include each rotated center-of-mass inertia and `m_i (||r_i||²I - r_i r_iᵀ)`. A split must reconstruct each member's velocity `v_i = v_com + ω × r_i`, preserve the intended momentum exchange, remap colliders and force sources, and stage the entire operation atomically. Breakable joints, motors and variable fuel mass prevent an unconditional replacement. These formulas are requirements, not an implementation.
+
+## Validation in this pass
+
+After each code change, `cargo +1.98.0 fmt --all -- --check`, `cargo +1.98.0 check --workspace --all-features --locked --offline -j 4`, `cargo +1.98.0 clippy --workspace --all-features --locked --offline -j 4 -- -D warnings`, and `git diff --check` passed. No test, benchmark, or numerical scene was run, and no new test was added. Previously measured rocket errors and timing were produced before this pass and cannot validate these changes. In particular, neither convergence improvement nor a speedup is established.
