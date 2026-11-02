@@ -46,7 +46,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S36 | Удаление тел по смежности | NOT AUDITED |
 | S37 | Adaptive timestep без повторных SPD solve | NOT AUDITED |
 | S38 | Уменьшение затрат query API | MITIGATED — expose caller-owned QueryScratch for raycast, sweep and overlaps; repeated query integration test passed |
-| S39 | Эффективные snapshots | NOT AUDITED |
+| S39 | Эффективные snapshots | MITIGATED — reuse existing index when body IDs and order are unchanged; all snapshot tests passed; performance not measured |
 | S40 | Буферизация событий | MITIGATED — event batches share nonempty immutable buffers across broadcast subscribers; initial publication still copies world events |
 | S41 | Graph Coloring внутри solver islands | NOT AUDITED |
 | S42 | Rigid Clusters / Compound Bodies | NOT AUDITED |
