@@ -150,6 +150,13 @@ impl CollisionSystem {
         self.joint_solver_options = self.joint_solver_options.with_iterations(iterations);
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_alternating_velocity_sweeps_for_bench(&mut self, enabled: bool) {
+        self.joint_solver_options = self
+            .joint_solver_options
+            .with_alternating_velocity_sweeps(enabled);
+    }
+
     pub(crate) fn events(&self) -> &[CollisionEvent] {
         &self.events
     }

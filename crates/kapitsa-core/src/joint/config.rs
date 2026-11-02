@@ -81,6 +81,8 @@ pub(crate) struct JointSolverOptions {
     reaction_mode: ReactionMode,
     projection: JointProjection,
     iterations: JointIterations,
+    #[cfg(feature = "bench-internals")]
+    alternate_velocity_sweeps: bool,
 }
 
 impl JointSolverOptions {
@@ -91,6 +93,8 @@ impl JointSolverOptions {
             reaction_mode: ReactionMode::VelocityOnly,
             projection: JointProjection::ScalarGaussSeidel,
             iterations: JointIterations::Fixed,
+            #[cfg(feature = "bench-internals")]
+            alternate_velocity_sweeps: false,
         }
     }
 
@@ -138,6 +142,17 @@ impl JointSolverOptions {
 
     pub(crate) const fn iterations(self) -> JointIterations {
         self.iterations
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn with_alternating_velocity_sweeps(mut self, enabled: bool) -> Self {
+        self.alternate_velocity_sweeps = enabled;
+        self
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn alternates_velocity_sweeps(self) -> bool {
+        self.alternate_velocity_sweeps
     }
 }
 

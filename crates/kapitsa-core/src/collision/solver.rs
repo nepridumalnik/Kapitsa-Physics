@@ -194,16 +194,19 @@ impl SolverWorkspace {
                 JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
                 joint_workspace.record_pre_joint_velocity_residual();
             }
-            for (joint_index, joint) in joints.iter().copied().enumerate() {
-                JointSolver::solve_velocity_joint(
-                    joint_workspace,
-                    bodies,
-                    joint,
-                    joint_index,
-                    joint_solver_step,
-                    velocity_iteration == 0,
-                )?;
-            }
+            #[cfg(feature = "bench-internals")]
+            let reverse_joint_sweep =
+                joint_solver_options.alternates_velocity_sweeps() && velocity_iteration % 2 == 1;
+            #[cfg(not(feature = "bench-internals"))]
+            let reverse_joint_sweep = false;
+            self.solve_joint_velocity_sweep(
+                bodies,
+                joint_workspace,
+                joints,
+                joint_solver_step,
+                velocity_iteration == 0,
+                reverse_joint_sweep,
+            )?;
             #[cfg(feature = "bench-internals")]
             {
                 JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
@@ -282,16 +285,19 @@ impl SolverWorkspace {
             }
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_velocity_iteration();
-            for (joint_index, joint) in joints.iter().copied().enumerate() {
-                JointSolver::solve_velocity_joint(
-                    joint_workspace,
-                    bodies,
-                    joint,
-                    joint_index,
-                    joint_solver_step,
-                    joint_velocity_sweeps == 0,
-                )?;
-            }
+            #[cfg(feature = "bench-internals")]
+            let reverse_joint_sweep = joint_solver_step.options().alternates_velocity_sweeps()
+                && joint_velocity_sweeps % 2 == 1;
+            #[cfg(not(feature = "bench-internals"))]
+            let reverse_joint_sweep = false;
+            self.solve_joint_velocity_sweep(
+                bodies,
+                joint_workspace,
+                joints,
+                joint_solver_step,
+                joint_velocity_sweeps == 0,
+                reverse_joint_sweep,
+            )?;
             joint_velocity_sweeps += 1;
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
         }
@@ -325,6 +331,33 @@ impl SolverWorkspace {
             }
             joint_position_sweeps += 1;
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+        }
+        Ok(())
+    }
+
+    fn solve_joint_velocity_sweep(
+        &mut self,
+        bodies: &mut [SolverBody],
+        joint_workspace: &mut JointWorkspace,
+        joints: &[JointConstraint],
+        joint_solver_step: JointSolverStep<'_>,
+        first_velocity_iteration: bool,
+        reverse_joint_order: bool,
+    ) -> Result<(), CollisionError> {
+        for offset in 0..joints.len() {
+            let joint_index = if reverse_joint_order {
+                joints.len() - 1 - offset
+            } else {
+                offset
+            };
+            JointSolver::solve_velocity_joint(
+                joint_workspace,
+                bodies,
+                joints[joint_index],
+                joint_index,
+                joint_solver_step,
+                first_velocity_iteration,
+            )?;
         }
         Ok(())
     }

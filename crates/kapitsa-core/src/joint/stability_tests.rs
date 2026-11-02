@@ -325,7 +325,8 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
         ("branch_100", 100, true),
     ] {
         for velocity_iterations in [1, 2, 4, 8, 16] {
-            let mut world = loaded_fixed_joint_graph(count, branching, velocity_iterations, false);
+            let mut world =
+                loaded_fixed_joint_graph(count, branching, velocity_iterations, false, false);
             let first_body = world.bodies().next().unwrap().0;
             let force = world
                 .bodies()
@@ -381,6 +382,7 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
                     branching,
                     velocity_iterations,
                     reverse_joint_order,
+                    false,
                 );
                 let first_body = world.bodies().next().unwrap().0;
                 let force = world
@@ -417,6 +419,43 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
             }
         }
     }
+
+    for (name, branching) in [("chain_100", false), ("branch_100", true)] {
+        for velocity_iterations in [8, 16] {
+            let mut world =
+                loaded_fixed_joint_graph(100, branching, velocity_iterations, false, true);
+            let first_body = world.bodies().next().unwrap().0;
+            let force = world
+                .bodies()
+                .filter_map(|(_, body)| body.physics().mass())
+                .map(|mass| mass.mass())
+                .sum::<f64>()
+                * 9.81
+                * 1.3;
+            let point = world
+                .body(first_body)
+                .unwrap()
+                .state()
+                .transform()
+                .transform_point(Vec3::Y * 0.25);
+            world
+                .body_mut(first_body)
+                .unwrap()
+                .apply_force_at_point(Vec3::Y * force, point)
+                .unwrap();
+            world.step(DT).unwrap();
+            let first = world.physics_step_metrics().joints;
+            world.step(DT).unwrap();
+            let second = world.physics_step_metrics().joints;
+            println!(
+                "graph={name} joint_order=alternating velocity_iterations={} linear_residual={:.6e}m/s angular_residual={:.6e}rad/s next_predicted_anchor={:.6e}m",
+                first.velocity_sweeps,
+                first.post_velocity_linear_residual_mps,
+                first.post_velocity_angular_residual_radps,
+                second.pre_velocity_anchor_error_m,
+            );
+        }
+    }
 }
 
 #[cfg(feature = "bench-internals")]
@@ -425,6 +464,7 @@ fn loaded_fixed_joint_graph(
     branching: bool,
     velocity_iterations: u32,
     reverse_joint_order: bool,
+    alternate_velocity_sweeps: bool,
 ) -> PhysicsWorld {
     let mut world = PhysicsWorld::new();
     let mut bodies = Vec::with_capacity(count);
@@ -481,6 +521,7 @@ fn loaded_fixed_joint_graph(
             ..CollisionConfig::default()
         })
         .unwrap();
+    world.set_joint_alternating_velocity_sweeps_for_bench(alternate_velocity_sweeps);
     world
 }
 
