@@ -10,8 +10,10 @@ pub(crate) struct ContactPoint {
     pub(crate) normal: Vec3,
     pub(crate) penetration: f64,
     pub(crate) feature_id: u64,
+    /// Accumulated normal impulse, including any warm-start contribution.
     pub(crate) normal_impulse: f64,
-    pub(crate) normal_impulse_delta: f64,
+    /// Sum of positive solver updates only; not the net impulse change.
+    pub(crate) normal_impulse_increase_sum: f64,
     pub(crate) tangent_impulse: [f64; 2],
 }
 
@@ -23,7 +25,7 @@ impl ContactPoint {
         penetration: 0.0,
         feature_id: 0,
         normal_impulse: 0.0,
-        normal_impulse_delta: 0.0,
+        normal_impulse_increase_sum: 0.0,
         tangent_impulse: [0.0; 2],
     };
 
@@ -64,7 +66,7 @@ impl ContactPoint {
             penetration,
             feature_id,
             normal_impulse: 0.0,
-            normal_impulse_delta: 0.0,
+            normal_impulse_increase_sum: 0.0,
             tangent_impulse: [0.0; 2],
         })
     }

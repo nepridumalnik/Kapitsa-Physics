@@ -180,8 +180,8 @@ impl ContactCache {
                 if !contact.normal.is_finite()
                     || !contact.normal_impulse.is_finite()
                     || contact.normal_impulse < 0.0
-                    || !contact.normal_impulse_delta.is_finite()
-                    || contact.normal_impulse_delta < 0.0
+                    || !contact.normal_impulse_increase_sum.is_finite()
+                    || contact.normal_impulse_increase_sum < 0.0
                     || contact
                         .tangent_impulse
                         .iter()

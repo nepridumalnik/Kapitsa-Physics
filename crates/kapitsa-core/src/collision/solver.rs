@@ -448,11 +448,11 @@ impl SolverWorkspace {
                 let contact = contact_mut(manifolds, point)?;
                 contact.normal_impulse = next_normal_impulse;
                 if normal_delta > 0.0 {
-                    let total_delta = contact.normal_impulse_delta + normal_delta;
+                    let total_delta = contact.normal_impulse_increase_sum + normal_delta;
                     if !total_delta.is_finite() {
                         return Err(CollisionError::ArithmeticOverflow);
                     }
-                    contact.normal_impulse_delta = total_delta;
+                    contact.normal_impulse_increase_sum = total_delta;
                 }
             }
 

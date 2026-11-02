@@ -2281,7 +2281,7 @@ impl PhysicsWorld {
                     let mut impulse_delta = 0.0;
                     for point in solved_manifold.points() {
                         normal_impulse += point.normal_impulse;
-                        impulse_delta += point.normal_impulse_delta;
+                        impulse_delta += point.normal_impulse_increase_sum;
                     }
                     if !normal_impulse.is_finite() || !impulse_delta.is_finite() {
                         return Err(CollisionError::ArithmeticOverflow);
@@ -2880,7 +2880,7 @@ impl PhysicsWorld {
         let mut impulse_delta = 0.0;
         for point in solved_manifold.points() {
             normal_impulse += point.normal_impulse;
-            impulse_delta += point.normal_impulse_delta;
+            impulse_delta += point.normal_impulse_increase_sum;
         }
         if !normal_impulse.is_finite() || !impulse_delta.is_finite() {
             return Err(CollisionError::ArithmeticOverflow);
@@ -4508,7 +4508,7 @@ impl PhysicsWorld {
                 if !total_impulse.is_finite() {
                     return Err(CollisionError::ArithmeticOverflow);
                 }
-                impact |= point.normal_impulse_delta > 0.0;
+                impact |= point.normal_impulse_increase_sum > 0.0;
                 if deepest.is_none_or(|current: crate::collision::ContactPoint| {
                     point.penetration > current.penetration
                 }) {

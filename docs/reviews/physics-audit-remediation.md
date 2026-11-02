@@ -23,7 +23,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S13 | Численная устойчивость трения | MITIGATED — c1e2fd4; conditioning threshold requires numerical validation |
 | S14 | Подготовленные effective masses контактов | NOT AUDITED |
 | S15 | Актуальность контактных Jacobian | NOT AUDITED |
-| S16 | Семантика нормальных импульсов | NOT AUDITED |
+| S16 | Семантика нормальных импульсов | MITIGATED — internal field renamed and documented as sum of positive updates; net change and impact classification remain separate work |
 | S17 | Корректный `Impact` | NOT AUDITED |
 | S18 | Согласованные данные событий | MITIGATED — document representative geometry timing and manifold impulse semantics; CCD and discrete samples can still be combined |
 | S19 | Взаимодействие CCD и дискретного solver | NOT AUDITED |
