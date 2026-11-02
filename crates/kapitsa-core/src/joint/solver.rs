@@ -916,9 +916,7 @@ fn append_fixed_rows(
     }
     let rotation_error = relative_rotation_error(rotation_a, rotation_b)?;
     for (axis_index, local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
-        let axis = rotation_a
-            .rotate_vector(local_axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let axis = fixed_rotation_row_axis(rotation_a, rotation_error, local_axis)?;
         let error = rotation_error
             .checked_dot(local_axis)
             .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -1005,8 +1003,7 @@ fn append_ball_angular_limits(
             )?;
         }
     }
-    if let Some(limit) = joint.twist_limit {
-        let twist = twist_angle(relative)?;
+    if let (Some(limit), Some(twist)) = (joint.twist_limit, twist_angle(relative)?) {
         let (error, bounds) = if twist < limit.lower {
             (twist - limit.lower, (0.0, f64::INFINITY))
         } else if twist > limit.upper {
@@ -1085,21 +1082,22 @@ fn append_hinge_rows(
     )?;
     append_axis_alignment(workspace, settings, rotation_a, rotation_b, 3)?;
 
-    let angle = twist_angle(canonical_relative_rotation(rotation_a, rotation_b)?)?;
-    if let Some(settings) = drive_settings(settings, joint.drive)? {
-        push_angular_row(
-            workspace,
-            settings,
-            rotation_a
-                .rotate_vector(Vec3::Z)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
-            angle - joint.drive.target_position,
-            5,
-            bilateral_bounds(),
-        )?;
-    }
-    if let Some(limit) = joint.angle_limit {
-        append_angular_limit(bodies, workspace, settings, rotation_a, angle, limit, 6)?;
+    if let Some(angle) = twist_angle(canonical_relative_rotation(rotation_a, rotation_b)?)? {
+        if let Some(settings) = drive_settings(settings, joint.drive)? {
+            push_angular_row(
+                workspace,
+                settings,
+                rotation_a
+                    .rotate_vector(Vec3::Z)
+                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                angle - joint.drive.target_position,
+                5,
+                bilateral_bounds(),
+            )?;
+        }
+        if let Some(limit) = joint.angle_limit {
+            append_angular_limit(bodies, workspace, settings, rotation_a, angle, limit, 6)?;
+        }
     }
     Ok(())
 }
@@ -1218,19 +1216,20 @@ fn append_cylindrical_rows(
         )?;
     }
 
-    let angle = twist_angle(canonical_relative_rotation(rotation_a, rotation_b)?)?;
-    if let Some(drive) = drive_settings(settings, joint.angular_drive)? {
-        push_angular_row(
-            workspace,
-            drive,
-            axis,
-            angle - joint.angular_drive.target_position,
-            6,
-            bilateral_bounds(),
-        )?;
-    }
-    if let Some(limit) = joint.angle_limit {
-        append_angular_limit(bodies, workspace, settings, rotation_a, angle, limit, 7)?;
+    if let Some(angle) = twist_angle(canonical_relative_rotation(rotation_a, rotation_b)?)? {
+        if let Some(drive) = drive_settings(settings, joint.angular_drive)? {
+            push_angular_row(
+                workspace,
+                drive,
+                axis,
+                angle - joint.angular_drive.target_position,
+                6,
+                bilateral_bounds(),
+            )?;
+        }
+        if let Some(limit) = joint.angle_limit {
+            append_angular_limit(bodies, workspace, settings, rotation_a, angle, limit, 7)?;
+        }
     }
     Ok(())
 }
@@ -1311,16 +1310,8 @@ fn append_planar_rows(
             bilateral_bounds(),
         )?;
     }
-    if let Some(limit) = joint.rotation_limit {
-        append_angular_axis_limit(
-            bodies,
-            workspace,
-            settings,
-            axes[2],
-            twist_angle(relative)?,
-            limit,
-            8,
-        )?;
+    if let (Some(limit), Some(angle)) = (joint.rotation_limit, twist_angle(relative)?) {
+        append_angular_axis_limit(bodies, workspace, settings, axes[2], angle, limit, 8)?;
     }
     Ok(())
 }
@@ -1400,7 +1391,10 @@ fn append_cone_twist_rows(
     )?;
     let relative = canonical_relative_rotation(rotation_a, rotation_b)?;
     let twist_length = relative.z.hypot(relative.w);
-    let twist = if twist_length > f64::MIN_POSITIVE {
+    if !twist_length.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    let twist = if twist_length > TWIST_SINGULAR_TOLERANCE {
         Quat::new(
             0.0,
             0.0,
@@ -1408,6 +1402,8 @@ fn append_cone_twist_rows(
             relative.w / twist_length,
         )
     } else {
+        // With no Z/W projection the twist coordinate is undefined. Treat the
+        // whole relative rotation as swing and skip the separate twist limit.
         Quat::IDENTITY
     };
     let swing = (relative * twist.conjugate())
@@ -1491,15 +1487,18 @@ fn append_cone_twist_rows(
             )?;
         }
     }
-    append_angular_axis_limit(
-        bodies,
-        workspace,
-        settings,
-        axes[2],
-        twist_angle(relative)?,
-        joint.twist_limit,
-        5,
-    )
+    if let Some(angle) = twist_angle(relative)? {
+        append_angular_axis_limit(
+            bodies,
+            workspace,
+            settings,
+            axes[2],
+            angle,
+            joint.twist_limit,
+            5,
+        )?;
+    }
+    Ok(())
 }
 
 fn append_d6_rows(
@@ -1954,23 +1953,65 @@ fn canonical_relative_rotation(rotation_a: Quat, rotation_b: Quat) -> Result<Qua
     Ok(relative)
 }
 
-fn twist_angle(relative: Quat) -> Result<f64, CollisionError> {
+fn fixed_rotation_row_axis(
+    rotation_a: Quat,
+    rotation_error: Vec3,
+    local_axis: Vec3,
+) -> Result<Vec3, CollisionError> {
+    let angle_squared = rotation_error
+        .checked_dot(rotation_error)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    if !angle_squared.is_finite() || !local_axis.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+
+    // The FixedJoint error is log(R_a^-1 R_b). Its derivative for world-space
+    // angular velocities uses J_l^-1(phi); row gradients use its transpose.
+    let coefficient = if angle_squared < 1.0e-4 {
+        1.0 / 12.0 + angle_squared / 720.0 + angle_squared * angle_squared / 30_240.0
+    } else {
+        let angle = angle_squared.sqrt();
+        let half_angle = angle * 0.5;
+        1.0 / angle_squared - half_angle.cos() / (2.0 * angle * half_angle.sin())
+    };
+    if !coefficient.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+
+    let first_cross = rotation_error
+        .checked_cross(local_axis)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let second_cross = rotation_error
+        .checked_cross(first_cross)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let local_gradient = local_axis
+        .checked_add(first_cross * 0.5)
+        .and_then(|value| value.checked_add(second_cross * coefficient))
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    rotation_a
+        .rotate_vector(local_gradient)
+        .filter(|axis| axis.is_finite())
+        .ok_or(CollisionError::ArithmeticOverflow)
+}
+
+const TWIST_SINGULAR_TOLERANCE: f64 = 64.0 * f64::EPSILON;
+
+fn twist_angle(relative: Quat) -> Result<Option<f64>, CollisionError> {
     let length = relative.z.hypot(relative.w);
     if !length.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
-    if length <= f64::MIN_POSITIVE {
-        // At a 180-degree swing with no twist component the twist axis is
-        // undefined; returning zero would invent a coordinate and can make a
-        // limit or motor act on an arbitrary value.
-        return Err(CollisionError::NonConvergent);
+    if length <= TWIST_SINGULAR_TOLERANCE {
+        // The swing is valid but its twist coordinate is undefined. Callers
+        // skip only constraints that require this coordinate until it exists.
+        return Ok(None);
     }
     let angle = 2.0 * (relative.z / length).atan2(relative.w / length);
     let wrapped =
         (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
     wrapped
         .is_finite()
-        .then_some(wrapped)
+        .then_some(Some(wrapped))
         .ok_or(CollisionError::ArithmeticOverflow)
 }
 
@@ -3412,6 +3453,243 @@ mod tests {
         .expect("relative angle");
         assert!(position_delta.length() < 1.0e-10);
         assert!(angle_delta.length() < 1.0e-10);
+    }
+
+    #[test]
+    fn fixed_joint_rotation_log_jacobian_matches_finite_differences() {
+        fn component(value: Vec3, index: usize) -> f64 {
+            match index {
+                0 => value.x,
+                1 => value.y,
+                2 => value.z,
+                _ => unreachable!("three rotation coordinates"),
+            }
+        }
+
+        let rotation_a =
+            Quat::from_axis_angle(Vec3::new(0.4, -0.3, 0.7), 0.73).expect("frame A rotation");
+        let relative_axis = Vec3::new(0.3, -0.7, 0.2)
+            .try_normalize()
+            .expect("relative axis");
+        let world_axes = [Vec3::X, Vec3::Y, Vec3::Z];
+        let epsilon = 1.0e-7;
+
+        for angle in [1.0e-5, 0.7, 2.8, std::f64::consts::PI - 1.0e-5] {
+            let relative = Quat::from_axis_angle(relative_axis, angle).expect("relative rotation");
+            let rotation_b = rotation_a * relative;
+            let error = relative_rotation_error(rotation_a, rotation_b).expect("log map");
+
+            for (row_index, local_axis) in world_axes.into_iter().enumerate() {
+                let row_axis = fixed_rotation_row_axis(rotation_a, error, local_axis)
+                    .expect("finite FixedJoint angular Jacobian");
+
+                for world_axis in world_axes {
+                    let perturbation =
+                        Quat::from_axis_angle(world_axis, epsilon).expect("small rotation");
+                    let inverse_perturbation = perturbation.conjugate();
+                    let expected_b = row_axis.dot(world_axis);
+                    let actual_b = (component(
+                        relative_rotation_error(rotation_a, perturbation * rotation_b)
+                            .expect("positive B perturbation"),
+                        row_index,
+                    ) - component(
+                        relative_rotation_error(rotation_a, inverse_perturbation * rotation_b)
+                            .expect("negative B perturbation"),
+                        row_index,
+                    )) / (2.0 * epsilon);
+                    assert!(
+                        (actual_b - expected_b).abs() <= 3.0e-6,
+                        "B Jacobian angle={angle} row={row_index} axis={world_axis:?}: {actual_b} != {expected_b}"
+                    );
+
+                    let expected_a = -expected_b;
+                    let actual_a = (component(
+                        relative_rotation_error(perturbation * rotation_a, rotation_b)
+                            .expect("positive A perturbation"),
+                        row_index,
+                    ) - component(
+                        relative_rotation_error(inverse_perturbation * rotation_a, rotation_b)
+                            .expect("negative A perturbation"),
+                        row_index,
+                    )) / (2.0 * epsilon);
+                    assert!(
+                        (actual_a - expected_a).abs() <= 3.0e-6,
+                        "A Jacobian angle={angle} row={row_index} axis={world_axis:?}: {actual_a} != {expected_a}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_joint_point_jacobians_match_finite_differences_with_offset_com() {
+        fn make_body(position: Vec3, rotation: Quat, center: Vec3, mass: f64) -> SolverBody {
+            let properties = MassProperties::new(
+                mass,
+                center,
+                kapitsa_math::Mat3::from_diagonal(Vec3::new(0.7, 1.1, 1.4)),
+            )
+            .expect("mass properties");
+            let body = RigidBody::new_dynamic(
+                Transform::new(position, rotation).expect("body transform"),
+                properties,
+            )
+            .expect("dynamic body");
+            let state = *body.state();
+            SolverBody::from_prediction(body, state)
+        }
+
+        fn rotate_about_center(
+            transform: Transform,
+            local_center: Vec3,
+            axis: Vec3,
+            angle: f64,
+        ) -> Transform {
+            let center = transform.transform_point(local_center);
+            let delta = Quat::from_axis_angle(axis, angle).expect("small rotation");
+            let rotation = delta * transform.rotation();
+            let rotated_local_center = rotation
+                .rotate_vector(local_center)
+                .expect("rotated center of mass");
+            Transform::new(center - rotated_local_center, rotation).expect("rotated body transform")
+        }
+
+        let center_a = Vec3::new(0.17, -0.09, 0.12);
+        let center_b = Vec3::new(-0.11, 0.14, 0.06);
+        let rotation_a =
+            Quat::from_axis_angle(Vec3::new(0.2, 0.8, -0.3), 0.37).expect("rotation A");
+        let rotation_b =
+            Quat::from_axis_angle(Vec3::new(-0.4, 0.1, 0.9), -0.29).expect("rotation B");
+        let bodies = [
+            make_body(Vec3::new(-0.3, 0.4, 0.2), rotation_a, center_a, 2.0),
+            make_body(Vec3::new(0.9, -0.2, 0.5), rotation_b, center_b, 3.5),
+        ];
+        let frame_a = JointFrame::new(
+            Vec3::new(0.3, -0.2, 0.1),
+            Quat::from_axis_angle(Vec3::Y, 0.23).expect("frame A rotation"),
+        );
+        let frame_b = JointFrame::new(
+            Vec3::new(-0.15, 0.25, -0.08),
+            Quat::from_axis_angle(Vec3::X, -0.31).expect("frame B rotation"),
+        );
+        let constraint = JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: Joint::Fixed(super::super::FixedJoint::new(JointCommon::new(
+                frame_a, frame_b,
+            ))),
+        };
+        let mut workspace = JointWorkspace::new();
+        JointSolver::prepare(&mut workspace, &bodies, &[constraint], 0.01)
+            .expect("prepare fixed point rows");
+        let row = workspace.rows()[0];
+        let transform_a = bodies[0].state().transform();
+        let transform_b = bodies[1].state().transform();
+        let error = |transform_a: Transform, transform_b: Transform| {
+            let anchor_a = transform_a.transform_point(frame_a.local_anchor);
+            let anchor_b = transform_b.transform_point(frame_b.local_anchor);
+            (anchor_b - anchor_a).dot(Vec3::X)
+        };
+        assert!((row.error - error(transform_a, transform_b)).abs() < 1.0e-12);
+
+        let epsilon = 1.0e-7;
+        for direction in [Vec3::X, Vec3::Y, Vec3::Z] {
+            let plus_a = Transform::new(
+                transform_a.translation() + direction * epsilon,
+                transform_a.rotation(),
+            )
+            .expect("translated A");
+            let minus_a = Transform::new(
+                transform_a.translation() - direction * epsilon,
+                transform_a.rotation(),
+            )
+            .expect("translated A");
+            let translation_a =
+                (error(plus_a, transform_b) - error(minus_a, transform_b)) / (2.0 * epsilon);
+            assert!((translation_a - row.linear_a.dot(direction)).abs() < 3.0e-6);
+
+            let plus_b = Transform::new(
+                transform_b.translation() + direction * epsilon,
+                transform_b.rotation(),
+            )
+            .expect("translated B");
+            let minus_b = Transform::new(
+                transform_b.translation() - direction * epsilon,
+                transform_b.rotation(),
+            )
+            .expect("translated B");
+            let translation_b =
+                (error(transform_a, plus_b) - error(transform_a, minus_b)) / (2.0 * epsilon);
+            assert!((translation_b - row.linear_b.dot(direction)).abs() < 3.0e-6);
+
+            let rotation_a_delta = (error(
+                rotate_about_center(transform_a, center_a, direction, epsilon),
+                transform_b,
+            ) - error(
+                rotate_about_center(transform_a, center_a, direction, -epsilon),
+                transform_b,
+            )) / (2.0 * epsilon);
+            assert!((rotation_a_delta - row.angular_a.dot(direction)).abs() < 3.0e-6);
+
+            let rotation_b_delta = (error(
+                transform_a,
+                rotate_about_center(transform_b, center_b, direction, epsilon),
+            ) - error(
+                transform_a,
+                rotate_about_center(transform_b, center_b, direction, -epsilon),
+            )) / (2.0 * epsilon);
+            assert!((rotation_b_delta - row.angular_b.dot(direction)).abs() < 3.0e-6);
+        }
+    }
+
+    #[test]
+    fn undefined_twist_does_not_fail_joint_preparation() {
+        let swing = Quat::from_axis_angle(Vec3::X, std::f64::consts::PI).expect("180-degree swing");
+        assert_eq!(twist_angle(swing), Ok(None));
+        assert!(matches!(
+            twist_angle(Quat::from_axis_angle(Vec3::Z, 0.7).expect("defined twist")),
+            Ok(Some(angle)) if (angle - 0.7).abs() < 1.0e-12
+        ));
+
+        let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        let limit = super::super::JointLimit::new(-0.25, 0.25);
+        let mut ball = super::super::BallJoint::new(common);
+        ball.swing_limit = Some(0.5);
+        ball.twist_limit = Some(limit);
+        let joints = [
+            Joint::Ball(ball),
+            Joint::Hinge(super::super::HingeJoint {
+                common,
+                angle_limit: Some(limit),
+                drive: super::super::JointDrive::DISABLED,
+            }),
+            Joint::Cylindrical(super::super::CylindricalJoint {
+                angle_limit: Some(limit),
+                ..super::super::CylindricalJoint::new(common)
+            }),
+            Joint::Planar(super::super::PlanarJoint {
+                rotation_limit: Some(limit),
+                ..super::super::PlanarJoint::new(common)
+            }),
+            Joint::ConeTwist(super::super::ConeTwistJoint::new(common, [0.5, 0.5], limit)),
+        ];
+        let bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_rotation(Vec3::ZERO, swing),
+        ];
+        for joint in joints {
+            let constraint = JointConstraint {
+                id: test_joint_id(),
+                body_a: 0,
+                body_b: 1,
+                joint,
+            };
+            let mut workspace = JointWorkspace::new();
+            JointSolver::prepare(&mut workspace, &bodies, &[constraint], 0.01)
+                .expect("undefined twist is not a failed physics step");
+            assert!(workspace.rows().iter().all(|row| row.error.is_finite()));
+        }
     }
 
     #[cfg(feature = "bench-internals")]
