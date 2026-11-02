@@ -12,12 +12,25 @@ pub enum CollisionEventKind {
     Impact,
 }
 
-/// Contact data associated with a collision event.
+/// Representative contact data associated with a collider pair.
+///
+/// These values are not necessarily a single simultaneous measurement:
+/// discrete contacts use the deepest generated point's normal and penetration,
+/// while `point` is reconstructed from its anchors after solving. Continuous
+/// collision contacts may instead describe an earlier impact in the step.
+/// When multiple interactions for a pair are staged, later contact data can
+/// replace earlier data; `Impact` therefore does not imply this geometry is
+/// the geometry of the first impact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContactInfo {
+    /// Representative world-space midpoint of the two contact anchors.
     pub point: Vec3,
+    /// Normal of the representative generated contact.
     pub normal: Vec3,
+    /// Penetration reported when the representative contact was generated.
     pub penetration: f64,
+    /// Sum of normal impulses in the selected manifold, not the impulse at
+    /// `point` alone or necessarily the total across all impacts in the step.
     pub normal_impulse: f64,
 }
 

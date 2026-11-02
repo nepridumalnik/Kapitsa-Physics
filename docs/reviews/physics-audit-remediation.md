@@ -25,7 +25,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S15 | Актуальность контактных Jacobian | NOT AUDITED |
 | S16 | Семантика нормальных импульсов | NOT AUDITED |
 | S17 | Корректный `Impact` | NOT AUDITED |
-| S18 | Согласованные данные событий | NOT AUDITED |
+| S18 | Согласованные данные событий | MITIGATED — document representative geometry timing and manifold impulse semantics; CCD and discrete samples can still be combined |
 | S19 | Взаимодействие CCD и дискретного solver | NOT AUDITED |
 | S20 | Достоверность GJK fallback | NOT AUDITED |
 | S21 | Критерии завершения EPA | NOT AUDITED |
