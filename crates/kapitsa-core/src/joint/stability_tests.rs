@@ -4,6 +4,8 @@ use crate::{
     world::PhysicsWorld,
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
+#[cfg(feature = "bench-internals")]
+use std::time::Instant;
 
 const DT: f64 = 1.0 / 120.0;
 
@@ -309,6 +311,177 @@ fn fixed_joint_chain_and_branch_sizes_report_residual_by_step() {
             .unwrap();
     }
     report(world, "branch_100");
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "diagnostic of loaded velocity convergence on joint graphs without contacts"]
+fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
+    for (name, count, branching) in [
+        ("chain_2", 2, false),
+        ("chain_10", 10, false),
+        ("chain_50", 50, false),
+        ("chain_100", 100, false),
+        ("branch_100", 100, true),
+    ] {
+        for velocity_iterations in [1, 2, 4, 8, 16] {
+            let mut world = loaded_fixed_joint_graph(count, branching, velocity_iterations, false);
+            let first_body = world.bodies().next().unwrap().0;
+            let force = world
+                .bodies()
+                .filter_map(|(_, body)| body.physics().mass())
+                .map(|mass| mass.mass())
+                .sum::<f64>()
+                * 9.81
+                * 1.3;
+            let point = world
+                .body(first_body)
+                .unwrap()
+                .state()
+                .transform()
+                .transform_point(Vec3::Y * 0.25);
+            world
+                .body_mut(first_body)
+                .unwrap()
+                .apply_force_at_point(Vec3::Y * force, point)
+                .unwrap();
+
+            let started = Instant::now();
+            world.step(DT).unwrap();
+            let first_elapsed = started.elapsed();
+            let first = world.physics_step_metrics().joints;
+            world.step(DT).unwrap();
+            let second_elapsed = started.elapsed().saturating_sub(first_elapsed);
+            let second = world.physics_step_metrics().joints;
+            println!(
+                "graph={name} joints={} velocity_iterations={} elapsed_us={}/{} step1_geometry_pre/post={:.6e}/{:.6e}m step2_geometry_pre/post={:.6e}/{:.6e}m velocity_linear_step1_first/final={:.6e}/{:.6e}m/s step2_final={:.6e}m/s velocity_angular_step1_first/final={:.6e}/{:.6e}rad/s step2_final={:.6e}rad/s",
+                world.joint_count(),
+                first.velocity_sweeps,
+                first_elapsed.as_micros(),
+                second_elapsed.as_micros(),
+                first.pre_velocity_anchor_error_m,
+                first.post_joint_anchor_error_m,
+                second.pre_velocity_anchor_error_m,
+                second.post_joint_anchor_error_m,
+                first.first_velocity_linear_residual_mps,
+                first.post_velocity_linear_residual_mps,
+                second.post_velocity_linear_residual_mps,
+                first.first_velocity_angular_residual_radps,
+                first.post_velocity_angular_residual_radps,
+                second.post_velocity_angular_residual_radps,
+            );
+        }
+    }
+
+    for (name, branching) in [("chain_100", false), ("branch_100", true)] {
+        for reverse_joint_order in [false, true] {
+            for velocity_iterations in [8, 16] {
+                let mut world = loaded_fixed_joint_graph(
+                    100,
+                    branching,
+                    velocity_iterations,
+                    reverse_joint_order,
+                );
+                let first_body = world.bodies().next().unwrap().0;
+                let force = world
+                    .bodies()
+                    .filter_map(|(_, body)| body.physics().mass())
+                    .map(|mass| mass.mass())
+                    .sum::<f64>()
+                    * 9.81
+                    * 1.3;
+                let point = world
+                    .body(first_body)
+                    .unwrap()
+                    .state()
+                    .transform()
+                    .transform_point(Vec3::Y * 0.25);
+                world
+                    .body_mut(first_body)
+                    .unwrap()
+                    .apply_force_at_point(Vec3::Y * force, point)
+                    .unwrap();
+                world.step(DT).unwrap();
+                let metrics = world.physics_step_metrics().joints;
+                println!(
+                    "graph={name} joint_order={} velocity_iterations={} linear_residual={:.6e}m/s angular_residual={:.6e}rad/s",
+                    if reverse_joint_order {
+                        "reverse"
+                    } else {
+                        "forward"
+                    },
+                    metrics.velocity_sweeps,
+                    metrics.post_velocity_linear_residual_mps,
+                    metrics.post_velocity_angular_residual_radps,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn loaded_fixed_joint_graph(
+    count: usize,
+    branching: bool,
+    velocity_iterations: u32,
+    reverse_joint_order: bool,
+) -> PhysicsWorld {
+    let mut world = PhysicsWorld::new();
+    let mut bodies = Vec::with_capacity(count);
+    let mut positions = Vec::with_capacity(count);
+    let mut edges = Vec::with_capacity(count.saturating_sub(1));
+    for index in 0..count {
+        let parent = if branching && index > 0 {
+            Some((index - 1) / 2)
+        } else if index > 0 {
+            Some(index - 1)
+        } else {
+            None
+        };
+        let position = parent.map_or(Vec3::ZERO, |parent| positions[parent] + Vec3::X);
+        positions.push(position);
+
+        let mass = 0.8 + (index % 7) as f64 * 0.17;
+        let center = Vec3::new(
+            (index % 3) as f64 * 0.002,
+            -((index % 5) as f64) * 0.001,
+            (index % 2) as f64 * 0.0015,
+        );
+        let scale = 0.7 + (index % 5) as f64 * 0.13;
+        let inertia = Mat3::from_diagonal(Vec3::new(scale * 0.6, scale * 0.8, scale));
+        let body = RigidBody::new_dynamic(
+            Transform::new(position, Quat::IDENTITY).unwrap(),
+            MassProperties::new(mass, center, inertia).unwrap(),
+        )
+        .unwrap();
+        bodies.push(world.add_body(body).unwrap());
+
+        if let Some(parent) = parent {
+            edges.push((parent, index));
+        }
+    }
+    if reverse_joint_order {
+        edges.reverse();
+    }
+    for (parent, child) in edges {
+        world
+            .add_joint(
+                bodies[parent],
+                bodies[child],
+                Joint::Fixed(FixedJoint::new(JointCommon::new(
+                    JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+                    JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+                ))),
+            )
+            .unwrap();
+    }
+    world
+        .set_collision_config(CollisionConfig {
+            velocity_iterations,
+            ..CollisionConfig::default()
+        })
+        .unwrap();
+    world
 }
 
 fn two_body_world(reverse: bool, static_a: bool) -> PhysicsWorld {

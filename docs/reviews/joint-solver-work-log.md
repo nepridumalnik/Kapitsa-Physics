@@ -110,3 +110,22 @@ Reversing the rocket's dense joint storage order provides a controlled solver or
 | Gravity with contact | Reverse | 0.3175803 / 0.03548104 | 1.624990 | 20 | 48.2826% |
 
 Reverse order slightly improves frame maxima but materially worsens anchor error in all three modes. A global reverse sweep is rejected as a fix; topology-aware ordering or symmetric sweeps still require separate measurement. This supports that graph/order sensitivity exists, but does not yet identify a single defective Jacobian or mass/COM calculation. Keep the remaining cause open.
+
+## 2026-11-02 — loaded graph velocity convergence
+
+Added an ignored Release diagnostic with no colliders or gravity. It applies a one-step thrust-like force at an offset point on the root of fixed-joint chains of 2, 10, 50, and 100 bodies, plus a 100-body binary branch. Bodies use varied mass, inertia, and local COM. The following rows show final velocity residual after the configured sweeps and the next step's predicted anchor error before position projection:
+
+| Graph | Velocity sweeps | Linear residual, m/s | Angular residual, rad/s | Next-step predicted anchor error, m |
+|---|---:|---:|---:|---:|
+| Chain 10 | 8 | 0.033454 | 0.046610 | 0.000837 |
+| Chain 50 | 8 | 0.179980 | 0.250763 | 0.004505 |
+| Chain 100 | 8 | 0.360431 | 0.502182 | 0.009046 |
+| Branch 100 | 8 | 0.287878 | 0.231644 | 0.009498 |
+| Chain 10 | 16 | 0.018329 | 0.037358 | 0.000695 |
+| Chain 50 | 16 | 0.098784 | 0.202327 | 0.003743 |
+| Chain 100 | 16 | 0.197826 | 0.405184 | 0.007510 |
+| Branch 100 | 16 | 0.070497 | 0.070647 | 0.007543 |
+
+The 100-body chain's first post-thrust velocity sweep leaves `2.319957 m/s` linear and `1.420510 rad/s` angular residual; 8 sweeps reduce these to `0.360431/0.502182`, and 16 to `0.197826/0.405184`. A second load-free step still produces a predicted anchor error before projection, so the residual is carried into the next integration. Small graphs converge rapidly (the 2-body chain reaches roundoff by 8 sweeps), while residual grows with graph size. This is direct evidence of loaded Gauss–Seidel under-convergence in long connected graphs; it is not caused by contact because the diagnostic has no colliders, and unequal masses/inertias and nonzero COM are part of the setup.
+
+Joint-storage order remains topology-dependent. At 100 bodies and 8 sweeps, reversing the chain increases linear/angular residual from `0.360431/0.502182` to `0.437700/0.613877`; reversing the branch improves linear but worsens angular (`0.287878/0.231644` to `0.138199/0.384722`). At 16 sweeps, reverse order worsens both residuals for both graphs. A global reverse traversal is not a general fix. The remaining production work should target bounded residual-based convergence and a measured graph-aware sweep policy; do not promote larger fixed iteration counts alone.
