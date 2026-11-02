@@ -2442,8 +2442,13 @@ fn projection_group_indices(rows: &[ConstraintRow], keys: [u8; 3]) -> Option<[us
             duplicate_key = true;
         }
     }
-    let complete = !duplicate_key && matching_rows == 3 && indices.iter().all(Option::is_some);
-    complete.then(|| indices.map(Option::unwrap))
+    if duplicate_key || matching_rows != 3 {
+        return None;
+    }
+    match indices {
+        [Some(a), Some(b), Some(c)] => Some([a, b, c]),
+        _ => None,
+    }
 }
 
 fn hard_bilateral_block(
