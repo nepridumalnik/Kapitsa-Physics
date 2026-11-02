@@ -33,7 +33,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S23 | Корректные вращательные Jacobian | NOT AUDITED |
 | S24 | Непрерывные координаты вращения | NOT AUDITED |
 | S25 | Физические единицы и compliance | NOT AUDITED |
-| S26 | Корректный adaptive residual | NOT AUDITED |
+| S26 | Корректный adaptive residual | MITIGATED — f076d1e corrects fixed bounds; damped and compliant velocity residuals still require review |
 | S27 | Реакции и разрушение Joint | NOT AUDITED |
 | S28 | Согласованность position/velocity solver | NOT AUDITED |
 | S29 | Изменение массовых характеристик | MITIGATED — documented state-edit contract; physical mass transfer remains unimplemented |
@@ -68,3 +68,5 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 - S13 skips the tangential correction when the normalized determinant is at most 64 machine epsilons; this conservative threshold and its effects need numerical validation.
 - S03 strict evaluation includes scenario assumptions (including impacts), which must be reviewed alongside S02 before interpreting a failure as numerical instability.
 - TGS, rigid clusters, ABA, on-rails propagation and other unreviewed strategies are not claimed as implemented.
+
+- The ignored release rocket scenario was explicitly run and failed strict criteria for 100, 200, 500 and 1000 parts. Maximum joint anchor errors were 0.2048983, 0.2826946, 0.7275499 and 2.759083 metres respectively. The 1000-part scenario also reported no surface events; the fixture and energy diagnostic remain to be reviewed. The fixed-bound residual correction was made after this run and affects the adaptive path; no rerun has established an effect on the default rocket scenario.
