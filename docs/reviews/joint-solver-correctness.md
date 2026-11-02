@@ -1,6 +1,6 @@
 # Joint solver correctness audit
 
-Baseline: `f9e0d17b1a1c4370e2bfd0d360fb7f5749935d09` on `audit/physics-remediation`. This document records static findings; this pass does not execute tests, benchmarks or simulations.
+Baseline: `f9e0d17b1a1c4370e2bfd0d360fb7f5749935d09` on `audit/physics-remediation`. The original entries record static findings; dated updates below supersede their statements about runtime validation and current status.
 
 ## Pipeline and contracts
 
@@ -72,3 +72,15 @@ For a future rigid assembly, mass must be `M = Σm_i`, center `c = Σm_i c_i / M
 ## Validation in this pass
 
 After each code change, `cargo +1.98.0 fmt --all -- --check`, `cargo +1.98.0 check --workspace --all-features --locked --offline -j 4`, `cargo +1.98.0 clippy --workspace --all-features --locked --offline -j 4 -- -D warnings`, and `git diff --check` passed. No test, benchmark, or numerical scene was run, and no new test was added. Previously measured rocket errors and timing were produced before this pass and cannot validate these changes. In particular, neither convergence improvement nor a speedup is established.
+
+## Dynamic energy and projection update (2026-11-03)
+
+The dated energy audit supersedes the earlier static-only validation note above.
+
+- A free anisotropic rotor test validates the midpoint gyroscopic update over ten seconds: energy drift is `−4.3135e−4%` at `dt=1/120` and `−1.0779e−4%` at `dt=1/240`; angular-momentum error decreases from `3.50e−5` to `8.36e−6`.
+- On a free two-body FixedJoint, post-integration `|Jv|` is `4.5551e−4 m/s` at `dt=1/120` and `2.2780e−4 m/s` at half dt. Over the same simulated time the Velocity Solver energy loss halves from `−8.2531e−6 J` to `−4.1268e−6 J`. The measured change agrees with the applied generalized-impulse work within `1.5e−16 J`.
+- On an isolated 100-body fixed chain, Scalar leaves `7.3648e−2 m/s / 1.976e−3 rad/s` velocity residual and loses `120.23 J`; IC(0) PCG 64 reduces it to roundoff and loses `1.977 J`. The correction identity closes to `3.7e−13 J`; this distinguishes admissible projection work from excess loss due to scalar under-convergence.
+- Post-position velocity residual remains near the post-velocity value in the tested single joint, chain, and free rocket assembly. Position-stage energy changes are orders smaller than the velocity projection. The split predictor still creates timestep-dependent `Jv` for constrained bodies; a fully coupled constrained midpoint integrator is not implemented.
+- Coast-energy diagnostics now use `U=−μm/r`, zero at infinity, normalized by initial `|T|+|R|+|U|`. For the same 500-part full-flight PCG trajectory, the corrected metric is `4.598934067e−7%`; the former surface-zero formula reports `88.94944039%` on identical states. The arbitrary reference nearly cancels the gravitational term and is not a physical drift measure.
+- Strict scalar rocket geometry still fails at all four sizes. Benchmark-only PCG caps `5/5` with 16 outer velocity sweeps pass unchanged strict criteria at 100/200/500/1,000 parts, but are `2.7x/3.5x/6.4x/9.0x` slower than the original strict timing and have frequent capped local solves. PCG is not the production default.
+- Release diagnostics, full serial workspace tests, all-features check and strict Clippy passed on the final code checkpoint. See [`joint-solver-energy-parallel-results.md`](joint-solver-energy-parallel-results.md) for the full stage ledger, cap screen, and performance table.

@@ -11,8 +11,8 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S01 | Реестр состояния | NOT AUDITED |
 | S02 | Корректность ракетной фикстуры | MITIGATED — pad start corrected and tested; separate flight, separation and collision configurations remain outstanding |
 | S03 | Строгая оценка стабильности | MITIGATED — c29c698; static check only |
-| S04 | Корректная энергетическая диагностика | NOT AUDITED |
-| S05 | Диагностика сходимости Joint | NOT AUDITED |
+| S04 | Корректная энергетическая диагностика | PARTIAL — midpoint gyro and physical coast potential validated; constrained predict/project dissipation characterized, coupled integration remains open |
+| S05 | Диагностика сходимости Joint | PARTIAL — geometric/Jv residuals and PCG cap outcomes measured; production convergence policy remains open |
 | S06 | Многоточечный Plane × Convex manifold | NOT AUDITED |
 | S07 | Многоточечный Convex × Convex manifold | NOT AUDITED |
 | S08 | Стабильная идентичность геометрических фич | NOT AUDITED |
@@ -35,7 +35,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S25 | Физические единицы и compliance | NOT AUDITED |
 | S26 | Корректный adaptive residual | MITIGATED — f076d1e corrects fixed bounds; damped and compliant velocity residuals still require review |
 | S27 | Реакции и разрушение Joint | NOT AUDITED |
-| S28 | Согласованность position/velocity solver | NOT AUDITED |
+| S28 | Согласованность position/velocity solver | PARTIAL — stage energy and post-position Jv measured; split integration still creates constrained-velocity mismatch |
 | S29 | Изменение массовых характеристик | MITIGATED — documented state-edit contract; physical mass transfer remains unimplemented |
 | S30 | Инвалидирование Joint warm-start | NOT AUDITED |
 | S31 | Повторное использование Joint row topology | NOT AUDITED |
@@ -48,7 +48,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S38 | Уменьшение затрат query API | MITIGATED — expose caller-owned QueryScratch for raycast, sweep and overlaps; repeated query integration test passed |
 | S39 | Эффективные snapshots | MITIGATED — reuse existing index when body IDs and order are unchanged; all snapshot tests passed; performance not measured |
 | S40 | Буферизация событий | MITIGATED — event batches share nonempty immutable buffers across broadcast subscribers; initial publication still copies world events |
-| S41 | Graph Coloring внутри solver islands | NOT AUDITED |
+| S41 | Graph Coloring внутри solver islands | MITIGATED — level-ordered conflict-free execution is implemented; branch speedups measured, connected-chain scaling not achieved |
 | S42 | Rigid Clusters / Compound Bodies | NOT AUDITED |
 | S43 | Featherstone ABA | BLOCKED — mathematical and numerical validation required before integration |
 | S44 | Транзакционная основа TGS | BLOCKED — existing CCD/forces/cache/rollback blocker; see temporal-substeps-blocker-report.md |
@@ -57,7 +57,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S47 | Разделение общих solver-примитивов | MITIGATED — staged SolverBody and tangent basis moved into common constraint module; joint code still uses collision errors |
 | S48 | Разделение внутренних модулей | NOT AUDITED |
 | S49 | Публичная конфигурация и feature gates | NOT AUDITED |
-| S50 | Аудит аллокаций и оставшихся hot paths | MITIGATED — reviewed contact cache, joint row storage, snapshots and event publication; broader hot-path audit remains |
+| S50 | Аудит аллокаций и оставшихся hot paths | MITIGATED — reviewed contact cache, joint row storage, snapshots and event publication; broader hot-path audit remains; diagnostic snapshot scratch is bench-only |
 
 ## Verification and risks
 
@@ -82,3 +82,11 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 - The rocket benchmark observed zero allocator calls at p50/p95 for warmed steady samples; it does not prove zero allocations for every step or scenario. Separation samples allocated. See `rocket-performance-observation.md` for conditions and interference.
 
 - Subsequent workspace run completed 773 unit/integration checks with 4 ignored, but its doctest phase failed because a concurrent build changed an artifact. A separate `cargo +1.98.0 test --workspace --doc --locked --offline -j 4` then passed both doctests. The impulse-field rename was checked separately with 8 collision-solver tests and strict workspace Clippy.
+
+## Joint solver update (2026-11-03)
+
+- The energy stage ledger and projection-work accounting are dynamically validated; see [`joint-solver-energy-parallel-results.md`](joint-solver-energy-parallel-results.md). Velocity projection loss on a free fixed assembly closes against impulse work. Scalar graph under-convergence is demonstrated; this does not mean ideal rigid assembly energy has been solved by the integrator.
+- Corrected physical coast drift and the former surface-zero metric were compared on the same 500-part PCG full-flight trajectory: `4.598934067e−7%` versus `88.94944039%`. The old denominator is sensitive to the arbitrary potential offset. The previously cited roughly 6% experimental-PCG figure has no matching saved configuration and is not reproduced by current free-assembly PCG runs (`0.004841–0.004958%`); attribution remains unverified.
+- The strict scalar rocket test fails anchor/frame limits at 100/200/500/1,000 parts. The benchmark-only IC(0) PCG 5/5 configuration with 16 outer velocity sweeps passes all four unchanged strict scenarios; it remains non-production because it is substantially slower and many local solves hit their cap.
+- Updated validation on this checkpoint: `cargo +1.98.0 fmt --all -- --check`, all-features workspace `check`, strict all-features Clippy, and serial workspace tests/doctests passed. Focused Release rotor, projection work, free assembly, gravity-only rocket, strict PCG screen, and same-state metric comparison passed. The default scalar strict rocket failure is retained as a failure.
+- Production gaps remain: no fully coupled constrained midpoint integrator, no production PCG selection, no complete audit of the 50/61 requested stages, and no verified persistent worker pool. The 6% historical PCG value remains unresolved until its exact scenario/configuration is recovered.
