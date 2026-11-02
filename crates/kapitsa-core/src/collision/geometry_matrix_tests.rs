@@ -425,7 +425,20 @@ fn triangle_cuboid_sat(
             .zip([half_extents.x, half_extents.y, half_extents.z])
             .map(|(box_axis, half)| half * box_axis.dot(axis).abs())
             .sum::<f64>();
-        triangle_max >= box_center - box_radius && triangle_min <= box_center + box_radius
+        // The rotated tangent cases accumulate rounding in the transformed
+        // vertices, normalized axis, and projections. An exact comparison
+        // can classify a theoretical contact as a separation by one ULP.
+        let scale = triangle_vertices
+            .iter()
+            .fold(
+                cuboid.transform.translation().abs().max_element(),
+                |s, v| s.max(v.abs().max_element()),
+            )
+            .max(box_radius);
+        let error =
+            kapitsa_math::numeric::roundoff_bound(scale, 64).expect("finite SAT projection scale");
+        triangle_max + error >= box_center - box_radius
+            && triangle_min - error <= box_center + box_radius
     })
 }
 
