@@ -607,6 +607,205 @@ fn parallel_velocity_pcg_matches_single_worker_on_a_large_joint_island() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
+fn conflict_free_colored_solver_is_deterministic_and_reuses_batches() {
+    let mut single_worker = loaded_fixed_joint_graph(200, true, 8, false, false);
+    let mut multiple_workers = loaded_fixed_joint_graph(200, true, 8, false, false);
+    let mut repeated_parallel = loaded_fixed_joint_graph(200, true, 8, false, false);
+    for world in [
+        &mut single_worker,
+        &mut multiple_workers,
+        &mut repeated_parallel,
+    ] {
+        let root = world.bodies().next().unwrap().0;
+        let point = world
+            .body(root)
+            .unwrap()
+            .state()
+            .transform()
+            .transform_point(Vec3::Y * 0.25);
+        world
+            .body_mut(root)
+            .unwrap()
+            .apply_force_at_point(Vec3::Y * 30_000.0, point)
+            .unwrap();
+    }
+
+    single_worker.step(DT).unwrap();
+    multiple_workers
+        .step_with_executor(DT, &ScopedPcgTestExecutor, 4)
+        .unwrap();
+    repeated_parallel
+        .step_with_executor(DT, &ScopedPcgTestExecutor, 4)
+        .unwrap();
+    for (((_, single), (_, parallel)), (_, repeated)) in single_worker
+        .bodies()
+        .zip(multiple_workers.bodies())
+        .zip(repeated_parallel.bodies())
+    {
+        assert_eq!(parallel.state(), repeated.state());
+        assert!(single.state().linear_velocity().is_finite());
+        assert!(parallel.state().linear_velocity().is_finite());
+    }
+    let first_step_metrics = multiple_workers.physics_step_metrics().joints;
+    assert!(first_step_metrics.constraint_coloring_rebuilds > 0);
+    assert!(first_step_metrics.color_batches_processed > 0);
+    assert_eq!(first_step_metrics.max_colors_per_island, 2);
+    assert!(first_step_metrics.constraint_coloring_constraints >= 199);
+
+    single_worker.step(DT).unwrap();
+    multiple_workers
+        .step_with_executor(DT, &ScopedPcgTestExecutor, 4)
+        .unwrap();
+    repeated_parallel
+        .step_with_executor(DT, &ScopedPcgTestExecutor, 4)
+        .unwrap();
+    for ((_, parallel), (_, repeated)) in multiple_workers.bodies().zip(repeated_parallel.bodies())
+    {
+        assert_eq!(parallel.state(), repeated.state());
+    }
+    let cached_metrics = multiple_workers.physics_step_metrics().joints;
+    assert_eq!(cached_metrics.constraint_coloring_rebuilds, 0);
+    assert!(cached_metrics.constraint_coloring_cache_hits > 0);
+    assert_finite_body_states(&multiple_workers);
+    let scalar_errors = max_joint_errors(&single_worker);
+    let colored_errors = max_joint_errors(&multiple_workers);
+    assert!((scalar_errors.0 - colored_errors.0).abs() < 1.0e-12);
+    assert!((scalar_errors.1 - colored_errors.1).abs() < 1.0e-12);
+    println!(
+        "branch=200 scalar_anchor/frame={:.6e}/{:.6e} colored_anchor/frame={:.6e}/{:.6e} colors={} batches={} cache_hits={}",
+        scalar_errors.0,
+        scalar_errors.1,
+        colored_errors.0,
+        colored_errors.1,
+        cached_metrics.max_colors_per_island,
+        cached_metrics.color_batches_processed,
+        cached_metrics.constraint_coloring_cache_hits,
+    );
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Release comparison of scalar and conflict-free colored large-island passes"]
+fn diagnose_colored_constraint_batch_scaling() {
+    fn percentile_micros(samples: &mut [u128], percentile: usize) -> u128 {
+        samples.sort_unstable();
+        let index = samples
+            .len()
+            .saturating_mul(percentile)
+            .div_ceil(100)
+            .max(1)
+            - 1;
+        samples[index.min(samples.len() - 1)]
+    }
+
+    for (topology, branching) in [("chain", false), ("branch", true)] {
+        for body_count in [200, 500, 1000] {
+            for worker_count in [1, 2, 4, 8] {
+                let mut world = loaded_fixed_joint_graph(body_count, branching, 8, false, false);
+                let root = world.bodies().next().unwrap().0;
+                let point = world
+                    .body(root)
+                    .unwrap()
+                    .state()
+                    .transform()
+                    .transform_point(Vec3::Y * 0.25);
+                let mut elapsed_samples = Vec::with_capacity(5);
+                for sample in 0..6 {
+                    world
+                        .body_mut(root)
+                        .unwrap()
+                        .apply_force_at_point(Vec3::Y * 30_000.0, point)
+                        .unwrap();
+                    let started = Instant::now();
+                    if worker_count == 1 {
+                        world.step(DT).unwrap();
+                    } else {
+                        world
+                            .step_with_executor(DT, &ScopedPcgTestExecutor, worker_count)
+                            .unwrap();
+                    }
+                    if sample > 0 {
+                        elapsed_samples.push(started.elapsed().as_micros());
+                    }
+                }
+                let p50 = percentile_micros(&mut elapsed_samples, 50);
+                let p95 = percentile_micros(&mut elapsed_samples, 95);
+                let metrics = world.physics_step_metrics().joints;
+                let errors = max_joint_errors(&world);
+                println!(
+                    "topology={topology} bodies={body_count} workers={worker_count} step_p50/p95_us={p50}/{p95} anchor/frame_error={:.6e}/{:.6e} colors={} batches={} color_prepare_us={} rebuild/cache={}/{}",
+                    errors.0,
+                    errors.1,
+                    metrics.max_colors_per_island,
+                    metrics.color_batches_processed,
+                    metrics.constraint_coloring_prepare_time.as_micros(),
+                    metrics.constraint_coloring_rebuilds,
+                    metrics.constraint_coloring_cache_hits,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Release convergence sweep for colored large-island iteration counts"]
+fn diagnose_colored_large_island_iteration_requirements() {
+    for (topology, branching) in [("chain", false), ("branch", true)] {
+        for (worker_count, velocity_iterations, position_iterations) in [
+            (1, 8, 3),
+            (4, 8, 3),
+            (4, 16, 3),
+            (4, 32, 3),
+            (4, 64, 3),
+            (4, 16, 8),
+            (4, 32, 8),
+        ] {
+            let mut world =
+                loaded_fixed_joint_graph(200, branching, velocity_iterations, false, false);
+            world
+                .set_collision_config(CollisionConfig {
+                    position_iterations,
+                    ..world.collision_config()
+                })
+                .unwrap();
+            let root = world.bodies().next().unwrap().0;
+            let point = world
+                .body(root)
+                .unwrap()
+                .state()
+                .transform()
+                .transform_point(Vec3::Y * 0.25);
+            for _ in 0..6 {
+                world
+                    .body_mut(root)
+                    .unwrap()
+                    .apply_force_at_point(Vec3::Y * 30_000.0, point)
+                    .unwrap();
+                if worker_count == 1 {
+                    world.step(DT).unwrap();
+                } else {
+                    world
+                        .step_with_executor(DT, &ScopedPcgTestExecutor, worker_count)
+                        .unwrap();
+                }
+            }
+            let errors = max_joint_errors(&world);
+            let metrics = world.physics_step_metrics().joints;
+            println!(
+                "topology={topology} bodies=200 workers={worker_count} velocity/position={velocity_iterations}/{position_iterations} anchor/frame={:.6e}/{:.6e} batches={} residual={:.6e}m/s/{:.6e}rad/s",
+                errors.0,
+                errors.1,
+                metrics.color_batches_processed,
+                metrics.post_velocity_linear_residual_mps,
+                metrics.post_velocity_angular_residual_radps,
+            );
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 fn velocity_pcg_reports_iteration_limit_without_claiming_convergence() {
     let mut world = loaded_fixed_joint_graph(100, false, 8, false, false);
     world.set_joint_global_velocity_pcg_for_bench(1, false);

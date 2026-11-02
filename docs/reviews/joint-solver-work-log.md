@@ -194,3 +194,22 @@ This rejects simply raising the adaptive cap as a production solution: the exist
 - The 600-body deterministic worker test now runs a second step and verifies unchanged topology hits the cache, reports the expected two colors, and preserves the one-worker result within `1e-9`. The graph builder's mixed contact/Joint fixture verifies shared dynamic endpoints conflict while static endpoints do not.
 - Release diagnostic at `dt=1/120`, seven measured steps after one cold step, found two colors for chain islands of 200, 500, and 1,000 bodies. Cold graph build was `6–38 us`; steady cache validation was `1–3 us`. The solver does not yet execute constraints by these groups; this stage records graph preparation cost and correctness only. The next large-island stage will use the group layout for execution and compare total solve time and residuals before enabling it.
 - Validation: Release conflict-coloring and 600-body worker tests passed; Release 100/200/500/1,000 PCG scaling diagnostic passed with color-cache telemetry; production and `bench-internals` checks and strict Clippy passed. No velocity/position solve order changed in this stage.
+
+## 2026-11-03 — level-ordered large-island execution
+
+- Executed the conflict-free groups in stable dependency levels. Static/kinematic endpoints seed level zero; unanchored components use the lowest-index dynamic body as the root. A constraint is assigned to its farthest dynamic endpoint's level, then greedily colored within that level. Levels execute sequentially, preserving the chain's outward correction propagation; independent constraints in a wide level run in bounded batches.
+- Large graphs whose widest level has fewer than 32 constraints use the scalar solver. This keeps long chains on the existing sequential path; the coloring cache's warm check costs 0–4 us in the measured 200–1,000-body chain cases. The 200-body branch regression verifies repeated multiworker steps are bitwise deterministic and have the same joint errors as the scalar solver.
+- Release benchmark used six loaded steps (one warm-up), with a force applied each step, and a scoped-thread test executor. The geometry errors matched scalar within each topology at all worker counts. Times below are per-step p50 in milliseconds:
+
+| Topology | Bodies | 1 worker (scalar) | 2 workers | 4 workers | 8 workers |
+|---|---:|---:|---:|---:|---:|
+| Chain | 200 | 15.418 | 15.485 | 15.629 | 15.482 |
+| Chain | 500 | 38.987 | 39.386 | 39.261 | 39.809 |
+| Chain | 1,000 | 90.771 | 90.798 | 90.967 | 91.975 |
+| Binary branch | 200 | 17.954 | 18.404 | 17.890 | 17.852 |
+| Binary branch | 500 | 41.948 | 35.366 | 38.363 | 37.897 |
+| Binary branch | 1,000 | 83.624 | 64.587 | 64.187 | 71.063 |
+
+  At 1,000 bodies the branch path is 23% faster with four workers; at 500 bodies two workers are 16% faster. The 200-body branch is within measurement noise. Eight scoped workers do not improve on four. These timings include per-chunk OS-thread creation and are not evidence for a persistent worker-pool speedup. The chain fallback has no material regression.
+- A 200-body forced-load iteration sweep shows the 8/3 branch result matches scalar (`0.2685 m / 0.2228 rad` max anchor/frame errors); higher iteration counts reduce residuals but are not enough to make this deliberately heavy fixture an acceptance test. Chain topology remains scalar at every worker count and has the same measured result as the baseline.
+- Validation: level-order and unanchored-root unit tests, Release deterministic/cache-reuse test, Release chain/branch performance matrix, and Release iteration sweep passed. The PCG path remains gated from colored execution. Full workspace validation, strict rocket acceptance, and report/PR updates remain open.

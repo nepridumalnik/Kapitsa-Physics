@@ -17,6 +17,8 @@ use super::{
 
 const POSITION_CORRECTION_FRACTION: f64 = 0.2;
 const LARGE_ISLAND_COLORING_THRESHOLD: usize = 128;
+const LARGE_ISLAND_BATCH_SIZE: usize = 16;
+const SMALL_COLOR_MERGE_THRESHOLD: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SolverMaterial {
@@ -33,7 +35,7 @@ pub(crate) struct SolverManifold {
     pub(crate) material: SolverMaterial,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct SolverPoint {
     manifold: usize,
     point: usize,
@@ -47,12 +49,131 @@ struct SolverPoint {
     restitution_target: f64,
 }
 
+enum ColoredConstraintKind {
+    Contact(SolverManifold),
+    Joint(JointConstraint),
+}
+
+#[derive(Clone, Copy)]
+enum ColoredConstraintPhase {
+    PrepareContactPoints,
+    WarmStartContacts,
+    Velocity { first_iteration: bool },
+    Position,
+}
+
+struct ColoredConstraintTask {
+    constraint_index: usize,
+    body_indices: [usize; 2],
+    bodies: [SolverBody; 2],
+    points: [SolverPoint; 4],
+    point_count: usize,
+    kind: ColoredConstraintKind,
+}
+
+impl ColoredConstraintTask {
+    fn new(
+        constraint_index: usize,
+        bodies: &[SolverBody],
+        manifolds: &[SolverManifold],
+        joints: &[JointConstraint],
+    ) -> Result<Self, CollisionError> {
+        let (body_indices, kind) = if let Some(manifold) = manifolds.get(constraint_index).copied()
+        {
+            (
+                [manifold.body_a, manifold.body_b],
+                ColoredConstraintKind::Contact(manifold),
+            )
+        } else {
+            let joint_index = constraint_index
+                .checked_sub(manifolds.len())
+                .ok_or(CollisionError::InvalidContact)?;
+            let joint = *joints
+                .get(joint_index)
+                .ok_or(CollisionError::InvalidContact)?;
+            (
+                [joint.body_a, joint.body_b],
+                ColoredConstraintKind::Joint(joint),
+            )
+        };
+        let body_a = bodies
+            .get(body_indices[0])
+            .ok_or(CollisionError::InvalidContact)?;
+        let body_b = bodies
+            .get(body_indices[1])
+            .ok_or(CollisionError::InvalidContact)?;
+        Ok(Self {
+            constraint_index,
+            body_indices,
+            bodies: [
+                SolverBody::from_prediction(*body_a.body(), body_a.state()),
+                SolverBody::from_prediction(*body_b.body(), body_b.state()),
+            ],
+            points: [SolverPoint::default(); 4],
+            point_count: 0,
+            kind,
+        })
+    }
+
+    fn update(
+        &mut self,
+        bodies: &[SolverBody],
+        manifolds: &[SolverManifold],
+        joints: &[JointConstraint],
+    ) -> Result<(), CollisionError> {
+        self.kind = if let Some(manifold) = manifolds.get(self.constraint_index).copied() {
+            self.body_indices = [manifold.body_a, manifold.body_b];
+            ColoredConstraintKind::Contact(manifold)
+        } else {
+            let joint_index = self
+                .constraint_index
+                .checked_sub(manifolds.len())
+                .ok_or(CollisionError::InvalidContact)?;
+            let joint = *joints
+                .get(joint_index)
+                .ok_or(CollisionError::InvalidContact)?;
+            self.body_indices = [joint.body_a, joint.body_b];
+            ColoredConstraintKind::Joint(joint)
+        };
+        for endpoint in 0..2 {
+            let body = bodies
+                .get(self.body_indices[endpoint])
+                .ok_or(CollisionError::InvalidContact)?;
+            self.bodies[endpoint] = SolverBody::from_prediction(*body.body(), body.state());
+        }
+        self.point_count = 0;
+        Ok(())
+    }
+}
+
+struct ColoredConstraintBatch {
+    tasks: Vec<ColoredConstraintTask>,
+    joint_workspace: JointWorkspace,
+    contact_points: Vec<SolverPoint>,
+    error: Option<CollisionError>,
+}
+
+impl ColoredConstraintBatch {
+    fn new() -> Self {
+        Self {
+            tasks: Vec::new(),
+            joint_workspace: JointWorkspace::new(),
+            contact_points: Vec::new(),
+            error: None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SolverWorkspace {
     points: Vec<SolverPoint>,
     constraint_coloring: super::constraint_coloring::ConstraintColoring,
     coloring_dynamic_bodies: Vec<bool>,
     coloring_endpoints: Vec<[usize; 2]>,
+    colored_batches: Vec<ColoredConstraintBatch>,
+    color_batch_offsets: Vec<usize>,
+    joint_task_locations: Vec<[usize; 2]>,
+    active_colored_batches: usize,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -232,6 +353,10 @@ impl SolverWorkspace {
             constraint_coloring: super::constraint_coloring::ConstraintColoring::new(),
             coloring_dynamic_bodies: Vec::new(),
             coloring_endpoints: Vec::new(),
+            colored_batches: Vec::new(),
+            color_batch_offsets: Vec::new(),
+            joint_task_locations: Vec::new(),
+            active_colored_batches: 0,
         }
     }
 
@@ -277,12 +402,547 @@ impl SolverWorkspace {
             .update(&self.coloring_dynamic_bodies, &self.coloring_endpoints)
     }
 
+    fn prepare_colored_batches(
+        &mut self,
+        bodies: &[SolverBody],
+        manifolds: &[SolverManifold],
+        joints: &[JointConstraint],
+        graph_rebuilt: bool,
+    ) -> Result<(), CollisionError> {
+        let rebuild_batches = graph_rebuilt || self.active_colored_batches == 0;
+        if rebuild_batches {
+            let group_count = self.constraint_coloring.schedule_group_count();
+            if self.color_batch_offsets.capacity() < group_count + 1 {
+                self.color_batch_offsets
+                    .try_reserve(group_count + 1 - self.color_batch_offsets.len())
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            }
+            self.color_batch_offsets.clear();
+            self.color_batch_offsets.resize(group_count + 1, 0);
+            let mut required_batches = 0_usize;
+            for group in 0..group_count {
+                let constraints = self
+                    .constraint_coloring
+                    .constraints_in_schedule_group(group)
+                    .ok_or(CollisionError::InvalidContact)?;
+                required_batches = required_batches
+                    .checked_add(constraints.len().div_ceil(LARGE_ISLAND_BATCH_SIZE))
+                    .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+            }
+            if self.colored_batches.capacity() < required_batches {
+                self.colored_batches
+                    .try_reserve(required_batches - self.colored_batches.len())
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            }
+            for batch in &mut self.colored_batches {
+                batch.tasks.clear();
+                batch.contact_points.clear();
+                batch.error = None;
+            }
+            self.active_colored_batches = 0;
+            if self.joint_task_locations.capacity() < joints.len() {
+                self.joint_task_locations
+                    .try_reserve(joints.len() - self.joint_task_locations.len())
+                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            }
+            self.joint_task_locations.resize(joints.len(), [0, 0]);
+            for group in 0..group_count {
+                let constraints = self
+                    .constraint_coloring
+                    .constraints_in_schedule_group(group)
+                    .ok_or(CollisionError::InvalidContact)?;
+                for chunk in constraints.chunks(LARGE_ISLAND_BATCH_SIZE) {
+                    if self.active_colored_batches == self.colored_batches.len() {
+                        self.colored_batches.push(ColoredConstraintBatch::new());
+                    }
+                    let batch = &mut self.colored_batches[self.active_colored_batches];
+                    if batch.tasks.capacity() < chunk.len() {
+                        batch
+                            .tasks
+                            .try_reserve(chunk.len() - batch.tasks.len())
+                            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    }
+                    for constraint_index in chunk.iter().copied() {
+                        let task_slot = batch.tasks.len();
+                        batch.tasks.push(ColoredConstraintTask::new(
+                            constraint_index,
+                            bodies,
+                            manifolds,
+                            joints,
+                        )?);
+                        if constraint_index >= manifolds.len() {
+                            let joint_index = constraint_index - manifolds.len();
+                            self.joint_task_locations[joint_index] =
+                                [self.active_colored_batches, task_slot];
+                        }
+                    }
+                    batch.joint_workspace.begin_step();
+                    self.active_colored_batches += 1;
+                }
+                self.color_batch_offsets[group + 1] = self.active_colored_batches;
+            }
+        } else {
+            for batch in self
+                .colored_batches
+                .iter_mut()
+                .take(self.active_colored_batches)
+            {
+                batch.error = None;
+                batch.contact_points.clear();
+                batch.joint_workspace.begin_step();
+                for task in &mut batch.tasks {
+                    task.update(bodies, manifolds, joints)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn can_solve_colored_constraints(
+        &self,
+        options: JointSolverOptions,
+        worker_count: usize,
+        constraint_count: usize,
+    ) -> bool {
+        if worker_count <= 1
+            || constraint_count < LARGE_ISLAND_COLORING_THRESHOLD
+            || self.constraint_coloring.max_level_constraint_count() < SMALL_COLOR_MERGE_THRESHOLD
+            || !matches!(options.iterations(), JointIterations::Fixed)
+        {
+            return false;
+        }
+        #[cfg(feature = "bench-internals")]
+        if options.global_velocity_pcg_max_iterations() > 0
+            || options.global_position_pcg_max_iterations() > 0
+            || options.alternates_velocity_sweeps()
+        {
+            return false;
+        }
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_colored_constraints(
+        &mut self,
+        bodies: &mut [SolverBody],
+        manifolds: &mut [SolverManifold],
+        joint_workspace: &mut JointWorkspace,
+        joints: &[JointConstraint],
+        config: CollisionConfig,
+        joint_solver_step: JointSolverStep<'_>,
+        gravity: Option<CentralGravity>,
+        executor: &impl crate::execution::StepExecutor,
+        worker_count: usize,
+    ) -> Result<(), CollisionError> {
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = gravity;
+        self.execute_colored_phase(
+            bodies,
+            manifolds,
+            config,
+            joint_solver_step,
+            ColoredConstraintPhase::PrepareContactPoints,
+            executor,
+            worker_count,
+        )?;
+        self.execute_colored_phase(
+            bodies,
+            manifolds,
+            config,
+            joint_solver_step,
+            ColoredConstraintPhase::WarmStartContacts,
+            executor,
+            worker_count,
+        )?;
+        #[cfg(feature = "bench-internals")]
+        let velocity_before_projection = snapshot_velocities(bodies);
+        #[cfg(feature = "bench-internals")]
+        {
+            if !joints.is_empty() {
+                JointSolver::measure_residual(
+                    joint_workspace,
+                    bodies,
+                    joints,
+                    joint_solver_step.dt(),
+                )?;
+                joint_workspace.record_initial_velocity_residual();
+                joint_workspace.record_pre_velocity_geometry();
+            }
+        }
+
+        for velocity_iteration in 0..config.velocity_iterations {
+            #[cfg(feature = "bench-internals")]
+            {
+                joint_workspace.record_velocity_iteration();
+                if !joints.is_empty() {
+                    JointSolver::measure_residual(
+                        joint_workspace,
+                        bodies,
+                        joints,
+                        joint_solver_step.dt(),
+                    )?;
+                    joint_workspace.record_pre_joint_velocity_residual();
+                }
+            }
+            self.execute_colored_phase(
+                bodies,
+                manifolds,
+                config,
+                joint_solver_step,
+                ColoredConstraintPhase::Velocity {
+                    first_iteration: velocity_iteration == 0,
+                },
+                executor,
+                worker_count,
+            )?;
+            #[cfg(feature = "bench-internals")]
+            {
+                joint_workspace.record_color_batches(self.active_colored_batches);
+                if !joints.is_empty() {
+                    JointSolver::measure_residual(
+                        joint_workspace,
+                        bodies,
+                        joints,
+                        joint_solver_step.dt(),
+                    )?;
+                    if velocity_iteration == 0 {
+                        joint_workspace.record_first_velocity_residual();
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "bench-internals")]
+        {
+            let (impulse_work, quadratic_work) =
+                velocity_projection_work(&velocity_before_projection, bodies)?;
+            joint_workspace.record_velocity_projection_work(impulse_work, quadratic_work);
+            joint_workspace.record_energy(
+                crate::joint::diagnostics::EnergyStage::AfterVelocitySolver,
+                energy_components(bodies, gravity),
+            );
+            if !joints.is_empty() {
+                JointSolver::measure_residual(
+                    joint_workspace,
+                    bodies,
+                    joints,
+                    joint_solver_step.dt(),
+                )?;
+                joint_workspace.record_post_velocity_geometry();
+            }
+        }
+
+        for _position_iteration in 0..config.position_iterations {
+            #[cfg(feature = "bench-internals")]
+            {
+                joint_workspace.record_position_iteration();
+                if !joints.is_empty() {
+                    JointSolver::measure_residual(
+                        joint_workspace,
+                        bodies,
+                        joints,
+                        joint_solver_step.dt(),
+                    )?;
+                    joint_workspace.record_pre_joint_geometry();
+                }
+            }
+            self.execute_colored_phase(
+                bodies,
+                manifolds,
+                config,
+                joint_solver_step,
+                ColoredConstraintPhase::Position,
+                executor,
+                worker_count,
+            )?;
+            #[cfg(feature = "bench-internals")]
+            {
+                joint_workspace.record_color_batches(self.active_colored_batches);
+                if !joints.is_empty() {
+                    JointSolver::measure_residual(
+                        joint_workspace,
+                        bodies,
+                        joints,
+                        joint_solver_step.dt(),
+                    )?;
+                }
+            }
+        }
+
+        self.merge_colored_joints(joint_workspace, joints, manifolds.len())?;
+        #[cfg(feature = "bench-internals")]
+        {
+            joint_workspace.record_energy(
+                crate::joint::diagnostics::EnergyStage::AfterPositionSolver,
+                energy_components(bodies, gravity),
+            );
+            if !joints.is_empty() {
+                JointSolver::measure_residual(
+                    joint_workspace,
+                    bodies,
+                    joints,
+                    joint_solver_step.dt(),
+                )?;
+                joint_workspace.record_post_joint_geometry(false);
+            }
+        }
+        joint_workspace.collect_break_events(
+            joints,
+            bodies,
+            joint_solver_step.dt(),
+            joint_solver_step.options().reaction_mode(),
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_colored_phase(
+        &mut self,
+        bodies: &mut [SolverBody],
+        manifolds: &mut [SolverManifold],
+        config: CollisionConfig,
+        joint_solver_step: JointSolverStep<'_>,
+        phase: ColoredConstraintPhase,
+        executor: &impl crate::execution::StepExecutor,
+        worker_count: usize,
+    ) -> Result<(), CollisionError> {
+        let group_count = self.color_batch_offsets.len().saturating_sub(1);
+        for group in 0..group_count {
+            let start = self.color_batch_offsets[group];
+            let end = self.color_batch_offsets[group + 1];
+            if start == end {
+                continue;
+            }
+            let constraint_count = self.colored_batches[start..end]
+                .iter()
+                .map(|batch| batch.tasks.len())
+                .sum::<usize>();
+            if constraint_count < SMALL_COLOR_MERGE_THRESHOLD {
+                for batch in &mut self.colored_batches[start..end] {
+                    Self::process_colored_batch(batch, bodies, config, joint_solver_step, phase)?;
+                }
+            } else {
+                let batch_count = end - start;
+                let task_count = worker_count
+                    .min(31)
+                    .saturating_mul(2)
+                    .min(batch_count)
+                    .max(1);
+                let chunk_size = batch_count.div_ceil(task_count);
+                let batch_result = executor.for_each_chunk_mut(
+                    &mut self.colored_batches[start..end],
+                    chunk_size,
+                    |_, batches| {
+                        for batch in batches {
+                            batch.error = Self::process_colored_batch(
+                                batch,
+                                bodies,
+                                config,
+                                joint_solver_step,
+                                phase,
+                            )
+                            .err();
+                        }
+                    },
+                );
+                if batch_result.is_err() {
+                    return Err(CollisionError::WorkerFailed);
+                }
+                if let Some(error) = self.colored_batches[start..end]
+                    .iter_mut()
+                    .find_map(|batch| batch.error.take())
+                {
+                    return Err(error);
+                }
+            }
+
+            if !matches!(phase, ColoredConstraintPhase::PrepareContactPoints) {
+                for batch in &self.colored_batches[start..end] {
+                    for task in &batch.tasks {
+                        for endpoint in 0..2 {
+                            let body_index = task.body_indices[endpoint];
+                            let destination = bodies
+                                .get_mut(body_index)
+                                .ok_or(CollisionError::InvalidContact)?;
+                            if destination.body().physics().body_type()
+                                == crate::rigid_body::BodyType::Dynamic
+                            {
+                                *destination = task.bodies[endpoint];
+                            }
+                        }
+                        if let ColoredConstraintKind::Contact(manifold) = &task.kind {
+                            let destination = manifolds
+                                .get_mut(task.constraint_index)
+                                .ok_or(CollisionError::InvalidContact)?;
+                            *destination = SolverManifold {
+                                body_a: task.body_indices[0],
+                                body_b: task.body_indices[1],
+                                ..*manifold
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn process_colored_batch(
+        batch: &mut ColoredConstraintBatch,
+        source_bodies: &[SolverBody],
+        config: CollisionConfig,
+        joint_solver_step: JointSolverStep<'_>,
+        phase: ColoredConstraintPhase,
+    ) -> Result<(), CollisionError> {
+        let dt = joint_solver_step.dt();
+        let options = joint_solver_step.options();
+        for (task_slot, task) in batch.tasks.iter_mut().enumerate() {
+            for endpoint in 0..2 {
+                let source = source_bodies
+                    .get(task.body_indices[endpoint])
+                    .ok_or(CollisionError::InvalidContact)?;
+                task.bodies[endpoint] = SolverBody::from_prediction(*source.body(), source.state());
+            }
+            match &mut task.kind {
+                ColoredConstraintKind::Contact(manifold) => {
+                    let mut local_manifold = SolverManifold {
+                        body_a: 0,
+                        body_b: 1,
+                        ..*manifold
+                    };
+                    let mut local_manifolds = [local_manifold];
+                    match phase {
+                        ColoredConstraintPhase::PrepareContactPoints => {
+                            Self::prepare_points_into(
+                                &mut batch.contact_points,
+                                &task.bodies,
+                                &local_manifolds,
+                                config,
+                            )?;
+                            if batch.contact_points.len() > task.points.len() {
+                                return Err(CollisionError::InvalidContact);
+                            }
+                            task.point_count = batch.contact_points.len();
+                            task.points[..task.point_count].copy_from_slice(&batch.contact_points);
+                        }
+                        ColoredConstraintPhase::WarmStartContacts => {
+                            Self::warm_start_points(
+                                &task.points[..task.point_count],
+                                &mut task.bodies,
+                                &local_manifolds,
+                            )?;
+                        }
+                        ColoredConstraintPhase::Velocity { .. } => {
+                            Self::solve_velocity_points(
+                                &task.points[..task.point_count],
+                                &mut task.bodies,
+                                &mut local_manifolds,
+                            )?;
+                            local_manifold = local_manifolds[0];
+                            *manifold = local_manifold;
+                        }
+                        ColoredConstraintPhase::Position => {
+                            Self::solve_position_points(
+                                &task.points[..task.point_count],
+                                &mut task.bodies,
+                                &local_manifolds,
+                                config,
+                            )?;
+                        }
+                    }
+                }
+                ColoredConstraintKind::Joint(joint) => {
+                    let local_joint = JointConstraint {
+                        body_a: 0,
+                        body_b: 1,
+                        ..*joint
+                    };
+                    match phase {
+                        ColoredConstraintPhase::PrepareContactPoints
+                        | ColoredConstraintPhase::WarmStartContacts => {}
+                        ColoredConstraintPhase::Velocity {
+                            first_iteration, ..
+                        } => {
+                            JointSolver::solve_velocity_joint(
+                                &mut batch.joint_workspace,
+                                &mut task.bodies,
+                                local_joint,
+                                task_slot,
+                                joint_solver_step,
+                                first_iteration,
+                            )?;
+                        }
+                        ColoredConstraintPhase::Position => {
+                            JointSolver::solve_position_joint(
+                                &mut batch.joint_workspace,
+                                &mut task.bodies,
+                                local_joint,
+                                task_slot,
+                                dt,
+                                options,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn merge_colored_joints(
+        &self,
+        destination: &mut JointWorkspace,
+        joints: &[JointConstraint],
+        manifold_count: usize,
+    ) -> Result<(), CollisionError> {
+        for (joint_index, joint) in joints.iter().copied().enumerate() {
+            let [batch_index, task_slot] = *self
+                .joint_task_locations
+                .get(joint_index)
+                .ok_or(CollisionError::InvalidContact)?;
+            let batch = self
+                .colored_batches
+                .get(batch_index)
+                .ok_or(CollisionError::InvalidContact)?;
+            destination.merge_colored_joint_from(
+                &batch.joint_workspace,
+                task_slot,
+                joint_index,
+                joint.id,
+                [joint.body_a, joint.body_b],
+            )?;
+        }
+        for batch in self
+            .colored_batches
+            .iter()
+            .take(self.active_colored_batches)
+        {
+            destination.accumulate_colored_metrics_from(&batch.joint_workspace);
+        }
+        if joints.len() + manifold_count != self.coloring_endpoints.len() {
+            return Err(CollisionError::InvalidContact);
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         self.points.capacity() * std::mem::size_of::<SolverPoint>()
             + self.constraint_coloring.retained_capacity_bytes()
             + self.coloring_dynamic_bodies.capacity() * std::mem::size_of::<bool>()
             + self.coloring_endpoints.capacity() * std::mem::size_of::<[usize; 2]>()
+            + self.color_batch_offsets.capacity() * std::mem::size_of::<usize>()
+            + self.joint_task_locations.capacity() * std::mem::size_of::<[usize; 2]>()
+            + self.colored_batches.capacity() * std::mem::size_of::<ColoredConstraintBatch>()
+            + self
+                .colored_batches
+                .iter()
+                .map(|batch| {
+                    batch.tasks.capacity() * std::mem::size_of::<ColoredConstraintTask>()
+                        + batch.joint_workspace.retained_capacity_bytes()
+                        + batch.contact_points.capacity() * std::mem::size_of::<SolverPoint>()
+                })
+                .sum::<usize>()
     }
 
     pub(crate) fn solve(
@@ -314,32 +974,50 @@ impl SolverWorkspace {
         worker_count: usize,
     ) -> Result<(), CollisionError> {
         #[cfg(not(feature = "bench-internals"))]
-        let _ = (gravity, executor, worker_count);
-        if joints.is_empty() {
-            return self.solve(bodies, manifolds, config);
-        }
+        let _ = gravity;
         config.validate()?;
         let dt = joint_solver_step.dt();
         let joint_solver_options = joint_solver_step.options();
         if !dt.is_finite() || dt <= 0.0 || !joint_solver_options.iterations().validate() {
             return Err(CollisionError::InvalidConfig);
         }
-        self.prepare_points(bodies, manifolds, config)?;
-        self.warm_start(bodies, manifolds)?;
         JointSolver::begin_step(joint_workspace);
         let coloring_constraint_count = manifolds.len().saturating_add(joints.len());
         if worker_count > 1 && coloring_constraint_count >= LARGE_ISLAND_COLORING_THRESHOLD {
             #[cfg(feature = "bench-internals")]
             let coloring_started = std::time::Instant::now();
-            let _rebuilt = self.prepare_constraint_coloring(bodies, manifolds, joints)?;
+            let graph_rebuilt = self.prepare_constraint_coloring(bodies, manifolds, joints)?;
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_constraint_coloring(
                 coloring_started.elapsed(),
                 self.constraint_coloring.constraint_count(),
                 self.constraint_coloring.color_count(),
-                _rebuilt,
+                graph_rebuilt,
             );
+            if self.can_solve_colored_constraints(
+                joint_solver_options,
+                worker_count,
+                coloring_constraint_count,
+            ) {
+                self.prepare_colored_batches(bodies, manifolds, joints, graph_rebuilt)?;
+                return self.solve_colored_constraints(
+                    bodies,
+                    manifolds,
+                    joint_workspace,
+                    joints,
+                    config,
+                    joint_solver_step,
+                    gravity,
+                    executor,
+                    worker_count,
+                );
+            }
         }
+        if joints.is_empty() {
+            return self.solve(bodies, manifolds, config);
+        }
+        self.prepare_points(bodies, manifolds, config)?;
+        self.warm_start(bodies, manifolds)?;
         #[cfg(feature = "bench-internals")]
         let velocity_before_projection = snapshot_velocities(bodies);
         #[cfg(feature = "bench-internals")]
@@ -745,13 +1423,22 @@ impl SolverWorkspace {
         manifolds: &[SolverManifold],
         config: CollisionConfig,
     ) -> Result<(), CollisionError> {
-        self.points.clear();
+        Self::prepare_points_into(&mut self.points, bodies, manifolds, config)
+    }
+
+    fn prepare_points_into(
+        points: &mut Vec<SolverPoint>,
+        bodies: &[SolverBody],
+        manifolds: &[SolverManifold],
+        config: CollisionConfig,
+    ) -> Result<(), CollisionError> {
+        points.clear();
         let count = manifolds.iter().try_fold(0_usize, |count, manifold| {
             count
                 .checked_add(manifold.manifold.len())
                 .ok_or(CollisionError::SpatialIndexCapacityExceeded)
         })?;
-        self.points
+        points
             .try_reserve(count)
             .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
 
@@ -802,7 +1489,7 @@ impl SolverWorkspace {
                 {
                     return Err(CollisionError::ArithmeticOverflow);
                 }
-                self.points.push(SolverPoint {
+                points.push(SolverPoint {
                     manifold: manifold_index,
                     point: point_index,
                     body_a: manifold.body_a,
@@ -824,7 +1511,15 @@ impl SolverWorkspace {
         bodies: &mut [SolverBody],
         manifolds: &[SolverManifold],
     ) -> Result<(), CollisionError> {
-        for point in self.points.iter().copied() {
+        Self::warm_start_points(&self.points, bodies, manifolds)
+    }
+
+    fn warm_start_points(
+        points: &[SolverPoint],
+        bodies: &mut [SolverBody],
+        manifolds: &[SolverManifold],
+    ) -> Result<(), CollisionError> {
+        for point in points.iter().copied() {
             let contact = contact_at(manifolds, point)?;
             let impulse = point.normal * contact.normal_impulse
                 + point.tangent_a * contact.tangent_impulse[0]
@@ -846,7 +1541,15 @@ impl SolverWorkspace {
         bodies: &mut [SolverBody],
         manifolds: &mut [SolverManifold],
     ) -> Result<(), CollisionError> {
-        for point in self.points.iter().copied() {
+        Self::solve_velocity_points(&self.points, bodies, manifolds)
+    }
+
+    fn solve_velocity_points(
+        points: &[SolverPoint],
+        bodies: &mut [SolverBody],
+        manifolds: &mut [SolverManifold],
+    ) -> Result<(), CollisionError> {
+        for point in points.iter().copied() {
             let contact = *contact_at(manifolds, point)?;
             let (body_a, body_b) = bodies_at(bodies, point.body_a, point.body_b)?;
             let denominator = effective_mass(
@@ -947,7 +1650,16 @@ impl SolverWorkspace {
         manifolds: &[SolverManifold],
         config: CollisionConfig,
     ) -> Result<(), CollisionError> {
-        for point in self.points.iter().copied() {
+        Self::solve_position_points(&self.points, bodies, manifolds, config)
+    }
+
+    fn solve_position_points(
+        points: &[SolverPoint],
+        bodies: &mut [SolverBody],
+        manifolds: &[SolverManifold],
+        config: CollisionConfig,
+    ) -> Result<(), CollisionError> {
+        for point in points.iter().copied() {
             let contact = contact_at(manifolds, point)?;
             let (body_a, body_b) = bodies_at(bodies, point.body_a, point.body_b)?;
             let position_a = body_a

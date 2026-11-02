@@ -405,6 +405,59 @@ impl JointWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_color_batches(&mut self, batches: usize) {
+        self.metrics.color_batches_processed = self
+            .metrics
+            .color_batches_processed
+            .saturating_add(batches as u64);
+    }
+
+    pub(crate) fn merge_colored_joint_from(
+        &mut self,
+        source: &Self,
+        source_joint_index: usize,
+        destination_joint_index: usize,
+        joint_id: crate::world::JointId,
+        body_indices: [usize; 2],
+    ) -> Result<(), CollisionError> {
+        let start = source
+            .row_joint_indices
+            .partition_point(|&owner| owner < source_joint_index);
+        let end = source
+            .row_joint_indices
+            .partition_point(|&owner| owner <= source_joint_index);
+        let rows = source
+            .rows
+            .get(start..end)
+            .ok_or(CollisionError::InvalidContact)?;
+        #[cfg(feature = "bench-internals")]
+        let prepared_rows_before_merge = self.metrics.prepared_rows;
+        self.begin_joint_prepare(destination_joint_index, joint_id);
+        self.preparing_rows
+            .try_reserve(rows.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for row in rows.iter().copied() {
+            let mut row = row;
+            row.body_a = body_indices[0];
+            row.body_b = body_indices[1];
+            self.preparing_rows.push(row);
+        }
+        self.finish_joint_prepare()?;
+        #[cfg(feature = "bench-internals")]
+        {
+            self.metrics.prepared_rows = prepared_rows_before_merge;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn accumulate_colored_metrics_from(&mut self, source: &Self) {
+        #[cfg(feature = "bench-internals")]
+        self.metrics.accumulate(source.metrics);
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = source;
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_velocity_pcg_result(&mut self, result: super::solver::VelocityPcgResult) {
         self.metrics.velocity_pcg_iterations = self
             .metrics

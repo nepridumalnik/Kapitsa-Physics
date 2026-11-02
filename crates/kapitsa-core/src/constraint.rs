@@ -6,6 +6,7 @@ use crate::{
 };
 
 /// A staged body shared by the contact and joint solvers.
+#[derive(Clone, Copy)]
 pub(crate) struct SolverBody {
     pub(crate) body: RigidBody,
 }
