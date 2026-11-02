@@ -316,7 +316,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "bench-internals")))]
+#[cfg(test)]
 mod stability_tests {
     use std::time::{Duration, Instant};
 
@@ -367,8 +367,8 @@ mod stability_tests {
         let report_only = std::env::var_os("KAPITSA_ROCKET_REPORT_ONLY").is_some();
         let mut all_stable = true;
         for part_count in [100, 200, 500, 1000] {
-            let first = run_fixed_scenario(part_count);
-            let repeated = run_fixed_scenario(part_count);
+            let first = run_fixed_scenario(part_count, false);
+            let repeated = run_fixed_scenario(part_count, false);
             assert_eq!(first.states, repeated.states, "{part_count} part repeat");
             assert_eq!(first.completed_ticks, repeated.completed_ticks);
             assert_eq!(first.step_failure, repeated.step_failure);
@@ -421,9 +421,40 @@ mod stability_tests {
         );
     }
 
-    fn run_fixed_scenario(part_count: usize) -> StabilityRun {
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release scalar versus FixedBlock3 comparison using the strict rocket fixture"]
+    fn compare_scalar_and_fixed_block3_rocket_stability() {
+        for part_count in [100, 200, 500, 1000] {
+            for block3 in [false, true] {
+                let run = run_fixed_scenario(part_count, block3);
+                println!(
+                    "parts={part_count} projection={} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
+                    if block3 { "FixedBlock3" } else { "Scalar" },
+                    run.elapsed.as_millis(),
+                    run.completed_ticks,
+                    run.max_anchor_error,
+                    run.rms_anchor_error,
+                    run.max_frame_error,
+                    run.rms_frame_error,
+                    run.max_coast_energy_drift * 100.0,
+                    run.surface_begins,
+                    run.surface_ends,
+                    run.surface_impacts,
+                    run.separation_momentum_error,
+                    run.step_failure,
+                );
+            }
+        }
+    }
+
+    fn run_fixed_scenario(part_count: usize, block3: bool) -> StabilityRun {
         let started = Instant::now();
         let mut rocket = ModularRocket::new(part_count);
+        #[cfg(feature = "bench-internals")]
+        rocket.world.set_joint_projection_for_bench(block3);
+        #[cfg(not(feature = "bench-internals"))]
+        assert!(!block3, "FixedBlock3 comparison requires bench-internals");
         let initial_lower_mass = stage_mass(&rocket, &rocket.lower_parts);
         let initial_upper_mass = stage_mass(&rocket, &rocket.upper_parts);
         let mut max_anchor_error: f64 = 0.0;
