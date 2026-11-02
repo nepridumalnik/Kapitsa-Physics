@@ -70,3 +70,5 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 - TGS, rigid clusters, ABA, on-rails propagation and other unreviewed strategies are not claimed as implemented.
 
 - The ignored release rocket scenario was explicitly run and failed strict criteria for 100, 200, 500 and 1000 parts. Maximum joint anchor errors were 0.2048983, 0.2826946, 0.7275499 and 2.759083 metres respectively. The 1000-part scenario also reported no surface events; the fixture and energy diagnostic remain to be reviewed. The fixed-bound residual correction was made after this run and affects the adaptive path; no rerun has established an effect on the default rocket scenario.
+
+- After S02 and S10, the release rocket scenario was rerun. All four sizes still failed the numerical criteria; maximum anchor errors were 0.2432003, 0.2867673, 0.7363993 and 2.911675 m for 100, 200, 500 and 1000 parts. All four completed the scenario. The root cause of the joint instability remains unverified.
