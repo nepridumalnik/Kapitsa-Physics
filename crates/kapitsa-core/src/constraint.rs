@@ -32,6 +32,22 @@ impl SolverBody {
     }
 }
 
+/// Builds an orthonormal tangent basis for a nonzero normal.
+pub(crate) fn tangent_basis(normal: Vec3) -> Option<(Vec3, Vec3)> {
+    let axis = if normal.x.abs() <= normal.y.abs() && normal.x.abs() <= normal.z.abs() {
+        Vec3::X
+    } else if normal.y.abs() <= normal.z.abs() {
+        Vec3::Y
+    } else {
+        Vec3::Z
+    };
+    let tangent_a = normal.checked_cross(axis).and_then(Vec3::try_normalize)?;
+    let tangent_b = normal
+        .checked_cross(tangent_a)
+        .and_then(Vec3::try_normalize)?;
+    Some((tangent_a, tangent_b))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConstraintError {
     InvalidMass,

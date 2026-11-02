@@ -1707,12 +1707,13 @@ fn append_axis_alignment(
     let error = if sine > f64::MIN_POSITIVE {
         cross * (sine.atan2(dot) / sine)
     } else if dot < 0.0 {
-        let (axis, _) = crate::collision::solver::tangent_basis(axis_a)?;
+        let (axis, _) = constraint::tangent_basis(axis_a).ok_or(CollisionError::InvalidContact)?;
         axis * std::f64::consts::PI
     } else {
         Vec3::ZERO
     };
-    let (tangent_a, tangent_b) = crate::collision::solver::tangent_basis(axis_a)?;
+    let (tangent_a, tangent_b) =
+        constraint::tangent_basis(axis_a).ok_or(CollisionError::InvalidContact)?;
     for (axis_index, axis) in [tangent_a, tangent_b].into_iter().enumerate() {
         let component = error
             .checked_dot(axis)
@@ -1876,7 +1877,7 @@ fn row_settings(body_a: usize, body_b: usize, common: super::JointCommon, dt: f6
 }
 
 fn perpendicular_basis(axis: Vec3) -> Result<[Vec3; 2], CollisionError> {
-    let (first, second) = crate::collision::solver::tangent_basis(axis)?;
+    let (first, second) = constraint::tangent_basis(axis).ok_or(CollisionError::InvalidContact)?;
     Ok([first, second])
 }
 

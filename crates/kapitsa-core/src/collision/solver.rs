@@ -780,22 +780,7 @@ fn contact_mut(
 }
 
 pub(crate) fn tangent_basis(normal: Vec3) -> Result<(Vec3, Vec3), CollisionError> {
-    let axis = if normal.x.abs() <= normal.y.abs() && normal.x.abs() <= normal.z.abs() {
-        Vec3::X
-    } else if normal.y.abs() <= normal.z.abs() {
-        Vec3::Y
-    } else {
-        Vec3::Z
-    };
-    let tangent_a = normal
-        .checked_cross(axis)
-        .and_then(Vec3::try_normalize)
-        .ok_or(CollisionError::InvalidContact)?;
-    let tangent_b = normal
-        .checked_cross(tangent_a)
-        .and_then(Vec3::try_normalize)
-        .ok_or(CollisionError::InvalidContact)?;
-    Ok((tangent_a, tangent_b))
+    constraint::tangent_basis(normal).ok_or(CollisionError::InvalidContact)
 }
 
 fn validate_material(material: SolverMaterial) -> Result<(), CollisionError> {
