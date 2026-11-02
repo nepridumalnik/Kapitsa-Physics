@@ -450,18 +450,36 @@ impl JointWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_first_velocity_residual(&mut self) {
+        self.metrics.first_velocity_linear_residual_mps = self.residual.max_velocity_mps;
+        self.metrics.first_velocity_angular_residual_radps =
+            self.residual.max_angular_velocity_radps;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_pre_joint_velocity_residual(&mut self) {
+        self.metrics.pre_joint_velocity_linear_residual_mps = self.residual.max_velocity_mps;
+        self.metrics.pre_joint_velocity_angular_residual_radps =
+            self.residual.max_angular_velocity_radps;
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_pre_joint_geometry(&mut self) {
         self.metrics.pre_joint_anchor_error_m = self.geometry_residual.anchor_error_m;
         self.metrics.pre_joint_frame_error_rad = self.geometry_residual.frame_error_rad;
     }
 
     #[cfg(feature = "bench-internals")]
-    pub(crate) fn record_post_joint_geometry(&mut self) {
+    pub(crate) fn record_post_joint_geometry(&mut self, first_sweep: bool) {
         self.metrics.post_joint_anchor_error_m = self.geometry_residual.anchor_error_m;
         self.metrics.post_joint_frame_error_rad = self.geometry_residual.frame_error_rad;
         self.metrics.post_position_linear_residual_mps = self.residual.max_velocity_mps;
         self.metrics.post_position_angular_residual_radps =
             self.residual.max_angular_velocity_radps;
+        if first_sweep {
+            self.metrics.first_post_joint_anchor_error_m = self.geometry_residual.anchor_error_m;
+            self.metrics.first_post_joint_frame_error_rad = self.geometry_residual.frame_error_rad;
+        }
     }
 
     #[cfg(feature = "bench-internals")]

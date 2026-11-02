@@ -189,6 +189,11 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_velocity_iteration();
             self.solve_velocity_iteration(bodies, manifolds)?;
+            #[cfg(feature = "bench-internals")]
+            {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.record_pre_joint_velocity_residual();
+            }
             for (joint_index, joint) in joints.iter().copied().enumerate() {
                 JointSolver::solve_velocity_joint(
                     joint_workspace,
@@ -200,14 +205,19 @@ impl SolverWorkspace {
                 )?;
             }
             #[cfg(feature = "bench-internals")]
-            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                if velocity_iteration == 0 {
+                    joint_workspace.record_first_velocity_residual();
+                }
+            }
         }
         #[cfg(feature = "bench-internals")]
         {
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
             joint_workspace.record_post_velocity_geometry();
         }
-        for _ in 0..config.position_iterations {
+        for _position_iteration in 0..config.position_iterations {
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_position_iteration();
             self.solve_position_iteration(bodies, manifolds, config)?;
@@ -227,9 +237,10 @@ impl SolverWorkspace {
                 )?;
             }
             #[cfg(feature = "bench-internals")]
-            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-            #[cfg(feature = "bench-internals")]
-            joint_workspace.record_post_joint_geometry();
+            {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.record_post_joint_geometry(_position_iteration == 0);
+            }
         }
         joint_workspace.collect_break_events(
             joints,

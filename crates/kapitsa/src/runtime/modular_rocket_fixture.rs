@@ -382,6 +382,12 @@ mod stability_tests {
         post_velocity_angular_residual_radps: f64,
         post_position_linear_residual_mps: f64,
         post_position_angular_residual_radps: f64,
+        first_velocity_linear_residual_mps: f64,
+        first_velocity_angular_residual_radps: f64,
+        first_post_joint_anchor_error_m: f64,
+        first_post_joint_frame_error_rad: f64,
+        pre_joint_velocity_linear_residual_mps: f64,
+        pre_joint_velocity_angular_residual_radps: f64,
     }
 
     #[allow(dead_code)] // Non-default source isolation modes are selected by an ignored diagnostic.
@@ -499,7 +505,7 @@ mod stability_tests {
             (ScenarioMode::CenteredThrustWithoutGravityOrContact, false),
             (ScenarioMode::Full, false),
         ] {
-            let run = run_scenario(100, false, mode, adaptive, None);
+            let run = run_scenario(100, false, mode, adaptive, None, false);
             println!(
                 "mode={mode:?} adaptive={adaptive} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} coast_energy_drift={:.4}% contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
                 run.elapsed.as_millis(),
@@ -524,7 +530,7 @@ mod stability_tests {
                     .filter(|sample| (10..=16).contains(&sample.tick))
                 {
                     println!(
-                        "solver_stage tick={} actual={:.6e}m/{:.6e}rad pre_velocity={:.6e}m/{:.6e}rad post_velocity={:.6e}m/{:.6e}rad after_contact_before_joint={:.6e}m/{:.6e}rad post_joint={:.6e}m/{:.6e}rad velocity_residual_after_velocity={:.6e}m/s/{:.6e}rad/s after_position={:.6e}m/s/{:.6e}rad/s",
+                        "solver_stage tick={} actual={:.6e}m/{:.6e}rad pre_velocity={:.6e}m/{:.6e}rad post_velocity={:.6e}m/{:.6e}rad after_contact_before_joint={:.6e}m/{:.6e}rad post_joint_first/final={:.6e}m/{:.6e}rad -> {:.6e}m/{:.6e}rad contact_velocity_residual={:.6e}m/s/{:.6e}rad/s velocity_residual_first/final={:.6e}m/s/{:.6e}rad/s -> {:.6e}m/s/{:.6e}rad/s after_position={:.6e}m/s/{:.6e}rad/s",
                         sample.tick,
                         sample.anchor_error_m,
                         sample.frame_error_rad,
@@ -534,8 +540,14 @@ mod stability_tests {
                         sample.post_velocity_frame_error_rad,
                         sample.pre_joint_anchor_error_m,
                         sample.pre_joint_frame_error_rad,
+                        sample.first_post_joint_anchor_error_m,
+                        sample.first_post_joint_frame_error_rad,
                         sample.post_joint_anchor_error_m,
                         sample.post_joint_frame_error_rad,
+                        sample.pre_joint_velocity_linear_residual_mps,
+                        sample.pre_joint_velocity_angular_residual_radps,
+                        sample.first_velocity_linear_residual_mps,
+                        sample.first_velocity_angular_residual_radps,
                         sample.post_velocity_linear_residual_mps,
                         sample.post_velocity_angular_residual_radps,
                         sample.post_position_linear_residual_mps,
@@ -561,22 +573,74 @@ mod stability_tests {
                     mode,
                     false,
                     Some((velocity_iterations, position_iterations)),
+                    false,
                 );
                 let crossing = run
                     .first_anchor_limit_tick
                     .and_then(|tick| run.solver_stage_trace.get(tick));
-                let (tick, before_velocity, after_velocity, velocity_residual, after_joint) =
-                    crossing.map_or((None, 0.0, 0.0, 0.0, 0.0), |sample| {
+                let (
+                    tick,
+                    before_velocity,
+                    after_velocity,
+                    first_velocity_residual,
+                    velocity_residual,
+                    first_joint,
+                    after_joint,
+                    contact_velocity_residual,
+                ) = crossing.map_or((None, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), |sample| {
+                    (
+                        Some(sample.tick),
+                        sample.pre_velocity_anchor_error_m,
+                        sample.post_velocity_anchor_error_m,
+                        sample.first_velocity_linear_residual_mps,
+                        sample.post_velocity_linear_residual_mps,
+                        sample.first_post_joint_anchor_error_m,
+                        sample.post_joint_anchor_error_m,
+                        sample.pre_joint_velocity_linear_residual_mps,
+                    )
+                });
+                println!(
+                    "mode={mode:?} iterations={velocity_iterations}v/{position_iterations}p elapsed_ms={} anchor_max/rms={:.6e}/{:.6e}m frame_max={:.6e}rad first_anchor_limit_tick={tick:?} pre/post_velocity={before_velocity:.6e}/{after_velocity:.6e}m contact_velocity_residual={contact_velocity_residual:.6e}m/s velocity_residual_first/final={first_velocity_residual:.6e}/{velocity_residual:.6e}m/s post_joint_first/final={first_joint:.6e}/{after_joint:.6e}m coast_energy_drift={:.4}%",
+                    run.elapsed.as_millis(),
+                    run.max_anchor_error,
+                    run.rms_anchor_error,
+                    run.max_frame_error,
+                    run.max_coast_energy_drift * 100.0,
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "diagnostic comparison of forward and reverse joint sweep order under loads"]
+    fn diagnose_rocket_joint_sweep_order() {
+        for mode in [
+            ScenarioMode::Full,
+            ScenarioMode::ThrustWithoutGravityOrContact,
+            ScenarioMode::GravityWithContact,
+        ] {
+            for reverse_joint_order in [false, true] {
+                let run = run_scenario(100, false, mode, false, None, reverse_joint_order);
+                let crossing = run
+                    .first_anchor_limit_tick
+                    .and_then(|tick| run.solver_stage_trace.get(tick));
+                let (tick, velocity_residual, contact_residual, position_error) =
+                    crossing.map_or((None, 0.0, 0.0, 0.0), |sample| {
                         (
                             Some(sample.tick),
-                            sample.pre_velocity_anchor_error_m,
-                            sample.post_velocity_anchor_error_m,
                             sample.post_velocity_linear_residual_mps,
+                            sample.pre_joint_velocity_linear_residual_mps,
                             sample.post_joint_anchor_error_m,
                         )
                     });
                 println!(
-                    "mode={mode:?} iterations={velocity_iterations}v/{position_iterations}p elapsed_ms={} anchor_max/rms={:.6e}/{:.6e}m frame_max={:.6e}rad first_anchor_limit_tick={tick:?} pre/post_velocity={before_velocity:.6e}/{after_velocity:.6e}m velocity_residual={velocity_residual:.6e}m/s post_joint={after_joint:.6e}m coast_energy_drift={:.4}%",
+                    "mode={mode:?} joint_order={} elapsed_ms={} anchor_max/rms={:.6e}/{:.6e}m frame_max={:.6e}rad first_anchor_limit_tick={tick:?} contact_velocity_residual={contact_residual:.6e}m/s post_velocity_residual={velocity_residual:.6e}m/s post_joint_anchor={position_error:.6e}m coast_energy_drift={:.4}%",
+                    if reverse_joint_order {
+                        "reverse"
+                    } else {
+                        "forward"
+                    },
                     run.elapsed.as_millis(),
                     run.max_anchor_error,
                     run.rms_anchor_error,
@@ -588,7 +652,7 @@ mod stability_tests {
     }
 
     fn run_fixed_scenario(part_count: usize, block3: bool) -> StabilityRun {
-        run_scenario(part_count, block3, ScenarioMode::Full, false, None)
+        run_scenario(part_count, block3, ScenarioMode::Full, false, None, false)
     }
 
     fn run_scenario(
@@ -597,9 +661,19 @@ mod stability_tests {
         mode: ScenarioMode,
         adaptive: bool,
         iteration_counts: Option<(u32, u32)>,
+        reverse_joint_order: bool,
     ) -> StabilityRun {
         let started = Instant::now();
         let mut rocket = ModularRocket::new(part_count);
+        #[cfg(feature = "bench-internals")]
+        if reverse_joint_order {
+            reverse_joint_storage_order(&mut rocket);
+        }
+        #[cfg(not(feature = "bench-internals"))]
+        assert!(
+            !reverse_joint_order,
+            "reverse sweep diagnostic needs bench-internals"
+        );
         if let Some((velocity_iterations, position_iterations)) = iteration_counts {
             let mut config = rocket.world.collision_config();
             config.velocity_iterations = velocity_iterations;
@@ -792,6 +866,17 @@ mod stability_tests {
                         .post_position_linear_residual_mps,
                     post_position_angular_residual_radps: joint_metrics
                         .post_position_angular_residual_radps,
+                    first_velocity_linear_residual_mps: joint_metrics
+                        .first_velocity_linear_residual_mps,
+                    first_velocity_angular_residual_radps: joint_metrics
+                        .first_velocity_angular_residual_radps,
+                    first_post_joint_anchor_error_m: joint_metrics.first_post_joint_anchor_error_m,
+                    first_post_joint_frame_error_rad: joint_metrics
+                        .first_post_joint_frame_error_rad,
+                    pre_joint_velocity_linear_residual_mps: joint_metrics
+                        .pre_joint_velocity_linear_residual_mps,
+                    pre_joint_velocity_angular_residual_radps: joint_metrics
+                        .pre_joint_velocity_angular_residual_radps,
                 });
             }
             for &id in &rocket.parts {
@@ -880,6 +965,43 @@ mod stability_tests {
             #[cfg(feature = "bench-internals")]
             solver_stage_trace,
         }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn reverse_joint_storage_order(rocket: &mut ModularRocket) {
+        let joints = rocket
+            .world
+            .joints()
+            .map(|(id, body_a, body_b, joint)| (id, body_a, body_b, joint.clone()))
+            .collect::<Vec<_>>();
+        let original_pairs = joints
+            .iter()
+            .map(|(_, body_a, body_b, _)| (*body_a, *body_b))
+            .collect::<Vec<_>>();
+        let old_separation_joint = rocket.separation_joint;
+        for (id, _, _, _) in joints.iter().rev() {
+            rocket
+                .world
+                .remove_joint(*id)
+                .expect("remove diagnostic joint");
+        }
+        let mut expected_pairs = original_pairs;
+        expected_pairs.reverse();
+        for (old_id, body_a, body_b, joint) in joints.into_iter().rev() {
+            let new_id = rocket
+                .world
+                .add_joint(body_a, body_b, joint)
+                .expect("restore diagnostic joint in reverse order");
+            if old_id == old_separation_joint {
+                rocket.separation_joint = new_id;
+            }
+        }
+        let reversed_pairs = rocket
+            .world
+            .joints()
+            .map(|(_, body_a, body_b, _)| (body_a, body_b))
+            .collect::<Vec<_>>();
+        assert_eq!(reversed_pairs, expected_pairs);
     }
 
     fn burn_tanks(rocket: &mut ModularRocket, lower: bool) {

@@ -91,3 +91,22 @@ More velocity sweeps lower the velocity residual and delay geometry failure. Mor
 
 - Validation for this diagnostic checkpoint: `cargo +1.98.0 fmt --all -- --check`, `cargo +1.98.0 check --workspace --all-features --locked`, and strict workspace Clippy passed. `cargo +1.98.0 test --workspace --locked` passed with 781 tests and 4 ignored; the focused geometric residual test and both ignored Release diagnostics also passed.
 - The strict Release rocket fixture was rerun with `KAPITSA_ROCKET_REPORT_ONLY` unset and failed as required by its real thresholds. All scenarios completed without step failure or joint breaks, but numerical stability failed at 100/200/500/1,000 parts. Current C metrics were respectively anchor max/RMS `0.1323372/0.01108183`, `0.2896826/0.02798799`, `0.7424552/0.06016442`, and `2.576289/0.1463842` m; max frame error `1.581435`, `1.491072`, `3.094329`, and `3.141282` rad; coast drift `3.6841%`, `68.7790%`, `66.1312%`, and `46.5546%`. The failure is preserved; the diagnostic work is not a correctness pass.
+
+## 2026-11-02 — per-sweep residual response and reverse-order check
+
+- Extended the benchmark trace to retain the first and final velocity-sweep residuals, first and final joint-position anchor residuals, and the velocity residual after contact solving but before joint velocity solving. This distinguishes whether the contact phase reintroduces error before the joint solver sees it.
+- At the first anchor-limit tick with thrust and no contact, default 8/3 sweeps reduce the linear velocity row residual from `0.9840819 m/s` after the first joint velocity sweep to `0.6828425 m/s` after all eight. The first position sweep leaves `0.03509969 m` anchor error; all three leave `0.03196534 m`. At 16/3 these fall from `0.9354011` to `0.3014304 m/s`, and from `0.03251405` to `0.03026537 m` respectively, but the complete run still fails.
+- With gravity and contact at 8/3, the residual is `0.5133333 m/s` after the first complete velocity iteration, `0.5322764 m/s` after contact velocity solving in the last iteration, and `0.5208623 m/s` after the final joint velocity solve. The first/final position anchor residuals are `0.03351901/0.03245108 m`. At 16/3, velocity residual decreases from `0.3422268` to `0.3264612 m/s`; the contact phase ends at `0.3305984 m/s`. This is evidence of contact/joint interaction in the contact case, while thrust alone still fails without contacts.
+
+Reversing the rocket's dense joint storage order provides a controlled solver ordering comparison without changing physics or solver code. It also updates the diagnostic stage-joint ID and verifies the stored body-pair order really is reversed:
+
+| Mode | Order | Anchor max / RMS, m | Frame max, rad | First anchor limit tick | Coast energy drift |
+|---|---|---:|---:|---:|---:|
+| Full | Forward | 0.1323372 / 0.01108183 | 1.581435 | 15 | 3.6841% |
+| Full | Reverse | 0.2783684 / 0.04333044 | 1.446800 | 16 | 5.7104% |
+| Thrust, no gravity/contact | Forward | 0.09826316 / 0.01210467 | 1.026284 | 20 | 68.8932% |
+| Thrust, no gravity/contact | Reverse | 0.1334365 / 0.02090281 | 0.993433 | 21 | 65.6509% |
+| Gravity with contact | Forward | 0.2081661 / 0.02127407 | 2.206484 | 19 | 42.9573% |
+| Gravity with contact | Reverse | 0.3175803 / 0.03548104 | 1.624990 | 20 | 48.2826% |
+
+Reverse order slightly improves frame maxima but materially worsens anchor error in all three modes. A global reverse sweep is rejected as a fix; topology-aware ordering or symmetric sweeps still require separate measurement. This supports that graph/order sensitivity exists, but does not yet identify a single defective Jacobian or mass/COM calculation. Keep the remaining cause open.

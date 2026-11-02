@@ -64,6 +64,24 @@ pub struct JointSolverMetrics {
     /// Maximum angular velocity row residual after position projection.
     #[cfg(feature = "bench-internals")]
     pub post_position_angular_residual_radps: f64,
+    /// Maximum linear velocity residual after contact solving, before joint solving.
+    #[cfg(feature = "bench-internals")]
+    pub pre_joint_velocity_linear_residual_mps: f64,
+    /// Maximum angular velocity residual after contact solving, before joint solving.
+    #[cfg(feature = "bench-internals")]
+    pub pre_joint_velocity_angular_residual_radps: f64,
+    /// Maximum linear velocity residual after the first velocity sweep.
+    #[cfg(feature = "bench-internals")]
+    pub first_velocity_linear_residual_mps: f64,
+    /// Maximum angular velocity residual after the first velocity sweep.
+    #[cfg(feature = "bench-internals")]
+    pub first_velocity_angular_residual_radps: f64,
+    /// Maximum anchor error after the first joint position sweep.
+    #[cfg(feature = "bench-internals")]
+    pub first_post_joint_anchor_error_m: f64,
+    /// Maximum frame angle after the first joint position sweep.
+    #[cfg(feature = "bench-internals")]
+    pub first_post_joint_frame_error_rad: f64,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -111,6 +129,18 @@ impl JointSolverMetrics {
         post_position_linear_residual_mps: 0.0,
         #[cfg(feature = "bench-internals")]
         post_position_angular_residual_radps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        pre_joint_velocity_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        pre_joint_velocity_angular_residual_radps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        first_velocity_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        first_velocity_angular_residual_radps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        first_post_joint_anchor_error_m: 0.0,
+        #[cfg(feature = "bench-internals")]
+        first_post_joint_frame_error_rad: 0.0,
     };
 
     pub(crate) fn accumulate(&mut self, other: Self) {
@@ -180,6 +210,24 @@ impl JointSolverMetrics {
             self.post_position_angular_residual_radps = self
                 .post_position_angular_residual_radps
                 .max(other.post_position_angular_residual_radps);
+            self.pre_joint_velocity_linear_residual_mps = self
+                .pre_joint_velocity_linear_residual_mps
+                .max(other.pre_joint_velocity_linear_residual_mps);
+            self.pre_joint_velocity_angular_residual_radps = self
+                .pre_joint_velocity_angular_residual_radps
+                .max(other.pre_joint_velocity_angular_residual_radps);
+            self.first_velocity_linear_residual_mps = self
+                .first_velocity_linear_residual_mps
+                .max(other.first_velocity_linear_residual_mps);
+            self.first_velocity_angular_residual_radps = self
+                .first_velocity_angular_residual_radps
+                .max(other.first_velocity_angular_residual_radps);
+            self.first_post_joint_anchor_error_m = self
+                .first_post_joint_anchor_error_m
+                .max(other.first_post_joint_anchor_error_m);
+            self.first_post_joint_frame_error_rad = self
+                .first_post_joint_frame_error_rad
+                .max(other.first_post_joint_frame_error_rad);
         }
     }
 }
@@ -286,6 +334,18 @@ mod metrics_tests {
             post_position_linear_residual_mps: f64::MAX,
             #[cfg(feature = "bench-internals")]
             post_position_angular_residual_radps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            first_velocity_linear_residual_mps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            first_velocity_angular_residual_radps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            first_post_joint_anchor_error_m: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            first_post_joint_frame_error_rad: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            pre_joint_velocity_linear_residual_mps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            pre_joint_velocity_angular_residual_radps: f64::MAX,
         };
         metrics.accumulate(JointSolverMetrics {
             prepared_rows: 1,
@@ -328,6 +388,12 @@ mod metrics_tests {
             assert_eq!(metrics.post_velocity_angular_residual_radps, f64::MAX);
             assert_eq!(metrics.post_position_linear_residual_mps, f64::MAX);
             assert_eq!(metrics.post_position_angular_residual_radps, f64::MAX);
+            assert_eq!(metrics.first_velocity_linear_residual_mps, f64::MAX);
+            assert_eq!(metrics.first_velocity_angular_residual_radps, f64::MAX);
+            assert_eq!(metrics.first_post_joint_anchor_error_m, f64::MAX);
+            assert_eq!(metrics.first_post_joint_frame_error_rad, f64::MAX);
+            assert_eq!(metrics.pre_joint_velocity_linear_residual_mps, f64::MAX);
+            assert_eq!(metrics.pre_joint_velocity_angular_residual_radps, f64::MAX);
         }
     }
 
@@ -349,6 +415,12 @@ mod metrics_tests {
                 post_joint_frame_error_rad: 0.5,
                 #[cfg(feature = "bench-internals")]
                 post_position_linear_residual_mps: 0.4,
+                #[cfg(feature = "bench-internals")]
+                first_velocity_linear_residual_mps: 0.8,
+                #[cfg(feature = "bench-internals")]
+                first_post_joint_anchor_error_m: 0.6,
+                #[cfg(feature = "bench-internals")]
+                pre_joint_velocity_linear_residual_mps: 0.9,
                 ..JointSolverMetrics::default()
             },
             JointSolverMetrics {
@@ -366,6 +438,12 @@ mod metrics_tests {
                 post_joint_frame_error_rad: 0.2,
                 #[cfg(feature = "bench-internals")]
                 post_position_linear_residual_mps: 0.2,
+                #[cfg(feature = "bench-internals")]
+                first_velocity_linear_residual_mps: 0.4,
+                #[cfg(feature = "bench-internals")]
+                first_post_joint_anchor_error_m: 0.7,
+                #[cfg(feature = "bench-internals")]
+                pre_joint_velocity_linear_residual_mps: 0.3,
                 ..JointSolverMetrics::default()
             },
             JointSolverMetrics {
@@ -392,6 +470,9 @@ mod metrics_tests {
             assert_eq!(forward.post_velocity_anchor_error_m, 0.75);
             assert_eq!(forward.post_position_linear_residual_mps, 0.4);
             assert_eq!(forward.post_joint_frame_error_rad, 0.5);
+            assert_eq!(forward.first_velocity_linear_residual_mps, 0.8);
+            assert_eq!(forward.first_post_joint_anchor_error_m, 0.7);
+            assert_eq!(forward.pre_joint_velocity_linear_residual_mps, 0.9);
         }
     }
 }
