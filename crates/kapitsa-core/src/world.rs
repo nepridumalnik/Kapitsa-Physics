@@ -763,6 +763,20 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return None;
         }
+        self.bodies.get(id.dense)?;
+        // A mutable borrow can change mass, pose, or velocity. Invalidate
+        // impulses for attached joints before exposing the body to the caller.
+        // The experimental cache is disabled in the normal production path.
+        if self.collision_system.joint_warm_start_enabled() {
+            for (dense, entry) in self.joints.iter() {
+                if entry.body_a == id || entry.body_b == id {
+                    self.collision_system.invalidate_joint_warm_start(JointId {
+                        world: self.world_id,
+                        dense,
+                    });
+                }
+            }
+        }
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.bodies.get_mut(id.dense).map(|entry| &mut entry.body)
@@ -5030,6 +5044,7 @@ impl PhysicsWorld {
                 break;
             };
             self.joints.remove(joint.dense)?;
+            self.collision_system.invalidate_joint_warm_start(joint);
         }
         loop {
             let source = self.force_sources.iter().find_map(|(dense, source)| {

@@ -212,6 +212,12 @@ impl JointImpulseCache {
             }
         }
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn clear(&mut self) {
+        clear_slots(&mut self.current);
+        clear_slots(&mut self.next);
+    }
 }
 
 fn ensure_slot(

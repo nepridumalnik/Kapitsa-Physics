@@ -34,3 +34,7 @@ The three translational rows now project `d` onto world X/Y/Z instead of frame-A
 ## Block preparation
 
 The experimental Block3 assembly evaluates the six independent entries of the symmetric `J M^-1 J^T` matrix and mirrors them, instead of evaluating nine entries independently. This reduces repeated cross-mass evaluations and avoids numerical asymmetry in the assembled matrix. The solver still checks positive definiteness and retains its existing scalar fallback. This does not establish the conditioning, finite-angle angular Jacobian or production suitability of the block path; no speedup is claimed without measurement.
+
+## Experimental warm-start invalidation
+
+When experimental joint warm-start is enabled, exposing a body through `body_mut` now invalidates cached impulses for its attached joints before the caller can change mass, inertia, pose or velocity. Removing a body invalidates each removed joint's cache; toggling the experimental strategy clears both cache generations. Joint update, disabling and direct removal retain their existing invalidation. The scan is linear in joint count on a mutable body borrow only while warm-start is enabled, so this is a correctness-first mitigation, not a hot-path optimization. Cache generation matching still protects reused slots. Warm-start remains disabled by default and internal pathways, numerical behavior and performance still need dynamic validation.

@@ -99,6 +99,10 @@ impl CollisionSystem {
         self.joint_impulse_cache.invalidate(joint);
     }
 
+    pub(crate) fn joint_warm_start_enabled(&self) -> bool {
+        self.joint_solver_options.warm_start().enabled
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn set_joint_mass_cache_for_bench(&mut self, enabled: bool) {
         self.joint_solver_options = self.joint_solver_options.with_mass_cache(enabled);
@@ -106,6 +110,9 @@ impl CollisionSystem {
 
     #[cfg(feature = "bench-internals")]
     pub(crate) fn set_joint_warm_start_for_bench(&mut self, enabled: bool) {
+        if self.joint_solver_options.warm_start().enabled != enabled {
+            self.joint_impulse_cache.clear();
+        }
         let config = if enabled {
             crate::joint::WarmStartConfig::enabled()
         } else {
