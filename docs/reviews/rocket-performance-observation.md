@@ -1,6 +1,6 @@
 # Large modular rocket: performance observation
 
-Run on 2026-11-02, AMD EPYC 9V74, 5 available logical CPUs, Linux x86_64, Rust 1.98.0. Command: `cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_rocket --locked --offline`. The binary was built at `b5becc5`, before subsequent refactorings and runtime optimizations; it used the corrected pad-start fixture. 60 steady samples followed 5 warmups; step size 1/120 s. It is a single run, not a before/after experiment.
+Run on 2026-11-02, AMD EPYC 9V74, 5 available logical CPUs, Linux x86_64, Rust 1.98.0. Command: `cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_rocket --locked --offline`. The run was launched at `cf28111`, before subsequent refactorings and runtime optimizations; event documentation was edited while the binary was compiling. It used the corrected pad-start fixture. 60 steady samples followed 5 warmups; step size 1/120 s. It is a single run, not a before/after experiment.
 
 Other tests and builds ran concurrently. One sample in the 500-body, 2-worker group was suspended while tests ran, yielding an invalid 12.97-second maximum and affecting its mean and potentially tail quantiles. The reported numbers should be treated as approximate observations, not controlled performance comparisons. Eight workers also exceed the five CPUs available. Baseline and final changes were not compared; the speed of snapshot and event changes was not measured.
 
