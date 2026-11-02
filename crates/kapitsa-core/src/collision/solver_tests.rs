@@ -308,7 +308,11 @@ fn solve_with_joints_prepares_each_joint_before_one_sweep_in_phase_order() {
             JointSolverCall::JointRowsPrepared(0),
             JointSolverCall::PositionSweep {
                 preparing_rows: true,
-                row_count: 6,
+                row_count: 3,
+            },
+            JointSolverCall::PositionSweep {
+                preparing_rows: true,
+                row_count: 3,
             },
             JointSolverCall::JointRowsCommitted(0),
         ]

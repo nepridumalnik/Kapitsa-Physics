@@ -346,6 +346,24 @@ impl JointSolver {
                 dt,
                 options,
             )?;
+        } else if matches!(constraint.joint, super::Joint::Fixed(_))
+            && workspace.solver_buffers_mut(true).0.len() == 6
+            && [constraint.body_a, constraint.body_b]
+                .into_iter()
+                .any(|body_index| {
+                    bodies.get(body_index).is_some_and(|body| {
+                        body.body().physics().body_type() == crate::rigid_body::BodyType::Dynamic
+                    })
+                })
+        {
+            Self::position_joint_fixed_scalar_sweep(
+                workspace,
+                bodies,
+                constraint,
+                joint_index,
+                dt,
+                options,
+            )?;
         } else {
             Self::position_sweep(workspace, bodies, dt, options, JointRowBuffer::Preparing)?;
         }
@@ -420,6 +438,101 @@ impl JointSolver {
         Ok(())
     }
 
+    fn position_sweep_range(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        body_indices: [usize; 2],
+        dt: f64,
+        options: JointSolverOptions,
+        row_buffer: JointRowBuffer,
+        range: std::ops::Range<usize>,
+    ) -> Result<bool, CollisionError> {
+        if options.mass_cache() {
+            workspace.ensure_solver_mass_slots(bodies.len())?;
+        }
+        let before = body_indices.map(|index| {
+            bodies
+                .get(index)
+                .map(|body| body.state().transform())
+                .ok_or(CollisionError::InvalidContact)
+        });
+        let [before_a, before_b] = [before[0]?, before[1]?];
+        #[cfg(any(test, feature = "bench-internals"))]
+        let row_count = range.end.saturating_sub(range.start);
+        let mut cache_stats = SolverMassCacheStats::default();
+        let result = {
+            let (rows, slots) = workspace.solver_buffers_mut(row_buffer.is_preparing());
+            let rows = rows.get_mut(range).ok_or(CollisionError::InvalidContact)?;
+            solve_position_rows(rows, slots, bodies, dt, options, &mut cache_stats)
+        };
+        record_solver_mass_cache_stats(workspace, cache_stats);
+        result?;
+        #[cfg(feature = "bench-internals")]
+        workspace.record_scalar_rows_solved(row_count);
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::PositionSweep {
+            preparing_rows: row_buffer.is_preparing(),
+            row_count,
+        });
+        let after_a = bodies
+            .get(body_indices[0])
+            .map(|body| body.state().transform())
+            .ok_or(CollisionError::InvalidContact)?;
+        let after_b = bodies
+            .get(body_indices[1])
+            .map(|body| body.state().transform())
+            .ok_or(CollisionError::InvalidContact)?;
+        Ok(before_a != after_a || before_b != after_b)
+    }
+
+    fn position_joint_fixed_scalar_sweep(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        constraint: JointConstraint,
+        joint_index: usize,
+        dt: f64,
+        options: JointSolverOptions,
+    ) -> Result<(), CollisionError> {
+        let linear_changed = Self::position_sweep_range(
+            workspace,
+            bodies,
+            [constraint.body_a, constraint.body_b],
+            dt,
+            options,
+            JointRowBuffer::Preparing,
+            0..3,
+        )?;
+        if linear_changed {
+            workspace.finish_joint_prepare()?;
+            workspace.begin_joint_prepare(joint_index, constraint.id);
+            prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+        }
+        let angular_changed = Self::position_sweep_range(
+            workspace,
+            bodies,
+            [constraint.body_a, constraint.body_b],
+            dt,
+            options,
+            JointRowBuffer::Preparing,
+            3..6,
+        )?;
+        if angular_changed {
+            workspace.finish_joint_prepare()?;
+            workspace.begin_joint_prepare(joint_index, constraint.id);
+            prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+            Self::position_sweep_range(
+                workspace,
+                bodies,
+                [constraint.body_a, constraint.body_b],
+                dt,
+                options,
+                JointRowBuffer::Preparing,
+                0..3,
+            )?;
+        }
+        Ok(())
+    }
+
     fn velocity_sweep(
         workspace: &mut JointWorkspace,
         bodies: &mut [SolverBody],
@@ -486,7 +599,15 @@ impl JointSolver {
             workspace.begin_joint_prepare(joint_index, constraint.id);
             prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
         }
-        Self::position_projection_group(workspace, bodies, dt, options, [3, 4, 5])?;
+        let angular = Self::position_projection_group(workspace, bodies, dt, options, [3, 4, 5])?;
+        if angular.pose_changed {
+            // Angular correction changes offset connector positions. Refresh
+            // point Jacobians and effective masses before the final linear pass.
+            workspace.finish_joint_prepare()?;
+            workspace.begin_joint_prepare(joint_index, constraint.id);
+            prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+        }
+        Self::position_projection_group(workspace, bodies, dt, options, [0, 1, 2])?;
         Self::position_projection_remainder(workspace, bodies, dt, options)?;
         Ok(())
     }

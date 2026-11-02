@@ -43,3 +43,26 @@ These values remain far above the unchanged strict geometry limits. Contacts occ
 - Source isolation on the 100-part fixture: no loads stayed at roundoff; gravity without contact stayed below `3.93e-8 m / 5.97e-8 rad`; gravity plus pad contact reached `0.293 m / 2.187 rad`; thrust without gravity/contact reached `0.103 m / 0.907 rad`. Centering the same thrust barely changed the errors (`0.103 m / 0.984 rad`), so its offset moment is not the main trigger. Both contact and thrust load cases are sufficient to expose the weakness.
 - The existing adaptive test path (1–8 position and velocity iterations) reduced geometry errors for contact (`0.293/2.187` to `0.134/1.259`) and thrust (`0.103/0.907` to `0.0604/0.567`) but roughly doubled elapsed time and increased coast energy drift (`46.7%` to `69.0%`, `68.1%` to `71.4%`). It remains experimental and is not a production fix.
 - These experiments establish load sensitivity and slow branched-graph convergence, but do not prove whether contact/joint ordering, per-sweep Jacobian refresh, or velocity/position coupling is the first rocket failure. Continue with residual tracing before changing production order or iteration defaults.
+
+## 2026-11-02 — position projection order A/B/C
+
+Variant A is the existing scalar Linear → Angular sweep. Variant B solves Angular, refreshes connector geometry and rows, then solves Linear. Variant C solves Linear, refreshes and solves Angular, refreshes again, then solves Linear. All variants retain multipliers by row key and apply only the newly computed multiplier delta.
+
+| Parts | Order | Anchor max, m | Frame max / RMS, rad | Coast energy drift | Elapsed, ms |
+|---:|---|---:|---:|---:|---:|
+| 100 | A | 0.1559734 | 1.358748 / 0.08467397 | 4.1414% | 852 |
+| 100 | B | 0.1387972 | 1.389727 / 0.08279818 | 4.0002% | 911 |
+| 100 | C | 0.1323372 | 1.581435 / 0.09111354 | 3.6841% | 1,098 |
+| 200 | A | 0.2910659 | 1.713914 / 0.1226009 | 70.8814% | 1,724 |
+| 200 | B | 0.2852765 | 1.649234 / 0.1132870 | 69.1131% | 1,828 |
+| 200 | C | 0.2896826 | 1.491072 / 0.1129851 | 68.7790% | 2,259 |
+| 500 | A | 0.7676298 | 3.139344 / 0.2949535 | 58.3762% | 4,408 |
+| 500 | B | 0.8195813 | 2.614975 / 0.2813381 | 63.2394% | 4,638 |
+| 500 | C | 0.7424552 | 3.094329 / 0.2548137 | 66.1312% | 5,700 |
+| 1,000 | A | 3.023810 | 3.141562 / 0.6276528 | 45.5216% | 8,836 |
+| 1,000 | B | 2.626698 | 3.141119 / 0.5419593 | 42.0811% | 9,293 |
+| 1,000 | C | 2.576289 | 3.141282 / 0.4688818 | 46.5546% | 11,576 |
+
+All three configurations fail the original strict limits. B is about 5–7% slower than A and trades anchor error against frame error. C improves maximum anchor error at all sizes and frame RMS at 200–1,000 parts, but costs about 26% more elapsed time, worsens the 100-part frame maximum, and raises 500/1,000-part coast energy drift relative to A. The actual strict C run failed at all sizes. Its first anchor/frame limit crossing ticks were `15/47`, `14/32`, `12/22`, and `12/19` for 100, 200, 500, and 1,000 parts. The larger cases cross the anchor limit on the first booster-thrust step (tick 12). The test does not identify a sequence as a complete fix.
+
+The production path currently uses C because it refreshes the offset-anchor geometry after angular correction and reduces the measured anchor maximum in all four rocket runs. The strict Release run on this exact implementation failed at all four sizes; it completed every tick with no step failure and reproduced the report-only metrics. The full workspace suite passed (781 passed, 4 ignored), as did workspace check, strict Clippy, formatting, and diff checks. This is a partial mathematical correction only; the stability defect remains, the extra pass has a measurable cost, and no overall win is claimed. Continue isolating the first loaded-step residual before considering solver optimization or Block3 promotion.

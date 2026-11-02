@@ -358,8 +358,11 @@ mod stability_tests {
         elapsed: Duration,
         completed_ticks: usize,
         step_failure: Option<String>,
+        first_anchor_limit_tick: Option<usize>,
+        first_frame_limit_tick: Option<usize>,
     }
 
+    #[allow(dead_code)] // Non-default source isolation modes are selected by an ignored diagnostic.
     #[derive(Clone, Copy, Debug)]
     enum ScenarioMode {
         Full,
@@ -400,7 +403,7 @@ mod stability_tests {
                 && first.max_coast_energy_drift < 0.1;
             all_stable &= numerical_stability;
             println!(
-                "parts={part_count} joints={} elapsed_ms={} completed_ticks={} scenario={} numerical_stability={} step_failure={:?} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% upper_root_max_y={:.3}m omega={:.3}rad_s separation_dp={:.3e} contacts(begin/end/impact)={}/{}/{} breaks={}",
+                "parts={part_count} joints={} elapsed_ms={} completed_ticks={} scenario={} numerical_stability={} step_failure={:?} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} coast_energy_drift={:.4}% upper_root_max_y={:.3}m omega={:.3}rad_s separation_dp={:.3e} contacts(begin/end/impact)={}/{}/{} breaks={}",
                 part_count - 1,
                 first.elapsed.as_millis(),
                 first.completed_ticks,
@@ -415,6 +418,8 @@ mod stability_tests {
                 first.rms_anchor_error,
                 first.max_frame_error,
                 first.rms_frame_error,
+                first.first_anchor_limit_tick,
+                first.first_frame_limit_tick,
                 first.max_coast_energy_drift * 100.0,
                 first.max_altitude,
                 first.max_angular_speed,
@@ -474,13 +479,15 @@ mod stability_tests {
         ] {
             let run = run_scenario(100, false, mode, adaptive);
             println!(
-                "mode={mode:?} adaptive={adaptive} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
+                "mode={mode:?} adaptive={adaptive} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} coast_energy_drift={:.4}% contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
                 run.elapsed.as_millis(),
                 run.completed_ticks,
                 run.max_anchor_error,
                 run.rms_anchor_error,
                 run.max_frame_error,
                 run.rms_frame_error,
+                run.first_anchor_limit_tick,
+                run.first_frame_limit_tick,
                 run.max_coast_energy_drift * 100.0,
                 run.surface_begins,
                 run.surface_ends,
@@ -563,6 +570,8 @@ mod stability_tests {
         let mut completed_ticks = 0;
         let mut step_failure = None;
         let mut joint_break_events = 0;
+        let mut first_anchor_limit_tick = None;
+        let mut first_frame_limit_tick = None;
 
         for tick in 0..TICKS {
             match mode {
@@ -642,12 +651,22 @@ mod stability_tests {
                 }
             }
 
+            let mut tick_anchor_error: f64 = 0.0;
+            let mut tick_frame_error: f64 = 0.0;
             for (_, anchor_error, frame_error) in joint_errors(&rocket) {
+                tick_anchor_error = tick_anchor_error.max(anchor_error);
+                tick_frame_error = tick_frame_error.max(frame_error);
                 max_anchor_error = max_anchor_error.max(anchor_error);
                 anchor_square_sum += anchor_error * anchor_error;
                 max_frame_error = max_frame_error.max(frame_error);
                 frame_square_sum += frame_error * frame_error;
                 joint_error_samples += 1;
+            }
+            if first_anchor_limit_tick.is_none() && tick_anchor_error >= 0.03 {
+                first_anchor_limit_tick = Some(tick);
+            }
+            if first_frame_limit_tick.is_none() && tick_frame_error >= 0.1 {
+                first_frame_limit_tick = Some(tick);
             }
             for &id in &rocket.parts {
                 let body = rocket.world.body(id).expect("rocket body");
@@ -730,6 +749,8 @@ mod stability_tests {
             elapsed: started.elapsed(),
             completed_ticks,
             step_failure,
+            first_anchor_limit_tick,
+            first_frame_limit_tick,
         }
     }
 
