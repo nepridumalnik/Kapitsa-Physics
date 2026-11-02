@@ -80,3 +80,5 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 - `asynchronous/service.rs` still copies world events once for publication; immutable batches now share nonempty vectors between subscribers. This adds an Arc allocation for a nonempty batch, so the net benefit depends on subscriber count.
 - Snapshot buffers are recycled only when no subscriber retains the prior Arc. Unchanged body IDs reuse their lookup index, but every body state is still copied to preserve immutable snapshots.
 - The rocket benchmark observed zero allocator calls at p50/p95 for warmed steady samples; it does not prove zero allocations for every step or scenario. Separation samples allocated. See `rocket-performance-observation.md` for conditions and interference.
+
+- Subsequent workspace run completed 773 unit/integration checks with 4 ignored, but its doctest phase failed because a concurrent build changed an artifact. A separate `cargo +1.98.0 test --workspace --doc --locked --offline -j 4` then passed both doctests. The impulse-field rename was checked separately with 8 collision-solver tests and strict workspace Clippy.
