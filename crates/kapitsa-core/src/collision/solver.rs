@@ -270,9 +270,19 @@ impl SolverWorkspace {
         let dt = joint_solver_step.dt();
         let velocity_outer = config.velocity_iterations.max(velocity.max);
         let mut joint_velocity_sweeps = 0;
+        #[cfg(feature = "bench-internals")]
+        {
+            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            joint_workspace.record_pre_velocity_geometry();
+        }
         for outer_iteration in 0..velocity_outer {
             if outer_iteration < config.velocity_iterations {
                 self.solve_velocity_iteration(bodies, manifolds)?;
+            }
+            #[cfg(feature = "bench-internals")]
+            {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.record_pre_joint_velocity_residual();
             }
             let residual_converged = if joint_velocity_sweeps >= velocity.min {
                 JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
@@ -300,6 +310,15 @@ impl SolverWorkspace {
             )?;
             joint_velocity_sweeps += 1;
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            #[cfg(feature = "bench-internals")]
+            if joint_velocity_sweeps == 1 {
+                joint_workspace.record_first_velocity_residual();
+            }
+        }
+        #[cfg(feature = "bench-internals")]
+        {
+            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            joint_workspace.record_post_velocity_geometry();
         }
 
         let position_outer = config.position_iterations.max(position.max);
@@ -307,6 +326,11 @@ impl SolverWorkspace {
         for outer_iteration in 0..position_outer {
             if outer_iteration < config.position_iterations {
                 self.solve_position_iteration(bodies, manifolds, config)?;
+            }
+            #[cfg(feature = "bench-internals")]
+            {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.record_pre_joint_geometry();
             }
             let residual_converged = if joint_position_sweeps >= position.min {
                 JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
@@ -331,6 +355,13 @@ impl SolverWorkspace {
             }
             joint_position_sweeps += 1;
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            #[cfg(feature = "bench-internals")]
+            joint_workspace.record_post_joint_geometry(joint_position_sweeps == 1);
+        }
+        #[cfg(feature = "bench-internals")]
+        {
+            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            joint_workspace.record_post_joint_geometry(false);
         }
         Ok(())
     }

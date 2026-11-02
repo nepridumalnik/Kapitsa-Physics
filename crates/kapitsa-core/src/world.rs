@@ -1704,6 +1704,13 @@ impl PhysicsWorld {
 
     #[cfg(feature = "bench-internals")]
     #[doc(hidden)]
+    pub fn set_joint_adaptive_velocity_max_for_bench(&mut self, max: u32) {
+        self.collision_system
+            .set_joint_adaptive_velocity_max_for_bench(max);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
     pub fn collision_step_metrics(&self) -> crate::collision::CollisionStepMetrics {
         let mut metrics = self.collision_system.benchmark_metrics();
         let query_index_bytes = self

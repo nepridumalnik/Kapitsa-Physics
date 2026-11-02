@@ -456,6 +456,46 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
             );
         }
     }
+
+    for (name, branching) in [("chain_100", false), ("branch_100", true)] {
+        for max_velocity_iterations in [8, 16, 32, 64, 128] {
+            let mut world = loaded_fixed_joint_graph(100, branching, 8, false, false);
+            world.set_joint_adaptive_velocity_max_for_bench(max_velocity_iterations);
+            let first_body = world.bodies().next().unwrap().0;
+            let force = world
+                .bodies()
+                .filter_map(|(_, body)| body.physics().mass())
+                .map(|mass| mass.mass())
+                .sum::<f64>()
+                * 9.81
+                * 1.3;
+            let point = world
+                .body(first_body)
+                .unwrap()
+                .state()
+                .transform()
+                .transform_point(Vec3::Y * 0.25);
+            world
+                .body_mut(first_body)
+                .unwrap()
+                .apply_force_at_point(Vec3::Y * force, point)
+                .unwrap();
+
+            let started = Instant::now();
+            world.step(DT).unwrap();
+            let metrics = world.physics_step_metrics().joints;
+            println!(
+                "graph={name} adaptive_velocity_max={} actual_sweeps={} elapsed_us={} residual={:.6e}m/s/{:.6e}rad/s geometry_post={:.6e}m/{:.6e}rad",
+                max_velocity_iterations,
+                metrics.velocity_sweeps,
+                started.elapsed().as_micros(),
+                metrics.post_velocity_linear_residual_mps,
+                metrics.post_velocity_angular_residual_radps,
+                metrics.post_joint_anchor_error_m,
+                metrics.post_joint_frame_error_rad,
+            );
+        }
+    }
 }
 
 #[cfg(feature = "bench-internals")]

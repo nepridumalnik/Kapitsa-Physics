@@ -157,6 +157,22 @@ impl CollisionSystem {
             .with_alternating_velocity_sweeps(enabled);
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_adaptive_velocity_max_for_bench(&mut self, max: u32) {
+        self.joint_solver_options =
+            self.joint_solver_options
+                .with_iterations(crate::joint::JointIterations::Adaptive {
+                    position: crate::joint::IterationRange::new(1, 8),
+                    velocity: crate::joint::IterationRange::new(1, max),
+                    tolerance: crate::joint::JointTolerance {
+                        linear_m: 1.0e-5,
+                        angular_rad: 1.0e-5,
+                        velocity_mps: 1.0e-4,
+                        angular_velocity_radps: 1.0e-4,
+                    },
+                });
+    }
+
     pub(crate) fn events(&self) -> &[CollisionEvent] {
         &self.events
     }
