@@ -247,6 +247,153 @@ fn physics_step_metrics_report_fixed_joint_solver_work() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
+fn joint_mass_cache_is_opt_in_through_the_internal_benchmark_setting() {
+    let mut legacy = PhysicsWorld::new();
+    add_fixed_pair(&mut legacy, 0.0);
+    legacy.step(1.0 / 60.0).expect("legacy fixed-joint step");
+    let legacy_metrics = legacy.physics_step_metrics().joints;
+    assert_eq!(legacy_metrics.solver_mass_cache_hits, 0);
+    assert_eq!(legacy_metrics.solver_mass_cache_misses, 0);
+
+    let mut cached = PhysicsWorld::new();
+    add_fixed_pair(&mut cached, 0.0);
+    cached.set_joint_mass_cache_for_bench(true);
+    cached.step(1.0 / 60.0).expect("cached fixed-joint step");
+    let cached_metrics = cached.physics_step_metrics().joints;
+    assert!(cached_metrics.solver_mass_cache_hits > 0);
+    assert!(cached_metrics.solver_mass_cache_misses > 0);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn joint_mass_cache_matches_legacy_for_anisotropic_fixed_joint() {
+    fn make_world() -> PhysicsWorld {
+        let mut world = PhysicsWorld::new();
+        let mass_a = MassProperties::new(
+            2.0,
+            Vec3::new(0.2, -0.1, 0.15),
+            Mat3::from_diagonal(Vec3::new(3.0, 4.0, 5.0)),
+        )
+        .expect("anisotropic mass A");
+        let mass_b = MassProperties::new(
+            3.5,
+            Vec3::new(-0.1, 0.25, 0.05),
+            Mat3::from_diagonal(Vec3::new(6.0, 4.0, 3.0)),
+        )
+        .expect("anisotropic mass B");
+        let body_a = world
+            .add_body(
+                RigidBody::new_dynamic(
+                    Transform::new(
+                        Vec3::ZERO,
+                        Quat::from_axis_angle(Vec3::Z, 0.15).expect("rotation A"),
+                    )
+                    .expect("transform A"),
+                    mass_a,
+                )
+                .expect("dynamic body A"),
+            )
+            .expect("add body A");
+        let mut body_b = RigidBody::new_dynamic(
+            Transform::new(
+                Vec3::new(1.15, 0.2, -0.1),
+                Quat::from_axis_angle(Vec3::new(0.2, 1.0, -0.1), 0.3).expect("rotation B"),
+            )
+            .expect("transform B"),
+            mass_b,
+        )
+        .expect("dynamic body B");
+        body_b
+            .set_angular_velocity(Vec3::new(0.1, -0.05, 0.08))
+            .expect("angular velocity");
+        let body_b = world.add_body(body_b).expect("add body B");
+        world
+            .add_joint(
+                body_a,
+                body_b,
+                Joint::Fixed(FixedJoint::new(JointCommon::new(
+                    JointFrame::new(Vec3::new(0.5, 0.0, 0.0), Quat::IDENTITY),
+                    JointFrame::new(Vec3::new(-0.5, 0.0, 0.0), Quat::IDENTITY),
+                ))),
+            )
+            .expect("fixed joint");
+        world
+    }
+
+    let mut legacy = make_world();
+    let mut cached = make_world();
+    cached.set_joint_mass_cache_for_bench(true);
+    for _ in 0..12 {
+        legacy.step(1.0 / 120.0).expect("legacy step");
+        cached.step(1.0 / 120.0).expect("cached step");
+    }
+
+    for ((_, actual), (_, expected)) in cached.bodies().zip(legacy.bodies()) {
+        let actual_state = actual.state();
+        let expected_state = expected.state();
+        assert!(
+            (actual_state.transform().translation() - expected_state.transform().translation())
+                .length()
+                <= 1.0e-9
+        );
+        assert!(
+            (actual_state.linear_velocity() - expected_state.linear_velocity()).length() <= 1.0e-9
+        );
+        assert!(
+            (actual_state.angular_velocity() - expected_state.angular_velocity()).length()
+                <= 1.0e-9
+        );
+        let actual_rotation = actual_state
+            .transform()
+            .rotation()
+            .to_mat3()
+            .expect("actual rotation");
+        let expected_rotation = expected_state
+            .transform()
+            .rotation()
+            .to_mat3()
+            .expect("expected rotation");
+        for (actual, expected) in actual_rotation
+            .to_cols_array()
+            .into_iter()
+            .zip(expected_rotation.to_cols_array())
+        {
+            assert!((actual - expected).abs() <= 1.0e-9);
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn joint_mass_cache_preserves_kinematic_trajectory() {
+    let mut world = PhysicsWorld::new();
+    let mut kinematic = RigidBody::new_kinematic(Transform::identity());
+    kinematic
+        .set_linear_velocity(Vec3::X)
+        .expect("kinematic velocity");
+    let kinematic = world.add_body(kinematic).expect("kinematic body");
+    let dynamic = world.add_body(body_at(Vec3::X, 1.0)).expect("dynamic body");
+    world
+        .add_joint(
+            kinematic,
+            dynamic,
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .expect("fixed joint");
+    world.set_joint_mass_cache_for_bench(true);
+
+    world.step(0.1).expect("cached joint step");
+
+    let state = world.body(kinematic).expect("kinematic body state").state();
+    assert!((state.transform().translation().x - 0.1).abs() <= 1.0e-12);
+    assert_eq!(state.linear_velocity(), Vec3::X);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 fn physics_step_metrics_keep_contact_and_joint_work_separate() {
     let mut world = PhysicsWorld::new();
     let plane_body = world

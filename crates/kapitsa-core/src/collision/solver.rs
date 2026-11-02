@@ -1,6 +1,6 @@
 use crate::{
     constraint,
-    joint::{JointConstraint, JointSolver, JointWorkspace},
+    joint::{JointConstraint, JointSolver, JointSolverStep, JointWorkspace},
     rigid_body::RigidBody,
 };
 use kapitsa_math::Vec3;
@@ -160,13 +160,15 @@ impl SolverWorkspace {
         manifolds: &mut [SolverManifold],
         joint_workspace: &mut JointWorkspace,
         joints: &[JointConstraint],
-        dt: f64,
         config: CollisionConfig,
+        joint_solver_step: JointSolverStep,
     ) -> Result<(), CollisionError> {
         if joints.is_empty() {
             return self.solve(bodies, manifolds, config);
         }
         config.validate()?;
+        let dt = joint_solver_step.dt();
+        let joint_solver_options = joint_solver_step.options();
         if !dt.is_finite() || dt <= 0.0 {
             return Err(CollisionError::InvalidConfig);
         }
@@ -179,7 +181,14 @@ impl SolverWorkspace {
             joint_workspace.record_velocity_iteration();
             self.solve_velocity_iteration(bodies, manifolds)?;
             for (joint_index, joint) in joints.iter().copied().enumerate() {
-                JointSolver::solve_velocity_joint(joint_workspace, bodies, joint, joint_index, dt)?;
+                JointSolver::solve_velocity_joint(
+                    joint_workspace,
+                    bodies,
+                    joint,
+                    joint_index,
+                    dt,
+                    joint_solver_options,
+                )?;
             }
             #[cfg(feature = "bench-internals")]
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
@@ -189,7 +198,14 @@ impl SolverWorkspace {
             joint_workspace.record_position_iteration();
             self.solve_position_iteration(bodies, manifolds, config)?;
             for (joint_index, joint) in joints.iter().copied().enumerate() {
-                JointSolver::solve_position_joint(joint_workspace, bodies, joint, joint_index, dt)?;
+                JointSolver::solve_position_joint(
+                    joint_workspace,
+                    bodies,
+                    joint,
+                    joint_index,
+                    dt,
+                    joint_solver_options,
+                )?;
             }
             #[cfg(feature = "bench-internals")]
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;

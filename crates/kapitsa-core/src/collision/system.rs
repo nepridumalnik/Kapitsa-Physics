@@ -38,6 +38,7 @@ pub(crate) struct CollisionSystem {
     islands: IslandLayout,
     ccd_islands: super::CcdIslandLayout,
     solver_islands: Vec<SolverIsland>,
+    joint_solver_options: crate::joint::JointSolverOptions,
     ccd_solver: SolverWorkspace,
     cache_staged: bool,
     #[cfg(feature = "bench-internals")]
@@ -65,6 +66,7 @@ impl CollisionSystem {
             islands: IslandLayout::new(),
             ccd_islands: super::CcdIslandLayout::new(),
             solver_islands: Vec::new(),
+            joint_solver_options: crate::joint::JointSolverOptions::legacy(),
             ccd_solver: SolverWorkspace::new(),
             cache_staged: false,
             #[cfg(feature = "bench-internals")]
@@ -89,6 +91,11 @@ impl CollisionSystem {
             cache.clear();
         }
         Ok(())
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_mass_cache_for_bench(&mut self, enabled: bool) {
+        self.joint_solver_options = crate::joint::JointSolverOptions::with_mass_cache(enabled);
     }
 
     pub(crate) fn events(&self) -> &[CollisionEvent] {
@@ -1043,6 +1050,7 @@ impl CollisionSystem {
             }
         }
         let config = self.config;
+        let joint_solver_step = crate::joint::JointSolverStep::new(dt, self.joint_solver_options);
         #[cfg(feature = "bench-internals")]
         let iterations_started = std::time::Instant::now();
         if worker_count <= 1 || island_count <= 1 {
@@ -1052,8 +1060,8 @@ impl CollisionSystem {
                     &mut island.manifolds,
                     &mut island.joint_workspace,
                     &island.joints,
-                    dt,
                     config,
+                    joint_solver_step,
                 )?;
             }
         } else {
@@ -1072,8 +1080,8 @@ impl CollisionSystem {
                                 &mut island.manifolds,
                                 &mut island.joint_workspace,
                                 &island.joints,
-                                dt,
                                 config,
+                                joint_solver_step,
                             ) {
                                 island.worker_error = Some(error);
                                 break;

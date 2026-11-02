@@ -1,5 +1,6 @@
 use super::{JointBreakEvent, row::ConstraintRow, solver::JointConstraint};
 use crate::collision::CollisionError;
+use crate::rigid_body::solver_mass::SolverMassSlot;
 use kapitsa_math::Vec3;
 
 #[derive(Clone, Copy, Debug)]
@@ -16,6 +17,7 @@ pub(crate) struct JointWorkspace {
     row_joint_indices: Vec<usize>,
     joint_ids: Vec<Option<crate::world::JointId>>,
     preparing_rows: Vec<ConstraintRow>,
+    solver_mass_slots: Vec<SolverMassSlot>,
     preparing_joint_indices: Vec<usize>,
     preparing_joint_ids: Vec<Option<crate::world::JointId>>,
     prepared_rows: usize,
@@ -39,6 +41,7 @@ impl JointWorkspace {
             row_joint_indices: Vec::new(),
             joint_ids: Vec::new(),
             preparing_rows: Vec::new(),
+            solver_mass_slots: Vec::new(),
             preparing_joint_indices: Vec::new(),
             preparing_joint_ids: Vec::new(),
             prepared_rows: 0,
@@ -182,6 +185,34 @@ impl JointWorkspace {
         &mut self.preparing_rows
     }
 
+    pub(crate) fn ensure_solver_mass_slots(
+        &mut self,
+        body_count: usize,
+    ) -> Result<(), CollisionError> {
+        if body_count > self.solver_mass_slots.len() {
+            self.solver_mass_slots
+                .try_reserve(body_count - self.solver_mass_slots.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.solver_mass_slots
+                .resize_with(body_count, SolverMassSlot::default);
+        } else {
+            self.solver_mass_slots.truncate(body_count);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn solver_buffers_mut(
+        &mut self,
+        preparing_rows: bool,
+    ) -> (&mut [ConstraintRow], &mut [SolverMassSlot]) {
+        let rows = if preparing_rows {
+            &mut self.preparing_rows
+        } else {
+            &mut self.rows
+        };
+        (rows, &mut self.solver_mass_slots)
+    }
+
     pub(crate) fn finish_joint_prepare(&mut self) -> Result<(), CollisionError> {
         let joint_id = self.active_joint_id.ok_or(CollisionError::InvalidContact)?;
         let new_count = self.preparing_rows.len();
@@ -258,6 +289,23 @@ impl JointWorkspace {
     pub(crate) fn record_scalar_rows_solved(&mut self, rows: usize) {
         self.metrics.scalar_rows_solved =
             self.metrics.scalar_rows_solved.saturating_add(rows as u64);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_solver_mass_cache(
+        &mut self,
+        hits: u64,
+        misses: u64,
+        inverse_inertia_updates: u64,
+    ) {
+        self.metrics.solver_mass_cache_hits =
+            self.metrics.solver_mass_cache_hits.saturating_add(hits);
+        self.metrics.solver_mass_cache_misses =
+            self.metrics.solver_mass_cache_misses.saturating_add(misses);
+        self.metrics.inverse_inertia_updates = self
+            .metrics
+            .inverse_inertia_updates
+            .saturating_add(inverse_inertia_updates);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -379,6 +427,7 @@ impl JointWorkspace {
             + self.row_joint_indices.capacity() * std::mem::size_of::<usize>()
             + self.joint_ids.capacity() * std::mem::size_of::<Option<crate::world::JointId>>()
             + self.preparing_rows.capacity() * std::mem::size_of::<ConstraintRow>()
+            + self.solver_mass_slots.capacity() * std::mem::size_of::<SolverMassSlot>()
             + self.preparing_joint_indices.capacity() * std::mem::size_of::<usize>()
             + self.preparing_joint_ids.capacity()
                 * std::mem::size_of::<Option<crate::world::JointId>>()

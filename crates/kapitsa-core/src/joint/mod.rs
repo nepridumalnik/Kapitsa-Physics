@@ -1,6 +1,7 @@
 mod ball;
 mod common;
 mod cone_twist;
+mod config;
 mod cylindrical;
 mod d6;
 #[cfg(feature = "bench-internals")]
@@ -24,6 +25,7 @@ mod workspace;
 pub use ball::BallJoint;
 pub use common::{JointCommon, JointDrive, JointFrame, JointLimit, JointMotion};
 pub use cone_twist::ConeTwistJoint;
+pub(crate) use config::{JointSolverOptions, JointSolverStep};
 pub use cylindrical::CylindricalJoint;
 pub use d6::D6Joint;
 pub use distance::DistanceJoint;

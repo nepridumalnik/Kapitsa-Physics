@@ -1,8 +1,10 @@
-use kapitsa_math::{CholeskyError, Mat3, Vec3};
+use kapitsa_math::{CholeskyError, Mat3, Quat, Vec3};
 
 use crate::{
     collision::CollisionError,
+    mass::MassProperties,
     rigid_body::{BodyError, BodyType, RigidBody},
+    transform::Transform,
 };
 
 /// Derived from the body's current transform and mass; never authoritative.
@@ -20,6 +22,7 @@ impl SolverMass {
         center: Vec3::ZERO,
     };
 
+    #[cfg(test)]
     pub(crate) fn from_body(body: &RigidBody) -> Result<Self, CollisionError> {
         if body.physics().body_type() != BodyType::Dynamic {
             return Ok(Self::STATIC);
@@ -75,11 +78,137 @@ impl SolverMass {
             .inverse_inertia
             .checked_mul_vector(angular_b)
             .ok_or(CollisionError::ArithmeticOverflow)?;
-        let value = self.inverse_mass * linear_a.dot(linear_b) + angular_a.dot(angular_response);
+        let linear_term = self.inverse_mass
+            * linear_a
+                .checked_dot(linear_b)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+        let angular_term = angular_a
+            .checked_dot(angular_response)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let value = linear_term + angular_term;
         value
             .is_finite()
             .then_some(value)
             .ok_or(CollisionError::ArithmeticOverflow)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SolverMassCacheStatus {
+    Hit,
+    Updated { inverse_inertia: bool },
+}
+
+/// Reusable derived mass for one solver-body slot. The body remains the source
+/// of truth; this value is valid only while its mass and transform match.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SolverMassSlot {
+    cached_mass: Option<MassProperties>,
+    cached_transform: Option<Transform>,
+    cached_rotation: Option<Quat>,
+    inverse_local_inertia: Mat3,
+    resolved: SolverMass,
+}
+
+impl Default for SolverMassSlot {
+    fn default() -> Self {
+        Self {
+            cached_mass: None,
+            cached_transform: None,
+            cached_rotation: None,
+            inverse_local_inertia: Mat3::ZERO,
+            resolved: SolverMass::STATIC,
+        }
+    }
+}
+
+impl SolverMassSlot {
+    pub(crate) fn invalidate(&mut self) {
+        self.cached_mass = None;
+        self.cached_transform = None;
+        self.cached_rotation = None;
+        self.inverse_local_inertia = Mat3::ZERO;
+        self.resolved = SolverMass::STATIC;
+    }
+
+    /// Invalidates pose-derived values while retaining the mass factorization.
+    pub(crate) fn invalidate_pose(&mut self) {
+        self.cached_transform = None;
+    }
+
+    pub(crate) fn resolve(
+        &mut self,
+        body: &RigidBody,
+    ) -> Result<(SolverMass, SolverMassCacheStatus), CollisionError> {
+        if body.physics().body_type() != BodyType::Dynamic {
+            if self.cached_mass.is_some()
+                || self.cached_transform.is_some()
+                || self.cached_rotation.is_some()
+                || self.resolved != SolverMass::STATIC
+            {
+                self.invalidate();
+                return Ok((
+                    SolverMass::STATIC,
+                    SolverMassCacheStatus::Updated {
+                        inverse_inertia: false,
+                    },
+                ));
+            }
+            return Ok((SolverMass::STATIC, SolverMassCacheStatus::Hit));
+        }
+
+        let mass = body
+            .physics()
+            .mass()
+            .ok_or(CollisionError::InvalidContact)?;
+        if self.cached_mass != Some(mass) {
+            self.inverse_local_inertia = inverse_spd(mass.inertia())?;
+            self.cached_mass = Some(mass);
+            self.cached_transform = None;
+            self.cached_rotation = None;
+        }
+
+        let transform = body.state().transform();
+        if self.cached_transform == Some(transform) {
+            return Ok((self.resolved, SolverMassCacheStatus::Hit));
+        }
+
+        let rotation_changed = self.cached_rotation != Some(transform.rotation());
+        let inverse_inertia = if rotation_changed {
+            let rotation = transform
+                .rotation()
+                .to_mat3()
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            rotation
+                .checked_mul_matrix(self.inverse_local_inertia)
+                .and_then(|matrix| matrix.checked_mul_matrix(rotation.transpose()))
+                .ok_or(CollisionError::ArithmeticOverflow)?
+        } else {
+            self.resolved.inverse_inertia
+        };
+        let inverse_mass = 1.0 / mass.mass();
+        if !inverse_mass.is_finite() || inverse_mass <= 0.0 {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        let center = body
+            .world_center_of_mass()
+            .map_err(|_| CollisionError::ArithmeticOverflow)?
+            .ok_or(CollisionError::InvalidContact)?;
+        self.resolved = SolverMass {
+            inverse_mass,
+            inverse_inertia,
+            center,
+        };
+        if rotation_changed {
+            self.cached_rotation = Some(transform.rotation());
+        }
+        self.cached_transform = Some(transform);
+        Ok((
+            self.resolved,
+            SolverMassCacheStatus::Updated {
+                inverse_inertia: rotation_changed,
+            },
+        ))
     }
 }
 
@@ -173,6 +302,25 @@ mod tests {
         );
     }
 
+    fn assert_solver_mass_close(actual: SolverMass, expected: SolverMass) {
+        assert_close(actual.inverse_mass, expected.inverse_mass);
+        for (actual, expected) in actual
+            .inverse_inertia
+            .to_cols_array()
+            .into_iter()
+            .zip(expected.inverse_inertia.to_cols_array())
+        {
+            assert_close(actual, expected);
+        }
+        for (actual, expected) in [
+            (actual.center.x, expected.center.x),
+            (actual.center.y, expected.center.y),
+            (actual.center.z, expected.center.z),
+        ] {
+            assert_close(actual, expected);
+        }
+    }
+
     fn jacobian(linear: Vec3, arm: Vec3) -> Jacobian {
         Jacobian {
             linear,
@@ -189,8 +337,18 @@ mod tests {
             jacobian(Vec3::new(-0.6, 0.1, 0.4), Vec3::new(0.2, -0.5, 0.7)),
             jacobian(Vec3::new(0.8, -0.3, 0.1), Vec3::new(0.5, 0.2, -0.4)),
         ];
-        let cached_a = SolverMass::from_body(body_a).expect("mass A");
-        let cached_b = SolverMass::from_body(body_b).expect("mass B");
+        let mut slot_a = SolverMassSlot::default();
+        let mut slot_b = SolverMassSlot::default();
+        let cached_a = slot_a.resolve(body_a).expect("slot mass A").0;
+        let cached_b = slot_b.resolve(body_b).expect("slot mass B").0;
+        assert_solver_mass_close(
+            cached_a,
+            SolverMass::from_body(body_a).expect("reference mass A"),
+        );
+        assert_solver_mass_close(
+            cached_b,
+            SolverMass::from_body(body_b).expect("reference mass B"),
+        );
         assert_eq!(
             cached_a.center,
             body_a
@@ -205,22 +363,9 @@ mod tests {
                 .expect("center B")
                 .unwrap_or(Vec3::ZERO)
         );
-        let actual = cached_a
-            .cross(
-                measurement[0].linear,
-                measurement[0].angular,
-                impulse[0].linear,
-                impulse[0].angular,
-            )
-            .expect("cached contribution A")
-            + cached_b
-                .cross(
-                    measurement[1].linear,
-                    measurement[1].angular,
-                    impulse[1].linear,
-                    impulse[1].angular,
-                )
-                .expect("cached contribution B");
+        let actual =
+            constraint::effective_cross_mass_cached([cached_a, cached_b], measurement, impulse)
+                .expect("cached effective mass");
         let expected = constraint::effective_cross_mass(body_a, body_b, measurement, impulse)
             .expect("reference effective mass");
         assert_close(actual, expected);
@@ -282,6 +427,209 @@ mod tests {
     #[test]
     fn inverse_spd_rejects_non_positive_definite_inputs() {
         assert_eq!(inverse_spd(Mat3::ZERO), Err(CollisionError::InvalidContact));
+    }
+
+    #[test]
+    fn solver_mass_slot_hits_for_unchanged_mass_and_pose() {
+        let body = dynamic_body(
+            Transform::identity(),
+            mass(Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0)), Vec3::ZERO),
+        );
+        let mut slot = SolverMassSlot::default();
+
+        let (first, first_status) = slot.resolve(&body).expect("initial slot resolve");
+        let (second, second_status) = slot.resolve(&body).expect("cached slot resolve");
+
+        assert_eq!(
+            first_status,
+            SolverMassCacheStatus::Updated {
+                inverse_inertia: true
+            }
+        );
+        assert_eq!(second_status, SolverMassCacheStatus::Hit);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn solver_mass_slot_keeps_static_and_kinematic_response_zero() {
+        let mut static_slot = SolverMassSlot::default();
+        let mut kinematic_slot = SolverMassSlot::default();
+        let static_body = RigidBody::new_static(Transform::identity());
+        let kinematic_body = RigidBody::new_kinematic(Transform::identity());
+        let (static_mass, _) = static_slot.resolve(&static_body).expect("static mass");
+        let (kinematic_mass, _) = kinematic_slot
+            .resolve(&kinematic_body)
+            .expect("kinematic mass");
+        let jacobians = [
+            Jacobian {
+                linear: Vec3::X,
+                angular: Vec3::Y,
+            },
+            Jacobian {
+                linear: Vec3::Z,
+                angular: Vec3::X,
+            },
+        ];
+
+        assert_eq!(static_mass, SolverMass::STATIC);
+        assert_eq!(kinematic_mass, SolverMass::STATIC);
+        assert_eq!(
+            constraint::effective_cross_mass_cached(
+                [static_mass, kinematic_mass],
+                jacobians,
+                jacobians,
+            )
+            .expect("zero response"),
+            0.0
+        );
+    }
+
+    #[test]
+    fn solver_mass_slot_translation_refreshes_center_without_inertia_update() {
+        let mut body = dynamic_body(
+            Transform::identity(),
+            mass(Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0)), Vec3::ZERO),
+        );
+        let mut slot = SolverMassSlot::default();
+        slot.resolve(&body).expect("initial slot resolve");
+        body.apply_constraint_position_impulse(Vec3::X, Vec3::ZERO)
+            .expect("translation correction");
+        slot.invalidate_pose();
+
+        let (actual, status) = slot.resolve(&body).expect("updated slot resolve");
+        assert_eq!(
+            status,
+            SolverMassCacheStatus::Updated {
+                inverse_inertia: false
+            }
+        );
+        assert_solver_mass_close(
+            actual,
+            SolverMass::from_body(&body).expect("reference mass"),
+        );
+    }
+
+    #[test]
+    fn solver_mass_slot_updates_world_inertia_after_orientation_change() {
+        let inertia = Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0));
+        let mut body = dynamic_body(
+            Transform::identity(),
+            mass(inertia, Vec3::new(0.2, -0.4, 0.3)),
+        );
+        let mut slot = SolverMassSlot::default();
+        slot.resolve(&body).expect("initial slot resolve");
+        body.apply_constraint_position_impulse(Vec3::new(0.1, -0.2, 0.3), Vec3::new(0.0, 0.0, 0.4))
+            .expect("position correction");
+        slot.invalidate_pose();
+
+        let (actual, status) = slot.resolve(&body).expect("updated slot resolve");
+        assert_eq!(
+            status,
+            SolverMassCacheStatus::Updated {
+                inverse_inertia: true
+            }
+        );
+        assert_solver_mass_close(
+            actual,
+            SolverMass::from_body(&body).expect("reference mass"),
+        );
+    }
+
+    #[test]
+    fn solver_mass_slot_rebuilds_after_mass_change() {
+        let mut body = dynamic_body(
+            Transform::identity(),
+            mass(Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0)), Vec3::ZERO),
+        );
+        let mut slot = SolverMassSlot::default();
+        slot.resolve(&body).expect("initial slot resolve");
+        let changed = MassProperties::new(
+            4.0,
+            Vec3::new(0.1, -0.3, 0.2),
+            Mat3::from_diagonal(Vec3::new(5.0, 7.0, 9.0)),
+        )
+        .expect("changed mass");
+        body.set_mass(changed).expect("set changed mass");
+
+        let (actual, status) = slot.resolve(&body).expect("updated slot resolve");
+        assert_eq!(
+            status,
+            SolverMassCacheStatus::Updated {
+                inverse_inertia: true
+            }
+        );
+        assert_solver_mass_close(
+            actual,
+            SolverMass::from_body(&body).expect("reference mass"),
+        );
+    }
+
+    #[test]
+    fn solver_mass_slot_handles_mass_and_orientation_change_together() {
+        let mut body = dynamic_body(
+            Transform::identity(),
+            mass(Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0)), Vec3::ZERO),
+        );
+        let mut slot = SolverMassSlot::default();
+        slot.resolve(&body).expect("initial slot resolve");
+        body.set_mass(
+            MassProperties::new(
+                3.5,
+                Vec3::new(-0.2, 0.1, 0.4),
+                Mat3::from_diagonal(Vec3::new(4.0, 6.0, 8.0)),
+            )
+            .expect("changed mass"),
+        )
+        .expect("set changed mass");
+        body.apply_constraint_position_impulse(Vec3::ZERO, Vec3::new(0.2, -0.1, 0.3))
+            .expect("position correction");
+
+        let (actual, status) = slot.resolve(&body).expect("updated slot resolve");
+        assert_eq!(
+            status,
+            SolverMassCacheStatus::Updated {
+                inverse_inertia: true
+            }
+        );
+        assert_solver_mass_close(
+            actual,
+            SolverMass::from_body(&body).expect("reference mass"),
+        );
+    }
+
+    #[test]
+    fn solver_mass_slot_reuse_resolves_the_new_body_state() {
+        let first = dynamic_body(
+            Transform::identity(),
+            mass(Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0)), Vec3::ZERO),
+        );
+        let second = dynamic_body(
+            Transform::new(
+                Vec3::new(3.0, -2.0, 1.0),
+                Quat::from_axis_angle(Vec3::Y, 0.7).expect("rotation"),
+            )
+            .expect("transform"),
+            MassProperties::new(
+                4.5,
+                Vec3::new(0.1, 0.2, -0.3),
+                Mat3::from_diagonal(Vec3::new(5.0, 6.0, 7.0)),
+            )
+            .expect("mass"),
+        );
+        let mut slot = SolverMassSlot::default();
+        slot.resolve(&first).expect("first body resolve");
+
+        let (actual, status) = slot.resolve(&second).expect("reused body slot resolve");
+        assert_eq!(
+            status,
+            SolverMassCacheStatus::Updated {
+                inverse_inertia: true
+            }
+        );
+        assert_solver_mass_close(
+            actual,
+            SolverMass::from_body(&second).expect("reference mass"),
+        );
     }
 
     #[test]

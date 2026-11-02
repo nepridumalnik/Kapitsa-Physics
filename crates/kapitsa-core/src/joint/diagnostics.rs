@@ -100,6 +100,8 @@ pub(super) fn projected_kkt_residual(
 pub struct JointSolverMetrics {
     pub prepared_rows: u64,
     pub inverse_inertia_updates: u64,
+    pub solver_mass_cache_hits: u64,
+    pub solver_mass_cache_misses: u64,
     pub scalar_rows_solved: u64,
     pub block_rows_solved: u64,
     pub velocity_warm_starts: u64,
@@ -113,6 +115,8 @@ impl JointSolverMetrics {
     pub(crate) const ZERO: Self = Self {
         prepared_rows: 0,
         inverse_inertia_updates: 0,
+        solver_mass_cache_hits: 0,
+        solver_mass_cache_misses: 0,
         scalar_rows_solved: 0,
         block_rows_solved: 0,
         velocity_warm_starts: 0,
@@ -127,6 +131,12 @@ impl JointSolverMetrics {
         self.inverse_inertia_updates = self
             .inverse_inertia_updates
             .saturating_add(other.inverse_inertia_updates);
+        self.solver_mass_cache_hits = self
+            .solver_mass_cache_hits
+            .saturating_add(other.solver_mass_cache_hits);
+        self.solver_mass_cache_misses = self
+            .solver_mass_cache_misses
+            .saturating_add(other.solver_mass_cache_misses);
         self.scalar_rows_solved = self
             .scalar_rows_solved
             .saturating_add(other.scalar_rows_solved);
@@ -160,6 +170,8 @@ mod metrics_tests {
         metrics.accumulate(JointSolverMetrics {
             prepared_rows: 2,
             inverse_inertia_updates: 3,
+            solver_mass_cache_hits: 10,
+            solver_mass_cache_misses: 11,
             scalar_rows_solved: 4,
             block_rows_solved: 5,
             velocity_warm_starts: 6,
@@ -173,6 +185,8 @@ mod metrics_tests {
             JointSolverMetrics {
                 prepared_rows: 2,
                 inverse_inertia_updates: 3,
+                solver_mass_cache_hits: 10,
+                solver_mass_cache_misses: 11,
                 scalar_rows_solved: 4,
                 block_rows_solved: 5,
                 velocity_warm_starts: 6,
@@ -204,6 +218,8 @@ mod metrics_tests {
     fn joint_solver_metrics_saturates() {
         let mut metrics = JointSolverMetrics {
             prepared_rows: u64::MAX,
+            solver_mass_cache_hits: u64::MAX,
+            solver_mass_cache_misses: u64::MAX,
             scalar_rows_solved: u64::MAX,
             color_batches_processed: u64::MAX,
             max_colors_per_island: u32::MAX,
@@ -211,12 +227,16 @@ mod metrics_tests {
         };
         metrics.accumulate(JointSolverMetrics {
             prepared_rows: 1,
+            solver_mass_cache_hits: 1,
+            solver_mass_cache_misses: 1,
             scalar_rows_solved: 1,
             color_batches_processed: 1,
             max_colors_per_island: 1,
             ..JointSolverMetrics::default()
         });
         assert_eq!(metrics.prepared_rows, u64::MAX);
+        assert_eq!(metrics.solver_mass_cache_hits, u64::MAX);
+        assert_eq!(metrics.solver_mass_cache_misses, u64::MAX);
         assert_eq!(metrics.scalar_rows_solved, u64::MAX);
         assert_eq!(metrics.color_batches_processed, u64::MAX);
         assert_eq!(metrics.max_colors_per_island, u32::MAX);

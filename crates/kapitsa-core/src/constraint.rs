@@ -2,7 +2,7 @@ use kapitsa_math::{CholeskyError, Vec3};
 
 use crate::{
     mass::MassProperties,
-    rigid_body::{BodyType, RigidBody},
+    rigid_body::{BodyType, RigidBody, solver_mass::SolverMass},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +116,35 @@ pub(crate) fn effective_cross_mass(
     Ok(result)
 }
 
+/// Generalized inverse-mass matrix entry using per-body derived solver mass.
+pub(crate) fn effective_cross_mass_cached(
+    masses: [SolverMass; 2],
+    measurement: [Jacobian; 2],
+    impulse: [Jacobian; 2],
+) -> Result<f64, ConstraintError> {
+    let mut result = 0.0;
+    for index in 0..2 {
+        let contribution = if measurement[index].linear == impulse[index].linear
+            && measurement[index].angular == impulse[index].angular
+        {
+            masses[index].diagonal(measurement[index].linear, measurement[index].angular)
+        } else {
+            masses[index].cross(
+                measurement[index].linear,
+                measurement[index].angular,
+                impulse[index].linear,
+                impulse[index].angular,
+            )
+        }
+        .map_err(map_solver_mass_error)?;
+        result += contribution;
+        if !result.is_finite() {
+            return Err(ConstraintError::ArithmeticOverflow);
+        }
+    }
+    Ok(result)
+}
+
 pub(crate) fn point_velocity(body: &RigidBody, position: Vec3) -> Result<Vec3, ConstraintError> {
     let center = body
         .world_center_of_mass()
@@ -177,6 +206,25 @@ pub(crate) fn apply_point_position_impulse_pair(
     if body_b.physics().body_type() == BodyType::Dynamic {
         body_b
             .apply_position_impulse(impulse_on_b, point_b)
+            .map_err(map_body_error)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_generalized_impulse_pair_cached(
+    body_a: &mut RigidBody,
+    body_b: &mut RigidBody,
+    masses: [SolverMass; 2],
+    impulses: [Jacobian; 2],
+) -> Result<(), ConstraintError> {
+    if body_a.physics().body_type() == BodyType::Dynamic {
+        body_a
+            .apply_constraint_impulse_cached(impulses[0].linear, impulses[0].angular, masses[0])
+            .map_err(map_body_error)?;
+    }
+    if body_b.physics().body_type() == BodyType::Dynamic {
+        body_b
+            .apply_constraint_impulse_cached(impulses[1].linear, impulses[1].angular, masses[1])
             .map_err(map_body_error)?;
     }
     Ok(())
@@ -244,5 +292,13 @@ fn map_cholesky_error(error: CholeskyError) -> ConstraintError {
         CholeskyError::NotSymmetric | CholeskyError::NotPositiveDefinite => {
             ConstraintError::NonConvergent
         }
+    }
+}
+
+fn map_solver_mass_error(error: crate::collision::CollisionError) -> ConstraintError {
+    match error {
+        crate::collision::CollisionError::InvalidContact => ConstraintError::InvalidMass,
+        crate::collision::CollisionError::ArithmeticOverflow => ConstraintError::ArithmeticOverflow,
+        _ => ConstraintError::NonConvergent,
     }
 }

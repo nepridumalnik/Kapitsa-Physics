@@ -2,10 +2,11 @@
 use super::diagnostics::{JointResidual, projected_kkt_residual};
 #[cfg(feature = "bench-internals")]
 use super::row::RowDimension;
-use super::{row::ConstraintRow, workspace::JointWorkspace};
+use super::{JointSolverOptions, row::ConstraintRow, workspace::JointWorkspace};
 use crate::{
     collision::{CollisionError, solver::SolverBody},
     constraint,
+    rigid_body::solver_mass::{SolverMass, SolverMassCacheStatus, SolverMassSlot},
     transform::Transform,
 };
 use kapitsa_math::{Quat, Vec3};
@@ -35,6 +36,42 @@ struct RowSettings {
     impulse_bounds: Option<(f64, f64)>,
 }
 
+#[derive(Default)]
+struct SolverMassCacheStats {
+    #[cfg(feature = "bench-internals")]
+    hits: u64,
+    #[cfg(feature = "bench-internals")]
+    misses: u64,
+    #[cfg(feature = "bench-internals")]
+    inverse_inertia_updates: u64,
+}
+
+impl SolverMassCacheStats {
+    fn record(&mut self, status: SolverMassCacheStatus) {
+        #[cfg(feature = "bench-internals")]
+        match status {
+            SolverMassCacheStatus::Hit => {
+                self.hits = self.hits.saturating_add(1);
+            }
+            SolverMassCacheStatus::Updated { inverse_inertia } => {
+                self.misses = self.misses.saturating_add(1);
+                if inverse_inertia {
+                    self.inverse_inertia_updates = self.inverse_inertia_updates.saturating_add(1);
+                }
+            }
+        }
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = status;
+    }
+}
+
+fn record_solver_mass_cache_stats(workspace: &mut JointWorkspace, stats: SolverMassCacheStats) {
+    #[cfg(feature = "bench-internals")]
+    workspace.record_solver_mass_cache(stats.hits, stats.misses, stats.inverse_inertia_updates);
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = (workspace, stats);
+}
+
 impl JointSolver {
     pub(crate) fn solve<F>(
         workspace: &mut JointWorkspace,
@@ -42,6 +79,29 @@ impl JointSolver {
         dt: f64,
         position_iterations: u32,
         velocity_iterations: u32,
+        prepare_rows: F,
+    ) -> Result<(), CollisionError>
+    where
+        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), CollisionError>,
+    {
+        Self::solve_with_options(
+            workspace,
+            bodies,
+            dt,
+            position_iterations,
+            velocity_iterations,
+            JointSolverOptions::legacy(),
+            prepare_rows,
+        )
+    }
+
+    pub(crate) fn solve_with_options<F>(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        dt: f64,
+        position_iterations: u32,
+        velocity_iterations: u32,
+        options: JointSolverOptions,
         mut prepare_rows: F,
     ) -> Result<(), CollisionError>
     where
@@ -51,17 +111,20 @@ impl JointSolver {
             return Err(CollisionError::InvalidConfig);
         }
         workspace.begin_step();
+        if options.mass_cache() {
+            workspace.ensure_solver_mass_slots(bodies.len())?;
+        }
         for _ in 0..position_iterations {
             #[cfg(feature = "bench-internals")]
             workspace.record_position_iteration();
             Self::prepare_iteration(workspace, bodies, &mut prepare_rows)?;
-            Self::solve_position_iteration(workspace, bodies, dt)?;
+            Self::solve_position_iteration(workspace, bodies, dt, options)?;
         }
         for _ in 0..velocity_iterations {
             #[cfg(feature = "bench-internals")]
             workspace.record_velocity_iteration();
             Self::prepare_iteration(workspace, bodies, &mut prepare_rows)?;
-            Self::solve_velocity_iteration(workspace, bodies, dt)?;
+            Self::solve_velocity_iteration(workspace, bodies, dt, options)?;
         }
         Ok(())
     }
@@ -86,8 +149,9 @@ impl JointSolver {
         workspace: &mut JointWorkspace,
         bodies: &mut [SolverBody],
         dt: f64,
+        options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
-        solve_position_iteration(workspace, bodies, dt)?;
+        solve_position_iteration(workspace, bodies, dt, options)?;
         #[cfg(feature = "bench-internals")]
         {
             let row_count = workspace.rows().len();
@@ -100,8 +164,9 @@ impl JointSolver {
         workspace: &mut JointWorkspace,
         bodies: &mut [SolverBody],
         dt: f64,
+        options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
-        solve_velocity_iteration(workspace, bodies, dt)?;
+        solve_velocity_iteration(workspace, bodies, dt, options)?;
         #[cfg(feature = "bench-internals")]
         {
             let row_count = workspace.rows().len();
@@ -116,12 +181,22 @@ impl JointSolver {
         constraint: JointConstraint,
         joint_index: usize,
         dt: f64,
+        options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
         workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
         #[cfg(feature = "bench-internals")]
         let row_count = workspace.prepared_rows_mut().len();
-        solve_position_rows(workspace.prepared_rows_mut(), bodies, dt)?;
+        if options.mass_cache() {
+            workspace.ensure_solver_mass_slots(bodies.len())?;
+        }
+        let mut cache_stats = SolverMassCacheStats::default();
+        let result = {
+            let (rows, slots) = workspace.solver_buffers_mut(true);
+            solve_position_rows(rows, slots, bodies, dt, options, &mut cache_stats)
+        };
+        record_solver_mass_cache_stats(workspace, cache_stats);
+        result?;
         #[cfg(feature = "bench-internals")]
         workspace.record_scalar_rows_solved(row_count);
         workspace.finish_joint_prepare()
@@ -133,12 +208,22 @@ impl JointSolver {
         constraint: JointConstraint,
         joint_index: usize,
         dt: f64,
+        options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
         workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
         #[cfg(feature = "bench-internals")]
         let row_count = workspace.prepared_rows_mut().len();
-        solve_velocity_rows(workspace.prepared_rows_mut(), bodies, dt)?;
+        if options.mass_cache() {
+            workspace.ensure_solver_mass_slots(bodies.len())?;
+        }
+        let mut cache_stats = SolverMassCacheStats::default();
+        let result = {
+            let (rows, slots) = workspace.solver_buffers_mut(true);
+            solve_velocity_rows(rows, slots, bodies, dt, options, &mut cache_stats)
+        };
+        record_solver_mass_cache_stats(workspace, cache_stats);
+        result?;
         #[cfg(feature = "bench-internals")]
         workspace.record_scalar_rows_solved(row_count);
         workspace.finish_joint_prepare()
@@ -1588,14 +1673,27 @@ fn solve_position_iteration(
     workspace: &mut JointWorkspace,
     bodies: &mut [SolverBody],
     dt: f64,
+    options: JointSolverOptions,
 ) -> Result<(), CollisionError> {
-    solve_position_rows(workspace.rows_mut(), bodies, dt)
+    if options.mass_cache() {
+        workspace.ensure_solver_mass_slots(bodies.len())?;
+    }
+    let mut cache_stats = SolverMassCacheStats::default();
+    let result = {
+        let (rows, slots) = workspace.solver_buffers_mut(false);
+        solve_position_rows(rows, slots, bodies, dt, options, &mut cache_stats)
+    };
+    record_solver_mass_cache_stats(workspace, cache_stats);
+    result
 }
 
 fn solve_position_rows(
     rows: &mut [ConstraintRow],
+    slots: &mut [SolverMassSlot],
     bodies: &mut [SolverBody],
     dt: f64,
+    options: JointSolverOptions,
+    cache_stats: &mut SolverMassCacheStats,
 ) -> Result<(), CollisionError> {
     let dt_squared = dt * dt;
     if !dt_squared.is_finite() || dt_squared <= 0.0 {
@@ -1610,7 +1708,7 @@ fn solve_position_rows(
         if !row.position_enabled {
             continue;
         }
-        let effective_mass = effective_mass_for_row(bodies, row)?;
+        let (effective_mass, _) = effective_mass_for_row(bodies, slots, row, options, cache_stats)?;
         let alpha = row.compliance * alpha_scale;
         if !alpha.is_finite() {
             return Err(CollisionError::ArithmeticOverflow);
@@ -1628,6 +1726,9 @@ fn solve_position_rows(
         }
         if applied != 0.0 {
             apply_position_row(bodies, row, applied)?;
+            if options.mass_cache() {
+                invalidate_solver_mass_pair(slots, row.body_a, row.body_b)?;
+            }
             rows[index].accumulated_multiplier = next;
         }
     }
@@ -1638,21 +1739,35 @@ fn solve_velocity_iteration(
     workspace: &mut JointWorkspace,
     bodies: &mut [SolverBody],
     dt: f64,
+    options: JointSolverOptions,
 ) -> Result<(), CollisionError> {
-    solve_velocity_rows(workspace.rows_mut(), bodies, dt)
+    if options.mass_cache() {
+        workspace.ensure_solver_mass_slots(bodies.len())?;
+    }
+    let mut cache_stats = SolverMassCacheStats::default();
+    let result = {
+        let (rows, slots) = workspace.solver_buffers_mut(false);
+        solve_velocity_rows(rows, slots, bodies, dt, options, &mut cache_stats)
+    };
+    record_solver_mass_cache_stats(workspace, cache_stats);
+    result
 }
 
 fn solve_velocity_rows(
     rows: &mut [ConstraintRow],
+    slots: &mut [SolverMassSlot],
     bodies: &mut [SolverBody],
     dt: f64,
+    options: JointSolverOptions,
+    cache_stats: &mut SolverMassCacheStats,
 ) -> Result<(), CollisionError> {
     for index in 0..rows.len() {
         let row = *rows.get(index).ok_or(CollisionError::InvalidContact)?;
         if !row.is_valid(bodies.len()) {
             return Err(CollisionError::InvalidContact);
         }
-        let effective_mass = effective_mass_for_row(bodies, row)?;
+        let (effective_mass, masses) =
+            effective_mass_for_row(bodies, slots, row, options, cache_stats)?;
         if effective_mass <= f64::MIN_POSITIVE {
             continue;
         }
@@ -1691,7 +1806,7 @@ fn solve_velocity_rows(
             return Err(CollisionError::ArithmeticOverflow);
         }
         if applied != 0.0 {
-            apply_velocity_row(bodies, row, applied)?;
+            apply_velocity_row(bodies, row, applied, masses)?;
             rows[index].accumulated_impulse = next;
         }
     }
@@ -1700,9 +1815,11 @@ fn solve_velocity_rows(
 
 fn effective_mass_for_row(
     bodies: &[SolverBody],
+    slots: &mut [SolverMassSlot],
     row: ConstraintRow,
-) -> Result<f64, CollisionError> {
-    let (body_a, body_b) = solver_bodies_at(bodies, row.body_a, row.body_b)?;
+    options: JointSolverOptions,
+    cache_stats: &mut SolverMassCacheStats,
+) -> Result<(f64, Option<[SolverMass; 2]>), CollisionError> {
     let jacobians = [
         constraint::Jacobian {
             linear: row.linear_a,
@@ -1713,8 +1830,17 @@ fn effective_mass_for_row(
             angular: row.angular_b,
         },
     ];
-    constraint::effective_cross_mass(body_a.body(), body_b.body(), jacobians, jacobians)
-        .map_err(map_constraint_error)
+    if options.mass_cache() {
+        let masses = resolve_solver_mass_pair(bodies, slots, row.body_a, row.body_b, cache_stats)?;
+        constraint::effective_cross_mass_cached(masses, jacobians, jacobians)
+            .map_err(map_constraint_error)
+            .map(|effective_mass| (effective_mass, Some(masses)))
+    } else {
+        let (body_a, body_b) = solver_bodies_at(bodies, row.body_a, row.body_b)?;
+        constraint::effective_cross_mass(body_a.body(), body_b.body(), jacobians, jacobians)
+            .map_err(map_constraint_error)
+            .map(|effective_mass| (effective_mass, None))
+    }
 }
 
 fn row_velocity(bodies: &[SolverBody], row: ConstraintRow) -> Result<f64, CollisionError> {
@@ -1752,17 +1878,87 @@ fn apply_velocity_row(
     bodies: &mut [SolverBody],
     row: ConstraintRow,
     impulse: f64,
+    masses: Option<[SolverMass; 2]>,
 ) -> Result<(), CollisionError> {
     let (body_a, body_b) = solver_bodies_at_mut(bodies, row.body_a, row.body_b)?;
-    constraint::apply_generalized_impulse_pair(
-        body_a.body_mut(),
-        body_b.body_mut(),
-        row.linear_a * impulse,
-        row.angular_a * impulse,
-        row.linear_b * impulse,
-        row.angular_b * impulse,
-    )
-    .map_err(map_constraint_error)
+    let impulses = [
+        constraint::Jacobian {
+            linear: row.linear_a * impulse,
+            angular: row.angular_a * impulse,
+        },
+        constraint::Jacobian {
+            linear: row.linear_b * impulse,
+            angular: row.angular_b * impulse,
+        },
+    ];
+    let result = if let Some(masses) = masses {
+        constraint::apply_generalized_impulse_pair_cached(
+            body_a.body_mut(),
+            body_b.body_mut(),
+            masses,
+            impulses,
+        )
+    } else {
+        constraint::apply_generalized_impulse_pair(
+            body_a.body_mut(),
+            body_b.body_mut(),
+            impulses[0].linear,
+            impulses[0].angular,
+            impulses[1].linear,
+            impulses[1].angular,
+        )
+    };
+    result.map_err(map_constraint_error)
+}
+
+fn resolve_solver_mass_pair(
+    bodies: &[SolverBody],
+    slots: &mut [SolverMassSlot],
+    body_a: usize,
+    body_b: usize,
+    cache_stats: &mut SolverMassCacheStats,
+) -> Result<[SolverMass; 2], CollisionError> {
+    let (solver_body_a, solver_body_b) = solver_bodies_at(bodies, body_a, body_b)?;
+    let (slot_a, slot_b) = solver_mass_slots_at_mut(slots, body_a, body_b)?;
+    let (mass_a, status_a) = slot_a.resolve(solver_body_a.body())?;
+    cache_stats.record(status_a);
+    let (mass_b, status_b) = slot_b.resolve(solver_body_b.body())?;
+    cache_stats.record(status_b);
+    Ok([mass_a, mass_b])
+}
+
+fn invalidate_solver_mass_pair(
+    slots: &mut [SolverMassSlot],
+    body_a: usize,
+    body_b: usize,
+) -> Result<(), CollisionError> {
+    let (slot_a, slot_b) = solver_mass_slots_at_mut(slots, body_a, body_b)?;
+    slot_a.invalidate_pose();
+    slot_b.invalidate_pose();
+    Ok(())
+}
+
+fn solver_mass_slots_at_mut(
+    slots: &mut [SolverMassSlot],
+    body_a: usize,
+    body_b: usize,
+) -> Result<(&mut SolverMassSlot, &mut SolverMassSlot), CollisionError> {
+    if body_a == body_b {
+        return Err(CollisionError::InvalidContact);
+    }
+    if body_a < body_b {
+        let (left, right) = slots.split_at_mut(body_b);
+        Ok((
+            left.get_mut(body_a).ok_or(CollisionError::InvalidContact)?,
+            right.first_mut().ok_or(CollisionError::InvalidContact)?,
+        ))
+    } else {
+        let (left, right) = slots.split_at_mut(body_a);
+        Ok((
+            right.first_mut().ok_or(CollisionError::InvalidContact)?,
+            left.get_mut(body_b).ok_or(CollisionError::InvalidContact)?,
+        ))
+    }
 }
 
 fn solver_bodies_at(
@@ -1889,6 +2085,43 @@ mod tests {
                 ))),
             )
             .expect("joint")
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn solver_mass_cache_metrics_report_reuse_and_pose_updates() {
+        let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::X * 1.5)];
+        let constraint = JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: super::super::Joint::Fixed(super::super::FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        };
+        let constraints = [constraint];
+        let mut workspace = JointWorkspace::new();
+        let prepare = |bodies: &[SolverBody], workspace: &mut JointWorkspace| {
+            prepare_joint_rows(bodies, workspace, &constraints, 0.01)
+        };
+
+        JointSolver::solve_with_options(
+            &mut workspace,
+            &mut bodies,
+            0.01,
+            2,
+            2,
+            JointSolverOptions::with_mass_cache(true),
+            prepare,
+        )
+        .expect("solve fixed joint");
+
+        let metrics = workspace.metrics();
+        assert!(metrics.solver_mass_cache_hits > 0, "{metrics:?}");
+        assert!(metrics.solver_mass_cache_misses > 0, "{metrics:?}");
+        assert!(metrics.inverse_inertia_updates > 0, "{metrics:?}");
+        assert!(metrics.inverse_inertia_updates <= metrics.solver_mass_cache_misses);
     }
 
     fn anchor_row(error: f64) -> ConstraintRow {

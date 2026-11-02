@@ -51,3 +51,20 @@ All four sizes are already numerical failures at this baseline. The 1,000-part r
 - The existing full-flight stability criteria fail at every size, including 100 parts. These results remain the numerical correctness gate for later stages.
 - The benchmark counters match the configured legacy path: 3 position sweeps, 8 velocity sweeps, scalar rows only, no block solving, no persistent joint warm start, and no coloring.
 - No full-flight performance or stability claim is inferred from the high-altitude Time Warp coast benchmark.
+
+## Stage 03 mass-cache comparison
+
+Measured 2026-11-02 with the same Release toolchain and machine above. Each run constructs the same deterministic 1,440-body fixed-joint chain for each mode, runs 3 warm-up steps and 301 measured one-worker steps, then reports nearest-rank p50 and p99 (`ceil(n * p) - 1`; p99 is the fourth-highest observation). Only the internal mass-cache option changes. Two separate benchmark processes were measured. Reproduce with:
+
+```powershell
+cargo bench -p kapitsa-core --features bench-internals --bench joint_stress -- --mass-cache-only
+```
+
+| Run | Mode | Step p50 / p99 | Steady allocations p50 / p99 | Cache hits / misses per p50 step | Inertia updates | Final anchor / frame error |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | Legacy | 41.032 / 56.016 ms | 0 / 0 | 0 / 0 | 0 | 0 / 0 |
+| 1 | Mass cache | 27.974 / 44.762 ms | 0 / 0 | 189,948 / 0 | 0 | 0 / 0 |
+| 2 | Legacy | 41.167 / 51.182 ms | 0 / 0 | 0 / 0 | 0 | 0 / 0 |
+| 2 | Mass cache | 28.275 / 45.311 ms | 0 / 0 | 189,948 / 0 | 0 | 0 / 0 |
+
+Across these two runs, the cache reduced p50 by 31.3–31.8% and p99 by 11.5–20.1%; all 301 steady samples per mode allocated no heap memory. The unchanged-pose chain had no mass or orientation invalidations after warm-up, so those paths are covered by focused tests. These timings do not establish a general flight or contact-scene speedup.
