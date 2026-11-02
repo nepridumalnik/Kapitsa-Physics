@@ -5,10 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use kapitsa_core::{
-    collision::CollisionStepMetrics,
-    world::{BodyId, PhysicsWorld},
-};
+use kapitsa_core::world::{BodyId, PhysicsStepMetrics, PhysicsWorld};
 use kapitsa_math::Vec3;
 
 #[path = "../src/runtime/modular_rocket_fixture.rs"]
@@ -66,7 +63,7 @@ struct TimedSample {
     elapsed: Duration,
     allocations: usize,
     requested_bytes: usize,
-    metrics: CollisionStepMetrics,
+    metrics: PhysicsStepMetrics,
 }
 
 #[derive(Clone, Copy)]
@@ -193,7 +190,7 @@ fn measure_step(world: &mut PhysicsWorld, workers: usize) -> Result<TimedSample,
         elapsed,
         allocations,
         requested_bytes,
-        metrics: world.collision_step_metrics(),
+        metrics: world.physics_step_metrics(),
     })
 }
 
@@ -260,14 +257,15 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
     let p95 = quantile(&ordered, 0.95);
     let p99 = quantile(&ordered, 0.99);
     let max = ordered[ordered.len() - 1];
-    let metrics = p50.metrics;
+    let metrics = p50.metrics.collision;
+    let joint_metrics = p50.metrics.joints;
     let mean_wall = samples
         .iter()
         .map(|sample| sample.elapsed.as_secs_f64())
         .sum::<f64>()
         / samples.len() as f64;
     println!(
-        "phase={phase} parts={parts} joints={} workers={workers} step_ms_min/p50/p95/p99/max={:.4}/{:.4}/{:.4}/{:.4}/{:.4} sim_x={:.2} allocs_p50/p95={}/{} bytes_p50/p95={}/{} retained_kib={} peak_scratch_kib={} growth_bytes={} joint_prepare_us={:.2} solver_prepare_us={:.2} solver_iterations_us={:.2} joint_rows_prepared={} scalar_rows_solved={} inverse_inertia_updates={} block_rows_solved={} warm_starts={} colors={} joint_sweeps_pos/vel={}/{} collision_us={:.2} island_build_us={:.2} islands={} largest_island_bodies/joints/contacts={}/{}/{} candidates/contacts={}/{}",
+        "phase={phase} parts={parts} joints={} workers={workers} step_ms_min/p50/p95/p99/max={:.4}/{:.4}/{:.4}/{:.4}/{:.4} sim_x={:.2} allocs_p50/p95={}/{} bytes_p50/p95={}/{} retained_kib={} peak_scratch_kib={} growth_bytes={} joint_prepare_us={:.2} solver_prepare_us={:.2} solver_iterations_us={:.2} joint_rows_prepared={} scalar_rows_solved={} inverse_inertia_updates={} block_rows_solved={} warm_starts={} color_batches={} max_colors_per_island={} joint_sweeps_pos/vel={}/{} collision_us={:.2} island_build_us={:.2} islands={} largest_island_bodies/joints/contacts={}/{}/{} candidates/contacts={}/{}",
         parts - 1,
         milliseconds(min.elapsed),
         milliseconds(p50.elapsed),
@@ -285,14 +283,15 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
         micros(metrics.joint_constraint_prepare),
         micros(metrics.solver_prepare),
         micros(metrics.solver_iterations),
-        metrics.joint_prepared_rows,
-        metrics.joint_scalar_rows_solved,
-        metrics.joint_inverse_inertia_updates,
-        metrics.joint_block_rows_solved,
-        metrics.joint_velocity_warm_starts,
-        metrics.joint_colors,
-        metrics.joint_position_iterations,
-        metrics.joint_velocity_iterations,
+        joint_metrics.prepared_rows,
+        joint_metrics.scalar_rows_solved,
+        joint_metrics.inverse_inertia_updates,
+        joint_metrics.block_rows_solved,
+        joint_metrics.velocity_warm_starts,
+        joint_metrics.color_batches_processed,
+        joint_metrics.max_colors_per_island,
+        joint_metrics.position_sweeps,
+        joint_metrics.velocity_sweeps,
         micros(collision_time(metrics)),
         micros(metrics.island_build),
         metrics.island_count,
@@ -335,7 +334,7 @@ fn report_events(phase: &str, parts: usize, workers: usize, samples: &[EventSamp
     report_samples(phase, parts, workers, &steps);
 }
 
-fn collision_time(metrics: CollisionStepMetrics) -> Duration {
+fn collision_time(metrics: kapitsa_core::collision::CollisionStepMetrics) -> Duration {
     metrics.spatial_index + metrics.broad_phase + metrics.ccd + metrics.narrow_phase
 }
 

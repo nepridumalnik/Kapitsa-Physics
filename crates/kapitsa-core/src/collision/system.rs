@@ -43,6 +43,10 @@ pub(crate) struct CollisionSystem {
     #[cfg(feature = "bench-internals")]
     benchmark_metrics: CollisionStepMetrics,
     #[cfg(feature = "bench-internals")]
+    joint_metrics: crate::joint::diagnostics::JointSolverMetrics,
+    #[cfg(feature = "bench-internals")]
+    step_metrics_committed: bool,
+    #[cfg(feature = "bench-internals")]
     benchmark_capacity_before_bytes: usize,
 }
 
@@ -65,6 +69,10 @@ impl CollisionSystem {
             cache_staged: false,
             #[cfg(feature = "bench-internals")]
             benchmark_metrics: CollisionStepMetrics::ZERO,
+            #[cfg(feature = "bench-internals")]
+            joint_metrics: crate::joint::diagnostics::JointSolverMetrics::ZERO,
+            #[cfg(feature = "bench-internals")]
+            step_metrics_committed: false,
             #[cfg(feature = "bench-internals")]
             benchmark_capacity_before_bytes: 0,
         }
@@ -99,6 +107,8 @@ impl CollisionSystem {
         {
             self.benchmark_capacity_before_bytes = self.retained_scratch_bytes();
             self.benchmark_metrics = CollisionStepMetrics::ZERO;
+            self.joint_metrics = crate::joint::diagnostics::JointSolverMetrics::ZERO;
+            self.step_metrics_committed = false;
         }
     }
 
@@ -371,6 +381,16 @@ impl CollisionSystem {
             .retained_scratch_bytes
             .saturating_sub(self.benchmark_capacity_before_bytes);
         metrics
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn joint_solver_metrics(&self) -> crate::joint::diagnostics::JointSolverMetrics {
+        self.joint_metrics
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn step_metrics_committed(&self) -> bool {
+        self.step_metrics_committed
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1077,8 +1097,8 @@ impl CollisionSystem {
 
         for island in self.solver_islands.iter().take(island_count) {
             #[cfg(feature = "bench-internals")]
-            self.benchmark_metrics
-                .record_joint_solver_counters(island.joint_workspace.counters());
+            self.joint_metrics
+                .accumulate(island.joint_workspace.metrics());
             self.context
                 .joint_break_events
                 .try_reserve(island.joint_workspace.break_events().len())
@@ -1236,6 +1256,11 @@ impl CollisionSystem {
         self.lifecycle.abort();
         self.lifecycle_staged = false;
         self.cache_staged = false;
+        #[cfg(feature = "bench-internals")]
+        {
+            self.joint_metrics = crate::joint::diagnostics::JointSolverMetrics::ZERO;
+            self.step_metrics_committed = false;
+        }
         self.mark_spatial_dirty();
         self.context.clear();
     }
@@ -1251,6 +1276,10 @@ impl CollisionSystem {
                 cache.commit();
             }
             self.cache_staged = false;
+        }
+        #[cfg(feature = "bench-internals")]
+        {
+            self.step_metrics_committed = true;
         }
         self.context.clear();
     }

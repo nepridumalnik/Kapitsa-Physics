@@ -3,7 +3,8 @@ mod common;
 mod cone_twist;
 mod cylindrical;
 mod d6;
-pub(crate) mod diagnostics;
+#[cfg(feature = "bench-internals")]
+pub mod diagnostics;
 mod distance;
 mod error;
 mod event;

@@ -186,6 +186,207 @@ fn body_at(position: Vec3, mass_value: f64) -> RigidBody {
     .expect("valid dynamic body")
 }
 
+#[cfg(feature = "bench-internals")]
+fn add_fixed_pair(world: &mut PhysicsWorld, offset: f64) -> (BodyId, BodyId) {
+    let body_a = world
+        .add_body(body_at(Vec3::new(offset, 0.0, 0.0), 1.0))
+        .expect("first fixed-joint body");
+    let body_b = world
+        .add_body(body_at(Vec3::new(offset + 1.0, 0.0, 0.0), 1.0))
+        .expect("second fixed-joint body");
+    world
+        .add_joint(
+            body_a,
+            body_b,
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .expect("fixed joint");
+    (body_a, body_b)
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn physics_step_metrics_are_zero_for_a_world_without_joints() {
+    let mut world = PhysicsWorld::new();
+    world.step(1.0 / 60.0).expect("step without joints");
+
+    let metrics = world.physics_step_metrics();
+    assert_eq!(
+        metrics.joints,
+        crate::joint::diagnostics::JointSolverMetrics::default()
+    );
+    assert_eq!(metrics.collision.island_count, 0);
+    assert_eq!(metrics.collision.joint_constraint_prepare, Duration::ZERO);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn physics_step_metrics_report_fixed_joint_solver_work() {
+    let mut world = PhysicsWorld::new();
+    add_fixed_pair(&mut world, 0.0);
+
+    world.step(1.0 / 60.0).expect("fixed-joint step");
+
+    let metrics = world.physics_step_metrics();
+    assert_eq!(metrics.joints.prepared_rows, 6 * (3 + 8));
+    assert_eq!(metrics.joints.scalar_rows_solved, 6 * (3 + 8));
+    assert_eq!(metrics.joints.position_sweeps, 3);
+    assert_eq!(metrics.joints.velocity_sweeps, 8);
+    assert_eq!(metrics.collision.island_count, 1);
+    assert!(
+        world
+            .collision_step_metrics()
+            .joint_constraint_prepare
+            .as_nanos()
+            > 0
+    );
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn physics_step_metrics_keep_contact_and_joint_work_separate() {
+    let mut world = PhysicsWorld::new();
+    let plane_body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("plane body");
+    world
+        .add_collider(
+            plane_body,
+            Collider::new(
+                Shape::Plane(crate::shape::Plane::new(0.0, 1.0, 0.0, 0.0).unwrap()),
+                Transform::identity(),
+            ),
+        )
+        .expect("plane collider");
+    let body_a = world
+        .add_body(body_at(Vec3::new(0.0, 0.5, 0.0), 1.0))
+        .expect("contact body");
+    world
+        .add_collider(body_a, collider(0.5))
+        .expect("sphere collider");
+    let body_b = world
+        .add_body(body_at(Vec3::new(3.0, 0.5, 0.0), 1.0))
+        .expect("joint body");
+    world
+        .add_joint(
+            body_a,
+            body_b,
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .expect("fixed joint");
+
+    world.step(1.0 / 60.0).expect("contact and joint step");
+
+    let metrics = world.physics_step_metrics();
+    assert!(metrics.collision.contact_count > 0);
+    assert!(metrics.joints.prepared_rows > 0);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn physics_step_metrics_sum_independent_islands_in_stable_order() {
+    let mut world = PhysicsWorld::new();
+    add_fixed_pair(&mut world, 0.0);
+    add_fixed_pair(&mut world, 10.0);
+
+    world.step(1.0 / 60.0).expect("multiple-island step");
+
+    let metrics = world.physics_step_metrics().joints;
+    assert_eq!(metrics.prepared_rows, 2 * 6 * (3 + 8));
+    assert_eq!(metrics.scalar_rows_solved, 2 * 6 * (3 + 8));
+    assert_eq!(metrics.position_sweeps, 2 * 3);
+    assert_eq!(metrics.velocity_sweeps, 2 * 8);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn physics_step_metrics_reset_for_each_step() {
+    let mut world = PhysicsWorld::new();
+    add_fixed_pair(&mut world, 0.0);
+
+    world.step(1.0 / 60.0).expect("first step");
+    let first = world.physics_step_metrics().joints;
+    world.step(1.0 / 60.0).expect("second step");
+
+    assert_eq!(world.physics_step_metrics().joints, first);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn physics_step_metrics_ignore_disabled_joints() {
+    let mut world = PhysicsWorld::new();
+    add_fixed_pair(&mut world, 0.0);
+    let joint_id = world
+        .joints()
+        .next()
+        .map(|(id, _, _, _)| id)
+        .expect("fixed joint id");
+    world
+        .set_joint_enabled(joint_id, false)
+        .expect("disable fixed joint");
+
+    world.step(1.0 / 60.0).expect("disabled-joint step");
+
+    let metrics = world.physics_step_metrics().joints;
+    assert_eq!(metrics.prepared_rows, 0);
+    assert_eq!(metrics.scalar_rows_solved, 0);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn physics_step_joint_metrics_match_sequential_and_parallel_island_solves() {
+    let mut sequential = PhysicsWorld::new();
+    add_fixed_pair(&mut sequential, 0.0);
+    add_fixed_pair(&mut sequential, 10.0);
+    let mut parallel = PhysicsWorld::new();
+    add_fixed_pair(&mut parallel, 0.0);
+    add_fixed_pair(&mut parallel, 10.0);
+
+    sequential
+        .step_with_executor(1.0 / 60.0, &crate::execution::SequentialExecutor, 1)
+        .expect("sequential step");
+    parallel
+        .step_with_executor(1.0 / 60.0, &ScopedThreadExecutor, 2)
+        .expect("parallel step");
+
+    assert_eq!(
+        sequential.physics_step_metrics().joints,
+        parallel.physics_step_metrics().joints
+    );
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn physics_step_metrics_are_empty_after_a_failed_step() {
+    let mut world = PhysicsWorld::new();
+    let (body_a, _) = add_fixed_pair(&mut world, 0.0);
+    world.step(1.0 / 60.0).expect("successful baseline step");
+    assert!(world.physics_step_metrics().joints.prepared_rows > 0);
+    world
+        .body_mut(body_a)
+        .expect("dynamic body")
+        .set_linear_velocity(Vec3::X * f64::MAX)
+        .expect("finite velocity");
+
+    assert!(matches!(
+        world.step(2.0),
+        Err(StepError::BodyIntegration { .. })
+    ));
+    let metrics = world.physics_step_metrics();
+    assert_eq!(
+        metrics.joints,
+        crate::joint::diagnostics::JointSolverMetrics::default()
+    );
+    assert_eq!(metrics.collision.island_count, 0);
+    assert_eq!(metrics.collision.joint_constraint_prepare, Duration::ZERO);
+}
+
 #[test]
 fn joint_ids_validate_world_and_generation_and_body_removal_cascades() {
     let mut world = PhysicsWorld::new();

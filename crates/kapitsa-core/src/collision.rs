@@ -68,22 +68,6 @@ pub struct CollisionStepMetrics {
     pub solver_iterations: Duration,
     /// Time spent writing solved states and manifolds back to staged data.
     pub solver_writeback: Duration,
-    /// Joint rows materialized by the solver.
-    pub joint_prepared_rows: u64,
-    /// Derived inverse-inertia kernels refreshed by the solver.
-    pub joint_inverse_inertia_updates: u64,
-    /// Scalar joint rows solved across all sweeps.
-    pub joint_scalar_rows_solved: u64,
-    /// Rows solved by a coupled block kernel.
-    pub joint_block_rows_solved: u64,
-    /// Velocity impulses applied from a persistent joint cache.
-    pub joint_velocity_warm_starts: u64,
-    /// Constraint color batches processed.
-    pub joint_colors: u32,
-    /// Joint position sweeps processed.
-    pub joint_position_iterations: u32,
-    /// Joint velocity sweeps processed.
-    pub joint_velocity_iterations: u32,
     /// Time spent constructing collision lifecycle events.
     pub events: Duration,
     /// Time spent committing body states and staged collision data.
@@ -182,14 +166,6 @@ impl CollisionStepMetrics {
         solver_prepare: Duration::ZERO,
         solver_iterations: Duration::ZERO,
         solver_writeback: Duration::ZERO,
-        joint_prepared_rows: 0,
-        joint_inverse_inertia_updates: 0,
-        joint_scalar_rows_solved: 0,
-        joint_block_rows_solved: 0,
-        joint_velocity_warm_starts: 0,
-        joint_colors: 0,
-        joint_position_iterations: 0,
-        joint_velocity_iterations: 0,
         events: Duration::ZERO,
         commit: Duration::ZERO,
         candidate_count: 0,
@@ -229,34 +205,6 @@ impl CollisionStepMetrics {
         solver_body_copies: 0,
         solver_manifold_copies: 0,
     };
-
-    pub(crate) fn record_joint_solver_counters(
-        &mut self,
-        counters: crate::joint::diagnostics::SolverCounters,
-    ) {
-        self.joint_prepared_rows = self
-            .joint_prepared_rows
-            .saturating_add(counters.prepared_rows);
-        self.joint_inverse_inertia_updates = self
-            .joint_inverse_inertia_updates
-            .saturating_add(counters.inverse_inertia_updates);
-        self.joint_scalar_rows_solved = self
-            .joint_scalar_rows_solved
-            .saturating_add(counters.scalar_rows_solved);
-        self.joint_block_rows_solved = self
-            .joint_block_rows_solved
-            .saturating_add(counters.block_rows_solved);
-        self.joint_velocity_warm_starts = self
-            .joint_velocity_warm_starts
-            .saturating_add(counters.velocity_warm_starts);
-        self.joint_colors = self.joint_colors.saturating_add(counters.colors);
-        self.joint_position_iterations = self
-            .joint_position_iterations
-            .saturating_add(counters.position_iterations);
-        self.joint_velocity_iterations = self
-            .joint_velocity_iterations
-            .saturating_add(counters.velocity_iterations);
-    }
 }
 pub(crate) use event::{CollisionInteraction, CollisionLifecycle};
 pub use query::{OverlapHit, QueryFilter, Ray, RayHit, ShapeHit};

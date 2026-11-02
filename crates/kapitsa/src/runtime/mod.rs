@@ -27,16 +27,16 @@ mod bench_counter_tests {
             .world
             .step(1.0 / 120.0)
             .expect("baseline physics step");
-        let counters = rocket.world.collision_step_metrics();
+        let counters = rocket.world.physics_step_metrics().joints;
 
-        assert_eq!(counters.joint_prepared_rows, 99 * 6 * (3 + 8));
-        assert_eq!(counters.joint_scalar_rows_solved, 99 * 6 * (3 + 8));
-        assert_eq!(counters.joint_position_iterations, 3);
-        assert_eq!(counters.joint_velocity_iterations, 8);
-        assert_eq!(counters.joint_inverse_inertia_updates, 0);
-        assert_eq!(counters.joint_block_rows_solved, 0);
-        assert_eq!(counters.joint_velocity_warm_starts, 0);
-        assert_eq!(counters.joint_colors, 0);
+        assert_eq!(counters.prepared_rows, 99 * 6 * (3 + 8));
+        assert_eq!(counters.scalar_rows_solved, 99 * 6 * (3 + 8));
+        assert_eq!(counters.position_sweeps, 3);
+        assert_eq!(counters.velocity_sweeps, 8);
+        assert_eq!(counters.inverse_inertia_updates, 0);
+        assert_eq!(counters.block_rows_solved, 0);
+        assert_eq!(counters.velocity_warm_starts, 0);
+        assert_eq!(counters.color_batches_processed, 0);
     }
 }
 

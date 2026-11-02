@@ -10,9 +10,13 @@ use std::time::Instant;
 
 mod error;
 mod id;
+#[cfg(feature = "bench-internals")]
+mod metrics;
 
 pub use error::{ForceSourceError, StepError, WorldError};
 pub use id::{BodyId, ColliderId, ForceSourceId, JointId};
+#[cfg(feature = "bench-internals")]
+pub use metrics::PhysicsStepMetrics;
 
 static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -1654,6 +1658,18 @@ impl PhysicsWorld {
             );
         metrics.committed_query_index_bytes = query_index_bytes;
         metrics
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn physics_step_metrics(&self) -> PhysicsStepMetrics {
+        if !self.collision_system.step_metrics_committed() {
+            return PhysicsStepMetrics::default();
+        }
+        PhysicsStepMetrics {
+            collision: self.collision_step_metrics(),
+            joints: self.collision_system.joint_solver_metrics(),
+        }
     }
 
     fn process_continuous_collisions(
