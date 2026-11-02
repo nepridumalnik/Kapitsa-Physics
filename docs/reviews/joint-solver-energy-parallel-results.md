@@ -66,6 +66,8 @@ The velocity-work closure is `3.48e−15 J` for scalar and `−4.79e−15 J` for
 
 For a 500-part rocket under gravity only, with contacts and thrust disabled, there are zero contact events and no step failure. Across 180 ticks, integration changes `T` by `+4.7121567e4 J`, `U` by `−4.7383354e4 J`, and total energy by `−2.6178704e2 J`; velocity correction changes total energy by `−1.50e−9 J`, and position correction by `−5.72e−5 J`. The corrected coast metric reports `+4.7584070e−7%` drift. This separates gravity integration error from the constrained-velocity projection.
 
+The earlier large full-flight PCG coast percentage is also metric-sensitive. Re-running the 500-part full fixture with IC(0) PCG 64/64 on the final code gives a physical coast drift of `4.598934067e−7%` through tick 176; sampling stops before the first upper-stage surface contact at tick 177. Evaluating that exact same trajectory with the former surface-relative potential and its `|E_initial|` denominator gives `88.94944039%`. This large discrepancy comes from the arbitrary potential offset and near-cancellation in that denominator, not from a second simulation or a change in solver state. The no-load 100-part assembly is a different quantity: kinetic-only drift with no gravity, contacts, thrust, or stage events. Current IC(0), diagonal, and block-Jacobi PCG runs report `0.004841%`, `0.004958%`, and `0.004907%` respectively. The previously mentioned approximately 6% experimental-PCG result is not reproducible from the saved current fixtures, and its exact prior configuration is not present in the repository; it should not be compared directly with the full-flight coast metric.
+
 ## Strict rocket iteration screen
 
 The screen holds the strict fixture, 16 outer velocity sweeps, and three position sweeps constant. No strict thresholds were relaxed.
@@ -121,6 +123,7 @@ cargo +1.98.0 test --release -p kapitsa-core --features bench-internals --lib jo
 cargo +1.98.0 test --release -p kapitsa --features bench-internals --lib runtime::modular_rocket_fixture::stability_tests::global_pcg_free_rigid_rocket_assembly_limits_kinetic_energy_drift --locked -- --exact --nocapture --test-threads=1
 cargo +1.98.0 test --release -p kapitsa --features bench-internals --lib runtime::modular_rocket_fixture::stability_tests::free_rigid_rocket_assembly_tracks_its_equivalent_single_body --locked -- --exact --nocapture --test-threads=1
 cargo +1.98.0 test --release -p kapitsa --features bench-internals --lib runtime::modular_rocket_fixture::stability_tests::diagnose_rocket_unforced_contact_free_energy_stages --locked -- --ignored --exact --nocapture --test-threads=1
+cargo +1.98.0 test --release -p kapitsa --features bench-internals --lib runtime::modular_rocket_fixture::stability_tests::diagnose_rocket_global_constraint_pcg_full_energy_trace --locked -- --ignored --exact --nocapture --test-threads=1
 cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_rocket --locked
 ```
 
@@ -133,5 +136,6 @@ cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_
 | `cargo +1.98.0 clippy --workspace --all-features --locked -- -D warnings` | PASS |
 | `cargo +1.98.0 test --workspace --locked --no-fail-fast -- --test-threads=1` | PASS; all executed suites and doctests passed, 4 ignored |
 | Focused Release energy and projection diagnostics | PASS |
+| Same-run full-rocket physical vs legacy surface-zero coast metric | PASS; `4.598934067e−7%` vs `88.94944039%` |
 | Strict rocket, default scalar path | FAIL on existing geometric criteria |
 | Strict rocket, benchmark-only PCG 5/5, 16 outer velocity sweeps | PASS at 100/200/500/1,000 parts |
