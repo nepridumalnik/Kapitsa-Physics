@@ -413,6 +413,14 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    fn record_joint_solver_counters(
+        &mut self,
+        counters: crate::joint::diagnostics::JointSolverMetrics,
+    ) {
+        self.joint_metrics.accumulate(counters);
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn step_metrics_committed(&self) -> bool {
         self.step_metrics_committed
     }
@@ -1125,10 +1133,12 @@ impl CollisionSystem {
             }
         }
 
-        for island in self.solver_islands.iter().take(island_count) {
+        for island_index in 0..island_count {
             #[cfg(feature = "bench-internals")]
-            self.joint_metrics
-                .accumulate(island.joint_workspace.metrics());
+            self.record_joint_solver_counters(
+                self.solver_islands[island_index].joint_workspace.metrics(),
+            );
+            let island = &self.solver_islands[island_index];
             self.context
                 .joint_break_events
                 .try_reserve(island.joint_workspace.break_events().len())
