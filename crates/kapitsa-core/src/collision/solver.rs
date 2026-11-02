@@ -612,11 +612,28 @@ fn solve_tangent_impulse(
         point.tangent_b,
         point.tangent_b,
     )?;
+    // Check positive definiteness relative to the matrix scale before
+    // inverting. A positive but nearly singular matrix amplifies velocity
+    // error into an arbitrarily large friction impulse.
+    let scale = k11.abs().max(k12.abs()).max(k22.abs());
+    if !scale.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    if scale == 0.0 {
+        return Ok((contact.tangent_impulse, Vec3::ZERO));
+    }
+    let a = k11 / scale;
+    let b = k12 / scale;
+    let c = k22 / scale;
+    let normalized_determinant = a * c - b * b;
+    if a <= 0.0 || c <= 0.0 || normalized_determinant <= 64.0 * f64::EPSILON {
+        return Ok((contact.tangent_impulse, Vec3::ZERO));
+    }
     let determinant = k11 * k22 - k12 * k12;
     if !determinant.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
-    if determinant <= f64::MIN_POSITIVE {
+    if determinant <= 0.0 {
         return Ok((contact.tangent_impulse, Vec3::ZERO));
     }
     let speed_a = velocity
