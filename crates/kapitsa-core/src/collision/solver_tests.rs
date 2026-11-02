@@ -288,6 +288,8 @@ fn solve_with_joints_prepares_each_joint_before_one_sweep_in_phase_order() {
             config,
             JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy()),
             None,
+            &crate::execution::SequentialExecutor,
+            1,
         )
         .unwrap();
 
@@ -385,6 +387,8 @@ fn adaptive_joint_iterations_stop_at_minimum_or_report_the_max_residual() {
                 config,
                 JointSolverStep::new(1.0 / 60.0, options),
                 None,
+                &crate::execution::SequentialExecutor,
+                1,
             )
             .unwrap();
         let velocity_sweeps = joint_workspace
@@ -484,6 +488,8 @@ fn adaptive_joint_policy_leaves_contact_iteration_budget_unchanged() {
             config,
             JointSolverStep::new(1.0 / 60.0, options),
             None,
+            &crate::execution::SequentialExecutor,
+            1,
         )
         .unwrap();
 

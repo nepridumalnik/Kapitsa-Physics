@@ -73,6 +73,30 @@ pub struct JointSolverMetrics {
     /// Inner iterations used by the benchmark-only global position PCG solve.
     #[cfg(feature = "bench-internals")]
     pub position_pcg_iterations: u64,
+    /// Time spent in matrix-free PCG operators.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_matrix_vector_time: std::time::Duration,
+    /// Time spent preparing masses, diagonals, and the PCG preconditioner.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_system_prepare_time: std::time::Duration,
+    /// Time spent applying the PCG preconditioner.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_preconditioner_time: std::time::Duration,
+    /// Time spent in deterministic PCG reductions.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_reduction_time: std::time::Duration,
+    /// PCG solves that met the configured physical residual before their cap.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_converged_calls: u64,
+    /// PCG solves that reached the iteration cap with a residual still above tolerance.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_iteration_limit_calls: u64,
+    /// Largest final linear residual reported by any velocity PCG call.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_linear_residual_mps: f64,
+    /// Largest final angular residual reported by any velocity PCG call.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_angular_residual_radps: f64,
     /// Whole-world energy before prediction/integration.
     #[cfg(feature = "bench-internals")]
     pub energy_before_integration: EnergyComponents,
@@ -196,6 +220,22 @@ impl JointSolverMetrics {
         velocity_pcg_iterations: 0,
         #[cfg(feature = "bench-internals")]
         position_pcg_iterations: 0,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_matrix_vector_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_system_prepare_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_preconditioner_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_reduction_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_converged_calls: 0,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_iteration_limit_calls: 0,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_angular_residual_radps: 0.0,
         #[cfg(feature = "bench-internals")]
         energy_before_integration: EnergyComponents {
             translational_j: 0.0,
@@ -336,6 +376,22 @@ impl JointSolverMetrics {
             self.velocity_pcg_iterations = self
                 .velocity_pcg_iterations
                 .saturating_add(other.velocity_pcg_iterations);
+            self.velocity_pcg_matrix_vector_time += other.velocity_pcg_matrix_vector_time;
+            self.velocity_pcg_system_prepare_time += other.velocity_pcg_system_prepare_time;
+            self.velocity_pcg_preconditioner_time += other.velocity_pcg_preconditioner_time;
+            self.velocity_pcg_reduction_time += other.velocity_pcg_reduction_time;
+            self.velocity_pcg_converged_calls = self
+                .velocity_pcg_converged_calls
+                .saturating_add(other.velocity_pcg_converged_calls);
+            self.velocity_pcg_iteration_limit_calls = self
+                .velocity_pcg_iteration_limit_calls
+                .saturating_add(other.velocity_pcg_iteration_limit_calls);
+            self.velocity_pcg_linear_residual_mps = self
+                .velocity_pcg_linear_residual_mps
+                .max(other.velocity_pcg_linear_residual_mps);
+            self.velocity_pcg_angular_residual_radps = self
+                .velocity_pcg_angular_residual_radps
+                .max(other.velocity_pcg_angular_residual_radps);
             self.energy_before_integration
                 .add_assign(other.energy_before_integration);
             self.energy_after_integration

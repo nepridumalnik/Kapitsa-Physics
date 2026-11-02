@@ -405,11 +405,28 @@ impl JointWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
-    pub(crate) fn record_velocity_pcg_iterations(&mut self, iterations: usize) {
+    pub(crate) fn record_velocity_pcg_result(&mut self, result: super::solver::VelocityPcgResult) {
         self.metrics.velocity_pcg_iterations = self
             .metrics
             .velocity_pcg_iterations
-            .saturating_add(iterations as u64);
+            .saturating_add(result.iterations as u64);
+        if result.converged {
+            self.metrics.velocity_pcg_converged_calls =
+                self.metrics.velocity_pcg_converged_calls.saturating_add(1);
+        } else {
+            self.metrics.velocity_pcg_iteration_limit_calls = self
+                .metrics
+                .velocity_pcg_iteration_limit_calls
+                .saturating_add(1);
+        }
+        self.metrics.velocity_pcg_linear_residual_mps = self
+            .metrics
+            .velocity_pcg_linear_residual_mps
+            .max(result.linear_residual_mps);
+        self.metrics.velocity_pcg_angular_residual_radps = self
+            .metrics
+            .velocity_pcg_angular_residual_radps
+            .max(result.angular_residual_radps);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -418,6 +435,20 @@ impl JointWorkspace {
             .metrics
             .position_pcg_iterations
             .saturating_add(iterations as u64);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_velocity_pcg_timings(
+        &mut self,
+        system_prepare: std::time::Duration,
+        matrix_vector: std::time::Duration,
+        preconditioner: std::time::Duration,
+        reduction: std::time::Duration,
+    ) {
+        self.metrics.velocity_pcg_system_prepare_time += system_prepare;
+        self.metrics.velocity_pcg_matrix_vector_time += matrix_vector;
+        self.metrics.velocity_pcg_preconditioner_time += preconditioner;
+        self.metrics.velocity_pcg_reduction_time += reduction;
     }
 
     #[cfg(feature = "bench-internals")]

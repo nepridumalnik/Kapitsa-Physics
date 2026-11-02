@@ -7,6 +7,8 @@ use super::{
     warm_start::{JointImpulseCache, WarmStartConfig},
     workspace::JointWorkspace,
 };
+#[cfg(feature = "bench-internals")]
+use crate::execution::StepExecutor;
 use crate::{
     collision::CollisionError,
     constraint::{self, SolverBody},
@@ -136,6 +138,15 @@ struct GeneralizedImpulse {
 }
 
 #[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct VelocityPcgResult {
+    pub(crate) iterations: usize,
+    pub(crate) converged: bool,
+    pub(crate) linear_residual_mps: f64,
+    pub(crate) angular_residual_radps: f64,
+}
+
+#[cfg(feature = "bench-internals")]
 #[derive(Default)]
 pub(crate) struct VelocityPcgScratch {
     pub(super) rows_prepared: bool,
@@ -150,12 +161,17 @@ pub(crate) struct VelocityPcgScratch {
     preconditioned: Vec<f64>,
     direction: Vec<f64>,
     product: Vec<f64>,
+    reduction_partials: Vec<f64>,
     body_impulses: Vec<GeneralizedImpulse>,
     body_responses: Vec<GeneralizedImpulse>,
     row_terms_by_body: Vec<Vec<VelocityRowTerm>>,
     lower_pattern: Vec<Vec<(usize, f64)>>,
     preconditioner: IncompleteCholeskyPreconditioner,
     block_jacobi: Vec<VelocityBlockFactor>,
+    system_prepare_time: std::time::Duration,
+    matrix_vector_time: std::time::Duration,
+    preconditioner_time: std::time::Duration,
+    reduction_time: std::time::Duration,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -174,12 +190,17 @@ impl VelocityPcgScratch {
             preconditioned: Vec::new(),
             direction: Vec::new(),
             product: Vec::new(),
+            reduction_partials: Vec::new(),
             body_impulses: Vec::new(),
             body_responses: Vec::new(),
             row_terms_by_body: Vec::new(),
             lower_pattern: Vec::new(),
             preconditioner: IncompleteCholeskyPreconditioner::new(),
             block_jacobi: Vec::new(),
+            system_prepare_time: std::time::Duration::ZERO,
+            matrix_vector_time: std::time::Duration::ZERO,
+            preconditioner_time: std::time::Duration::ZERO,
+            reduction_time: std::time::Duration::ZERO,
         }
     }
 
@@ -189,6 +210,10 @@ impl VelocityPcgScratch {
         self.unavailable = false;
         self.uses_incomplete_cholesky = false;
         self.uses_block_jacobi = false;
+        self.system_prepare_time = std::time::Duration::ZERO;
+        self.matrix_vector_time = std::time::Duration::ZERO;
+        self.preconditioner_time = std::time::Duration::ZERO;
+        self.reduction_time = std::time::Duration::ZERO;
     }
 }
 
@@ -390,6 +415,7 @@ impl JointSolver {
     }
 
     #[cfg(feature = "bench-internals")]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn solve_velocity_pcg(
         workspace: &mut JointWorkspace,
         bodies: &mut [SolverBody],
@@ -398,7 +424,9 @@ impl JointSolver {
         max_iterations: u32,
         incomplete_cholesky_preconditioner: bool,
         block_jacobi_preconditioner: bool,
-    ) -> Result<Option<usize>, CollisionError> {
+        executor: &impl StepExecutor,
+        worker_count: usize,
+    ) -> Result<Option<VelocityPcgResult>, CollisionError> {
         if !workspace.velocity_pcg_rows_prepared() {
             Self::prepare(workspace, bodies, joints, dt)?;
             workspace.mark_velocity_pcg_rows_prepared();
@@ -409,21 +437,35 @@ impl JointSolver {
             velocity_mps: 1.0e-4,
             angular_velocity_radps: 1.0e-4,
         };
-        let (rows, row_joint_indices, scratch) = workspace.velocity_pcg_rows_and_scratch_mut();
-        let iterations = solve_velocity_pcg_prepared(
-            rows,
-            row_joint_indices,
-            bodies,
-            max_iterations as usize,
-            tolerance,
-            incomplete_cholesky_preconditioner,
-            block_jacobi_preconditioner,
-            scratch,
-        )?;
-        if let Some(iterations) = iterations {
-            workspace.record_velocity_pcg_iterations(iterations);
+        let (result, timings) = {
+            let (rows, row_joint_indices, scratch) = workspace.velocity_pcg_rows_and_scratch_mut();
+            let result = solve_velocity_pcg_prepared(
+                rows,
+                row_joint_indices,
+                bodies,
+                max_iterations as usize,
+                tolerance,
+                incomplete_cholesky_preconditioner,
+                block_jacobi_preconditioner,
+                executor,
+                worker_count,
+                scratch,
+            )?;
+            (
+                result,
+                (
+                    std::mem::take(&mut scratch.system_prepare_time),
+                    std::mem::take(&mut scratch.matrix_vector_time),
+                    std::mem::take(&mut scratch.preconditioner_time),
+                    std::mem::take(&mut scratch.reduction_time),
+                ),
+            )
+        };
+        workspace.record_velocity_pcg_timings(timings.0, timings.1, timings.2, timings.3);
+        if let Some(result) = result {
+            workspace.record_velocity_pcg_result(result);
         }
-        Ok(iterations)
+        Ok(result)
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1204,10 +1246,15 @@ fn solve_velocity_pcg_prepared(
     tolerance: super::JointTolerance,
     incomplete_cholesky_preconditioner: bool,
     block_jacobi_preconditioner: bool,
+    executor: &impl StepExecutor,
+    worker_count: usize,
     scratch: &mut VelocityPcgScratch,
-) -> Result<Option<usize>, CollisionError> {
+) -> Result<Option<VelocityPcgResult>, CollisionError> {
     if rows.is_empty() {
-        return Ok(Some(0));
+        return Ok(Some(VelocityPcgResult {
+            converged: true,
+            ..VelocityPcgResult::default()
+        }));
     }
     if scratch.unavailable {
         return Ok(None);
@@ -1226,6 +1273,17 @@ fn solve_velocity_pcg_prepared(
     }
 
     resize_f64_buffer(&mut scratch.residual, rows.len())?;
+    if rows.iter().any(|row| !row.is_valid(bodies.len())) {
+        return Err(CollisionError::InvalidContact);
+    }
+    prepare_velocity_residual_parallel(
+        rows,
+        bodies,
+        &mut scratch.residual,
+        executor,
+        worker_count,
+    )?;
+    let system_prepare_started = std::time::Instant::now();
     if !scratch.system_prepared {
         clear_mass_buffer(&mut scratch.masses, bodies.len())?;
         for body in bodies.iter() {
@@ -1233,37 +1291,29 @@ fn solve_velocity_pcg_prepared(
         }
         resize_f64_buffer(&mut scratch.diagonal, rows.len())?;
     }
-    for (index, row) in rows.iter().copied().enumerate() {
-        if !row.is_valid(bodies.len()) {
-            return Err(CollisionError::InvalidContact);
-        }
-        scratch.residual[index] = row.target_velocity - row_velocity(bodies, row)?;
-        if !scratch.residual[index].is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
-        }
-        if scratch.system_prepared {
-            continue;
-        }
-        let mass_a = *scratch
-            .masses
-            .get(row.body_a)
-            .ok_or(CollisionError::InvalidContact)?;
-        let mass_b = *scratch
-            .masses
-            .get(row.body_b)
-            .ok_or(CollisionError::InvalidContact)?;
-        scratch.diagonal[index] = mass_a.diagonal(row.linear_a, row.angular_a)?
-            + mass_b.diagonal(row.linear_b, row.angular_b)?;
-        if !scratch.diagonal[index].is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
-        }
-        if scratch.diagonal[index] <= f64::MIN_POSITIVE {
-            if scratch.residual[index].abs() > velocity_row_tolerance(row, tolerance) {
-                scratch.unavailable = true;
-                return Ok(None);
+    if !scratch.system_prepared {
+        for (index, row) in rows.iter().copied().enumerate() {
+            let mass_a = *scratch
+                .masses
+                .get(row.body_a)
+                .ok_or(CollisionError::InvalidContact)?;
+            let mass_b = *scratch
+                .masses
+                .get(row.body_b)
+                .ok_or(CollisionError::InvalidContact)?;
+            scratch.diagonal[index] = mass_a.diagonal(row.linear_a, row.angular_a)?
+                + mass_b.diagonal(row.linear_b, row.angular_b)?;
+            if !scratch.diagonal[index].is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
             }
-            scratch.diagonal[index] = 1.0;
-            scratch.residual[index] = 0.0;
+            if scratch.diagonal[index] <= f64::MIN_POSITIVE {
+                if scratch.residual[index].abs() > velocity_row_tolerance(row, tolerance) {
+                    scratch.unavailable = true;
+                    return Ok(None);
+                }
+                scratch.diagonal[index] = 1.0;
+                scratch.residual[index] = 0.0;
+            }
         }
     }
     if !scratch.system_prepared {
@@ -1297,10 +1347,28 @@ fn solve_velocity_pcg_prepared(
             scratch.unavailable = true;
             return Ok(None);
         }
+        if !incomplete_cholesky_preconditioner
+            && !build_velocity_row_terms_by_body(
+                rows,
+                scratch.masses.len(),
+                &mut scratch.row_terms_by_body,
+            )?
+        {
+            scratch.unavailable = true;
+            return Ok(None);
+        }
         scratch.system_prepared = true;
+        scratch.system_prepare_time += system_prepare_started.elapsed();
     }
-    if velocity_vector_converged(rows, &scratch.residual, tolerance) {
-        return Ok(Some(0));
+    if velocity_vector_converged_parallel(
+        rows,
+        &scratch.residual,
+        &mut scratch.reduction_partials,
+        tolerance,
+        executor,
+        worker_count,
+    )? {
+        return Ok(Some(velocity_pcg_result(rows, &scratch.residual, 0, true)));
     }
 
     let preconditioner = if scratch.uses_incomplete_cholesky {
@@ -1312,15 +1380,27 @@ fn solve_velocity_pcg_prepared(
     resize_f64_buffer(&mut scratch.preconditioned, rows.len())?;
     resize_f64_buffer(&mut scratch.direction, rows.len())?;
     resize_f64_buffer(&mut scratch.product, rows.len())?;
+    let stage_started = std::time::Instant::now();
     apply_velocity_pcg_preconditioner(
         &scratch.residual,
         &scratch.diagonal,
         preconditioner,
         scratch.uses_block_jacobi.then_some(&scratch.block_jacobi),
         &mut scratch.preconditioned,
+        executor,
+        worker_count,
     )?;
+    scratch.preconditioner_time += stage_started.elapsed();
     scratch.direction.copy_from_slice(&scratch.preconditioned);
-    let mut residual_product = checked_dot_product(&scratch.residual, &scratch.preconditioned)?;
+    let stage_started = std::time::Instant::now();
+    let mut residual_product = checked_dot_product_parallel(
+        &scratch.residual,
+        &scratch.preconditioned,
+        &mut scratch.reduction_partials,
+        executor,
+        worker_count,
+    )?;
+    scratch.reduction_time += stage_started.elapsed();
     if residual_product <= f64::MIN_POSITIVE {
         return Ok(None);
     }
@@ -1328,16 +1408,30 @@ fn solve_velocity_pcg_prepared(
     resize_impulse_buffer(&mut scratch.body_impulses, bodies.len())?;
     resize_impulse_buffer(&mut scratch.body_responses, bodies.len())?;
     let mut completed_iterations = 0;
+    let mut converged = false;
     for iteration in 0..max_iterations {
-        global_velocity_matrix_vector(
+        let stage_started = std::time::Instant::now();
+        global_velocity_matrix_vector_parallel(
             rows,
             &scratch.direction,
             &scratch.masses,
+            &scratch.row_terms_by_body,
             &mut scratch.body_impulses,
             &mut scratch.body_responses,
             &mut scratch.product,
+            executor,
+            worker_count,
         )?;
-        let denominator = checked_dot_product(&scratch.direction, &scratch.product)?;
+        scratch.matrix_vector_time += stage_started.elapsed();
+        let stage_started = std::time::Instant::now();
+        let denominator = checked_dot_product_parallel(
+            &scratch.direction,
+            &scratch.product,
+            &mut scratch.reduction_partials,
+            executor,
+            worker_count,
+        )?;
+        scratch.reduction_time += stage_started.elapsed();
         if denominator <= f64::MIN_POSITIVE {
             return Ok(None);
         }
@@ -1345,27 +1439,53 @@ fn solve_velocity_pcg_prepared(
         if !alpha.is_finite() {
             return Err(CollisionError::ArithmeticOverflow);
         }
-        for index in 0..rows.len() {
-            scratch.solution[index] += alpha * scratch.direction[index];
-            scratch.residual[index] -= alpha * scratch.product[index];
-            if !scratch.solution[index].is_finite() || !scratch.residual[index].is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
-            }
-        }
+        velocity_pcg_scaled_add(
+            &mut scratch.solution,
+            &scratch.direction,
+            alpha,
+            executor,
+            worker_count,
+        )?;
+        velocity_pcg_scaled_add(
+            &mut scratch.residual,
+            &scratch.product,
+            -alpha,
+            executor,
+            worker_count,
+        )?;
         completed_iterations = iteration + 1;
-        if velocity_vector_converged(rows, &scratch.residual, tolerance) {
+        if velocity_vector_converged_parallel(
+            rows,
+            &scratch.residual,
+            &mut scratch.reduction_partials,
+            tolerance,
+            executor,
+            worker_count,
+        )? {
+            converged = true;
             break;
         }
 
+        let stage_started = std::time::Instant::now();
         apply_velocity_pcg_preconditioner(
             &scratch.residual,
             &scratch.diagonal,
             preconditioner,
             scratch.uses_block_jacobi.then_some(&scratch.block_jacobi),
             &mut scratch.preconditioned,
+            executor,
+            worker_count,
         )?;
-        let next_residual_product =
-            checked_dot_product(&scratch.residual, &scratch.preconditioned)?;
+        scratch.preconditioner_time += stage_started.elapsed();
+        let stage_started = std::time::Instant::now();
+        let next_residual_product = checked_dot_product_parallel(
+            &scratch.residual,
+            &scratch.preconditioned,
+            &mut scratch.reduction_partials,
+            executor,
+            worker_count,
+        )?;
+        scratch.reduction_time += stage_started.elapsed();
         if next_residual_product <= f64::MIN_POSITIVE {
             return Ok(None);
         }
@@ -1373,17 +1493,23 @@ fn solve_velocity_pcg_prepared(
         if !beta.is_finite() {
             return Err(CollisionError::ArithmeticOverflow);
         }
-        for index in 0..rows.len() {
-            scratch.direction[index] =
-                scratch.preconditioned[index] + beta * scratch.direction[index];
-            if !scratch.direction[index].is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
-            }
-        }
+        velocity_pcg_update_direction(
+            &mut scratch.direction,
+            &scratch.preconditioned,
+            beta,
+            executor,
+            worker_count,
+        )?;
         residual_product = next_residual_product;
     }
 
-    global_velocity_impulse(rows, &scratch.solution, &mut scratch.body_impulses)?;
+    global_velocity_impulse_parallel(
+        &scratch.solution,
+        &scratch.row_terms_by_body,
+        &mut scratch.body_impulses,
+        executor,
+        worker_count,
+    )?;
     for (body, impulse) in bodies.iter_mut().zip(scratch.body_impulses.iter().copied()) {
         if impulse.linear == Vec3::ZERO && impulse.angular == Vec3::ZERO {
             continue;
@@ -1401,7 +1527,12 @@ fn solve_velocity_pcg_prepared(
         }
         row.accumulated_impulse = next;
     }
-    Ok(Some(completed_iterations))
+    Ok(Some(velocity_pcg_result(
+        rows,
+        &scratch.residual,
+        completed_iterations,
+        converged,
+    )))
 }
 
 #[cfg(feature = "bench-internals")]
@@ -1429,6 +1560,31 @@ struct VelocityRowTerm {
     row: usize,
     linear: Vec3,
     angular: Vec3,
+}
+
+#[cfg(feature = "bench-internals")]
+fn build_velocity_row_terms_by_body(
+    rows: &[ConstraintRow],
+    body_count: usize,
+    row_terms_by_body: &mut Vec<Vec<VelocityRowTerm>>,
+) -> Result<bool, CollisionError> {
+    resize_nested_buffer(row_terms_by_body, body_count)?;
+    for (row_index, row) in rows.iter().copied().enumerate() {
+        for (body_index, linear, angular) in [
+            (row.body_a, row.linear_a, row.angular_a),
+            (row.body_b, row.linear_b, row.angular_b),
+        ] {
+            let Some(terms) = row_terms_by_body.get_mut(body_index) else {
+                return Ok(false);
+            };
+            terms.push(VelocityRowTerm {
+                row: row_index,
+                linear,
+                angular,
+            });
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(feature = "bench-internals")]
@@ -1533,6 +1689,8 @@ fn apply_velocity_pcg_preconditioner(
     incomplete_cholesky: Option<&IncompleteCholeskyPreconditioner>,
     block_jacobi: Option<&[VelocityBlockFactor]>,
     output: &mut [f64],
+    executor: &impl StepExecutor,
+    worker_count: usize,
 ) -> Result<(), CollisionError> {
     if let Some(blocks) = block_jacobi {
         if residual.len() != output.len() {
@@ -1558,8 +1716,24 @@ fn apply_velocity_pcg_preconditioner(
             }
         }
         Ok(())
-    } else {
+    } else if incomplete_cholesky.is_some() {
         apply_velocity_preconditioner(residual, diagonal, incomplete_cholesky, output)
+    } else {
+        if residual.len() != diagonal.len() || residual.len() != output.len() {
+            return Err(CollisionError::InvalidContact);
+        }
+        let chunk_size = velocity_pcg_chunk_size(output.len(), worker_count);
+        velocity_pcg_for_each_chunk_mut(output, chunk_size, executor, |chunk_index, chunk| {
+            let start = chunk_index * chunk_size;
+            for (offset, value) in chunk.iter_mut().enumerate() {
+                let index = start + offset;
+                *value = residual[index] / diagonal[index];
+            }
+        })?;
+        if output.iter().any(|value| !value.is_finite()) {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        Ok(())
     }
 }
 
@@ -1598,24 +1772,10 @@ fn build_incomplete_cholesky_preconditioner_into(
     if diagonal.len() != rows.len() {
         return Ok(false);
     }
-    resize_nested_buffer(row_terms_by_body, masses.len())?;
-    resize_nested_buffer(lower_pattern, rows.len())?;
-
-    for (row_index, row) in rows.iter().copied().enumerate() {
-        for (body_index, linear, angular) in [
-            (row.body_a, row.linear_a, row.angular_a),
-            (row.body_b, row.linear_b, row.angular_b),
-        ] {
-            row_terms_by_body
-                .get_mut(body_index)
-                .ok_or(CollisionError::InvalidContact)?
-                .push(VelocityRowTerm {
-                    row: row_index,
-                    linear,
-                    angular,
-                });
-        }
+    if !build_velocity_row_terms_by_body(rows, masses.len(), row_terms_by_body)? {
+        return Ok(false);
     }
+    resize_nested_buffer(lower_pattern, rows.len())?;
 
     for (body_index, terms) in row_terms_by_body.iter().enumerate() {
         let mass = *masses
@@ -1849,6 +2009,226 @@ fn global_velocity_impulse(
 }
 
 #[cfg(feature = "bench-internals")]
+#[allow(clippy::too_many_arguments)]
+fn global_velocity_matrix_vector_parallel(
+    rows: &[ConstraintRow],
+    vector: &[f64],
+    masses: &[SolverMass],
+    row_terms_by_body: &[Vec<VelocityRowTerm>],
+    body_impulses: &mut [GeneralizedImpulse],
+    body_responses: &mut [GeneralizedImpulse],
+    result: &mut [f64],
+    executor: &impl StepExecutor,
+    worker_count: usize,
+) -> Result<(), CollisionError> {
+    if rows.len() != vector.len()
+        || rows.len() != result.len()
+        || masses.len() != row_terms_by_body.len()
+        || masses.len() != body_impulses.len()
+        || masses.len() != body_responses.len()
+    {
+        return Err(CollisionError::InvalidContact);
+    }
+    let chunk_size = velocity_pcg_chunk_size(masses.len(), worker_count);
+    velocity_pcg_for_each_chunk_mut(body_impulses, chunk_size, executor, |chunk_index, chunk| {
+        let start = chunk_index * chunk_size;
+        for (offset, impulse) in chunk.iter_mut().enumerate() {
+            let mut sum = GeneralizedImpulse::default();
+            for term in &row_terms_by_body[start + offset] {
+                let coefficient = vector[term.row];
+                sum.linear += term.linear * coefficient;
+                sum.angular += term.angular * coefficient;
+            }
+            *impulse = sum;
+        }
+    })?;
+    if body_impulses
+        .iter()
+        .any(|impulse| !impulse.linear.is_finite() || !impulse.angular.is_finite())
+    {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+
+    velocity_pcg_for_each_chunk_mut(
+        body_responses,
+        chunk_size,
+        executor,
+        |chunk_index, chunk| {
+            let start = chunk_index * chunk_size;
+            for (offset, response) in chunk.iter_mut().enumerate() {
+                let index = start + offset;
+                let mass = masses[index];
+                let impulse = body_impulses[index];
+                *response = GeneralizedImpulse {
+                    linear: impulse.linear * mass.inverse_mass,
+                    angular: mass
+                        .inverse_inertia
+                        .checked_mul_vector(impulse.angular)
+                        .unwrap_or(Vec3::new(f64::NAN, f64::NAN, f64::NAN)),
+                };
+            }
+        },
+    )?;
+    if body_responses
+        .iter()
+        .any(|response| !response.linear.is_finite() || !response.angular.is_finite())
+    {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+
+    let chunk_size = velocity_pcg_chunk_size(rows.len(), worker_count);
+    velocity_pcg_for_each_chunk_mut(result, chunk_size, executor, |chunk_index, chunk| {
+        let start = chunk_index * chunk_size;
+        for (offset, value) in chunk.iter_mut().enumerate() {
+            let row = rows[start + offset];
+            let response_a = body_responses[row.body_a];
+            let response_b = body_responses[row.body_b];
+            *value = row
+                .linear_a
+                .checked_dot(response_a.linear)
+                .unwrap_or(f64::NAN)
+                + row
+                    .angular_a
+                    .checked_dot(response_a.angular)
+                    .unwrap_or(f64::NAN)
+                + row
+                    .linear_b
+                    .checked_dot(response_b.linear)
+                    .unwrap_or(f64::NAN)
+                + row
+                    .angular_b
+                    .checked_dot(response_b.angular)
+                    .unwrap_or(f64::NAN);
+        }
+    })?;
+    if result.iter().any(|value| !value.is_finite()) {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+fn global_velocity_impulse_parallel(
+    vector: &[f64],
+    row_terms_by_body: &[Vec<VelocityRowTerm>],
+    body_impulses: &mut [GeneralizedImpulse],
+    executor: &impl StepExecutor,
+    worker_count: usize,
+) -> Result<(), CollisionError> {
+    if body_impulses.len() != row_terms_by_body.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    let chunk_size = velocity_pcg_chunk_size(body_impulses.len(), worker_count);
+    velocity_pcg_for_each_chunk_mut(body_impulses, chunk_size, executor, |chunk_index, chunk| {
+        let start = chunk_index * chunk_size;
+        for (offset, impulse) in chunk.iter_mut().enumerate() {
+            let mut sum = GeneralizedImpulse::default();
+            for term in &row_terms_by_body[start + offset] {
+                let coefficient = vector[term.row];
+                sum.linear += term.linear * coefficient;
+                sum.angular += term.angular * coefficient;
+            }
+            *impulse = sum;
+        }
+    })?;
+    if body_impulses
+        .iter()
+        .any(|impulse| !impulse.linear.is_finite() || !impulse.angular.is_finite())
+    {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+const PCG_MIN_PARALLEL_CHUNK: usize = 256;
+
+#[cfg(feature = "bench-internals")]
+fn velocity_pcg_chunk_size(length: usize, worker_count: usize) -> usize {
+    if worker_count <= 1 || length < PCG_MIN_PARALLEL_CHUNK {
+        return length.max(1);
+    }
+    let task_count = worker_count.min((length / PCG_MIN_PARALLEL_CHUNK).max(1));
+    length.div_ceil(task_count)
+}
+
+#[cfg(feature = "bench-internals")]
+fn velocity_pcg_for_each_chunk_mut<T, F>(
+    values: &mut [T],
+    chunk_size: usize,
+    executor: &impl StepExecutor,
+    operation: F,
+) -> Result<(), CollisionError>
+where
+    T: Send,
+    F: Fn(usize, &mut [T]) + Send + Sync,
+{
+    if values.is_empty() {
+        return Ok(());
+    }
+    if chunk_size >= values.len() {
+        operation(0, values);
+        return Ok(());
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        executor.for_each_chunk_mut(values, chunk_size, operation)
+    }));
+    if matches!(result, Ok(Ok(()))) {
+        Ok(())
+    } else {
+        Err(CollisionError::WorkerFailed)
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn velocity_pcg_scaled_add(
+    destination: &mut [f64],
+    source: &[f64],
+    scale: f64,
+    executor: &impl StepExecutor,
+    worker_count: usize,
+) -> Result<(), CollisionError> {
+    if destination.len() != source.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    let chunk_size = velocity_pcg_chunk_size(destination.len(), worker_count);
+    velocity_pcg_for_each_chunk_mut(destination, chunk_size, executor, |chunk_index, chunk| {
+        let start = chunk_index * chunk_size;
+        for (offset, value) in chunk.iter_mut().enumerate() {
+            *value += scale * source[start + offset];
+        }
+    })?;
+    if destination.iter().any(|value| !value.is_finite()) {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+fn velocity_pcg_update_direction(
+    direction: &mut [f64],
+    preconditioned: &[f64],
+    beta: f64,
+    executor: &impl StepExecutor,
+    worker_count: usize,
+) -> Result<(), CollisionError> {
+    if direction.len() != preconditioned.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    let chunk_size = velocity_pcg_chunk_size(direction.len(), worker_count);
+    velocity_pcg_for_each_chunk_mut(direction, chunk_size, executor, |chunk_index, chunk| {
+        let start = chunk_index * chunk_size;
+        for (offset, value) in chunk.iter_mut().enumerate() {
+            *value = preconditioned[start + offset] + beta * *value;
+        }
+    })?;
+    if direction.iter().any(|value| !value.is_finite()) {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
 fn add_generalized_impulse(
     impulse: &mut GeneralizedImpulse,
     linear: Vec3,
@@ -1873,6 +2253,92 @@ fn velocity_vector_converged(
     rows.iter()
         .zip(residual)
         .all(|(row, value)| value.abs() <= velocity_row_tolerance(*row, tolerance))
+}
+
+#[cfg(feature = "bench-internals")]
+fn velocity_vector_converged_parallel(
+    rows: &[ConstraintRow],
+    residual: &[f64],
+    partial_results: &mut Vec<f64>,
+    tolerance: super::JointTolerance,
+    executor: &impl StepExecutor,
+    worker_count: usize,
+) -> Result<bool, CollisionError> {
+    if rows.len() != residual.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    let chunk_size = velocity_pcg_chunk_size(rows.len(), worker_count);
+    if chunk_size >= rows.len().max(1) {
+        return Ok(velocity_vector_converged(rows, residual, tolerance));
+    }
+    let task_count = rows.len().div_ceil(chunk_size);
+    resize_f64_buffer(partial_results, task_count)?;
+    velocity_pcg_for_each_chunk_mut(partial_results, 1, executor, |task_index, output| {
+        let start = task_index * chunk_size;
+        let end = (start + chunk_size).min(rows.len());
+        output[0] = if rows[start..end]
+            .iter()
+            .zip(&residual[start..end])
+            .all(|(row, value)| value.abs() <= velocity_row_tolerance(*row, tolerance))
+        {
+            1.0
+        } else {
+            0.0
+        };
+    })?;
+    Ok(partial_results[..task_count]
+        .iter()
+        .all(|result| *result == 1.0))
+}
+
+#[cfg(feature = "bench-internals")]
+fn velocity_pcg_result(
+    rows: &[ConstraintRow],
+    residual: &[f64],
+    iterations: usize,
+    converged: bool,
+) -> VelocityPcgResult {
+    let mut result = VelocityPcgResult {
+        iterations,
+        converged,
+        ..VelocityPcgResult::default()
+    };
+    for (row, residual) in rows.iter().zip(residual) {
+        match row.dimension {
+            RowDimension::Linear => {
+                result.linear_residual_mps = result.linear_residual_mps.max(residual.abs())
+            }
+            RowDimension::Angular => {
+                result.angular_residual_radps = result.angular_residual_radps.max(residual.abs())
+            }
+        }
+    }
+    result
+}
+
+#[cfg(feature = "bench-internals")]
+fn prepare_velocity_residual_parallel(
+    rows: &[ConstraintRow],
+    bodies: &[SolverBody],
+    residual: &mut [f64],
+    executor: &impl StepExecutor,
+    worker_count: usize,
+) -> Result<(), CollisionError> {
+    if rows.len() != residual.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    let chunk_size = velocity_pcg_chunk_size(rows.len(), worker_count);
+    velocity_pcg_for_each_chunk_mut(residual, chunk_size, executor, |chunk_index, chunk| {
+        let start = chunk_index * chunk_size;
+        for (offset, value) in chunk.iter_mut().enumerate() {
+            let row = rows[start + offset];
+            *value = row.target_velocity - row_velocity(bodies, row).unwrap_or(f64::NAN);
+        }
+    })?;
+    if residual.iter().any(|value| !value.is_finite()) {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    Ok(())
 }
 
 #[cfg(feature = "bench-internals")]
@@ -1913,6 +2379,42 @@ fn checked_dot_product(left: &[f64], right: &[f64]) -> Result<f64, CollisionErro
             .then_some(next)
             .ok_or(CollisionError::ArithmeticOverflow)
     })
+}
+
+#[cfg(feature = "bench-internals")]
+fn checked_dot_product_parallel(
+    left: &[f64],
+    right: &[f64],
+    partial_sums: &mut Vec<f64>,
+    executor: &impl StepExecutor,
+    worker_count: usize,
+) -> Result<f64, CollisionError> {
+    if left.len() != right.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    let chunk_size = velocity_pcg_chunk_size(left.len(), worker_count);
+    if chunk_size >= left.len().max(1) {
+        return checked_dot_product(left, right);
+    }
+    let task_count = left.len().div_ceil(chunk_size);
+    resize_f64_buffer(partial_sums, task_count)?;
+    velocity_pcg_for_each_chunk_mut(partial_sums, 1, executor, |task_index, output| {
+        let start = task_index * chunk_size;
+        let end = (start + chunk_size).min(left.len());
+        let mut sum = 0.0;
+        for index in start..end {
+            sum += left[index] * right[index];
+        }
+        output[0] = sum;
+    })?;
+    partial_sums[..task_count]
+        .iter()
+        .try_fold(0.0, |sum, partial| {
+            let next = sum + partial;
+            next.is_finite()
+                .then_some(next)
+                .ok_or(CollisionError::ArithmeticOverflow)
+        })
 }
 
 #[cfg(feature = "bench-internals")]

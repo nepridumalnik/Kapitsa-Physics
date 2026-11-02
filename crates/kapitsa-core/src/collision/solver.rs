@@ -260,9 +260,11 @@ impl SolverWorkspace {
         config: CollisionConfig,
         joint_solver_step: JointSolverStep<'_>,
         gravity: Option<CentralGravity>,
+        executor: &impl crate::execution::StepExecutor,
+        worker_count: usize,
     ) -> Result<(), CollisionError> {
         #[cfg(not(feature = "bench-internals"))]
-        let _ = gravity;
+        let _ = (gravity, executor, worker_count);
         if joints.is_empty() {
             return self.solve(bodies, manifolds, config);
         }
@@ -343,7 +345,7 @@ impl SolverWorkspace {
                         joint_solver_options.global_velocity_pcg_incomplete_cholesky();
                     let block_jacobi_preconditioner =
                         joint_solver_options.global_velocity_pcg_block_jacobi();
-                    let pcg_iterations = JointSolver::solve_velocity_pcg(
+                    let pcg_result = JointSolver::solve_velocity_pcg(
                         joint_workspace,
                         bodies,
                         joints,
@@ -351,9 +353,11 @@ impl SolverWorkspace {
                         pcg_max_iterations,
                         incomplete_cholesky_preconditioner,
                         block_jacobi_preconditioner,
+                        executor,
+                        worker_count,
                     )?;
                     #[cfg(feature = "bench-internals")]
-                    if pcg_iterations.is_some() {
+                    if pcg_result.is_some() {
                         let energy_after_pcg = energy_components(bodies, gravity);
                         joint_workspace.record_energy(
                             crate::joint::diagnostics::EnergyStage::AfterVelocityPcg,
@@ -365,7 +369,7 @@ impl SolverWorkspace {
                             energy_after_pcg,
                         );
                     }
-                    if pcg_iterations.is_none() {
+                    if pcg_result.is_none() {
                         self.solve_joint_velocity_sweep(
                             bodies,
                             joint_workspace,

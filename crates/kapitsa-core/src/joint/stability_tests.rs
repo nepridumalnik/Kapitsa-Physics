@@ -1,4 +1,6 @@
 use super::{FixedJoint, Joint, JointCommon, JointFrame};
+#[cfg(feature = "bench-internals")]
+use crate::execution::{ExecutionError, StepExecutor};
 use crate::{
     collision::CollisionConfig, mass::MassProperties, rigid_body::RigidBody, transform::Transform,
     world::PhysicsWorld,
@@ -8,6 +10,64 @@ use kapitsa_math::{Mat3, Quat, Vec3};
 use std::time::Instant;
 
 const DT: f64 = 1.0 / 120.0;
+
+#[cfg(feature = "bench-internals")]
+struct ScopedPcgTestExecutor;
+
+#[cfg(feature = "bench-internals")]
+impl StepExecutor for ScopedPcgTestExecutor {
+    fn for_each_chunk_mut<T, F>(
+        &self,
+        values: &mut [T],
+        chunk_size: usize,
+        operation: F,
+    ) -> Result<(), ExecutionError>
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Send + Sync,
+    {
+        if chunk_size == 0 {
+            return Err(ExecutionError::InvalidChunkLayout);
+        }
+        std::thread::scope(|scope| {
+            for (index, chunk) in values.chunks_mut(chunk_size).enumerate() {
+                let operation = &operation;
+                scope.spawn(move || operation(index, chunk));
+            }
+        });
+        Ok(())
+    }
+
+    fn for_each_chunk_layout_mut<T, F>(
+        &self,
+        values: &mut [T],
+        chunk_sizes: &[usize],
+        operation: F,
+    ) -> Result<(), ExecutionError>
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Send + Sync,
+    {
+        let total = chunk_sizes.iter().try_fold(0_usize, |total, size| {
+            (*size > 0).then(|| total.checked_add(*size)).flatten()
+        });
+        if total != Some(values.len()) {
+            return Err(ExecutionError::InvalidChunkLayout);
+        }
+        std::thread::scope(|scope| {
+            let mut remaining = values;
+            let mut start = 0;
+            for &chunk_size in chunk_sizes {
+                let (chunk, tail) = remaining.split_at_mut(chunk_size);
+                let operation = &operation;
+                scope.spawn(move || operation(start, chunk));
+                start += chunk_size;
+                remaining = tail;
+            }
+        });
+        Ok(())
+    }
+}
 
 #[test]
 fn fixed_hub_with_144_bodies_converges_from_pose_perturbations() {
@@ -454,6 +514,194 @@ fn physical_kinetic_energy(world: &PhysicsWorld) -> f64 {
 
 #[cfg(feature = "bench-internals")]
 #[test]
+fn parallel_velocity_pcg_matches_single_worker_on_a_large_joint_island() {
+    let mut single_worker = loaded_fixed_joint_graph(600, false, 8, false, false);
+    let mut multiple_workers = loaded_fixed_joint_graph(600, false, 8, false, false);
+    let mut repeated_parallel = loaded_fixed_joint_graph(600, false, 8, false, false);
+    single_worker.set_joint_global_velocity_pcg_for_bench(64, true);
+    multiple_workers.set_joint_global_velocity_pcg_for_bench(64, true);
+    repeated_parallel.set_joint_global_velocity_pcg_for_bench(64, true);
+    for world in [
+        &mut single_worker,
+        &mut multiple_workers,
+        &mut repeated_parallel,
+    ] {
+        let root = world.bodies().next().unwrap().0;
+        let point = world
+            .body(root)
+            .unwrap()
+            .state()
+            .transform()
+            .transform_point(Vec3::Y * 0.25);
+        world
+            .body_mut(root)
+            .unwrap()
+            .apply_force_at_point(Vec3::Y * 30_000.0, point)
+            .unwrap();
+    }
+
+    single_worker.step(DT).unwrap();
+    multiple_workers
+        .step_with_executor(DT, &ScopedPcgTestExecutor, 4)
+        .unwrap();
+    repeated_parallel
+        .step_with_executor(DT, &ScopedPcgTestExecutor, 4)
+        .unwrap();
+
+    for (((_, single), (_, parallel)), (_, repeated)) in single_worker
+        .bodies()
+        .zip(multiple_workers.bodies())
+        .zip(repeated_parallel.bodies())
+    {
+        assert_eq!(parallel.state(), repeated.state());
+        let single_state = single.state();
+        let parallel_state = parallel.state();
+        let single_transform = single_state.transform();
+        let parallel_transform = parallel_state.transform();
+        assert!(
+            (single_transform.translation() - parallel_transform.translation()).length() < 1.0e-9
+        );
+        assert!(
+            (single_state.linear_velocity() - parallel_state.linear_velocity()).length() < 1.0e-9
+        );
+        assert!(
+            (single_state.angular_velocity() - parallel_state.angular_velocity()).length() < 1.0e-9
+        );
+        let single_rotation = single_transform.rotation();
+        let parallel_rotation = parallel_transform.rotation();
+        let rotation_delta = |sign: f64| {
+            Vec3::new(
+                single_rotation.x - sign * parallel_rotation.x,
+                single_rotation.y - sign * parallel_rotation.y,
+                single_rotation.z - sign * parallel_rotation.z,
+            )
+            .length()
+            .hypot(single_rotation.w - sign * parallel_rotation.w)
+        };
+        assert!(rotation_delta(1.0).min(rotation_delta(-1.0)) < 1.0e-9);
+    }
+
+    let metrics = multiple_workers.physics_step_metrics().joints;
+    assert!(metrics.velocity_pcg_iterations > 0);
+    assert!(metrics.velocity_pcg_converged_calls > 0);
+    assert_eq!(metrics.velocity_pcg_iteration_limit_calls, 0);
+    assert!(metrics.velocity_pcg_system_prepare_time > std::time::Duration::ZERO);
+    assert!(metrics.velocity_pcg_matrix_vector_time > std::time::Duration::ZERO);
+    assert!(metrics.velocity_pcg_preconditioner_time > std::time::Duration::ZERO);
+    assert!(metrics.velocity_pcg_reduction_time > std::time::Duration::ZERO);
+    assert!(metrics.post_velocity_linear_residual_mps < 1.0e-4);
+    assert!(metrics.post_velocity_angular_residual_radps < 1.0e-4);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn velocity_pcg_reports_iteration_limit_without_claiming_convergence() {
+    let mut world = loaded_fixed_joint_graph(100, false, 8, false, false);
+    world.set_joint_global_velocity_pcg_for_bench(1, false);
+    let root = world.bodies().next().unwrap().0;
+    let point = world
+        .body(root)
+        .unwrap()
+        .state()
+        .transform()
+        .transform_point(Vec3::Y * 0.25);
+    world
+        .body_mut(root)
+        .unwrap()
+        .apply_force_at_point(Vec3::Y * 30_000.0, point)
+        .unwrap();
+
+    world.step(DT).unwrap();
+
+    let metrics = world.physics_step_metrics().joints;
+    assert!(metrics.velocity_pcg_iteration_limit_calls > 0);
+    assert!(metrics.velocity_pcg_linear_residual_mps > 1.0e-4);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Release comparison of parallel matrix-free velocity PCG across island sizes and workers"]
+fn diagnose_parallel_velocity_pcg_scaling() {
+    fn percentile_micros(samples: &mut [u128], percentile: usize) -> u128 {
+        samples.sort_unstable();
+        let index = samples
+            .len()
+            .saturating_mul(percentile)
+            .div_ceil(100)
+            .max(1)
+            - 1;
+        samples[index.min(samples.len() - 1)]
+    }
+
+    for body_count in [100, 200, 500, 1000] {
+        for worker_count in [1, 2, 4, 8] {
+            let mut world = loaded_fixed_joint_graph(body_count, false, 8, false, false);
+            world.set_joint_global_velocity_pcg_for_bench(64, true);
+            let root = world.bodies().next().unwrap().0;
+            let point = world
+                .body(root)
+                .unwrap()
+                .state()
+                .transform()
+                .transform_point(Vec3::Y * 0.25);
+            let mut elapsed_samples = Vec::with_capacity(7);
+            let mut solver_samples = Vec::with_capacity(7);
+            let mut system_prepare_samples = Vec::with_capacity(7);
+            let mut matrix_vector_samples = Vec::with_capacity(7);
+            let mut preconditioner_samples = Vec::with_capacity(7);
+            let mut reduction_samples = Vec::with_capacity(7);
+            for sample in 0..8 {
+                world
+                    .body_mut(root)
+                    .unwrap()
+                    .apply_force_at_point(Vec3::Y * 30_000.0, point)
+                    .unwrap();
+                let started = Instant::now();
+                if worker_count == 1 {
+                    world.step(DT).unwrap();
+                } else {
+                    world
+                        .step_with_executor(DT, &ScopedPcgTestExecutor, worker_count)
+                        .unwrap();
+                }
+                let elapsed = started.elapsed();
+                if sample == 0 {
+                    continue;
+                }
+                let metrics = world.physics_step_metrics();
+                elapsed_samples.push(elapsed.as_micros());
+                solver_samples.push(metrics.collision.solver_iterations.as_micros());
+                system_prepare_samples
+                    .push(metrics.joints.velocity_pcg_system_prepare_time.as_micros());
+                matrix_vector_samples
+                    .push(metrics.joints.velocity_pcg_matrix_vector_time.as_micros());
+                preconditioner_samples
+                    .push(metrics.joints.velocity_pcg_preconditioner_time.as_micros());
+                reduction_samples.push(metrics.joints.velocity_pcg_reduction_time.as_micros());
+            }
+            let elapsed_p50 = percentile_micros(&mut elapsed_samples, 50);
+            let elapsed_p95 = percentile_micros(&mut elapsed_samples, 95);
+            let solver_p50 = percentile_micros(&mut solver_samples, 50);
+            let solver_p95 = percentile_micros(&mut solver_samples, 95);
+            let system_prepare_p50 = percentile_micros(&mut system_prepare_samples, 50);
+            let matrix_vector_p50 = percentile_micros(&mut matrix_vector_samples, 50);
+            let preconditioner_p50 = percentile_micros(&mut preconditioner_samples, 50);
+            let reduction_p50 = percentile_micros(&mut reduction_samples, 50);
+            let pcg_metrics = world.physics_step_metrics().joints;
+            println!(
+                "graph=chain_{body_count} workers={worker_count} steps={} step_p50/p95_us={elapsed_p50}/{elapsed_p95} solver_p50/p95_us={solver_p50}/{solver_p95} pcg_prepare/matrix_vector/preconditioner/reduction_p50_us={system_prepare_p50}/{matrix_vector_p50}/{preconditioner_p50}/{reduction_p50} converged/iteration_limit={}/{} residual={:.6e}m/s/{:.6e}rad/s",
+                elapsed_samples.len(),
+                pcg_metrics.velocity_pcg_converged_calls,
+                pcg_metrics.velocity_pcg_iteration_limit_calls,
+                pcg_metrics.post_velocity_linear_residual_mps,
+                pcg_metrics.post_velocity_angular_residual_radps,
+            );
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 #[ignore = "diagnostic of loaded velocity convergence on joint graphs without contacts"]
 fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
     for (name, count, branching) in [
@@ -716,8 +964,12 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
                 world.step(DT).unwrap();
                 let second = world.physics_step_metrics().joints;
                 println!(
-                    "graph={name} solver=global_pcg preconditioner={preconditioner} max_iterations={max_pcg_iterations} actual_iterations={} elapsed_us={} velocity_residual={:.6e}m/s/{:.6e}rad/s next_predicted_anchor={:.6e}m",
+                    "graph={name} solver=global_pcg preconditioner={preconditioner} max_iterations={max_pcg_iterations} actual_iterations={} converged/iteration_limit={}/{} pcg_residual={:.6e}m/s/{:.6e}rad/s elapsed_us={} velocity_residual={:.6e}m/s/{:.6e}rad/s next_predicted_anchor={:.6e}m",
                     first.velocity_pcg_iterations,
+                    first.velocity_pcg_converged_calls,
+                    first.velocity_pcg_iteration_limit_calls,
+                    first.velocity_pcg_linear_residual_mps,
+                    first.velocity_pcg_angular_residual_radps,
                     started.elapsed().as_micros(),
                     first.post_velocity_linear_residual_mps,
                     first.post_velocity_angular_residual_radps,

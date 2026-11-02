@@ -1200,6 +1200,7 @@ impl CollisionSystem {
         }
         let joint_solver_step = crate::joint::JointSolverStep::new(dt, self.joint_solver_options)
             .with_impulse_cache(&self.joint_impulse_cache);
+        let inner_worker_count = if island_count == 1 { worker_count } else { 1 };
         #[cfg(feature = "bench-internals")]
         let iterations_started = std::time::Instant::now();
         if worker_count <= 1 || island_count <= 1 {
@@ -1212,6 +1213,8 @@ impl CollisionSystem {
                     config,
                     joint_solver_step,
                     gravity,
+                    executor,
+                    inner_worker_count,
                 )?;
             }
         } else {
@@ -1231,6 +1234,8 @@ impl CollisionSystem {
                                 config,
                                 joint_solver_step,
                                 gravity,
+                                executor,
+                                inner_worker_count,
                             ) {
                                 island.worker_error = Some(error);
                                 break;
