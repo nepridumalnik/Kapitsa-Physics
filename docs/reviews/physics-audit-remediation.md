@@ -57,7 +57,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S47 | Разделение общих solver-примитивов | MITIGATED — staged SolverBody and tangent basis moved into common constraint module; joint code still uses collision errors |
 | S48 | Разделение внутренних модулей | NOT AUDITED |
 | S49 | Публичная конфигурация и feature gates | NOT AUDITED |
-| S50 | Аудит аллокаций и оставшихся hot paths | NOT AUDITED |
+| S50 | Аудит аллокаций и оставшихся hot paths | MITIGATED — reviewed contact cache, joint row storage, snapshots and event publication; broader hot-path audit remains |
 
 ## Verification and risks
 
@@ -72,3 +72,11 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 - The ignored release rocket scenario was explicitly run and failed strict criteria for 100, 200, 500 and 1000 parts. Maximum joint anchor errors were 0.2048983, 0.2826946, 0.7275499 and 2.759083 metres respectively. The 1000-part scenario also reported no surface events; the fixture and energy diagnostic remain to be reviewed. The fixed-bound residual correction was made after this run and affects the adaptive path; no rerun has established an effect on the default rocket scenario.
 
 - After S02 and S10, the release rocket scenario was rerun. All four sizes still failed the numerical criteria; maximum anchor errors were 0.2432003, 0.2867673, 0.7363993 and 2.911675 m for 100, 200, 500 and 1000 parts. All four completed the scenario. The root cause of the joint instability remains unverified.
+
+## Allocation review (partial)
+
+- `joint/workspace.rs` retains row buffers but still uses `Vec::splice` when a joint changes its row count; repeated tail movement remains (S32).
+- `collision/cache.rs` retains separate current and next hash maps for transactional commit/abort; those buffers are intentional and can grow when contact count grows.
+- `asynchronous/service.rs` still copies world events once for publication; immutable batches now share nonempty vectors between subscribers. This adds an Arc allocation for a nonempty batch, so the net benefit depends on subscriber count.
+- Snapshot buffers are recycled only when no subscriber retains the prior Arc. Unchanged body IDs reuse their lookup index, but every body state is still copied to preserve immutable snapshots.
+- The rocket benchmark observed zero allocator calls at p50/p95 for warmed steady samples; it does not prove zero allocations for every step or scenario. Separation samples allocated. See `rocket-performance-observation.md` for conditions and interference.
