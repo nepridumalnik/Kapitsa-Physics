@@ -62,7 +62,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 ## Verification and risks
 
 - Rust 1.98: `cargo fmt --all -- --check`, `cargo check --workspace --all-features --locked --offline`, and `cargo clippy --workspace --all-features --locked --offline -- -D warnings` passed after S13.
-- Tests, benchmarks and physical simulations were not run. Static checks cannot establish physical accuracy, convergence, event semantics, or performance.
+- After the user lifted the verification restriction, `cargo +1.98.0 test --workspace --locked --offline -j 4` ran: the main kapitsa unit suite passed 118 tests with 4 ignored, integration suites passed 12, 3 and 1 tests, and kapitsa-core had 574 passed and one failed; Cargo stopped before the remaining workspace suites. The failing independent triangle/cuboid SAT tangent case also fails on unmodified baseline 8be00b2. The SAT oracle measured a separating gap of approximately 1.39e-17 after rotation; the discrepancy requires further investigation. Benchmarks and ignored simulations have not been run. Static checks cannot establish physical accuracy, convergence, event semantics, or performance.
 - S09 uses both body-local anchors; accumulated world-coordinate rounding and conservative duplicate rejection still need translated-scene validation.
 - S11 resets rather than scales cached impulses outside [0.5, 2]; the thresholds are a policy, not an experimentally established optimum.
 - S13 skips the tangential correction when the normalized determinant is at most 64 machine epsilons; this conservative threshold and its effects need numerical validation.
