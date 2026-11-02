@@ -360,6 +360,28 @@ mod stability_tests {
         step_failure: Option<String>,
         first_anchor_limit_tick: Option<usize>,
         first_frame_limit_tick: Option<usize>,
+        #[cfg(feature = "bench-internals")]
+        solver_stage_trace: Vec<SolverStageSample>,
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[derive(Clone, Copy, Debug)]
+    struct SolverStageSample {
+        tick: usize,
+        anchor_error_m: f64,
+        frame_error_rad: f64,
+        pre_velocity_anchor_error_m: f64,
+        pre_velocity_frame_error_rad: f64,
+        post_velocity_anchor_error_m: f64,
+        post_velocity_frame_error_rad: f64,
+        pre_joint_anchor_error_m: f64,
+        pre_joint_frame_error_rad: f64,
+        post_joint_anchor_error_m: f64,
+        post_joint_frame_error_rad: f64,
+        post_velocity_linear_residual_mps: f64,
+        post_velocity_angular_residual_radps: f64,
+        post_position_linear_residual_mps: f64,
+        post_position_angular_residual_radps: f64,
     }
 
     #[allow(dead_code)] // Non-default source isolation modes are selected by an ignored diagnostic.
@@ -477,7 +499,7 @@ mod stability_tests {
             (ScenarioMode::CenteredThrustWithoutGravityOrContact, false),
             (ScenarioMode::Full, false),
         ] {
-            let run = run_scenario(100, false, mode, adaptive);
+            let run = run_scenario(100, false, mode, adaptive, None);
             println!(
                 "mode={mode:?} adaptive={adaptive} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} coast_energy_drift={:.4}% contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
                 run.elapsed.as_millis(),
@@ -495,11 +517,78 @@ mod stability_tests {
                 run.separation_momentum_error,
                 run.step_failure,
             );
+            if matches!(mode, ScenarioMode::Full) && !adaptive {
+                for sample in run
+                    .solver_stage_trace
+                    .iter()
+                    .filter(|sample| (10..=16).contains(&sample.tick))
+                {
+                    println!(
+                        "solver_stage tick={} actual={:.6e}m/{:.6e}rad pre_velocity={:.6e}m/{:.6e}rad post_velocity={:.6e}m/{:.6e}rad after_contact_before_joint={:.6e}m/{:.6e}rad post_joint={:.6e}m/{:.6e}rad velocity_residual_after_velocity={:.6e}m/s/{:.6e}rad/s after_position={:.6e}m/s/{:.6e}rad/s",
+                        sample.tick,
+                        sample.anchor_error_m,
+                        sample.frame_error_rad,
+                        sample.pre_velocity_anchor_error_m,
+                        sample.pre_velocity_frame_error_rad,
+                        sample.post_velocity_anchor_error_m,
+                        sample.post_velocity_frame_error_rad,
+                        sample.pre_joint_anchor_error_m,
+                        sample.pre_joint_frame_error_rad,
+                        sample.post_joint_anchor_error_m,
+                        sample.post_joint_frame_error_rad,
+                        sample.post_velocity_linear_residual_mps,
+                        sample.post_velocity_angular_residual_radps,
+                        sample.post_position_linear_residual_mps,
+                        sample.post_position_angular_residual_radps,
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "diagnostic comparison of velocity and position sweep convergence under loads"]
+    fn diagnose_rocket_solver_iteration_residuals() {
+        for mode in [
+            ScenarioMode::ThrustWithoutGravityOrContact,
+            ScenarioMode::GravityWithContact,
+        ] {
+            for (velocity_iterations, position_iterations) in [(8, 3), (16, 3), (8, 6), (16, 6)] {
+                let run = run_scenario(
+                    100,
+                    false,
+                    mode,
+                    false,
+                    Some((velocity_iterations, position_iterations)),
+                );
+                let crossing = run
+                    .first_anchor_limit_tick
+                    .and_then(|tick| run.solver_stage_trace.get(tick));
+                let (tick, before_velocity, after_velocity, velocity_residual, after_joint) =
+                    crossing.map_or((None, 0.0, 0.0, 0.0, 0.0), |sample| {
+                        (
+                            Some(sample.tick),
+                            sample.pre_velocity_anchor_error_m,
+                            sample.post_velocity_anchor_error_m,
+                            sample.post_velocity_linear_residual_mps,
+                            sample.post_joint_anchor_error_m,
+                        )
+                    });
+                println!(
+                    "mode={mode:?} iterations={velocity_iterations}v/{position_iterations}p elapsed_ms={} anchor_max/rms={:.6e}/{:.6e}m frame_max={:.6e}rad first_anchor_limit_tick={tick:?} pre/post_velocity={before_velocity:.6e}/{after_velocity:.6e}m velocity_residual={velocity_residual:.6e}m/s post_joint={after_joint:.6e}m coast_energy_drift={:.4}%",
+                    run.elapsed.as_millis(),
+                    run.max_anchor_error,
+                    run.rms_anchor_error,
+                    run.max_frame_error,
+                    run.max_coast_energy_drift * 100.0,
+                );
+            }
         }
     }
 
     fn run_fixed_scenario(part_count: usize, block3: bool) -> StabilityRun {
-        run_scenario(part_count, block3, ScenarioMode::Full, false)
+        run_scenario(part_count, block3, ScenarioMode::Full, false, None)
     }
 
     fn run_scenario(
@@ -507,9 +596,19 @@ mod stability_tests {
         block3: bool,
         mode: ScenarioMode,
         adaptive: bool,
+        iteration_counts: Option<(u32, u32)>,
     ) -> StabilityRun {
         let started = Instant::now();
         let mut rocket = ModularRocket::new(part_count);
+        if let Some((velocity_iterations, position_iterations)) = iteration_counts {
+            let mut config = rocket.world.collision_config();
+            config.velocity_iterations = velocity_iterations;
+            config.position_iterations = position_iterations;
+            rocket
+                .world
+                .set_collision_config(config)
+                .expect("valid diagnostic solver iteration counts");
+        }
         #[cfg(feature = "bench-internals")]
         rocket
             .world
@@ -572,6 +671,8 @@ mod stability_tests {
         let mut joint_break_events = 0;
         let mut first_anchor_limit_tick = None;
         let mut first_frame_limit_tick = None;
+        #[cfg(feature = "bench-internals")]
+        let mut solver_stage_trace = Vec::with_capacity(TICKS);
 
         for tick in 0..TICKS {
             match mode {
@@ -668,6 +769,31 @@ mod stability_tests {
             if first_frame_limit_tick.is_none() && tick_frame_error >= 0.1 {
                 first_frame_limit_tick = Some(tick);
             }
+            #[cfg(feature = "bench-internals")]
+            {
+                let joint_metrics = rocket.world.physics_step_metrics().joints;
+                solver_stage_trace.push(SolverStageSample {
+                    tick,
+                    anchor_error_m: tick_anchor_error,
+                    frame_error_rad: tick_frame_error,
+                    pre_velocity_anchor_error_m: joint_metrics.pre_velocity_anchor_error_m,
+                    pre_velocity_frame_error_rad: joint_metrics.pre_velocity_frame_error_rad,
+                    post_velocity_anchor_error_m: joint_metrics.post_velocity_anchor_error_m,
+                    post_velocity_frame_error_rad: joint_metrics.post_velocity_frame_error_rad,
+                    pre_joint_anchor_error_m: joint_metrics.pre_joint_anchor_error_m,
+                    pre_joint_frame_error_rad: joint_metrics.pre_joint_frame_error_rad,
+                    post_joint_anchor_error_m: joint_metrics.post_joint_anchor_error_m,
+                    post_joint_frame_error_rad: joint_metrics.post_joint_frame_error_rad,
+                    post_velocity_linear_residual_mps: joint_metrics
+                        .post_velocity_linear_residual_mps,
+                    post_velocity_angular_residual_radps: joint_metrics
+                        .post_velocity_angular_residual_radps,
+                    post_position_linear_residual_mps: joint_metrics
+                        .post_position_linear_residual_mps,
+                    post_position_angular_residual_radps: joint_metrics
+                        .post_position_angular_residual_radps,
+                });
+            }
             for &id in &rocket.parts {
                 let body = rocket.world.body(id).expect("rocket body");
                 let state = body.state();
@@ -751,6 +877,8 @@ mod stability_tests {
             step_failure,
             first_anchor_limit_tick,
             first_frame_limit_tick,
+            #[cfg(feature = "bench-internals")]
+            solver_stage_trace,
         }
     }
 

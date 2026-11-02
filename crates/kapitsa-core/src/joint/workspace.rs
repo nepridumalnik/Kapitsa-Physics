@@ -42,6 +42,8 @@ pub(crate) struct JointWorkspace {
     break_events: Vec<JointBreakEvent>,
     #[cfg(feature = "bench-internals")]
     metrics: super::diagnostics::JointSolverMetrics,
+    #[cfg(feature = "bench-internals")]
+    geometry_residual: super::diagnostics::JointGeometryResidual,
     residual: super::solver::JointResidual,
     #[cfg(test)]
     solver_calls: Vec<JointSolverCall>,
@@ -83,6 +85,11 @@ impl JointWorkspace {
             break_events: Vec::new(),
             #[cfg(feature = "bench-internals")]
             metrics: super::diagnostics::JointSolverMetrics::ZERO,
+            #[cfg(feature = "bench-internals")]
+            geometry_residual: super::diagnostics::JointGeometryResidual {
+                anchor_error_m: 0.0,
+                frame_error_rad: 0.0,
+            },
             residual: super::solver::JointResidual::ZERO,
             #[cfg(test)]
             solver_calls: Vec::new(),
@@ -103,6 +110,7 @@ impl JointWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
+            self.geometry_residual = super::diagnostics::JointGeometryResidual::default();
         }
         self.residual = super::solver::JointResidual::ZERO;
         for row in &mut self.rows {
@@ -131,6 +139,7 @@ impl JointWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
+            self.geometry_residual = super::diagnostics::JointGeometryResidual::default();
         }
         self.residual = super::solver::JointResidual::ZERO;
     }
@@ -410,6 +419,49 @@ impl JointWorkspace {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn metrics(&self) -> super::diagnostics::JointSolverMetrics {
         self.metrics
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn row_joint_indices(&self) -> &[usize] {
+        &self.row_joint_indices
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_geometry_residual(
+        &mut self,
+        residual: super::diagnostics::JointGeometryResidual,
+    ) {
+        self.geometry_residual = residual;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_pre_velocity_geometry(&mut self) {
+        self.metrics.pre_velocity_anchor_error_m = self.geometry_residual.anchor_error_m;
+        self.metrics.pre_velocity_frame_error_rad = self.geometry_residual.frame_error_rad;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_post_velocity_geometry(&mut self) {
+        self.metrics.post_velocity_anchor_error_m = self.geometry_residual.anchor_error_m;
+        self.metrics.post_velocity_frame_error_rad = self.geometry_residual.frame_error_rad;
+        self.metrics.post_velocity_linear_residual_mps = self.residual.max_velocity_mps;
+        self.metrics.post_velocity_angular_residual_radps =
+            self.residual.max_angular_velocity_radps;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_pre_joint_geometry(&mut self) {
+        self.metrics.pre_joint_anchor_error_m = self.geometry_residual.anchor_error_m;
+        self.metrics.pre_joint_frame_error_rad = self.geometry_residual.frame_error_rad;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_post_joint_geometry(&mut self) {
+        self.metrics.post_joint_anchor_error_m = self.geometry_residual.anchor_error_m;
+        self.metrics.post_joint_frame_error_rad = self.geometry_residual.frame_error_rad;
+        self.metrics.post_position_linear_residual_mps = self.residual.max_velocity_mps;
+        self.metrics.post_position_angular_residual_radps =
+            self.residual.max_angular_velocity_radps;
     }
 
     #[cfg(feature = "bench-internals")]

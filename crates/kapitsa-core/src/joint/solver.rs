@@ -755,10 +755,50 @@ impl JointSolver {
         Self::prepare(workspace, bodies, joints, dt)?;
         let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
         #[cfg(feature = "bench-internals")]
+        let geometry_residual =
+            measure_joint_geometry(workspace.rows(), workspace.row_joint_indices())?;
+        #[cfg(feature = "bench-internals")]
         workspace.restore_metrics(metrics);
+        #[cfg(feature = "bench-internals")]
+        workspace.set_geometry_residual(geometry_residual);
         workspace.set_residual(residual);
         Ok(())
     }
+}
+
+#[cfg(feature = "bench-internals")]
+fn measure_joint_geometry(
+    rows: &[ConstraintRow],
+    row_joint_indices: &[usize],
+) -> Result<super::diagnostics::JointGeometryResidual, CollisionError> {
+    if rows.len() != row_joint_indices.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    let mut residual = super::diagnostics::JointGeometryResidual::default();
+    let mut row_index = 0;
+    while row_index < rows.len() {
+        let joint_index = row_joint_indices[row_index];
+        let mut anchor_error_m: f64 = 0.0;
+        let mut frame_error_rad: f64 = 0.0;
+        while row_index < rows.len() && row_joint_indices[row_index] == joint_index {
+            let row = rows[row_index];
+            let value = row.error.abs();
+            match row.dimension {
+                RowDimension::Linear => anchor_error_m = anchor_error_m.hypot(value),
+                RowDimension::Angular => frame_error_rad = frame_error_rad.hypot(value),
+            }
+            row_index += 1;
+        }
+        // FixedJoint rows are the three world-axis anchor components and three
+        // components of the connector rotation log, so these norms match its
+        // geometric residuals rather than the projected KKT residual.
+        if !anchor_error_m.is_finite() || !frame_error_rad.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        residual.anchor_error_m = residual.anchor_error_m.max(anchor_error_m);
+        residual.frame_error_rad = residual.frame_error_rad.max(frame_error_rad);
+    }
+    Ok(residual)
 }
 
 fn apply_warm_start(
@@ -3010,6 +3050,45 @@ mod tests {
         transform::Transform,
     };
     use kapitsa_math::{Quat, Vec3};
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn joint_geometry_residual_uses_per_joint_linear_and_angular_norms() {
+        let row = |dimension, error| ConstraintRow {
+            key: 0,
+            dimension,
+            body_a: 0,
+            body_b: 1,
+            linear_a: Vec3::ZERO,
+            angular_a: Vec3::ZERO,
+            linear_b: Vec3::ZERO,
+            angular_b: Vec3::ZERO,
+            error,
+            target_velocity: 0.0,
+            force_bias: 0.0,
+            position_enabled: true,
+            compliance: 0.0,
+            damping: 0.0,
+            min_multiplier: f64::NEG_INFINITY,
+            max_multiplier: f64::INFINITY,
+            min_impulse: f64::NEG_INFINITY,
+            max_impulse: f64::INFINITY,
+            accumulated_multiplier: 0.0,
+            accumulated_impulse: 0.0,
+        };
+        let rows = [
+            row(RowDimension::Linear, 3.0),
+            row(RowDimension::Linear, 4.0),
+            row(RowDimension::Angular, 0.6),
+            row(RowDimension::Angular, 0.8),
+            row(RowDimension::Linear, 0.2),
+            row(RowDimension::Angular, 0.3),
+        ];
+        let residual = measure_joint_geometry(&rows, &[0, 0, 0, 0, 1, 1])
+            .expect("valid joint geometry residual");
+        assert!((residual.anchor_error_m - 5.0).abs() < 1.0e-12);
+        assert!((residual.frame_error_rad - 1.0).abs() < 1.0e-12);
+    }
 
     fn solver_body(position: Vec3) -> SolverBody {
         solver_body_with_rotation(position, Quat::IDENTITY)

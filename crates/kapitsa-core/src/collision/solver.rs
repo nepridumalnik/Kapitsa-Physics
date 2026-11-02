@@ -180,6 +180,11 @@ impl SolverWorkspace {
             return Ok(());
         }
 
+        #[cfg(feature = "bench-internals")]
+        {
+            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            joint_workspace.record_pre_velocity_geometry();
+        }
         for velocity_iteration in 0..config.velocity_iterations {
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_velocity_iteration();
@@ -197,10 +202,20 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
         }
+        #[cfg(feature = "bench-internals")]
+        {
+            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            joint_workspace.record_post_velocity_geometry();
+        }
         for _ in 0..config.position_iterations {
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_position_iteration();
             self.solve_position_iteration(bodies, manifolds, config)?;
+            #[cfg(feature = "bench-internals")]
+            {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.record_pre_joint_geometry();
+            }
             for (joint_index, joint) in joints.iter().copied().enumerate() {
                 JointSolver::solve_position_joint(
                     joint_workspace,
@@ -213,6 +228,8 @@ impl SolverWorkspace {
             }
             #[cfg(feature = "bench-internals")]
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            #[cfg(feature = "bench-internals")]
+            joint_workspace.record_post_joint_geometry();
         }
         joint_workspace.collect_break_events(
             joints,
