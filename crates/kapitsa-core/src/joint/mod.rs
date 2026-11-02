@@ -1,4 +1,6 @@
 mod ball;
+#[allow(dead_code)] // Isolated kernel; opt-in solver integration is gated to Stage 08.
+mod block;
 mod common;
 mod cone_twist;
 mod config;
