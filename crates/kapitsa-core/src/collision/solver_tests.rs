@@ -7,8 +7,9 @@ use crate::{
         solver::{SolverBody, SolverManifold, SolverMaterial, SolverWorkspace},
     },
     joint::{
-        FixedJoint, Joint, JointCommon, JointConstraint, JointFrame, JointSolverCall,
-        JointSolverOptions, JointSolverStep, JointWorkspace,
+        FixedJoint, IterationRange, Joint, JointCommon, JointConstraint, JointFrame,
+        JointIterations, JointSolverCall, JointSolverOptions, JointSolverStep, JointTolerance,
+        JointWorkspace,
     },
     mass::MassProperties,
     rigid_body::RigidBody,
@@ -311,6 +312,189 @@ fn solve_with_joints_prepares_each_joint_before_one_sweep_in_phase_order() {
             },
             JointSolverCall::JointRowsCommitted(0),
         ]
+    );
+}
+
+#[test]
+fn adaptive_joint_iterations_stop_at_minimum_or_report_the_max_residual() {
+    fn solve(offset: Vec3) -> (usize, usize, crate::joint::JointResidual) {
+        let mut id_world = PhysicsWorld::new();
+        let id_a = id_world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .unwrap();
+        let id_b = id_world
+            .add_body(RigidBody::new_static(Transform::identity()))
+            .unwrap();
+        let joint_id = id_world
+            .add_joint(
+                id_a,
+                id_b,
+                Joint::Fixed(FixedJoint::new(JointCommon::new(
+                    JointFrame::IDENTITY,
+                    JointFrame::IDENTITY,
+                ))),
+            )
+            .unwrap();
+        let joint = JointConstraint {
+            id: joint_id,
+            body_a: 0,
+            body_b: 1,
+            joint: Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        };
+        let body_a = RigidBody::new_static(Transform::identity());
+        let body_b =
+            RigidBody::new_static(Transform::new(offset, kapitsa_math::Quat::IDENTITY).unwrap());
+        let state_a = *body_a.state();
+        let state_b = *body_b.state();
+        let mut bodies = vec![
+            SolverBody::from_prediction(body_a, state_a),
+            SolverBody::from_prediction(body_b, state_b),
+        ];
+        let tolerance = JointTolerance {
+            linear_m: 1.0e-6,
+            angular_rad: 1.0e-6,
+            velocity_mps: 1.0e-5,
+            angular_velocity_radps: 1.0e-5,
+        };
+        let options = JointSolverOptions::legacy().with_iterations(JointIterations::Adaptive {
+            position: IterationRange::new(2, 4),
+            velocity: IterationRange::new(2, 5),
+            tolerance,
+        });
+        let config = super::CollisionConfig {
+            velocity_iterations: 1,
+            position_iterations: 1,
+            ..super::CollisionConfig::default()
+        };
+        let mut collision_solver = SolverWorkspace::new();
+        let mut joint_workspace = JointWorkspace::new();
+        collision_solver
+            .solve_with_joints(
+                &mut bodies,
+                &mut [],
+                &mut joint_workspace,
+                &[joint],
+                config,
+                JointSolverStep::new(1.0 / 60.0, options),
+            )
+            .unwrap();
+        let velocity_sweeps = joint_workspace
+            .solver_calls()
+            .iter()
+            .filter(|call| matches!(call, JointSolverCall::VelocitySweep { .. }))
+            .count();
+        let position_sweeps = joint_workspace
+            .solver_calls()
+            .iter()
+            .filter(|call| matches!(call, JointSolverCall::PositionSweep { .. }))
+            .count();
+        (position_sweeps, velocity_sweeps, joint_workspace.residual())
+    }
+
+    let tolerance = JointTolerance {
+        linear_m: 1.0e-6,
+        angular_rad: 1.0e-6,
+        velocity_mps: 1.0e-5,
+        angular_velocity_radps: 1.0e-5,
+    };
+    let satisfied = solve(Vec3::ZERO);
+    assert_eq!((satisfied.0, satisfied.1), (2, 2));
+    assert!(satisfied.2.position_converged(tolerance));
+    assert!(satisfied.2.velocity_converged(tolerance));
+
+    let unsatisfiable = solve(Vec3::X);
+    assert_eq!((unsatisfiable.0, unsatisfiable.1), (4, 2));
+    assert!(!unsatisfiable.2.position_converged(tolerance));
+    assert!(unsatisfiable.2.max_linear_m > tolerance.linear_m);
+    assert_eq!(solve(Vec3::X), unsatisfiable);
+}
+
+#[test]
+fn adaptive_joint_policy_leaves_contact_iteration_budget_unchanged() {
+    let config = super::CollisionConfig {
+        velocity_iterations: 4,
+        position_iterations: 3,
+        ..super::CollisionConfig::default()
+    };
+    let (mut baseline_bodies, mut baseline_manifolds) = ball_on_plane(Vec3::new(2.0, -1.0, 0.5));
+    SolverWorkspace::new()
+        .solve(&mut baseline_bodies, &mut baseline_manifolds, config)
+        .unwrap();
+
+    let (mut bodies, mut manifolds) = ball_on_plane(Vec3::new(2.0, -1.0, 0.5));
+    for position in [Vec3::ZERO, Vec3::X * 2.0] {
+        let body =
+            RigidBody::new_static(Transform::new(position, kapitsa_math::Quat::IDENTITY).unwrap());
+        let state = *body.state();
+        bodies.push(SolverBody::from_prediction(body, state));
+    }
+    let mut id_world = PhysicsWorld::new();
+    let id_a = id_world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let id_b = id_world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let joint_id = id_world
+        .add_joint(
+            id_a,
+            id_b,
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .unwrap();
+    let joint = JointConstraint {
+        id: joint_id,
+        body_a: 2,
+        body_b: 3,
+        joint: Joint::Fixed(FixedJoint::new(JointCommon::new(
+            JointFrame::IDENTITY,
+            JointFrame::IDENTITY,
+        ))),
+    };
+    let tolerance = JointTolerance {
+        linear_m: 1.0e-6,
+        angular_rad: 1.0e-6,
+        velocity_mps: 1.0e-6,
+        angular_velocity_radps: 1.0e-6,
+    };
+    let options = JointSolverOptions::legacy().with_iterations(JointIterations::Adaptive {
+        position: IterationRange::new(1, 1),
+        velocity: IterationRange::new(1, 1),
+        tolerance,
+    });
+    let mut collision_solver = SolverWorkspace::new();
+    collision_solver
+        .solve_with_joints(
+            &mut bodies,
+            &mut manifolds,
+            &mut JointWorkspace::new(),
+            &[joint],
+            config,
+            JointSolverStep::new(1.0 / 60.0, options),
+        )
+        .unwrap();
+
+    assert_eq!(
+        bodies[1].state().transform(),
+        baseline_bodies[1].state().transform()
+    );
+    assert_eq!(
+        bodies[1].state().linear_velocity(),
+        baseline_bodies[1].state().linear_velocity()
+    );
+    assert_eq!(
+        bodies[1].state().angular_velocity(),
+        baseline_bodies[1].state().angular_velocity()
+    );
+    assert_eq!(
+        manifolds[0].manifold.points()[0].normal_impulse,
+        baseline_manifolds[0].manifold.points()[0].normal_impulse
     );
 }
 

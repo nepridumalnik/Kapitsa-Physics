@@ -124,6 +124,25 @@ impl CollisionSystem {
         self.joint_solver_options = self.joint_solver_options.with_projection(projection);
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_adaptive_iterations_for_bench(&mut self, enabled: bool) {
+        let iterations = if enabled {
+            crate::joint::JointIterations::Adaptive {
+                position: crate::joint::IterationRange::new(1, 8),
+                velocity: crate::joint::IterationRange::new(1, 8),
+                tolerance: crate::joint::JointTolerance {
+                    linear_m: 1.0e-5,
+                    angular_rad: 1.0e-5,
+                    velocity_mps: 1.0e-4,
+                    angular_velocity_radps: 1.0e-4,
+                },
+            }
+        } else {
+            crate::joint::JointIterations::Fixed
+        };
+        self.joint_solver_options = self.joint_solver_options.with_iterations(iterations);
+    }
+
     pub(crate) fn events(&self) -> &[CollisionEvent] {
         &self.events
     }

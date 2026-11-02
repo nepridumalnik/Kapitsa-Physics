@@ -7,6 +7,8 @@ mod cylindrical;
 mod d6;
 #[cfg(feature = "bench-internals")]
 pub mod diagnostics;
+#[cfg(not(feature = "bench-internals"))]
+mod diagnostics;
 mod distance;
 mod error;
 mod event;
@@ -28,9 +30,12 @@ mod workspace;
 pub use ball::BallJoint;
 pub use common::{JointCommon, JointDrive, JointFrame, JointLimit, JointMotion};
 pub use cone_twist::ConeTwistJoint;
-pub(crate) use config::{JointProjection, JointSolverOptions, JointSolverStep};
+pub(crate) use config::{JointIterations, JointProjection, JointSolverOptions, JointSolverStep};
 pub use cylindrical::CylindricalJoint;
 pub use d6::D6Joint;
+#[cfg(test)]
+pub(crate) use diagnostics::JointResidual;
+pub(crate) use diagnostics::{IterationRange, JointTolerance};
 pub use distance::DistanceJoint;
 pub use error::JointError;
 pub use event::JointBreakEvent;

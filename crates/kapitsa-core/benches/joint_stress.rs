@@ -240,6 +240,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         report_block_projection_comparison(72, fixed_projection_scene)?;
         return Ok(());
     }
+    if std::env::args().any(|argument| argument == "--adaptive-joints-only") {
+        report_adaptive_iteration_comparison(72, fixed_projection_scene)?;
+        return Ok(());
+    }
     println!(
         "Joint stress scenes: warmups={WARMUPS}, samples={SAMPLES}, sizes={SIZES:?}, workers={WORKERS:?}"
     );
@@ -375,6 +379,48 @@ fn report_block_projection_comparison(
                 final_errors.1,
             );
         }
+    }
+    Ok(())
+}
+
+fn report_adaptive_iteration_comparison(
+    size: usize,
+    build: fn(usize) -> Result<PhysicsWorld, Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    for adaptive in [false, true] {
+        let mut world = build(size)?;
+        world.set_joint_adaptive_iterations_for_bench(adaptive);
+        let mut config = world.collision_config();
+        config.position_iterations = 8;
+        config.velocity_iterations = 8;
+        world.set_collision_config(config)?;
+        let initial_errors = max_joint_frame_errors(&world)?;
+        for _ in 0..WARMUPS {
+            world.step_with_executor(DT, &ScopedThreadExecutor, 1)?;
+        }
+
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let (result, timing) =
+                measure(|| world.step_with_executor(DT, &ScopedThreadExecutor, 1));
+            result?;
+            samples.push((timing, world.physics_step_metrics().joints));
+        }
+        let final_errors = max_joint_frame_errors(&world)?;
+        validate_bodies(&world)?;
+        samples.sort_unstable_by_key(|sample| sample.0.elapsed);
+        let median = &samples[SAMPLES / 2];
+        println!(
+            "fixed-joint adaptive iteration comparison size={size} adaptive={adaptive}: p50_ms={:.3} p99_ms={:.3} position_sweeps={} velocity_sweeps={} initial_anchor_error_m/rad={:.6e}/{:.6e} final_anchor_error_m/rad={:.6e}/{:.6e}",
+            milliseconds(median.0.elapsed),
+            milliseconds(samples[SAMPLES - 1].0.elapsed),
+            median.1.position_sweeps,
+            median.1.velocity_sweeps,
+            initial_errors.0,
+            initial_errors.1,
+            final_errors.0,
+            final_errors.1,
+        );
     }
     Ok(())
 }

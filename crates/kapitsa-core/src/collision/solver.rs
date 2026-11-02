@@ -1,6 +1,9 @@
 use crate::{
     constraint,
-    joint::{JointConstraint, JointSolver, JointSolverStep, JointWorkspace},
+    joint::{
+        IterationRange, JointConstraint, JointIterations, JointSolver, JointSolverStep,
+        JointTolerance, JointWorkspace,
+    },
     rigid_body::RigidBody,
 };
 use kapitsa_math::Vec3;
@@ -169,12 +172,38 @@ impl SolverWorkspace {
         config.validate()?;
         let dt = joint_solver_step.dt();
         let joint_solver_options = joint_solver_step.options();
-        if !dt.is_finite() || dt <= 0.0 {
+        if !dt.is_finite() || dt <= 0.0 || !joint_solver_options.iterations().validate() {
             return Err(CollisionError::InvalidConfig);
         }
         self.prepare_points(bodies, manifolds, config)?;
         self.warm_start(bodies, manifolds)?;
         JointSolver::begin_step(joint_workspace);
+
+        if let JointIterations::Adaptive {
+            position,
+            velocity,
+            tolerance,
+        } = joint_solver_options.iterations()
+        {
+            self.solve_adaptive_joint_iterations(
+                bodies,
+                manifolds,
+                joint_workspace,
+                joints,
+                config,
+                joint_solver_step,
+                position,
+                velocity,
+                tolerance,
+            )?;
+            joint_workspace.collect_break_events(
+                joints,
+                bodies,
+                dt,
+                joint_solver_options.reaction_mode(),
+            )?;
+            return Ok(());
+        }
 
         for velocity_iteration in 0..config.velocity_iterations {
             #[cfg(feature = "bench-internals")]
@@ -216,6 +245,84 @@ impl SolverWorkspace {
             dt,
             joint_solver_options.reaction_mode(),
         )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_adaptive_joint_iterations(
+        &mut self,
+        bodies: &mut [SolverBody],
+        manifolds: &mut [SolverManifold],
+        joint_workspace: &mut JointWorkspace,
+        joints: &[JointConstraint],
+        config: CollisionConfig,
+        joint_solver_step: JointSolverStep<'_>,
+        position: IterationRange,
+        velocity: IterationRange,
+        tolerance: JointTolerance,
+    ) -> Result<(), CollisionError> {
+        let dt = joint_solver_step.dt();
+        let velocity_outer = config.velocity_iterations.max(velocity.max);
+        let mut joint_velocity_sweeps = 0;
+        for outer_iteration in 0..velocity_outer {
+            if outer_iteration < config.velocity_iterations {
+                self.solve_velocity_iteration(bodies, manifolds)?;
+            }
+            let residual_converged = if joint_velocity_sweeps >= velocity.min {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.residual().velocity_converged(tolerance)
+            } else {
+                false
+            };
+            if joint_velocity_sweeps == velocity.max || residual_converged {
+                continue;
+            }
+            #[cfg(feature = "bench-internals")]
+            joint_workspace.record_velocity_iteration();
+            for (joint_index, joint) in joints.iter().copied().enumerate() {
+                JointSolver::solve_velocity_joint(
+                    joint_workspace,
+                    bodies,
+                    joint,
+                    joint_index,
+                    joint_solver_step,
+                    joint_velocity_sweeps == 0,
+                )?;
+            }
+            joint_velocity_sweeps += 1;
+            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+        }
+
+        let position_outer = config.position_iterations.max(position.max);
+        let mut joint_position_sweeps = 0;
+        for outer_iteration in 0..position_outer {
+            if outer_iteration < config.position_iterations {
+                self.solve_position_iteration(bodies, manifolds, config)?;
+            }
+            let residual_converged = if joint_position_sweeps >= position.min {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.residual().position_converged(tolerance)
+            } else {
+                false
+            };
+            if joint_position_sweeps == position.max || residual_converged {
+                continue;
+            }
+            #[cfg(feature = "bench-internals")]
+            joint_workspace.record_position_iteration();
+            for (joint_index, joint) in joints.iter().copied().enumerate() {
+                JointSolver::solve_position_joint(
+                    joint_workspace,
+                    bodies,
+                    joint,
+                    joint_index,
+                    dt,
+                    joint_solver_step.options(),
+                )?;
+            }
+            joint_position_sweeps += 1;
+            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+        }
         Ok(())
     }
 

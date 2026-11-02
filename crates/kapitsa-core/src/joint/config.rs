@@ -1,6 +1,7 @@
 /// Internal joint-solver strategy selection. Public physics configuration
 /// stays stable while individual solver strategies are validated.
 use super::JointImpulseCache;
+use super::diagnostics::{IterationRange, JointTolerance};
 use super::reaction::ReactionMode;
 use super::warm_start::WarmStartConfig;
 
@@ -12,11 +13,37 @@ pub(crate) enum JointProjection {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[allow(dead_code)] // Adaptive policy is only selected by tests and benchmark controls.
+pub(crate) enum JointIterations {
+    #[default]
+    Fixed,
+    Adaptive {
+        position: IterationRange,
+        velocity: IterationRange,
+        tolerance: JointTolerance,
+    },
+}
+
+impl JointIterations {
+    pub(crate) fn validate(self) -> bool {
+        match self {
+            Self::Fixed => true,
+            Self::Adaptive {
+                position,
+                velocity,
+                tolerance,
+            } => position.is_valid() && velocity.is_valid() && tolerance.validate(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct JointSolverOptions {
     mass_cache: bool,
     warm_start: WarmStartConfig,
     reaction_mode: ReactionMode,
     projection: JointProjection,
+    iterations: JointIterations,
 }
 
 impl JointSolverOptions {
@@ -26,6 +53,7 @@ impl JointSolverOptions {
             warm_start: WarmStartConfig::disabled(),
             reaction_mode: ReactionMode::VelocityOnly,
             projection: JointProjection::ScalarGaussSeidel,
+            iterations: JointIterations::Fixed,
         }
     }
 
@@ -62,6 +90,17 @@ impl JointSolverOptions {
 
     pub(crate) const fn projection(self) -> JointProjection {
         self.projection
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[allow(dead_code)] // Exposed only to tests and benchmark strategy controls.
+    pub(crate) const fn with_iterations(mut self, iterations: JointIterations) -> Self {
+        self.iterations = iterations;
+        self
+    }
+
+    pub(crate) const fn iterations(self) -> JointIterations {
+        self.iterations
     }
 }
 
@@ -108,6 +147,43 @@ mod tests {
         assert_eq!(
             JointSolverOptions::legacy().reaction_mode(),
             ReactionMode::VelocityOnly
+        );
+    }
+
+    #[test]
+    fn adaptive_iteration_policy_rejects_invalid_ranges_and_tolerances() {
+        let tolerance = JointTolerance {
+            linear_m: 1.0e-3,
+            angular_rad: 1.0e-3,
+            velocity_mps: 1.0e-2,
+            angular_velocity_radps: 1.0e-2,
+        };
+        assert!(
+            JointIterations::Adaptive {
+                position: IterationRange::new(1, 4),
+                velocity: IterationRange::new(2, 6),
+                tolerance,
+            }
+            .validate()
+        );
+        assert!(
+            !JointIterations::Adaptive {
+                position: IterationRange::new(0, 4),
+                velocity: IterationRange::new(2, 6),
+                tolerance,
+            }
+            .validate()
+        );
+        assert!(
+            !JointIterations::Adaptive {
+                position: IterationRange::new(1, 4),
+                velocity: IterationRange::new(2, 6),
+                tolerance: JointTolerance {
+                    angular_velocity_radps: f64::INFINITY,
+                    ..tolerance
+                },
+            }
+            .validate()
         );
     }
 }

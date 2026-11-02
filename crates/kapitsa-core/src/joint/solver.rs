@@ -1,10 +1,9 @@
-#[cfg(feature = "bench-internals")]
 use super::diagnostics::{JointResidual, projected_kkt_residual};
 use super::row::RowDimension;
 #[cfg(test)]
 use super::workspace::JointSolverCall;
 use super::{
-    JointSolverOptions, JointSolverStep,
+    JointIterations, JointSolverOptions, JointSolverStep,
     row::ConstraintRow,
     warm_start::{JointImpulseCache, WarmStartConfig},
     workspace::JointWorkspace,
@@ -148,12 +147,23 @@ impl JointSolver {
             || position_iterations == 0
             || velocity_iterations == 0
             || options.warm_start().enabled
+            || !options.iterations().validate()
         {
             return Err(CollisionError::InvalidConfig);
         }
         workspace.begin_step();
         if options.mass_cache() {
             workspace.ensure_solver_mass_slots(bodies.len())?;
+        }
+        if matches!(options.iterations(), JointIterations::Adaptive { .. }) {
+            return Self::solve_adaptive(
+                workspace,
+                bodies,
+                dt,
+                options.iterations(),
+                options,
+                &mut prepare_rows,
+            );
         }
         for _ in 0..position_iterations {
             #[cfg(feature = "bench-internals")]
@@ -166,6 +176,52 @@ impl JointSolver {
             workspace.record_velocity_iteration();
             Self::prepare_iteration(workspace, bodies, &mut prepare_rows)?;
             Self::solve_velocity_iteration(workspace, bodies, dt, options)?;
+        }
+        Ok(())
+    }
+
+    fn solve_adaptive<F>(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        dt: f64,
+        iterations: JointIterations,
+        options: JointSolverOptions,
+        prepare_rows: &mut F,
+    ) -> Result<(), CollisionError>
+    where
+        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), CollisionError>,
+    {
+        let JointIterations::Adaptive {
+            position,
+            velocity,
+            tolerance,
+        } = iterations
+        else {
+            return Err(CollisionError::InvalidConfig);
+        };
+        for iteration in 0..position.max {
+            #[cfg(feature = "bench-internals")]
+            workspace.record_position_iteration();
+            Self::prepare_iteration(workspace, bodies, prepare_rows)?;
+            Self::solve_position_iteration(workspace, bodies, dt, options)?;
+            Self::prepare_iteration(workspace, bodies, prepare_rows)?;
+            let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
+            workspace.set_residual(residual);
+            if iteration + 1 >= position.min && residual.position_converged(tolerance) {
+                break;
+            }
+        }
+        for iteration in 0..velocity.max {
+            #[cfg(feature = "bench-internals")]
+            workspace.record_velocity_iteration();
+            Self::prepare_iteration(workspace, bodies, prepare_rows)?;
+            Self::solve_velocity_iteration(workspace, bodies, dt, options)?;
+            Self::prepare_iteration(workspace, bodies, prepare_rows)?;
+            let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
+            workspace.set_residual(residual);
+            if iteration + 1 >= velocity.min && residual.velocity_converged(tolerance) {
+                break;
+            }
         }
         Ok(())
     }
@@ -502,16 +558,17 @@ impl JointSolver {
         Ok(())
     }
 
-    #[cfg(feature = "bench-internals")]
     pub(crate) fn measure_residual(
         workspace: &mut JointWorkspace,
         bodies: &[SolverBody],
         joints: &[JointConstraint],
         dt: f64,
     ) -> Result<(), CollisionError> {
+        #[cfg(feature = "bench-internals")]
         let metrics = workspace.metrics();
         Self::prepare(workspace, bodies, joints, dt)?;
         let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
+        #[cfg(feature = "bench-internals")]
         workspace.restore_metrics(metrics);
         workspace.set_residual(residual);
         Ok(())
@@ -560,7 +617,6 @@ fn apply_warm_start(
     Ok(())
 }
 
-#[cfg(feature = "bench-internals")]
 fn measure_prepared_rows(
     rows: &[ConstraintRow],
     bodies: &[SolverBody],
@@ -619,7 +675,6 @@ fn measure_prepared_rows(
     }
 }
 
-#[cfg(feature = "bench-internals")]
 fn update_position_residual(
     residual: &mut JointResidual,
     dimension: RowDimension,
@@ -635,7 +690,6 @@ fn update_position_residual(
     Ok(())
 }
 
-#[cfg(feature = "bench-internals")]
 fn update_velocity_residual(
     residual: &mut JointResidual,
     dimension: RowDimension,
@@ -2870,6 +2924,50 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn shared_solver_adaptive_policy_observes_minimum_sweeps() {
+        let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::X * 2.0)];
+        let row = anchor_row(0.0);
+        let mut workspace = JointWorkspace::new();
+        let prepare = |bodies: &[SolverBody], workspace: &mut JointWorkspace| {
+            let distance = bodies[1].state().transform().translation().x
+                - bodies[0].state().transform().translation().x;
+            workspace.push(ConstraintRow {
+                error: distance - 1.0,
+                ..row
+            });
+            Ok(())
+        };
+        let tolerance = super::super::JointTolerance {
+            linear_m: 1.0e-8,
+            angular_rad: 1.0e-8,
+            velocity_mps: 1.0e-8,
+            angular_velocity_radps: 1.0e-8,
+        };
+        let options =
+            JointSolverOptions::legacy().with_iterations(super::super::JointIterations::Adaptive {
+                position: super::super::IterationRange::new(2, 6),
+                velocity: super::super::IterationRange::new(3, 5),
+                tolerance,
+            });
+        JointSolver::solve_with_options(&mut workspace, &mut bodies, 0.01, 1, 1, options, prepare)
+            .expect("adaptive shared solver");
+
+        let position_sweeps = workspace
+            .solver_calls()
+            .iter()
+            .filter(|call| matches!(call, JointSolverCall::PositionSweep { .. }))
+            .count();
+        let velocity_sweeps = workspace
+            .solver_calls()
+            .iter()
+            .filter(|call| matches!(call, JointSolverCall::VelocitySweep { .. }))
+            .count();
+        assert_eq!((position_sweeps, velocity_sweeps), (2, 3));
+        assert!(workspace.residual().position_converged(tolerance));
+        assert!(workspace.residual().velocity_converged(tolerance));
     }
 
     #[cfg(feature = "bench-internals")]

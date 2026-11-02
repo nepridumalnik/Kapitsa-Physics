@@ -57,6 +57,20 @@ impl JointResidual {
             && self.max_velocity_mps <= tolerance.velocity_mps
             && self.max_angular_velocity_radps <= tolerance.angular_velocity_radps
     }
+
+    pub(crate) fn position_converged(self, tolerance: JointTolerance) -> bool {
+        self.is_valid()
+            && tolerance.validate()
+            && self.max_linear_m <= tolerance.linear_m
+            && self.max_angular_rad <= tolerance.angular_rad
+    }
+
+    pub(crate) fn velocity_converged(self, tolerance: JointTolerance) -> bool {
+        self.is_valid()
+            && tolerance.validate()
+            && self.max_velocity_mps <= tolerance.velocity_mps
+            && self.max_angular_velocity_radps <= tolerance.angular_velocity_radps
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +110,7 @@ pub(super) fn projected_kkt_residual(
 }
 
 /// Work performed by the joint solver during one physics step.
+#[cfg(feature = "bench-internals")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JointSolverMetrics {
     pub prepared_rows: u64,
@@ -112,6 +127,7 @@ pub struct JointSolverMetrics {
     pub velocity_sweeps: u64,
 }
 
+#[cfg(feature = "bench-internals")]
 impl JointSolverMetrics {
     pub(crate) const ZERO: Self = Self {
         prepared_rows: 0,
@@ -160,7 +176,7 @@ impl JointSolverMetrics {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bench-internals"))]
 mod metrics_tests {
     use super::JointSolverMetrics;
 
@@ -353,6 +369,29 @@ mod residual_tests {
                 ..residual
             }
             .converged(tolerance)
+        );
+        assert!(residual.position_converged(tolerance));
+        assert!(residual.velocity_converged(tolerance));
+        assert!(
+            JointResidual {
+                max_velocity_mps: 1.0,
+                ..residual
+            }
+            .position_converged(tolerance)
+        );
+        assert!(
+            !JointResidual {
+                max_linear_m: 1.0,
+                ..residual
+            }
+            .position_converged(tolerance)
+        );
+        assert!(
+            !JointResidual {
+                max_velocity_mps: 1.0,
+                ..residual
+            }
+            .velocity_converged(tolerance)
         );
     }
 
