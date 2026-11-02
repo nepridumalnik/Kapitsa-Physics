@@ -1,3 +1,7 @@
+#[cfg(feature = "bench-internals")]
+use super::diagnostics::{JointResidual, projected_kkt_residual};
+#[cfg(feature = "bench-internals")]
+use super::row::RowDimension;
 use super::{row::ConstraintRow, workspace::JointWorkspace};
 use crate::{
     collision::{CollisionError, solver::SolverBody},
@@ -153,6 +157,114 @@ impl JointSolver {
         workspace.finish_prepare();
         Ok(())
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn measure_residual(
+        workspace: &mut JointWorkspace,
+        bodies: &[SolverBody],
+        joints: &[JointConstraint],
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        let metrics = workspace.metrics();
+        Self::prepare(workspace, bodies, joints, dt)?;
+        let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
+        workspace.restore_metrics(metrics);
+        workspace.set_residual(residual);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn measure_prepared_rows(
+    rows: &[ConstraintRow],
+    bodies: &[SolverBody],
+    dt: f64,
+) -> Result<JointResidual, CollisionError> {
+    let dt_squared = dt * dt;
+    if !dt_squared.is_finite() || dt_squared <= 0.0 {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    let alpha_scale = dt_squared.recip();
+    let mut residual = JointResidual::ZERO;
+    for row in rows.iter().copied() {
+        if !row.is_valid(bodies.len()) {
+            return Err(CollisionError::InvalidContact);
+        }
+        if row.position_enabled {
+            let gradient = row.error + row.compliance * alpha_scale * row.accumulated_multiplier;
+            if !gradient.is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+            let position_error =
+                if row.min_multiplier != f64::NEG_INFINITY || row.max_multiplier != f64::INFINITY {
+                    projected_kkt_residual(
+                        gradient,
+                        row.accumulated_multiplier,
+                        row.min_multiplier,
+                        row.max_multiplier,
+                    )
+                } else {
+                    gradient.abs()
+                };
+            update_position_residual(&mut residual, row.dimension, position_error)?;
+        }
+
+        let speed_error = row.target_velocity - row_velocity(bodies, row)?;
+        if !speed_error.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        let velocity_error =
+            if row.min_impulse != f64::NEG_INFINITY || row.max_impulse != f64::INFINITY {
+                projected_kkt_residual(
+                    -speed_error,
+                    row.accumulated_impulse,
+                    row.min_impulse,
+                    row.max_impulse,
+                )
+            } else {
+                speed_error.abs()
+            };
+        update_velocity_residual(&mut residual, row.dimension, velocity_error)?;
+    }
+    if residual.is_valid() {
+        Ok(residual)
+    } else {
+        Err(CollisionError::ArithmeticOverflow)
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn update_position_residual(
+    residual: &mut JointResidual,
+    dimension: RowDimension,
+    value: f64,
+) -> Result<(), CollisionError> {
+    if !value.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    match dimension {
+        RowDimension::Linear => residual.max_linear_m = residual.max_linear_m.max(value),
+        RowDimension::Angular => residual.max_angular_rad = residual.max_angular_rad.max(value),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+fn update_velocity_residual(
+    residual: &mut JointResidual,
+    dimension: RowDimension,
+    value: f64,
+) -> Result<(), CollisionError> {
+    if !value.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    match dimension {
+        RowDimension::Linear => residual.max_velocity_mps = residual.max_velocity_mps.max(value),
+        RowDimension::Angular => {
+            residual.max_angular_velocity_radps = residual.max_angular_velocity_radps.max(value)
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn prepare_joint_rows(
@@ -1396,6 +1508,8 @@ fn push_linear_row(
         .ok_or(CollisionError::ArithmeticOverflow)?;
     workspace.push(ConstraintRow {
         key,
+        #[cfg(feature = "bench-internals")]
+        dimension: RowDimension::Linear,
         body_a: settings.body_a,
         body_b: settings.body_b,
         linear_a: -axis,
@@ -1435,6 +1549,8 @@ fn push_angular_row(
     }
     workspace.push(ConstraintRow {
         key,
+        #[cfg(feature = "bench-internals")]
+        dimension: RowDimension::Angular,
         body_a: settings.body_a,
         body_b: settings.body_b,
         linear_a: Vec3::ZERO,
@@ -1697,6 +1813,8 @@ fn map_constraint_error(error: constraint::ConstraintError) -> CollisionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "bench-internals")]
+    use crate::joint::row::RowDimension;
     use crate::{
         joint::{D6Joint, Joint, JointCommon, JointDrive, JointFrame, JointLimit, JointMotion},
         mass::MassProperties,
@@ -1776,6 +1894,8 @@ mod tests {
     fn anchor_row(error: f64) -> ConstraintRow {
         ConstraintRow {
             key: 0,
+            #[cfg(feature = "bench-internals")]
+            dimension: RowDimension::Linear,
             body_a: 0,
             body_b: 1,
             linear_a: -Vec3::X,
@@ -1795,6 +1915,144 @@ mod tests {
             accumulated_multiplier: 0.0,
             accumulated_impulse: 0.0,
         }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn post_sweep_residual_uses_current_frames_without_double_counting_preparation() {
+        let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::X * 2.0)];
+        let constraint = JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: super::super::Joint::Fixed(super::super::FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        };
+        let constraints = [constraint];
+        let mut workspace = JointWorkspace::new();
+        JointSolver::prepare(&mut workspace, &bodies, &constraints, 0.01)
+            .expect("prepare initially separated frames");
+        let prepared_rows = workspace.metrics().prepared_rows;
+        bodies[1]
+            .body_mut()
+            .set_transform(Transform::identity())
+            .expect("coincident frame");
+
+        JointSolver::measure_residual(&mut workspace, &bodies, &constraints, 0.01)
+            .expect("measure current frames");
+
+        assert_eq!(workspace.residual(), JointResidual::ZERO);
+        assert_eq!(workspace.metrics().prepared_rows, prepared_rows);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn residual_uses_absolute_geometry_and_keeps_linear_and_angular_units_separate() {
+        let bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        let positive =
+            measure_prepared_rows(&[anchor_row(0.25)], &bodies, 0.01).expect("positive residual");
+        let negative =
+            measure_prepared_rows(&[anchor_row(-0.25)], &bodies, 0.01).expect("negative residual");
+        assert_eq!(positive.max_linear_m, 0.25);
+        assert_eq!(negative.max_linear_m, positive.max_linear_m);
+
+        let mut angular_row = anchor_row(0.125);
+        angular_row.dimension = RowDimension::Angular;
+        let angular =
+            measure_prepared_rows(&[angular_row], &bodies, 0.01).expect("angular residual");
+        assert_eq!(angular.max_linear_m, 0.0);
+        assert_eq!(angular.max_angular_rad, 0.125);
+
+        let moving_bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_velocities(Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO, Vec3::X * 0.5),
+        ];
+        angular_row.linear_a = Vec3::ZERO;
+        angular_row.linear_b = Vec3::ZERO;
+        angular_row.angular_a = -Vec3::X;
+        angular_row.angular_b = Vec3::X;
+        let angular_velocity = measure_prepared_rows(&[angular_row], &moving_bodies, 0.01)
+            .expect("angular velocity residual");
+        assert_eq!(angular_velocity.max_velocity_mps, 0.0);
+        assert_eq!(angular_velocity.max_angular_velocity_radps, 0.5);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn residual_applies_unilateral_kkt_conditions_and_rejects_overflow() {
+        let bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        let mut satisfied_limit = anchor_row(0.25);
+        satisfied_limit.min_multiplier = 0.0;
+        let satisfied = measure_prepared_rows(&[satisfied_limit], &bodies, 0.01)
+            .expect("satisfied lower-bound limit");
+        assert_eq!(satisfied.max_linear_m, 0.0);
+
+        let mut violated_limit = anchor_row(-0.25);
+        violated_limit.min_multiplier = 0.0;
+        let violated = measure_prepared_rows(&[violated_limit], &bodies, 0.01)
+            .expect("violated lower-bound limit");
+        assert_eq!(violated.max_linear_m, 0.25);
+
+        let moving_bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_velocities(Vec3::ZERO, Quat::IDENTITY, Vec3::X * 0.25, Vec3::ZERO),
+        ];
+        let mut satisfied_impulse = anchor_row(0.0);
+        satisfied_impulse.min_impulse = 0.0;
+        assert_eq!(
+            measure_prepared_rows(&[satisfied_impulse], &moving_bodies, 0.01)
+                .expect("satisfied impulse lower bound")
+                .max_velocity_mps,
+            0.0
+        );
+        let mut violated_impulse = anchor_row(0.0);
+        violated_impulse.min_impulse = 0.0;
+        let violating_bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_velocities(Vec3::ZERO, Quat::IDENTITY, -Vec3::X * 0.25, Vec3::ZERO),
+        ];
+        assert_eq!(
+            measure_prepared_rows(&[violated_impulse], &violating_bodies, 0.01)
+                .expect("violated impulse lower bound")
+                .max_velocity_mps,
+            0.25
+        );
+
+        let fast_bodies = [
+            solver_body_with_velocities(Vec3::ZERO, Quat::IDENTITY, Vec3::X * f64::MAX, Vec3::ZERO),
+            solver_body(Vec3::ZERO),
+        ];
+        let mut overflow_row = anchor_row(0.0);
+        overflow_row.target_velocity = f64::MAX;
+        assert_eq!(
+            measure_prepared_rows(&[overflow_row], &fast_bodies, 0.01),
+            Err(CollisionError::ArithmeticOverflow)
+        );
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn residual_for_disabled_joint_is_zero() {
+        let bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        let mut joint = super::super::FixedJoint::new(JointCommon::new(
+            JointFrame::IDENTITY,
+            JointFrame::IDENTITY,
+        ));
+        joint.common.enabled = false;
+        let constraints = [JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: super::super::Joint::Fixed(joint),
+        }];
+        let mut workspace = JointWorkspace::new();
+
+        JointSolver::measure_residual(&mut workspace, &bodies, &constraints, 0.01)
+            .expect("measure disabled joint");
+
+        assert_eq!(workspace.residual(), JointResidual::ZERO);
     }
 
     #[test]

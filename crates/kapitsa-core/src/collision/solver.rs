@@ -181,6 +181,8 @@ impl SolverWorkspace {
             for (joint_index, joint) in joints.iter().copied().enumerate() {
                 JointSolver::solve_velocity_joint(joint_workspace, bodies, joint, joint_index, dt)?;
             }
+            #[cfg(feature = "bench-internals")]
+            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
         }
         for _ in 0..config.position_iterations {
             #[cfg(feature = "bench-internals")]
@@ -189,6 +191,8 @@ impl SolverWorkspace {
             for (joint_index, joint) in joints.iter().copied().enumerate() {
                 JointSolver::solve_position_joint(joint_workspace, bodies, joint, joint_index, dt)?;
             }
+            #[cfg(feature = "bench-internals")]
+            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
         }
         joint_workspace.collect_break_events(joints, dt)?;
         Ok(())

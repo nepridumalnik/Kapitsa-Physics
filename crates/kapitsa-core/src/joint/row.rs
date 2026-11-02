@@ -1,10 +1,19 @@
 use kapitsa_math::Vec3;
 
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowDimension {
+    Linear,
+    Angular,
+}
+
 /// Scalar constraint row with generalized Jacobians for both connected bodies.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ConstraintRow {
     /// Stable within its owning joint, independent of which other rows are active.
     pub(crate) key: u8,
+    #[cfg(feature = "bench-internals")]
+    pub(crate) dimension: RowDimension,
     pub(crate) body_a: usize,
     pub(crate) body_b: usize,
     pub(crate) linear_a: Vec3,

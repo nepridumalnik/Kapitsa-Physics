@@ -1,3 +1,100 @@
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)]
+pub(crate) struct JointTolerance {
+    pub(crate) linear_m: f64,
+    pub(crate) angular_rad: f64,
+    pub(crate) velocity_mps: f64,
+    pub(crate) angular_velocity_radps: f64,
+}
+
+#[allow(dead_code)]
+impl JointTolerance {
+    pub(crate) fn validate(self) -> bool {
+        [
+            self.linear_m,
+            self.angular_rad,
+            self.velocity_mps,
+            self.angular_velocity_radps,
+        ]
+        .into_iter()
+        .all(|value| value.is_finite() && value > 0.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct JointResidual {
+    pub(crate) max_linear_m: f64,
+    pub(crate) max_angular_rad: f64,
+    pub(crate) max_velocity_mps: f64,
+    pub(crate) max_angular_velocity_radps: f64,
+}
+
+impl JointResidual {
+    pub(crate) const ZERO: Self = Self {
+        max_linear_m: 0.0,
+        max_angular_rad: 0.0,
+        max_velocity_mps: 0.0,
+        max_angular_velocity_radps: 0.0,
+    };
+
+    pub(crate) fn is_valid(self) -> bool {
+        [
+            self.max_linear_m,
+            self.max_angular_rad,
+            self.max_velocity_mps,
+            self.max_angular_velocity_radps,
+        ]
+        .into_iter()
+        .all(|value| value.is_finite() && value >= 0.0)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn converged(self, tolerance: JointTolerance) -> bool {
+        self.is_valid()
+            && tolerance.validate()
+            && self.max_linear_m <= tolerance.linear_m
+            && self.max_angular_rad <= tolerance.angular_rad
+            && self.max_velocity_mps <= tolerance.velocity_mps
+            && self.max_angular_velocity_radps <= tolerance.angular_velocity_radps
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct IterationRange {
+    pub(crate) min: u32,
+    pub(crate) max: u32,
+}
+
+#[allow(dead_code)]
+impl IterationRange {
+    pub(crate) const fn new(min: u32, max: u32) -> Self {
+        Self { min, max }
+    }
+
+    pub(crate) const fn is_valid(self) -> bool {
+        self.min > 0 && self.min <= self.max
+    }
+}
+
+/// Project a scalar constraint gradient onto its active multiplier bounds.
+pub(super) fn projected_kkt_residual(
+    gradient: f64,
+    multiplier: f64,
+    lower: f64,
+    upper: f64,
+) -> f64 {
+    if lower == upper {
+        gradient.abs()
+    } else if multiplier <= lower {
+        (-gradient).max(0.0)
+    } else if multiplier >= upper {
+        gradient.max(0.0)
+    } else {
+        gradient.abs()
+    }
+}
+
 /// Work performed by the joint solver during one physics step.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JointSolverMetrics {
@@ -49,7 +146,7 @@ impl JointSolverMetrics {
 }
 
 #[cfg(test)]
-mod tests {
+mod metrics_tests {
     use super::JointSolverMetrics;
 
     #[test]
@@ -159,5 +256,92 @@ mod tests {
             reverse.accumulate(island);
         }
         assert_eq!(forward, reverse);
+    }
+}
+
+#[cfg(test)]
+mod residual_tests {
+    use super::{IterationRange, JointResidual, JointTolerance, projected_kkt_residual};
+
+    #[test]
+    fn tolerances_and_iteration_ranges_reject_invalid_values() {
+        assert!(
+            JointTolerance {
+                linear_m: 1.0e-3,
+                angular_rad: 1.0e-3,
+                velocity_mps: 1.0e-2,
+                angular_velocity_radps: 1.0e-2,
+            }
+            .validate()
+        );
+        assert!(
+            !JointTolerance {
+                linear_m: 0.0,
+                angular_rad: 1.0,
+                velocity_mps: 1.0,
+                angular_velocity_radps: 1.0,
+            }
+            .validate()
+        );
+        assert!(
+            !JointTolerance {
+                linear_m: f64::NAN,
+                angular_rad: 1.0,
+                velocity_mps: 1.0,
+                angular_velocity_radps: 1.0,
+            }
+            .validate()
+        );
+        assert!(IterationRange::new(2, 8).is_valid());
+        assert!(IterationRange::new(1, 1).is_valid());
+        assert!(!IterationRange::new(0, 1).is_valid());
+        assert!(!IterationRange::new(4, 3).is_valid());
+    }
+
+    #[test]
+    fn convergence_rejects_non_finite_residuals_and_keeps_units_independent() {
+        let tolerance = JointTolerance {
+            linear_m: 1.0e-3,
+            angular_rad: 1.0e-2,
+            velocity_mps: 1.0e-2,
+            angular_velocity_radps: 1.0e-1,
+        };
+        let residual = JointResidual {
+            max_linear_m: 5.0e-4,
+            max_angular_rad: 5.0e-3,
+            max_velocity_mps: 5.0e-3,
+            max_angular_velocity_radps: 5.0e-2,
+        };
+        assert!(residual.converged(tolerance));
+        assert!(
+            !JointResidual {
+                max_linear_m: 2.0e-3,
+                ..residual
+            }
+            .converged(tolerance)
+        );
+        assert!(
+            !JointResidual {
+                max_angular_velocity_radps: f64::INFINITY,
+                ..residual
+            }
+            .converged(tolerance)
+        );
+    }
+
+    #[test]
+    fn projected_residual_obeys_lower_upper_and_bilateral_kkt_conditions() {
+        assert_eq!(projected_kkt_residual(1.0, 0.0, 0.0, f64::INFINITY), 0.0);
+        assert_eq!(projected_kkt_residual(-1.0, 0.0, 0.0, f64::INFINITY), 1.0);
+        assert_eq!(
+            projected_kkt_residual(-1.0, 0.0, f64::NEG_INFINITY, 0.0),
+            0.0
+        );
+        assert_eq!(
+            projected_kkt_residual(1.0, 0.0, f64::NEG_INFINITY, 0.0),
+            1.0
+        );
+        assert_eq!(projected_kkt_residual(-2.0, 0.0, -1.0, 1.0), 2.0);
+        assert_eq!(projected_kkt_residual(2.0, 0.0, 1.0, 1.0), 2.0);
     }
 }

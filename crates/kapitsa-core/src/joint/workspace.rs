@@ -28,6 +28,8 @@ pub(crate) struct JointWorkspace {
     break_events: Vec<JointBreakEvent>,
     #[cfg(feature = "bench-internals")]
     metrics: super::diagnostics::JointSolverMetrics,
+    #[cfg(feature = "bench-internals")]
+    residual: super::diagnostics::JointResidual,
 }
 
 impl JointWorkspace {
@@ -49,6 +51,8 @@ impl JointWorkspace {
             break_events: Vec::new(),
             #[cfg(feature = "bench-internals")]
             metrics: super::diagnostics::JointSolverMetrics::ZERO,
+            #[cfg(feature = "bench-internals")]
+            residual: super::diagnostics::JointResidual::ZERO,
         }
     }
 
@@ -64,6 +68,7 @@ impl JointWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
+            self.residual = super::diagnostics::JointResidual::ZERO;
         }
         for row in &mut self.rows {
             row.accumulated_multiplier = 0.0;
@@ -89,6 +94,7 @@ impl JointWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
+            self.residual = super::diagnostics::JointResidual::ZERO;
         }
     }
 
@@ -259,6 +265,21 @@ impl JointWorkspace {
         self.metrics
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn restore_metrics(&mut self, metrics: super::diagnostics::JointSolverMetrics) {
+        self.metrics = metrics;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_residual(&mut self, residual: super::diagnostics::JointResidual) {
+        self.residual = residual;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn residual(&self) -> super::diagnostics::JointResidual {
+        self.residual
+    }
+
     pub(crate) fn set_joint_index(&mut self, index: usize, id: crate::world::JointId) {
         self.previous_row_start = self
             .row_joint_indices
@@ -380,6 +401,8 @@ fn set_joint_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "bench-internals")]
+    use crate::joint::row::RowDimension;
     use crate::{
         joint::{FixedJoint, Joint, JointCommon, JointFrame},
         rigid_body::RigidBody,
@@ -411,6 +434,8 @@ mod tests {
     fn row(key: u8) -> ConstraintRow {
         ConstraintRow {
             key,
+            #[cfg(feature = "bench-internals")]
+            dimension: RowDimension::Linear,
             body_a: 0,
             body_b: 1,
             linear_a: -Vec3::X,
@@ -442,6 +467,8 @@ mod tests {
                 workspace.set_joint_index(joint_index, joint_id);
                 workspace.push(ConstraintRow {
                     key: joint_index as u8,
+                    #[cfg(feature = "bench-internals")]
+                    dimension: RowDimension::Linear,
                     body_a: 0,
                     body_b: 1,
                     linear_a: -Vec3::X,
