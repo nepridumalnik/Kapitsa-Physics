@@ -236,6 +236,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         report_mass_cache_comparison(1_440, fixed_chain)?;
         return Ok(());
     }
+    if std::env::args().any(|argument| argument == "--block-projection-only") {
+        report_block_projection_comparison(72, fixed_projection_scene)?;
+        return Ok(());
+    }
     println!(
         "Joint stress scenes: warmups={WARMUPS}, samples={SAMPLES}, sizes={SIZES:?}, workers={WORKERS:?}"
     );
@@ -324,6 +328,53 @@ fn report_mass_cache_comparison(
             frame_errors.0,
             frame_errors.1,
         );
+    }
+    Ok(())
+}
+
+fn report_block_projection_comparison(
+    size: usize,
+    build: fn(usize) -> Result<PhysicsWorld, Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    for projection in [false, true] {
+        for warm_start in [false, true] {
+            let mut world = build(size)?;
+            world.set_joint_projection_for_bench(projection);
+            world.set_joint_warm_start_for_bench(warm_start);
+            let mut config = world.collision_config();
+            config.position_iterations = 1;
+            config.velocity_iterations = 1;
+            world.set_collision_config(config)?;
+            let initial_errors = max_joint_frame_errors(&world)?;
+            for _ in 0..WARMUPS {
+                world.step_with_executor(DT, &ScopedThreadExecutor, 1)?;
+            }
+
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for _ in 0..SAMPLES {
+                let (result, timing) =
+                    measure(|| world.step_with_executor(DT, &ScopedThreadExecutor, 1));
+                result?;
+                samples.push((timing, world.physics_step_metrics().joints));
+            }
+            let final_errors = max_joint_frame_errors(&world)?;
+            validate_bodies(&world)?;
+            samples.sort_unstable_by_key(|sample| sample.0.elapsed);
+            let median = &samples[SAMPLES / 2];
+            println!(
+                "fixed-joint projection comparison size={size} fixed_block3={} warm_start={warm_start}: initial_anchor_error_m/rad={:.6e}/{:.6e} p50_ms={:.3} p99_ms={:.3} block_rows={} fallback_rows={} warm_rows={} final_anchor_error_m/rad={:.6e}/{:.6e}",
+                projection,
+                initial_errors.0,
+                initial_errors.1,
+                milliseconds(median.0.elapsed),
+                milliseconds(samples[SAMPLES - 1].0.elapsed),
+                median.1.block_rows_solved,
+                median.1.block_fallback_rows,
+                median.1.velocity_warm_starts,
+                final_errors.0,
+                final_errors.1,
+            );
+        }
     }
     Ok(())
 }
@@ -553,6 +604,47 @@ fn disturbed_fixed_chain(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
     let common = fixed_joint_frames();
     for pair in bodies.windows(2) {
         world.add_joint(pair[0], pair[1], Joint::Fixed(FixedJoint::new(common)))?;
+    }
+    Ok(world)
+}
+
+fn fixed_projection_scene(body_count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let pairs = (body_count / 2).max(1);
+    for pair in 0..pairs {
+        let offset = Vec3::X * (pair as f64 * 3.0);
+        let rotation_a = Quat::from_axis_angle(Vec3::Z, 0.23).ok_or("valid rotation")?;
+        let rotation_b =
+            Quat::from_axis_angle(Vec3::new(1.0, 0.6, -0.2), 0.51).ok_or("valid rotation")?;
+        let mass_a = MassProperties::new(
+            1.0,
+            Vec3::new(0.08, -0.03, 0.04),
+            Mat3::from_diagonal(Vec3::new(0.5, 1.2, 1.5)),
+        )?;
+        let mass_b = MassProperties::new(
+            1_000.0,
+            Vec3::new(-0.06, 0.04, 0.02),
+            Mat3::from_diagonal(Vec3::new(400.0, 700.0, 900.0)),
+        )?;
+        let transform_a = Transform::new(offset, rotation_a)?;
+        let transform_b = Transform::new(offset + Vec3::new(1.8, -0.7, 0.9), rotation_b)?;
+        let body_a = RigidBody::new_dynamic(transform_a, mass_a)?;
+        let mut body_b = RigidBody::new_dynamic(transform_b, mass_b)?;
+        body_b.set_linear_velocity(Vec3::new(0.0, 0.1, -0.04))?;
+        body_b.set_angular_velocity(Vec3::new(0.02, -0.03, 0.01))?;
+        let id_a = world.add_body(body_a)?;
+        let id_b = world.add_body(body_b)?;
+        let common = JointCommon::new(
+            JointFrame::new(
+                Vec3::new(0.2, -0.1, 0.08),
+                Quat::from_axis_angle(Vec3::Y, 0.17).ok_or("valid frame rotation")?,
+            ),
+            JointFrame::new(
+                Vec3::new(-0.15, 0.12, -0.04),
+                Quat::from_axis_angle(Vec3::X, -0.28).ok_or("valid frame rotation")?,
+            ),
+        );
+        world.add_joint(id_a, id_b, Joint::Fixed(FixedJoint::new(common)))?;
     }
     Ok(world)
 }

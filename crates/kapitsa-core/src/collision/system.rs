@@ -114,6 +114,16 @@ impl CollisionSystem {
         self.joint_solver_options = self.joint_solver_options.with_warm_start(config);
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_projection_for_bench(&mut self, enabled: bool) {
+        let projection = if enabled {
+            crate::joint::JointProjection::FixedBlock3
+        } else {
+            crate::joint::JointProjection::ScalarGaussSeidel
+        };
+        self.joint_solver_options = self.joint_solver_options.with_projection(projection);
+    }
+
     pub(crate) fn events(&self) -> &[CollisionEvent] {
         &self.events
     }

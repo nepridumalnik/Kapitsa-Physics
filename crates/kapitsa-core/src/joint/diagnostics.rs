@@ -104,6 +104,7 @@ pub struct JointSolverMetrics {
     pub solver_mass_cache_misses: u64,
     pub scalar_rows_solved: u64,
     pub block_rows_solved: u64,
+    pub block_fallback_rows: u64,
     pub velocity_warm_starts: u64,
     pub color_batches_processed: u64,
     pub max_colors_per_island: u32,
@@ -119,6 +120,7 @@ impl JointSolverMetrics {
         solver_mass_cache_misses: 0,
         scalar_rows_solved: 0,
         block_rows_solved: 0,
+        block_fallback_rows: 0,
         velocity_warm_starts: 0,
         color_batches_processed: 0,
         max_colors_per_island: 0,
@@ -143,6 +145,9 @@ impl JointSolverMetrics {
         self.block_rows_solved = self
             .block_rows_solved
             .saturating_add(other.block_rows_solved);
+        self.block_fallback_rows = self
+            .block_fallback_rows
+            .saturating_add(other.block_fallback_rows);
         self.velocity_warm_starts = self
             .velocity_warm_starts
             .saturating_add(other.velocity_warm_starts);
@@ -174,6 +179,7 @@ mod metrics_tests {
             solver_mass_cache_misses: 11,
             scalar_rows_solved: 4,
             block_rows_solved: 5,
+            block_fallback_rows: 6,
             velocity_warm_starts: 6,
             color_batches_processed: 7,
             max_colors_per_island: 2,
@@ -189,6 +195,7 @@ mod metrics_tests {
                 solver_mass_cache_misses: 11,
                 scalar_rows_solved: 4,
                 block_rows_solved: 5,
+                block_fallback_rows: 6,
                 velocity_warm_starts: 6,
                 color_batches_processed: 7,
                 max_colors_per_island: 2,

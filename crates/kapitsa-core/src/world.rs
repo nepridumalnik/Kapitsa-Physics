@@ -1666,6 +1666,13 @@ impl PhysicsWorld {
 
     #[cfg(feature = "bench-internals")]
     #[doc(hidden)]
+    pub fn set_joint_projection_for_bench(&mut self, enabled: bool) {
+        self.collision_system
+            .set_joint_projection_for_bench(enabled);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
     pub fn collision_step_metrics(&self) -> crate::collision::CollisionStepMetrics {
         let mut metrics = self.collision_system.benchmark_metrics();
         let query_index_bytes = self

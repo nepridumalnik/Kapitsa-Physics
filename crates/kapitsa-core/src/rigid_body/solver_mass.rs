@@ -22,7 +22,6 @@ impl SolverMass {
         center: Vec3::ZERO,
     };
 
-    #[cfg(test)]
     pub(crate) fn from_body(body: &RigidBody) -> Result<Self, CollisionError> {
         if body.physics().body_type() != BodyType::Dynamic {
             return Ok(Self::STATIC);

@@ -1,5 +1,4 @@
 mod ball;
-#[allow(dead_code)] // Isolated kernel; opt-in solver integration is gated to Stage 08.
 mod block;
 mod common;
 mod cone_twist;
@@ -29,7 +28,7 @@ mod workspace;
 pub use ball::BallJoint;
 pub use common::{JointCommon, JointDrive, JointFrame, JointLimit, JointMotion};
 pub use cone_twist::ConeTwistJoint;
-pub(crate) use config::{JointSolverOptions, JointSolverStep};
+pub(crate) use config::{JointProjection, JointSolverOptions, JointSolverStep};
 pub use cylindrical::CylindricalJoint;
 pub use d6::D6Joint;
 pub use distance::DistanceJoint;

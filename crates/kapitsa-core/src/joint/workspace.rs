@@ -374,6 +374,17 @@ impl JointWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_block_rows_solved(&mut self, rows: usize) {
+        self.metrics.block_rows_solved = self.metrics.block_rows_solved.saturating_add(rows as u64);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_block_fallback_rows(&mut self, rows: usize) {
+        self.metrics.block_fallback_rows =
+            self.metrics.block_fallback_rows.saturating_add(rows as u64);
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_solver_mass_cache(
         &mut self,
         hits: u64,

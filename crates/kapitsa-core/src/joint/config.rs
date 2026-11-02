@@ -4,11 +4,19 @@ use super::JointImpulseCache;
 use super::reaction::ReactionMode;
 use super::warm_start::WarmStartConfig;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum JointProjection {
+    #[default]
+    ScalarGaussSeidel,
+    FixedBlock3,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct JointSolverOptions {
     mass_cache: bool,
     warm_start: WarmStartConfig,
     reaction_mode: ReactionMode,
+    projection: JointProjection,
 }
 
 impl JointSolverOptions {
@@ -17,6 +25,7 @@ impl JointSolverOptions {
             mass_cache: false,
             warm_start: WarmStartConfig::disabled(),
             reaction_mode: ReactionMode::VelocityOnly,
+            projection: JointProjection::ScalarGaussSeidel,
         }
     }
 
@@ -32,6 +41,13 @@ impl JointSolverOptions {
         self
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[allow(dead_code)] // Exposed only to tests and benchmark strategy controls.
+    pub(crate) const fn with_projection(mut self, projection: JointProjection) -> Self {
+        self.projection = projection;
+        self
+    }
+
     pub(crate) const fn mass_cache(self) -> bool {
         self.mass_cache
     }
@@ -42,6 +58,10 @@ impl JointSolverOptions {
 
     pub(crate) const fn reaction_mode(self) -> ReactionMode {
         self.reaction_mode
+    }
+
+    pub(crate) const fn projection(self) -> JointProjection {
+        self.projection
     }
 }
 
