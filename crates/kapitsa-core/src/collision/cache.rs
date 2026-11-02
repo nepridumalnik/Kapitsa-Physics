@@ -9,6 +9,9 @@ use super::{
 };
 
 const MINIMUM_NORMAL_DOT: f64 = 0.95;
+// A large timestep change makes the previous step's impulse a poor estimate.
+const MINIMUM_TIMESTEP_RATIO: f64 = 0.5;
+const MAXIMUM_TIMESTEP_RATIO: f64 = 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ContactKey {
@@ -46,10 +49,20 @@ impl ContactCache {
         manifolds: &mut [SolverManifold],
         dt: f64,
     ) -> Result<(), CollisionError> {
-        let impulse_scale = self.current_dt.map_or(1.0, |previous_dt| dt / previous_dt);
-        if !impulse_scale.is_finite() || impulse_scale <= 0.0 {
+        if !dt.is_finite() || dt <= 0.0 {
             return Err(CollisionError::ArithmeticOverflow);
         }
+        let impulse_scale = match self.current_dt {
+            None => 1.0,
+            Some(previous_dt) if previous_dt.is_finite() && previous_dt > 0.0 => {
+                let ratio = dt / previous_dt;
+                if !(MINIMUM_TIMESTEP_RATIO..=MAXIMUM_TIMESTEP_RATIO).contains(&ratio) {
+                    return Ok(());
+                }
+                ratio
+            }
+            Some(_) => return Err(CollisionError::ArithmeticOverflow),
+        };
         for manifold in manifolds {
             self.warm_start_manifold(manifold, impulse_scale)?;
         }
