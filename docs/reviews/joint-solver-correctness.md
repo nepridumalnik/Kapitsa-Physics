@@ -26,3 +26,7 @@ Chaos release `260bb2e1c5610b31c63a36206eedd289409c5f11`: the requested Gauss-Se
 ## Scope and unresolved gates
 
 The 3×3 block solver is present behind non-default controls and retains a scalar fallback; it has not been proven production-ready for every supported joint, angle or degeneracy. Exact nonlinear angular Jacobians, convergence policy, strict cache invalidation, safe intra-island parallelism and rigid assembly lifecycle require further work. No runtime behavior or performance claim follows from a static check alone.
+
+## FixedJoint point basis correction
+
+The three translational rows now project `d` onto world X/Y/Z instead of frame-A axes. The Jacobian remains `(-e, -(r_a × e), e, r_b × e)`; `e` is constant, so it is the derivative of the projected position error. All three components still constrain the same world-space vector, and angular rows retain their existing basis. No dynamic validation has been run; the effect on finite-iteration behavior and the rocket scenario is unknown.

@@ -896,10 +896,10 @@ fn append_fixed_rows(
     let position_error = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    for (axis_index, local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
-        let axis = rotation_a
-            .rotate_vector(local_axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+    // The point Jacobian below differentiates a projection on a fixed world
+    // axis. Using a frame-A axis would also require the derivative of that
+    // rotating axis when the anchors are separated.
+    for (axis_index, axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
         let error = position_error
             .checked_dot(axis)
             .ok_or(CollisionError::ArithmeticOverflow)?;
