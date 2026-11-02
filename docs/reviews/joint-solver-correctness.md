@@ -38,3 +38,7 @@ The experimental Block3 assembly evaluates the six independent entries of the sy
 ## Experimental warm-start invalidation
 
 When experimental joint warm-start is enabled, exposing a body through `body_mut` now invalidates cached impulses for its attached joints before the caller can change mass, inertia, pose or velocity. Removing a body invalidates each removed joint's cache; toggling the experimental strategy clears both cache generations. Joint update, disabling and direct removal retain their existing invalidation. The scan is linear in joint count on a mutable body borrow only while warm-start is enabled, so this is a correctness-first mitigation, not a hot-path optimization. Cache generation matching still protects reused slots. Warm-start remains disabled by default and internal pathways, numerical behavior and performance still need dynamic validation.
+
+## Singular twist coordinate
+
+`twist_angle` uses the quaternion's `(z, w)` projection. When both components vanish (a 180-degree swing perpendicular to the twist axis), the decomposition has no unique twist. It now reports `NonConvergent` rather than silently assigning zero. This is an observable change: a step reaching that singularity can fail and roll back. The ordinary angle remains wrapped to `[-π, π)`; multi-turn tracking is not implemented. Behavior near the singularity and all existing scenarios remain dynamically unverified in this pass.

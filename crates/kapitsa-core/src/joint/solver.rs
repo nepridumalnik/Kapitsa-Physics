@@ -1960,7 +1960,10 @@ fn twist_angle(relative: Quat) -> Result<f64, CollisionError> {
         return Err(CollisionError::ArithmeticOverflow);
     }
     if length <= f64::MIN_POSITIVE {
-        return Ok(0.0);
+        // At a 180-degree swing with no twist component the twist axis is
+        // undefined; returning zero would invent a coordinate and can make a
+        // limit or motor act on an arbitrary value.
+        return Err(CollisionError::NonConvergent);
     }
     let angle = 2.0 * (relative.z / length).atan2(relative.w / length);
     let wrapped =
