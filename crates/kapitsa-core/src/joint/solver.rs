@@ -48,10 +48,14 @@ impl JointSolver {
         }
         workspace.begin_step();
         for _ in 0..position_iterations {
+            #[cfg(feature = "bench-internals")]
+            workspace.record_position_iteration();
             Self::prepare_iteration(workspace, bodies, &mut prepare_rows)?;
             Self::solve_position_iteration(workspace, bodies, dt)?;
         }
         for _ in 0..velocity_iterations {
+            #[cfg(feature = "bench-internals")]
+            workspace.record_velocity_iteration();
             Self::prepare_iteration(workspace, bodies, &mut prepare_rows)?;
             Self::solve_velocity_iteration(workspace, bodies, dt)?;
         }
@@ -79,7 +83,13 @@ impl JointSolver {
         bodies: &mut [SolverBody],
         dt: f64,
     ) -> Result<(), CollisionError> {
-        solve_position_iteration(workspace, bodies, dt)
+        solve_position_iteration(workspace, bodies, dt)?;
+        #[cfg(feature = "bench-internals")]
+        {
+            let row_count = workspace.rows().len();
+            workspace.record_scalar_rows_solved(row_count);
+        }
+        Ok(())
     }
 
     pub(crate) fn solve_velocity_iteration(
@@ -87,7 +97,13 @@ impl JointSolver {
         bodies: &mut [SolverBody],
         dt: f64,
     ) -> Result<(), CollisionError> {
-        solve_velocity_iteration(workspace, bodies, dt)
+        solve_velocity_iteration(workspace, bodies, dt)?;
+        #[cfg(feature = "bench-internals")]
+        {
+            let row_count = workspace.rows().len();
+            workspace.record_scalar_rows_solved(row_count);
+        }
+        Ok(())
     }
 
     pub(crate) fn solve_position_joint(
@@ -99,7 +115,11 @@ impl JointSolver {
     ) -> Result<(), CollisionError> {
         workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+        #[cfg(feature = "bench-internals")]
+        let row_count = workspace.prepared_rows_mut().len();
         solve_position_rows(workspace.prepared_rows_mut(), bodies, dt)?;
+        #[cfg(feature = "bench-internals")]
+        workspace.record_scalar_rows_solved(row_count);
         workspace.finish_joint_prepare()
     }
 
@@ -112,7 +132,11 @@ impl JointSolver {
     ) -> Result<(), CollisionError> {
         workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+        #[cfg(feature = "bench-internals")]
+        let row_count = workspace.prepared_rows_mut().len();
         solve_velocity_rows(workspace.prepared_rows_mut(), bodies, dt)?;
+        #[cfg(feature = "bench-internals")]
+        workspace.record_scalar_rows_solved(row_count);
         workspace.finish_joint_prepare()
     }
 

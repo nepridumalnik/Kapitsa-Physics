@@ -175,12 +175,16 @@ impl SolverWorkspace {
         JointSolver::begin_step(joint_workspace);
 
         for _ in 0..config.velocity_iterations {
+            #[cfg(feature = "bench-internals")]
+            joint_workspace.record_velocity_iteration();
             self.solve_velocity_iteration(bodies, manifolds)?;
             for (joint_index, joint) in joints.iter().copied().enumerate() {
                 JointSolver::solve_velocity_joint(joint_workspace, bodies, joint, joint_index, dt)?;
             }
         }
         for _ in 0..config.position_iterations {
+            #[cfg(feature = "bench-internals")]
+            joint_workspace.record_position_iteration();
             self.solve_position_iteration(bodies, manifolds, config)?;
             for (joint_index, joint) in joints.iter().copied().enumerate() {
                 JointSolver::solve_position_joint(joint_workspace, bodies, joint, joint_index, dt)?;

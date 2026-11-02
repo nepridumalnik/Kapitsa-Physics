@@ -267,7 +267,7 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
         .sum::<f64>()
         / samples.len() as f64;
     println!(
-        "phase={phase} parts={parts} joints={} workers={workers} step_ms_min/p50/p95/p99/max={:.4}/{:.4}/{:.4}/{:.4}/{:.4} sim_x={:.2} allocs_p50/p95={}/{} bytes_p50/p95={}/{} retained_kib={} peak_scratch_kib={} growth_bytes={} joint_prepare_us={:.2} solver_prepare_us={:.2} solver_iterations_us={:.2} collision_us={:.2} island_build_us={:.2} islands={} largest_island_bodies/joints/contacts={}/{}/{} candidates/contacts={}/{}",
+        "phase={phase} parts={parts} joints={} workers={workers} step_ms_min/p50/p95/p99/max={:.4}/{:.4}/{:.4}/{:.4}/{:.4} sim_x={:.2} allocs_p50/p95={}/{} bytes_p50/p95={}/{} retained_kib={} peak_scratch_kib={} growth_bytes={} joint_prepare_us={:.2} solver_prepare_us={:.2} solver_iterations_us={:.2} joint_rows_prepared={} scalar_rows_solved={} inverse_inertia_updates={} block_rows_solved={} warm_starts={} colors={} joint_sweeps_pos/vel={}/{} collision_us={:.2} island_build_us={:.2} islands={} largest_island_bodies/joints/contacts={}/{}/{} candidates/contacts={}/{}",
         parts - 1,
         milliseconds(min.elapsed),
         milliseconds(p50.elapsed),
@@ -285,6 +285,14 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
         micros(metrics.joint_constraint_prepare),
         micros(metrics.solver_prepare),
         micros(metrics.solver_iterations),
+        metrics.joint_prepared_rows,
+        metrics.joint_scalar_rows_solved,
+        metrics.joint_inverse_inertia_updates,
+        metrics.joint_block_rows_solved,
+        metrics.joint_velocity_warm_starts,
+        metrics.joint_colors,
+        metrics.joint_position_iterations,
+        metrics.joint_velocity_iterations,
         micros(collision_time(metrics)),
         micros(metrics.island_build),
         metrics.island_count,

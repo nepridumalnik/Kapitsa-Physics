@@ -1076,6 +1076,9 @@ impl CollisionSystem {
         }
 
         for island in self.solver_islands.iter().take(island_count) {
+            #[cfg(feature = "bench-internals")]
+            self.benchmark_metrics
+                .record_joint_solver_counters(island.joint_workspace.counters());
             self.context
                 .joint_break_events
                 .try_reserve(island.joint_workspace.break_events().len())

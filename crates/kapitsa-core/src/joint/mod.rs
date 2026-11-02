@@ -3,6 +3,7 @@ mod common;
 mod cone_twist;
 mod cylindrical;
 mod d6;
+pub(crate) mod diagnostics;
 mod distance;
 mod error;
 mod event;

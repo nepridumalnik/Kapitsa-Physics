@@ -26,6 +26,8 @@ pub(crate) struct JointWorkspace {
     previous_row_end: usize,
     reactions: Vec<JointReaction>,
     break_events: Vec<JointBreakEvent>,
+    #[cfg(feature = "bench-internals")]
+    counters: super::diagnostics::SolverCounters,
 }
 
 impl JointWorkspace {
@@ -45,6 +47,8 @@ impl JointWorkspace {
             previous_row_end: 0,
             reactions: Vec::new(),
             break_events: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            counters: super::diagnostics::SolverCounters::ZERO,
         }
     }
 
@@ -57,6 +61,10 @@ impl JointWorkspace {
         self.previous_row_end = 0;
         self.reactions.clear();
         self.break_events.clear();
+        #[cfg(feature = "bench-internals")]
+        {
+            self.counters = super::diagnostics::SolverCounters::ZERO;
+        }
         for row in &mut self.rows {
             row.accumulated_multiplier = 0.0;
             row.accumulated_impulse = 0.0;
@@ -78,6 +86,10 @@ impl JointWorkspace {
         self.previous_row_end = 0;
         self.reactions.clear();
         self.break_events.clear();
+        #[cfg(feature = "bench-internals")]
+        {
+            self.counters = super::diagnostics::SolverCounters::ZERO;
+        }
     }
 
     pub(crate) fn begin_prepare(&mut self) {
@@ -119,6 +131,13 @@ impl JointWorkspace {
     }
 
     pub(crate) fn finish_prepare(&mut self) {
+        #[cfg(feature = "bench-internals")]
+        {
+            self.counters.prepared_rows = self
+                .counters
+                .prepared_rows
+                .saturating_add(self.preparing_rows.len() as u64);
+        }
         std::mem::swap(&mut self.rows, &mut self.preparing_rows);
         std::mem::swap(
             &mut self.row_joint_indices,
@@ -170,6 +189,11 @@ impl JointWorkspace {
                 owners.fill(self.active_joint_index);
             }
             self.update_joint_id(joint_id)?;
+            #[cfg(feature = "bench-internals")]
+            {
+                self.counters.prepared_rows =
+                    self.counters.prepared_rows.saturating_add(new_count as u64);
+            }
             self.preparing_rows.clear();
             self.preparing_joint_indices.clear();
             self.preparing_joint_ids.clear();
@@ -194,6 +218,11 @@ impl JointWorkspace {
             std::iter::repeat_n(self.active_joint_index, new_count),
         );
         self.update_joint_id(joint_id)?;
+        #[cfg(feature = "bench-internals")]
+        {
+            self.counters.prepared_rows =
+                self.counters.prepared_rows.saturating_add(new_count as u64);
+        }
         self.preparing_rows.clear();
         self.preparing_joint_indices.clear();
         self.preparing_joint_ids.clear();
@@ -207,6 +236,27 @@ impl JointWorkspace {
 
     pub(crate) fn rows_mut(&mut self) -> &mut [ConstraintRow] {
         &mut self.rows
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_position_iteration(&mut self) {
+        self.counters.position_iterations = self.counters.position_iterations.saturating_add(1);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_velocity_iteration(&mut self) {
+        self.counters.velocity_iterations = self.counters.velocity_iterations.saturating_add(1);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_scalar_rows_solved(&mut self, rows: usize) {
+        self.counters.scalar_rows_solved =
+            self.counters.scalar_rows_solved.saturating_add(rows as u64);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn counters(&self) -> super::diagnostics::SolverCounters {
+        self.counters
     }
 
     pub(crate) fn set_joint_index(&mut self, index: usize, id: crate::world::JointId) {
