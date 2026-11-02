@@ -210,7 +210,7 @@ fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
             },
         }];
         if warm_start {
-            cache.warm_start_solver(&mut manifolds, 1.0).unwrap();
+            cache.warm_start_solver(&mut manifolds, 1.0, 0.01).unwrap();
         }
         let initial_energy = kinetic_energy(bodies[1].body());
         SolverWorkspace::default()

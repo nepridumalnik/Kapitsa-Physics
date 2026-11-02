@@ -17,7 +17,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S07 | Многоточечный Convex × Convex manifold | NOT AUDITED |
 | S08 | Стабильная идентичность геометрических фич | NOT AUDITED |
 | S09 | Масштабно-корректные геометрические допуски | MITIGATED — b1c2738; translation/rounding behavior requires numerical validation |
-| S10 | Геометрическая валидация ContactCache | NOT AUDITED |
+| S10 | Геометрическая валидация ContactCache | MITIGATED — validate both body-local anchors within contact_offset; cache regression and collision suite passed |
 | S11 | Корректное масштабирование warm-start | MITIGATED — 00b191d; policy requires numerical validation |
 | S12 | Persistent contact manifold | NOT AUDITED |
 | S13 | Численная устойчивость трения | MITIGATED — c1e2fd4; conditioning threshold requires numerical validation |

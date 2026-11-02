@@ -950,7 +950,11 @@ impl CollisionSystem {
     ) -> Result<(), CollisionError> {
         self.context.joint_break_events.clear();
         if let Some(cache) = self.contact_cache.as_ref() {
-            cache.warm_start_solver(&mut self.context.solver_manifolds, dt)?;
+            cache.warm_start_solver(
+                &mut self.context.solver_manifolds,
+                dt,
+                self.config.contact_offset,
+            )?;
         }
         #[cfg(feature = "bench-internals")]
         let island_started = std::time::Instant::now();

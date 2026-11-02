@@ -22,6 +22,8 @@ struct ContactKey {
 #[derive(Clone, Copy)]
 struct CachedImpulse {
     normal: Vec3,
+    local_a: Vec3,
+    local_b: Vec3,
     normal_impulse: f64,
     tangent_world: Vec3,
 }
@@ -48,8 +50,9 @@ impl ContactCache {
         &self,
         manifolds: &mut [SolverManifold],
         dt: f64,
+        contact_offset: f64,
     ) -> Result<(), CollisionError> {
-        if !dt.is_finite() || dt <= 0.0 {
+        if !dt.is_finite() || dt <= 0.0 || !contact_offset.is_finite() || contact_offset < 0.0 {
             return Err(CollisionError::ArithmeticOverflow);
         }
         let impulse_scale = match self.current_dt {
@@ -64,7 +67,7 @@ impl ContactCache {
             Some(_) => return Err(CollisionError::ArithmeticOverflow),
         };
         for manifold in manifolds {
-            self.warm_start_manifold(manifold, impulse_scale)?;
+            self.warm_start_manifold(manifold, impulse_scale, contact_offset)?;
         }
         Ok(())
     }
@@ -73,6 +76,7 @@ impl ContactCache {
         &self,
         solver_manifold: &mut SolverManifold,
         impulse_scale: f64,
+        contact_offset: f64,
     ) -> Result<(), CollisionError> {
         let pair = solver_manifold.manifold.pair;
         for index in 0..solver_manifold.manifold.len() {
@@ -90,6 +94,20 @@ impl ContactCache {
                 continue;
             };
             if normal.dot(cached.normal) < MINIMUM_NORMAL_DOT {
+                continue;
+            }
+            // A feature can be reused for a different point, especially on
+            // smooth shapes. Reject the impulse when either body-local anchor
+            // has moved beyond the contact generation distance.
+            let anchor_matches = |current: Vec3, previous: Vec3| {
+                current
+                    .checked_sub(previous)
+                    .and_then(Vec3::checked_length)
+                    .is_some_and(|distance| distance <= contact_offset)
+            };
+            if !anchor_matches(contact.local_a, cached.local_a)
+                || !anchor_matches(contact.local_b, cached.local_b)
+            {
                 continue;
             }
             let (tangent_a, tangent_b) = tangent_basis(normal)?;
@@ -201,6 +219,8 @@ impl ContactCache {
                     },
                     CachedImpulse {
                         normal,
+                        local_a: contact.local_a,
+                        local_b: contact.local_b,
                         normal_impulse: contact.normal_impulse,
                         tangent_world,
                     },
