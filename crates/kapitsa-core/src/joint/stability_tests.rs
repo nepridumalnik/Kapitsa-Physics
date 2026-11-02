@@ -315,6 +315,137 @@ fn fixed_joint_chain_and_branch_sizes_report_residual_by_step() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
+#[ignore = "Release comparison of post-integration Jv error and velocity projection work"]
+fn diagnose_free_asymmetric_fixed_joint_velocity_projection_work() {
+    for count in [2, 100] {
+        for dt in [DT, DT * 0.5] {
+            for (label, pcg_iterations) in [("scalar", None), ("global_pcg", Some(64))] {
+                let mut world = PhysicsWorld::new();
+                let mut bodies = Vec::with_capacity(count);
+                let mut centers = Vec::with_capacity(count);
+                for index in 0..count {
+                    let scale = 0.7 + (index % 5) as f64 * 0.13;
+                    let mass = MassProperties::new(
+                        0.8 + (index % 7) as f64 * 0.17,
+                        Vec3::new(
+                            (index % 3) as f64 * 0.02,
+                            -((index % 5) as f64) * 0.015,
+                            (index % 2) as f64 * 0.01,
+                        ),
+                        Mat3::from_diagonal(Vec3::new(scale * 0.6, scale * 0.8, scale * 1.1)),
+                    )
+                    .unwrap();
+                    let body = RigidBody::new_dynamic(
+                        Transform::new(Vec3::X * index as f64, Quat::IDENTITY).unwrap(),
+                        mass,
+                    )
+                    .unwrap();
+                    centers.push(body.world_center_of_mass().unwrap().unwrap());
+                    bodies.push(world.add_body(body).unwrap());
+                }
+                let common = Joint::Fixed(FixedJoint::new(JointCommon::new(
+                    JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+                    JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+                )));
+                for pair in bodies.windows(2) {
+                    world.add_joint(pair[0], pair[1], common).unwrap();
+                }
+                let initial_angular_velocity = Vec3::new(0.15, -0.12, 0.2);
+                let base_linear_velocity = Vec3::new(0.4, -0.2, 0.1);
+                for (index, id) in bodies.iter().copied().enumerate() {
+                    let velocity =
+                        base_linear_velocity + initial_angular_velocity.cross(centers[index]);
+                    let body = world.body_mut(id).unwrap();
+                    body.set_linear_velocity(velocity).unwrap();
+                    body.set_angular_velocity(initial_angular_velocity).unwrap();
+                }
+                if let Some(iterations) = pcg_iterations {
+                    world.set_joint_global_velocity_pcg_for_bench(iterations, true);
+                }
+
+                let initial_energy = physical_kinetic_energy(&world);
+                let steps = (1.5 / dt).round() as usize;
+                let mut integration_delta = crate::joint::diagnostics::EnergyComponents::default();
+                let mut velocity_delta = crate::joint::diagnostics::EnergyComponents::default();
+                let mut position_delta = crate::joint::diagnostics::EnergyComponents::default();
+                let mut impulse_work = 0.0;
+                let mut quadratic_work = 0.0;
+                let mut first_metrics = None;
+                let mut last_metrics = None;
+                for _ in 0..steps {
+                    world.step(dt).unwrap();
+                    let metrics = world.physics_step_metrics().joints;
+                    integration_delta.add_assign(
+                        metrics
+                            .energy_after_integration
+                            .delta(metrics.energy_before_integration),
+                    );
+                    velocity_delta.add_assign(
+                        metrics
+                            .energy_after_velocity_solver
+                            .delta(metrics.energy_after_integration),
+                    );
+                    position_delta.add_assign(
+                        metrics
+                            .energy_after_position_solver
+                            .delta(metrics.energy_after_velocity_solver),
+                    );
+                    impulse_work += metrics.velocity_projection_impulse_work_j;
+                    quadratic_work += metrics.velocity_projection_quadratic_work_j;
+                    first_metrics.get_or_insert(metrics);
+                    last_metrics = Some(metrics);
+                }
+                let first = first_metrics.unwrap();
+                let last = last_metrics.unwrap();
+                let measured_velocity_delta = velocity_delta.translational_j
+                    + velocity_delta.rotational_j
+                    + velocity_delta.potential_j;
+                let predicted_velocity_delta = impulse_work + quadratic_work;
+                let final_energy = physical_kinetic_energy(&world);
+                println!(
+                    "free_fixed_graph={count} solver={label} dt={dt:.9e}s steps={steps} kinetic_drift={:+.9e}% initial_Jv={:.9e}m/s/{:.9e}rad/s final_Jv={:.9e}m/s/{:.9e}rad/s energy_delta(integration/velocity/position)={:+.9e}/{:+.9e}/{:+.9e}J impulse_work={impulse_work:+.9e}J quadratic_work={quadratic_work:+.9e}J work_prediction={predicted_velocity_delta:+.9e}J closure_error={:+.9e}J",
+                    (final_energy - initial_energy) / initial_energy * 100.0,
+                    first.initial_velocity_linear_residual_mps,
+                    first.initial_velocity_angular_residual_radps,
+                    last.post_velocity_linear_residual_mps,
+                    last.post_velocity_angular_residual_radps,
+                    integration_delta.translational_j
+                        + integration_delta.rotational_j
+                        + integration_delta.potential_j,
+                    measured_velocity_delta,
+                    position_delta.translational_j
+                        + position_delta.rotational_j
+                        + position_delta.potential_j,
+                    predicted_velocity_delta - measured_velocity_delta,
+                );
+                assert!((predicted_velocity_delta - measured_velocity_delta).abs() < 1.0e-8);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn physical_kinetic_energy(world: &PhysicsWorld) -> f64 {
+    world
+        .bodies()
+        .map(|(_, body)| {
+            let Some(mass) = body.physics().mass() else {
+                return 0.0;
+            };
+            let state = body.state();
+            let rotation = state.transform().rotation();
+            let local_angular_velocity = rotation
+                .conjugate()
+                .rotate_vector(state.angular_velocity())
+                .unwrap();
+            0.5 * mass.mass() * state.linear_velocity().length_squared()
+                + 0.5 * local_angular_velocity.dot(mass.inertia() * local_angular_velocity)
+        })
+        .sum()
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 #[ignore = "diagnostic of loaded velocity convergence on joint graphs without contacts"]
 fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
     for (name, count, branching) in [
@@ -494,6 +625,89 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
                 metrics.post_joint_anchor_error_m,
                 metrics.post_joint_frame_error_rad,
             );
+        }
+    }
+
+    for (name, branching) in [("chain_100", false), ("branch_100", true)] {
+        for relaxation in [1.0, 1.3, 1.6, 1.8, 1.9, 1.95] {
+            let mut world = loaded_fixed_joint_graph(100, branching, 8, false, false);
+            world.set_joint_velocity_relaxation_for_bench(relaxation);
+            let first_body = world.bodies().next().unwrap().0;
+            let force = world
+                .bodies()
+                .filter_map(|(_, body)| body.physics().mass())
+                .map(|mass| mass.mass())
+                .sum::<f64>()
+                * 9.81
+                * 1.3;
+            let point = world
+                .body(first_body)
+                .unwrap()
+                .state()
+                .transform()
+                .transform_point(Vec3::Y * 0.25);
+            world
+                .body_mut(first_body)
+                .unwrap()
+                .apply_force_at_point(Vec3::Y * force, point)
+                .unwrap();
+            let started = Instant::now();
+            world.step(DT).unwrap();
+            let metrics = world.physics_step_metrics().joints;
+            world.step(DT).unwrap();
+            let next = world.physics_step_metrics().joints;
+            println!(
+                "graph={name} solver=relaxed_gs relaxation={relaxation:.2} elapsed_us={} residual={:.6e}m/s/{:.6e}rad/s next_predicted_anchor={:.6e}m",
+                started.elapsed().as_micros(),
+                metrics.post_velocity_linear_residual_mps,
+                metrics.post_velocity_angular_residual_radps,
+                next.pre_velocity_anchor_error_m,
+            );
+        }
+    }
+
+    for (name, branching) in [("chain_100", false), ("branch_100", true)] {
+        for incomplete_cholesky_preconditioner in [false, true] {
+            for max_pcg_iterations in [64, 128, 256] {
+                let mut world = loaded_fixed_joint_graph(100, branching, 8, false, false);
+                world.set_joint_global_velocity_pcg_for_bench(
+                    max_pcg_iterations,
+                    incomplete_cholesky_preconditioner,
+                );
+                let first_body = world.bodies().next().unwrap().0;
+                let force = world
+                    .bodies()
+                    .filter_map(|(_, body)| body.physics().mass())
+                    .map(|mass| mass.mass())
+                    .sum::<f64>()
+                    * 9.81
+                    * 1.3;
+                let point = world
+                    .body(first_body)
+                    .unwrap()
+                    .state()
+                    .transform()
+                    .transform_point(Vec3::Y * 0.25);
+                world
+                    .body_mut(first_body)
+                    .unwrap()
+                    .apply_force_at_point(Vec3::Y * force, point)
+                    .unwrap();
+
+                let started = Instant::now();
+                world.step(DT).unwrap();
+                let first = world.physics_step_metrics().joints;
+                world.step(DT).unwrap();
+                let second = world.physics_step_metrics().joints;
+                println!(
+                    "graph={name} solver=global_pcg incomplete_cholesky_preconditioner={incomplete_cholesky_preconditioner} max_iterations={max_pcg_iterations} actual_iterations={} elapsed_us={} velocity_residual={:.6e}m/s/{:.6e}rad/s next_predicted_anchor={:.6e}m",
+                    first.velocity_pcg_iterations,
+                    started.elapsed().as_micros(),
+                    first.post_velocity_linear_residual_mps,
+                    first.post_velocity_angular_residual_radps,
+                    second.pre_velocity_anchor_error_m,
+                );
+            }
         }
     }
 }

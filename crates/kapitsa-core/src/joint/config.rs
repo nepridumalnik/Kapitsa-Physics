@@ -81,8 +81,17 @@ pub(crate) struct JointSolverOptions {
     reaction_mode: ReactionMode,
     projection: JointProjection,
     iterations: JointIterations,
+    velocity_relaxation: f64,
     #[cfg(feature = "bench-internals")]
     alternate_velocity_sweeps: bool,
+    #[cfg(feature = "bench-internals")]
+    global_velocity_pcg_max_iterations: u32,
+    #[cfg(feature = "bench-internals")]
+    global_velocity_pcg_incomplete_cholesky: bool,
+    #[cfg(feature = "bench-internals")]
+    global_position_pcg_max_iterations: u32,
+    #[cfg(feature = "bench-internals")]
+    global_position_pcg_incomplete_cholesky: bool,
 }
 
 impl JointSolverOptions {
@@ -93,8 +102,17 @@ impl JointSolverOptions {
             reaction_mode: ReactionMode::VelocityOnly,
             projection: JointProjection::ScalarGaussSeidel,
             iterations: JointIterations::Fixed,
+            velocity_relaxation: 1.0,
             #[cfg(feature = "bench-internals")]
             alternate_velocity_sweeps: false,
+            #[cfg(feature = "bench-internals")]
+            global_velocity_pcg_max_iterations: 0,
+            #[cfg(feature = "bench-internals")]
+            global_velocity_pcg_incomplete_cholesky: false,
+            #[cfg(feature = "bench-internals")]
+            global_position_pcg_max_iterations: 0,
+            #[cfg(feature = "bench-internals")]
+            global_position_pcg_incomplete_cholesky: false,
         }
     }
 
@@ -145,6 +163,16 @@ impl JointSolverOptions {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) const fn with_velocity_relaxation(mut self, relaxation: f64) -> Self {
+        self.velocity_relaxation = relaxation;
+        self
+    }
+
+    pub(crate) const fn velocity_relaxation(self) -> f64 {
+        self.velocity_relaxation
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) const fn with_alternating_velocity_sweeps(mut self, enabled: bool) -> Self {
         self.alternate_velocity_sweeps = enabled;
         self
@@ -153,6 +181,48 @@ impl JointSolverOptions {
     #[cfg(feature = "bench-internals")]
     pub(crate) const fn alternates_velocity_sweeps(self) -> bool {
         self.alternate_velocity_sweeps
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn with_global_velocity_pcg(
+        mut self,
+        max: u32,
+        incomplete_cholesky_preconditioner: bool,
+    ) -> Self {
+        self.global_velocity_pcg_max_iterations = max;
+        self.global_velocity_pcg_incomplete_cholesky = incomplete_cholesky_preconditioner;
+        self
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn global_velocity_pcg_max_iterations(self) -> u32 {
+        self.global_velocity_pcg_max_iterations
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn global_velocity_pcg_incomplete_cholesky(self) -> bool {
+        self.global_velocity_pcg_incomplete_cholesky
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn with_global_position_pcg(
+        mut self,
+        max: u32,
+        incomplete_cholesky_preconditioner: bool,
+    ) -> Self {
+        self.global_position_pcg_max_iterations = max;
+        self.global_position_pcg_incomplete_cholesky = incomplete_cholesky_preconditioner;
+        self
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn global_position_pcg_max_iterations(self) -> u32 {
+        self.global_position_pcg_max_iterations
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn global_position_pcg_incomplete_cholesky(self) -> bool {
+        self.global_position_pcg_incomplete_cholesky
     }
 }
 

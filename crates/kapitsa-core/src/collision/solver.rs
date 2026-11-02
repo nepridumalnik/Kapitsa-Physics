@@ -1,9 +1,10 @@
 pub(crate) use crate::constraint::SolverBody;
 use crate::{
     constraint,
+    gravity::CentralGravity,
     joint::{
-        IterationRange, JointConstraint, JointIterations, JointSolver, JointSolverStep,
-        JointTolerance, JointWorkspace,
+        IterationRange, JointConstraint, JointIterations, JointSolver, JointSolverOptions,
+        JointSolverStep, JointTolerance, JointWorkspace,
     },
     rigid_body::RigidBody,
 };
@@ -48,6 +49,123 @@ struct SolverPoint {
 #[derive(Default)]
 pub(crate) struct SolverWorkspace {
     points: Vec<SolverPoint>,
+}
+
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy)]
+struct VelocitySnapshot {
+    mass: crate::mass::MassProperties,
+    rotation: kapitsa_math::Quat,
+    linear: Vec3,
+    angular: Vec3,
+}
+
+#[cfg(feature = "bench-internals")]
+fn snapshot_velocities(bodies: &[SolverBody]) -> Vec<Option<VelocitySnapshot>> {
+    bodies
+        .iter()
+        .map(|solver_body| {
+            let body = solver_body.body();
+            let mass = body.physics().mass()?;
+            let state = body.state();
+            Some(VelocitySnapshot {
+                mass,
+                rotation: state.transform().rotation(),
+                linear: state.linear_velocity(),
+                angular: state.angular_velocity(),
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "bench-internals")]
+fn velocity_projection_work(
+    before: &[Option<VelocitySnapshot>],
+    bodies: &[SolverBody],
+) -> Result<(f64, f64), CollisionError> {
+    if before.len() != bodies.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    let mut impulse_work = 0.0;
+    let mut quadratic_work = 0.0;
+    for (before, solver_body) in before.iter().zip(bodies) {
+        let Some(before) = before else { continue };
+        let state = solver_body.state();
+        let linear_delta = state
+            .linear_velocity()
+            .checked_sub(before.linear)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let angular_delta = state
+            .angular_velocity()
+            .checked_sub(before.angular)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let linear_impulse = linear_delta
+            .checked_mul_scalar(before.mass.mass())
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let local_angular_delta = before
+            .rotation
+            .conjugate()
+            .rotate_vector(angular_delta)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let angular_impulse = before
+            .rotation
+            .rotate_vector(before.mass.inertia() * local_angular_delta)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        impulse_work += before.linear.dot(linear_impulse) + before.angular.dot(angular_impulse);
+        quadratic_work +=
+            0.5 * (linear_delta.dot(linear_impulse) + angular_delta.dot(angular_impulse));
+    }
+    if impulse_work.is_finite() && quadratic_work.is_finite() {
+        Ok((impulse_work, quadratic_work))
+    } else {
+        Err(CollisionError::ArithmeticOverflow)
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn body_energy_components(
+    body: &RigidBody,
+    state: crate::rigid_body::BodyState,
+    gravity: Option<CentralGravity>,
+) -> crate::joint::diagnostics::EnergyComponents {
+    let Some(mass) = body.physics().mass() else {
+        return crate::joint::diagnostics::EnergyComponents::default();
+    };
+    let angular_velocity = state.angular_velocity();
+    let rotation = state.transform().rotation();
+    let rotational = rotation
+        .conjugate()
+        .rotate_vector(angular_velocity)
+        .map(|local_omega| mass.inertia() * local_omega)
+        .and_then(|local_i_omega| rotation.rotate_vector(local_i_omega))
+        .map_or(0.0, |world_i_omega| {
+            0.5 * angular_velocity.dot(world_i_omega)
+        });
+    let mut potential = 0.0;
+    if let Some(gravity) = gravity {
+        let center = state.transform().transform_point(mass.center_of_mass());
+        let radius = (center - gravity.center()).length();
+        if radius > 0.0 && radius.is_finite() {
+            potential = -gravity.gravitational_parameter() * mass.mass() / radius;
+        }
+    }
+    crate::joint::diagnostics::EnergyComponents {
+        translational_j: 0.5 * mass.mass() * state.linear_velocity().length_squared(),
+        rotational_j: rotational,
+        potential_j: potential,
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn energy_components(
+    bodies: &[SolverBody],
+    gravity: Option<CentralGravity>,
+) -> crate::joint::diagnostics::EnergyComponents {
+    let mut energy = crate::joint::diagnostics::EnergyComponents::default();
+    for body in bodies {
+        energy.add_assign(body_energy_components(body.body(), body.state(), gravity));
+    }
+    energy
 }
 
 pub(crate) struct SolverIsland {
@@ -132,6 +250,7 @@ impl SolverWorkspace {
         self.solve_position_constraints(bodies, manifolds, config)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn solve_with_joints(
         &mut self,
         bodies: &mut [SolverBody],
@@ -140,7 +259,10 @@ impl SolverWorkspace {
         joints: &[JointConstraint],
         config: CollisionConfig,
         joint_solver_step: JointSolverStep<'_>,
+        gravity: Option<CentralGravity>,
     ) -> Result<(), CollisionError> {
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = gravity;
         if joints.is_empty() {
             return self.solve(bodies, manifolds, config);
         }
@@ -153,6 +275,12 @@ impl SolverWorkspace {
         self.prepare_points(bodies, manifolds, config)?;
         self.warm_start(bodies, manifolds)?;
         JointSolver::begin_step(joint_workspace);
+        #[cfg(feature = "bench-internals")]
+        let velocity_before_projection = snapshot_velocities(bodies);
+        #[cfg(feature = "bench-internals")]
+        let mut velocity_pcg_before_recorded = false;
+        #[cfg(feature = "bench-internals")]
+        let mut position_pcg_before_recorded = false;
 
         if let JointIterations::Adaptive {
             position,
@@ -183,6 +311,7 @@ impl SolverWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            joint_workspace.record_initial_velocity_residual();
             joint_workspace.record_pre_velocity_geometry();
         }
         for velocity_iteration in 0..config.velocity_iterations {
@@ -197,15 +326,71 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             let reverse_joint_sweep =
                 joint_solver_options.alternates_velocity_sweeps() && velocity_iteration % 2 == 1;
+            #[cfg(feature = "bench-internals")]
+            {
+                let pcg_max_iterations = joint_solver_options.global_velocity_pcg_max_iterations();
+                if pcg_max_iterations > 0 {
+                    let energy_before_pcg = energy_components(bodies, gravity);
+                    #[cfg(feature = "bench-internals")]
+                    if !velocity_pcg_before_recorded {
+                        joint_workspace.record_energy(
+                            crate::joint::diagnostics::EnergyStage::BeforeVelocityPcg,
+                            energy_before_pcg,
+                        );
+                        velocity_pcg_before_recorded = true;
+                    }
+                    let incomplete_cholesky_preconditioner =
+                        joint_solver_options.global_velocity_pcg_incomplete_cholesky();
+                    let pcg_iterations = JointSolver::solve_velocity_pcg(
+                        joint_workspace,
+                        bodies,
+                        joints,
+                        dt,
+                        pcg_max_iterations,
+                        incomplete_cholesky_preconditioner,
+                    )?;
+                    #[cfg(feature = "bench-internals")]
+                    if pcg_iterations.is_some() {
+                        let energy_after_pcg = energy_components(bodies, gravity);
+                        joint_workspace.record_energy(
+                            crate::joint::diagnostics::EnergyStage::AfterVelocityPcg,
+                            energy_after_pcg,
+                        );
+                        joint_workspace.record_energy_delta(
+                            crate::joint::diagnostics::EnergyStage::VelocityPcgDelta,
+                            energy_before_pcg,
+                            energy_after_pcg,
+                        );
+                    }
+                    if pcg_iterations.is_none() {
+                        self.solve_joint_velocity_sweep(
+                            bodies,
+                            joint_workspace,
+                            joints,
+                            joint_solver_step,
+                            velocity_iteration == 0,
+                            reverse_joint_sweep,
+                        )?;
+                    }
+                } else {
+                    self.solve_joint_velocity_sweep(
+                        bodies,
+                        joint_workspace,
+                        joints,
+                        joint_solver_step,
+                        velocity_iteration == 0,
+                        reverse_joint_sweep,
+                    )?;
+                }
+            }
             #[cfg(not(feature = "bench-internals"))]
-            let reverse_joint_sweep = false;
             self.solve_joint_velocity_sweep(
                 bodies,
                 joint_workspace,
                 joints,
                 joint_solver_step,
                 velocity_iteration == 0,
-                reverse_joint_sweep,
+                false,
             )?;
             #[cfg(feature = "bench-internals")]
             {
@@ -215,6 +400,17 @@ impl SolverWorkspace {
                 }
             }
         }
+        #[cfg(feature = "bench-internals")]
+        {
+            let (impulse_work, quadratic_work) =
+                velocity_projection_work(&velocity_before_projection, bodies)?;
+            joint_workspace.record_velocity_projection_work(impulse_work, quadratic_work);
+        }
+        #[cfg(feature = "bench-internals")]
+        joint_workspace.record_energy(
+            crate::joint::diagnostics::EnergyStage::AfterVelocitySolver,
+            energy_components(bodies, gravity),
+        );
         #[cfg(feature = "bench-internals")]
         {
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
@@ -229,22 +425,80 @@ impl SolverWorkspace {
                 JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
                 joint_workspace.record_pre_joint_geometry();
             }
-            for (joint_index, joint) in joints.iter().copied().enumerate() {
-                JointSolver::solve_position_joint(
-                    joint_workspace,
-                    bodies,
-                    joint,
-                    joint_index,
-                    dt,
-                    joint_solver_options,
-                )?;
+            #[cfg(feature = "bench-internals")]
+            {
+                let pcg_max_iterations = joint_solver_options.global_position_pcg_max_iterations();
+                if pcg_max_iterations > 0 {
+                    let energy_before_pcg = energy_components(bodies, gravity);
+                    #[cfg(feature = "bench-internals")]
+                    if !position_pcg_before_recorded {
+                        joint_workspace.record_energy(
+                            crate::joint::diagnostics::EnergyStage::BeforePositionPcg,
+                            energy_before_pcg,
+                        );
+                        position_pcg_before_recorded = true;
+                    }
+                    let incomplete_cholesky_preconditioner =
+                        joint_solver_options.global_position_pcg_incomplete_cholesky();
+                    let pcg_iterations = JointSolver::solve_position_pcg(
+                        joint_workspace,
+                        bodies,
+                        joints,
+                        dt,
+                        pcg_max_iterations,
+                        incomplete_cholesky_preconditioner,
+                    )?;
+                    #[cfg(feature = "bench-internals")]
+                    if pcg_iterations.is_some() {
+                        let energy_after_pcg = energy_components(bodies, gravity);
+                        joint_workspace.record_energy(
+                            crate::joint::diagnostics::EnergyStage::AfterPositionPcg,
+                            energy_after_pcg,
+                        );
+                        joint_workspace.record_energy_delta(
+                            crate::joint::diagnostics::EnergyStage::PositionPcgDelta,
+                            energy_before_pcg,
+                            energy_after_pcg,
+                        );
+                    }
+                    if pcg_iterations.is_none() {
+                        self.solve_joint_position_sweep(
+                            bodies,
+                            joint_workspace,
+                            joints,
+                            dt,
+                            joint_solver_options,
+                        )?;
+                    }
+                } else {
+                    self.solve_joint_position_sweep(
+                        bodies,
+                        joint_workspace,
+                        joints,
+                        dt,
+                        joint_solver_options,
+                    )?;
+                }
             }
+            #[cfg(not(feature = "bench-internals"))]
+            self.solve_joint_position_sweep(
+                bodies,
+                joint_workspace,
+                joints,
+                dt,
+                joint_solver_options,
+            )?;
             #[cfg(feature = "bench-internals")]
             {
                 JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
                 joint_workspace.record_post_joint_geometry(_position_iteration == 0);
             }
         }
+        #[cfg(feature = "bench-internals")]
+        joint_workspace.record_energy(
+            crate::joint::diagnostics::EnergyStage::AfterPositionSolver,
+            energy_components(bodies, gravity),
+        );
         joint_workspace.collect_break_events(
             joints,
             bodies,
@@ -273,6 +527,7 @@ impl SolverWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            joint_workspace.record_initial_velocity_residual();
             joint_workspace.record_pre_velocity_geometry();
         }
         for outer_iteration in 0..velocity_outer {
@@ -388,6 +643,27 @@ impl SolverWorkspace {
                 joint_index,
                 joint_solver_step,
                 first_velocity_iteration,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn solve_joint_position_sweep(
+        &mut self,
+        bodies: &mut [SolverBody],
+        joint_workspace: &mut JointWorkspace,
+        joints: &[JointConstraint],
+        dt: f64,
+        options: JointSolverOptions,
+    ) -> Result<(), CollisionError> {
+        for (joint_index, joint) in joints.iter().copied().enumerate() {
+            JointSolver::solve_position_joint(
+                joint_workspace,
+                bodies,
+                joint,
+                joint_index,
+                dt,
+                options,
             )?;
         }
         Ok(())

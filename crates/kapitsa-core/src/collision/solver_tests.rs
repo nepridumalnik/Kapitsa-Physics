@@ -287,6 +287,7 @@ fn solve_with_joints_prepares_each_joint_before_one_sweep_in_phase_order() {
             &[joint],
             config,
             JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy()),
+            None,
         )
         .unwrap();
 
@@ -383,6 +384,7 @@ fn adaptive_joint_iterations_stop_at_minimum_or_report_the_max_residual() {
                 &[joint],
                 config,
                 JointSolverStep::new(1.0 / 60.0, options),
+                None,
             )
             .unwrap();
         let velocity_sweeps = joint_workspace
@@ -481,6 +483,7 @@ fn adaptive_joint_policy_leaves_contact_iteration_budget_unchanged() {
             &[joint],
             config,
             JointSolverStep::new(1.0 / 60.0, options),
+            None,
         )
         .unwrap();
 

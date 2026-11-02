@@ -173,6 +173,36 @@ impl CollisionSystem {
                 });
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_global_velocity_pcg_for_bench(
+        &mut self,
+        max_iterations: u32,
+        incomplete_cholesky_preconditioner: bool,
+    ) {
+        self.joint_solver_options = self
+            .joint_solver_options
+            .with_global_velocity_pcg(max_iterations, incomplete_cholesky_preconditioner);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_velocity_relaxation_for_bench(&mut self, relaxation: f64) {
+        assert!(relaxation.is_finite() && relaxation > 0.0 && relaxation < 2.0);
+        self.joint_solver_options = self
+            .joint_solver_options
+            .with_velocity_relaxation(relaxation);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_global_position_pcg_for_bench(
+        &mut self,
+        max_iterations: u32,
+        incomplete_cholesky_preconditioner: bool,
+    ) {
+        self.joint_solver_options = self
+            .joint_solver_options
+            .with_global_position_pcg(max_iterations, incomplete_cholesky_preconditioner);
+    }
+
     pub(crate) fn events(&self) -> &[CollisionEvent] {
         &self.events
     }
@@ -469,6 +499,22 @@ impl CollisionSystem {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn joint_solver_metrics(&self) -> crate::joint::diagnostics::JointSolverMetrics {
         self.joint_metrics
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_energy_before_integration(
+        &mut self,
+        energy: crate::joint::diagnostics::EnergyComponents,
+    ) {
+        self.joint_metrics.energy_before_integration = energy;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_energy_after_integration(
+        &mut self,
+        energy: crate::joint::diagnostics::EnergyComponents,
+    ) {
+        self.joint_metrics.energy_after_integration = energy;
     }
 
     #[cfg(feature = "bench-internals")]
@@ -977,6 +1023,7 @@ impl CollisionSystem {
         worker_count: usize,
         executor: &impl StepExecutor,
         dt: f64,
+        gravity: Option<crate::gravity::CentralGravity>,
     ) -> Result<(), CollisionError> {
         self.context.joint_break_events.clear();
         if let Some(cache) = self.contact_cache.as_ref() {
@@ -1157,6 +1204,7 @@ impl CollisionSystem {
                     &island.joints,
                     config,
                     joint_solver_step,
+                    gravity,
                 )?;
             }
         } else {
@@ -1175,6 +1223,7 @@ impl CollisionSystem {
                                 &island.joints,
                                 config,
                                 joint_solver_step,
+                                gravity,
                             ) {
                                 island.worker_error = Some(error);
                                 break;

@@ -128,6 +128,13 @@ struct SolverMassCacheStats {
     inverse_inertia_updates: u64,
 }
 
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Default)]
+struct GeneralizedImpulse {
+    linear: Vec3,
+    angular: Vec3,
+}
+
 impl SolverMassCacheStats {
     fn record(&mut self, status: SolverMassCacheStatus) {
         #[cfg(feature = "bench-internals")]
@@ -323,6 +330,64 @@ impl JointSolver {
         options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
         Self::velocity_sweep(workspace, bodies, dt, options, JointRowBuffer::Current)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn solve_velocity_pcg(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        joints: &[JointConstraint],
+        dt: f64,
+        max_iterations: u32,
+        incomplete_cholesky_preconditioner: bool,
+    ) -> Result<Option<usize>, CollisionError> {
+        Self::prepare(workspace, bodies, joints, dt)?;
+        let tolerance = super::JointTolerance {
+            linear_m: 1.0e-5,
+            angular_rad: 1.0e-5,
+            velocity_mps: 1.0e-4,
+            angular_velocity_radps: 1.0e-4,
+        };
+        let iterations = solve_velocity_pcg_prepared(
+            workspace.rows_mut(),
+            bodies,
+            max_iterations as usize,
+            tolerance,
+            incomplete_cholesky_preconditioner,
+        )?;
+        if let Some(iterations) = iterations {
+            workspace.record_velocity_pcg_iterations(iterations);
+        }
+        Ok(iterations)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn solve_position_pcg(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        joints: &[JointConstraint],
+        dt: f64,
+        max_iterations: u32,
+        incomplete_cholesky_preconditioner: bool,
+    ) -> Result<Option<usize>, CollisionError> {
+        Self::prepare(workspace, bodies, joints, dt)?;
+        let tolerance = super::JointTolerance {
+            linear_m: 1.0e-5,
+            angular_rad: 1.0e-5,
+            velocity_mps: 1.0e-4,
+            angular_velocity_radps: 1.0e-4,
+        };
+        let iterations = solve_position_pcg_prepared(
+            workspace.rows_mut(),
+            bodies,
+            max_iterations as usize,
+            tolerance,
+            incomplete_cholesky_preconditioner,
+        )?;
+        if let Some(iterations) = iterations {
+            workspace.record_position_pcg_iterations(iterations);
+        }
+        Ok(iterations)
     }
 
     pub(crate) fn solve_position_joint(
@@ -899,6 +964,714 @@ fn measure_prepared_rows(
     } else {
         Err(CollisionError::ArithmeticOverflow)
     }
+}
+
+#[cfg(feature = "bench-internals")]
+fn solve_position_pcg_prepared(
+    rows: &mut [ConstraintRow],
+    bodies: &mut [SolverBody],
+    max_iterations: usize,
+    tolerance: super::JointTolerance,
+    incomplete_cholesky_preconditioner: bool,
+) -> Result<Option<usize>, CollisionError> {
+    if rows.is_empty() {
+        return Ok(Some(0));
+    }
+    if max_iterations == 0
+        || rows.iter().any(|row| {
+            !row.position_enabled
+                || row.compliance != 0.0
+                || row.damping != 0.0
+                || row.force_bias != 0.0
+                || row.min_multiplier != f64::NEG_INFINITY
+                || row.max_multiplier != f64::INFINITY
+        })
+    {
+        return Ok(None);
+    }
+
+    let mut masses = Vec::new();
+    masses
+        .try_reserve_exact(bodies.len())
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    for body in bodies.iter() {
+        masses.push(SolverMass::from_body(body.body())?);
+    }
+
+    let mut residual = zero_f64_buffer(rows.len())?;
+    let mut diagonal = zero_f64_buffer(rows.len())?;
+    for (index, row) in rows.iter().copied().enumerate() {
+        if !row.is_valid(bodies.len()) {
+            return Err(CollisionError::InvalidContact);
+        }
+        residual[index] = -row.error;
+        let mass_a = *masses
+            .get(row.body_a)
+            .ok_or(CollisionError::InvalidContact)?;
+        let mass_b = *masses
+            .get(row.body_b)
+            .ok_or(CollisionError::InvalidContact)?;
+        diagonal[index] = mass_a.diagonal(row.linear_a, row.angular_a)?
+            + mass_b.diagonal(row.linear_b, row.angular_b)?;
+        if !residual[index].is_finite() || !diagonal[index].is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        if diagonal[index] <= f64::MIN_POSITIVE {
+            if residual[index].abs() > position_row_tolerance(row, tolerance) {
+                return Ok(None);
+            }
+            diagonal[index] = 1.0;
+            residual[index] = 0.0;
+        }
+    }
+    if position_vector_converged(rows, &residual, tolerance) {
+        return Ok(Some(0));
+    }
+
+    let preconditioner = if incomplete_cholesky_preconditioner {
+        let Some(preconditioner) =
+            build_incomplete_cholesky_preconditioner(rows, &masses, &diagonal)?
+        else {
+            return Ok(None);
+        };
+        Some(preconditioner)
+    } else {
+        None
+    };
+    let mut solution = zero_f64_buffer(rows.len())?;
+    let mut preconditioned = zero_f64_buffer(rows.len())?;
+    let mut direction = zero_f64_buffer(rows.len())?;
+    let mut product = zero_f64_buffer(rows.len())?;
+    apply_velocity_preconditioner(
+        &residual,
+        &diagonal,
+        preconditioner.as_ref(),
+        &mut preconditioned,
+    )?;
+    direction.copy_from_slice(&preconditioned);
+    let mut residual_product = checked_dot_product(&residual, &preconditioned)?;
+    if residual_product <= f64::MIN_POSITIVE {
+        return Ok(None);
+    }
+
+    let mut body_impulses = zero_impulse_buffer(bodies.len())?;
+    let mut body_responses = zero_impulse_buffer(bodies.len())?;
+    let mut completed_iterations = 0;
+    for iteration in 0..max_iterations {
+        global_velocity_matrix_vector(
+            rows,
+            &direction,
+            &masses,
+            &mut body_impulses,
+            &mut body_responses,
+            &mut product,
+        )?;
+        let denominator = checked_dot_product(&direction, &product)?;
+        if denominator <= f64::MIN_POSITIVE {
+            return Ok(None);
+        }
+        let alpha = residual_product / denominator;
+        if !alpha.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        for index in 0..rows.len() {
+            solution[index] += alpha * direction[index];
+            residual[index] -= alpha * product[index];
+            if !solution[index].is_finite() || !residual[index].is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+        }
+        completed_iterations = iteration + 1;
+        if position_vector_converged(rows, &residual, tolerance) {
+            break;
+        }
+        apply_velocity_preconditioner(
+            &residual,
+            &diagonal,
+            preconditioner.as_ref(),
+            &mut preconditioned,
+        )?;
+        let next_residual_product = checked_dot_product(&residual, &preconditioned)?;
+        if next_residual_product <= f64::MIN_POSITIVE {
+            return Ok(None);
+        }
+        let beta = next_residual_product / residual_product;
+        if !beta.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        for index in 0..rows.len() {
+            direction[index] = preconditioned[index] + beta * direction[index];
+            if !direction[index].is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+        }
+        residual_product = next_residual_product;
+    }
+
+    global_velocity_impulse(rows, &solution, &mut body_impulses)?;
+    for (body, impulse) in bodies.iter_mut().zip(body_impulses) {
+        if impulse.linear == Vec3::ZERO && impulse.angular == Vec3::ZERO {
+            continue;
+        }
+        if body.body().physics().body_type() == crate::rigid_body::BodyType::Dynamic {
+            body.body_mut()
+                .apply_constraint_position_impulse(impulse.linear, impulse.angular)
+                .map_err(map_rigid_body_error)?;
+        }
+    }
+    for (row, delta) in rows.iter_mut().zip(solution) {
+        let next = row.accumulated_multiplier + delta;
+        if !next.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        row.accumulated_multiplier = next;
+    }
+    Ok(Some(completed_iterations))
+}
+
+#[cfg(feature = "bench-internals")]
+fn solve_velocity_pcg_prepared(
+    rows: &mut [ConstraintRow],
+    bodies: &mut [SolverBody],
+    max_iterations: usize,
+    tolerance: super::JointTolerance,
+    incomplete_cholesky_preconditioner: bool,
+) -> Result<Option<usize>, CollisionError> {
+    if rows.is_empty() {
+        return Ok(Some(0));
+    }
+    if max_iterations == 0
+        || rows.iter().any(|row| {
+            row.compliance != 0.0
+                || row.damping != 0.0
+                || row.force_bias != 0.0
+                || row.min_impulse != f64::NEG_INFINITY
+                || row.max_impulse != f64::INFINITY
+        })
+    {
+        return Ok(None);
+    }
+
+    let mut masses = Vec::new();
+    masses
+        .try_reserve_exact(bodies.len())
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    for body in bodies.iter() {
+        masses.push(SolverMass::from_body(body.body())?);
+    }
+
+    let mut residual = zero_f64_buffer(rows.len())?;
+    let mut diagonal = zero_f64_buffer(rows.len())?;
+    for (index, row) in rows.iter().copied().enumerate() {
+        if !row.is_valid(bodies.len()) {
+            return Err(CollisionError::InvalidContact);
+        }
+        residual[index] = row.target_velocity - row_velocity(bodies, row)?;
+        let mass_a = *masses
+            .get(row.body_a)
+            .ok_or(CollisionError::InvalidContact)?;
+        let mass_b = *masses
+            .get(row.body_b)
+            .ok_or(CollisionError::InvalidContact)?;
+        diagonal[index] = mass_a.diagonal(row.linear_a, row.angular_a)?
+            + mass_b.diagonal(row.linear_b, row.angular_b)?;
+        if !residual[index].is_finite() || !diagonal[index].is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        if diagonal[index] <= f64::MIN_POSITIVE {
+            if residual[index].abs() > velocity_row_tolerance(row, tolerance) {
+                return Ok(None);
+            }
+            diagonal[index] = 1.0;
+            residual[index] = 0.0;
+        }
+    }
+    if velocity_vector_converged(rows, &residual, tolerance) {
+        return Ok(Some(0));
+    }
+
+    let preconditioner = if incomplete_cholesky_preconditioner {
+        let Some(preconditioner) =
+            build_incomplete_cholesky_preconditioner(rows, &masses, &diagonal)?
+        else {
+            return Ok(None);
+        };
+        Some(preconditioner)
+    } else {
+        None
+    };
+
+    let mut solution = zero_f64_buffer(rows.len())?;
+    let mut preconditioned = zero_f64_buffer(rows.len())?;
+    let mut direction = zero_f64_buffer(rows.len())?;
+    let mut product = zero_f64_buffer(rows.len())?;
+    apply_velocity_preconditioner(
+        &residual,
+        &diagonal,
+        preconditioner.as_ref(),
+        &mut preconditioned,
+    )?;
+    direction[..rows.len()].copy_from_slice(&preconditioned[..rows.len()]);
+    let mut residual_product = checked_dot_product(&residual, &preconditioned)?;
+    if residual_product <= f64::MIN_POSITIVE {
+        return Ok(None);
+    }
+
+    let mut body_impulses = zero_impulse_buffer(bodies.len())?;
+    let mut body_responses = zero_impulse_buffer(bodies.len())?;
+    let mut completed_iterations = 0;
+    for iteration in 0..max_iterations {
+        global_velocity_matrix_vector(
+            rows,
+            &direction,
+            &masses,
+            &mut body_impulses,
+            &mut body_responses,
+            &mut product,
+        )?;
+        let denominator = checked_dot_product(&direction, &product)?;
+        if denominator <= f64::MIN_POSITIVE {
+            return Ok(None);
+        }
+        let alpha = residual_product / denominator;
+        if !alpha.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        for index in 0..rows.len() {
+            solution[index] += alpha * direction[index];
+            residual[index] -= alpha * product[index];
+            if !solution[index].is_finite() || !residual[index].is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+        }
+        completed_iterations = iteration + 1;
+        if velocity_vector_converged(rows, &residual, tolerance) {
+            break;
+        }
+
+        apply_velocity_preconditioner(
+            &residual,
+            &diagonal,
+            preconditioner.as_ref(),
+            &mut preconditioned,
+        )?;
+        let next_residual_product = checked_dot_product(&residual, &preconditioned)?;
+        if next_residual_product <= f64::MIN_POSITIVE {
+            return Ok(None);
+        }
+        let beta = next_residual_product / residual_product;
+        if !beta.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        for index in 0..rows.len() {
+            direction[index] = preconditioned[index] + beta * direction[index];
+            if !direction[index].is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+        }
+        residual_product = next_residual_product;
+    }
+
+    global_velocity_impulse(rows, &solution, &mut body_impulses)?;
+    for (body, impulse) in bodies.iter_mut().zip(body_impulses) {
+        if impulse.linear == Vec3::ZERO && impulse.angular == Vec3::ZERO {
+            continue;
+        }
+        if body.body().physics().body_type() == crate::rigid_body::BodyType::Dynamic {
+            body.body_mut()
+                .apply_constraint_impulse(impulse.linear, impulse.angular)
+                .map_err(map_rigid_body_error)?;
+        }
+    }
+    for (row, delta) in rows.iter_mut().zip(solution) {
+        let next = row.accumulated_impulse + delta;
+        if !next.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        row.accumulated_impulse = next;
+    }
+    Ok(Some(completed_iterations))
+}
+
+#[cfg(feature = "bench-internals")]
+struct IncompleteCholeskyPreconditioner {
+    lower_rows: Vec<Vec<(usize, f64)>>,
+    lower_columns: Vec<Vec<(usize, f64)>>,
+    diagonal: Vec<f64>,
+}
+
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy)]
+struct VelocityRowTerm {
+    row: usize,
+    linear: Vec3,
+    angular: Vec3,
+}
+
+#[cfg(feature = "bench-internals")]
+fn build_incomplete_cholesky_preconditioner(
+    rows: &[ConstraintRow],
+    masses: &[SolverMass],
+    diagonal: &[f64],
+) -> Result<Option<IncompleteCholeskyPreconditioner>, CollisionError> {
+    let mut row_terms_by_body = Vec::new();
+    row_terms_by_body
+        .try_reserve_exact(masses.len())
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    row_terms_by_body.extend((0..masses.len()).map(|_| Vec::<VelocityRowTerm>::new()));
+    if diagonal.len() != rows.len() {
+        return Ok(None);
+    }
+    let mut lower_pattern = Vec::new();
+    lower_pattern
+        .try_reserve_exact(rows.len())
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    lower_pattern.extend((0..rows.len()).map(|_| Vec::<(usize, f64)>::new()));
+
+    for (row_index, row) in rows.iter().copied().enumerate() {
+        for (body_index, linear, angular) in [
+            (row.body_a, row.linear_a, row.angular_a),
+            (row.body_b, row.linear_b, row.angular_b),
+        ] {
+            row_terms_by_body
+                .get_mut(body_index)
+                .ok_or(CollisionError::InvalidContact)?
+                .push(VelocityRowTerm {
+                    row: row_index,
+                    linear,
+                    angular,
+                });
+        }
+    }
+
+    for (body_index, terms) in row_terms_by_body.iter().enumerate() {
+        let mass = *masses
+            .get(body_index)
+            .ok_or(CollisionError::InvalidContact)?;
+        for right in 0..terms.len() {
+            for left in 0..right {
+                let left_term = terms[left];
+                let right_term = terms[right];
+                let (row, column) = if left_term.row > right_term.row {
+                    (left_term.row, right_term.row)
+                } else {
+                    (right_term.row, left_term.row)
+                };
+                let value = mass.cross(
+                    left_term.linear,
+                    left_term.angular,
+                    right_term.linear,
+                    right_term.angular,
+                )?;
+                if !value.is_finite() {
+                    return Err(CollisionError::ArithmeticOverflow);
+                }
+                lower_pattern[row].push((column, value));
+            }
+        }
+    }
+
+    for entries in &mut lower_pattern {
+        entries.sort_unstable_by_key(|(column, _)| *column);
+        let mut combined = Vec::<(usize, f64)>::with_capacity(entries.len());
+        for (column, value) in entries.drain(..) {
+            if let Some((previous_column, previous_value)) = combined.last_mut()
+                && *previous_column == column
+            {
+                *previous_value += value;
+                if !previous_value.is_finite() {
+                    return Err(CollisionError::ArithmeticOverflow);
+                }
+            } else {
+                combined.push((column, value));
+            }
+        }
+        *entries = combined;
+    }
+
+    let mut lower_rows = Vec::new();
+    lower_rows
+        .try_reserve_exact(rows.len())
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    lower_rows.extend((0..rows.len()).map(|_| Vec::<(usize, f64)>::new()));
+    let mut lower_columns = Vec::new();
+    lower_columns
+        .try_reserve_exact(rows.len())
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    lower_columns.extend((0..rows.len()).map(|_| Vec::<(usize, f64)>::new()));
+    let mut cholesky_diagonal = zero_f64_buffer(rows.len())?;
+
+    for row in 0..rows.len() {
+        for &(column, matrix_value) in &lower_pattern[row] {
+            let mut value = matrix_value;
+            for &(previous_column, row_factor) in &lower_rows[row] {
+                if previous_column >= column {
+                    break;
+                }
+                if let Ok(index) = lower_rows[column]
+                    .binary_search_by_key(&previous_column, |(entry_column, _)| *entry_column)
+                {
+                    value -= row_factor * lower_rows[column][index].1;
+                }
+            }
+            let factor = value / cholesky_diagonal[column];
+            if !factor.is_finite() {
+                return Ok(None);
+            }
+            lower_rows[row].push((column, factor));
+            lower_columns[column].push((row, factor));
+        }
+        let mut diagonal_value = diagonal[row];
+        for &(_, factor) in &lower_rows[row] {
+            diagonal_value -= factor * factor;
+        }
+        if !diagonal_value.is_finite() || diagonal_value <= f64::MIN_POSITIVE {
+            return Ok(None);
+        }
+        cholesky_diagonal[row] = diagonal_value.sqrt();
+    }
+    Ok(Some(IncompleteCholeskyPreconditioner {
+        lower_rows,
+        lower_columns,
+        diagonal: cholesky_diagonal,
+    }))
+}
+
+#[cfg(feature = "bench-internals")]
+fn apply_velocity_preconditioner(
+    residual: &[f64],
+    diagonal: &[f64],
+    preconditioner: Option<&IncompleteCholeskyPreconditioner>,
+    output: &mut [f64],
+) -> Result<(), CollisionError> {
+    if residual.len() != diagonal.len() || residual.len() != output.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    let Some(preconditioner) = preconditioner else {
+        for index in 0..residual.len() {
+            output[index] = residual[index] / diagonal[index];
+        }
+        return Ok(());
+    };
+    if preconditioner.diagonal.len() != residual.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    for row in 0..residual.len() {
+        let mut value = residual[row];
+        for &(column, factor) in &preconditioner.lower_rows[row] {
+            value -= factor * output[column];
+        }
+        output[row] = value / preconditioner.diagonal[row];
+        if !output[row].is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+    }
+    for row in (0..residual.len()).rev() {
+        let mut value = output[row];
+        for &(lower_row, factor) in &preconditioner.lower_columns[row] {
+            value -= factor * output[lower_row];
+        }
+        output[row] = value / preconditioner.diagonal[row];
+        if !output[row].is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+fn global_velocity_matrix_vector(
+    rows: &[ConstraintRow],
+    vector: &[f64],
+    masses: &[SolverMass],
+    body_impulses: &mut [GeneralizedImpulse],
+    body_responses: &mut [GeneralizedImpulse],
+    result: &mut [f64],
+) -> Result<(), CollisionError> {
+    if rows.len() != vector.len() || rows.len() != result.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    body_impulses.fill(GeneralizedImpulse::default());
+    body_responses.fill(GeneralizedImpulse::default());
+    for (row, coefficient) in rows.iter().copied().zip(vector.iter().copied()) {
+        add_generalized_impulse(
+            body_impulses
+                .get_mut(row.body_a)
+                .ok_or(CollisionError::InvalidContact)?,
+            row.linear_a,
+            row.angular_a,
+            coefficient,
+        )?;
+        add_generalized_impulse(
+            body_impulses
+                .get_mut(row.body_b)
+                .ok_or(CollisionError::InvalidContact)?,
+            row.linear_b,
+            row.angular_b,
+            coefficient,
+        )?;
+    }
+    for index in 0..masses.len() {
+        let mass = masses[index];
+        let impulse = body_impulses[index];
+        body_responses[index] = GeneralizedImpulse {
+            linear: impulse.linear * mass.inverse_mass,
+            angular: mass
+                .inverse_inertia
+                .checked_mul_vector(impulse.angular)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        };
+        if !body_responses[index].linear.is_finite() || !body_responses[index].angular.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+    }
+    for (index, row) in rows.iter().copied().enumerate() {
+        let response_a = body_responses
+            .get(row.body_a)
+            .ok_or(CollisionError::InvalidContact)?;
+        let response_b = body_responses
+            .get(row.body_b)
+            .ok_or(CollisionError::InvalidContact)?;
+        let value = row
+            .linear_a
+            .checked_dot(response_a.linear)
+            .ok_or(CollisionError::ArithmeticOverflow)?
+            + row
+                .angular_a
+                .checked_dot(response_a.angular)
+                .ok_or(CollisionError::ArithmeticOverflow)?
+            + row
+                .linear_b
+                .checked_dot(response_b.linear)
+                .ok_or(CollisionError::ArithmeticOverflow)?
+            + row
+                .angular_b
+                .checked_dot(response_b.angular)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+        if !value.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        result[index] = value;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+fn global_velocity_impulse(
+    rows: &[ConstraintRow],
+    vector: &[f64],
+    body_impulses: &mut [GeneralizedImpulse],
+) -> Result<(), CollisionError> {
+    if rows.len() != vector.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    body_impulses.fill(GeneralizedImpulse::default());
+    for (row, coefficient) in rows.iter().copied().zip(vector.iter().copied()) {
+        add_generalized_impulse(
+            body_impulses
+                .get_mut(row.body_a)
+                .ok_or(CollisionError::InvalidContact)?,
+            row.linear_a,
+            row.angular_a,
+            coefficient,
+        )?;
+        add_generalized_impulse(
+            body_impulses
+                .get_mut(row.body_b)
+                .ok_or(CollisionError::InvalidContact)?,
+            row.linear_b,
+            row.angular_b,
+            coefficient,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+fn add_generalized_impulse(
+    impulse: &mut GeneralizedImpulse,
+    linear: Vec3,
+    angular: Vec3,
+    coefficient: f64,
+) -> Result<(), CollisionError> {
+    impulse.linear += linear * coefficient;
+    impulse.angular += angular * coefficient;
+    if impulse.linear.is_finite() && impulse.angular.is_finite() {
+        Ok(())
+    } else {
+        Err(CollisionError::ArithmeticOverflow)
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn velocity_vector_converged(
+    rows: &[ConstraintRow],
+    residual: &[f64],
+    tolerance: super::JointTolerance,
+) -> bool {
+    rows.iter()
+        .zip(residual)
+        .all(|(row, value)| value.abs() <= velocity_row_tolerance(*row, tolerance))
+}
+
+#[cfg(feature = "bench-internals")]
+fn velocity_row_tolerance(row: ConstraintRow, tolerance: super::JointTolerance) -> f64 {
+    match row.dimension {
+        RowDimension::Linear => tolerance.velocity_mps,
+        RowDimension::Angular => tolerance.angular_velocity_radps,
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn position_vector_converged(
+    rows: &[ConstraintRow],
+    residual: &[f64],
+    tolerance: super::JointTolerance,
+) -> bool {
+    rows.iter()
+        .zip(residual)
+        .all(|(row, value)| value.abs() <= position_row_tolerance(*row, tolerance))
+}
+
+#[cfg(feature = "bench-internals")]
+fn position_row_tolerance(row: ConstraintRow, tolerance: super::JointTolerance) -> f64 {
+    match row.dimension {
+        RowDimension::Linear => tolerance.linear_m,
+        RowDimension::Angular => tolerance.angular_rad,
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn checked_dot_product(left: &[f64], right: &[f64]) -> Result<f64, CollisionError> {
+    if left.len() != right.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    left.iter().zip(right).try_fold(0.0, |sum, (left, right)| {
+        let next = sum + left * right;
+        next.is_finite()
+            .then_some(next)
+            .ok_or(CollisionError::ArithmeticOverflow)
+    })
+}
+
+#[cfg(feature = "bench-internals")]
+fn zero_f64_buffer(length: usize) -> Result<Vec<f64>, CollisionError> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(length)
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    buffer.resize(length, 0.0);
+    Ok(buffer)
+}
+
+#[cfg(feature = "bench-internals")]
+fn zero_impulse_buffer(length: usize) -> Result<Vec<GeneralizedImpulse>, CollisionError> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(length)
+        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    buffer.resize(length, GeneralizedImpulse::default());
+    Ok(buffer)
 }
 
 fn update_position_residual(
@@ -2443,7 +3216,7 @@ fn solve_velocity_row(
         speed_error / (effective_mass + alpha)
     } else {
         0.0
-    };
+    } * options.velocity_relaxation();
     let next = (row.accumulated_impulse + delta).clamp(row.min_impulse, row.max_impulse);
     let applied = next - row.accumulated_impulse;
     if !delta.is_finite() || !next.is_finite() || !applied.is_finite() {
@@ -3034,6 +3807,19 @@ fn map_constraint_error(error: constraint::ConstraintError) -> CollisionError {
         constraint::ConstraintError::InvalidMass => CollisionError::InvalidContact,
         constraint::ConstraintError::ArithmeticOverflow => CollisionError::ArithmeticOverflow,
         constraint::ConstraintError::NonConvergent => CollisionError::NonConvergent,
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+fn map_rigid_body_error(error: crate::rigid_body::BodyError) -> CollisionError {
+    match error {
+        crate::rigid_body::BodyError::ArithmeticOverflow
+        | crate::rigid_body::BodyError::NonFiniteValue => CollisionError::ArithmeticOverflow,
+        crate::rigid_body::BodyError::InvalidInertiaTensor => CollisionError::NonConvergent,
+        crate::rigid_body::BodyError::BodyMustBeDynamic
+        | crate::rigid_body::BodyError::StaticBodyCannotHaveVelocity => {
+            CollisionError::InvalidContact
+        }
     }
 }
 

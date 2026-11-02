@@ -1116,24 +1116,40 @@ impl PhysicsWorld {
         worker_count: usize,
     ) -> Result<(), StepError> {
         self.collision_system.begin_step();
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_energy_before_integration(self.energy_components());
         if let Err(error) = self.prepare_joint_collision_pairs() {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
 
+        #[cfg(feature = "bench-internals")]
+        let mut integrated_energy = crate::joint::diagnostics::EnergyComponents::default();
         for (dense_id, entry) in self.bodies.iter() {
             let body_id = BodyId {
                 world: self.world_id,
                 dense: dense_id,
             };
             match predict(&entry.body, dt) {
-                Ok(state) => self.collision_system.stage_prediction(body_id, state),
+                Ok(state) => {
+                    #[cfg(feature = "bench-internals")]
+                    integrated_energy.add_assign(crate::collision::solver::body_energy_components(
+                        &entry.body,
+                        state,
+                        self.central_gravity,
+                    ));
+                    self.collision_system.stage_prediction(body_id, state)
+                }
                 Err(cause) => {
                     self.collision_system.abort_step();
                     return Err(StepError::BodyIntegration { body_id, cause });
                 }
             }
         }
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_energy_after_integration(integrated_energy);
 
         let worker_count = worker_count.max(1);
         if let Err(error) = self.prepare_collision_candidates(dt, worker_count, executor) {
@@ -1711,6 +1727,41 @@ impl PhysicsWorld {
 
     #[cfg(feature = "bench-internals")]
     #[doc(hidden)]
+    pub fn set_joint_global_velocity_pcg_for_bench(
+        &mut self,
+        max_iterations: u32,
+        incomplete_cholesky_preconditioner: bool,
+    ) {
+        self.collision_system
+            .set_joint_global_velocity_pcg_for_bench(
+                max_iterations,
+                incomplete_cholesky_preconditioner,
+            );
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn set_joint_velocity_relaxation_for_bench(&mut self, relaxation: f64) {
+        self.collision_system
+            .set_joint_velocity_relaxation_for_bench(relaxation);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn set_joint_global_position_pcg_for_bench(
+        &mut self,
+        max_iterations: u32,
+        incomplete_cholesky_preconditioner: bool,
+    ) {
+        self.collision_system
+            .set_joint_global_position_pcg_for_bench(
+                max_iterations,
+                incomplete_cholesky_preconditioner,
+            );
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
     pub fn collision_step_metrics(&self) -> crate::collision::CollisionStepMetrics {
         let mut metrics = self.collision_system.benchmark_metrics();
         let query_index_bytes = self
@@ -1737,6 +1788,19 @@ impl PhysicsWorld {
             collision: self.collision_step_metrics(),
             joints: self.collision_system.joint_solver_metrics(),
         }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn energy_components(&self) -> crate::joint::diagnostics::EnergyComponents {
+        let mut energy = crate::joint::diagnostics::EnergyComponents::default();
+        for (_, entry) in self.bodies.iter() {
+            energy.add_assign(crate::collision::solver::body_energy_components(
+                &entry.body,
+                *entry.body.state(),
+                self.central_gravity,
+            ));
+        }
+        energy
     }
 
     fn process_continuous_collisions(
@@ -4285,8 +4349,12 @@ impl PhysicsWorld {
             .iter()
             .any(|(_, entry)| entry.joint.common().enabled);
         if candidate_count == 0 && !has_active_joints {
-            self.collision_system
-                .solve_contacts(worker_count, executor, dt)?;
+            self.collision_system.solve_contacts(
+                worker_count,
+                executor,
+                dt,
+                self.central_gravity,
+            )?;
             self.stage_collision_events()?;
             return Ok(());
         }
@@ -4303,8 +4371,12 @@ impl PhysicsWorld {
         }
 
         if candidate_count == 0 {
-            self.collision_system
-                .solve_contacts(worker_count, executor, dt)?;
+            self.collision_system.solve_contacts(
+                worker_count,
+                executor,
+                dt,
+                self.central_gravity,
+            )?;
             self.stage_collision_events()?;
             return Ok(());
         }
@@ -4489,7 +4561,7 @@ impl PhysicsWorld {
                 });
         }
         self.collision_system
-            .solve_contacts(worker_count, executor, dt)?;
+            .solve_contacts(worker_count, executor, dt, self.central_gravity)?;
 
         for manifold in self.collision_system.context.manifolds.iter().copied() {
             let collider_a = self

@@ -327,8 +327,6 @@ mod stability_tests {
 
     const DT: f64 = 1.0 / 120.0;
     const TICKS: usize = 180;
-    const SURFACE_RADIUS: f64 = 6_371_000.0;
-    const GRAVITATIONAL_PARAMETER: f64 = 9.81 * SURFACE_RADIUS * SURFACE_RADIUS;
 
     #[derive(Debug, PartialEq)]
     struct PartState {
@@ -345,12 +343,22 @@ mod stability_tests {
         max_frame_error: f64,
         rms_frame_error: f64,
         max_coast_energy_drift: f64,
+        max_coast_energy_drift_tick: Option<usize>,
+        final_coast_energy_signed_drift: f64,
+        coast_energy_start_components: (f64, f64, f64),
+        coast_energy_reference_scale_j: f64,
+        coast_energy_final_components: (f64, f64, f64),
         max_altitude: f64,
         max_angular_speed: f64,
         separation_momentum_error: f64,
         surface_begins: usize,
         surface_ends: usize,
         surface_impacts: usize,
+        other_contact_events: usize,
+        post_cutoff_surface_events: usize,
+        post_cutoff_upper_surface_events: usize,
+        post_cutoff_upper_surface_event_ticks: Vec<usize>,
+        coast_energy_trace: Vec<(usize, f64)>,
         lower_fuel_mass: f64,
         upper_fuel_mass: f64,
         joints_after_separation: usize,
@@ -362,6 +370,8 @@ mod stability_tests {
         first_frame_limit_tick: Option<usize>,
         #[cfg(feature = "bench-internals")]
         solver_stage_trace: Vec<SolverStageSample>,
+        #[cfg(feature = "bench-internals")]
+        energy_trace: Vec<kapitsa_core::joint::diagnostics::JointSolverMetrics>,
     }
 
     #[cfg(feature = "bench-internals")]
@@ -388,6 +398,8 @@ mod stability_tests {
         first_post_joint_frame_error_rad: f64,
         pre_joint_velocity_linear_residual_mps: f64,
         pre_joint_velocity_angular_residual_radps: f64,
+        velocity_pcg_iterations: u64,
+        position_pcg_iterations: u64,
     }
 
     #[allow(dead_code)] // Non-default source isolation modes are selected by an ignored diagnostic.
@@ -398,7 +410,13 @@ mod stability_tests {
         GravityWithoutContact,
         GravityWithContact,
         ThrustWithoutGravityOrContact,
+        ThrustWithGravityWithoutContact,
         CenteredThrustWithoutGravityOrContact,
+        StagedThrustWithoutGravityOrContact,
+        StagedThrustWithGravityWithoutContact,
+        StagedThrustWithGravityAndBodyColliders,
+        RocketCoastWithoutContactOrThrust,
+        RocketFreeAssemblyWithoutLoads,
     }
 
     #[test]
@@ -406,10 +424,13 @@ mod stability_tests {
     fn fixed_step_rockets_report_stability_and_reproducibility_at_all_sizes() {
         // Reporting is opt-in; ordinary verification must fail on violated limits.
         let report_only = std::env::var_os("KAPITSA_ROCKET_REPORT_ONLY").is_some();
+        let velocity_pcg_cap = std::env::var("KAPITSA_ROCKET_VELOCITY_PCG_CAP")
+            .ok()
+            .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"));
         let mut all_stable = true;
         for part_count in [100, 200, 500, 1000] {
-            let first = run_fixed_scenario(part_count, false);
-            let repeated = run_fixed_scenario(part_count, false);
+            let first = run_fixed_scenario_with_velocity_pcg(part_count, velocity_pcg_cap);
+            let repeated = run_fixed_scenario_with_velocity_pcg(part_count, velocity_pcg_cap);
             assert_eq!(first.states, repeated.states, "{part_count} part repeat");
             assert_eq!(first.completed_ticks, repeated.completed_ticks);
             assert_eq!(first.step_failure, repeated.step_failure);
@@ -422,7 +443,8 @@ mod stability_tests {
                 && first.lower_fuel_mass == 3.5
                 && first.upper_fuel_mass == 3.5
                 && first.joints_after_separation == part_count - 2
-                && first.joint_break_events == 0;
+                && first.joint_break_events == 0
+                && !first.coast_energy_trace.is_empty();
             let numerical_stability = scenario_complete
                 && first.max_anchor_error < 0.03
                 && first.rms_anchor_error < 0.01
@@ -431,7 +453,11 @@ mod stability_tests {
                 && first.max_coast_energy_drift < 0.1;
             all_stable &= numerical_stability;
             println!(
-                "parts={part_count} joints={} elapsed_ms={} completed_ticks={} scenario={} numerical_stability={} step_failure={:?} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} coast_energy_drift={:.4}% upper_root_max_y={:.3}m omega={:.3}rad_s separation_dp={:.3e} contacts(begin/end/impact)={}/{}/{} breaks={}",
+                "parts={part_count} solver={} joints={} elapsed_ms={} completed_ticks={} scenario={} numerical_stability={} step_failure={:?} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} collision_free_coast_drift={:+.6e}% energy_reference_scale={:.6e}J coast_samples={} upper_coast_contacts={} first_upper_coast_contact={:?} coast_energy_start(T/R/U)={:.6e}/{:.6e}/{:.6e}J final(T/R/U)={:.6e}/{:.6e}/{:.6e}J upper_root_max_y={:.3}m omega={:.3}rad_s separation_dp={:.3e} contacts(begin/end/impact)={}/{}/{} breaks={}",
+                velocity_pcg_cap.map_or_else(
+                    || "scalar".to_owned(),
+                    |cap| format!("global_velocity_pcg_{cap}")
+                ),
                 part_count - 1,
                 first.elapsed.as_millis(),
                 first.completed_ticks,
@@ -448,7 +474,17 @@ mod stability_tests {
                 first.rms_frame_error,
                 first.first_anchor_limit_tick,
                 first.first_frame_limit_tick,
-                first.max_coast_energy_drift * 100.0,
+                first.final_coast_energy_signed_drift * 100.0,
+                first.coast_energy_reference_scale_j,
+                first.coast_energy_trace.len(),
+                first.post_cutoff_upper_surface_events,
+                first.post_cutoff_upper_surface_event_ticks.first(),
+                first.coast_energy_start_components.0,
+                first.coast_energy_start_components.1,
+                first.coast_energy_start_components.2,
+                first.coast_energy_final_components.0,
+                first.coast_energy_final_components.1,
+                first.coast_energy_final_components.2,
                 first.max_altitude,
                 first.max_angular_speed,
                 first.separation_momentum_error,
@@ -505,7 +541,7 @@ mod stability_tests {
             (ScenarioMode::CenteredThrustWithoutGravityOrContact, false),
             (ScenarioMode::Full, false),
         ] {
-            let run = run_scenario(100, false, mode, adaptive, None, false);
+            let run = run_scenario(100, false, mode, adaptive, None, false, None, None, None);
             println!(
                 "mode={mode:?} adaptive={adaptive} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} coast_energy_drift={:.4}% contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
                 run.elapsed.as_millis(),
@@ -574,6 +610,9 @@ mod stability_tests {
                     false,
                     Some((velocity_iterations, position_iterations)),
                     false,
+                    None,
+                    None,
+                    None,
                 );
                 let crossing = run
                     .first_anchor_limit_tick
@@ -621,7 +660,17 @@ mod stability_tests {
             ScenarioMode::GravityWithContact,
         ] {
             for reverse_joint_order in [false, true] {
-                let run = run_scenario(100, false, mode, false, None, reverse_joint_order);
+                let run = run_scenario(
+                    100,
+                    false,
+                    mode,
+                    false,
+                    None,
+                    reverse_joint_order,
+                    None,
+                    None,
+                    None,
+                );
                 let crossing = run
                     .first_anchor_limit_tick
                     .and_then(|tick| run.solver_stage_trace.get(tick));
@@ -651,8 +700,671 @@ mod stability_tests {
         }
     }
 
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release comparison of global velocity PCG against the strict rocket fixture"]
+    fn diagnose_rocket_global_velocity_pcg() {
+        for part_count in [100, 200, 500, 1000] {
+            let run = run_scenario(
+                part_count,
+                false,
+                ScenarioMode::Full,
+                false,
+                None,
+                false,
+                Some(64),
+                None,
+                None,
+            );
+            let crossing = run.first_anchor_limit_tick.and_then(|tick| {
+                run.solver_stage_trace
+                    .iter()
+                    .find(|sample| sample.tick == tick)
+            });
+            let peak = run.solver_stage_trace.iter().max_by(|left, right| {
+                left.post_joint_anchor_error_m
+                    .total_cmp(&right.post_joint_anchor_error_m)
+            });
+            println!(
+                "parts={part_count} solver=global_velocity_pcg_ic0 max_iterations=64 elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} crossing_pre/post_velocity={:.6e}/{:.6e}m post_joint={:.6e}m velocity_residual={:.6e}/{:.6e}m/s/{:.6e}/{:.6e}rad/s pcg_iterations={} peak_tick={:?} peak_pre/post_velocity={:.6e}/{:.6e}m peak_after_position={:.6e}m peak_velocity_residual={:.6e}/{:.6e}m/s contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
+                run.elapsed.as_millis(),
+                run.completed_ticks,
+                run.max_anchor_error,
+                run.rms_anchor_error,
+                run.max_frame_error,
+                run.rms_frame_error,
+                run.max_coast_energy_drift * 100.0,
+                run.first_anchor_limit_tick,
+                crossing.map_or(0.0, |sample| sample.pre_velocity_anchor_error_m),
+                crossing.map_or(0.0, |sample| sample.post_velocity_anchor_error_m),
+                crossing.map_or(0.0, |sample| sample.post_joint_anchor_error_m),
+                crossing.map_or(0.0, |sample| sample.first_velocity_linear_residual_mps),
+                crossing.map_or(0.0, |sample| sample.post_velocity_linear_residual_mps),
+                crossing.map_or(0.0, |sample| sample.first_velocity_angular_residual_radps),
+                crossing.map_or(0.0, |sample| sample.post_velocity_angular_residual_radps),
+                crossing.map_or(0, |sample| sample.velocity_pcg_iterations),
+                peak.map(|sample| sample.tick),
+                peak.map_or(0.0, |sample| sample.pre_velocity_anchor_error_m),
+                peak.map_or(0.0, |sample| sample.post_velocity_anchor_error_m),
+                peak.map_or(0.0, |sample| sample.post_joint_anchor_error_m),
+                peak.map_or(0.0, |sample| sample.post_velocity_linear_residual_mps),
+                peak.map_or(0.0, |sample| sample.post_velocity_angular_residual_radps),
+                run.surface_begins,
+                run.surface_ends,
+                run.surface_impacts,
+                run.separation_momentum_error,
+                run.step_failure,
+            );
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release evaluation of relaxed Gauss-Seidel on the strict rocket fixture"]
+    fn diagnose_rocket_relaxed_gauss_seidel() {
+        for part_count in [100, 200, 500, 1000] {
+            let run = run_scenario(
+                part_count,
+                false,
+                ScenarioMode::Full,
+                false,
+                None,
+                false,
+                None,
+                Some(1.3),
+                None,
+            );
+            println!(
+                "parts={part_count} solver=relaxed_gs relaxation=1.30 elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
+                run.elapsed.as_millis(),
+                run.completed_ticks,
+                run.max_anchor_error,
+                run.rms_anchor_error,
+                run.max_frame_error,
+                run.rms_frame_error,
+                run.max_coast_energy_drift * 100.0,
+                run.surface_begins,
+                run.surface_ends,
+                run.surface_impacts,
+                run.separation_momentum_error,
+                run.step_failure,
+            );
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release measurement of position projection convergence on the 1000-part rocket"]
+    fn diagnose_rocket_position_sweeps_at_scale() {
+        for position_iterations in [3, 6, 12] {
+            let run = run_scenario(
+                1000,
+                false,
+                ScenarioMode::Full,
+                false,
+                Some((8, position_iterations)),
+                false,
+                None,
+                None,
+                None,
+            );
+            let peak = run.solver_stage_trace.iter().max_by(|left, right| {
+                left.post_joint_anchor_error_m
+                    .total_cmp(&right.post_joint_anchor_error_m)
+            });
+            println!(
+                "parts=1000 velocity/position_sweeps=8/{position_iterations} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} peak_tick={:?} peak_pre_velocity={:.6e}m peak_post_position={:.6e}m peak_velocity_residual={:.6e}m/s/{:.6e}rad/s failure={:?}",
+                run.elapsed.as_millis(),
+                run.completed_ticks,
+                run.max_anchor_error,
+                run.rms_anchor_error,
+                run.max_frame_error,
+                run.rms_frame_error,
+                run.max_coast_energy_drift * 100.0,
+                run.first_anchor_limit_tick,
+                peak.map(|sample| sample.tick),
+                peak.map_or(0.0, |sample| sample.pre_velocity_anchor_error_m),
+                peak.map_or(0.0, |sample| sample.post_joint_anchor_error_m),
+                peak.map_or(0.0, |sample| sample.post_velocity_linear_residual_mps),
+                peak.map_or(0.0, |sample| sample.post_velocity_angular_residual_radps),
+                run.step_failure,
+            );
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release measurement of combined global velocity and position PCG on rocket sizes"]
+    fn diagnose_rocket_global_constraint_pcg() {
+        for part_count in [100, 200, 500, 1000] {
+            let run = run_scenario(
+                part_count,
+                false,
+                ScenarioMode::Full,
+                false,
+                None,
+                false,
+                Some(64),
+                None,
+                Some(64),
+            );
+            let peak = run.solver_stage_trace.iter().max_by(|left, right| {
+                left.post_joint_anchor_error_m
+                    .total_cmp(&right.post_joint_anchor_error_m)
+            });
+            println!(
+                "parts={part_count} solver=global_velocity_position_pcg_ic0 elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} peak_tick={:?} peak_pre_velocity={:.6e}m peak_post_position={:.6e}m peak_velocity_pcg_iterations={} peak_position_pcg_iterations={} failure={:?}",
+                run.elapsed.as_millis(),
+                run.completed_ticks,
+                run.max_anchor_error,
+                run.rms_anchor_error,
+                run.max_frame_error,
+                run.rms_frame_error,
+                run.max_coast_energy_drift * 100.0,
+                run.first_anchor_limit_tick,
+                peak.map(|sample| sample.tick),
+                peak.map_or(0.0, |sample| sample.pre_velocity_anchor_error_m),
+                peak.map_or(0.0, |sample| sample.post_joint_anchor_error_m),
+                peak.map_or(0, |sample| sample.velocity_pcg_iterations),
+                peak.map_or(0, |sample| sample.position_pcg_iterations),
+                run.step_failure,
+            );
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release source isolation of joint energy drift under thrust without gravity or contacts"]
+    fn diagnose_rocket_global_constraint_pcg_thrust_only() {
+        let run = run_scenario(
+            500,
+            false,
+            ScenarioMode::ThrustWithoutGravityOrContact,
+            false,
+            None,
+            false,
+            Some(64),
+            None,
+            Some(64),
+        );
+        println!(
+            "parts=500 mode=thrust_without_gravity_or_contact solver=global_velocity_position_pcg_ic0 elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} contacts(begin/end/impact)={}/{}/{} failure={:?}",
+            run.elapsed.as_millis(),
+            run.completed_ticks,
+            run.max_anchor_error,
+            run.rms_anchor_error,
+            run.max_frame_error,
+            run.rms_frame_error,
+            run.max_coast_energy_drift * 100.0,
+            run.first_anchor_limit_tick,
+            run.surface_begins,
+            run.surface_ends,
+            run.surface_impacts,
+            run.step_failure,
+        );
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release isolated coast energy check after stage separation"]
+    fn diagnose_rocket_global_constraint_pcg_isolated_coast() {
+        for (mode, label) in [
+            (
+                ScenarioMode::StagedThrustWithoutGravityOrContact,
+                "staged_thrust_without_gravity_or_contact",
+            ),
+            (
+                ScenarioMode::StagedThrustWithGravityWithoutContact,
+                "staged_thrust_with_gravity_without_contact",
+            ),
+            (
+                ScenarioMode::StagedThrustWithGravityAndBodyColliders,
+                "staged_thrust_with_gravity_contacts_and_fuel",
+            ),
+        ] {
+            let run = run_scenario(
+                500,
+                false,
+                mode,
+                false,
+                None,
+                false,
+                Some(64),
+                None,
+                Some(64),
+            );
+            println!(
+                "parts=500 mode={label} solver=global_velocity_position_pcg_ic0 elapsed_ms={} ticks={} joints_after_separation={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% surface_contacts(begin/end/impact)={}/{}/{} other_contact_events={} separation_dp={:.3e} failure={:?}",
+                run.elapsed.as_millis(),
+                run.completed_ticks,
+                run.joints_after_separation,
+                run.max_anchor_error,
+                run.rms_anchor_error,
+                run.max_frame_error,
+                run.rms_frame_error,
+                run.max_coast_energy_drift * 100.0,
+                run.surface_begins,
+                run.surface_ends,
+                run.surface_impacts,
+                run.other_contact_events,
+                run.separation_momentum_error,
+                run.step_failure,
+            );
+            assert_eq!(run.completed_ticks, TICKS);
+            assert_eq!(run.joints_after_separation, 498);
+            assert_eq!(
+                run.surface_begins + run.surface_ends + run.surface_impacts,
+                0
+            );
+            assert!(run.step_failure.is_none());
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release full-scene coast energy trace with global constraint PCG"]
+    fn diagnose_rocket_global_constraint_pcg_full_energy_trace() {
+        let run = run_scenario(
+            500,
+            false,
+            ScenarioMode::Full,
+            false,
+            None,
+            false,
+            Some(64),
+            None,
+            Some(64),
+        );
+        println!(
+            "parts=500 mode=full solver=global_velocity_position_pcg_ic0 elapsed_ms={} ticks={} energy_drift_max={:.4}% at_tick={:?} final_signed={:+.4}% start_energy(T/R/U)={:.6e}/{:.6e}/{:.6e}J final_energy(T/R/U)={:.6e}/{:.6e}/{:.6e}J anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad surface_contacts={}/{}/{} post_cutoff_surface_events={} post_cutoff_upper_surface_events={} upper_contact_ticks={:?} other_contact_events={} altitude_max={:.3}m failure={:?}",
+            run.elapsed.as_millis(),
+            run.completed_ticks,
+            run.max_coast_energy_drift * 100.0,
+            run.max_coast_energy_drift_tick,
+            run.final_coast_energy_signed_drift * 100.0,
+            run.coast_energy_start_components.0,
+            run.coast_energy_start_components.1,
+            run.coast_energy_start_components.2,
+            run.coast_energy_final_components.0,
+            run.coast_energy_final_components.1,
+            run.coast_energy_final_components.2,
+            run.max_anchor_error,
+            run.rms_anchor_error,
+            run.max_frame_error,
+            run.rms_frame_error,
+            run.surface_begins,
+            run.surface_ends,
+            run.surface_impacts,
+            run.post_cutoff_surface_events,
+            run.post_cutoff_upper_surface_events,
+            run.post_cutoff_upper_surface_event_ticks,
+            run.other_contact_events,
+            run.max_altitude,
+            run.step_failure,
+        );
+        let initial = run.coast_energy_trace[0].1;
+        for (tick, energy) in run.coast_energy_trace.iter().rev().take(6).rev() {
+            println!(
+                "free_coast_tick={tick} signed_drift={:+.4}%",
+                (energy - initial) / run.coast_energy_reference_scale_j.max(1.0) * 100.0,
+            );
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release per-stage energy trace for an unforced contact-free rocket"]
+    fn diagnose_rocket_unforced_contact_free_energy_stages() {
+        for (label, velocity_pcg, position_pcg) in
+            [("scalar", None, None), ("global_pcg", Some(64), Some(64))]
+        {
+            let run = run_scenario(
+                500,
+                false,
+                ScenarioMode::RocketCoastWithoutContactOrThrust,
+                false,
+                None,
+                false,
+                velocity_pcg,
+                None,
+                position_pcg,
+            );
+            let zero = kapitsa_core::joint::diagnostics::EnergyComponents::default();
+            println!(
+                "parts=500 mode=unforced_contact_free_rocket solver={label} ticks={} collision_free_coast_drift={:+.9e}% other_contact_events={} step_failure={:?} coast_energy_start(T/R/U)={:.9e}/{:.9e}/{:.9e}J coast_energy_final(T/R/U)={:.9e}/{:.9e}/{:.9e}J",
+                run.completed_ticks,
+                run.max_coast_energy_drift * 100.0,
+                run.other_contact_events,
+                run.step_failure,
+                run.coast_energy_start_components.0,
+                run.coast_energy_start_components.1,
+                run.coast_energy_start_components.2,
+                run.coast_energy_final_components.0,
+                run.coast_energy_final_components.1,
+                run.coast_energy_final_components.2,
+            );
+            print_energy_delta(
+                "sum_180_integration",
+                zero,
+                sum_energy_deltas(
+                    &run.energy_trace,
+                    |m| m.energy_before_integration,
+                    |m| m.energy_after_integration,
+                ),
+            );
+            print_energy_delta(
+                "sum_180_velocity_pcg",
+                zero,
+                sum_energy_deltas(&run.energy_trace, |_| zero, |m| m.velocity_pcg_energy_delta),
+            );
+            print_energy_delta(
+                "sum_180_velocity_solver",
+                zero,
+                sum_energy_deltas(
+                    &run.energy_trace,
+                    |m| m.energy_after_integration,
+                    |m| m.energy_after_velocity_solver,
+                ),
+            );
+            print_energy_delta(
+                "sum_180_position_pcg",
+                zero,
+                sum_energy_deltas(&run.energy_trace, |_| zero, |m| m.position_pcg_energy_delta),
+            );
+            print_energy_delta(
+                "sum_180_position_solver",
+                zero,
+                sum_energy_deltas(
+                    &run.energy_trace,
+                    |m| m.energy_after_velocity_solver,
+                    |m| m.energy_after_position_solver,
+                ),
+            );
+            let first = run.energy_trace.first().expect("first step energy trace");
+            let last = run.energy_trace.last().expect("last step energy trace");
+            print_energy_delta(
+                "step0_integration",
+                first.energy_before_integration,
+                first.energy_after_integration,
+            );
+            print_energy_delta(
+                "step0_velocity_pcg",
+                first.energy_before_velocity_pcg,
+                first.energy_after_velocity_pcg,
+            );
+            print_energy_delta(
+                "step0_position_pcg",
+                first.energy_before_position_pcg,
+                first.energy_after_position_pcg,
+            );
+            print_energy_delta(
+                "step179_integration",
+                last.energy_before_integration,
+                last.energy_after_integration,
+            );
+            print_energy_delta(
+                "step179_velocity_pcg",
+                last.energy_before_velocity_pcg,
+                last.energy_after_velocity_pcg,
+            );
+            print_energy_delta(
+                "step179_position_pcg",
+                last.energy_before_position_pcg,
+                last.energy_after_position_pcg,
+            );
+            assert_eq!(run.completed_ticks, TICKS);
+            assert_eq!(run.other_contact_events, 0);
+            assert!(run.step_failure.is_none());
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "Release energy changes during gravity plus thrust with contacts disabled"]
+    fn diagnose_rocket_loaded_contact_free_energy_stages() {
+        let run = run_scenario(
+            100,
+            false,
+            ScenarioMode::ThrustWithGravityWithoutContact,
+            false,
+            None,
+            false,
+            Some(64),
+            None,
+            Some(64),
+        );
+        for tick in [11, 12, 13, 14, 15] {
+            let metrics = &run.energy_trace[tick];
+            println!("energy_trace_tick={tick}");
+            print_energy_delta(
+                "integration",
+                metrics.energy_before_integration,
+                metrics.energy_after_integration,
+            );
+            print_energy_delta(
+                "velocity_pcg",
+                metrics.energy_before_velocity_pcg,
+                metrics.energy_after_velocity_pcg,
+            );
+            print_energy_delta(
+                "velocity_solver",
+                metrics.energy_after_integration,
+                metrics.energy_after_velocity_solver,
+            );
+            print_energy_delta(
+                "position_pcg",
+                metrics.energy_before_position_pcg,
+                metrics.energy_after_position_pcg,
+            );
+            print_energy_delta(
+                "position_solver",
+                metrics.energy_after_velocity_solver,
+                metrics.energy_after_position_solver,
+            );
+        }
+        println!(
+            "parts=100 contacts={} failure={:?} anchor_max={:.6e}m frame_max={:.6e}rad",
+            run.surface_begins + run.surface_ends + run.surface_impacts + run.other_contact_events,
+            run.step_failure,
+            run.max_anchor_error,
+            run.max_frame_error,
+        );
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn global_pcg_free_rigid_rocket_assembly_limits_kinetic_energy_drift() {
+        let mut pcg_conserved = false;
+        for (label, velocity_pcg, position_pcg) in [
+            ("scalar_reference", None, None),
+            ("global_pcg", Some(64), Some(64)),
+        ] {
+            let run = run_scenario(
+                100,
+                false,
+                ScenarioMode::RocketFreeAssemblyWithoutLoads,
+                false,
+                None,
+                false,
+                velocity_pcg,
+                None,
+                position_pcg,
+            );
+            let first = run.energy_trace.first().expect("first step energy trace");
+            let last = run.energy_trace.last().expect("last step energy trace");
+            let mut integration_delta = (0.0, 0.0, 0.0);
+            let mut velocity_pcg_delta = (0.0, 0.0, 0.0);
+            let mut velocity_solver_delta = (0.0, 0.0, 0.0);
+            let mut position_pcg_delta = (0.0, 0.0, 0.0);
+            let mut position_solver_delta = (0.0, 0.0, 0.0);
+            let mut impulse_work = 0.0;
+            let mut quadratic_work = 0.0;
+            for metrics in &run.energy_trace {
+                accumulate_energy_delta(
+                    &mut integration_delta,
+                    metrics.energy_before_integration,
+                    metrics.energy_after_integration,
+                );
+                accumulate_energy_delta(
+                    &mut velocity_pcg_delta,
+                    kapitsa_core::joint::diagnostics::EnergyComponents::default(),
+                    metrics.velocity_pcg_energy_delta,
+                );
+                accumulate_energy_delta(
+                    &mut velocity_solver_delta,
+                    metrics.energy_after_integration,
+                    metrics.energy_after_velocity_solver,
+                );
+                accumulate_energy_delta(
+                    &mut position_pcg_delta,
+                    kapitsa_core::joint::diagnostics::EnergyComponents::default(),
+                    metrics.position_pcg_energy_delta,
+                );
+                accumulate_energy_delta(
+                    &mut position_solver_delta,
+                    metrics.energy_after_velocity_solver,
+                    metrics.energy_after_position_solver,
+                );
+                impulse_work += metrics.velocity_projection_impulse_work_j;
+                quadratic_work += metrics.velocity_projection_quadratic_work_j;
+            }
+            println!(
+                "parts=100 mode=free_rigid_assembly solver={label} ticks={} kinetic_energy_drift={:.6}% contacts={} failure={:?}",
+                run.completed_ticks,
+                run.max_coast_energy_drift * 100.0,
+                run.other_contact_events,
+                run.step_failure,
+            );
+            print_energy_delta(
+                "sum_180_integration",
+                kapitsa_core::joint::diagnostics::EnergyComponents::default(),
+                energy_components_from_delta(integration_delta),
+            );
+            print_energy_delta(
+                "sum_180_velocity_pcg",
+                kapitsa_core::joint::diagnostics::EnergyComponents::default(),
+                energy_components_from_delta(velocity_pcg_delta),
+            );
+            print_energy_delta(
+                "sum_180_velocity_solver",
+                kapitsa_core::joint::diagnostics::EnergyComponents::default(),
+                energy_components_from_delta(velocity_solver_delta),
+            );
+            print_energy_delta(
+                "sum_180_position_pcg",
+                kapitsa_core::joint::diagnostics::EnergyComponents::default(),
+                energy_components_from_delta(position_pcg_delta),
+            );
+            print_energy_delta(
+                "sum_180_position_solver",
+                kapitsa_core::joint::diagnostics::EnergyComponents::default(),
+                energy_components_from_delta(position_solver_delta),
+            );
+            println!(
+                "velocity_projection solver={label} post_integration_max_Jv={:.6e}m/s/{:.6e}rad/s post_solver_max_Jv={:.6e}m/s/{:.6e}rad/s impulse_work={impulse_work:+.9e}J quadratic_work={quadratic_work:+.9e}J predicted_delta={:+.9e}J measured_delta={:+.9e}J closure_error={:+.9e}J",
+                first.initial_velocity_linear_residual_mps,
+                first.initial_velocity_angular_residual_radps,
+                last.post_velocity_linear_residual_mps,
+                last.post_velocity_angular_residual_radps,
+                impulse_work + quadratic_work,
+                velocity_solver_delta.0 + velocity_solver_delta.1 + velocity_solver_delta.2,
+                impulse_work + quadratic_work
+                    - velocity_solver_delta.0
+                    - velocity_solver_delta.1
+                    - velocity_solver_delta.2,
+            );
+            print_energy_delta(
+                "step0_integration",
+                first.energy_before_integration,
+                first.energy_after_integration,
+            );
+            print_energy_delta(
+                "step0_velocity_solver",
+                first.energy_after_integration,
+                first.energy_after_velocity_solver,
+            );
+            print_energy_delta(
+                "step0_position_solver",
+                first.energy_after_velocity_solver,
+                first.energy_after_position_solver,
+            );
+            print_energy_delta(
+                "step0_velocity_pcg",
+                first.energy_before_velocity_pcg,
+                first.energy_after_velocity_pcg,
+            );
+            print_energy_delta(
+                "step0_position_pcg",
+                first.energy_before_position_pcg,
+                first.energy_after_position_pcg,
+            );
+            print_energy_delta(
+                "step179_integration",
+                last.energy_before_integration,
+                last.energy_after_integration,
+            );
+            print_energy_delta(
+                "step179_velocity_solver",
+                last.energy_after_integration,
+                last.energy_after_velocity_solver,
+            );
+            print_energy_delta(
+                "step179_position_solver",
+                last.energy_after_velocity_solver,
+                last.energy_after_position_solver,
+            );
+            print_energy_delta(
+                "step179_velocity_pcg",
+                last.energy_before_velocity_pcg,
+                last.energy_after_velocity_pcg,
+            );
+            print_energy_delta(
+                "step179_position_pcg",
+                last.energy_before_position_pcg,
+                last.energy_after_position_pcg,
+            );
+            assert_eq!(run.completed_ticks, TICKS);
+            assert_eq!(run.other_contact_events, 0);
+            assert!(run.step_failure.is_none());
+            if label == "global_pcg" {
+                pcg_conserved = run.max_coast_energy_drift < 1.0e-4;
+            }
+        }
+        assert!(
+            pcg_conserved,
+            "global PCG free rigid assembly exceeded the 0.01% kinetic-energy drift limit"
+        );
+    }
+
     fn run_fixed_scenario(part_count: usize, block3: bool) -> StabilityRun {
-        run_scenario(part_count, block3, ScenarioMode::Full, false, None, false)
+        run_scenario(
+            part_count,
+            block3,
+            ScenarioMode::Full,
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn run_fixed_scenario_with_velocity_pcg(
+        part_count: usize,
+        global_velocity_pcg_iterations: Option<u32>,
+    ) -> StabilityRun {
+        run_scenario(
+            part_count,
+            false,
+            ScenarioMode::Full,
+            false,
+            None,
+            false,
+            global_velocity_pcg_iterations,
+            None,
+            None,
+        )
     }
 
     fn run_scenario(
@@ -662,6 +1374,9 @@ mod stability_tests {
         adaptive: bool,
         iteration_counts: Option<(u32, u32)>,
         reverse_joint_order: bool,
+        global_velocity_pcg_iterations: Option<u32>,
+        velocity_relaxation: Option<f64>,
+        global_position_pcg_iterations: Option<u32>,
     ) -> StabilityRun {
         let started = Instant::now();
         let mut rocket = ModularRocket::new(part_count);
@@ -689,12 +1404,51 @@ mod stability_tests {
             .set_joint_adaptive_iterations_for_bench(adaptive);
         #[cfg(not(feature = "bench-internals"))]
         assert!(!adaptive, "adaptive comparison requires bench-internals");
+        #[cfg(feature = "bench-internals")]
+        if let Some(max_iterations) = global_velocity_pcg_iterations {
+            rocket
+                .world
+                .set_joint_global_velocity_pcg_for_bench(max_iterations, true);
+        }
+        #[cfg(feature = "bench-internals")]
+        if let Some(relaxation) = velocity_relaxation {
+            rocket
+                .world
+                .set_joint_velocity_relaxation_for_bench(relaxation);
+        }
+        #[cfg(feature = "bench-internals")]
+        if let Some(max_iterations) = global_position_pcg_iterations {
+            rocket
+                .world
+                .set_joint_global_position_pcg_for_bench(max_iterations, true);
+        }
+        #[cfg(not(feature = "bench-internals"))]
+        assert!(
+            global_velocity_pcg_iterations.is_none(),
+            "global velocity PCG comparison requires bench-internals"
+        );
+        #[cfg(not(feature = "bench-internals"))]
+        assert!(
+            velocity_relaxation.is_none(),
+            "relaxed Gauss-Seidel comparison requires bench-internals"
+        );
+        #[cfg(not(feature = "bench-internals"))]
+        assert!(
+            global_position_pcg_iterations.is_none(),
+            "global position PCG comparison requires bench-internals"
+        );
         if matches!(
             mode,
             ScenarioMode::NoLoads
                 | ScenarioMode::GravityWithoutContact
                 | ScenarioMode::ThrustWithoutGravityOrContact
+                | ScenarioMode::ThrustWithGravityWithoutContact
                 | ScenarioMode::CenteredThrustWithoutGravityOrContact
+                | ScenarioMode::StagedThrustWithoutGravityOrContact
+                | ScenarioMode::StagedThrustWithGravityWithoutContact
+                | ScenarioMode::StagedThrustWithGravityAndBodyColliders
+                | ScenarioMode::RocketCoastWithoutContactOrThrust
+                | ScenarioMode::RocketFreeAssemblyWithoutLoads
         ) {
             rocket
                 .world
@@ -706,8 +1460,27 @@ mod stability_tests {
             ScenarioMode::NoLoads
                 | ScenarioMode::ThrustWithoutGravityOrContact
                 | ScenarioMode::CenteredThrustWithoutGravityOrContact
+                | ScenarioMode::StagedThrustWithoutGravityOrContact
+                | ScenarioMode::RocketFreeAssemblyWithoutLoads
         ) {
             rocket.world.set_central_gravity(None);
+        }
+        if matches!(
+            mode,
+            ScenarioMode::StagedThrustWithoutGravityOrContact
+                | ScenarioMode::StagedThrustWithGravityWithoutContact
+                | ScenarioMode::ThrustWithGravityWithoutContact
+                | ScenarioMode::RocketCoastWithoutContactOrThrust
+                | ScenarioMode::RocketFreeAssemblyWithoutLoads
+        ) {
+            let colliders = rocket
+                .world
+                .colliders()
+                .map(|(id, _, _)| id)
+                .collect::<Vec<_>>();
+            for collider in colliders {
+                rocket.world.remove_collider(collider);
+            }
         }
         if matches!(mode, ScenarioMode::CenteredThrustWithoutGravityOrContact) {
             let thrust = rocket
@@ -719,6 +1492,9 @@ mod stability_tests {
                 .world
                 .set_force_source(rocket.lower_engine, Vec3::ZERO, thrust)
                 .expect("centered diagnostic engine");
+        }
+        if matches!(mode, ScenarioMode::RocketFreeAssemblyWithoutLoads) {
+            set_rigid_assembly_velocity(&mut rocket);
         }
         #[cfg(feature = "bench-internals")]
         rocket.world.set_joint_projection_for_bench(block3);
@@ -732,13 +1508,24 @@ mod stability_tests {
         let mut frame_square_sum = 0.0;
         let mut joint_error_samples = 0usize;
         let mut max_coast_energy_drift: f64 = 0.0;
+        let mut max_coast_energy_drift_tick = None;
+        let mut final_coast_energy_signed_drift: f64 = 0.0;
         let mut coast_energy_start = None;
+        let mut coast_energy_start_components = None;
+        let mut coast_energy_reference_scale = None;
+        let mut coast_energy_final_components = (0.0, 0.0, 0.0);
         let mut max_altitude: f64 = 0.0;
         let mut max_angular_speed: f64 = 0.0;
         let mut separation_momentum_error = 0.0;
         let mut surface_begins = 0;
         let mut surface_ends = 0;
         let mut surface_impacts = 0;
+        let mut other_contact_events = 0;
+        let mut post_cutoff_surface_events = 0;
+        let mut post_cutoff_upper_surface_events = 0;
+        let mut post_cutoff_upper_surface_event_ticks = Vec::new();
+        let mut coast_energy_trace = Vec::new();
+        let mut upper_coast_contact_seen = false;
         let mut joints_after_separation = 0;
         let mut completed_ticks = 0;
         let mut step_failure = None;
@@ -747,6 +1534,8 @@ mod stability_tests {
         let mut first_frame_limit_tick = None;
         #[cfg(feature = "bench-internals")]
         let mut solver_stage_trace = Vec::with_capacity(TICKS);
+        #[cfg(feature = "bench-internals")]
+        let mut energy_trace = Vec::with_capacity(TICKS);
 
         for tick in 0..TICKS {
             match mode {
@@ -789,6 +1578,7 @@ mod stability_tests {
                     _ => {}
                 },
                 ScenarioMode::ThrustWithoutGravityOrContact
+                | ScenarioMode::ThrustWithGravityWithoutContact
                 | ScenarioMode::CenteredThrustWithoutGravityOrContact => match tick {
                     12 => rocket
                         .world
@@ -800,9 +1590,55 @@ mod stability_tests {
                         .expect("booster cutoff"),
                     _ => {}
                 },
+                ScenarioMode::StagedThrustWithoutGravityOrContact
+                | ScenarioMode::StagedThrustWithGravityWithoutContact
+                | ScenarioMode::StagedThrustWithGravityAndBodyColliders => match tick {
+                    12 => rocket
+                        .world
+                        .set_force_source_enabled(rocket.lower_engine, true)
+                        .expect("booster ignition"),
+                    24 if matches!(mode, ScenarioMode::StagedThrustWithGravityAndBodyColliders) => {
+                        burn_tanks(&mut rocket, true)
+                    }
+                    54 => {
+                        let momentum_before = stage_momentum(&rocket, &rocket.lower_parts)
+                            + stage_momentum(&rocket, &rocket.upper_parts);
+                        rocket
+                            .world
+                            .remove_joint(rocket.separation_joint)
+                            .expect("diagnostic stage separation");
+                        joints_after_separation = rocket.world.joint_count();
+                        rocket
+                            .world
+                            .set_force_source_enabled(rocket.lower_engine, false)
+                            .expect("booster cutoff");
+                        rocket
+                            .world
+                            .set_force_source_enabled(rocket.upper_engine, true)
+                            .expect("upper-stage ignition");
+                        let impulse = Vec3::Y * 2.0;
+                        let lower_parts = rocket.lower_parts.clone();
+                        let upper_parts = rocket.upper_parts.clone();
+                        apply_stage_impulse(&mut rocket, &lower_parts, -impulse);
+                        apply_stage_impulse(&mut rocket, &upper_parts, impulse);
+                        let momentum_after = stage_momentum(&rocket, &rocket.lower_parts)
+                            + stage_momentum(&rocket, &rocket.upper_parts);
+                        separation_momentum_error = (momentum_after - momentum_before).length();
+                    }
+                    72 if matches!(mode, ScenarioMode::StagedThrustWithGravityAndBodyColliders) => {
+                        burn_tanks(&mut rocket, false)
+                    }
+                    90 => rocket
+                        .world
+                        .set_force_source_enabled(rocket.upper_engine, false)
+                        .expect("upper-stage cutoff"),
+                    _ => {}
+                },
                 ScenarioMode::NoLoads
                 | ScenarioMode::GravityWithoutContact
-                | ScenarioMode::GravityWithContact => {}
+                | ScenarioMode::GravityWithContact
+                | ScenarioMode::RocketCoastWithoutContactOrThrust
+                | ScenarioMode::RocketFreeAssemblyWithoutLoads => {}
             }
 
             if let Err(error) = rocket.world.step(DT) {
@@ -810,13 +1646,35 @@ mod stability_tests {
                 break;
             }
             completed_ticks += 1;
+            #[cfg(feature = "bench-internals")]
+            energy_trace.push(rocket.world.physics_step_metrics().joints);
             joint_break_events += rocket.world.joint_events().len();
             for event in rocket.world.collision_events() {
-                if event.sensor
-                    || (event.pair.a != rocket.surface_collider
-                        && event.pair.b != rocket.surface_collider)
-                {
+                if event.sensor {
                     continue;
+                }
+                if event.pair.a != rocket.surface_collider
+                    && event.pair.b != rocket.surface_collider
+                {
+                    other_contact_events += 1;
+                    continue;
+                }
+                if tick >= 90 {
+                    post_cutoff_surface_events += 1;
+                    let vehicle_collider = if event.pair.a == rocket.surface_collider {
+                        event.pair.b
+                    } else {
+                        event.pair.a
+                    };
+                    if rocket
+                        .world
+                        .collider_body(vehicle_collider)
+                        .is_some_and(|body| rocket.upper_parts.contains(&body))
+                    {
+                        post_cutoff_upper_surface_events += 1;
+                        post_cutoff_upper_surface_event_ticks.push(tick);
+                        upper_coast_contact_seen = true;
+                    }
                 }
                 match event.kind {
                     CollisionEventKind::Begin => surface_begins += 1,
@@ -877,6 +1735,8 @@ mod stability_tests {
                         .pre_joint_velocity_linear_residual_mps,
                     pre_joint_velocity_angular_residual_radps: joint_metrics
                         .pre_joint_velocity_angular_residual_radps,
+                    velocity_pcg_iterations: joint_metrics.velocity_pcg_iterations,
+                    position_pcg_iterations: joint_metrics.position_pcg_iterations,
                 });
             }
             for &id in &rocket.parts {
@@ -898,11 +1758,42 @@ mod stability_tests {
                 max_angular_speed = max_angular_speed.max(state.angular_velocity().length());
             }
 
-            if tick >= 90 {
-                let energy = mechanical_energy(&rocket, &rocket.upper_parts);
-                let initial = *coast_energy_start.get_or_insert(energy);
-                max_coast_energy_drift =
-                    max_coast_energy_drift.max((energy - initial).abs() / initial.abs().max(1.0));
+            if tick >= 90 && !upper_coast_contact_seen {
+                let energy_parts = if matches!(
+                    mode,
+                    ScenarioMode::RocketCoastWithoutContactOrThrust
+                        | ScenarioMode::RocketFreeAssemblyWithoutLoads
+                ) {
+                    &rocket.parts
+                } else {
+                    &rocket.upper_parts
+                };
+                let components = mechanical_energy_components(&rocket, energy_parts);
+                let energy = match mode {
+                    ScenarioMode::StagedThrustWithoutGravityOrContact => {
+                        kinetic_energy(&rocket, energy_parts)
+                    }
+                    ScenarioMode::RocketFreeAssemblyWithoutLoads => {
+                        kinetic_energy(&rocket, energy_parts)
+                    }
+                    _ => components.0 + components.1 + components.2,
+                };
+                let initial = *coast_energy_start.get_or_insert_with(|| {
+                    coast_energy_start_components = Some(components);
+                    energy
+                });
+                let reference_scale = *coast_energy_reference_scale.get_or_insert_with(|| {
+                    components.0.abs() + components.1.abs() + components.2.abs()
+                });
+                let signed_drift = (energy - initial) / reference_scale.max(1.0);
+                let drift = signed_drift.abs();
+                coast_energy_trace.push((tick, energy));
+                final_coast_energy_signed_drift = signed_drift;
+                coast_energy_final_components = components;
+                if drift > max_coast_energy_drift {
+                    max_coast_energy_drift = drift;
+                    max_coast_energy_drift_tick = Some(tick);
+                }
             }
         }
 
@@ -947,12 +1838,22 @@ mod stability_tests {
             max_frame_error,
             rms_frame_error: (frame_square_sum / samples).sqrt(),
             max_coast_energy_drift,
+            max_coast_energy_drift_tick,
+            final_coast_energy_signed_drift,
+            coast_energy_start_components: coast_energy_start_components.unwrap_or_default(),
+            coast_energy_reference_scale_j: coast_energy_reference_scale.unwrap_or_default(),
+            coast_energy_final_components,
             max_altitude,
             max_angular_speed,
             separation_momentum_error,
             surface_begins,
             surface_ends,
             surface_impacts,
+            other_contact_events,
+            post_cutoff_surface_events,
+            post_cutoff_upper_surface_events,
+            post_cutoff_upper_surface_event_ticks,
+            coast_energy_trace,
             lower_fuel_mass,
             upper_fuel_mass,
             joints_after_separation,
@@ -964,6 +1865,91 @@ mod stability_tests {
             first_frame_limit_tick,
             #[cfg(feature = "bench-internals")]
             solver_stage_trace,
+            #[cfg(feature = "bench-internals")]
+            energy_trace,
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn print_energy_delta(
+        label: &str,
+        before: kapitsa_core::joint::diagnostics::EnergyComponents,
+        after: kapitsa_core::joint::diagnostics::EnergyComponents,
+    ) {
+        let translational = after.translational_j - before.translational_j;
+        let rotational = after.rotational_j - before.rotational_j;
+        let potential = after.potential_j - before.potential_j;
+        println!(
+            "energy_stage={label} d_translation={translational:+.9e}J d_rotation={rotational:+.9e}J d_potential={potential:+.9e}J d_total={:+.9e}J",
+            translational + rotational + potential,
+        );
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn accumulate_energy_delta(
+        total: &mut (f64, f64, f64),
+        before: kapitsa_core::joint::diagnostics::EnergyComponents,
+        after: kapitsa_core::joint::diagnostics::EnergyComponents,
+    ) {
+        total.0 += after.translational_j - before.translational_j;
+        total.1 += after.rotational_j - before.rotational_j;
+        total.2 += after.potential_j - before.potential_j;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn energy_components_from_delta(
+        delta: (f64, f64, f64),
+    ) -> kapitsa_core::joint::diagnostics::EnergyComponents {
+        kapitsa_core::joint::diagnostics::EnergyComponents {
+            translational_j: delta.0,
+            rotational_j: delta.1,
+            potential_j: delta.2,
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn sum_energy_deltas(
+        metrics: &[kapitsa_core::joint::diagnostics::JointSolverMetrics],
+        before: impl Fn(
+            &kapitsa_core::joint::diagnostics::JointSolverMetrics,
+        ) -> kapitsa_core::joint::diagnostics::EnergyComponents,
+        after: impl Fn(
+            &kapitsa_core::joint::diagnostics::JointSolverMetrics,
+        ) -> kapitsa_core::joint::diagnostics::EnergyComponents,
+    ) -> kapitsa_core::joint::diagnostics::EnergyComponents {
+        let mut total = kapitsa_core::joint::diagnostics::EnergyComponents::default();
+        for metric in metrics {
+            let delta = after(metric).delta(before(metric));
+            total.translational_j += delta.translational_j;
+            total.rotational_j += delta.rotational_j;
+            total.potential_j += delta.potential_j;
+        }
+        total
+    }
+
+    fn set_rigid_assembly_velocity(rocket: &mut ModularRocket) {
+        let origin = rocket
+            .world
+            .body(rocket.lower_root)
+            .and_then(|body| body.world_center_of_mass().ok().flatten())
+            .expect("assembly origin");
+        let base_velocity = Vec3::new(0.5, -0.25, 0.1);
+        let angular_velocity = Vec3::new(0.15, -0.12, 0.2);
+        for id in rocket.parts.clone() {
+            let center = rocket
+                .world
+                .body(id)
+                .and_then(|body| body.world_center_of_mass().ok().flatten())
+                .expect("part center of mass");
+            let linear_velocity = base_velocity
+                + angular_velocity
+                    .checked_cross(center - origin)
+                    .expect("rigid assembly velocity");
+            let body = rocket.world.body_mut(id).expect("assembly part");
+            body.set_linear_velocity(linear_velocity)
+                .expect("finite assembly velocity");
+            body.set_angular_velocity(angular_velocity)
+                .expect("finite assembly spin");
         }
     }
 
@@ -1101,31 +2087,62 @@ mod stability_tests {
             .collect()
     }
 
-    fn mechanical_energy(rocket: &ModularRocket, parts: &[kapitsa_core::world::BodyId]) -> f64 {
+    fn mechanical_energy_components(
+        rocket: &ModularRocket,
+        parts: &[kapitsa_core::world::BodyId],
+    ) -> (f64, f64, f64) {
+        let gravity = rocket.world.central_gravity();
+        let mut translational = 0.0;
+        let mut rotational = 0.0;
+        let mut potential = 0.0;
+        for &id in parts {
+            let body = rocket.world.body(id).expect("energy body");
+            let mass = body.physics().mass().expect("energy mass");
+            let state = body.state();
+            let transform = state.transform();
+            let velocity = state.linear_velocity();
+            let omega = state.angular_velocity();
+            let rotation = transform.rotation();
+            let local_omega = rotation
+                .conjugate()
+                .rotate_vector(omega)
+                .expect("local angular velocity");
+            let world_i_omega = rotation
+                .rotate_vector(mass.inertia() * local_omega)
+                .expect("world angular momentum");
+            translational += 0.5 * mass.mass() * velocity.length_squared();
+            rotational += 0.5 * omega.dot(world_i_omega);
+            if let Some(gravity) = gravity {
+                let position = transform.transform_point(mass.center_of_mass());
+                let radius = (position - gravity.center()).length();
+                if radius > 0.0 {
+                    // Keep the physical zero at infinity; a surface-relative
+                    // offset makes percent drift depend on an arbitrary constant.
+                    potential -= gravity.gravitational_parameter() * mass.mass() / radius;
+                }
+            }
+        }
+        (translational, rotational, potential)
+    }
+
+    fn kinetic_energy(rocket: &ModularRocket, parts: &[kapitsa_core::world::BodyId]) -> f64 {
         parts
             .iter()
             .map(|&id| {
                 let body = rocket.world.body(id).expect("energy body");
                 let mass = body.physics().mass().expect("energy mass");
                 let state = body.state();
-                let transform = state.transform();
-                let position = transform.transform_point(mass.center_of_mass());
-                let center_of_gravity = Vec3::new(0.0, -SURFACE_RADIUS, 0.0);
-                let radius = (position - center_of_gravity).length();
-                let velocity = state.linear_velocity();
                 let omega = state.angular_velocity();
-                let rotation = transform.rotation();
+                let rotation = state.transform().rotation();
                 let local_omega = rotation
                     .conjugate()
                     .rotate_vector(omega)
                     .expect("local angular velocity");
-                let local_i_omega = mass.inertia() * local_omega;
                 let world_i_omega = rotation
-                    .rotate_vector(local_i_omega)
+                    .rotate_vector(mass.inertia() * local_omega)
                     .expect("world angular momentum");
-                0.5 * mass.mass() * velocity.length_squared()
+                0.5 * mass.mass() * state.linear_velocity().length_squared()
                     + 0.5 * omega.dot(world_i_omega)
-                    + GRAVITATIONAL_PARAMETER * mass.mass() * (1.0 / SURFACE_RADIUS - 1.0 / radius)
             })
             .sum()
     }

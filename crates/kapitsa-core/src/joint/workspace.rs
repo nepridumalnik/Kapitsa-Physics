@@ -375,6 +375,85 @@ impl JointWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_velocity_pcg_iterations(&mut self, iterations: usize) {
+        self.metrics.velocity_pcg_iterations = self
+            .metrics
+            .velocity_pcg_iterations
+            .saturating_add(iterations as u64);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_position_pcg_iterations(&mut self, iterations: usize) {
+        self.metrics.position_pcg_iterations = self
+            .metrics
+            .position_pcg_iterations
+            .saturating_add(iterations as u64);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_energy(
+        &mut self,
+        stage: super::diagnostics::EnergyStage,
+        energy: super::diagnostics::EnergyComponents,
+    ) {
+        let target = match stage {
+            super::diagnostics::EnergyStage::BeforeVelocityPcg => {
+                &mut self.metrics.energy_before_velocity_pcg
+            }
+            super::diagnostics::EnergyStage::AfterVelocityPcg => {
+                &mut self.metrics.energy_after_velocity_pcg
+            }
+            super::diagnostics::EnergyStage::VelocityPcgDelta => {
+                &mut self.metrics.velocity_pcg_energy_delta
+            }
+            super::diagnostics::EnergyStage::AfterVelocitySolver => {
+                &mut self.metrics.energy_after_velocity_solver
+            }
+            super::diagnostics::EnergyStage::BeforePositionPcg => {
+                &mut self.metrics.energy_before_position_pcg
+            }
+            super::diagnostics::EnergyStage::AfterPositionPcg => {
+                &mut self.metrics.energy_after_position_pcg
+            }
+            super::diagnostics::EnergyStage::PositionPcgDelta => {
+                &mut self.metrics.position_pcg_energy_delta
+            }
+            super::diagnostics::EnergyStage::AfterPositionSolver => {
+                &mut self.metrics.energy_after_position_solver
+            }
+        };
+        if matches!(
+            stage,
+            super::diagnostics::EnergyStage::VelocityPcgDelta
+                | super::diagnostics::EnergyStage::PositionPcgDelta
+        ) {
+            target.add_assign(energy);
+        } else {
+            *target = energy;
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_energy_delta(
+        &mut self,
+        stage: super::diagnostics::EnergyStage,
+        before: super::diagnostics::EnergyComponents,
+        after: super::diagnostics::EnergyComponents,
+    ) {
+        self.record_energy(stage, after.delta(before));
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_velocity_projection_work(
+        &mut self,
+        impulse_work_j: f64,
+        quadratic_work_j: f64,
+    ) {
+        self.metrics.velocity_projection_impulse_work_j += impulse_work_j;
+        self.metrics.velocity_projection_quadratic_work_j += quadratic_work_j;
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_scalar_rows_solved(&mut self, rows: usize) {
         self.metrics.scalar_rows_solved =
             self.metrics.scalar_rows_solved.saturating_add(rows as u64);
@@ -460,6 +539,13 @@ impl JointWorkspace {
     pub(crate) fn record_pre_joint_velocity_residual(&mut self) {
         self.metrics.pre_joint_velocity_linear_residual_mps = self.residual.max_velocity_mps;
         self.metrics.pre_joint_velocity_angular_residual_radps =
+            self.residual.max_angular_velocity_radps;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_initial_velocity_residual(&mut self) {
+        self.metrics.initial_velocity_linear_residual_mps = self.residual.max_velocity_mps;
+        self.metrics.initial_velocity_angular_residual_radps =
             self.residual.max_angular_velocity_radps;
     }
 

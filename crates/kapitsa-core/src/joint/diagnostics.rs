@@ -1,5 +1,44 @@
 //! Benchmark-only work counters owned by the joint solver.
 
+/// Kinetic and gravitational energy at a solver stage.
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EnergyComponents {
+    pub translational_j: f64,
+    pub rotational_j: f64,
+    pub potential_j: f64,
+}
+
+#[cfg(feature = "bench-internals")]
+impl EnergyComponents {
+    pub(crate) fn add_assign(&mut self, other: Self) {
+        self.translational_j += other.translational_j;
+        self.rotational_j += other.rotational_j;
+        self.potential_j += other.potential_j;
+    }
+
+    pub fn delta(self, before: Self) -> Self {
+        Self {
+            translational_j: self.translational_j - before.translational_j,
+            rotational_j: self.rotational_j - before.rotational_j,
+            potential_j: self.potential_j - before.potential_j,
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy)]
+pub(crate) enum EnergyStage {
+    BeforeVelocityPcg,
+    AfterVelocityPcg,
+    VelocityPcgDelta,
+    AfterVelocitySolver,
+    BeforePositionPcg,
+    AfterPositionPcg,
+    PositionPcgDelta,
+    AfterPositionSolver,
+}
+
 /// Work performed by the joint solver during one physics step.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(not(feature = "bench-internals"), derive(Eq))]
@@ -28,6 +67,48 @@ pub struct JointSolverMetrics {
     pub position_sweeps: u64,
     /// Number of velocity constraint sweeps actually executed.
     pub velocity_sweeps: u64,
+    /// Inner iterations used by the benchmark-only global velocity PCG solve.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_iterations: u64,
+    /// Inner iterations used by the benchmark-only global position PCG solve.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_iterations: u64,
+    /// Whole-world energy before prediction/integration.
+    #[cfg(feature = "bench-internals")]
+    pub energy_before_integration: EnergyComponents,
+    /// Whole-world energy after prediction/integration and before solving.
+    #[cfg(feature = "bench-internals")]
+    pub energy_after_integration: EnergyComponents,
+    /// Island energy before the first global velocity PCG invocation.
+    #[cfg(feature = "bench-internals")]
+    pub energy_before_velocity_pcg: EnergyComponents,
+    /// Island energy after the final global velocity PCG invocation.
+    #[cfg(feature = "bench-internals")]
+    pub energy_after_velocity_pcg: EnergyComponents,
+    /// Sum of signed component energy changes across individual velocity PCG calls.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_energy_delta: EnergyComponents,
+    /// Island energy after all velocity constraints.
+    #[cfg(feature = "bench-internals")]
+    pub energy_after_velocity_solver: EnergyComponents,
+    /// Island energy before the first global position PCG invocation.
+    #[cfg(feature = "bench-internals")]
+    pub energy_before_position_pcg: EnergyComponents,
+    /// Island energy after the final global position PCG invocation.
+    #[cfg(feature = "bench-internals")]
+    pub energy_after_position_pcg: EnergyComponents,
+    /// Sum of signed component energy changes across individual position PCG calls.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_energy_delta: EnergyComponents,
+    /// First-order work v·Δp + ω·ΔL done by the velocity projection impulses.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_projection_impulse_work_j: f64,
+    /// Quadratic kinetic term 0.5·Δv·Δp + 0.5·Δω·ΔL of the velocity projection.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_projection_quadratic_work_j: f64,
+    /// Island energy after all position constraints.
+    #[cfg(feature = "bench-internals")]
+    pub energy_after_position_solver: EnergyComponents,
     /// Maximum anchor error before velocity constraints are solved.
     #[cfg(feature = "bench-internals")]
     pub pre_velocity_anchor_error_m: f64,
@@ -67,6 +148,12 @@ pub struct JointSolverMetrics {
     /// Maximum linear velocity residual after contact solving, before joint solving.
     #[cfg(feature = "bench-internals")]
     pub pre_joint_velocity_linear_residual_mps: f64,
+    /// Maximum |Jv-target| immediately after integration, before solver impulses.
+    #[cfg(feature = "bench-internals")]
+    pub initial_velocity_linear_residual_mps: f64,
+    /// Maximum angular |Jv-target| immediately after integration, before solver impulses.
+    #[cfg(feature = "bench-internals")]
+    pub initial_velocity_angular_residual_radps: f64,
     /// Maximum angular velocity residual after contact solving, before joint solving.
     #[cfg(feature = "bench-internals")]
     pub pre_joint_velocity_angular_residual_radps: f64,
@@ -106,6 +193,74 @@ impl JointSolverMetrics {
         position_sweeps: 0,
         velocity_sweeps: 0,
         #[cfg(feature = "bench-internals")]
+        velocity_pcg_iterations: 0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_iterations: 0,
+        #[cfg(feature = "bench-internals")]
+        energy_before_integration: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_after_integration: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_before_velocity_pcg: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_after_velocity_pcg: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_energy_delta: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_after_velocity_solver: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_before_position_pcg: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_after_position_pcg: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        position_pcg_energy_delta: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        velocity_projection_impulse_work_j: 0.0,
+        #[cfg(feature = "bench-internals")]
+        velocity_projection_quadratic_work_j: 0.0,
+        #[cfg(feature = "bench-internals")]
+        energy_after_position_solver: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
         pre_velocity_anchor_error_m: 0.0,
         #[cfg(feature = "bench-internals")]
         pre_velocity_frame_error_rad: 0.0,
@@ -131,6 +286,10 @@ impl JointSolverMetrics {
         post_position_angular_residual_radps: 0.0,
         #[cfg(feature = "bench-internals")]
         pre_joint_velocity_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        initial_velocity_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        initial_velocity_angular_residual_radps: 0.0,
         #[cfg(feature = "bench-internals")]
         pre_joint_velocity_angular_residual_radps: 0.0,
         #[cfg(feature = "bench-internals")]
@@ -174,6 +333,34 @@ impl JointSolverMetrics {
         self.velocity_sweeps = self.velocity_sweeps.saturating_add(other.velocity_sweeps);
         #[cfg(feature = "bench-internals")]
         {
+            self.velocity_pcg_iterations = self
+                .velocity_pcg_iterations
+                .saturating_add(other.velocity_pcg_iterations);
+            self.energy_before_integration
+                .add_assign(other.energy_before_integration);
+            self.energy_after_integration
+                .add_assign(other.energy_after_integration);
+            self.energy_before_velocity_pcg
+                .add_assign(other.energy_before_velocity_pcg);
+            self.energy_after_velocity_pcg
+                .add_assign(other.energy_after_velocity_pcg);
+            self.velocity_pcg_energy_delta
+                .add_assign(other.velocity_pcg_energy_delta);
+            self.energy_after_velocity_solver
+                .add_assign(other.energy_after_velocity_solver);
+            self.energy_before_position_pcg
+                .add_assign(other.energy_before_position_pcg);
+            self.energy_after_position_pcg
+                .add_assign(other.energy_after_position_pcg);
+            self.position_pcg_energy_delta
+                .add_assign(other.position_pcg_energy_delta);
+            self.velocity_projection_impulse_work_j += other.velocity_projection_impulse_work_j;
+            self.velocity_projection_quadratic_work_j += other.velocity_projection_quadratic_work_j;
+            self.energy_after_position_solver
+                .add_assign(other.energy_after_position_solver);
+        }
+        #[cfg(feature = "bench-internals")]
+        {
             self.pre_velocity_anchor_error_m = self
                 .pre_velocity_anchor_error_m
                 .max(other.pre_velocity_anchor_error_m);
@@ -213,6 +400,12 @@ impl JointSolverMetrics {
             self.pre_joint_velocity_linear_residual_mps = self
                 .pre_joint_velocity_linear_residual_mps
                 .max(other.pre_joint_velocity_linear_residual_mps);
+            self.initial_velocity_linear_residual_mps = self
+                .initial_velocity_linear_residual_mps
+                .max(other.initial_velocity_linear_residual_mps);
+            self.initial_velocity_angular_residual_radps = self
+                .initial_velocity_angular_residual_radps
+                .max(other.initial_velocity_angular_residual_radps);
             self.pre_joint_velocity_angular_residual_radps = self
                 .pre_joint_velocity_angular_residual_radps
                 .max(other.pre_joint_velocity_angular_residual_radps);
@@ -311,6 +504,8 @@ mod metrics_tests {
             position_sweeps: u64::MAX,
             velocity_sweeps: u64::MAX,
             #[cfg(feature = "bench-internals")]
+            velocity_pcg_iterations: u64::MAX,
+            #[cfg(feature = "bench-internals")]
             pre_velocity_anchor_error_m: f64::MAX,
             #[cfg(feature = "bench-internals")]
             pre_velocity_frame_error_rad: f64::MAX,
@@ -346,6 +541,7 @@ mod metrics_tests {
             pre_joint_velocity_linear_residual_mps: f64::MAX,
             #[cfg(feature = "bench-internals")]
             pre_joint_velocity_angular_residual_radps: f64::MAX,
+            ..JointSolverMetrics::default()
         };
         metrics.accumulate(JointSolverMetrics {
             prepared_rows: 1,
