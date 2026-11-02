@@ -3149,6 +3149,65 @@ fn tracked_world_allocations(mut operation: impl FnMut()) -> (usize, usize) {
 }
 
 #[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Release allocation check for warm global velocity PCG steps"]
+fn diagnose_global_velocity_pcg_warm_step_allocations() {
+    const BODY_COUNT: usize = 100;
+    const SAMPLES: usize = 32;
+    let mut scalar = allocation_check_joint_chain(BODY_COUNT, false);
+    let (scalar_allocations, scalar_bytes) = warm_step_allocations(&mut scalar, SAMPLES);
+    let mut pcg = allocation_check_joint_chain(BODY_COUNT, true);
+    let (pcg_allocations, pcg_bytes) = warm_step_allocations(&mut pcg, SAMPLES);
+    println!(
+        "bodies={BODY_COUNT} samples={SAMPLES} scalar_allocations_per_step={:.3} scalar_bytes_per_step={:.1} pcg_allocations_per_step={:.3} pcg_bytes_per_step={:.1}",
+        scalar_allocations as f64 / SAMPLES as f64,
+        scalar_bytes as f64 / SAMPLES as f64,
+        pcg_allocations as f64 / SAMPLES as f64,
+        pcg_bytes as f64 / SAMPLES as f64,
+    );
+    assert_eq!(pcg_allocations, scalar_allocations);
+    assert_eq!(pcg_bytes, scalar_bytes);
+}
+
+#[cfg(feature = "bench-internals")]
+fn allocation_check_joint_chain(body_count: usize, pcg_enabled: bool) -> PhysicsWorld {
+    let mut world = PhysicsWorld::new();
+    let bodies = (0..body_count)
+        .map(|index| {
+            world
+                .add_body(body_at(Vec3::X * index as f64, 1.0))
+                .expect("body")
+        })
+        .collect::<Vec<_>>();
+    let common = JointCommon::new(
+        JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+        JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+    );
+    let joint = Joint::Fixed(FixedJoint::new(common));
+    for pair in bodies.windows(2) {
+        world
+            .add_joint(pair[0], pair[1], joint)
+            .expect("fixed joint");
+    }
+    if pcg_enabled {
+        world.set_joint_global_velocity_pcg_for_bench(64, true);
+    }
+    world
+}
+
+#[cfg(feature = "bench-internals")]
+fn warm_step_allocations(world: &mut PhysicsWorld, samples: usize) -> (usize, usize) {
+    for _ in 0..2 {
+        world.step(1.0 / 120.0).expect("warm solver step");
+    }
+    tracked_world_allocations(|| {
+        for _ in 0..samples {
+            world.step(1.0 / 120.0).expect("measured solver step");
+        }
+    })
+}
+
+#[cfg(feature = "bench-internals")]
 fn force_source_preparation_samples(
     scenario: ForceSourceBenchScenario,
     source_count: usize,

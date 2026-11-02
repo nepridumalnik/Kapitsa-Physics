@@ -427,10 +427,14 @@ mod stability_tests {
         let velocity_pcg_cap = std::env::var("KAPITSA_ROCKET_VELOCITY_PCG_CAP")
             .ok()
             .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"));
+        let position_pcg_cap = std::env::var("KAPITSA_ROCKET_POSITION_PCG_CAP")
+            .ok()
+            .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"));
         let mut all_stable = true;
         for part_count in [100, 200, 500, 1000] {
-            let first = run_fixed_scenario_with_velocity_pcg(part_count, velocity_pcg_cap);
-            let repeated = run_fixed_scenario_with_velocity_pcg(part_count, velocity_pcg_cap);
+            let first = run_fixed_scenario_with_pcg(part_count, velocity_pcg_cap, position_pcg_cap);
+            let repeated =
+                run_fixed_scenario_with_pcg(part_count, velocity_pcg_cap, position_pcg_cap);
             assert_eq!(first.states, repeated.states, "{part_count} part repeat");
             assert_eq!(first.completed_ticks, repeated.completed_ticks);
             assert_eq!(first.step_failure, repeated.step_failure);
@@ -454,10 +458,10 @@ mod stability_tests {
             all_stable &= numerical_stability;
             println!(
                 "parts={part_count} solver={} joints={} elapsed_ms={} completed_ticks={} scenario={} numerical_stability={} step_failure={:?} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad first_limit_ticks(anchor/frame)={:?}/{:?} collision_free_coast_drift={:+.6e}% energy_reference_scale={:.6e}J coast_samples={} upper_coast_contacts={} first_upper_coast_contact={:?} coast_energy_start(T/R/U)={:.6e}/{:.6e}/{:.6e}J final(T/R/U)={:.6e}/{:.6e}/{:.6e}J upper_root_max_y={:.3}m omega={:.3}rad_s separation_dp={:.3e} contacts(begin/end/impact)={}/{}/{} breaks={}",
-                velocity_pcg_cap.map_or_else(
-                    || "scalar".to_owned(),
-                    |cap| format!("global_velocity_pcg_{cap}")
-                ),
+                match (velocity_pcg_cap, position_pcg_cap) {
+                    (None, None) => "scalar".to_owned(),
+                    (velocity, position) => format!("global_pcg_v{velocity:?}_p{position:?}"),
+                },
                 part_count - 1,
                 first.elapsed.as_millis(),
                 first.completed_ticks,
@@ -836,7 +840,19 @@ mod stability_tests {
     #[test]
     #[ignore = "Release measurement of combined global velocity and position PCG on rocket sizes"]
     fn diagnose_rocket_global_constraint_pcg() {
-        for part_count in [100, 200, 500, 1000] {
+        let part_counts = std::env::var("KAPITSA_ROCKET_DIAGNOSTIC_PARTS")
+            .ok()
+            .map(|value| vec![value.parse::<usize>().expect("valid rocket part count")])
+            .unwrap_or_else(|| vec![100, 200, 500, 1000]);
+        let velocity_cap = std::env::var("KAPITSA_ROCKET_VELOCITY_PCG_CAP")
+            .ok()
+            .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"))
+            .unwrap_or(64);
+        let position_cap = std::env::var("KAPITSA_ROCKET_POSITION_PCG_CAP")
+            .ok()
+            .map(|value| value.parse::<u32>().expect("valid PCG iteration cap"))
+            .unwrap_or(64);
+        for part_count in part_counts {
             let run = run_scenario(
                 part_count,
                 false,
@@ -844,16 +860,16 @@ mod stability_tests {
                 false,
                 None,
                 false,
-                Some(64),
+                Some(velocity_cap),
                 None,
-                Some(64),
+                Some(position_cap),
             );
             let peak = run.solver_stage_trace.iter().max_by(|left, right| {
                 left.post_joint_anchor_error_m
                     .total_cmp(&right.post_joint_anchor_error_m)
             });
             println!(
-                "parts={part_count} solver=global_velocity_position_pcg_ic0 elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} peak_tick={:?} peak_pre_velocity={:.6e}m peak_post_position={:.6e}m peak_velocity_pcg_iterations={} peak_position_pcg_iterations={} failure={:?}",
+                "parts={part_count} solver=global_velocity_position_pcg_ic0 caps={velocity_cap}/{position_cap} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% first_anchor_limit={:?} peak_tick={:?} peak_pre_velocity={:.6e}m peak_post_position={:.6e}m peak_velocity_pcg_iterations={} peak_position_pcg_iterations={} max_altitude={:.3}m failure={:?}",
                 run.elapsed.as_millis(),
                 run.completed_ticks,
                 run.max_anchor_error,
@@ -867,6 +883,7 @@ mod stability_tests {
                 peak.map_or(0.0, |sample| sample.post_joint_anchor_error_m),
                 peak.map_or(0, |sample| sample.velocity_pcg_iterations),
                 peak.map_or(0, |sample| sample.position_pcg_iterations),
+                run.max_altitude,
                 run.step_failure,
             );
         }
@@ -1350,9 +1367,10 @@ mod stability_tests {
         )
     }
 
-    fn run_fixed_scenario_with_velocity_pcg(
+    fn run_fixed_scenario_with_pcg(
         part_count: usize,
         global_velocity_pcg_iterations: Option<u32>,
+        global_position_pcg_iterations: Option<u32>,
     ) -> StabilityRun {
         run_scenario(
             part_count,
@@ -1363,7 +1381,7 @@ mod stability_tests {
             false,
             global_velocity_pcg_iterations,
             None,
-            None,
+            global_position_pcg_iterations,
         )
     }
 

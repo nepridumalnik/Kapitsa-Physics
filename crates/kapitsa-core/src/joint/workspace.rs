@@ -44,6 +44,8 @@ pub(crate) struct JointWorkspace {
     metrics: super::diagnostics::JointSolverMetrics,
     #[cfg(feature = "bench-internals")]
     geometry_residual: super::diagnostics::JointGeometryResidual,
+    #[cfg(feature = "bench-internals")]
+    velocity_pcg_scratch: super::solver::VelocityPcgScratch,
     residual: super::solver::JointResidual,
     #[cfg(test)]
     solver_calls: Vec<JointSolverCall>,
@@ -90,6 +92,8 @@ impl JointWorkspace {
                 anchor_error_m: 0.0,
                 frame_error_rad: 0.0,
             },
+            #[cfg(feature = "bench-internals")]
+            velocity_pcg_scratch: super::solver::VelocityPcgScratch::new(),
             residual: super::solver::JointResidual::ZERO,
             #[cfg(test)]
             solver_calls: Vec::new(),
@@ -111,6 +115,7 @@ impl JointWorkspace {
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
             self.geometry_residual = super::diagnostics::JointGeometryResidual::default();
+            self.velocity_pcg_scratch.begin_step();
         }
         self.residual = super::solver::JointResidual::ZERO;
         for row in &mut self.rows {
@@ -250,6 +255,23 @@ impl JointWorkspace {
             &mut self.rows
         };
         (rows, &mut self.solver_mass_slots)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn velocity_pcg_rows_and_scratch_mut(
+        &mut self,
+    ) -> (&mut [ConstraintRow], &mut super::solver::VelocityPcgScratch) {
+        (&mut self.rows, &mut self.velocity_pcg_scratch)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn velocity_pcg_rows_prepared(&self) -> bool {
+        self.velocity_pcg_scratch.rows_prepared
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn mark_velocity_pcg_rows_prepared(&mut self) {
+        self.velocity_pcg_scratch.rows_prepared = true;
     }
 
     pub(crate) fn stage_impulses(
