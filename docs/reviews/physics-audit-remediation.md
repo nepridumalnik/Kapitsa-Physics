@@ -9,7 +9,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | Stage | Requested area | Current state |
 |---|---|---|
 | S01 | Реестр состояния | NOT AUDITED |
-| S02 | Корректность ракетной фикстуры | NOT AUDITED |
+| S02 | Корректность ракетной фикстуры | MITIGATED — pad start corrected and tested; separate flight, separation and collision configurations remain outstanding |
 | S03 | Строгая оценка стабильности | MITIGATED — c29c698; static check only |
 | S04 | Корректная энергетическая диагностика | NOT AUDITED |
 | S05 | Диагностика сходимости Joint | NOT AUDITED |

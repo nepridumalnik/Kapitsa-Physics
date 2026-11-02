@@ -55,7 +55,9 @@ impl ModularRocket {
         let mut stages: [Vec<BodyId>; 2] = std::array::from_fn(|_| Vec::with_capacity(stage_parts));
         let mut tanks: [Vec<BodyId>; 2] = std::array::from_fn(|_| Vec::new());
         for stage in 0..2 {
-            let root_position = Vec3::new(0.0, if stage == 0 { 0.5 } else { 1.5 }, 0.0);
+            // Root cuboids have a full height of 0.5 m. Place the lower
+            // face on the pad instead of starting the rocket in free fall.
+            let root_position = Vec3::new(0.0, if stage == 0 { 0.25 } else { 1.25 }, 0.0);
             let trunk_parts = ((stage_parts as f64).sqrt() as usize).max(2);
             let mut positions = Vec::with_capacity(stage_parts);
             for index in 0..stage_parts {
@@ -212,6 +214,26 @@ mod tests {
     use super::ModularRocket;
 
     #[test]
+    fn lower_root_starts_on_the_pad() {
+        let rocket = ModularRocket::new(8);
+        let root = rocket.world.body(rocket.lower_root).unwrap();
+        let collider = rocket
+            .world
+            .colliders()
+            .find(|(_, body, _)| *body == rocket.lower_root)
+            .map(|(_, _, collider)| collider)
+            .unwrap();
+        let kapitsa_core::shape::Shape::Cuboid(cuboid) = collider.shape() else {
+            panic!("root collider must be a cuboid");
+        };
+        assert_eq!(collider.local_transform().translation().y, 0.0);
+        assert_eq!(
+            root.state().transform().translation().y,
+            cuboid.half_extents().y
+        );
+    }
+
+    #[test]
     fn requested_rocket_sizes_have_connected_repeatable_joint_graphs() {
         for total_parts in [100, 200, 500, 1000] {
             let first = ModularRocket::new(total_parts);
@@ -356,7 +378,6 @@ mod stability_tests {
                 && first.max_angular_speed > 0.01
                 && first.separation_momentum_error < 1.0e-9
                 && first.surface_begins > 0
-                && first.surface_impacts > 0
                 && first.lower_fuel_mass == 3.5
                 && first.upper_fuel_mass == 3.5
                 && first.joints_after_separation == part_count - 2
