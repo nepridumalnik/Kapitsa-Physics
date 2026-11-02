@@ -3644,6 +3644,245 @@ mod tests {
     }
 
     #[test]
+    fn fixed_joint_position_order_reports_anchor_rotation_coupling() {
+        #[derive(Clone, Copy)]
+        struct Residual {
+            anchor: f64,
+            frame: f64,
+        }
+
+        fn make_body(
+            position: Vec3,
+            rotation: Quat,
+            mass: f64,
+            center: Vec3,
+            inertia: Vec3,
+        ) -> SolverBody {
+            let properties =
+                MassProperties::new(mass, center, kapitsa_math::Mat3::from_diagonal(inertia))
+                    .expect("mass properties");
+            let body = RigidBody::new_dynamic(
+                Transform::new(position, rotation).expect("transform"),
+                properties,
+            )
+            .expect("dynamic body");
+            let state = *body.state();
+            SolverBody::from_prediction(body, state)
+        }
+
+        fn make_constraint() -> JointConstraint {
+            let common = JointCommon::new(
+                JointFrame::new(Vec3::new(0.28, -0.16, 0.11), Quat::IDENTITY),
+                JointFrame::new(Vec3::new(-0.12, 0.23, -0.09), Quat::IDENTITY),
+            );
+            JointConstraint {
+                id: test_joint_id(),
+                body_a: 0,
+                body_b: 1,
+                joint: Joint::Fixed(super::super::FixedJoint::new(common)),
+            }
+        }
+
+        fn make_bodies(angle: f64) -> [SolverBody; 2] {
+            let axis = Vec3::new(0.3, -0.6, 0.7)
+                .try_normalize()
+                .expect("rotation axis");
+            let rotation_a =
+                Quat::from_axis_angle(Vec3::new(0.2, 0.8, -0.3), 0.23).expect("rotation A");
+            let relative = Quat::from_axis_angle(axis, angle).expect("relative rotation");
+            let rotation_b = rotation_a * relative;
+            [
+                make_body(
+                    Vec3::new(-0.4, 0.2, -0.1),
+                    rotation_a,
+                    1.7,
+                    Vec3::new(0.12, -0.07, 0.09),
+                    Vec3::new(0.35, 0.8, 1.1),
+                ),
+                make_body(
+                    Vec3::new(0.9, -0.25, 0.3),
+                    rotation_b,
+                    3.4,
+                    Vec3::new(-0.08, 0.14, 0.04),
+                    Vec3::new(1.4, 0.6, 0.95),
+                ),
+            ]
+        }
+
+        fn residual(bodies: &[SolverBody], constraint: JointConstraint) -> Residual {
+            let joint = match constraint.joint {
+                Joint::Fixed(joint) => joint,
+                _ => unreachable!("fixed diagnostic constraint"),
+            };
+            let (anchor_a, rotation_a) =
+                world_frame(bodies, constraint.body_a, joint.common.frame_a).expect("frame A");
+            let (anchor_b, rotation_b) =
+                world_frame(bodies, constraint.body_b, joint.common.frame_b).expect("frame B");
+            Residual {
+                anchor: (anchor_b - anchor_a).length(),
+                frame: relative_rotation_error(rotation_a, rotation_b)
+                    .expect("frame error")
+                    .length(),
+            }
+        }
+
+        fn solve_subset(
+            workspace: &mut JointWorkspace,
+            bodies: &mut [SolverBody],
+            range: std::ops::Range<usize>,
+        ) {
+            let mut cache_stats = SolverMassCacheStats::default();
+            let (rows, slots) = workspace.solver_buffers_mut(false);
+            solve_position_rows(
+                &mut rows[range],
+                slots,
+                bodies,
+                0.01,
+                JointSolverOptions::legacy(),
+                &mut cache_stats,
+            )
+            .expect("position row subset");
+        }
+
+        fn reprepare(
+            workspace: &mut JointWorkspace,
+            bodies: &[SolverBody],
+            constraint: JointConstraint,
+        ) {
+            JointSolver::prepare(workspace, bodies, &[constraint], 0.01)
+                .expect("refresh joint geometry");
+        }
+
+        fn run_world_steps(angle: f64, constraint: JointConstraint) -> [Residual; 3] {
+            let bodies = make_bodies(angle);
+            let mut world = crate::world::PhysicsWorld::new();
+            let ids = bodies.map(|body| world.add_body(body.body).expect("world dynamic body"));
+            let joint = match constraint.joint {
+                Joint::Fixed(joint) => Joint::Fixed(joint),
+                _ => unreachable!("fixed diagnostic constraint"),
+            };
+            world
+                .add_joint(ids[0], ids[1], joint)
+                .expect("world fixed joint");
+            let measure = |world: &crate::world::PhysicsWorld| {
+                let body_a = world.body(ids[0]).expect("body A");
+                let body_b = world.body(ids[1]).expect("body B");
+                let frame_a = match constraint.joint {
+                    Joint::Fixed(joint) => joint.common.frame_a,
+                    _ => unreachable!("fixed diagnostic constraint"),
+                };
+                let frame_b = match constraint.joint {
+                    Joint::Fixed(joint) => joint.common.frame_b,
+                    _ => unreachable!("fixed diagnostic constraint"),
+                };
+                let transform_a = body_a.state().transform();
+                let transform_b = body_b.state().transform();
+                let anchor_a = transform_a.transform_point(frame_a.local_anchor);
+                let anchor_b = transform_b.transform_point(frame_b.local_anchor);
+                let rotation_a = transform_a.rotation() * frame_a.local_rotation;
+                let rotation_b = transform_b.rotation() * frame_b.local_rotation;
+                let relative = canonical_relative_rotation(rotation_a, rotation_b)
+                    .expect("normalized relative frame");
+                Residual {
+                    anchor: (anchor_b - anchor_a).length(),
+                    frame: 2.0
+                        * relative
+                            .x
+                            .hypot(relative.y)
+                            .hypot(relative.z)
+                            .atan2(relative.w),
+                }
+            };
+            let initial = measure(&world);
+            world.step(0.01).expect("first force-free physics step");
+            let first = measure(&world);
+            world.step(0.01).expect("second force-free physics step");
+            [initial, first, measure(&world)]
+        }
+
+        for degrees in [5.0_f64, 15.0, 45.0, 90.0] {
+            let angle = degrees.to_radians();
+            let constraint = make_constraint();
+
+            let mut bodies_a = make_bodies(angle);
+            let mut workspace_a = JointWorkspace::new();
+            reprepare(&mut workspace_a, &bodies_a, constraint);
+            let initial = residual(&bodies_a, constraint);
+            solve_subset(&mut workspace_a, &mut bodies_a, 0..3);
+            let a_after_linear = residual(&bodies_a, constraint);
+            solve_subset(&mut workspace_a, &mut bodies_a, 3..6);
+            let a_after_full = residual(&bodies_a, constraint);
+
+            let mut bodies_b = make_bodies(angle);
+            let mut workspace_b = JointWorkspace::new();
+            reprepare(&mut workspace_b, &bodies_b, constraint);
+            solve_subset(&mut workspace_b, &mut bodies_b, 3..6);
+            let b_after_angular = residual(&bodies_b, constraint);
+            reprepare(&mut workspace_b, &bodies_b, constraint);
+            solve_subset(&mut workspace_b, &mut bodies_b, 0..3);
+            let b_after_full = residual(&bodies_b, constraint);
+
+            let mut bodies_c = make_bodies(angle);
+            let mut workspace_c = JointWorkspace::new();
+            reprepare(&mut workspace_c, &bodies_c, constraint);
+            solve_subset(&mut workspace_c, &mut bodies_c, 0..3);
+            let c_after_linear = residual(&bodies_c, constraint);
+            reprepare(&mut workspace_c, &bodies_c, constraint);
+            solve_subset(&mut workspace_c, &mut bodies_c, 3..6);
+            let c_after_angular = residual(&bodies_c, constraint);
+            reprepare(&mut workspace_c, &bodies_c, constraint);
+            solve_subset(&mut workspace_c, &mut bodies_c, 0..3);
+            let c_after_full = residual(&bodies_c, constraint);
+
+            let world_steps = run_world_steps(angle, constraint);
+            println!(
+                "angle_deg={degrees:.0} start=({:.6e}m,{:.6e}rad) A_linear=({:.6e},{:.6e}) A_full=({:.6e},{:.6e}) A_angular_anchor_delta={:.6e}m B_angular=({:.6e},{:.6e}) B_full=({:.6e},{:.6e}) C_linear=({:.6e},{:.6e}) C_angular=({:.6e},{:.6e}) C_full=({:.6e},{:.6e}) world_step1=({:.6e},{:.6e}) world_step2=({:.6e},{:.6e})",
+                initial.anchor,
+                initial.frame,
+                a_after_linear.anchor,
+                a_after_linear.frame,
+                a_after_full.anchor,
+                a_after_full.frame,
+                a_after_full.anchor - a_after_linear.anchor,
+                b_after_angular.anchor,
+                b_after_angular.frame,
+                b_after_full.anchor,
+                b_after_full.frame,
+                c_after_linear.anchor,
+                c_after_linear.frame,
+                c_after_angular.anchor,
+                c_after_angular.frame,
+                c_after_full.anchor,
+                c_after_full.frame,
+                world_steps[1].anchor,
+                world_steps[1].frame,
+                world_steps[2].anchor,
+                world_steps[2].frame,
+            );
+
+            for value in [
+                initial,
+                a_after_linear,
+                a_after_full,
+                b_after_angular,
+                b_after_full,
+                c_after_linear,
+                c_after_angular,
+                c_after_full,
+                world_steps[0],
+                world_steps[1],
+                world_steps[2],
+            ] {
+                assert!(value.anchor.is_finite() && value.frame.is_finite());
+            }
+            assert!(c_after_full.anchor < initial.anchor);
+            assert!(c_after_full.frame < initial.frame);
+            assert!(world_steps[2].anchor <= world_steps[1].anchor);
+            assert!(world_steps[2].frame <= world_steps[1].frame);
+        }
+    }
+
+    #[test]
     fn undefined_twist_does_not_fail_joint_preparation() {
         let swing = Quat::from_axis_angle(Vec3::X, std::f64::consts::PI).expect("180-degree swing");
         assert_eq!(twist_angle(swing), Ok(None));

@@ -360,6 +360,16 @@ mod stability_tests {
         step_failure: Option<String>,
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum ScenarioMode {
+        Full,
+        NoLoads,
+        GravityWithoutContact,
+        GravityWithContact,
+        ThrustWithoutGravityOrContact,
+        CenteredThrustWithoutGravityOrContact,
+    }
+
     #[test]
     #[ignore = "full 1/120 s modular rocket scale and repeatability test; run explicitly in release"]
     fn fixed_step_rockets_report_stability_and_reproducibility_at_all_sizes() {
@@ -448,9 +458,88 @@ mod stability_tests {
         }
     }
 
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "diagnostic source isolation for modular rocket joint drift"]
+    fn diagnose_rocket_joint_error_sources() {
+        for (mode, adaptive) in [
+            (ScenarioMode::NoLoads, false),
+            (ScenarioMode::GravityWithoutContact, false),
+            (ScenarioMode::GravityWithContact, false),
+            (ScenarioMode::GravityWithContact, true),
+            (ScenarioMode::ThrustWithoutGravityOrContact, false),
+            (ScenarioMode::ThrustWithoutGravityOrContact, true),
+            (ScenarioMode::CenteredThrustWithoutGravityOrContact, false),
+            (ScenarioMode::Full, false),
+        ] {
+            let run = run_scenario(100, false, mode, adaptive);
+            println!(
+                "mode={mode:?} adaptive={adaptive} elapsed_ms={} ticks={} anchor_max/rms={:.6e}/{:.6e}m frame_max/rms={:.6e}/{:.6e}rad coast_energy_drift={:.4}% contacts(begin/end/impact)={}/{}/{} separation_dp={:.3e} failure={:?}",
+                run.elapsed.as_millis(),
+                run.completed_ticks,
+                run.max_anchor_error,
+                run.rms_anchor_error,
+                run.max_frame_error,
+                run.rms_frame_error,
+                run.max_coast_energy_drift * 100.0,
+                run.surface_begins,
+                run.surface_ends,
+                run.surface_impacts,
+                run.separation_momentum_error,
+                run.step_failure,
+            );
+        }
+    }
+
     fn run_fixed_scenario(part_count: usize, block3: bool) -> StabilityRun {
+        run_scenario(part_count, block3, ScenarioMode::Full, false)
+    }
+
+    fn run_scenario(
+        part_count: usize,
+        block3: bool,
+        mode: ScenarioMode,
+        adaptive: bool,
+    ) -> StabilityRun {
         let started = Instant::now();
         let mut rocket = ModularRocket::new(part_count);
+        #[cfg(feature = "bench-internals")]
+        rocket
+            .world
+            .set_joint_adaptive_iterations_for_bench(adaptive);
+        #[cfg(not(feature = "bench-internals"))]
+        assert!(!adaptive, "adaptive comparison requires bench-internals");
+        if matches!(
+            mode,
+            ScenarioMode::NoLoads
+                | ScenarioMode::GravityWithoutContact
+                | ScenarioMode::ThrustWithoutGravityOrContact
+                | ScenarioMode::CenteredThrustWithoutGravityOrContact
+        ) {
+            rocket
+                .world
+                .remove_collider(rocket.surface_collider)
+                .expect("remove diagnostic pad collider");
+        }
+        if matches!(
+            mode,
+            ScenarioMode::NoLoads
+                | ScenarioMode::ThrustWithoutGravityOrContact
+                | ScenarioMode::CenteredThrustWithoutGravityOrContact
+        ) {
+            rocket.world.set_central_gravity(None);
+        }
+        if matches!(mode, ScenarioMode::CenteredThrustWithoutGravityOrContact) {
+            let thrust = rocket
+                .world
+                .force_source(rocket.lower_engine)
+                .expect("lower engine")
+                .local_force();
+            rocket
+                .world
+                .set_force_source(rocket.lower_engine, Vec3::ZERO, thrust)
+                .expect("centered diagnostic engine");
+        }
         #[cfg(feature = "bench-internals")]
         rocket.world.set_joint_projection_for_bench(block3);
         #[cfg(not(feature = "bench-internals"))]
@@ -476,43 +565,60 @@ mod stability_tests {
         let mut joint_break_events = 0;
 
         for tick in 0..TICKS {
-            match tick {
-                12 => rocket
-                    .world
-                    .set_force_source_enabled(rocket.lower_engine, true)
-                    .expect("booster ignition"),
-                24 => burn_tanks(&mut rocket, true),
-                54 => {
-                    let momentum_before = stage_momentum(&rocket, &rocket.lower_parts)
-                        + stage_momentum(&rocket, &rocket.upper_parts);
-                    rocket
+            match mode {
+                ScenarioMode::Full => match tick {
+                    12 => rocket
                         .world
-                        .remove_joint(rocket.separation_joint)
-                        .expect("stage separation");
-                    joints_after_separation = rocket.world.joint_count();
-                    rocket
+                        .set_force_source_enabled(rocket.lower_engine, true)
+                        .expect("booster ignition"),
+                    24 => burn_tanks(&mut rocket, true),
+                    54 => {
+                        let momentum_before = stage_momentum(&rocket, &rocket.lower_parts)
+                            + stage_momentum(&rocket, &rocket.upper_parts);
+                        rocket
+                            .world
+                            .remove_joint(rocket.separation_joint)
+                            .expect("stage separation");
+                        joints_after_separation = rocket.world.joint_count();
+                        rocket
+                            .world
+                            .set_force_source_enabled(rocket.lower_engine, false)
+                            .expect("booster cutoff");
+                        rocket
+                            .world
+                            .set_force_source_enabled(rocket.upper_engine, true)
+                            .expect("upper-stage ignition");
+                        let impulse = Vec3::Y * 2.0;
+                        let lower_parts = rocket.lower_parts.clone();
+                        let upper_parts = rocket.upper_parts.clone();
+                        apply_stage_impulse(&mut rocket, &lower_parts, -impulse);
+                        apply_stage_impulse(&mut rocket, &upper_parts, impulse);
+                        let momentum_after = stage_momentum(&rocket, &rocket.lower_parts)
+                            + stage_momentum(&rocket, &rocket.upper_parts);
+                        separation_momentum_error = (momentum_after - momentum_before).length();
+                    }
+                    72 => burn_tanks(&mut rocket, false),
+                    90 => rocket
+                        .world
+                        .set_force_source_enabled(rocket.upper_engine, false)
+                        .expect("upper-stage cutoff"),
+                    _ => {}
+                },
+                ScenarioMode::ThrustWithoutGravityOrContact
+                | ScenarioMode::CenteredThrustWithoutGravityOrContact => match tick {
+                    12 => rocket
+                        .world
+                        .set_force_source_enabled(rocket.lower_engine, true)
+                        .expect("booster ignition"),
+                    90 => rocket
                         .world
                         .set_force_source_enabled(rocket.lower_engine, false)
-                        .expect("booster cutoff");
-                    rocket
-                        .world
-                        .set_force_source_enabled(rocket.upper_engine, true)
-                        .expect("upper-stage ignition");
-                    let impulse = Vec3::Y * 2.0;
-                    let lower_parts = rocket.lower_parts.clone();
-                    let upper_parts = rocket.upper_parts.clone();
-                    apply_stage_impulse(&mut rocket, &lower_parts, -impulse);
-                    apply_stage_impulse(&mut rocket, &upper_parts, impulse);
-                    let momentum_after = stage_momentum(&rocket, &rocket.lower_parts)
-                        + stage_momentum(&rocket, &rocket.upper_parts);
-                    separation_momentum_error = (momentum_after - momentum_before).length();
-                }
-                72 => burn_tanks(&mut rocket, false),
-                90 => rocket
-                    .world
-                    .set_force_source_enabled(rocket.upper_engine, false)
-                    .expect("upper-stage cutoff"),
-                _ => {}
+                        .expect("booster cutoff"),
+                    _ => {}
+                },
+                ScenarioMode::NoLoads
+                | ScenarioMode::GravityWithoutContact
+                | ScenarioMode::GravityWithContact => {}
             }
 
             if let Err(error) = rocket.world.step(DT) {
@@ -570,7 +676,7 @@ mod stability_tests {
             }
         }
 
-        if completed_ticks == TICKS {
+        if completed_ticks == TICKS && matches!(mode, ScenarioMode::Full) {
             assert!(initial_lower_mass > stage_mass(&rocket, &rocket.lower_parts));
             assert!(initial_upper_mass > stage_mass(&rocket, &rocket.upper_parts));
         }

@@ -211,6 +211,106 @@ fn fixed_joint_handles_mass_ratios_and_off_center_thrust() {
     }
 }
 
+#[test]
+fn fixed_joint_chain_and_branch_sizes_report_residual_by_step() {
+    fn perturbed_body(index: usize, position: Vec3) -> RigidBody {
+        let angle = if index.is_multiple_of(2) {
+            0.001
+        } else {
+            -0.001
+        };
+        let rotation = Quat::from_axis_angle(Vec3::new(0.2, 0.7, -0.3), angle).unwrap();
+        let mass = 0.8 + (index % 7) as f64 * 0.17;
+        let center = Vec3::new(
+            (index % 3) as f64 * 0.002,
+            -((index % 5) as f64) * 0.001,
+            (index % 2) as f64 * 0.0015,
+        );
+        let inertia_scale = 0.7 + (index % 5) as f64 * 0.13;
+        let inertia = Mat3::from_diagonal(Vec3::new(
+            inertia_scale * 0.6,
+            inertia_scale * 0.8,
+            inertia_scale,
+        ));
+        RigidBody::new_dynamic(
+            Transform::new(position, rotation).unwrap(),
+            MassProperties::new(mass, center, inertia).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn report(mut world: PhysicsWorld, name: &str) {
+        let initial = max_joint_errors(&world);
+        let mut by_step = Vec::with_capacity(11);
+        by_step.push(initial);
+        for _ in 0..10 {
+            world.step(DT).unwrap();
+            assert_finite_body_states(&world);
+            by_step.push(max_joint_errors(&world));
+        }
+        println!(
+            "{name} joints={} initial={initial:?} after1={:?} after2={:?} after10={:?}",
+            world.joint_count(),
+            by_step[1],
+            by_step[2],
+            by_step[10],
+        );
+        let final_error = by_step[10];
+        assert!(
+            final_error.0 < initial.0,
+            "{name} anchor error did not fall"
+        );
+        assert!(final_error.1 < initial.1, "{name} frame error did not fall");
+    }
+
+    for count in [2, 10, 50, 100] {
+        let mut world = PhysicsWorld::new();
+        let bodies = (0..count)
+            .map(|index| {
+                let position = Vec3::X * index as f64
+                    + Vec3::new(0.0, (index % 3) as f64 * 0.001, (index % 2) as f64 * 0.001);
+                world.add_body(perturbed_body(index, position)).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let common = JointCommon::new(
+            JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+            JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+        );
+        let joint = Joint::Fixed(FixedJoint::new(common));
+        for pair in bodies.windows(2) {
+            world.add_joint(pair[0], pair[1], joint).unwrap();
+        }
+        report(world, &format!("chain_{count}"));
+    }
+
+    let mut world = PhysicsWorld::new();
+    let mut positions = vec![Vec3::ZERO; 100];
+    let mut bodies = Vec::with_capacity(positions.len());
+    for index in 0..positions.len() {
+        if index > 0 {
+            let parent = (index - 1) / 2;
+            let side = if index.is_multiple_of(2) { 1.0 } else { -1.0 };
+            positions[index] =
+                positions[parent] + Vec3::new(side * 0.003, 0.004, (index % 3) as f64 * 0.001);
+        }
+        bodies.push(
+            world
+                .add_body(perturbed_body(index, positions[index]))
+                .unwrap(),
+        );
+    }
+    let joint = Joint::Fixed(FixedJoint::new(JointCommon::new(
+        JointFrame::IDENTITY,
+        JointFrame::IDENTITY,
+    )));
+    for child in 1..bodies.len() {
+        world
+            .add_joint(bodies[(child - 1) / 2], bodies[child], joint)
+            .unwrap();
+    }
+    report(world, "branch_100");
+}
+
 fn two_body_world(reverse: bool, static_a: bool) -> PhysicsWorld {
     let mut world = PhysicsWorld::new();
     let rotation = Quat::from_axis_angle(Vec3::Z, 0.001).unwrap();
