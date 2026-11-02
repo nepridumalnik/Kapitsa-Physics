@@ -137,8 +137,15 @@ impl RigidBody {
 
     /// Replaces dynamic mass properties without changing position or velocity.
     ///
+    /// This is a state edit, not a model of fuel ejection, mass transfer, or
+    /// attachment: it does not conserve linear or angular momentum. When the
+    /// local center of mass changes, the stored linear velocity is retained
+    /// as the velocity of the new center of mass. Callers must account for
+    /// any physical impulse or momentum exchange required by their model.
+    ///
     /// Changed mass properties wake the body and clear accumulated forces and
-    /// torques, whose torque reference may otherwise be stale.
+    /// torques, whose torque reference may otherwise be stale. Separately
+    /// registered force sources are not removed by this operation.
     pub fn set_mass(&mut self, mass: MassProperties) -> Result<(), BodyError> {
         if self.physics.body_type != BodyType::Dynamic {
             return Err(BodyError::BodyMustBeDynamic);

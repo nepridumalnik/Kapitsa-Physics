@@ -36,7 +36,7 @@ Statuses below describe current evidence, not an assertion that unaudited stages
 | S26 | Корректный adaptive residual | NOT AUDITED |
 | S27 | Реакции и разрушение Joint | NOT AUDITED |
 | S28 | Согласованность position/velocity solver | NOT AUDITED |
-| S29 | Изменение массовых характеристик | NOT AUDITED |
+| S29 | Изменение массовых характеристик | MITIGATED — documented state-edit contract; physical mass transfer remains unimplemented |
 | S30 | Инвалидирование Joint warm-start | NOT AUDITED |
 | S31 | Повторное использование Joint row topology | NOT AUDITED |
 | S32 | Устранение `Vec::splice` из горячего пути | NOT AUDITED |
