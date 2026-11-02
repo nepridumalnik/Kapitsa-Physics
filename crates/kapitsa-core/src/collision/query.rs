@@ -132,8 +132,12 @@ pub(crate) struct QueryTarget<'a> {
     pub(crate) deformed_vertices: Option<&'a [Vec3]>,
 }
 
+/// Reusable, caller-owned workspace for batches of world queries.
+///
+/// Create one with `Default` and pass it to the `*_with_scratch` world
+/// methods. Separate callers can use separate workspaces concurrently.
 #[derive(Default)]
-pub(crate) struct QueryScratch {
+pub struct QueryScratch {
     pub(crate) mesh: MeshQueryWorkspace,
     pub(crate) candidates: Vec<usize>,
     pub(crate) height_cells: Vec<HeightFieldTriangle>,

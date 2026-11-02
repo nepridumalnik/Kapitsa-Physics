@@ -259,7 +259,8 @@ impl PhysicsWorld {
         self.raycast_with_scratch(ray, filter, &mut QueryScratch::default())
     }
 
-    fn raycast_with_scratch(
+    /// Performs a raycast using caller-owned reusable query storage.
+    pub fn raycast_with_scratch(
         &self,
         ray: Ray,
         filter: QueryFilter,
@@ -316,7 +317,8 @@ impl PhysicsWorld {
         )
     }
 
-    fn sweep_with_scratch(
+    /// Performs a sweep using caller-owned reusable query storage.
+    pub fn sweep_with_scratch(
         &self,
         shape: &crate::shape::Shape,
         transform: crate::transform::Transform,
@@ -418,7 +420,8 @@ impl PhysicsWorld {
         )
     }
 
-    fn overlaps_with_scratch(
+    /// Collects overlaps using caller-owned reusable query storage.
+    pub fn overlaps_with_scratch(
         &self,
         shape: &crate::shape::Shape,
         transform: crate::transform::Transform,
