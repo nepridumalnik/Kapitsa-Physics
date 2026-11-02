@@ -16,6 +16,7 @@ use super::{
 };
 
 const POSITION_CORRECTION_FRACTION: f64 = 0.2;
+const LARGE_ISLAND_COLORING_THRESHOLD: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SolverMaterial {
@@ -49,6 +50,9 @@ struct SolverPoint {
 #[derive(Default)]
 pub(crate) struct SolverWorkspace {
     points: Vec<SolverPoint>,
+    constraint_coloring: super::constraint_coloring::ConstraintColoring,
+    coloring_dynamic_bodies: Vec<bool>,
+    coloring_endpoints: Vec<[usize; 2]>,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -223,16 +227,62 @@ impl SolverIsland {
 
 impl SolverWorkspace {
     pub(crate) const fn new() -> Self {
-        Self { points: Vec::new() }
+        Self {
+            points: Vec::new(),
+            constraint_coloring: super::constraint_coloring::ConstraintColoring::new(),
+            coloring_dynamic_bodies: Vec::new(),
+            coloring_endpoints: Vec::new(),
+        }
     }
 
     pub(crate) fn clear(&mut self) {
         self.points.clear();
     }
 
+    fn prepare_constraint_coloring(
+        &mut self,
+        bodies: &[SolverBody],
+        manifolds: &[SolverManifold],
+        joints: &[JointConstraint],
+    ) -> Result<bool, CollisionError> {
+        let constraint_count = manifolds
+            .len()
+            .checked_add(joints.len())
+            .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+        if self.coloring_dynamic_bodies.capacity() < bodies.len() {
+            self.coloring_dynamic_bodies
+                .try_reserve(bodies.len() - self.coloring_dynamic_bodies.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        }
+        self.coloring_dynamic_bodies.clear();
+        self.coloring_dynamic_bodies.extend(
+            bodies.iter().map(|body| {
+                body.body().physics().body_type() == crate::rigid_body::BodyType::Dynamic
+            }),
+        );
+        if self.coloring_endpoints.capacity() < constraint_count {
+            self.coloring_endpoints
+                .try_reserve(constraint_count - self.coloring_endpoints.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        }
+        self.coloring_endpoints.clear();
+        self.coloring_endpoints.extend(
+            manifolds
+                .iter()
+                .map(|manifold| [manifold.body_a, manifold.body_b]),
+        );
+        self.coloring_endpoints
+            .extend(joints.iter().map(|joint| [joint.body_a, joint.body_b]));
+        self.constraint_coloring
+            .update(&self.coloring_dynamic_bodies, &self.coloring_endpoints)
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         self.points.capacity() * std::mem::size_of::<SolverPoint>()
+            + self.constraint_coloring.retained_capacity_bytes()
+            + self.coloring_dynamic_bodies.capacity() * std::mem::size_of::<bool>()
+            + self.coloring_endpoints.capacity() * std::mem::size_of::<[usize; 2]>()
     }
 
     pub(crate) fn solve(
@@ -277,6 +327,19 @@ impl SolverWorkspace {
         self.prepare_points(bodies, manifolds, config)?;
         self.warm_start(bodies, manifolds)?;
         JointSolver::begin_step(joint_workspace);
+        let coloring_constraint_count = manifolds.len().saturating_add(joints.len());
+        if worker_count > 1 && coloring_constraint_count >= LARGE_ISLAND_COLORING_THRESHOLD {
+            #[cfg(feature = "bench-internals")]
+            let coloring_started = std::time::Instant::now();
+            let _rebuilt = self.prepare_constraint_coloring(bodies, manifolds, joints)?;
+            #[cfg(feature = "bench-internals")]
+            joint_workspace.record_constraint_coloring(
+                coloring_started.elapsed(),
+                self.constraint_coloring.constraint_count(),
+                self.constraint_coloring.color_count(),
+                _rebuilt,
+            );
+        }
         #[cfg(feature = "bench-internals")]
         let velocity_before_projection = snapshot_velocities(bodies);
         #[cfg(feature = "bench-internals")]

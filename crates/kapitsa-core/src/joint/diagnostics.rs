@@ -63,6 +63,14 @@ pub struct JointSolverMetrics {
     pub color_batches_processed: u64,
     /// Maximum graph colors used by an island; zero if no colored pass runs.
     pub max_colors_per_island: u32,
+    /// Time spent preparing or validating the conflict graph for large islands.
+    pub constraint_coloring_prepare_time: std::time::Duration,
+    /// Constraint graph rebuilds; cache hits reuse the previous topology layout.
+    pub constraint_coloring_rebuilds: u64,
+    /// Constraint graph cache hits for unchanged body types and endpoints.
+    pub constraint_coloring_cache_hits: u64,
+    /// Constraints represented by the current step's graph plans.
+    pub constraint_coloring_constraints: u64,
     /// Number of position constraint sweeps actually executed.
     pub position_sweeps: u64,
     /// Number of velocity constraint sweeps actually executed.
@@ -214,6 +222,10 @@ impl JointSolverMetrics {
         velocity_warm_starts: 0,
         color_batches_processed: 0,
         max_colors_per_island: 0,
+        constraint_coloring_prepare_time: std::time::Duration::ZERO,
+        constraint_coloring_rebuilds: 0,
+        constraint_coloring_cache_hits: 0,
+        constraint_coloring_constraints: 0,
         position_sweeps: 0,
         velocity_sweeps: 0,
         #[cfg(feature = "bench-internals")]
@@ -369,6 +381,16 @@ impl JointSolverMetrics {
             .color_batches_processed
             .saturating_add(other.color_batches_processed);
         self.max_colors_per_island = self.max_colors_per_island.max(other.max_colors_per_island);
+        self.constraint_coloring_prepare_time += other.constraint_coloring_prepare_time;
+        self.constraint_coloring_rebuilds = self
+            .constraint_coloring_rebuilds
+            .saturating_add(other.constraint_coloring_rebuilds);
+        self.constraint_coloring_cache_hits = self
+            .constraint_coloring_cache_hits
+            .saturating_add(other.constraint_coloring_cache_hits);
+        self.constraint_coloring_constraints = self
+            .constraint_coloring_constraints
+            .saturating_add(other.constraint_coloring_constraints);
         self.position_sweeps = self.position_sweeps.saturating_add(other.position_sweeps);
         self.velocity_sweeps = self.velocity_sweeps.saturating_add(other.velocity_sweeps);
         #[cfg(feature = "bench-internals")]

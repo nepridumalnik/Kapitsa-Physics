@@ -547,6 +547,13 @@ fn parallel_velocity_pcg_matches_single_worker_on_a_large_joint_island() {
     repeated_parallel
         .step_with_executor(DT, &ScopedPcgTestExecutor, 4)
         .unwrap();
+    single_worker.step(DT).unwrap();
+    multiple_workers
+        .step_with_executor(DT, &ScopedPcgTestExecutor, 4)
+        .unwrap();
+    repeated_parallel
+        .step_with_executor(DT, &ScopedPcgTestExecutor, 4)
+        .unwrap();
 
     for (((_, single), (_, parallel)), (_, repeated)) in single_worker
         .bodies()
@@ -589,6 +596,11 @@ fn parallel_velocity_pcg_matches_single_worker_on_a_large_joint_island() {
     assert!(metrics.velocity_pcg_matrix_vector_time > std::time::Duration::ZERO);
     assert!(metrics.velocity_pcg_preconditioner_time > std::time::Duration::ZERO);
     assert!(metrics.velocity_pcg_reduction_time > std::time::Duration::ZERO);
+    assert!(metrics.constraint_coloring_prepare_time > std::time::Duration::ZERO);
+    assert!(metrics.constraint_coloring_constraints >= 599);
+    assert!(metrics.max_colors_per_island >= 2);
+    assert_eq!(metrics.constraint_coloring_rebuilds, 0);
+    assert!(metrics.constraint_coloring_cache_hits > 0);
     assert!(metrics.post_velocity_linear_residual_mps < 1.0e-4);
     assert!(metrics.post_velocity_angular_residual_radps < 1.0e-4);
 }
@@ -646,10 +658,12 @@ fn diagnose_parallel_velocity_pcg_scaling() {
                 .transform_point(Vec3::Y * 0.25);
             let mut elapsed_samples = Vec::with_capacity(7);
             let mut solver_samples = Vec::with_capacity(7);
+            let mut coloring_samples = Vec::with_capacity(7);
             let mut system_prepare_samples = Vec::with_capacity(7);
             let mut matrix_vector_samples = Vec::with_capacity(7);
             let mut preconditioner_samples = Vec::with_capacity(7);
             let mut reduction_samples = Vec::with_capacity(7);
+            let mut cold_coloring_us = 0;
             for sample in 0..8 {
                 world
                     .body_mut(root)
@@ -665,12 +679,19 @@ fn diagnose_parallel_velocity_pcg_scaling() {
                         .unwrap();
                 }
                 let elapsed = started.elapsed();
+                let coloring_us = world
+                    .physics_step_metrics()
+                    .joints
+                    .constraint_coloring_prepare_time
+                    .as_micros();
                 if sample == 0 {
+                    cold_coloring_us = coloring_us;
                     continue;
                 }
                 let metrics = world.physics_step_metrics();
                 elapsed_samples.push(elapsed.as_micros());
                 solver_samples.push(metrics.collision.solver_iterations.as_micros());
+                coloring_samples.push(coloring_us);
                 system_prepare_samples
                     .push(metrics.joints.velocity_pcg_system_prepare_time.as_micros());
                 matrix_vector_samples
@@ -683,14 +704,18 @@ fn diagnose_parallel_velocity_pcg_scaling() {
             let elapsed_p95 = percentile_micros(&mut elapsed_samples, 95);
             let solver_p50 = percentile_micros(&mut solver_samples, 50);
             let solver_p95 = percentile_micros(&mut solver_samples, 95);
+            let coloring_p50 = percentile_micros(&mut coloring_samples, 50);
             let system_prepare_p50 = percentile_micros(&mut system_prepare_samples, 50);
             let matrix_vector_p50 = percentile_micros(&mut matrix_vector_samples, 50);
             let preconditioner_p50 = percentile_micros(&mut preconditioner_samples, 50);
             let reduction_p50 = percentile_micros(&mut reduction_samples, 50);
             let pcg_metrics = world.physics_step_metrics().joints;
             println!(
-                "graph=chain_{body_count} workers={worker_count} steps={} step_p50/p95_us={elapsed_p50}/{elapsed_p95} solver_p50/p95_us={solver_p50}/{solver_p95} pcg_prepare/matrix_vector/preconditioner/reduction_p50_us={system_prepare_p50}/{matrix_vector_p50}/{preconditioner_p50}/{reduction_p50} converged/iteration_limit={}/{} residual={:.6e}m/s/{:.6e}rad/s",
+                "graph=chain_{body_count} workers={worker_count} steps={} step_p50/p95_us={elapsed_p50}/{elapsed_p95} solver_p50/p95_us={solver_p50}/{solver_p95} coloring_cold/steady_p50_us={cold_coloring_us}/{coloring_p50} colors={} graph_rebuilds/cache_hits={}/{} pcg_prepare/matrix_vector/preconditioner/reduction_p50_us={system_prepare_p50}/{matrix_vector_p50}/{preconditioner_p50}/{reduction_p50} converged/iteration_limit={}/{} residual={:.6e}m/s/{:.6e}rad/s",
                 elapsed_samples.len(),
+                pcg_metrics.max_colors_per_island,
+                pcg_metrics.constraint_coloring_rebuilds,
+                pcg_metrics.constraint_coloring_cache_hits,
                 pcg_metrics.velocity_pcg_converged_calls,
                 pcg_metrics.velocity_pcg_iteration_limit_calls,
                 pcg_metrics.post_velocity_linear_residual_mps,

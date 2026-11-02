@@ -3,6 +3,7 @@ mod cache;
 mod ccd;
 mod ccd_island;
 mod config;
+mod constraint_coloring;
 mod contact;
 mod epa;
 mod error;

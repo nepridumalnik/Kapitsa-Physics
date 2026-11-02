@@ -430,6 +430,34 @@ impl JointWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_constraint_coloring(
+        &mut self,
+        elapsed: std::time::Duration,
+        constraint_count: usize,
+        color_count: usize,
+        rebuilt: bool,
+    ) {
+        self.metrics.constraint_coloring_prepare_time += elapsed;
+        self.metrics.constraint_coloring_constraints = self
+            .metrics
+            .constraint_coloring_constraints
+            .saturating_add(constraint_count as u64);
+        self.metrics.max_colors_per_island = self
+            .metrics
+            .max_colors_per_island
+            .max(color_count.min(u32::MAX as usize) as u32);
+        if rebuilt {
+            self.metrics.constraint_coloring_rebuilds =
+                self.metrics.constraint_coloring_rebuilds.saturating_add(1);
+        } else {
+            self.metrics.constraint_coloring_cache_hits = self
+                .metrics
+                .constraint_coloring_cache_hits
+                .saturating_add(1);
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_position_pcg_iterations(&mut self, iterations: usize) {
         self.metrics.position_pcg_iterations = self
             .metrics
