@@ -321,6 +321,10 @@ mod stability_tests {
     use std::time::{Duration, Instant};
 
     use kapitsa_core::collision::CollisionEventKind;
+    #[cfg(feature = "bench-internals")]
+    use kapitsa_core::world::PhysicsWorld;
+    #[cfg(feature = "bench-internals")]
+    use kapitsa_core::{mass::MassProperties, rigid_body::RigidBody, transform::Transform};
     use kapitsa_math::Vec3;
 
     use super::{ModularRocket, rocket_part_mass};
@@ -1434,11 +1438,13 @@ mod stability_tests {
                 energy_components_from_delta(position_solver_delta),
             );
             println!(
-                "velocity_projection solver={label} post_integration_max_Jv={:.6e}m/s/{:.6e}rad/s post_solver_max_Jv={:.6e}m/s/{:.6e}rad/s impulse_work={impulse_work:+.9e}J quadratic_work={quadratic_work:+.9e}J predicted_delta={:+.9e}J measured_delta={:+.9e}J closure_error={:+.9e}J",
+                "velocity_projection solver={label} post_integration_max_Jv={:.6e}m/s/{:.6e}rad/s post_velocity_solver_max_Jv={:.6e}m/s/{:.6e}rad/s post_position_solver_max_Jv={:.6e}m/s/{:.6e}rad/s impulse_work={impulse_work:+.9e}J quadratic_work={quadratic_work:+.9e}J predicted_delta={:+.9e}J measured_delta={:+.9e}J closure_error={:+.9e}J",
                 first.initial_velocity_linear_residual_mps,
                 first.initial_velocity_angular_residual_radps,
                 last.post_velocity_linear_residual_mps,
                 last.post_velocity_angular_residual_radps,
+                last.post_position_linear_residual_mps,
+                last.post_position_angular_residual_radps,
                 impulse_work + quadratic_work,
                 velocity_solver_delta.0 + velocity_solver_delta.1 + velocity_solver_delta.2,
                 impulse_work + quadratic_work
@@ -1507,6 +1513,175 @@ mod stability_tests {
             pcg_conserved,
             "global PCG free rigid assembly exceeded the 0.01% kinetic-energy drift limit"
         );
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn free_rigid_rocket_assembly_tracks_its_equivalent_single_body() {
+        let mut rocket = ModularRocket::new(100);
+        rocket.world.set_central_gravity(None);
+        let colliders = rocket
+            .world
+            .colliders()
+            .map(|(id, _, _)| id)
+            .collect::<Vec<_>>();
+        for collider in colliders {
+            rocket
+                .world
+                .remove_collider(collider)
+                .expect("remove collider");
+        }
+        rocket
+            .world
+            .set_force_source_enabled(rocket.lower_engine, false)
+            .expect("disable lower engine");
+        rocket
+            .world
+            .set_force_source_enabled(rocket.upper_engine, false)
+            .expect("disable upper engine");
+        set_rigid_assembly_velocity(&mut rocket);
+
+        let parts = rocket
+            .parts
+            .iter()
+            .map(|id| {
+                let body = rocket.world.body(*id).expect("assembly part");
+                (
+                    body.physics().mass().expect("part mass"),
+                    body.state().transform(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let combined_mass = MassProperties::combine(&parts).expect("combined mass properties");
+        let total_mass = combined_mass.mass();
+        let center_velocity = rocket
+            .parts
+            .iter()
+            .map(|id| {
+                let body = rocket.world.body(*id).expect("assembly part");
+                body.state().linear_velocity() * body.physics().mass().expect("part mass").mass()
+            })
+            .fold(Vec3::ZERO, |sum, momentum| sum + momentum)
+            / total_mass;
+        let angular_velocity = rocket
+            .world
+            .body(rocket.parts[0])
+            .expect("assembly part")
+            .state()
+            .angular_velocity();
+        let mut reference_body =
+            RigidBody::new_dynamic(Transform::identity(), combined_mass).expect("reference body");
+        reference_body
+            .set_linear_velocity(center_velocity)
+            .expect("finite COM velocity");
+        reference_body
+            .set_angular_velocity(angular_velocity)
+            .expect("finite angular velocity");
+        let mut reference_world = PhysicsWorld::new();
+        let reference_id = reference_world
+            .add_body(reference_body)
+            .expect("add reference body");
+
+        rocket
+            .world
+            .set_joint_global_velocity_pcg_for_bench(64, true);
+        rocket
+            .world
+            .set_joint_global_position_pcg_for_bench(64, true);
+        let initial_energy = world_kinetic_energy(&rocket.world);
+        let initial_momentum = system_momentum(&rocket.world);
+        for _ in 0..TICKS {
+            rocket.world.step(DT).expect("free rigid assembly step");
+            reference_world.step(DT).expect("free reference-body step");
+        }
+
+        let final_energy = world_kinetic_energy(&rocket.world);
+        let reference_energy = world_kinetic_energy(&reference_world);
+        let final_momentum = system_momentum(&rocket.world);
+        let reference_momentum = system_momentum(&reference_world);
+        let final_center = system_center_of_mass(&rocket.world);
+        let reference_center = system_center_of_mass(&reference_world);
+        let relative_energy_error = (final_energy - reference_energy).abs() / initial_energy;
+        let relative_angular_momentum_error =
+            (final_momentum.1 - reference_momentum.1).length() / initial_momentum.1.length();
+
+        println!(
+            "free_rigid_assembly_reference parts={} ticks={TICKS} relative_energy_error={relative_energy_error:.9e} relative_angular_momentum_error={relative_angular_momentum_error:.9e} COM_error={:.9e}m",
+            rocket.parts.len(),
+            (final_center - reference_center).length(),
+        );
+        assert!(relative_energy_error < 1.0e-4);
+        assert!(relative_angular_momentum_error < 1.0e-4);
+        assert!((final_momentum.0 - reference_momentum.0).length() < 1.0e-9);
+        assert!((final_center - reference_center).length() < 1.0e-7);
+        assert_eq!(reference_world.body_count(), 1);
+        assert!(reference_world.body(reference_id).is_some());
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn world_kinetic_energy(world: &PhysicsWorld) -> f64 {
+        world
+            .bodies()
+            .filter_map(|(_, body)| {
+                let mass = body.physics().mass()?;
+                let rotation = body.state().transform().rotation();
+                let local_angular_velocity = rotation
+                    .conjugate()
+                    .rotate_vector(body.state().angular_velocity())
+                    .expect("local angular velocity");
+                Some(
+                    0.5 * mass.mass() * body.state().linear_velocity().length_squared()
+                        + 0.5 * local_angular_velocity.dot(mass.inertia() * local_angular_velocity),
+                )
+            })
+            .sum()
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn system_momentum(world: &PhysicsWorld) -> (Vec3, Vec3) {
+        world.bodies().fold(
+            (Vec3::ZERO, Vec3::ZERO),
+            |(mut linear, mut angular), (_, body)| {
+                let Some(mass) = body.physics().mass() else {
+                    return (linear, angular);
+                };
+                let state = body.state();
+                let momentum = state.linear_velocity() * mass.mass();
+                let rotation = state.transform().rotation();
+                let local_angular_velocity = rotation
+                    .conjugate()
+                    .rotate_vector(state.angular_velocity())
+                    .expect("local angular velocity");
+                let spin = rotation
+                    .rotate_vector(mass.inertia() * local_angular_velocity)
+                    .expect("world angular momentum");
+                let center = body
+                    .world_center_of_mass()
+                    .expect("valid COM")
+                    .expect("dynamic body COM");
+                linear += momentum;
+                angular += spin + center.cross(momentum);
+                (linear, angular)
+            },
+        )
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn system_center_of_mass(world: &PhysicsWorld) -> Vec3 {
+        let (mass, weighted_center) = world.bodies().fold(
+            (0.0, Vec3::ZERO),
+            |(total_mass, weighted_center), (_, body)| {
+                let Some(body_mass) = body.physics().mass().map(|mass| mass.mass()) else {
+                    return (total_mass, weighted_center);
+                };
+                let center = body
+                    .world_center_of_mass()
+                    .expect("valid COM")
+                    .expect("dynamic body COM");
+                (total_mass + body_mass, weighted_center + center * body_mass)
+            },
+        );
+        weighted_center / mass
     }
 
     fn run_fixed_scenario(part_count: usize, block3: bool) -> StabilityRun {

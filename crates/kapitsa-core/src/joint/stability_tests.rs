@@ -471,12 +471,14 @@ fn diagnose_free_asymmetric_fixed_joint_velocity_projection_work() {
                 let predicted_velocity_delta = impulse_work + quadratic_work;
                 let final_energy = physical_kinetic_energy(&world);
                 println!(
-                    "free_fixed_graph={count} solver={label} dt={dt:.9e}s steps={steps} kinetic_drift={:+.9e}% initial_Jv={:.9e}m/s/{:.9e}rad/s final_Jv={:.9e}m/s/{:.9e}rad/s energy_delta(integration/velocity/position)={:+.9e}/{:+.9e}/{:+.9e}J impulse_work={impulse_work:+.9e}J quadratic_work={quadratic_work:+.9e}J work_prediction={predicted_velocity_delta:+.9e}J closure_error={:+.9e}J",
+                    "free_fixed_graph={count} solver={label} dt={dt:.9e}s steps={steps} kinetic_drift={:+.9e}% post_integration_Jv={:.9e}m/s/{:.9e}rad/s post_velocity_solver_Jv={:.9e}m/s/{:.9e}rad/s post_position_solver_Jv={:.9e}m/s/{:.9e}rad/s energy_delta(integration/velocity/position)={:+.9e}/{:+.9e}/{:+.9e}J impulse_work={impulse_work:+.9e}J quadratic_work={quadratic_work:+.9e}J work_prediction={predicted_velocity_delta:+.9e}J closure_error={:+.9e}J",
                     (final_energy - initial_energy) / initial_energy * 100.0,
                     first.initial_velocity_linear_residual_mps,
                     first.initial_velocity_angular_residual_radps,
                     last.post_velocity_linear_residual_mps,
                     last.post_velocity_angular_residual_radps,
+                    last.post_position_linear_residual_mps,
+                    last.post_position_angular_residual_radps,
                     integration_delta.translational_j
                         + integration_delta.rotational_j
                         + integration_delta.potential_j,

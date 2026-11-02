@@ -167,6 +167,8 @@ impl ColoredConstraintBatch {
 #[derive(Default)]
 pub(crate) struct SolverWorkspace {
     points: Vec<SolverPoint>,
+    #[cfg(feature = "bench-internals")]
+    velocity_snapshots: Vec<VelocitySnapshot>,
     constraint_coloring: super::constraint_coloring::ConstraintColoring,
     coloring_dynamic_bodies: Vec<bool>,
     coloring_endpoints: Vec<[usize; 2]>,
@@ -179,33 +181,34 @@ pub(crate) struct SolverWorkspace {
 #[cfg(feature = "bench-internals")]
 #[derive(Clone, Copy)]
 struct VelocitySnapshot {
-    mass: crate::mass::MassProperties,
-    rotation: kapitsa_math::Quat,
     linear: Vec3,
     angular: Vec3,
 }
 
 #[cfg(feature = "bench-internals")]
-fn snapshot_velocities(bodies: &[SolverBody]) -> Vec<Option<VelocitySnapshot>> {
-    bodies
-        .iter()
-        .map(|solver_body| {
-            let body = solver_body.body();
-            let mass = body.physics().mass()?;
-            let state = body.state();
-            Some(VelocitySnapshot {
-                mass,
-                rotation: state.transform().rotation(),
-                linear: state.linear_velocity(),
-                angular: state.angular_velocity(),
-            })
-        })
-        .collect()
+fn snapshot_velocities(
+    bodies: &[SolverBody],
+    snapshots: &mut Vec<VelocitySnapshot>,
+) -> Result<(), CollisionError> {
+    if snapshots.capacity() < bodies.len() {
+        snapshots
+            .try_reserve(bodies.len().saturating_sub(snapshots.len()))
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+    }
+    snapshots.clear();
+    snapshots.extend(bodies.iter().map(|solver_body| {
+        let state = solver_body.state();
+        VelocitySnapshot {
+            linear: state.linear_velocity(),
+            angular: state.angular_velocity(),
+        }
+    }));
+    Ok(())
 }
 
 #[cfg(feature = "bench-internals")]
 fn velocity_projection_work(
-    before: &[Option<VelocitySnapshot>],
+    before: &[VelocitySnapshot],
     bodies: &[SolverBody],
 ) -> Result<(f64, f64), CollisionError> {
     if before.len() != bodies.len() {
@@ -214,7 +217,11 @@ fn velocity_projection_work(
     let mut impulse_work = 0.0;
     let mut quadratic_work = 0.0;
     for (before, solver_body) in before.iter().zip(bodies) {
-        let Some(before) = before else { continue };
+        let body = solver_body.body();
+        let Some(mass) = body.physics().mass() else {
+            continue;
+        };
+        let rotation = solver_body.state().transform().rotation();
         let state = solver_body.state();
         let linear_delta = state
             .linear_velocity()
@@ -225,16 +232,14 @@ fn velocity_projection_work(
             .checked_sub(before.angular)
             .ok_or(CollisionError::ArithmeticOverflow)?;
         let linear_impulse = linear_delta
-            .checked_mul_scalar(before.mass.mass())
+            .checked_mul_scalar(mass.mass())
             .ok_or(CollisionError::ArithmeticOverflow)?;
-        let local_angular_delta = before
-            .rotation
+        let local_angular_delta = rotation
             .conjugate()
             .rotate_vector(angular_delta)
             .ok_or(CollisionError::ArithmeticOverflow)?;
-        let angular_impulse = before
-            .rotation
-            .rotate_vector(before.mass.inertia() * local_angular_delta)
+        let angular_impulse = rotation
+            .rotate_vector(mass.inertia() * local_angular_delta)
             .ok_or(CollisionError::ArithmeticOverflow)?;
         impulse_work += before.linear.dot(linear_impulse) + before.angular.dot(angular_impulse);
         quadratic_work +=
@@ -350,6 +355,8 @@ impl SolverWorkspace {
     pub(crate) const fn new() -> Self {
         Self {
             points: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            velocity_snapshots: Vec::new(),
             constraint_coloring: super::constraint_coloring::ConstraintColoring::new(),
             coloring_dynamic_bodies: Vec::new(),
             coloring_endpoints: Vec::new(),
@@ -362,6 +369,8 @@ impl SolverWorkspace {
 
     pub(crate) fn clear(&mut self) {
         self.points.clear();
+        #[cfg(feature = "bench-internals")]
+        self.velocity_snapshots.clear();
     }
 
     fn prepare_constraint_coloring(
@@ -555,7 +564,7 @@ impl SolverWorkspace {
             worker_count,
         )?;
         #[cfg(feature = "bench-internals")]
-        let velocity_before_projection = snapshot_velocities(bodies);
+        snapshot_velocities(bodies, &mut self.velocity_snapshots)?;
         #[cfg(feature = "bench-internals")]
         {
             if !joints.is_empty() {
@@ -615,7 +624,7 @@ impl SolverWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             let (impulse_work, quadratic_work) =
-                velocity_projection_work(&velocity_before_projection, bodies)?;
+                velocity_projection_work(&self.velocity_snapshots, bodies)?;
             joint_workspace.record_velocity_projection_work(impulse_work, quadratic_work);
             joint_workspace.record_energy(
                 crate::joint::diagnostics::EnergyStage::AfterVelocitySolver,
@@ -928,6 +937,7 @@ impl SolverWorkspace {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         self.points.capacity() * std::mem::size_of::<SolverPoint>()
+            + self.velocity_snapshots.capacity() * std::mem::size_of::<VelocitySnapshot>()
             + self.constraint_coloring.retained_capacity_bytes()
             + self.coloring_dynamic_bodies.capacity() * std::mem::size_of::<bool>()
             + self.coloring_endpoints.capacity() * std::mem::size_of::<[usize; 2]>()
@@ -1019,7 +1029,7 @@ impl SolverWorkspace {
         self.prepare_points(bodies, manifolds, config)?;
         self.warm_start(bodies, manifolds)?;
         #[cfg(feature = "bench-internals")]
-        let velocity_before_projection = snapshot_velocities(bodies);
+        snapshot_velocities(bodies, &mut self.velocity_snapshots)?;
         #[cfg(feature = "bench-internals")]
         let mut velocity_pcg_before_recorded = false;
         #[cfg(feature = "bench-internals")]
@@ -1151,7 +1161,7 @@ impl SolverWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             let (impulse_work, quadratic_work) =
-                velocity_projection_work(&velocity_before_projection, bodies)?;
+                velocity_projection_work(&self.velocity_snapshots, bodies)?;
             joint_workspace.record_velocity_projection_work(impulse_work, quadratic_work);
         }
         #[cfg(feature = "bench-internals")]
