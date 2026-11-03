@@ -4117,6 +4117,7 @@ fn make_linear_row(
         max_impulse: settings.impulse_bounds.map_or(bounds.1, |value| value.1),
         accumulated_multiplier: 0.0,
         accumulated_impulse: 0.0,
+        cached_velocity_effective_mass: 0.0,
     })
 }
 
@@ -4167,6 +4168,7 @@ fn make_angular_row(
         max_impulse: settings.impulse_bounds.map_or(bounds.1, |value| value.1),
         accumulated_multiplier: 0.0,
         accumulated_impulse: 0.0,
+        cached_velocity_effective_mass: 0.0,
     })
 }
 
@@ -4296,8 +4298,27 @@ fn solve_velocity_row<B: SolverBodyAccess + ?Sized>(
     if !row.is_valid(bodies.len()) {
         return Err(CollisionError::InvalidContact);
     }
-    let (effective_mass, masses) =
-        effective_mass_for_row(bodies, slots, *row, options, cache_stats)?;
+    let (effective_mass, masses) = if options.mass_cache() {
+        let (masses, statuses) = resolve_solver_mass_pair_with_status(
+            bodies,
+            slots,
+            row.body_a,
+            row.body_b,
+            cache_stats,
+        )?;
+        let unchanged = statuses == [SolverMassCacheStatus::Hit; 2];
+        let effective_mass = if unchanged && row.cached_velocity_effective_mass > 0.0 {
+            row.cached_velocity_effective_mass
+        } else {
+            effective_mass_from_masses(*row, masses)?
+        };
+        row.cached_velocity_effective_mass = effective_mass;
+        (effective_mass, Some(masses))
+    } else {
+        let (effective_mass, masses) =
+            effective_mass_for_row(bodies, slots, *row, options, cache_stats)?;
+        (effective_mass, masses)
+    };
     if effective_mass <= f64::MIN_POSITIVE {
         return Ok(());
     }
@@ -4733,7 +4754,29 @@ fn effective_mass_for_row<B: SolverBodyAccess + ?Sized>(
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
 ) -> Result<(f64, Option<[SolverMass; 2]>), CollisionError> {
-    let jacobians = [
+    if options.mass_cache() {
+        let masses = resolve_solver_mass_pair(bodies, slots, row.body_a, row.body_b, cache_stats)?;
+        effective_mass_from_masses(row, masses).map(|effective_mass| (effective_mass, Some(masses)))
+    } else {
+        let jacobians = row_jacobians(row);
+        let (body_a, body_b) = solver_bodies_at(bodies, row.body_a, row.body_b)?;
+        constraint::effective_cross_mass(body_a.body(), body_b.body(), jacobians, jacobians)
+            .map_err(map_constraint_error)
+            .map(|effective_mass| (effective_mass, None))
+    }
+}
+
+fn effective_mass_from_masses(
+    row: ConstraintRow,
+    masses: [SolverMass; 2],
+) -> Result<f64, CollisionError> {
+    let jacobians = row_jacobians(row);
+    constraint::effective_cross_mass_cached(masses, jacobians, jacobians)
+        .map_err(map_constraint_error)
+}
+
+fn row_jacobians(row: ConstraintRow) -> [constraint::Jacobian; 2] {
+    [
         constraint::Jacobian {
             linear: row.linear_a,
             angular: row.angular_a,
@@ -4742,18 +4785,7 @@ fn effective_mass_for_row<B: SolverBodyAccess + ?Sized>(
             linear: row.linear_b,
             angular: row.angular_b,
         },
-    ];
-    if options.mass_cache() {
-        let masses = resolve_solver_mass_pair(bodies, slots, row.body_a, row.body_b, cache_stats)?;
-        constraint::effective_cross_mass_cached(masses, jacobians, jacobians)
-            .map_err(map_constraint_error)
-            .map(|effective_mass| (effective_mass, Some(masses)))
-    } else {
-        let (body_a, body_b) = solver_bodies_at(bodies, row.body_a, row.body_b)?;
-        constraint::effective_cross_mass(body_a.body(), body_b.body(), jacobians, jacobians)
-            .map_err(map_constraint_error)
-            .map(|effective_mass| (effective_mass, None))
-    }
+    ]
 }
 
 fn row_velocity<B: SolverBodyAccess + ?Sized>(
@@ -4872,13 +4904,24 @@ fn resolve_solver_mass_pair<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     cache_stats: &mut SolverMassCacheStats,
 ) -> Result<[SolverMass; 2], CollisionError> {
+    resolve_solver_mass_pair_with_status(bodies, slots, body_a, body_b, cache_stats)
+        .map(|(masses, _)| masses)
+}
+
+fn resolve_solver_mass_pair_with_status<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
+    slots: &mut [SolverMassSlot],
+    body_a: usize,
+    body_b: usize,
+    cache_stats: &mut SolverMassCacheStats,
+) -> Result<([SolverMass; 2], [SolverMassCacheStatus; 2]), CollisionError> {
     let (solver_body_a, solver_body_b) = solver_bodies_at(bodies, body_a, body_b)?;
     let (slot_a, slot_b) = solver_mass_slots_at_mut(slots, body_a, body_b)?;
     let (mass_a, status_a) = slot_a.resolve(solver_body_a.body())?;
     cache_stats.record(status_a);
     let (mass_b, status_b) = slot_b.resolve(solver_body_b.body())?;
     cache_stats.record(status_b);
-    Ok([mass_a, mass_b])
+    Ok(([mass_a, mass_b], [status_a, status_b]))
 }
 
 fn invalidate_solver_mass_pair(
@@ -4988,6 +5031,7 @@ mod tests {
             max_impulse: f64::INFINITY,
             accumulated_multiplier: 0.0,
             accumulated_impulse: 0.0,
+            cached_velocity_effective_mass: 0.0,
         };
         let rows = [
             row(RowDimension::Linear, 3.0),
@@ -5257,7 +5301,81 @@ mod tests {
             max_impulse: f64::INFINITY,
             accumulated_multiplier: 0.0,
             accumulated_impulse: 0.0,
+            cached_velocity_effective_mass: 0.0,
         }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn cached_velocity_effective_mass_refreshes_after_orientation_change() {
+        let inertia = kapitsa_math::Mat3::from_diagonal(Vec3::new(1.0, 1.5, 2.0));
+        let mut bodies = [
+            solver_body_with_properties(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                1.0,
+                Vec3::ZERO,
+                inertia,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ),
+            solver_body_with_properties(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                1.0,
+                Vec3::ZERO,
+                inertia,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ),
+        ];
+        let mut row = anchor_row(0.0);
+        row.linear_a = Vec3::ZERO;
+        row.linear_b = Vec3::ZERO;
+        row.angular_a = Vec3::X;
+        row.angular_b = -Vec3::X;
+        let options = JointSolverOptions::legacy();
+        let mut slots = vec![SolverMassSlot::default(); bodies.len()];
+        let mut cache_stats = SolverMassCacheStats::default();
+        solve_velocity_row(
+            &mut row,
+            &mut slots,
+            &mut bodies,
+            1.0 / 60.0,
+            options,
+            &mut cache_stats,
+        )
+        .expect("initial velocity row solve");
+        let initial_effective_mass = row.cached_velocity_effective_mass;
+        assert!(initial_effective_mass > 0.0);
+
+        bodies[1]
+            .body_mut()
+            .apply_constraint_position_impulse(Vec3::ZERO, Vec3::Z)
+            .expect("rotate body for cache invalidation");
+        let mut cache_stats = SolverMassCacheStats::default();
+        solve_velocity_row(
+            &mut row,
+            &mut slots,
+            &mut bodies,
+            1.0 / 60.0,
+            options,
+            &mut cache_stats,
+        )
+        .expect("velocity row solve after orientation change");
+        let refreshed_effective_mass = row.cached_velocity_effective_mass;
+        assert!(cache_stats.inverse_inertia_updates > 0);
+        assert_ne!(refreshed_effective_mass, initial_effective_mass);
+
+        let (current_effective_mass, _) = effective_mass_for_row(
+            &bodies,
+            &mut slots,
+            row,
+            options,
+            &mut SolverMassCacheStats::default(),
+        )
+        .expect("current effective mass");
+        assert!((refreshed_effective_mass - current_effective_mass).abs() < 1.0e-12);
     }
 
     #[cfg(feature = "bench-internals")]

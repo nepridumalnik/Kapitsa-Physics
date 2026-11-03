@@ -1047,6 +1047,7 @@ mod tests {
             max_impulse: f64::INFINITY,
             accumulated_multiplier: 0.0,
             accumulated_impulse: 0.0,
+            cached_velocity_effective_mass: 0.0,
         }
     }
 
@@ -1107,6 +1108,7 @@ mod tests {
             max_impulse: f64::INFINITY,
             accumulated_multiplier: 1.0e12,
             accumulated_impulse: impulse,
+            cached_velocity_effective_mass: 0.0,
         }
     }
 
@@ -1306,6 +1308,7 @@ mod tests {
                     max_impulse: f64::INFINITY,
                     accumulated_multiplier: 0.0,
                     accumulated_impulse: 0.0,
+                    cached_velocity_effective_mass: 0.0,
                 });
             }
             workspace.finish_prepare();

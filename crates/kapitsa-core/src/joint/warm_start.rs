@@ -306,6 +306,7 @@ mod tests {
             max_impulse: f64::INFINITY,
             accumulated_multiplier: 0.0,
             accumulated_impulse: 2.0,
+            cached_velocity_effective_mass: 0.0,
         }
     }
 

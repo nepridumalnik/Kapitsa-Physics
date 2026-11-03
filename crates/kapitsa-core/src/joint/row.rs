@@ -32,6 +32,8 @@ pub(crate) struct ConstraintRow {
     pub(crate) max_impulse: f64,
     pub(crate) accumulated_multiplier: f64,
     pub(crate) accumulated_impulse: f64,
+    /// Inverse effective mass cached while body poses and row Jacobians stay fixed.
+    pub(crate) cached_velocity_effective_mass: f64,
 }
 
 impl ConstraintRow {
@@ -58,5 +60,7 @@ impl ConstraintRow {
             && self.min_impulse <= self.max_impulse
             && self.accumulated_multiplier.is_finite()
             && self.accumulated_impulse.is_finite()
+            && self.cached_velocity_effective_mass.is_finite()
+            && self.cached_velocity_effective_mass >= 0.0
     }
 }
