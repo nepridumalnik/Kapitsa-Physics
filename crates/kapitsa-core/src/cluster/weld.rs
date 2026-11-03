@@ -26,6 +26,42 @@ pub struct WeldDesc {
     pub stiffness: WeldStiffness,
 }
 
+impl WeldDesc {
+    pub(crate) fn validate(&self) -> Result<(), crate::world::ClusterError> {
+        use crate::world::ClusterError;
+        self.frame_a
+            .validate()
+            .map_err(|_| ClusterError::InvalidWeld)?;
+        self.frame_b
+            .validate()
+            .map_err(|_| ClusterError::InvalidWeld)?;
+        if !self.stiffness.linear.is_finite()
+            || self.stiffness.linear <= 0.0
+            || !self.stiffness.angular.is_finite()
+            || self.stiffness.angular <= 0.0
+        {
+            return Err(ClusterError::InvalidWeld);
+        }
+        if let WeldStrength::Breakable {
+            max_force,
+            max_torque,
+        } = self.strength
+        {
+            if max_force.is_none() && max_torque.is_none() {
+                return Err(ClusterError::InvalidWeld);
+            }
+            if [max_force, max_torque]
+                .into_iter()
+                .flatten()
+                .any(|limit| !limit.is_finite() || limit <= 0.0)
+            {
+                return Err(ClusterError::InvalidWeld);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A weld joining two cluster parts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Weld {

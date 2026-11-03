@@ -52,8 +52,22 @@ the remaining root is chosen deterministically by minimum stable part ID.
 Mass properties are aggregated from transformed part mass properties, not
 collider geometry, only when the composition or part masses change. Static and
 kinematic clusters retain these properties for later transition to dynamic.
-Mass editing explicitly selects the velocity-field or remaining-momentum mode;
-it is not a fuel exhaust model.
+
+`KeepVelocityField` preserves world-space rigid velocity and geometry when the
+COM changes: `V_new = V_old + omega × (C_new - C_old)` and `omega_new = omega_old`.
+`ConserveRemainingMomentum` requires an explicit matter-transfer model with
+signed momentum changes about a fixed world point `O`; it is rejected when these
+inputs are absent. Given old momentum `P_old` and angular momentum `H_old` about
+`O`, use `P_new = P_old + ΔP` and `H_new = H_old + ΔH`, including any external
+impulses belonging to the same operation. Then `V_new = P_new / M_new` and
+`omega_new = I_new_world⁻¹ (H_new - (C_new - O) × P_new)`. Positive transfer
+enters the body and negative transfer leaves it. Preserving the old total body
+momentum is not a substitute for this model.
+
+Fuel mass editing and nozzle thrust are separate operations: calculate thrust
+from mass flow and effective exhaust velocity and apply it at the nozzle, without
+double-counting the reactive impulse. Stage separation uses Split, followed by
+optional equal and opposite separation impulses.
 
 ## External objects and collision lifecycle
 

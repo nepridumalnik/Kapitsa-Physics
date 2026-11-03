@@ -280,10 +280,19 @@ pub(crate) async fn run(config: FlightConfig) -> Result<Vec<SceneFrame>, Box<dyn
     }
     .await;
 
+    let state = simulation.state();
+    let metrics = simulation.metrics();
+    let snapshot = physics.snapshot();
     let stopped = simulation.stop().await;
-    let frames = flight?;
-    stopped?;
-    Ok(frames)
+    match (flight, stopped) {
+        (Ok(frames), Ok(())) => Ok(frames),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+        (Err(flight_error), Err(service_error)) => Err(io::Error::other(format!(
+            "flight: {flight_error}; service: {service_error:?}; state: {state:?}; steps: {}; simulation time: {:?}; snapshot step: {}",
+            metrics.total_steps, snapshot.simulation_time(), snapshot.step()
+        )).into()),
+    }
 }
 
 async fn setup(

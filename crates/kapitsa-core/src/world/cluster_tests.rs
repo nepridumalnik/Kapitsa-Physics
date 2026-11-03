@@ -114,6 +114,13 @@ fn validation_rejects_disconnected_and_invalid_graphs() {
         cluster.welds.push(edge);
     }
     assert_eq!(world.validate_clusters(), Ok(()));
+    if let Some(weld) = world.welds.get_mut(edge.dense) {
+        weld.desc.stiffness.linear = f64::NAN;
+    }
+    assert_eq!(world.validate_clusters(), Err(ClusterError::InvalidWeld));
+    if let Some(weld) = world.welds.get_mut(edge.dense) {
+        weld.desc.stiffness.linear = 1.0;
+    }
     if let Some(cluster) = world
         .bodies
         .get_mut(body.dense)
@@ -181,6 +188,181 @@ fn managed_body_mutation_is_validated() {
         Some(Vec3::Y)
     );
     assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
+fn changing_mass_preserves_rotating_velocity_field_and_force() {
+    let mut world = PhysicsWorld::new();
+    let mass = match MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY) {
+        Ok(value) => value,
+        Err(error) => panic!("mass: {error}"),
+    };
+    let mut dynamic = match RigidBody::new_dynamic(Transform::identity(), mass) {
+        Ok(value) => value,
+        Err(error) => panic!("body: {error}"),
+    };
+    assert!(dynamic.set_angular_velocity(Vec3::Z).is_ok());
+    assert!(dynamic.apply_force(Vec3::Y).is_ok());
+    let body = match world.add_body(dynamic) {
+        Ok(value) => value,
+        Err(error) => panic!("body: {error}"),
+    };
+    let root = part(&mut world, body);
+    if let Some(entry) = world.bodies.get_mut(body.dense) {
+        entry.cluster = Some(RigidCluster {
+            root,
+            parts: vec![root],
+            welds: Vec::new(),
+        });
+    }
+    assert_eq!(
+        world.set_part_mass(
+            root,
+            mass,
+            crate::cluster::MassChangeMode::KeepVelocityField
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        world.body(body).map(|value| value.forces().force()),
+        Some(Vec3::Y)
+    );
+    let shifted = match MassProperties::new(0.5, Vec3::X, Mat3::IDENTITY) {
+        Ok(value) => value,
+        Err(error) => panic!("mass: {error}"),
+    };
+    assert_eq!(
+        world.set_part_mass(
+            root,
+            shifted,
+            crate::cluster::MassChangeMode::KeepVelocityField
+        ),
+        Ok(())
+    );
+    let body = match world.body(body) {
+        Some(value) => value,
+        None => panic!("missing body"),
+    };
+    assert_eq!(body.state().linear_velocity(), Vec3::Y);
+    assert_eq!(body.state().angular_velocity(), Vec3::Z);
+    assert_eq!(body.forces().force(), Vec3::Y);
+    assert_eq!(body.forces().torque(), -Vec3::Z);
+    assert_eq!(body.state().transform(), Transform::identity());
+}
+
+#[test]
+fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
+    let mut world = PhysicsWorld::new();
+    let mass = match MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY) {
+        Ok(value) => value,
+        Err(error) => panic!("mass: {error}"),
+    };
+    let dynamic = match RigidBody::new_dynamic(Transform::identity(), mass) {
+        Ok(value) => value,
+        Err(error) => panic!("body: {error}"),
+    };
+    let body = match world.add_body(dynamic) {
+        Ok(value) => value,
+        Err(error) => panic!("body: {error}"),
+    };
+    let root = part(&mut world, body);
+    if let Some(entry) = world.bodies.get_mut(body.dense) {
+        entry.cluster = Some(RigidCluster {
+            root,
+            parts: vec![root],
+            welds: Vec::new(),
+        });
+    }
+    let transfer = crate::cluster::MassTransfer {
+        world_origin: Vec3::ZERO,
+        linear_impulse: Vec3::X,
+        angular_impulse: Vec3::Z,
+    };
+    assert_eq!(
+        world.set_part_mass_with_transfer(root, mass, transfer),
+        Ok(())
+    );
+    let updated = match world.body(body) {
+        Some(value) => *value,
+        None => panic!("missing body"),
+    };
+    assert_eq!(updated.state().linear_velocity(), Vec3::X);
+    assert_eq!(updated.state().angular_velocity(), Vec3::Z);
+    assert_eq!(
+        world.set_part_mass(
+            root,
+            mass,
+            crate::cluster::MassChangeMode::ConserveRemainingMomentum
+        ),
+        Err(ClusterError::InvalidMotion)
+    );
+    assert_eq!(world.body(body), Some(&updated));
+    let invalid = crate::cluster::MassTransfer {
+        linear_impulse: Vec3::splat(f64::NAN),
+        ..transfer
+    };
+    assert_eq!(
+        world.set_part_mass_with_transfer(root, mass, invalid),
+        Err(ClusterError::InvalidMotion)
+    );
+    assert_eq!(world.body(body), Some(&updated));
+    let overflow = crate::cluster::MassTransfer {
+        world_origin: Vec3::splat(f64::MAX),
+        linear_impulse: Vec3::splat(f64::MAX),
+        angular_impulse: Vec3::splat(f64::MAX),
+    };
+    assert!(
+        world
+            .set_part_mass_with_transfer(root, mass, overflow)
+            .is_err()
+    );
+    assert_eq!(world.body(body), Some(&updated));
+    assert_eq!(world.cluster_part(root).map(ClusterPart::mass), Some(mass));
+    let unlinked = part(&mut world, body);
+    assert_eq!(
+        world.set_part_mass(
+            unlinked,
+            mass,
+            crate::cluster::MassChangeMode::KeepVelocityField
+        ),
+        Err(ClusterError::InvalidTopology)
+    );
+    assert_eq!(world.body(body), Some(&updated));
+}
+
+#[test]
+fn changing_static_cluster_mass_rejects_world_center_overflow() {
+    let mut world = PhysicsWorld::new();
+    let pose = match Transform::new(Vec3::splat(f64::MAX), kapitsa_math::Quat::IDENTITY) {
+        Ok(value) => value,
+        Err(error) => panic!("pose: {error}"),
+    };
+    let body = match world.add_body(RigidBody::new_static(pose)) {
+        Ok(value) => value,
+        Err(error) => panic!("body: {error}"),
+    };
+    let root = part(&mut world, body);
+    if let Some(entry) = world.bodies.get_mut(body.dense) {
+        entry.cluster = Some(RigidCluster {
+            root,
+            parts: vec![root],
+            welds: Vec::new(),
+        });
+    }
+    let before = world.cluster_part(root).map(ClusterPart::mass);
+    let replacement = match MassProperties::new(1.0, Vec3::splat(f64::MAX), Mat3::IDENTITY) {
+        Ok(value) => value,
+        Err(error) => panic!("mass: {error}"),
+    };
+    assert_eq!(
+        world.set_part_mass(
+            root,
+            replacement,
+            crate::cluster::MassChangeMode::KeepVelocityField
+        ),
+        Err(ClusterError::ArithmeticOverflow)
+    );
+    assert_eq!(world.cluster_part(root).map(ClusterPart::mass), before);
 }
 
 #[test]

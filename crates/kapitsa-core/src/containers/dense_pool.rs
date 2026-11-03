@@ -48,7 +48,7 @@ struct Slot {
     state: SlotState,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlotState {
     Occupied { dense_index: u32 },
     Free { next: Option<u32> },
@@ -71,6 +71,72 @@ impl<T> DensePool<T> {
             slots: Vec::new(),
             free_head: None,
         }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn try_reserve_insertions(&mut self, count: usize) -> Result<(), DensePoolError> {
+        if count == 0 {
+            return Ok(());
+        }
+
+        let last_dense_index = self
+            .values
+            .len()
+            .checked_add(count - 1)
+            .ok_or(DensePoolError::IndexOverflow)?;
+        u32::try_from(last_dense_index).map_err(|_| DensePoolError::IndexOverflow)?;
+
+        let mut free_slots = 0usize;
+        let mut next_free = self.free_head;
+        let mut visited = std::collections::HashSet::new();
+        visited
+            .try_reserve(count.min(self.slots.len()))
+            .map_err(|_| DensePoolError::CapacityExceeded)?;
+        while free_slots < count {
+            let Some(slot_index) = next_free else {
+                break;
+            };
+            if !visited.insert(slot_index) {
+                return Err(DensePoolError::InvalidFreeList);
+            }
+            let slot_position =
+                usize::try_from(slot_index).map_err(|_| DensePoolError::InvalidFreeList)?;
+            let slot = self
+                .slots
+                .get(slot_position)
+                .ok_or(DensePoolError::InvalidFreeList)?;
+            next_free = match slot.state {
+                SlotState::Free { next } => next,
+                SlotState::Occupied { .. } | SlotState::Retired => {
+                    return Err(DensePoolError::InvalidFreeList);
+                }
+            };
+            free_slots += 1;
+        }
+        if next_free.is_some_and(|index| visited.contains(&index)) {
+            return Err(DensePoolError::InvalidFreeList);
+        }
+
+        let new_slots = count - free_slots;
+        if new_slots != 0 {
+            let last_slot_index = self
+                .slots
+                .len()
+                .checked_add(new_slots - 1)
+                .ok_or(DensePoolError::IndexOverflow)?;
+            u32::try_from(last_slot_index).map_err(|_| DensePoolError::IndexOverflow)?;
+        }
+
+        self.values
+            .try_reserve(count)
+            .map_err(|_| DensePoolError::CapacityExceeded)?;
+        self.dense_to_slot
+            .try_reserve(count)
+            .map_err(|_| DensePoolError::CapacityExceeded)?;
+        self.slots
+            .try_reserve(new_slots)
+            .map_err(|_| DensePoolError::CapacityExceeded)?;
+        Ok(())
     }
 
     pub fn insert(&mut self, value: T) -> Result<DenseId, DensePoolError> {

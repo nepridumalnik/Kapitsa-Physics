@@ -2,12 +2,154 @@ use std::collections::{HashMap, HashSet};
 
 use super::{BodyId, ClusterError, ColliderId, PartId, PhysicsWorld, WeldId};
 use crate::{
-    cluster::{ClusterPart, RigidCluster, Weld},
+    cluster::{
+        ClusterPart, MassChangeMode, MassTransfer, RigidCluster, Weld,
+        mass::aggregate_mass,
+        motion::{transfer_motion, velocity_field},
+    },
+    mass::MassProperties,
     rigid_body::BodyType,
     transform::Transform,
 };
 
 impl PhysicsWorld {
+    /// Changes a part's mass while preserving the body's world-space velocity field.
+    ///
+    /// `ConserveRemainingMomentum` requires explicit impulses and is rejected here;
+    /// use [`Self::set_part_mass_with_transfer`] for that operation.
+    pub fn set_part_mass(
+        &mut self,
+        part: PartId,
+        mass: MassProperties,
+        mode: MassChangeMode,
+    ) -> Result<(), ClusterError> {
+        if mode == MassChangeMode::ConserveRemainingMomentum {
+            return Err(ClusterError::InvalidMotion);
+        }
+        self.set_part_mass_inner(part, mass, None)
+    }
+
+    /// Changes a dynamic cluster's mass with explicitly supplied signed impulses.
+    pub fn set_part_mass_with_transfer(
+        &mut self,
+        part: PartId,
+        mass: MassProperties,
+        transfer: MassTransfer,
+    ) -> Result<(), ClusterError> {
+        transfer.validate()?;
+        self.set_part_mass_inner(part, mass, Some(transfer))
+    }
+
+    fn set_part_mass_inner(
+        &mut self,
+        part: PartId,
+        mass: MassProperties,
+        transfer: Option<MassTransfer>,
+    ) -> Result<(), ClusterError> {
+        let body = self
+            .cluster_part(part)
+            .ok_or(ClusterError::InvalidPartId)?
+            .body();
+        let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+        if !cluster.parts().contains(&part) {
+            return Err(ClusterError::InvalidTopology);
+        }
+        let mut values = Vec::new();
+        values
+            .try_reserve(cluster.parts().len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for &id in cluster.parts() {
+            let entry = self.cluster_part(id).ok_or(ClusterError::InvalidTopology)?;
+            values.push((
+                if id == part { mass } else { entry.mass() },
+                entry.local_transform(),
+            ));
+        }
+        let aggregate = aggregate_mass(values.iter().map(|(mass, transform)| (mass, transform)))?;
+        let original = *self.body(body).ok_or(ClusterError::InvalidBodyId)?;
+        let new_center = original
+            .state()
+            .transform()
+            .transform_point(aggregate.center_of_mass());
+        if !new_center.is_finite() {
+            return Err(ClusterError::ArithmeticOverflow);
+        }
+        if transfer.is_none()
+            && self
+                .cluster_part(part)
+                .is_some_and(|entry| entry.mass() == mass)
+        {
+            return Ok(());
+        }
+        if transfer.is_some() && original.physics().body_type() != BodyType::Dynamic {
+            return Err(ClusterError::IncompatibleMotion);
+        }
+        let mut prepared = original;
+        if original.physics().body_type() == BodyType::Dynamic {
+            let old_center = original
+                .world_center_of_mass()
+                .map_err(ClusterError::Body)?
+                .ok_or(ClusterError::InvalidMass)?;
+            let (velocity, omega) = if let Some(transfer) = transfer {
+                let old_mass = original.physics().mass().ok_or(ClusterError::InvalidMass)?;
+                let pose = original.state().transform();
+                transfer_motion(
+                    old_mass,
+                    pose,
+                    original.state().linear_velocity(),
+                    original.state().angular_velocity(),
+                    aggregate,
+                    pose,
+                    transfer.world_origin,
+                    transfer.linear_impulse,
+                    transfer.angular_impulse,
+                )?
+            } else {
+                velocity_field(
+                    old_center,
+                    original.state().linear_velocity(),
+                    original.state().angular_velocity(),
+                    new_center,
+                )?
+            };
+            let force = original.forces().force();
+            let torque = old_center
+                .checked_sub(new_center)
+                .and_then(|offset| offset.checked_cross(force))
+                .and_then(|shift| original.forces().torque().checked_add(shift))
+                .ok_or(ClusterError::ArithmeticOverflow)?;
+            let aggregate_changed = original.physics().mass() != Some(aggregate);
+            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+            prepared
+                .set_linear_velocity(velocity)
+                .map_err(ClusterError::Body)?;
+            prepared
+                .set_angular_velocity(omega)
+                .map_err(ClusterError::Body)?;
+            if aggregate_changed {
+                prepared.apply_force(force).map_err(ClusterError::Body)?;
+                prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+            }
+        }
+        let target = self
+            .parts
+            .get_mut(part.dense)
+            .ok_or(ClusterError::InvalidTopology)?;
+        let entry = self
+            .bodies
+            .get_mut(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        target.mass = mass;
+        entry.body = prepared;
+        let mut collider = entry.first_collider;
+        while let Some(id) = collider {
+            collider = self.colliders.get(id.dense).and_then(|entry| entry.next);
+            self.collision_system.invalidate_collider_contacts(id);
+        }
+        self.invalidate_body_edit(body);
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn rebind_collider(
         &mut self,
@@ -153,6 +295,7 @@ impl PhysicsWorld {
             }
             for &weld_id in cluster.welds() {
                 let weld = self.weld(weld_id).ok_or(ClusterError::InvalidTopology)?;
+                weld.desc().validate()?;
                 let (a, b) = weld.parts();
                 if a == b
                     || !all_welds.insert(weld_id)
@@ -181,6 +324,7 @@ impl PhysicsWorld {
                 return Err(ClusterError::InvalidTopology);
             }
             let mut collider = entry.first_collider;
+            let mut previous = None;
             let mut linked_colliders = HashSet::new();
             while let Some(id) = collider {
                 if !all_colliders.contains(&id) || !linked_colliders.insert(id) {
@@ -190,9 +334,10 @@ impl PhysicsWorld {
                     .colliders
                     .get(id.dense)
                     .ok_or(ClusterError::InvalidTopology)?;
-                if collider_entry.body != body {
+                if collider_entry.body != body || collider_entry.prev != previous {
                     return Err(ClusterError::InvalidTopology);
                 }
+                previous = Some(id);
                 collider = collider_entry.next;
             }
             if adjacency

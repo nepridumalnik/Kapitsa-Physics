@@ -255,3 +255,75 @@ fn values_length_stays_synchronized_with_pool_length() -> Result<(), DensePoolEr
     assert!(pool.values().is_empty());
     Ok(())
 }
+
+#[test]
+fn reserves_insertions_for_reused_and_new_slots() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let first = pool.insert(1)?;
+    let second = pool.insert(2)?;
+    let third = pool.insert(3)?;
+    assert_eq!(pool.remove(second), Some(2));
+    assert_eq!(pool.remove(first), Some(1));
+
+    pool.try_reserve_insertions(4)?;
+    let ids = [
+        pool.insert(10)?,
+        pool.insert(11)?,
+        pool.insert(12)?,
+        pool.insert(13)?,
+    ];
+
+    assert_eq!(ids[0].index(), first.index());
+    assert_eq!(ids[1].index(), second.index());
+    assert_eq!(ids[2].index(), 3);
+    assert_eq!(ids[3].index(), 4);
+    assert_eq!(pool.get(third), Some(&3));
+    Ok(())
+}
+
+#[test]
+fn reserve_overflow_does_not_change_pool() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let id = pool.insert(7)?;
+    let values = pool.values().to_vec();
+    let dense_to_slot = pool.dense_to_slot.clone();
+    let slots = pool
+        .slots
+        .iter()
+        .map(|slot| (slot.generation, slot.state))
+        .collect::<Vec<_>>();
+    let free_head = pool.free_head;
+
+    assert_eq!(
+        pool.try_reserve_insertions(usize::MAX),
+        Err(DensePoolError::IndexOverflow)
+    );
+    assert_eq!(pool.values(), values.as_slice());
+    assert_eq!(pool.dense_to_slot, dense_to_slot);
+    assert_eq!(
+        pool.slots
+            .iter()
+            .map(|slot| (slot.generation, slot.state))
+            .collect::<Vec<_>>(),
+        slots
+    );
+    assert_eq!(pool.free_head, free_head);
+    assert_eq!(pool.get(id), Some(&7));
+    Ok(())
+}
+
+#[test]
+fn reserve_rejects_a_cycle_before_insertion() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let id = pool.insert(7)?;
+    assert_eq!(pool.remove(id), Some(7));
+    pool.slots[id.index() as usize].state = SlotState::Free {
+        next: Some(id.index()),
+    };
+    assert_eq!(
+        pool.try_reserve_insertions(2),
+        Err(DensePoolError::InvalidFreeList)
+    );
+    assert_eq!(pool.len(), 0);
+    Ok(())
+}
