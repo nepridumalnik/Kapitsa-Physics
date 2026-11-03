@@ -122,10 +122,12 @@ The position-PCG timing counters over the 180-tick 1,000-body run were `38,235 m
 
 | Parts | Run ms | Anchor max / RMS, m | Frame max / RMS, rad | Coast drift | Max altitude, m | Velocity conv/cap | Position conv/cap |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 100 | 1,967 | `0.000347 / 0.000034` | `0.000691 / 0.000035` | `−4.78e−7%` | 2.310 | `2,744 / 2,152` | `456 / 462` |
-| 200 | 5,537 | `0.001417 / 0.000150` | `0.001380 / 0.000178` | `−4.76e−7%` | 2.192 | `2,315 / 2,581` | `406 / 512` |
-| 500 | 27,839 | `0.009504 / 0.001406` | `0.007923 / 0.001031` | `−1.77e−5%` | 1.834 | `1,513 / 3,271` | `260 / 637` |
-| 1,000 | 77,845 | `0.026590 / 0.001923` | `0.010279 / 0.001075` | `−4.28e−7%` | 1.613 | `2,306 / 2,590` | `437 / 481` |
+| 100 | 1,966 | `0.000347 / 0.000034` | `0.000691 / 0.000035` | `−4.78e−7%` | 2.310 | `2,744 / 2,152` | `456 / 462` |
+| 200 | 5,506 | `0.001417 / 0.000150` | `0.001380 / 0.000178` | `−4.76e−7%` | 2.192 | `2,315 / 2,581` | `406 / 512` |
+| 500 | 28,614 | `0.009504 / 0.001406` | `0.007923 / 0.001031` | `−1.77e−5%` | 1.834 | `1,513 / 3,271` | `260 / 637` |
+| 1,000 | 78,333 | `0.026590 / 0.001923` | `0.010279 / 0.001075` | `−4.28e−7%` | 1.613 | `2,306 / 2,590` | `437 / 481` |
+
+A same-step IC(0) reuse trial kept the previous position factor across outer position passes while rebuilding the current masses, diagonal, residual, and matrix-vector operator. It cut the 1,000-body strict run from `78,333` to `53,336 ms` (`31.9%`), and the deterministic fixture still passed its broad limits, but maximum frame error rose from `0.010279` to `0.081698 rad` and RMS from `0.001075` to `0.003627 rad`. At 500 bodies, maximum frame error rose from `0.007923` to `0.011054 rad`. The factor is mathematically positive definite, but its stale approximation materially degraded convergence at the fixed cap, so the experiment was reverted and is not included in the solver.
 
 Alternative position preconditioners were screened at 1,000 bodies, 16 external sweeps, and cap 5. Diagonal PCG took `43,364 ms` but ended at `0.216 m / 0.782 rad`; one-joint block Jacobi took `42,559 ms` and ended at `0.121 m / 0.400 rad`. A two-joint block test took `42,108 ms` and ended at `0.139 m / 0.361 rad`; increasing its position cap to 16 reduced the anchor error to `0.0480 m` but frame error remained `0.208 rad`. These faster variants fail strict geometry and are not retained as selectable solver paths. IC(0) remains the only screened position preconditioner that passes.
 
@@ -174,7 +176,40 @@ The experimental parallel solver now greedily colors the complete island constra
 
 The 200-body mixed contact/joint fixture builds two colors and is repeatable across parallel runs. It also shows the numerical tradeoff from changing the Gauss–Seidel order: after two steps the scalar and colored maximum anchor errors are `0.10930 m` and `0.10793 m`, while maximum frame errors are `0.13557 rad` and `0.268998 rad`. In the six-step chain/branch diagnostic, the colored path required many more outer sweeps and still did not match scalar geometry; for example, the chain at `32` velocity and `8` position sweeps remains at `0.21994 m / 0.45701 rad`, versus `0.48699 m / 0.40625 rad` for scalar at `8 / 3`. The global-color route is therefore compiled only with `bench-internals` and is not selected in production. This verifies memory safety, rollback, and repeatability, but does not establish a production-quality convergence or scaling win.
 
-Constraint-color graph construction measured `6–38 μs` cold and `1–3 μs` for a warm topology check in 200–1,000-body cases. The benchmark uses a scoped-thread executor, so task launch and synchronization are included in the end-to-end result; it does not establish persistent-pool utilization. The PCG chain benchmark also did not scale with worker count. Reusing diagnostic velocity-snapshot scratch removes steady-state diagnostic allocations (`0/0` p50/p95) at the cost of retaining 48 bytes per body; this scratch is compiled only with `bench-internals`.
+Constraint-color graph construction measured `6–38 μs` cold and `1–3 μs` for a warm topology check in 200–1,000-body cases. The earlier scoped-thread measurements included task launch and synchronization but did not establish persistent-pool utilization; the dedicated persistent-pool comparison follows below. Reusing diagnostic velocity-snapshot scratch removes steady-state diagnostic allocations (`0/0` p50/p95) at the cost of retaining 48 bytes per body; this scratch is compiled only with `bench-internals`.
+
+### Persistent Rayon scaling benchmark
+
+`joint_parallel_scaling` uses one persistent Rayon pool per worker configuration and a separate `SequentialExecutor` control with no pool. It measures 20 timed steps after three warm-ups, on 100/200/500/1,000-body disturbed fixed-joint chains at `dt=1/120 s`. Each timed step starts with the same terminal velocity kick; Scalar uses the default `8/3` outer velocity/position sweeps, while IC(0) PCG is capped at `5/5`. Reported p95 is nearest-rank. The tables show full-step p50/p95 in milliseconds for the no-pool control and each Rayon worker count:
+
+| Bodies | Scalar no pool | Scalar Rayon 1 | Scalar + coloring Rayon 2 | Scalar + coloring Rayon 4 | Scalar + coloring Rayon 8 |
+|---:|---:|---:|---:|---:|---:|
+| 100 | `4.008 / 4.127` | `3.989 / 4.116` | `3.990 / 4.370` | `3.939 / 4.117` | `3.926 / 4.114` |
+| 200 | `6.659 / 7.382` | `6.662 / 7.310` | `6.412 / 6.551` | `5.309 / 5.608` | `5.906 / 6.397` |
+| 500 | `15.216 / 15.612` | `14.629 / 15.327` | `15.169 / 16.648` | `12.492 / 12.980` | `11.002 / 11.254` |
+| 1,000 | `28.798 / 31.098` | `29.294 / 30.433` | `28.434 / 30.046` | `23.380 / 24.131` | `22.544 / 26.230` |
+
+| Bodies | PCG no pool | PCG Rayon 1 | PCG Rayon 2 | PCG Rayon 4 | PCG Rayon 8 |
+|---:|---:|---:|---:|---:|---:|
+| 100 | `2.511 / 2.538` | `2.521 / 2.556` | `2.735 / 2.886` | `2.804 / 2.994` | `3.798 / 4.019` |
+| 200 | `5.083 / 5.121` | `5.066 / 5.098` | `5.388 / 5.900` | `5.901 / 6.764` | `6.900 / 7.452` |
+| 500 | `13.205 / 13.887` | `13.118 / 13.489` | `14.152 / 16.666` | `13.837 / 14.843` | `15.202 / 18.624` |
+| 1,000 | `27.849 / 29.850` | `28.012 / 29.244` | `28.669 / 32.191` | `28.485 / 30.046` | `31.610 / 35.913` |
+
+On this chain, no-pool Scalar/PCG solver-prepare p50 is `0.004/0.004`, `0.008/0.008`, `0.026/0.019`, and `0.060/0.046 ms`; summed joint-row preparation is `0.738/0.198`, `1.217/0.397`, `2.617/1.018`, and `5.214/2.104 ms`. Scalar runs eight velocity and three position sweeps. PCG reaches its residual in one velocity and one position iteration at every size, with zero capped calls; its maximum velocity residual grows from `3.36e−14 m/s / 3.92e−15 rad/s` at 100 bodies to `1.96e−10 m/s / 2.10e−11 rad/s` at 1,000 bodies. Its final maximum anchor/frame errors are `1.43e−9 m / 1.52e−17 rad` through `1.73e−9 m / 1.59e−14 rad`. The scalar no-pool measured `Jv` is `2.00e−3 m/s / 3.65e−3 rad/s`, with final geometry errors `1.67e−4 m / 3.20e−4 rad` at all sizes.
+
+PCG's near-identical one-worker Rayon results and increasing two-to-eight-worker times show no useful pool scaling in this workload. The scalar whole-island color path lowers p50 from `6.659` to `5.309 ms` at 200 bodies, `15.216` to `11.002 ms` at 500, and `28.798` to `22.544 ms` at 1,000 (best worker counts 4/8/8). At 1,000 bodies its p95 moves from `31.098` to `26.230 ms`. These aggregate gains include graph coloring and the changed projection order; they do not isolate the removed copies/writeback. The colored run's final frame error is `6.17e−4 rad`, versus `3.20e−4 rad` for scalar, and its measured angular `Jv` is higher. It stays experimental. For PCG, the 1,000-body best p50 is the no-pool control (`27.849 ms`); eight workers cost `31.610 ms`.
+
+The measured full-step cost attributed to the earlier optimizations is summarized here. Row-preparation savings are from the paired Scalar A/B; full-step savings are from the same captures. Effective-mass savings compare cached and uncached Scalar. FixedBlock3 remains an experimental measurement, not the selected path.
+
+| Bodies | Incremental rows: row-prep saved | Incremental rows: full-step saved | Mass cache: full-step saved | FixedBlock3 extra: full-step saved |
+|---:|---:|---:|---:|---:|
+| 100 | `0.302 ms` | `0.492 ms` | `1.355 ms` | `1.029 ms` |
+| 200 | `0.630 ms` | `1.240 ms` | `2.780 ms` | `2.135 ms` |
+| 500 | `1.728 ms` | `3.992 ms` | `7.009 ms` | `5.271 ms` |
+| 1,000 | `3.435 ms` | `7.557 ms` | `13.509 ms` | `10.880 ms` |
+
+No isolated millisecond claim is assigned to the body-copy/writeback removal: the experimental colored run changes solver ordering at the same time. Rayon thread-pool construction is outside the timed region; executor dispatch and synchronization remain inside the full-step timings.
 
 ## Classification and remaining limits
 
@@ -195,6 +230,12 @@ cargo +1.98.0 test --release -p kapitsa --features bench-internals --lib runtime
 cargo +1.98.0 test --release -p kapitsa --features bench-internals --lib runtime::modular_rocket_fixture::stability_tests::diagnose_rocket_unforced_contact_free_energy_stages --locked -- --ignored --exact --nocapture --test-threads=1
 cargo +1.98.0 test --release -p kapitsa --features bench-internals --lib runtime::modular_rocket_fixture::stability_tests::diagnose_rocket_global_constraint_pcg_full_energy_trace --locked -- --ignored --exact --nocapture --test-threads=1
 cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_rocket --locked
+cargo +1.98.0 bench -p kapitsa-core --features bench-internals --bench joint_parallel_scaling --locked
+cargo +1.98.0 test --workspace --locked --no-fail-fast -- --test-threads=1
+cargo +1.98.0 test --workspace --all-features --locked --no-fail-fast -- --test-threads=1
+cargo +1.98.0 check --workspace --all-features --locked
+cargo +1.98.0 clippy --workspace --all-features --lib --bins --locked -- -D warnings
+cargo +1.98.0 clippy -p kapitsa-core --features bench-internals --bench joint_parallel_scaling --locked -- -D warnings
 ```
 
 ## Final validation
@@ -203,9 +244,16 @@ cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_
 |---|---|
 | `cargo +1.98.0 fmt --all -- --check` | PASS |
 | `cargo +1.98.0 check --workspace --all-features --locked` | PASS |
-| `cargo +1.98.0 clippy --workspace --all-features --locked -- -D warnings` | PASS |
+| `cargo +1.98.0 clippy --workspace --all-features --lib --bins --locked -- -D warnings` | PASS |
+| New `joint_parallel_scaling` bench Clippy | PASS |
+| `cargo +1.98.0 clippy --workspace --all-features --all-targets --locked -- -D warnings` | FAIL: the existing `large_modular_rocket` benchmark compiles a test module with unused imports/dead code under `-D warnings`; 26 warnings, outside this change |
 | `cargo +1.98.0 test --workspace --locked --no-fail-fast -- --test-threads=1` | PASS; all executed suites and doctests passed, 4 ignored |
+| `cargo +1.98.0 test --workspace --all-features --locked --no-fail-fast -- --test-threads=1` | PASS; all executed suites and doctests passed |
+| Stage 4 colored solver and graph tests | PASS; rollback, repeated parallel state, contacts plus joints, 629 core unit tests under all features |
+| Persistent Rayon scaling benchmark | PASS; 40 solver/size/executor cases, 20 measured samples each |
 | Focused Release energy and projection diagnostics | PASS |
 | Same-run full-rocket physical vs legacy surface-zero coast metric | PASS; `4.598934067e−7%` vs `88.94944039%` |
 | Strict rocket, default scalar path | FAIL on existing geometric criteria |
-| Strict rocket, benchmark-only PCG 5/5, 16 outer velocity sweeps | PASS at 100/200/500/1,000 parts |
+| Strict rocket, benchmark-only PCG 5/5, 16 outer velocity sweeps | PASS at 100/200/500/1,000 parts; 180 ticks per run and deterministic repeats |
+| Same-step position IC(0) reuse experiment | REJECTED: 31.9% faster at 1,000 parts, but maximum frame error increased 7.9x; implementation reverted |
+| Free rigid rocket energy invariant | PASS; Scalar `0.075847%`, IC(0) PCG `0.004841%`, correction-work closure `−4.79e−15 J` |
