@@ -1,7 +1,7 @@
 use std::{error::Error, time::Instant};
 
 use kapitsa_core::{
-    execution::{ExecutionError, SequentialExecutor, StepExecutor},
+    execution::SequentialExecutor,
     joint::{FixedJoint, Joint, JointCommon, JointFrame},
     mass::MassProperties,
     rigid_body::RigidBody,
@@ -9,7 +9,11 @@ use kapitsa_core::{
     world::PhysicsWorld,
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
-use rayon::prelude::*;
+
+#[path = "support/rayon_executor.rs"]
+mod rayon_executor;
+
+use rayon_executor::RayonExecutor;
 
 const BODY_COUNTS: [usize; 4] = [100, 200, 500, 1_000];
 const WORKER_COUNTS: [usize; 4] = [1, 2, 4, 8];
@@ -44,76 +48,6 @@ impl Executor {
             Self::Sequential => world.step_with_executor(DT, &SequentialExecutor, 1)?,
             Self::Rayon(executor) => world.step_with_executor(DT, executor, workers)?,
         }
-        Ok(())
-    }
-}
-
-struct RayonExecutor {
-    pool: rayon::ThreadPool,
-}
-
-impl RayonExecutor {
-    fn new(workers: usize) -> Result<Self, Box<dyn Error>> {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(workers)
-            .build()?;
-        Ok(Self { pool })
-    }
-}
-
-impl StepExecutor for RayonExecutor {
-    fn for_each_chunk_mut<T, F>(
-        &self,
-        values: &mut [T],
-        chunk_size: usize,
-        operation: F,
-    ) -> Result<(), ExecutionError>
-    where
-        T: Send,
-        F: Fn(usize, &mut [T]) + Send + Sync,
-    {
-        if chunk_size == 0 {
-            return Err(ExecutionError::InvalidChunkLayout);
-        }
-        self.pool.install(|| {
-            values
-                .par_chunks_mut(chunk_size)
-                .enumerate()
-                .for_each(|(index, chunk)| operation(index, chunk));
-        });
-        Ok(())
-    }
-
-    fn for_each_chunk_layout_mut<T, F>(
-        &self,
-        values: &mut [T],
-        chunk_sizes: &[usize],
-        operation: F,
-    ) -> Result<(), ExecutionError>
-    where
-        T: Send,
-        F: Fn(usize, &mut [T]) + Send + Sync,
-    {
-        let total = chunk_sizes.iter().try_fold(0_usize, |total, &size| {
-            (size > 0).then(|| total.checked_add(size)).flatten()
-        });
-        if total != Some(values.len()) {
-            return Err(ExecutionError::InvalidChunkLayout);
-        }
-
-        self.pool.install(|| {
-            rayon::scope(|scope| {
-                let mut remaining = values;
-                let mut start = 0;
-                for &chunk_size in chunk_sizes {
-                    let (chunk, tail) = remaining.split_at_mut(chunk_size);
-                    let operation = &operation;
-                    scope.spawn(move |_| operation(start, chunk));
-                    start += chunk_size;
-                    remaining = tail;
-                }
-            });
-        });
         Ok(())
     }
 }

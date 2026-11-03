@@ -14,6 +14,10 @@ For a constrained assembly, most of the remaining energy change occurs during ve
 
 The strict 100/200/500/1,000-part rocket fixture passes with benchmark-only velocity/position PCG caps `5/5` and 16 outer velocity sweeps. Caps 1–4 fail at 1,000 parts. The production scalar configuration still fails the strict geometric limits, while the passing PCG configuration is substantially slower and many local PCG calls hit their cap. PCG remains experimental; no solver defaults or acceptance tolerances were changed.
 
+The Scalar full-step regression was traced to repeated six-row velocity preparation across sweeps. Reusing the prepared rows cuts p50 by `39–51%` on the 100–1,000-body chain benchmark while preserving its final `Jv` and geometry. A per-row inverse effective-mass cache is also reused while both body mass slots remain valid; mass, inertia, and transform changes invalidate it. The production Scalar full rocket path now measures `4.57 / 9.14 / 22.95 / 46.52 ms` p50 at 100/200/500/1,000 parts in the no-pool control.
+
+The worker scaling requirement did not produce a safe production parallel win. Persistent Rayon measurements show that the experimental whole-island color path slows the optimized Scalar chain, and the rocket's 1,000-part colored cases double row preparation and are slower than the sequential control. PCG remains accurate but gains no speed from additional workers; IC(0) setup still dominates the strict rocket run. Both paths remain experimental where the measurements do not justify enabling them.
+
 ## Energy accounting and diagnosis
 
 All reported changes use the signed convention `ΔE = E_after − E_before`; positive values are gains, negative values are losses. `T`, `R`, and `U` are translational, rotational, and gravitational potential energy. Stage diagnostics sample after prediction/integration, after velocity solving (including each PCG call), and after position solving (including each PCG call).
@@ -84,10 +88,10 @@ Caps 1–3 were rerun after the rotational CCD change. The cap-4 screen was also
 
 | Parts | Run ms | Anchor max / RMS, m | Frame max / RMS, rad | Coast drift | Max altitude, m | PCG converged / cap hits |
 |---:|---:|---:|---:|---:|---:|---:|
-| 100 | 2,283 | `0.000347 / 0.000034` | `0.000691 / 0.000035` | `−4.78e−7%` | 2.310 | `2,744 / 2,152` |
-| 200 | 6,135 | `0.001417 / 0.000150` | `0.001380 / 0.000178` | `−4.76e−7%` | 2.192 | `2,315 / 2,581` |
-| 500 | 29,114 | `0.009504 / 0.001406` | `0.007923 / 0.001031` | `−1.77e−5%` | 1.834 | `1,513 / 3,271` |
-| 1,000 | 81,353 | `0.026590 / 0.001923` | `0.010279 / 0.001075` | `−4.28e−7%` | 1.613 | `2,306 / 2,590` |
+| 100 | 1,980 | `0.000347 / 0.000034` | `0.000691 / 0.000035` | `−4.78e−7%` | 2.310 | `2,744 / 2,152` |
+| 200 | 5,473 | `0.001417 / 0.000150` | `0.001380 / 0.000178` | `−4.76e−7%` | 2.192 | `2,315 / 2,581` |
+| 500 | 28,484 | `0.009504 / 0.001406` | `0.007923 / 0.001031` | `−1.77e−5%` | 1.834 | `1,513 / 3,271` |
+| 1,000 | 78,702 | `0.026590 / 0.001923` | `0.010279 / 0.001075` | `−4.28e−7%` | 1.613 | `2,306 / 2,590` |
 
 Many local PCG calls still hit the cap; this fixture pass does not imply every solve reached its internal residual tolerance. With the production scalar path and unchanged defaults, the same strict rocket test fails the geometric thresholds at every size: maximum anchor error is `0.1334 / 0.2907 / 0.7411 / 2.5072 m` for 100/200/500/1,000 parts. PCG is therefore not enabled by default. The 5/5 strict configuration is about `2.7x / 3.5x / 6.4x / 9.0x` slower than the original revision's strict-run timings, whose trajectory also fails the original correctness limits.
 
@@ -118,31 +122,26 @@ The strict 1,000-body screen used three contact/position sweeps and IC(0) for po
 
 Raising the velocity cap to 16 does not remove the need for the outer contact passes: 8 and 12 external sweeps still fail altitude at `1.523 m` and `1.585 m`. At 16 sweeps and cap 5, the 1,000-body run reports velocity `2,306 converged / 2,590 capped` calls and position `437 / 481`; the physical fixture passes even though many local linear solves reach their caps.
 
-The position-PCG timing counters over the 180-tick 1,000-body run were `38,235 ms` system preparation (including IC(0) construction), `172 ms` matrix-vector products, `1,841 ms` preconditioner applications, and `13 ms` reductions. IC(0) setup dominates. The current strict run took `77,845 ms`, versus `81,353 ms` recorded before the Scalar and mass-cache optimizations; this `4.3%` change is not an isolated PCG A/B measurement. The saved strict results are:
+An instrumented 180-tick 1,000-body position-PCG run attributed `38,235 ms` to system preparation (including IC(0) construction), `172 ms` to matrix-vector products, `1,841 ms` to preconditioner applications, and `13 ms` to reductions. IC(0) setup dominates. The final strict run at 1,000 bodies took `78,702 ms`; this is not a PCG-only A/B measurement.
 
-| Parts | Run ms | Anchor max / RMS, m | Frame max / RMS, rad | Coast drift | Max altitude, m | Velocity conv/cap | Position conv/cap |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 100 | 1,966 | `0.000347 / 0.000034` | `0.000691 / 0.000035` | `−4.78e−7%` | 2.310 | `2,744 / 2,152` | `456 / 462` |
-| 200 | 5,506 | `0.001417 / 0.000150` | `0.001380 / 0.000178` | `−4.76e−7%` | 2.192 | `2,315 / 2,581` | `406 / 512` |
-| 500 | 28,614 | `0.009504 / 0.001406` | `0.007923 / 0.001031` | `−1.77e−5%` | 1.834 | `1,513 / 3,271` | `260 / 637` |
-| 1,000 | 78,333 | `0.026590 / 0.001923` | `0.010279 / 0.001075` | `−4.28e−7%` | 1.613 | `2,306 / 2,590` | `437 / 481` |
-
-A same-step IC(0) reuse trial kept the previous position factor across outer position passes while rebuilding the current masses, diagonal, residual, and matrix-vector operator. It cut the 1,000-body strict run from `78,333` to `53,336 ms` (`31.9%`), and the deterministic fixture still passed its broad limits, but maximum frame error rose from `0.010279` to `0.081698 rad` and RMS from `0.001075` to `0.003627 rad`. At 500 bodies, maximum frame error rose from `0.007923` to `0.011054 rad`. The factor is mathematically positive definite, but its stale approximation materially degraded convergence at the fixed cap, so the experiment was reverted and is not included in the solver.
+The final strict run's convergence and geometry results are the same as the table above. A same-step IC(0) reuse trial kept the previous position factor across outer position passes while rebuilding the current masses, diagonal, residual, and matrix-vector operator. It cut the 1,000-body strict run from `78,333` to `53,336 ms` (`31.9%`), and the deterministic fixture still passed its broad limits, but maximum frame error rose from `0.010279` to `0.081698 rad` and RMS from `0.001075` to `0.003627 rad`. At 500 bodies, maximum frame error rose from `0.007923` to `0.011054 rad`. The factor is mathematically positive definite, but its stale approximation materially degraded convergence at the fixed cap, so the experiment was reverted and is not included in the solver.
 
 Alternative position preconditioners were screened at 1,000 bodies, 16 external sweeps, and cap 5. Diagonal PCG took `43,364 ms` but ended at `0.216 m / 0.782 rad`; one-joint block Jacobi took `42,559 ms` and ended at `0.121 m / 0.400 rad`. A two-joint block test took `42,108 ms` and ended at `0.139 m / 0.361 rad`; increasing its position cap to 16 reduced the anchor error to `0.0480 m` but frame error remained `0.208 rad`. These faster variants fail strict geometry and are not retained as selectable solver paths. IC(0) remains the only screened position preconditioner that passes.
 
 ## Release performance and parallelism
 
-The large modular rocket benchmark uses 5 warm-up and 60 steady samples at `dt=1/120 s`, on the same local machine and toolchain as the original baseline. The table below preserves the measurements from before the Scalar FixedJoint optimization:
+The large modular rocket benchmark uses 5 warm-up and 60 steady samples at `dt=1/120 s`. It now defaults to a persistent Rayon pool, built outside the timed samples and reused for every size at that worker count. `--no-pool` runs a separate `SequentialExecutor` control at one worker. The historical baseline was recorded before the executor change.
 
-| Parts | Original 1 worker | Current 1 worker | Current 8 workers |
-|---:|---:|---:|---:|
-| 100 | `5.582 / 5.633 ms` | `8.289 / 8.377 ms` | `8.233 / 8.662 ms` |
-| 200 | `11.293 / 12.089 ms` | `16.464 / 16.627 ms` | `16.545 / 17.381 ms` |
-| 500 | `28.416 / 30.852 ms` | `41.731 / 42.251 ms` | `42.343 / 44.163 ms` |
-| 1,000 | `56.540 / 57.065 ms` | `83.349 / 84.523 ms` | `85.739 / 87.599 ms` |
+The old comparison showed the regression that motivated this follow-up. Final full-step p50/p95 values are below; the historical original column used the earlier benchmark executor, so the chain A/B in the next section is the clean comparison for solver changes.
 
-Those pre-optimization single-worker p50 values were `46–49%` slower than the original baseline. Eight scoped workers did not speed up this connected rocket workload; results were within noise at 100 parts and slower at larger sizes. A separate loaded binary-branch test measured `16%` improvement at 500 bodies with two workers and `23%` at 1,000 bodies with four workers. A connected chain remained sequential, and eight workers did not improve on four.
+| Parts | Historical original, 1 worker | Pre-fix current, 1 worker | Final no pool | Final Rayon 1 | Final Rayon 2 | Final Rayon 4 | Final Rayon 8 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100 | `5.582 / 5.633` | `8.289 / 8.377` | `4.570 / 4.650` | `4.611 / 4.684` | `4.613 / 4.742` | `4.592 / 4.692` | `4.664 / 5.933` |
+| 200 | `11.293 / 12.089` | `16.464 / 16.627` | `9.137 / 9.261` | `9.194 / 9.540` | `9.262 / 9.480` | `9.350 / 10.722` | `9.365 / 9.609` |
+| 500 | `28.416 / 30.852` | `41.731 / 42.251` | `22.949 / 23.256` | `23.037 / 24.152` | `23.269 / 24.179` | `23.449 / 25.564` | `23.452 / 25.982` |
+| 1,000 | `56.540 / 57.065` | `83.349 / 84.523` | `46.524 / 47.675` | `46.457 / 47.996` | `65.179 / 69.296` | `54.572 / 57.740` | `54.812 / 62.775` |
+
+Times are milliseconds. At 100–500 parts, worker counts change little. At 1,000 parts, 2/4/8 workers trigger 803 color batches and prepare `83,916` rows, twice the `41,958` rows in the uncolored Scalar path. Those colored full steps are slower than no pool. The historical original-to-final table also changes executor; the paired chain measurements below attribute the row-reuse gain without that confound.
 
 ### Scalar FixedJoint incremental preparation
 
@@ -155,20 +154,33 @@ To isolate stage 1, the old `c936f44` implementation and the optimized implement
 | 500 | `43.634 / 46.913` | `39.642 / 40.804` | `6.953 / 7.408` | `5.225 / 5.381` | `50,898 → 41,916` | `37,425` |
 | 1,000 | `86.931 / 89.420` | `79.374 / 81.198` | `13.828 / 14.118` | `10.393 / 10.655` | `101,898 → 83,916` | `74,925` |
 
-The number of prepared rows fell by `17.65%`, while the number of solved scalar rows and projection ordering stayed the same. Row-preparation p50 fell by `22–25%`; complete-step p50 fell by `5.8–9.2%` (`0.49 / 1.24 / 3.99 / 7.56 ms`). At 100 parts the p95 step time is within run noise; larger sizes improve by `1.54 / 6.11 / 8.22 ms` at p95. The scalar strict-rocket geometric failure remains unchanged, so this optimization improves cost without claiming solver convergence or fixing that correctness limit.
+The first implementation reduced prepared rows by `17.65%` while preserving solved rows and projection order. The follow-up reuses the six-row blocks across all Scalar velocity sweeps when warm-start, alternating sweep order, and PCG are disabled. It also measures the current residual directly from those prepared rows, so diagnostics do not rebuild them. Position projections still prepare rows after each pose update and retain their original ordered sequence.
+
+The following paired persistent-benchmark run compares the earlier path with the final row-reuse path using the same no-pool executor and fixture. Row preparation is p50; full-step values are p50/p95.
+
+| Bodies | Full step before, ms | Full step after, ms | Row preparation before → after, ms | Prepared rows after | p50 saved, ms |
+|---:|---:|---:|---:|---:|---:|
+| 100 | `4.008 / 4.127` | `2.426 / 2.549` | `0.738 → 0.389` | `4,158` | `1.582` |
+| 200 | `6.659 / 7.382` | `3.698 / 4.391` | `1.217 → 0.578` | `8,358` | `2.961` |
+| 500 | `15.216 / 15.612` | `7.457 / 8.207` | `2.617 → 1.111` | `20,958` | `7.759` |
+| 1,000 | `28.798 / 31.098` | `14.178 / 14.788` | `5.214 → 2.034` | `41,958` | `14.620` |
+
+The p50 reduction is `39.5 / 44.5 / 51.0 / 50.8%`. Scalar still runs eight velocity and three position sweeps. Its measured `Jv` (`2.003e−3 m/s / 3.652e−3 rad/s`) and final geometry (`1.667e−4 m / 3.196e−4 rad`) are unchanged from the earlier run. The strict rocket's Scalar geometric failure therefore remains; the optimization reduces cost without claiming convergence.
 
 ### Effective-mass cache and FixedBlock3
 
-The per-body `SolverMassSlot` cache is now the production default. It retains the inverse local inertia across position changes, refreshes world inverse inertia when orientation changes, and recomputes the world center when the transform changes. `MassProperties` and the full transform are compared on resolve, so an inertia-only or mass-only edit invalidates the cache. The solver also invalidates pose-derived values after an applied position correction. The retained workspace grows by `39 / 77 / 192 / 383 KiB` at 100/200/500/1,000 bodies; steady samples still allocate `0/0` times/bytes after warm-up.
+`SolverMassSlot` retains inverse local inertia across position changes, refreshes world inverse inertia when orientation changes, and recomputes the world center when the transform changes. It compares mass properties and the full transform, so mass-only, inertia-only, and pose edits invalidate it. The per-row scalar inverse effective mass is reused only when both body slots report a cache hit; otherwise it is recomputed from the refreshed 3×3 inverse-mass/inertia data. Position changes rebuild the rows before the next velocity solve. A focused anisotropic-inertia test rotates one body, observes the cache refresh, and compares the refreshed value with a fresh calculation. The retained workspace grows by `39 / 77 / 192 / 383 KiB` at 100/200/500/1,000 bodies; steady samples still allocate `0/0` times/bytes after warm-up.
 
-| Parts | Scalar without cache p50/p95, ms | Scalar with cache p50/p95, ms | Cached FixedBlock3 p50/p95, ms |
-|---:|---:|---:|---:|
-| 100 | `7.810 / 8.024` | `6.455 / 6.532` | `5.426 / 5.464` |
-| 200 | `15.784 / 17.863` | `13.004 / 13.199` | `10.869 / 11.053` |
-| 500 | `39.588 / 41.106` | `32.579 / 33.207` | `27.308 / 27.568` |
-| 1,000 | `79.664 / 83.074` | `66.155 / 69.001` | `55.275 / 56.218` |
+Final no-pool p50/p95 comparisons include both per-body mass caching and row effective-mass reuse. `FixedBlock3` uses the prepared symmetric 3×3 block solve, but its earlier speed advantage was measured against Scalar before the row-reuse optimization and no longer holds.
 
-The cache reduces full-step p50 by `17%` and p95 by `17–26%`. The prepared 3×3 FixedBlock3 path adds another `16%` over cached Scalar and uses the existing symmetric effective-mass block solve. In the strict rocket comparison it is about `17–20%` faster, but does not meet geometry limits: its maximum anchor errors are `0.1108 / 0.2859 / 0.7638 / 2.4983 m`, and maximum frame errors are `1.7293 / 1.4835 / 2.8749 / 3.1405 rad`. It remains experimental; the measured speedup does not justify changing the default projection while the strict fixture fails. Cached Scalar reproduced the uncached strict-rocket residuals at all sizes. Warm-start remains disabled because no end-to-end gain has been established.
+| Parts | Scalar cache off, ms | Scalar cache on, ms | Saved p50 | FixedBlock3, ms |
+|---:|---:|---:|---:|---:|
+| 100 | `6.014 / 6.350` | `4.570 / 4.650` | `1.443 ms (24.0%)` | `5.308 / 5.432` |
+| 200 | `12.137 / 12.447` | `9.137 / 9.261` | `2.999 ms (24.7%)` | `10.642 / 10.937` |
+| 500 | `30.588 / 34.393` | `22.949 / 23.256` | `7.639 ms (25.0%)` | `26.798 / 27.400` |
+| 1,000 | `61.555 / 65.107` | `46.524 / 47.675` | `15.031 ms (24.4%)` | `54.168 / 55.953` |
+
+The scalar effective-mass cache now wins end-to-end. `FixedBlock3` is `16–17%` slower than this optimized Scalar path and remains experimental. It also fails the strict geometry limits: its maximum anchor errors are `0.1108 / 0.2859 / 0.7638 / 2.4983 m`, and maximum frame errors are `1.7293 / 1.4835 / 2.8749 / 3.1405 rad`. Warm-start remains disabled because no end-to-end gain has been established.
 
 ### Whole-island constraint coloring
 
@@ -180,36 +192,38 @@ Constraint-color graph construction measured `6–38 μs` cold and `1–3 μs` f
 
 ### Persistent Rayon scaling benchmark
 
-`joint_parallel_scaling` uses one persistent Rayon pool per worker configuration and a separate `SequentialExecutor` control with no pool. It measures 20 timed steps after three warm-ups, on 100/200/500/1,000-body disturbed fixed-joint chains at `dt=1/120 s`. Each timed step starts with the same terminal velocity kick; Scalar uses the default `8/3` outer velocity/position sweeps, while IC(0) PCG is capped at `5/5`. Reported p95 is nearest-rank. The tables show full-step p50/p95 in milliseconds for the no-pool control and each Rayon worker count:
+`joint_parallel_scaling` uses a persistent Rayon pool per worker configuration and a separate `SequentialExecutor` control with no pool. It measures 20 timed steps after three warm-ups on 100/200/500/1,000-body disturbed fixed-joint chains at `dt=1/120 s`. Each step starts with the same terminal velocity kick. Scalar uses eight velocity and three position sweeps; IC(0) PCG uses a `5/5` cap. The full rocket benchmark uses the same shared Rayon executor, with the no-pool control run separately. Pool construction is outside timed samples. Times below are p50/p95 milliseconds.
 
-| Bodies | Scalar no pool | Scalar Rayon 1 | Scalar + coloring Rayon 2 | Scalar + coloring Rayon 4 | Scalar + coloring Rayon 8 |
+| Bodies | Scalar no pool | Scalar Rayon 1 | Scalar Rayon 2 | Scalar Rayon 4 | Scalar Rayon 8 |
 |---:|---:|---:|---:|---:|---:|
-| 100 | `4.008 / 4.127` | `3.989 / 4.116` | `3.990 / 4.370` | `3.939 / 4.117` | `3.926 / 4.114` |
-| 200 | `6.659 / 7.382` | `6.662 / 7.310` | `6.412 / 6.551` | `5.309 / 5.608` | `5.906 / 6.397` |
-| 500 | `15.216 / 15.612` | `14.629 / 15.327` | `15.169 / 16.648` | `12.492 / 12.980` | `11.002 / 11.254` |
-| 1,000 | `28.798 / 31.098` | `29.294 / 30.433` | `28.434 / 30.046` | `23.380 / 24.131` | `22.544 / 26.230` |
+| 100 | `2.426 / 2.549` | `2.445 / 2.550` | `2.437 / 2.529` | `2.416 / 2.582` | `2.420 / 2.563` |
+| 200 | `3.698 / 4.391` | `3.787 / 4.383` | `6.363 / 6.610` | `5.362 / 5.675` | `6.195 / 6.485` |
+| 500 | `7.457 / 8.207` | `7.483 / 8.176` | `13.798 / 15.024` | `11.912 / 13.136` | `12.728 / 13.748` |
+| 1,000 | `14.178 / 14.788` | `13.897 / 14.517` | `28.513 / 30.168` | `24.975 / 27.093` | `22.052 / 23.338` |
 
 | Bodies | PCG no pool | PCG Rayon 1 | PCG Rayon 2 | PCG Rayon 4 | PCG Rayon 8 |
 |---:|---:|---:|---:|---:|---:|
-| 100 | `2.511 / 2.538` | `2.521 / 2.556` | `2.735 / 2.886` | `2.804 / 2.994` | `3.798 / 4.019` |
-| 200 | `5.083 / 5.121` | `5.066 / 5.098` | `5.388 / 5.900` | `5.901 / 6.764` | `6.900 / 7.452` |
-| 500 | `13.205 / 13.887` | `13.118 / 13.489` | `14.152 / 16.666` | `13.837 / 14.843` | `15.202 / 18.624` |
-| 1,000 | `27.849 / 29.850` | `28.012 / 29.244` | `28.669 / 32.191` | `28.485 / 30.046` | `31.610 / 35.913` |
+| 100 | `2.578 / 2.613` | `2.571 / 2.616` | `2.770 / 2.924` | `2.970 / 3.118` | `3.538 / 3.939` |
+| 200 | `5.185 / 5.255` | `5.167 / 5.204` | `5.523 / 5.875` | `5.552 / 5.869` | `7.140 / 7.729` |
+| 500 | `13.409 / 13.503` | `13.317 / 14.490` | `14.124 / 18.887` | `14.549 / 16.853` | `14.859 / 19.672` |
+| 1,000 | `27.594 / 28.710` | `27.923 / 29.313` | `29.892 / 31.118` | `28.922 / 29.885` | `30.649 / 35.315` |
 
-On this chain, no-pool Scalar/PCG solver-prepare p50 is `0.004/0.004`, `0.008/0.008`, `0.026/0.019`, and `0.060/0.046 ms`; summed joint-row preparation is `0.738/0.198`, `1.217/0.397`, `2.617/1.018`, and `5.214/2.104 ms`. Scalar runs eight velocity and three position sweeps. PCG reaches its residual in one velocity and one position iteration at every size, with zero capped calls; its maximum velocity residual grows from `3.36e−14 m/s / 3.92e−15 rad/s` at 100 bodies to `1.96e−10 m/s / 2.10e−11 rad/s` at 1,000 bodies. Its final maximum anchor/frame errors are `1.43e−9 m / 1.52e−17 rad` through `1.73e−9 m / 1.59e−14 rad`. The scalar no-pool measured `Jv` is `2.00e−3 m/s / 3.65e−3 rad/s`, with final geometry errors `1.67e−4 m / 3.20e−4 rad` at all sizes.
+The no-pool Scalar/PCG solver-prepare p50 values are `0.004/0.004`, `0.008/0.008`, `0.021/0.022`, and `0.048/0.048 ms`; joint-row preparation is `0.389/0.197`, `0.578/0.404`, `1.111/1.007`, and `2.034/2.138 ms`. PCG reaches convergence in one velocity and one position iteration at every size, with zero capped calls. Its maximum linear/angular velocity residual grows from `3.36e−14 / 3.92e−15` at 100 bodies to `1.96e−10 / 2.10e−11` at 1,000; final anchor/frame errors are at most `1.73e−9 m / 1.59e−14 rad`. Scalar no-pool ends at `2.003e−3 m/s / 3.652e−3 rad/s` measured `Jv`, `1.667e−4 m` maximum anchor error, and `3.196e−4 rad` maximum frame error.
 
-PCG's near-identical one-worker Rayon results and increasing two-to-eight-worker times show no useful pool scaling in this workload. The scalar whole-island color path lowers p50 from `6.659` to `5.309 ms` at 200 bodies, `15.216` to `11.002 ms` at 500, and `28.798` to `22.544 ms` at 1,000 (best worker counts 4/8/8). At 1,000 bodies its p95 moves from `31.098` to `26.230 ms`. These aggregate gains include graph coloring and the changed projection order; they do not isolate the removed copies/writeback. The colored run's final frame error is `6.17e−4 rad`, versus `3.20e−4 rad` for scalar, and its measured angular `Jv` is higher. It stays experimental. For PCG, the 1,000-body best p50 is the no-pool control (`27.849 ms`); eight workers cost `31.610 ms`.
+Coloring was not selected for the 100-body cases; its threshold is reached on this chain at 200 bodies.
 
-The measured full-step cost attributed to the earlier optimizations is summarized here. Row-preparation savings are from the paired Scalar A/B; full-step savings are from the same captures. Effective-mass savings compare cached and uncached Scalar. FixedBlock3 remains an experimental measurement, not the selected path.
+The persistent pool does not improve PCG. At 1,000 bodies, its best p50 is no pool (`27.594 ms`); eight workers cost `30.649 ms`. The colored Scalar path also loses to the optimized sequential path at every size from 200 bodies onward: at 1,000 bodies, even eight workers cost `22.052 ms` vs `14.178 ms` no pool, while p95 is `23.338` vs `14.788 ms`. The final colored chain frame error is `6.17e−4 rad`, compared with `3.20e−4 rad` sequentially. Coloring removes per-task body copies and serial writeback, and direct-write rollback/determinism tests pass, but its row preparation, synchronization, and changed projection order eliminate the speedup on these connected fixtures. It remains bench-only.
 
-| Bodies | Incremental rows: row-prep saved | Incremental rows: full-step saved | Mass cache: full-step saved | FixedBlock3 extra: full-step saved |
+The measured cost contributions are listed separately; the effective-mass comparison is the current no-pool cache-on/off A/B. FixedBlock3's negative saving means it is slower than final Scalar.
+
+| Bodies | Row reuse: preparation saved | Row reuse: full step saved | Mass/effective cache: full step saved | FixedBlock3 delta vs Scalar |
 |---:|---:|---:|---:|---:|
-| 100 | `0.302 ms` | `0.492 ms` | `1.355 ms` | `1.029 ms` |
-| 200 | `0.630 ms` | `1.240 ms` | `2.780 ms` | `2.135 ms` |
-| 500 | `1.728 ms` | `3.992 ms` | `7.009 ms` | `5.271 ms` |
-| 1,000 | `3.435 ms` | `7.557 ms` | `13.509 ms` | `10.880 ms` |
+| 100 | `0.349 ms` | `1.582 ms` | `1.443 ms` | `−0.738 ms` |
+| 200 | `0.639 ms` | `2.961 ms` | `2.999 ms` | `−1.505 ms` |
+| 500 | `1.506 ms` | `7.759 ms` | `7.639 ms` | `−3.848 ms` |
+| 1,000 | `3.180 ms` | `14.620 ms` | `15.031 ms` | `−7.644 ms` |
 
-No isolated millisecond claim is assigned to the body-copy/writeback removal: the experimental colored run changes solver ordering at the same time. Rayon thread-pool construction is outside the timed region; executor dispatch and synchronization remain inside the full-step timings.
+No separate millisecond win is assigned to coloring: executor, preparation, and ordering costs change together. Rayon pool construction is excluded from timed samples; dispatch and synchronization remain included.
 
 ## Classification and remaining limits
 
@@ -218,7 +232,7 @@ No isolated millisecond claim is assigned to the body-copy/writeback removal: th
 - **Physically admissible split-solver dissipation:** post-integration `Jv` is projected out; the correction-work identity closes to roundoff. Halving `dt` reduces the one-joint mismatch and loss. Do not inject compensating energy into Velocity PCG.
 - **Numerical solver defect:** scalar velocity sweeps under-converge on a long connected chain, leaving a large `Jv` residual and causing excess projection loss. IC(0) PCG removes that excess in the diagnostic, but its strict rocket pass is expensive and has frequent capped solves.
 - **Position correction:** measured position-stage energy changes are much smaller; post-position residuals stay close to their post-velocity values in the tested fixtures. A fully coupled constrained midpoint integrator is not implemented, so the independent predict/project split still incurs timestep-dependent projection dissipation.
-- **Production status:** scalar strict rocket geometry remains a failure. No new solver path is selected as a default. Performance, contacts, and broader load cases still require optimization and validation before production integration.
+- **Production status:** scalar strict rocket geometry remains a failure, despite the measured performance gain. Warm-start, FixedBlock3 projection, whole-island coloring, and PCG remain experimental; none is selected as the default projection. The new row and mass caches preserve the tested Scalar trajectory and are enabled with the production Scalar path.
 
 ## Commands used
 
@@ -230,12 +244,17 @@ cargo +1.98.0 test --release -p kapitsa --features bench-internals --lib runtime
 cargo +1.98.0 test --release -p kapitsa --features bench-internals --lib runtime::modular_rocket_fixture::stability_tests::diagnose_rocket_unforced_contact_free_energy_stages --locked -- --ignored --exact --nocapture --test-threads=1
 cargo +1.98.0 test --release -p kapitsa --features bench-internals --lib runtime::modular_rocket_fixture::stability_tests::diagnose_rocket_global_constraint_pcg_full_energy_trace --locked -- --ignored --exact --nocapture --test-threads=1
 cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_rocket --locked
+cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_rocket --locked -- --steady-only
+cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_rocket --locked -- --no-pool --steady-only
+cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_rocket --locked -- --no-pool --no-mass-cache --steady-only
+cargo +1.98.0 bench -p kapitsa --features bench-internals --bench large_modular_rocket --locked -- --no-pool --block3 --steady-only
 cargo +1.98.0 bench -p kapitsa-core --features bench-internals --bench joint_parallel_scaling --locked
 cargo +1.98.0 test --workspace --locked --no-fail-fast -- --test-threads=1
 cargo +1.98.0 test --workspace --all-features --locked --no-fail-fast -- --test-threads=1
 cargo +1.98.0 check --workspace --all-features --locked
 cargo +1.98.0 clippy --workspace --all-features --lib --bins --locked -- -D warnings
 cargo +1.98.0 clippy -p kapitsa-core --features bench-internals --bench joint_parallel_scaling --locked -- -D warnings
+cargo +1.98.0 clippy -p kapitsa --features bench-internals --bench large_modular_rocket --locked -- -D warnings -A dead_code -A unused_imports
 ```
 
 ## Final validation
@@ -246,11 +265,15 @@ cargo +1.98.0 clippy -p kapitsa-core --features bench-internals --bench joint_pa
 | `cargo +1.98.0 check --workspace --all-features --locked` | PASS |
 | `cargo +1.98.0 clippy --workspace --all-features --lib --bins --locked -- -D warnings` | PASS |
 | New `joint_parallel_scaling` bench Clippy | PASS |
+| `large_modular_rocket` bench compile and targeted Clippy | PASS; 26 pre-existing warnings in its included test module are allowed for this target-specific check |
 | `cargo +1.98.0 clippy --workspace --all-features --all-targets --locked -- -D warnings` | FAIL: the existing `large_modular_rocket` benchmark compiles a test module with unused imports/dead code under `-D warnings`; 26 warnings, outside this change |
 | `cargo +1.98.0 test --workspace --locked --no-fail-fast -- --test-threads=1` | PASS; all executed suites and doctests passed, 4 ignored |
 | `cargo +1.98.0 test --workspace --all-features --locked --no-fail-fast -- --test-threads=1` | PASS; all executed suites and doctests passed |
-| Stage 4 colored solver and graph tests | PASS; rollback, repeated parallel state, contacts plus joints, 629 core unit tests under all features |
-| Persistent Rayon scaling benchmark | PASS; 40 solver/size/executor cases, 20 measured samples each |
+| Stage 4 colored solver and graph tests | PASS; rollback, repeated parallel state, contacts plus joints; 630 core unit tests passed under all features |
+| Persistent Rayon chain benchmark | PASS; 40 solver/size/executor cases, 20 measured samples each; includes Scalar, PCG, p50/p95, preparation, iterations, residuals, and geometry |
+| Persistent Rayon full rocket benchmark | PASS; 16 worker/size cases plus 4 no-pool controls; 5 warm-ups and 60 samples per case |
+| Current Scalar mass-cache A/B | PASS; no-pool cache-on/off at all four sizes; steady samples allocate `0/0` times/bytes |
+| Current FixedBlock3 A/B | PASS; slower than optimized Scalar by `0.74 / 1.50 / 3.85 / 7.64 ms` p50, so remains experimental |
 | Focused Release energy and projection diagnostics | PASS |
 | Same-run full-rocket physical vs legacy surface-zero coast metric | PASS; `4.598934067e−7%` vs `88.94944039%` |
 | Strict rocket, default scalar path | FAIL on existing geometric criteria |
