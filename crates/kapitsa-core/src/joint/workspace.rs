@@ -352,7 +352,6 @@ impl JointWorkspace {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn solver_rows_len(&self, preparing_rows: bool) -> usize {
         if preparing_rows {
             self.preparing_rows.len()

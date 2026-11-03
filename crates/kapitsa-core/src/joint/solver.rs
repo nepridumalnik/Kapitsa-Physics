@@ -5830,6 +5830,9 @@ mod tests {
             bodies: &mut [SolverBody],
             range: std::ops::Range<usize>,
         ) {
+            workspace
+                .ensure_solver_mass_slots(bodies.len())
+                .expect("solver mass workspace");
             let mut cache_stats = SolverMassCacheStats::default();
             let (rows, slots) = workspace.solver_buffers_mut(false);
             solve_position_rows(

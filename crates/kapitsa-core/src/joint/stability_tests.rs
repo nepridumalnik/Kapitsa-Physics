@@ -1,14 +1,15 @@
 use super::{FixedJoint, Joint, JointCommon, JointFrame};
 #[cfg(feature = "bench-internals")]
 use crate::execution::{ExecutionError, StepExecutor};
+#[cfg(feature = "bench-internals")]
 use crate::{
     collider::Collider,
-    collision::CollisionConfig,
-    mass::MassProperties,
-    rigid_body::RigidBody,
     shape::{Shape, Sphere},
-    transform::Transform,
-    world::{PhysicsWorld, StepError},
+    world::StepError,
+};
+use crate::{
+    collision::CollisionConfig, mass::MassProperties, rigid_body::RigidBody, transform::Transform,
+    world::PhysicsWorld,
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
 #[cfg(feature = "bench-internals")]
