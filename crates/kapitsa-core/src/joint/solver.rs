@@ -1924,14 +1924,24 @@ fn build_incomplete_cholesky_preconditioner_into(
     for row in 0..rows.len() {
         for &(column, matrix_value) in &lower_pattern[row] {
             let mut value = matrix_value;
-            for &(previous_column, row_factor) in &preconditioner.lower_rows[row] {
-                if previous_column >= column {
+            let row_factors = &preconditioner.lower_rows[row];
+            let column_factors = &preconditioner.lower_rows[column];
+            let (mut row_factor_index, mut column_factor_index) = (0, 0);
+            while row_factor_index < row_factors.len() && column_factor_index < column_factors.len()
+            {
+                let (row_column, row_factor) = row_factors[row_factor_index];
+                if row_column >= column {
                     break;
                 }
-                if let Ok(index) = preconditioner.lower_rows[column]
-                    .binary_search_by_key(&previous_column, |(entry_column, _)| *entry_column)
-                {
-                    value -= row_factor * preconditioner.lower_rows[column][index].1;
+                let (column_column, column_factor) = column_factors[column_factor_index];
+                match row_column.cmp(&column_column) {
+                    std::cmp::Ordering::Less => row_factor_index += 1,
+                    std::cmp::Ordering::Greater => column_factor_index += 1,
+                    std::cmp::Ordering::Equal => {
+                        value -= row_factor * column_factor;
+                        row_factor_index += 1;
+                        column_factor_index += 1;
+                    }
                 }
             }
             let factor = value / preconditioner.diagonal[column];
