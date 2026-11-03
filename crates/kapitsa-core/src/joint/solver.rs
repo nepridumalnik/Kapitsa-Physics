@@ -987,6 +987,20 @@ impl JointSolver {
         workspace.set_residual(residual);
         Ok(())
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn measure_current_residual(
+        workspace: &mut JointWorkspace,
+        bodies: &[SolverBody],
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
+        let geometry_residual =
+            measure_joint_geometry(workspace.rows(), workspace.row_joint_indices())?;
+        workspace.set_residual(residual);
+        workspace.set_geometry_residual(geometry_residual);
+        Ok(())
+    }
 }
 
 #[cfg(feature = "bench-internals")]

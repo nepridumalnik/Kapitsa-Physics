@@ -1134,8 +1134,26 @@ impl SolverWorkspace {
         }
 
         #[cfg(feature = "bench-internals")]
+        let reuse_scalar_velocity_rows = joint_solver_options.projection()
+            == crate::joint::JointProjection::ScalarGaussSeidel
+            && !joint_solver_options.warm_start().enabled
+            && !joint_solver_options.alternates_velocity_sweeps()
+            && joint_solver_options.global_velocity_pcg_max_iterations() == 0;
+        #[cfg(not(feature = "bench-internals"))]
+        let reuse_scalar_velocity_rows = joint_solver_options.projection()
+            == crate::joint::JointProjection::ScalarGaussSeidel
+            && !joint_solver_options.warm_start().enabled;
+        if reuse_scalar_velocity_rows {
+            JointSolver::prepare(joint_workspace, bodies, joints, dt)?;
+        }
+
+        #[cfg(feature = "bench-internals")]
         {
-            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            if reuse_scalar_velocity_rows {
+                JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
+            } else {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            }
             joint_workspace.record_initial_velocity_residual();
             joint_workspace.record_pre_velocity_geometry();
         }
@@ -1145,7 +1163,11 @@ impl SolverWorkspace {
             self.solve_velocity_iteration(bodies, manifolds)?;
             #[cfg(feature = "bench-internals")]
             {
-                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                if reuse_scalar_velocity_rows {
+                    JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
+                } else {
+                    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                }
                 joint_workspace.record_pre_joint_velocity_residual();
             }
             #[cfg(feature = "bench-internals")]
@@ -1154,7 +1176,14 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             {
                 let pcg_max_iterations = joint_solver_options.global_velocity_pcg_max_iterations();
-                if pcg_max_iterations > 0 {
+                if reuse_scalar_velocity_rows {
+                    JointSolver::solve_velocity_iteration(
+                        joint_workspace,
+                        bodies,
+                        dt,
+                        joint_solver_options,
+                    )?;
+                } else if pcg_max_iterations > 0 {
                     let energy_before_pcg = energy_components(bodies, gravity);
                     #[cfg(feature = "bench-internals")]
                     if !velocity_pcg_before_recorded {
@@ -1214,17 +1243,30 @@ impl SolverWorkspace {
                 }
             }
             #[cfg(not(feature = "bench-internals"))]
-            self.solve_joint_velocity_sweep(
-                bodies,
-                joint_workspace,
-                joints,
-                joint_solver_step,
-                velocity_iteration == 0,
-                false,
-            )?;
+            if reuse_scalar_velocity_rows {
+                JointSolver::solve_velocity_iteration(
+                    joint_workspace,
+                    bodies,
+                    dt,
+                    joint_solver_options,
+                )?;
+            } else {
+                self.solve_joint_velocity_sweep(
+                    bodies,
+                    joint_workspace,
+                    joints,
+                    joint_solver_step,
+                    velocity_iteration == 0,
+                    false,
+                )?;
+            }
             #[cfg(feature = "bench-internals")]
             {
-                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                if reuse_scalar_velocity_rows {
+                    JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
+                } else {
+                    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                }
                 if velocity_iteration == 0 {
                     joint_workspace.record_first_velocity_residual();
                 }

@@ -29,7 +29,7 @@ mod bench_counter_tests {
             .expect("baseline physics step");
         let counters = rocket.world.physics_step_metrics().joints;
 
-        assert_eq!(counters.prepared_rows, 99 * 6 * 14);
+        assert_eq!(counters.prepared_rows, 99 * 6 * 7);
         assert_eq!(counters.scalar_rows_solved, 7_425);
         assert_eq!(counters.position_sweeps, 3);
         assert_eq!(counters.velocity_sweeps, 8);

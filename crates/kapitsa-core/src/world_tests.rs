@@ -248,7 +248,7 @@ fn physics_step_metrics_report_fixed_joint_solver_work() {
     world.step(1.0 / 60.0).expect("fixed-joint step");
 
     let metrics = world.physics_step_metrics();
-    assert_eq!(metrics.joints.prepared_rows, 69);
+    assert_eq!(metrics.joints.prepared_rows, 27);
     assert_eq!(metrics.joints.scalar_rows_solved, 66);
     assert_eq!(metrics.joints.position_sweeps, 3);
     assert_eq!(metrics.joints.velocity_sweeps, 8);
@@ -524,7 +524,7 @@ fn physics_step_metrics_sum_independent_islands_in_stable_order() {
     world.step(1.0 / 60.0).expect("multiple-island step");
 
     let metrics = world.physics_step_metrics().joints;
-    assert_eq!(metrics.prepared_rows, 2 * 69);
+    assert_eq!(metrics.prepared_rows, 2 * 27);
     assert_eq!(metrics.scalar_rows_solved, 2 * 66);
     assert_eq!(metrics.position_sweeps, 2 * 3);
     assert_eq!(metrics.velocity_sweeps, 2 * 8);
@@ -538,11 +538,11 @@ fn physics_step_metrics_reset_for_each_step() {
 
     world.step(1.0 / 60.0).expect("first step");
     let first = world.physics_step_metrics().joints;
-    assert_eq!(first.prepared_rows, 69);
+    assert_eq!(first.prepared_rows, 27);
     world.step(1.0 / 60.0).expect("second step");
 
     let second = world.physics_step_metrics().joints;
-    assert_eq!(second.prepared_rows, 66);
+    assert_eq!(second.prepared_rows, 24);
     assert_eq!(second.scalar_rows_solved, first.scalar_rows_solved);
     assert_eq!(second.position_sweeps, first.position_sweeps);
     assert_eq!(second.velocity_sweeps, first.velocity_sweeps);

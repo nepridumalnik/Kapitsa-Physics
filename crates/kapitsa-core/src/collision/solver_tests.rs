@@ -232,7 +232,7 @@ fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
 }
 
 #[test]
-fn solve_with_joints_prepares_each_joint_before_one_sweep_in_phase_order() {
+fn solve_with_joints_reuses_scalar_velocity_rows_across_sweeps_in_phase_order() {
     let mut id_world = PhysicsWorld::new();
     let id_a = id_world
         .add_body(RigidBody::new_static(Transform::identity()))
@@ -296,18 +296,14 @@ fn solve_with_joints_prepares_each_joint_before_one_sweep_in_phase_order() {
     assert_eq!(
         joint_workspace.solver_calls(),
         [
-            JointSolverCall::JointRowsPrepared(0),
             JointSolverCall::VelocitySweep {
-                preparing_rows: true,
+                preparing_rows: false,
                 row_count: 6,
             },
-            JointSolverCall::JointRowsCommitted(0),
-            JointSolverCall::JointRowsPrepared(0),
             JointSolverCall::VelocitySweep {
-                preparing_rows: true,
+                preparing_rows: false,
                 row_count: 6,
             },
-            JointSolverCall::JointRowsCommitted(0),
             JointSolverCall::JointRowsPrepared(0),
             JointSolverCall::PositionSweep {
                 preparing_rows: true,
