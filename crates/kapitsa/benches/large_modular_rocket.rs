@@ -94,21 +94,56 @@ fn end_allocation_sample() -> (usize, usize) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let parts_filter = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--parts="))
+        .map(str::parse::<usize>)
+        .transpose()?;
+    let workers_filter = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--workers="))
+        .map(str::parse::<usize>)
+        .transpose()?;
+    if parts_filter.is_some_and(|parts| !SIZES.contains(&parts)) {
+        return Err(format!("parts must be one of {SIZES:?}").into());
+    }
+    if workers_filter.is_some_and(|workers| !WORKERS.contains(&workers)) {
+        return Err(format!("workers must be one of {WORKERS:?}").into());
+    }
+    let mass_cache = !args.iter().any(|arg| arg == "--no-mass-cache");
+    let block3 = args.iter().any(|arg| arg == "--block3");
+    let steady_only = args.iter().any(|arg| arg == "--steady-only");
     println!(
-        "Large modular rocket Release benchmark: dt={DT:.9}s warmups={WARMUPS} steady_samples={SAMPLES} event_samples={EVENT_SAMPLES} workers={WORKERS:?}"
+        "Large modular rocket Release benchmark: dt={DT:.9}s warmups={WARMUPS} steady_samples={SAMPLES} event_samples={EVENT_SAMPLES} mass_cache={mass_cache} projection={} steady_only={steady_only}",
+        if block3 { "fixed_block3" } else { "scalar" }
     );
-    for parts in SIZES {
-        for workers in WORKERS {
-            report_steady(parts, workers)?;
-            report_start(parts, workers)?;
-            report_separation(parts, workers)?;
+    for parts in SIZES
+        .into_iter()
+        .filter(|parts| parts_filter.is_none_or(|selected| selected == *parts))
+    {
+        for workers in WORKERS
+            .into_iter()
+            .filter(|workers| workers_filter.is_none_or(|selected| selected == *workers))
+        {
+            report_steady(parts, workers, mass_cache, block3)?;
+            if !steady_only {
+                report_start(parts, workers, mass_cache, block3)?;
+                report_separation(parts, workers, mass_cache, block3)?;
+            }
         }
     }
     Ok(())
 }
 
-fn report_steady(parts: usize, workers: usize) -> Result<(), Box<dyn Error>> {
+fn report_steady(
+    parts: usize,
+    workers: usize,
+    mass_cache: bool,
+    block3: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut rocket = ModularRocket::new(parts);
+    configure_solver(&mut rocket, mass_cache, block3);
     validate_fixture(&rocket, parts)?;
     warm(&mut rocket.world, workers, WARMUPS)?;
     let mut samples = Vec::with_capacity(SAMPLES);
@@ -120,10 +155,16 @@ fn report_steady(parts: usize, workers: usize) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn report_start(parts: usize, workers: usize) -> Result<(), Box<dyn Error>> {
+fn report_start(
+    parts: usize,
+    workers: usize,
+    mass_cache: bool,
+    block3: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut samples = Vec::with_capacity(EVENT_SAMPLES);
     for _ in 0..EVENT_SAMPLES {
         let mut rocket = ModularRocket::new(parts);
+        configure_solver(&mut rocket, mass_cache, block3);
         validate_fixture(&rocket, parts)?;
         warm(&mut rocket.world, workers, WARMUPS)?;
         let started = Instant::now();
@@ -139,10 +180,16 @@ fn report_start(parts: usize, workers: usize) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn report_separation(parts: usize, workers: usize) -> Result<(), Box<dyn Error>> {
+fn report_separation(
+    parts: usize,
+    workers: usize,
+    mass_cache: bool,
+    block3: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut samples = Vec::with_capacity(EVENT_SAMPLES);
     for _ in 0..EVENT_SAMPLES {
         let mut rocket = ModularRocket::new(parts);
+        configure_solver(&mut rocket, mass_cache, block3);
         validate_fixture(&rocket, parts)?;
         warm(&mut rocket.world, workers, WARMUPS)?;
         let started = Instant::now();
@@ -170,6 +217,11 @@ fn report_separation(parts: usize, workers: usize) -> Result<(), Box<dyn Error>>
     }
     report_events("separation", parts, workers, &samples);
     Ok(())
+}
+
+fn configure_solver(rocket: &mut ModularRocket, mass_cache: bool, block3: bool) {
+    rocket.world.set_joint_mass_cache_for_bench(mass_cache);
+    rocket.world.set_joint_projection_for_bench(block3);
 }
 
 fn warm(world: &mut PhysicsWorld, workers: usize, count: usize) -> Result<(), Box<dyn Error>> {

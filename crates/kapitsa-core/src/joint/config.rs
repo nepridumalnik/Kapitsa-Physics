@@ -99,7 +99,7 @@ pub(crate) struct JointSolverOptions {
 impl JointSolverOptions {
     pub(crate) const fn legacy() -> Self {
         Self {
-            mass_cache: false,
+            mass_cache: true,
             warm_start: WarmStartConfig::disabled(),
             reaction_mode: ReactionMode::VelocityOnly,
             projection: JointProjection::ScalarGaussSeidel,

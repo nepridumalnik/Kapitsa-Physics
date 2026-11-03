@@ -321,9 +321,6 @@ impl JointSolver {
             return Err(CollisionError::InvalidConfig);
         }
         workspace.begin_step();
-        if options.mass_cache() {
-            workspace.ensure_solver_mass_slots(bodies.len())?;
-        }
         if matches!(options.iterations(), JointIterations::Adaptive { .. }) {
             return Self::solve_adaptive(
                 workspace,
@@ -596,7 +593,7 @@ impl JointSolver {
         options: JointSolverOptions,
         row_buffer: JointRowBuffer,
     ) -> Result<(), CollisionError> {
-        if options.mass_cache() {
+        if options.mass_cache() && workspace.solver_rows_len(row_buffer.is_preparing()) > 0 {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
         #[cfg(any(test, feature = "bench-internals"))]
@@ -726,7 +723,7 @@ impl JointSolver {
         options: JointSolverOptions,
         row_buffer: JointRowBuffer,
     ) -> Result<(), CollisionError> {
-        if options.mass_cache() {
+        if options.mass_cache() && workspace.solver_rows_len(row_buffer.is_preparing()) > 0 {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
         #[cfg(any(test, feature = "bench-internals"))]

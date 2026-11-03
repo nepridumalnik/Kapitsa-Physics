@@ -493,7 +493,6 @@ mod tests {
         slot.resolve(&body).expect("initial slot resolve");
         body.apply_constraint_position_impulse(Vec3::X, Vec3::ZERO)
             .expect("translation correction");
-        slot.invalidate_pose();
 
         let (actual, status) = slot.resolve(&body).expect("updated slot resolve");
         assert_eq!(
@@ -519,7 +518,6 @@ mod tests {
         slot.resolve(&body).expect("initial slot resolve");
         body.apply_constraint_position_impulse(Vec3::new(0.1, -0.2, 0.3), Vec3::new(0.0, 0.0, 0.4))
             .expect("position correction");
-        slot.invalidate_pose();
 
         let (actual, status) = slot.resolve(&body).expect("updated slot resolve");
         assert_eq!(
@@ -544,11 +542,42 @@ mod tests {
         slot.resolve(&body).expect("initial slot resolve");
         let changed = MassProperties::new(
             4.0,
-            Vec3::new(0.1, -0.3, 0.2),
-            Mat3::from_diagonal(Vec3::new(5.0, 7.0, 9.0)),
+            Vec3::ZERO,
+            Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0)),
         )
         .expect("changed mass");
         body.set_mass(changed).expect("set changed mass");
+
+        let (actual, status) = slot.resolve(&body).expect("updated slot resolve");
+        assert_eq!(
+            status,
+            SolverMassCacheStatus::Updated {
+                inverse_inertia: true
+            }
+        );
+        assert_solver_mass_close(
+            actual,
+            SolverMass::from_body(&body).expect("reference mass"),
+        );
+    }
+
+    #[test]
+    fn solver_mass_slot_rebuilds_after_inertia_change() {
+        let mut body = dynamic_body(
+            Transform::identity(),
+            mass(Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0)), Vec3::ZERO),
+        );
+        let mut slot = SolverMassSlot::default();
+        slot.resolve(&body).expect("initial slot resolve");
+        body.set_mass(
+            MassProperties::new(
+                2.5,
+                Vec3::ZERO,
+                Mat3::from_diagonal(Vec3::new(5.0, 7.0, 9.0)),
+            )
+            .expect("changed inertia"),
+        )
+        .expect("set changed inertia");
 
         let (actual, status) = slot.resolve(&body).expect("updated slot resolve");
         assert_eq!(

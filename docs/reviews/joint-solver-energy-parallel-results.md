@@ -106,7 +106,7 @@ Those pre-optimization single-worker p50 values were `46–49%` slower than the 
 
 ### Scalar FixedJoint incremental preparation
 
-To isolate stage 1, the old `c936f44` implementation and the optimized implementation were benchmarked in Release with identical `bench-internals` row-preparation timers, warm-up, sample count, fixture, and one worker. The detached baseline run completed all four one-worker sizes; later worker-count runs were stopped after capturing the four one-worker comparisons. Times are p50/p95. Each prepared FixedJoint row count includes all constraints in one world step; scalar solved-row counts are unchanged.
+To isolate stage 1, the old `c936f44` implementation and the optimized implementation were benchmarked in Release with identical `bench-internals` row-preparation timers, warm-up, sample count, fixture, one worker, and the mass cache disabled in both runs. The detached baseline run completed all four one-worker sizes; later worker-count runs were stopped after capturing the four one-worker comparisons. Times are p50/p95. Each prepared FixedJoint row count includes all constraints in one world step; scalar solved-row counts are unchanged.
 
 | Parts | Full step before, ms | Full step after, ms | Row preparation before, ms | Row preparation after, ms | Prepared rows before → after | Solved rows |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -116,6 +116,19 @@ To isolate stage 1, the old `c936f44` implementation and the optimized implement
 | 1,000 | `86.931 / 89.420` | `79.374 / 81.198` | `13.828 / 14.118` | `10.393 / 10.655` | `101,898 → 83,916` | `74,925` |
 
 The number of prepared rows fell by `17.65%`, while the number of solved scalar rows and projection ordering stayed the same. Row-preparation p50 fell by `22–25%`; complete-step p50 fell by `5.8–9.2%` (`0.49 / 1.24 / 3.99 / 7.56 ms`). At 100 parts the p95 step time is within run noise; larger sizes improve by `1.54 / 6.11 / 8.22 ms` at p95. The scalar strict-rocket geometric failure remains unchanged, so this optimization improves cost without claiming solver convergence or fixing that correctness limit.
+
+### Effective-mass cache and FixedBlock3
+
+The per-body `SolverMassSlot` cache is now the production default. It retains the inverse local inertia across position changes, refreshes world inverse inertia when orientation changes, and recomputes the world center when the transform changes. `MassProperties` and the full transform are compared on resolve, so an inertia-only or mass-only edit invalidates the cache. The solver also invalidates pose-derived values after an applied position correction. The retained workspace grows by `39 / 77 / 192 / 383 KiB` at 100/200/500/1,000 bodies; steady samples still allocate `0/0` times/bytes after warm-up.
+
+| Parts | Scalar without cache p50/p95, ms | Scalar with cache p50/p95, ms | Cached FixedBlock3 p50/p95, ms |
+|---:|---:|---:|---:|
+| 100 | `7.810 / 8.024` | `6.455 / 6.532` | `5.426 / 5.464` |
+| 200 | `15.784 / 17.863` | `13.004 / 13.199` | `10.869 / 11.053` |
+| 500 | `39.588 / 41.106` | `32.579 / 33.207` | `27.308 / 27.568` |
+| 1,000 | `79.664 / 83.074` | `66.155 / 69.001` | `55.275 / 56.218` |
+
+The cache reduces full-step p50 by `17%` and p95 by `17–26%`. The prepared 3×3 FixedBlock3 path adds another `16%` over cached Scalar and uses the existing symmetric effective-mass block solve. In the strict rocket comparison it is about `17–20%` faster, but does not meet geometry limits: its maximum anchor errors are `0.1108 / 0.2859 / 0.7638 / 2.4983 m`, and maximum frame errors are `1.7293 / 1.4835 / 2.8749 / 3.1405 rad`. It remains experimental; the measured speedup does not justify changing the default projection while the strict fixture fails. Cached Scalar reproduced the uncached strict-rocket residuals at all sizes. Warm-start remains disabled because no end-to-end gain has been established.
 
 Constraint-color graph construction measured `6–38 μs` cold and `1–3 μs` for a warm topology check in 200–1,000-body cases. The benchmark uses a scoped-thread executor, so task launch and synchronization are included in the end-to-end result; it does not establish persistent-pool utilization. The PCG chain benchmark also did not scale with worker count. Reusing diagnostic velocity-snapshot scratch removes steady-state diagnostic allocations (`0/0` p50/p95) at the cost of retaining 48 bytes per body; this scratch is compiled only with `bench-internals`.
 

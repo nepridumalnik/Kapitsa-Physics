@@ -247,21 +247,23 @@ fn physics_step_metrics_report_fixed_joint_solver_work() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
-fn joint_mass_cache_is_opt_in_through_the_internal_benchmark_setting() {
-    let mut legacy = PhysicsWorld::new();
-    add_fixed_pair(&mut legacy, 0.0);
-    legacy.step(1.0 / 60.0).expect("legacy fixed-joint step");
-    let legacy_metrics = legacy.physics_step_metrics().joints;
-    assert_eq!(legacy_metrics.solver_mass_cache_hits, 0);
-    assert_eq!(legacy_metrics.solver_mass_cache_misses, 0);
-
+fn joint_mass_cache_is_enabled_by_default_and_can_be_disabled_for_comparison() {
     let mut cached = PhysicsWorld::new();
     add_fixed_pair(&mut cached, 0.0);
-    cached.set_joint_mass_cache_for_bench(true);
     cached.step(1.0 / 60.0).expect("cached fixed-joint step");
     let cached_metrics = cached.physics_step_metrics().joints;
     assert!(cached_metrics.solver_mass_cache_hits > 0);
     assert!(cached_metrics.solver_mass_cache_misses > 0);
+
+    let mut uncached = PhysicsWorld::new();
+    add_fixed_pair(&mut uncached, 0.0);
+    uncached.set_joint_mass_cache_for_bench(false);
+    uncached
+        .step(1.0 / 60.0)
+        .expect("uncached fixed-joint step");
+    let uncached_metrics = uncached.physics_step_metrics().joints;
+    assert_eq!(uncached_metrics.solver_mass_cache_hits, 0);
+    assert_eq!(uncached_metrics.solver_mass_cache_misses, 0);
 }
 
 #[cfg(feature = "bench-internals")]
@@ -382,7 +384,7 @@ fn joint_mass_cache_matches_legacy_for_anisotropic_fixed_joint() {
 
     let mut legacy = make_world();
     let mut cached = make_world();
-    cached.set_joint_mass_cache_for_bench(true);
+    legacy.set_joint_mass_cache_for_bench(false);
     for _ in 0..12 {
         legacy.step(1.0 / 120.0).expect("legacy step");
         cached.step(1.0 / 120.0).expect("cached step");
