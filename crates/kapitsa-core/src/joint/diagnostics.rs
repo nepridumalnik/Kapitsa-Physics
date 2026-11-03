@@ -84,6 +84,30 @@ pub struct JointSolverMetrics {
     /// Inner iterations used by the benchmark-only global position PCG solve.
     #[cfg(feature = "bench-internals")]
     pub position_pcg_iterations: u64,
+    /// Position PCG solves that met the configured geometric residual.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_converged_calls: u64,
+    /// Position PCG solves that reached the iteration cap above tolerance.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_iteration_limit_calls: u64,
+    /// Largest final linear residual reported by any position PCG call.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_linear_residual_m: f64,
+    /// Largest final angular residual reported by any position PCG call.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_angular_residual_rad: f64,
+    /// Time spent preparing position PCG masses, diagonals, and factorization.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_system_prepare_time: std::time::Duration,
+    /// Time spent in the position PCG matrix-free operator.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_matrix_vector_time: std::time::Duration,
+    /// Time spent applying the position PCG preconditioner.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_preconditioner_time: std::time::Duration,
+    /// Time spent in position PCG dot products and residual scans.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_reduction_time: std::time::Duration,
     /// Time spent in matrix-free PCG operators.
     #[cfg(feature = "bench-internals")]
     pub velocity_pcg_matrix_vector_time: std::time::Duration,
@@ -237,6 +261,22 @@ impl JointSolverMetrics {
         velocity_pcg_iterations: 0,
         #[cfg(feature = "bench-internals")]
         position_pcg_iterations: 0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_converged_calls: 0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_iteration_limit_calls: 0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_linear_residual_m: 0.0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_angular_residual_rad: 0.0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_system_prepare_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_matrix_vector_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_preconditioner_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_reduction_time: std::time::Duration::ZERO,
         #[cfg(feature = "bench-internals")]
         velocity_pcg_matrix_vector_time: std::time::Duration::ZERO,
         #[cfg(feature = "bench-internals")]
@@ -410,6 +450,22 @@ impl JointSolverMetrics {
             self.position_pcg_iterations = self
                 .position_pcg_iterations
                 .saturating_add(other.position_pcg_iterations);
+            self.position_pcg_converged_calls = self
+                .position_pcg_converged_calls
+                .saturating_add(other.position_pcg_converged_calls);
+            self.position_pcg_iteration_limit_calls = self
+                .position_pcg_iteration_limit_calls
+                .saturating_add(other.position_pcg_iteration_limit_calls);
+            self.position_pcg_linear_residual_m = self
+                .position_pcg_linear_residual_m
+                .max(other.position_pcg_linear_residual_m);
+            self.position_pcg_angular_residual_rad = self
+                .position_pcg_angular_residual_rad
+                .max(other.position_pcg_angular_residual_rad);
+            self.position_pcg_system_prepare_time += other.position_pcg_system_prepare_time;
+            self.position_pcg_matrix_vector_time += other.position_pcg_matrix_vector_time;
+            self.position_pcg_preconditioner_time += other.position_pcg_preconditioner_time;
+            self.position_pcg_reduction_time += other.position_pcg_reduction_time;
             self.velocity_pcg_matrix_vector_time += other.velocity_pcg_matrix_vector_time;
             self.velocity_pcg_system_prepare_time += other.velocity_pcg_system_prepare_time;
             self.velocity_pcg_preconditioner_time += other.velocity_pcg_preconditioner_time;

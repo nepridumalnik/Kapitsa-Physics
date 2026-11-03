@@ -833,6 +833,25 @@ fn velocity_pcg_reports_iteration_limit_without_claiming_convergence() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
+fn position_pcg_reports_iteration_limit_without_claiming_convergence() {
+    let mut world = loaded_fixed_joint_graph(100, false, 8, false, false);
+    world.set_joint_global_position_pcg_for_bench(1, false);
+    let end = world.bodies().last().unwrap().0;
+    world
+        .body_mut(end)
+        .unwrap()
+        .set_linear_velocity(Vec3::Y * 30.0)
+        .unwrap();
+
+    world.step(DT).unwrap();
+
+    let metrics = world.physics_step_metrics().joints;
+    assert!(metrics.position_pcg_iteration_limit_calls > 0);
+    assert!(metrics.position_pcg_linear_residual_m > 1.0e-5);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 #[ignore = "Release comparison of parallel matrix-free velocity PCG across island sizes and workers"]
 fn diagnose_parallel_velocity_pcg_scaling() {
     fn percentile_micros(samples: &mut [u128], percentile: usize) -> u128 {

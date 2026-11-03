@@ -297,6 +297,21 @@ impl JointWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn position_pcg_rows_slots_and_scratch_mut(
+        &mut self,
+    ) -> (
+        &mut [ConstraintRow],
+        &mut [SolverMassSlot],
+        &mut super::solver::VelocityPcgScratch,
+    ) {
+        (
+            &mut self.rows,
+            &mut self.solver_mass_slots,
+            &mut self.velocity_pcg_scratch,
+        )
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) const fn velocity_pcg_rows_prepared(&self) -> bool {
         self.velocity_pcg_scratch.rows_prepared
     }
@@ -535,11 +550,28 @@ impl JointWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
-    pub(crate) fn record_position_pcg_iterations(&mut self, iterations: usize) {
+    pub(crate) fn record_position_pcg_result(&mut self, result: super::solver::PositionPcgResult) {
         self.metrics.position_pcg_iterations = self
             .metrics
             .position_pcg_iterations
-            .saturating_add(iterations as u64);
+            .saturating_add(result.iterations as u64);
+        if result.converged {
+            self.metrics.position_pcg_converged_calls =
+                self.metrics.position_pcg_converged_calls.saturating_add(1);
+        } else {
+            self.metrics.position_pcg_iteration_limit_calls = self
+                .metrics
+                .position_pcg_iteration_limit_calls
+                .saturating_add(1);
+        }
+        self.metrics.position_pcg_linear_residual_m = self
+            .metrics
+            .position_pcg_linear_residual_m
+            .max(result.linear_residual_m);
+        self.metrics.position_pcg_angular_residual_rad = self
+            .metrics
+            .position_pcg_angular_residual_rad
+            .max(result.angular_residual_rad);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -554,6 +586,20 @@ impl JointWorkspace {
         self.metrics.velocity_pcg_matrix_vector_time += matrix_vector;
         self.metrics.velocity_pcg_preconditioner_time += preconditioner;
         self.metrics.velocity_pcg_reduction_time += reduction;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_position_pcg_timings(
+        &mut self,
+        system_prepare: std::time::Duration,
+        matrix_vector: std::time::Duration,
+        preconditioner: std::time::Duration,
+        reduction: std::time::Duration,
+    ) {
+        self.metrics.position_pcg_system_prepare_time += system_prepare;
+        self.metrics.position_pcg_matrix_vector_time += matrix_vector;
+        self.metrics.position_pcg_preconditioner_time += preconditioner;
+        self.metrics.position_pcg_reduction_time += reduction;
     }
 
     #[cfg(feature = "bench-internals")]

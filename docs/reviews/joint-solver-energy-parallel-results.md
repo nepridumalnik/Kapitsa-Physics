@@ -91,6 +91,44 @@ Caps 1–3 were rerun after the rotational CCD change. The cap-4 screen was also
 
 Many local PCG calls still hit the cap; this fixture pass does not imply every solve reached its internal residual tolerance. With the production scalar path and unchanged defaults, the same strict rocket test fails the geometric thresholds at every size: maximum anchor error is `0.1334 / 0.2907 / 0.7411 / 2.5072 m` for 100/200/500/1,000 parts. PCG is therefore not enabled by default. The 5/5 strict configuration is about `2.7x / 3.5x / 6.4x / 9.0x` slower than the original revision's strict-run timings, whose trajectory also fails the original correctness limits.
 
+### Global PCG scratch reuse and minimum outer sweeps
+
+Position PCG now keeps its vectors, row terms, IC(0) factor buffers, and body impulses in the joint workspace, and resolves mass data through the validated per-body cache. Repeated position solves at a stable island size reuse those capacities. Position PCG reports converged calls separately from calls that reached the iteration cap; the focused limit test verifies that a capped solve is not counted as converged. The strict fixture repeats every size and compares all final body states exactly.
+
+The strict 1,000-body screen used three contact/position sweeps and IC(0) for position PCG. With velocity and position caps fixed at 5, all 16 integer external velocity sweep counts were tested. Counts 1 through 15 fail an unchanged strict criterion; 16 is the minimum passing value. The full screen is:
+
+| External velocity sweeps | Run ms | Anchor max, m | Frame max, rad | Max altitude, m | Result |
+|---:|---:|---:|---:|---:|---|
+| 1 | 94,305 | `0.247406` | `0.228963` | 1.249 | Fail |
+| 2 | 66,090 | `0.092469` | `0.031892` | 1.249 | Fail |
+| 3 | 66,608 | `0.045015` | `0.010554` | 1.259 | Fail |
+| 4 | 68,076 | `0.042868` | `0.014510` | 1.306 | Fail |
+| 5 | 66,542 | `0.032450` | `0.011077` | 1.351 | Fail |
+| 6 | 67,685 | `0.035791` | `0.010236` | 1.388 | Fail |
+| 7 | 68,642 | `0.033007` | `0.010487` | 1.419 | Fail |
+| 8 | 71,340 | `0.033844` | `0.010363` | 1.451 | Fail |
+| 9 | 70,221 | `0.032167` | `0.011141` | 1.477 | Fail |
+| 10 | 71,000 | `0.029973` | `0.011501` | 1.502 | Fail: altitude |
+| 11 | 72,337 | `0.029105` | `0.011167` | 1.522 | Fail: altitude |
+| 12 | 75,126 | `0.027486` | `0.010333` | 1.545 | Fail: altitude |
+| 13 | 75,461 | `0.026793` | `0.010837` | 1.562 | Fail: altitude |
+| 14 | 76,903 | `0.026770` | `0.010944` | 1.582 | Fail: altitude |
+| 15 | 78,224 | `0.026486` | `0.010856` | 1.598 | Fail: altitude (`>1.6 m` required) |
+| 16 | 79,388 | `0.026590` | `0.010279` | 1.613 | Pass |
+
+Raising the velocity cap to 16 does not remove the need for the outer contact passes: 8 and 12 external sweeps still fail altitude at `1.523 m` and `1.585 m`. At 16 sweeps and cap 5, the 1,000-body run reports velocity `2,306 converged / 2,590 capped` calls and position `437 / 481`; the physical fixture passes even though many local linear solves reach their caps.
+
+The position-PCG timing counters over the 180-tick 1,000-body run were `38,235 ms` system preparation (including IC(0) construction), `172 ms` matrix-vector products, `1,841 ms` preconditioner applications, and `13 ms` reductions. IC(0) setup dominates. The current strict run took `77,845 ms`, versus `81,353 ms` recorded before the Scalar and mass-cache optimizations; this `4.3%` change is not an isolated PCG A/B measurement. The saved strict results are:
+
+| Parts | Run ms | Anchor max / RMS, m | Frame max / RMS, rad | Coast drift | Max altitude, m | Velocity conv/cap | Position conv/cap |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 1,967 | `0.000347 / 0.000034` | `0.000691 / 0.000035` | `−4.78e−7%` | 2.310 | `2,744 / 2,152` | `456 / 462` |
+| 200 | 5,537 | `0.001417 / 0.000150` | `0.001380 / 0.000178` | `−4.76e−7%` | 2.192 | `2,315 / 2,581` | `406 / 512` |
+| 500 | 27,839 | `0.009504 / 0.001406` | `0.007923 / 0.001031` | `−1.77e−5%` | 1.834 | `1,513 / 3,271` | `260 / 637` |
+| 1,000 | 77,845 | `0.026590 / 0.001923` | `0.010279 / 0.001075` | `−4.28e−7%` | 1.613 | `2,306 / 2,590` | `437 / 481` |
+
+Alternative position preconditioners were screened at 1,000 bodies, 16 external sweeps, and cap 5. Diagonal PCG took `43,364 ms` but ended at `0.216 m / 0.782 rad`; one-joint block Jacobi took `42,559 ms` and ended at `0.121 m / 0.400 rad`. A two-joint block test took `42,108 ms` and ended at `0.139 m / 0.361 rad`; increasing its position cap to 16 reduced the anchor error to `0.0480 m` but frame error remained `0.208 rad`. These faster variants fail strict geometry and are not retained as selectable solver paths. IC(0) remains the only screened position preconditioner that passes.
+
 ## Release performance and parallelism
 
 The large modular rocket benchmark uses 5 warm-up and 60 steady samples at `dt=1/120 s`, on the same local machine and toolchain as the original baseline. The table below preserves the measurements from before the Scalar FixedJoint optimization:

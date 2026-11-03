@@ -162,6 +162,15 @@ pub(crate) struct VelocityPcgResult {
 }
 
 #[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PositionPcgResult {
+    pub(crate) iterations: usize,
+    pub(crate) converged: bool,
+    pub(crate) linear_residual_m: f64,
+    pub(crate) angular_residual_rad: f64,
+}
+
+#[cfg(feature = "bench-internals")]
 #[derive(Default)]
 pub(crate) struct VelocityPcgScratch {
     pub(super) rows_prepared: bool,
@@ -187,6 +196,10 @@ pub(crate) struct VelocityPcgScratch {
     matrix_vector_time: std::time::Duration,
     preconditioner_time: std::time::Duration,
     reduction_time: std::time::Duration,
+    position_system_prepare_time: std::time::Duration,
+    position_matrix_vector_time: std::time::Duration,
+    position_preconditioner_time: std::time::Duration,
+    position_reduction_time: std::time::Duration,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -216,6 +229,10 @@ impl VelocityPcgScratch {
             matrix_vector_time: std::time::Duration::ZERO,
             preconditioner_time: std::time::Duration::ZERO,
             reduction_time: std::time::Duration::ZERO,
+            position_system_prepare_time: std::time::Duration::ZERO,
+            position_matrix_vector_time: std::time::Duration::ZERO,
+            position_preconditioner_time: std::time::Duration::ZERO,
+            position_reduction_time: std::time::Duration::ZERO,
         }
     }
 
@@ -229,6 +246,10 @@ impl VelocityPcgScratch {
         self.matrix_vector_time = std::time::Duration::ZERO;
         self.preconditioner_time = std::time::Duration::ZERO;
         self.reduction_time = std::time::Duration::ZERO;
+        self.position_system_prepare_time = std::time::Duration::ZERO;
+        self.position_matrix_vector_time = std::time::Duration::ZERO;
+        self.position_preconditioner_time = std::time::Duration::ZERO;
+        self.position_reduction_time = std::time::Duration::ZERO;
     }
 }
 
@@ -488,25 +509,44 @@ impl JointSolver {
         dt: f64,
         max_iterations: u32,
         incomplete_cholesky_preconditioner: bool,
-    ) -> Result<Option<usize>, CollisionError> {
+    ) -> Result<Option<PositionPcgResult>, CollisionError> {
         Self::prepare(workspace, bodies, joints, dt)?;
+        workspace.ensure_solver_mass_slots(bodies.len())?;
         let tolerance = super::JointTolerance {
             linear_m: 1.0e-5,
             angular_rad: 1.0e-5,
             velocity_mps: 1.0e-4,
             angular_velocity_radps: 1.0e-4,
         };
-        let iterations = solve_position_pcg_prepared(
-            workspace.rows_mut(),
-            bodies,
-            max_iterations as usize,
-            tolerance,
-            incomplete_cholesky_preconditioner,
-        )?;
-        if let Some(iterations) = iterations {
-            workspace.record_position_pcg_iterations(iterations);
+        let mut cache_stats = SolverMassCacheStats::default();
+        let (result, timings) = {
+            let (rows, slots, scratch) = workspace.position_pcg_rows_slots_and_scratch_mut();
+            let result = solve_position_pcg_prepared(
+                rows,
+                slots,
+                bodies,
+                max_iterations as usize,
+                tolerance,
+                incomplete_cholesky_preconditioner,
+                scratch,
+                &mut cache_stats,
+            )?;
+            (
+                result,
+                (
+                    std::mem::take(&mut scratch.position_system_prepare_time),
+                    std::mem::take(&mut scratch.position_matrix_vector_time),
+                    std::mem::take(&mut scratch.position_preconditioner_time),
+                    std::mem::take(&mut scratch.position_reduction_time),
+                ),
+            )
+        };
+        record_solver_mass_cache_stats(workspace, cache_stats);
+        workspace.record_position_pcg_timings(timings.0, timings.1, timings.2, timings.3);
+        if let Some(result) = result {
+            workspace.record_position_pcg_result(result);
         }
-        Ok(iterations)
+        Ok(result)
     }
 
     pub(crate) fn solve_position_joint(
@@ -1085,15 +1125,22 @@ fn measure_prepared_rows(
 }
 
 #[cfg(feature = "bench-internals")]
+#[allow(clippy::too_many_arguments)]
 fn solve_position_pcg_prepared(
     rows: &mut [ConstraintRow],
+    slots: &mut [SolverMassSlot],
     bodies: &mut [SolverBody],
     max_iterations: usize,
     tolerance: super::JointTolerance,
     incomplete_cholesky_preconditioner: bool,
-) -> Result<Option<usize>, CollisionError> {
+    scratch: &mut VelocityPcgScratch,
+    cache_stats: &mut SolverMassCacheStats,
+) -> Result<Option<PositionPcgResult>, CollisionError> {
     if rows.is_empty() {
-        return Ok(Some(0));
+        return Ok(Some(PositionPcgResult {
+            converged: true,
+            ..PositionPcgResult::default()
+        }));
     }
     if max_iterations == 0
         || rows.iter().any(|row| {
@@ -1108,83 +1155,108 @@ fn solve_position_pcg_prepared(
         return Ok(None);
     }
 
-    let mut masses = Vec::new();
-    masses
-        .try_reserve_exact(bodies.len())
+    if slots.len() < bodies.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    let preparation_started = std::time::Instant::now();
+    scratch.masses.clear();
+    scratch
+        .masses
+        .try_reserve(bodies.len())
         .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-    for body in bodies.iter() {
-        masses.push(SolverMass::from_body(body.body())?);
+    for (body, slot) in bodies.iter().zip(slots) {
+        let (mass, status) = slot.resolve(body.body())?;
+        cache_stats.record(status);
+        scratch.masses.push(mass);
     }
 
-    let mut residual = zero_f64_buffer(rows.len())?;
-    let mut diagonal = zero_f64_buffer(rows.len())?;
+    resize_f64_buffer(&mut scratch.residual, rows.len())?;
+    resize_f64_buffer(&mut scratch.diagonal, rows.len())?;
     for (index, row) in rows.iter().copied().enumerate() {
         if !row.is_valid(bodies.len()) {
             return Err(CollisionError::InvalidContact);
         }
-        residual[index] = -row.error;
-        let mass_a = *masses
+        scratch.residual[index] = -row.error;
+        let mass_a = *scratch
+            .masses
             .get(row.body_a)
             .ok_or(CollisionError::InvalidContact)?;
-        let mass_b = *masses
+        let mass_b = *scratch
+            .masses
             .get(row.body_b)
             .ok_or(CollisionError::InvalidContact)?;
-        diagonal[index] = mass_a.diagonal(row.linear_a, row.angular_a)?
+        scratch.diagonal[index] = mass_a.diagonal(row.linear_a, row.angular_a)?
             + mass_b.diagonal(row.linear_b, row.angular_b)?;
-        if !residual[index].is_finite() || !diagonal[index].is_finite() {
+        if !scratch.residual[index].is_finite() || !scratch.diagonal[index].is_finite() {
             return Err(CollisionError::ArithmeticOverflow);
         }
-        if diagonal[index] <= f64::MIN_POSITIVE {
-            if residual[index].abs() > position_row_tolerance(row, tolerance) {
+        if scratch.diagonal[index] <= f64::MIN_POSITIVE {
+            if scratch.residual[index].abs() > position_row_tolerance(row, tolerance) {
                 return Ok(None);
             }
-            diagonal[index] = 1.0;
-            residual[index] = 0.0;
+            scratch.diagonal[index] = 1.0;
+            scratch.residual[index] = 0.0;
         }
     }
-    if position_vector_converged(rows, &residual, tolerance) {
-        return Ok(Some(0));
+    if position_vector_converged(rows, &scratch.residual, tolerance) {
+        scratch.position_system_prepare_time += preparation_started.elapsed();
+        return Ok(Some(position_pcg_result(rows, &scratch.residual, 0, true)));
     }
 
-    let preconditioner = if incomplete_cholesky_preconditioner {
-        let Some(preconditioner) =
-            build_incomplete_cholesky_preconditioner(rows, &masses, &diagonal)?
-        else {
-            return Ok(None);
-        };
-        Some(preconditioner)
-    } else {
-        None
-    };
-    let mut solution = zero_f64_buffer(rows.len())?;
-    let mut preconditioned = zero_f64_buffer(rows.len())?;
-    let mut direction = zero_f64_buffer(rows.len())?;
-    let mut product = zero_f64_buffer(rows.len())?;
+    if incomplete_cholesky_preconditioner
+        && !build_incomplete_cholesky_preconditioner_into(
+            rows,
+            &scratch.masses,
+            &scratch.diagonal,
+            &mut scratch.row_terms_by_body,
+            &mut scratch.lower_pattern,
+            &mut scratch.preconditioner,
+        )?
+    {
+        return Ok(None);
+    }
+    scratch.position_system_prepare_time += preparation_started.elapsed();
+
+    resize_f64_buffer(&mut scratch.solution, rows.len())?;
+    scratch.solution.fill(0.0);
+    resize_f64_buffer(&mut scratch.preconditioned, rows.len())?;
+    resize_f64_buffer(&mut scratch.direction, rows.len())?;
+    resize_f64_buffer(&mut scratch.product, rows.len())?;
+    let preconditioner = incomplete_cholesky_preconditioner.then_some(&scratch.preconditioner);
+    let preconditioner_started = std::time::Instant::now();
     apply_velocity_preconditioner(
-        &residual,
-        &diagonal,
-        preconditioner.as_ref(),
-        &mut preconditioned,
+        &scratch.residual,
+        &scratch.diagonal,
+        preconditioner,
+        &mut scratch.preconditioned,
     )?;
-    direction.copy_from_slice(&preconditioned);
-    let mut residual_product = checked_dot_product(&residual, &preconditioned)?;
+    scratch.position_preconditioner_time += preconditioner_started.elapsed();
+    scratch.direction.copy_from_slice(&scratch.preconditioned);
+    let reduction_started = std::time::Instant::now();
+    let mut residual_product = checked_dot_product(&scratch.residual, &scratch.preconditioned)?;
+    scratch.position_reduction_time += reduction_started.elapsed();
     if residual_product <= f64::MIN_POSITIVE {
         return Ok(None);
     }
 
-    let mut body_impulses = zero_impulse_buffer(bodies.len())?;
-    let mut body_responses = zero_impulse_buffer(bodies.len())?;
+    resize_impulse_buffer(&mut scratch.body_impulses, bodies.len())?;
+    resize_impulse_buffer(&mut scratch.body_responses, bodies.len())?;
     let mut completed_iterations = 0;
+    let mut converged = false;
     for iteration in 0..max_iterations {
+        let matrix_vector_started = std::time::Instant::now();
         global_velocity_matrix_vector(
             rows,
-            &direction,
-            &masses,
-            &mut body_impulses,
-            &mut body_responses,
-            &mut product,
+            &scratch.direction,
+            &scratch.masses,
+            &mut scratch.body_impulses,
+            &mut scratch.body_responses,
+            &mut scratch.product,
         )?;
-        let denominator = checked_dot_product(&direction, &product)?;
+        scratch.position_matrix_vector_time += matrix_vector_started.elapsed();
+        let reduction_started = std::time::Instant::now();
+        let denominator = checked_dot_product(&scratch.direction, &scratch.product)?;
+        scratch.position_reduction_time += reduction_started.elapsed();
         if denominator <= f64::MIN_POSITIVE {
             return Ok(None);
         }
@@ -1193,23 +1265,29 @@ fn solve_position_pcg_prepared(
             return Err(CollisionError::ArithmeticOverflow);
         }
         for index in 0..rows.len() {
-            solution[index] += alpha * direction[index];
-            residual[index] -= alpha * product[index];
-            if !solution[index].is_finite() || !residual[index].is_finite() {
+            scratch.solution[index] += alpha * scratch.direction[index];
+            scratch.residual[index] -= alpha * scratch.product[index];
+            if !scratch.solution[index].is_finite() || !scratch.residual[index].is_finite() {
                 return Err(CollisionError::ArithmeticOverflow);
             }
         }
         completed_iterations = iteration + 1;
-        if position_vector_converged(rows, &residual, tolerance) {
+        if position_vector_converged(rows, &scratch.residual, tolerance) {
+            converged = true;
             break;
         }
+        let preconditioner_started = std::time::Instant::now();
         apply_velocity_preconditioner(
-            &residual,
-            &diagonal,
-            preconditioner.as_ref(),
-            &mut preconditioned,
+            &scratch.residual,
+            &scratch.diagonal,
+            preconditioner,
+            &mut scratch.preconditioned,
         )?;
-        let next_residual_product = checked_dot_product(&residual, &preconditioned)?;
+        scratch.position_preconditioner_time += preconditioner_started.elapsed();
+        let reduction_started = std::time::Instant::now();
+        let next_residual_product =
+            checked_dot_product(&scratch.residual, &scratch.preconditioned)?;
+        scratch.position_reduction_time += reduction_started.elapsed();
         if next_residual_product <= f64::MIN_POSITIVE {
             return Ok(None);
         }
@@ -1218,16 +1296,17 @@ fn solve_position_pcg_prepared(
             return Err(CollisionError::ArithmeticOverflow);
         }
         for index in 0..rows.len() {
-            direction[index] = preconditioned[index] + beta * direction[index];
-            if !direction[index].is_finite() {
+            scratch.direction[index] =
+                scratch.preconditioned[index] + beta * scratch.direction[index];
+            if !scratch.direction[index].is_finite() {
                 return Err(CollisionError::ArithmeticOverflow);
             }
         }
         residual_product = next_residual_product;
     }
 
-    global_velocity_impulse(rows, &solution, &mut body_impulses)?;
-    for (body, impulse) in bodies.iter_mut().zip(body_impulses) {
+    global_velocity_impulse(rows, &scratch.solution, &mut scratch.body_impulses)?;
+    for (body, impulse) in bodies.iter_mut().zip(scratch.body_impulses.iter().copied()) {
         if impulse.linear == Vec3::ZERO && impulse.angular == Vec3::ZERO {
             continue;
         }
@@ -1237,14 +1316,19 @@ fn solve_position_pcg_prepared(
                 .map_err(map_rigid_body_error)?;
         }
     }
-    for (row, delta) in rows.iter_mut().zip(solution) {
+    for (row, delta) in rows.iter_mut().zip(scratch.solution.iter().copied()) {
         let next = row.accumulated_multiplier + delta;
         if !next.is_finite() {
             return Err(CollisionError::ArithmeticOverflow);
         }
         row.accumulated_multiplier = next;
     }
-    Ok(Some(completed_iterations))
+    Ok(Some(position_pcg_result(
+        rows,
+        &scratch.residual,
+        completed_iterations,
+        converged,
+    )))
 }
 
 #[cfg(feature = "bench-internals")]
@@ -1704,29 +1788,7 @@ fn apply_velocity_pcg_preconditioner(
     worker_count: usize,
 ) -> Result<(), CollisionError> {
     if let Some(blocks) = block_jacobi {
-        if residual.len() != output.len() {
-            return Err(CollisionError::InvalidContact);
-        }
-        for block in blocks {
-            for row in 0..block.len {
-                let mut value = residual[block.start + row];
-                for column in 0..row {
-                    value -= block.lower[row * 6 + column] * output[block.start + column];
-                }
-                output[block.start + row] = value / block.lower[row * 6 + row];
-            }
-            for row in (0..block.len).rev() {
-                let mut value = output[block.start + row];
-                for lower_row in row + 1..block.len {
-                    value -= block.lower[lower_row * 6 + row] * output[block.start + lower_row];
-                }
-                output[block.start + row] = value / block.lower[row * 6 + row];
-                if !output[block.start + row].is_finite() {
-                    return Err(CollisionError::ArithmeticOverflow);
-                }
-            }
-        }
-        Ok(())
+        apply_block_jacobi_preconditioner(residual, blocks, output)
     } else if incomplete_cholesky.is_some() {
         apply_velocity_preconditioner(residual, diagonal, incomplete_cholesky, output)
     } else {
@@ -1749,26 +1811,34 @@ fn apply_velocity_pcg_preconditioner(
 }
 
 #[cfg(feature = "bench-internals")]
-fn build_incomplete_cholesky_preconditioner(
-    rows: &[ConstraintRow],
-    masses: &[SolverMass],
-    diagonal: &[f64],
-) -> Result<Option<IncompleteCholeskyPreconditioner>, CollisionError> {
-    let mut row_terms_by_body = Vec::new();
-    let mut lower_pattern = Vec::new();
-    let mut preconditioner = IncompleteCholeskyPreconditioner::new();
-    if build_incomplete_cholesky_preconditioner_into(
-        rows,
-        masses,
-        diagonal,
-        &mut row_terms_by_body,
-        &mut lower_pattern,
-        &mut preconditioner,
-    )? {
-        Ok(Some(preconditioner))
-    } else {
-        Ok(None)
+fn apply_block_jacobi_preconditioner(
+    residual: &[f64],
+    blocks: &[VelocityBlockFactor],
+    output: &mut [f64],
+) -> Result<(), CollisionError> {
+    if residual.len() != output.len() {
+        return Err(CollisionError::InvalidContact);
     }
+    for block in blocks {
+        for row in 0..block.len {
+            let mut value = residual[block.start + row];
+            for column in 0..row {
+                value -= block.lower[row * 6 + column] * output[block.start + column];
+            }
+            output[block.start + row] = value / block.lower[row * 6 + row];
+        }
+        for row in (0..block.len).rev() {
+            let mut value = output[block.start + row];
+            for lower_row in row + 1..block.len {
+                value -= block.lower[lower_row * 6 + row] * output[block.start + lower_row];
+            }
+            output[block.start + row] = value / block.lower[row * 6 + row];
+            if !output[block.start + row].is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "bench-internals")]
@@ -2321,6 +2391,31 @@ fn velocity_pcg_result(
             }
             RowDimension::Angular => {
                 result.angular_residual_radps = result.angular_residual_radps.max(residual.abs())
+            }
+        }
+    }
+    result
+}
+
+#[cfg(feature = "bench-internals")]
+fn position_pcg_result(
+    rows: &[ConstraintRow],
+    residual: &[f64],
+    iterations: usize,
+    converged: bool,
+) -> PositionPcgResult {
+    let mut result = PositionPcgResult {
+        iterations,
+        converged,
+        ..PositionPcgResult::default()
+    };
+    for (row, residual) in rows.iter().zip(residual) {
+        match row.dimension {
+            RowDimension::Linear => {
+                result.linear_residual_m = result.linear_residual_m.max(residual.abs())
+            }
+            RowDimension::Angular => {
+                result.angular_residual_rad = result.angular_residual_rad.max(residual.abs())
             }
         }
     }
