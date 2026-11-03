@@ -124,3 +124,59 @@ fn validation_rejects_disconnected_and_invalid_graphs() {
         Err(ClusterError::InvalidTopology)
     );
 }
+
+#[test]
+fn managed_body_mutation_is_validated() {
+    let mut world = PhysicsWorld::new();
+    let mass = match MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY) {
+        Ok(value) => value,
+        Err(error) => panic!("mass: {error}"),
+    };
+    let dynamic = match RigidBody::new_dynamic(Transform::identity(), mass) {
+        Ok(value) => value,
+        Err(error) => panic!("body: {error}"),
+    };
+    let body = match world.add_body(dynamic) {
+        Ok(value) => value,
+        Err(error) => panic!("body: {error}"),
+    };
+    let root = part(&mut world, body);
+    if let Some(entry) = world.bodies.get_mut(body.dense) {
+        entry.cluster = Some(RigidCluster {
+            root,
+            parts: vec![root],
+            welds: Vec::new(),
+        });
+    }
+    assert!(world.body_mut(body).is_none());
+    assert!(!world.bodies_mut().any(|(id, _)| id == body));
+    let replacement_mass = match MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY) {
+        Ok(value) => value,
+        Err(error) => panic!("mass: {error}"),
+    };
+    assert_eq!(
+        world.edit_body(body, |body| body.set_mass(replacement_mass)),
+        Err(ClusterError::ManagedMass)
+    );
+    assert_eq!(
+        world.replace_body_state(body, RigidBody::new_static(Transform::identity())),
+        Err(ClusterError::ManagedMass)
+    );
+    assert_eq!(
+        world.edit_body(body, |body| body.set_linear_velocity(Vec3::X)),
+        Ok(())
+    );
+    assert_eq!(
+        world.body(body).map(|body| body.state().linear_velocity()),
+        Some(Vec3::X)
+    );
+    assert_eq!(
+        world.edit_body(body, |body| body.apply_force(Vec3::Y)),
+        Ok(())
+    );
+    assert_eq!(
+        world.body(body).map(|body| body.forces().force()),
+        Some(Vec3::Y)
+    );
+    assert_eq!(world.validate_clusters(), Ok(()));
+}

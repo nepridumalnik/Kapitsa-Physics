@@ -6,12 +6,12 @@ use kapitsa_core::{
     joint::Joint,
     mass::MassProperties,
     material::MaterialId,
-    rigid_body::{CcdMode, RigidBody},
+    rigid_body::{BodyError, CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
     world::{
-        BodyId, ColliderId, ForceSource, ForceSourceError, ForceSourceId, JointId, PhysicsWorld,
-        WorldError,
+        BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, JointId,
+        PhysicsWorld, WorldError,
     },
 };
 use kapitsa_math::{Affine3, Vec3};
@@ -498,6 +498,13 @@ fn apply_command_batch_staged(
             });
         };
 
+        if matches!(command, PhysicsCommand::SetMass { .. }) && world.cluster(id).is_some() {
+            return Err(PhysicsBatchError {
+                command_index: Some(command_index),
+                error: PhysicsClientError::Cluster(ClusterError::ManagedMass),
+            });
+        }
+
         let body_index = if scratch.updated_bodies.len() <= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
             scratch
                 .updated_bodies
@@ -534,7 +541,7 @@ fn apply_command_batch_staged(
         if let Err(error) = apply_body_command(&mut scratch.updated_bodies[body_index].1, command) {
             return Err(PhysicsBatchError {
                 command_index: Some(command_index),
-                error,
+                error: error.into(),
             });
         }
     }
@@ -569,9 +576,12 @@ fn apply_command_batch_staged(
     // Batch commands do not change body membership, so each staged body ID
     // remains live until the final copyback.
     for (id, body) in &scratch.updated_bodies {
-        if let Some(target) = world.body_mut(*id) {
-            *target = *body;
-        }
+        world
+            .replace_body_state(*id, *body)
+            .map_err(|error| PhysicsBatchError {
+                command_index: None,
+                error: error.into(),
+            })?;
     }
     Ok(())
 }
@@ -704,10 +714,7 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
     }
 }
 
-fn apply_body_command(
-    body: &mut RigidBody,
-    command: &PhysicsCommand,
-) -> Result<(), PhysicsClientError> {
+fn apply_body_command(body: &mut RigidBody, command: &PhysicsCommand) -> Result<(), BodyError> {
     match command {
         PhysicsCommand::SetTransform { transform, .. } => body.set_transform(*transform)?,
         PhysicsCommand::SetLinearVelocity { velocity, .. } => {
@@ -750,7 +757,7 @@ fn apply_body_command(
         | PhysicsCommand::Raycast { .. }
         | PhysicsCommand::Sweep { .. }
         | PhysicsCommand::Overlaps { .. } => {
-            return Err(PhysicsClientError::UnsupportedBatchCommand);
+            unreachable!("only body commands reach apply_body_command");
         }
     }
     Ok(())
@@ -817,101 +824,32 @@ pub(crate) fn apply_command(
             world.set_force_source_enabled(id, enabled)?;
             PhysicsCommandResult::Done
         }
-        PhysicsCommand::SetTransform { id, transform } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .set_transform(transform)?;
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::SetLinearVelocity { id, velocity } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .set_linear_velocity(velocity)?;
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::SetAngularVelocity { id, velocity } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .set_angular_velocity(velocity)?;
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::SetMass { id, mass } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .set_mass(mass)?;
+        command @ (PhysicsCommand::SetTransform { .. }
+        | PhysicsCommand::SetLinearVelocity { .. }
+        | PhysicsCommand::SetAngularVelocity { .. }
+        | PhysicsCommand::SetMass { .. }
+        | PhysicsCommand::SetCcdMode { .. }
+        | PhysicsCommand::Sleep { .. }
+        | PhysicsCommand::WakeUp { .. }
+        | PhysicsCommand::ApplyForce { .. }
+        | PhysicsCommand::ApplyForceAtPoint { .. }
+        | PhysicsCommand::ApplyTorque { .. }
+        | PhysicsCommand::ApplyImpulse { .. }
+        | PhysicsCommand::ApplyImpulseAtPoint { .. }
+        | PhysicsCommand::ClearForces { .. }) => {
+            let Some(id) = body_command_id(&command) else {
+                return Err(PhysicsClientError::UnsupportedBatchCommand);
+            };
+            if matches!(command, PhysicsCommand::SetMass { .. }) && world.cluster(id).is_some() {
+                return Err(PhysicsClientError::Cluster(ClusterError::ManagedMass));
+            }
+            world.edit_body(id, |body| apply_body_command(body, &command))?;
             PhysicsCommandResult::Done
         }
         PhysicsCommand::SetCollisionConfig { config } => {
             world
                 .set_collision_config(config)
                 .map_err(WorldError::Collision)?;
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::SetCcdMode { id, mode } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .set_ccd_mode(mode);
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::Sleep { id } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .sleep()?;
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::WakeUp { id } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .wake_up();
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::ApplyForce { id, force } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .apply_force(force)?;
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::ApplyForceAtPoint { id, force, point } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .apply_force_at_point(force, point)?;
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::ApplyTorque { id, torque } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .apply_torque(torque)?;
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::ApplyImpulse { id, impulse } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .apply_impulse(impulse)?;
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::ApplyImpulseAtPoint { id, impulse, point } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .apply_impulse_at_point(impulse, point)?;
-            PhysicsCommandResult::Done
-        }
-        PhysicsCommand::ClearForces { id } => {
-            world
-                .body_mut(id)
-                .ok_or(WorldError::InvalidBodyId)?
-                .clear_forces();
             PhysicsCommandResult::Done
         }
         PhysicsCommand::SetColliderFilter { id, filter } => {

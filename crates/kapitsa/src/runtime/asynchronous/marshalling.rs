@@ -24,7 +24,7 @@ use std::fmt;
 use kapitsa_core::{
     collision::QueryError,
     rigid_body::BodyError,
-    world::{ForceSourceError, StepError, WorldError},
+    world::{ClusterError, ForceSourceError, StepError, WorldError},
 };
 
 /// Failure returned while submitting or completing a physics command.
@@ -34,6 +34,7 @@ pub enum PhysicsClientError {
     ChannelClosed,
     World(WorldError),
     Body(BodyError),
+    Cluster(ClusterError),
     Query(QueryError),
     ForceSource(ForceSourceError),
     /// The command changed the world, but the associated step failed before
@@ -53,6 +54,7 @@ impl fmt::Display for PhysicsClientError {
             Self::ChannelClosed => formatter.write_str("physics command channel is closed"),
             Self::World(error) => write!(formatter, "physics world command failed: {error}"),
             Self::Body(error) => write!(formatter, "rigid body command failed: {error}"),
+            Self::Cluster(error) => write!(formatter, "rigid cluster command failed: {error}"),
             Self::Query(error) => write!(formatter, "physics query failed: {error}"),
             Self::ForceSource(error) => write!(formatter, "force source command failed: {error}"),
             Self::StepFailedAfterApply { step, cause } => write!(
@@ -74,6 +76,7 @@ impl std::error::Error for PhysicsClientError {
         match self {
             Self::World(error) => Some(error),
             Self::Body(error) => Some(error),
+            Self::Cluster(error) => Some(error),
             Self::Query(error) => Some(error),
             Self::ForceSource(error) => Some(error),
             Self::StepFailedAfterApply { cause, .. } => Some(cause),
@@ -97,6 +100,16 @@ impl From<BodyError> for PhysicsClientError {
     }
 }
 
+impl From<ClusterError> for PhysicsClientError {
+    fn from(error: ClusterError) -> Self {
+        match error {
+            ClusterError::InvalidBodyId => Self::World(WorldError::InvalidBodyId),
+            ClusterError::Body(error) => Self::Body(error),
+            error => Self::Cluster(error),
+        }
+    }
+}
+
 impl From<QueryError> for PhysicsClientError {
     fn from(error: QueryError) -> Self {
         Self::Query(error)
@@ -106,5 +119,26 @@ impl From<QueryError> for PhysicsClientError {
 impl From<ForceSourceError> for PhysicsClientError {
     fn from(error: ForceSourceError) -> Self {
         Self::ForceSource(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cluster_body_errors_preserve_existing_client_errors() {
+        assert_eq!(
+            PhysicsClientError::from(ClusterError::InvalidBodyId),
+            PhysicsClientError::World(WorldError::InvalidBodyId)
+        );
+        assert_eq!(
+            PhysicsClientError::from(ClusterError::Body(BodyError::NonFiniteValue)),
+            PhysicsClientError::Body(BodyError::NonFiniteValue)
+        );
+        assert_eq!(
+            PhysicsClientError::from(ClusterError::ManagedMass),
+            PhysicsClientError::Cluster(ClusterError::ManagedMass)
+        );
     }
 }

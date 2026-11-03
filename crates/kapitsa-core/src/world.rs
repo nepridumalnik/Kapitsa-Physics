@@ -767,14 +767,49 @@ impl PhysicsWorld {
         self.bodies.get(id.dense).map(|entry| &entry.body)
     }
 
+    /// Returns mutable access only for bodies whose mass is not cluster-managed.
     pub fn body_mut(&mut self, id: BodyId) -> Option<&mut RigidBody> {
-        if id.world != self.world_id {
+        if id.world != self.world_id || self.bodies.get(id.dense)?.cluster.is_some() {
             return None;
         }
-        self.bodies.get(id.dense)?;
-        // A mutable borrow can change mass, pose, or velocity. Invalidate
-        // impulses for attached joints before exposing the body to the caller.
-        // The experimental cache is disabled in the normal production path.
+        self.invalidate_body_edit(id);
+        self.bodies.get_mut(id.dense).map(|entry| &mut entry.body)
+    }
+
+    /// Applies a validated edit to a copy before updating a body in this world.
+    /// Cluster-owned mass and motion type must remain unchanged.
+    pub fn edit_body(
+        &mut self,
+        id: BodyId,
+        edit: impl FnOnce(&mut RigidBody) -> Result<(), crate::rigid_body::BodyError>,
+    ) -> Result<(), ClusterError> {
+        let mut body = *self.body(id).ok_or(ClusterError::InvalidBodyId)?;
+        edit(&mut body).map_err(ClusterError::Body)?;
+        self.replace_body_state(id, body)
+    }
+
+    /// Replaces body state while protecting cluster-managed physical properties.
+    pub fn replace_body_state(&mut self, id: BodyId, body: RigidBody) -> Result<(), ClusterError> {
+        if id.world != self.world_id {
+            return Err(ClusterError::InvalidBodyId);
+        }
+        let entry = self
+            .bodies
+            .get(id.dense)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        if entry.cluster.is_some() && entry.body.physics() != body.physics() {
+            return Err(ClusterError::ManagedMass);
+        }
+        self.invalidate_body_edit(id);
+        let entry = self
+            .bodies
+            .get_mut(id.dense)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        entry.body = body;
+        Ok(())
+    }
+
+    fn invalidate_body_edit(&mut self, id: BodyId) {
         if self.collision_system.joint_warm_start_enabled() {
             for (dense, entry) in self.joints.iter() {
                 if entry.body_a == id || entry.body_b == id {
@@ -787,7 +822,6 @@ impl PhysicsWorld {
         }
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
-        self.bodies.get_mut(id.dense).map(|entry| &mut entry.body)
     }
 
     pub fn body_count(&self) -> usize {
@@ -5175,18 +5209,19 @@ impl PhysicsWorld {
         })
     }
 
-    /// Mutably iterates over bodies in dense storage order, which may change after removal.
+    /// Mutably iterates over non-cluster bodies in dense storage order.
+    /// The order may change after removal; cluster-managed bodies are omitted.
     pub fn bodies_mut(&mut self) -> impl Iterator<Item = (BodyId, &mut RigidBody)> {
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
-        self.bodies.iter_mut().map(|(dense, entry)| {
-            (
+        self.bodies.iter_mut().filter_map(|(dense, entry)| {
+            entry.cluster.is_none().then_some((
                 BodyId {
                     world: self.world_id,
                     dense,
                 },
                 &mut entry.body,
-            )
+            ))
         })
     }
 
