@@ -93,7 +93,7 @@ Many local PCG calls still hit the cap; this fixture pass does not imply every s
 
 ## Release performance and parallelism
 
-The large modular rocket benchmark uses 5 warm-up and 60 steady samples at `dt=1/120 s`, on the same local machine and toolchain as the original baseline. Values are complete world-step p50/p95:
+The large modular rocket benchmark uses 5 warm-up and 60 steady samples at `dt=1/120 s`, on the same local machine and toolchain as the original baseline. The table below preserves the measurements from before the Scalar FixedJoint optimization:
 
 | Parts | Original 1 worker | Current 1 worker | Current 8 workers |
 |---:|---:|---:|---:|
@@ -102,7 +102,20 @@ The large modular rocket benchmark uses 5 warm-up and 60 steady samples at `dt=1
 | 500 | `28.416 / 30.852 ms` | `41.731 / 42.251 ms` | `42.343 / 44.163 ms` |
 | 1,000 | `56.540 / 57.065 ms` | `83.349 / 84.523 ms` | `85.739 / 87.599 ms` |
 
-The current single-worker p50 is `46–49%` slower than the original baseline. Eight workers do not speed up this connected rocket workload; results are within noise at 100 parts and slower at larger sizes. A separate loaded binary-branch test measured `16%` improvement at 500 bodies with two workers and `23%` at 1,000 bodies with four workers. A connected chain remained sequential, and eight workers did not improve on four.
+Those pre-optimization single-worker p50 values were `46–49%` slower than the original baseline. Eight scoped workers did not speed up this connected rocket workload; results were within noise at 100 parts and slower at larger sizes. A separate loaded binary-branch test measured `16%` improvement at 500 bodies with two workers and `23%` at 1,000 bodies with four workers. A connected chain remained sequential, and eight workers did not improve on four.
+
+### Scalar FixedJoint incremental preparation
+
+To isolate stage 1, the old `c936f44` implementation and the optimized implementation were benchmarked in Release with identical `bench-internals` row-preparation timers, warm-up, sample count, fixture, and one worker. The detached baseline run completed all four one-worker sizes; later worker-count runs were stopped after capturing the four one-worker comparisons. Times are p50/p95. Each prepared FixedJoint row count includes all constraints in one world step; scalar solved-row counts are unchanged.
+
+| Parts | Full step before, ms | Full step after, ms | Row preparation before, ms | Row preparation after, ms | Prepared rows before → after | Solved rows |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100 | `8.418 / 8.540` | `7.926 / 8.573` | `1.346 / 1.372` | `1.044 / 1.120` | `10,098 → 8,316` | `7,425` |
+| 200 | `17.111 / 18.024` | `15.871 / 16.484` | `2.720 / 2.803` | `2.090 / 2.150` | `20,298 → 16,716` | `14,925` |
+| 500 | `43.634 / 46.913` | `39.642 / 40.804` | `6.953 / 7.408` | `5.225 / 5.381` | `50,898 → 41,916` | `37,425` |
+| 1,000 | `86.931 / 89.420` | `79.374 / 81.198` | `13.828 / 14.118` | `10.393 / 10.655` | `101,898 → 83,916` | `74,925` |
+
+The number of prepared rows fell by `17.65%`, while the number of solved scalar rows and projection ordering stayed the same. Row-preparation p50 fell by `22–25%`; complete-step p50 fell by `5.8–9.2%` (`0.49 / 1.24 / 3.99 / 7.56 ms`). At 100 parts the p95 step time is within run noise; larger sizes improve by `1.54 / 6.11 / 8.22 ms` at p95. The scalar strict-rocket geometric failure remains unchanged, so this optimization improves cost without claiming solver convergence or fixing that correctness limit.
 
 Constraint-color graph construction measured `6–38 μs` cold and `1–3 μs` for a warm topology check in 200–1,000-body cases. The benchmark uses a scoped-thread executor, so task launch and synchronization are included in the end-to-end result; it does not establish persistent-pool utilization. The PCG chain benchmark also did not scale with worker count. Reusing diagnostic velocity-snapshot scratch removes steady-state diagnostic allocations (`0/0` p50/p95) at the cost of retaining 48 bytes per body; this scratch is compiled only with `bench-internals`.
 

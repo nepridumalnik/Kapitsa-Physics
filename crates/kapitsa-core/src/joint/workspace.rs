@@ -7,6 +7,12 @@ use crate::rigid_body::solver_mass::SolverMassSlot;
 use crate::rigid_body::{BodyError, BodyType};
 use kapitsa_math::Vec3;
 
+type FixedRowBlocksMut<'a> = (
+    &'a mut [ConstraintRow; 3],
+    &'a mut [ConstraintRow; 3],
+    &'a mut [SolverMassSlot],
+);
+
 #[derive(Clone, Copy, Debug)]
 enum ReactionSide {
     A,
@@ -255,6 +261,24 @@ impl JointWorkspace {
             &mut self.rows
         };
         (rows, &mut self.solver_mass_slots)
+    }
+
+    pub(crate) fn preparing_fixed_row_blocks_mut(
+        &mut self,
+    ) -> Result<FixedRowBlocksMut<'_>, CollisionError> {
+        let (rows, slots) = (&mut self.preparing_rows, &mut self.solver_mass_slots);
+        let rows: &mut [ConstraintRow; 6] = rows
+            .as_mut_slice()
+            .try_into()
+            .map_err(|_| CollisionError::InvalidContact)?;
+        let (anchor_rows, frame_rows) = rows.split_at_mut(3);
+        let anchor_rows = anchor_rows
+            .try_into()
+            .map_err(|_| CollisionError::InvalidContact)?;
+        let frame_rows = frame_rows
+            .try_into()
+            .map_err(|_| CollisionError::InvalidContact)?;
+        Ok((anchor_rows, frame_rows, slots))
     }
 
     #[cfg(feature = "bench-internals")]
@@ -627,6 +651,16 @@ impl JointWorkspace {
             .metrics
             .inverse_inertia_updates
             .saturating_add(inverse_inertia_updates);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_incremental_rows_prepared(&mut self, count: usize) {
+        self.metrics.prepared_rows = self.metrics.prepared_rows.saturating_add(count as u64);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_joint_row_preparation_time(&mut self, elapsed: std::time::Duration) {
+        self.metrics.joint_row_preparation_time += elapsed;
     }
 
     #[cfg(feature = "bench-internals")]

@@ -265,7 +265,7 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
         .sum::<f64>()
         / samples.len() as f64;
     println!(
-        "phase={phase} parts={parts} joints={} workers={workers} step_ms_min/p50/p95/p99/max={:.4}/{:.4}/{:.4}/{:.4}/{:.4} sim_x={:.2} allocs_p50/p95={}/{} bytes_p50/p95={}/{} retained_kib={} peak_scratch_kib={} growth_bytes={} joint_prepare_us_p50/p95={:.2}/{:.2} solver_prepare_us_p50/p95={:.2}/{:.2} solver_iterations_ms_p50/p95={:.4}/{:.4} joint_rows_prepared={} scalar_rows_solved={} inverse_inertia_updates={} block_rows_solved={} warm_starts={} color_batches={} max_colors_per_island={} joint_sweeps_pos/vel={}/{} collision_us={:.2} island_build_us={:.2} islands={} largest_island_bodies/joints/contacts={}/{}/{} candidates/contacts={}/{}",
+        "phase={phase} parts={parts} joints={} workers={workers} step_ms_min/p50/p95/p99/max={:.4}/{:.4}/{:.4}/{:.4}/{:.4} sim_x={:.2} allocs_p50/p95={}/{} bytes_p50/p95={}/{} retained_kib={} peak_scratch_kib={} growth_bytes={} joint_gather_us_p50/p95={:.2}/{:.2} joint_row_prepare_us_p50/p95={:.2}/{:.2} solver_prepare_us_p50/p95={:.2}/{:.2} solver_iterations_ms_p50/p95={:.4}/{:.4} joint_rows_prepared={} scalar_rows_solved={} inverse_inertia_updates={} block_rows_solved={} warm_starts={} color_batches={} max_colors_per_island={} joint_sweeps_pos/vel={}/{} collision_us={:.2} island_build_us={:.2} islands={} largest_island_bodies/joints/contacts={}/{}/{} candidates/contacts={}/{}",
         parts - 1,
         milliseconds(min.elapsed),
         milliseconds(p50.elapsed),
@@ -285,6 +285,12 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
         })),
         micros(sample_duration_quantile(samples, 0.95, |sample| {
             sample.metrics.collision.joint_constraint_prepare
+        })),
+        micros(sample_duration_quantile(samples, 0.50, |sample| {
+            sample.metrics.joints.joint_row_preparation_time
+        })),
+        micros(sample_duration_quantile(samples, 0.95, |sample| {
+            sample.metrics.joints.joint_row_preparation_time
         })),
         micros(sample_duration_quantile(samples, 0.50, |sample| {
             sample.metrics.collision.solver_prepare

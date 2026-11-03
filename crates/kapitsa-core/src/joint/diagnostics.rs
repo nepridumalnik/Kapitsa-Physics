@@ -45,6 +45,9 @@ pub(crate) enum EnergyStage {
 pub struct JointSolverMetrics {
     /// Number of scalar constraint rows prepared.
     pub prepared_rows: u64,
+    /// Time spent preparing or refreshing joint constraint rows.
+    #[cfg(feature = "bench-internals")]
+    pub joint_row_preparation_time: std::time::Duration,
     /// Number of cached inverse inertia tensors recomputed.
     pub inverse_inertia_updates: u64,
     /// Solver mass cache hits retained for the joint stress benchmark.
@@ -213,6 +216,8 @@ pub(crate) struct JointGeometryResidual {
 impl JointSolverMetrics {
     pub(crate) const ZERO: Self = Self {
         prepared_rows: 0,
+        #[cfg(feature = "bench-internals")]
+        joint_row_preparation_time: std::time::Duration::ZERO,
         inverse_inertia_updates: 0,
         solver_mass_cache_hits: 0,
         solver_mass_cache_misses: 0,
@@ -356,6 +361,10 @@ impl JointSolverMetrics {
 
     pub(crate) fn accumulate(&mut self, other: Self) {
         self.prepared_rows = self.prepared_rows.saturating_add(other.prepared_rows);
+        #[cfg(feature = "bench-internals")]
+        {
+            self.joint_row_preparation_time += other.joint_row_preparation_time;
+        }
         self.inverse_inertia_updates = self
             .inverse_inertia_updates
             .saturating_add(other.inverse_inertia_updates);

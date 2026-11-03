@@ -109,9 +109,24 @@ struct RowSettings {
 }
 
 #[derive(Clone, Copy)]
+struct FixedJointGeometry {
+    anchor_a: Vec3,
+    anchor_b: Vec3,
+    rotation_a: Quat,
+    position_error: Vec3,
+    rotation_error: Vec3,
+}
+
+#[derive(Clone, Copy)]
 enum JointRowBuffer {
     Current,
     Preparing,
+}
+
+#[derive(Clone, Copy)]
+enum FixedJointRowBlock {
+    Anchor,
+    Frame,
 }
 
 impl JointRowBuffer {
@@ -528,14 +543,7 @@ impl JointSolver {
                     })
                 })
         {
-            Self::position_joint_fixed_scalar_sweep(
-                workspace,
-                bodies,
-                constraint,
-                joint_index,
-                dt,
-                options,
-            )?;
+            Self::position_joint_fixed_scalar_sweep(workspace, bodies, constraint, dt, options)?;
         } else {
             Self::position_sweep(workspace, bodies, dt, options, JointRowBuffer::Preparing)?;
         }
@@ -610,14 +618,13 @@ impl JointSolver {
         Ok(())
     }
 
-    fn position_sweep_range(
+    fn position_sweep_fixed_block(
         workspace: &mut JointWorkspace,
         bodies: &mut [SolverBody],
         body_indices: [usize; 2],
         dt: f64,
         options: JointSolverOptions,
-        row_buffer: JointRowBuffer,
-        range: std::ops::Range<usize>,
+        block: FixedJointRowBlock,
     ) -> Result<bool, CollisionError> {
         if options.mass_cache() {
             workspace.ensure_solver_mass_slots(bodies.len())?;
@@ -630,11 +637,14 @@ impl JointSolver {
         });
         let [before_a, before_b] = [before[0]?, before[1]?];
         #[cfg(any(test, feature = "bench-internals"))]
-        let row_count = range.end.saturating_sub(range.start);
+        let row_count = 3;
         let mut cache_stats = SolverMassCacheStats::default();
         let result = {
-            let (rows, slots) = workspace.solver_buffers_mut(row_buffer.is_preparing());
-            let rows = rows.get_mut(range).ok_or(CollisionError::InvalidContact)?;
+            let (anchor_rows, frame_rows, slots) = workspace.preparing_fixed_row_blocks_mut()?;
+            let rows = match block {
+                FixedJointRowBlock::Anchor => anchor_rows.as_mut_slice(),
+                FixedJointRowBlock::Frame => frame_rows.as_mut_slice(),
+            };
             solve_position_rows(rows, slots, bodies, dt, options, &mut cache_stats)
         };
         record_solver_mass_cache_stats(workspace, cache_stats);
@@ -643,7 +653,7 @@ impl JointSolver {
         workspace.record_scalar_rows_solved(row_count);
         #[cfg(test)]
         workspace.record_solver_call(JointSolverCall::PositionSweep {
-            preparing_rows: row_buffer.is_preparing(),
+            preparing_rows: true,
             row_count,
         });
         let after_a = bodies
@@ -661,45 +671,49 @@ impl JointSolver {
         workspace: &mut JointWorkspace,
         bodies: &mut [SolverBody],
         constraint: JointConstraint,
-        joint_index: usize,
         dt: f64,
         options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
-        let linear_changed = Self::position_sweep_range(
+        let linear_changed = Self::position_sweep_fixed_block(
             workspace,
             bodies,
             [constraint.body_a, constraint.body_b],
             dt,
             options,
-            JointRowBuffer::Preparing,
-            0..3,
+            FixedJointRowBlock::Anchor,
         )?;
         if linear_changed {
-            workspace.finish_joint_prepare()?;
-            workspace.begin_joint_prepare(joint_index, constraint.id);
-            prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+            refresh_fixed_joint_row_block(
+                workspace,
+                bodies,
+                constraint,
+                dt,
+                FixedJointRowBlock::Frame,
+            )?;
         }
-        let angular_changed = Self::position_sweep_range(
+        let angular_changed = Self::position_sweep_fixed_block(
             workspace,
             bodies,
             [constraint.body_a, constraint.body_b],
             dt,
             options,
-            JointRowBuffer::Preparing,
-            3..6,
+            FixedJointRowBlock::Frame,
         )?;
         if angular_changed {
-            workspace.finish_joint_prepare()?;
-            workspace.begin_joint_prepare(joint_index, constraint.id);
-            prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
-            Self::position_sweep_range(
+            refresh_fixed_joint_row_block(
+                workspace,
+                bodies,
+                constraint,
+                dt,
+                FixedJointRowBlock::Anchor,
+            )?;
+            Self::position_sweep_fixed_block(
                 workspace,
                 bodies,
                 [constraint.body_a, constraint.body_b],
                 dt,
                 options,
-                JointRowBuffer::Preparing,
-                0..3,
+                FixedJointRowBlock::Anchor,
             )?;
         }
         Ok(())
@@ -2545,8 +2559,10 @@ fn prepare_joint_rows_for_constraint(
     if !constraint.joint.common().enabled {
         return Ok(());
     }
+    #[cfg(feature = "bench-internals")]
+    let preparation_started = std::time::Instant::now();
     solver_bodies_at(bodies, constraint.body_a, constraint.body_b)?;
-    match constraint.joint {
+    let result = match constraint.joint {
         super::Joint::Fixed(joint) => append_fixed_rows(
             bodies,
             workspace,
@@ -2627,7 +2643,10 @@ fn prepare_joint_rows_for_constraint(
             joint,
             dt,
         ),
-    }
+    };
+    #[cfg(feature = "bench-internals")]
+    workspace.record_joint_row_preparation_time(preparation_started.elapsed());
+    result
 }
 
 fn append_fixed_rows(
@@ -2638,47 +2657,190 @@ fn append_fixed_rows(
     joint: super::FixedJoint,
     dt: f64,
 ) -> Result<(), CollisionError> {
-    let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
-    let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
+    let geometry = fixed_joint_geometry(
+        bodies,
+        body_a,
+        body_b,
+        joint.common.frame_a,
+        joint.common.frame_b,
+    )?;
     let mut settings = row_settings(body_a, body_b, joint.common, dt);
     // Fixed-joint position projection already corrects connector drift. A
     // Baumgarte velocity target on the same error can add energy to large trees.
     settings.velocity_bias = false;
+    for row in fixed_anchor_rows(bodies, settings, geometry)?.into_iter() {
+        workspace.push(row);
+    }
+    for row in fixed_frame_rows(settings, geometry)?.into_iter() {
+        workspace.push(row);
+    }
+    Ok(())
+}
+
+fn fixed_joint_geometry(
+    bodies: &[SolverBody],
+    body_a: usize,
+    body_b: usize,
+    frame_a: super::JointFrame,
+    frame_b: super::JointFrame,
+) -> Result<FixedJointGeometry, CollisionError> {
+    let (anchor_a, rotation_a) = world_frame(bodies, body_a, frame_a)?;
+    let (anchor_b, rotation_b) = world_frame(bodies, body_b, frame_b)?;
     let position_error = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    // The point Jacobian below differentiates a projection on a fixed world
-    // axis. Using a frame-A axis would also require the derivative of that
-    // rotating axis when the anchors are separated.
-    for (axis_index, axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
-        let error = position_error
-            .checked_dot(axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
-        push_linear_row(
-            bodies,
-            workspace,
-            settings,
-            [anchor_a, anchor_b],
-            axis,
-            error,
-            axis_index as u8,
-            bilateral_bounds(),
-        )?;
-    }
     let rotation_error = relative_rotation_error(rotation_a, rotation_b)?;
-    for (axis_index, local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
-        let axis = fixed_rotation_row_axis(rotation_a, rotation_error, local_axis)?;
-        let error = rotation_error
-            .checked_dot(local_axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
-        push_angular_row(
-            workspace,
+    Ok(FixedJointGeometry {
+        anchor_a,
+        anchor_b,
+        rotation_a,
+        position_error,
+        rotation_error,
+    })
+}
+
+fn fixed_anchor_rows(
+    bodies: &[SolverBody],
+    settings: RowSettings,
+    geometry: FixedJointGeometry,
+) -> Result<[ConstraintRow; 3], CollisionError> {
+    // These rows share centers and anchors, so resolve them once per block.
+    let centers = [
+        center_of_mass(
+            bodies
+                .get(settings.body_a)
+                .ok_or(CollisionError::InvalidContact)?,
+        )?,
+        center_of_mass(
+            bodies
+                .get(settings.body_b)
+                .ok_or(CollisionError::InvalidContact)?,
+        )?,
+    ];
+    let anchors = [geometry.anchor_a, geometry.anchor_b];
+    Ok([
+        make_linear_row(
             settings,
-            axis,
-            error,
-            axis_index as u8 + 3,
+            anchors,
+            Vec3::X,
+            geometry
+                .position_error
+                .checked_dot(Vec3::X)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+            0,
             bilateral_bounds(),
-        )?;
+            centers,
+        )?,
+        make_linear_row(
+            settings,
+            anchors,
+            Vec3::Y,
+            geometry
+                .position_error
+                .checked_dot(Vec3::Y)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+            1,
+            bilateral_bounds(),
+            centers,
+        )?,
+        make_linear_row(
+            settings,
+            anchors,
+            Vec3::Z,
+            geometry
+                .position_error
+                .checked_dot(Vec3::Z)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+            2,
+            bilateral_bounds(),
+            centers,
+        )?,
+    ])
+}
+
+fn fixed_frame_rows(
+    settings: RowSettings,
+    geometry: FixedJointGeometry,
+) -> Result<[ConstraintRow; 3], CollisionError> {
+    Ok([
+        make_angular_row(
+            settings,
+            fixed_rotation_row_axis(geometry.rotation_a, geometry.rotation_error, Vec3::X)?,
+            geometry
+                .rotation_error
+                .checked_dot(Vec3::X)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+            3,
+            bilateral_bounds(),
+        )?,
+        make_angular_row(
+            settings,
+            fixed_rotation_row_axis(geometry.rotation_a, geometry.rotation_error, Vec3::Y)?,
+            geometry
+                .rotation_error
+                .checked_dot(Vec3::Y)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+            4,
+            bilateral_bounds(),
+        )?,
+        make_angular_row(
+            settings,
+            fixed_rotation_row_axis(geometry.rotation_a, geometry.rotation_error, Vec3::Z)?,
+            geometry
+                .rotation_error
+                .checked_dot(Vec3::Z)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+            5,
+            bilateral_bounds(),
+        )?,
+    ])
+}
+
+fn refresh_fixed_joint_row_block(
+    workspace: &mut JointWorkspace,
+    bodies: &[SolverBody],
+    constraint: JointConstraint,
+    dt: f64,
+    block: FixedJointRowBlock,
+) -> Result<(), CollisionError> {
+    let joint = match constraint.joint {
+        super::Joint::Fixed(joint) => joint,
+        _ => return Err(CollisionError::InvalidContact),
+    };
+    #[cfg(feature = "bench-internals")]
+    let preparation_started = std::time::Instant::now();
+    let geometry = fixed_joint_geometry(
+        bodies,
+        constraint.body_a,
+        constraint.body_b,
+        joint.common.frame_a,
+        joint.common.frame_b,
+    )?;
+    let mut settings = row_settings(constraint.body_a, constraint.body_b, joint.common, dt);
+    settings.velocity_bias = false;
+    let replacements = match block {
+        FixedJointRowBlock::Anchor => fixed_anchor_rows(bodies, settings, geometry)?,
+        FixedJointRowBlock::Frame => fixed_frame_rows(settings, geometry)?,
+    };
+    {
+        let (anchor_rows, frame_rows, _) = workspace.preparing_fixed_row_blocks_mut()?;
+        let rows = match block {
+            FixedJointRowBlock::Anchor => anchor_rows,
+            FixedJointRowBlock::Frame => frame_rows,
+        };
+        for (row, mut replacement) in rows.iter_mut().zip(replacements) {
+            if row.key != replacement.key {
+                return Err(CollisionError::InvalidContact);
+            }
+            replacement.accumulated_multiplier = row.accumulated_multiplier;
+            replacement.accumulated_impulse = row.accumulated_impulse;
+            *row = replacement;
+        }
+    }
+    #[cfg(feature = "bench-internals")]
+    {
+        workspace.record_incremental_rows_prepared(3);
+        workspace.record_joint_row_preparation_time(preparation_started.elapsed());
     }
     Ok(())
 }
@@ -3781,24 +3943,41 @@ fn push_linear_row(
     key: u8,
     bounds: (f64, f64),
 ) -> Result<(), CollisionError> {
+    let centers = [
+        center_of_mass(
+            bodies
+                .get(settings.body_a)
+                .ok_or(CollisionError::InvalidContact)?,
+        )?,
+        center_of_mass(
+            bodies
+                .get(settings.body_b)
+                .ok_or(CollisionError::InvalidContact)?,
+        )?,
+    ];
+    workspace.push(make_linear_row(
+        settings, anchors, axis, error, key, bounds, centers,
+    )?);
+    Ok(())
+}
+
+fn make_linear_row(
+    settings: RowSettings,
+    anchors: [Vec3; 2],
+    axis: Vec3,
+    error: f64,
+    key: u8,
+    bounds: (f64, f64),
+    centers: [Vec3; 2],
+) -> Result<ConstraintRow, CollisionError> {
     if !axis.is_finite() || !error.is_finite() || !settings.dt.is_finite() || settings.dt <= 0.0 {
         return Err(CollisionError::ArithmeticOverflow);
     }
-    let center_a = center_of_mass(
-        bodies
-            .get(settings.body_a)
-            .ok_or(CollisionError::InvalidContact)?,
-    )?;
-    let center_b = center_of_mass(
-        bodies
-            .get(settings.body_b)
-            .ok_or(CollisionError::InvalidContact)?,
-    )?;
     let offset_a = anchors[0]
-        .checked_sub(center_a)
+        .checked_sub(centers[0])
         .ok_or(CollisionError::ArithmeticOverflow)?;
     let offset_b = anchors[1]
-        .checked_sub(center_b)
+        .checked_sub(centers[1])
         .ok_or(CollisionError::ArithmeticOverflow)?;
     let angular_a = offset_a
         .checked_cross(axis)
@@ -3807,7 +3986,7 @@ fn push_linear_row(
     let angular_b = offset_b
         .checked_cross(axis)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    workspace.push(ConstraintRow {
+    Ok(ConstraintRow {
         key,
         dimension: RowDimension::Linear,
         body_a: settings.body_a,
@@ -3832,8 +4011,7 @@ fn push_linear_row(
         max_impulse: settings.impulse_bounds.map_or(bounds.1, |value| value.1),
         accumulated_multiplier: 0.0,
         accumulated_impulse: 0.0,
-    });
-    Ok(())
+    })
 }
 
 fn push_angular_row(
@@ -3844,10 +4022,21 @@ fn push_angular_row(
     key: u8,
     bounds: (f64, f64),
 ) -> Result<(), CollisionError> {
+    workspace.push(make_angular_row(settings, axis, error, key, bounds)?);
+    Ok(())
+}
+
+fn make_angular_row(
+    settings: RowSettings,
+    axis: Vec3,
+    error: f64,
+    key: u8,
+    bounds: (f64, f64),
+) -> Result<ConstraintRow, CollisionError> {
     if !axis.is_finite() || !error.is_finite() || !settings.dt.is_finite() || settings.dt <= 0.0 {
         return Err(CollisionError::ArithmeticOverflow);
     }
-    workspace.push(ConstraintRow {
+    Ok(ConstraintRow {
         key,
         dimension: RowDimension::Angular,
         body_a: settings.body_a,
@@ -3872,8 +4061,7 @@ fn push_angular_row(
         max_impulse: settings.impulse_bounds.map_or(bounds.1, |value| value.1),
         accumulated_multiplier: 0.0,
         accumulated_impulse: 0.0,
-    });
-    Ok(())
+    })
 }
 
 fn center_of_mass(body: &SolverBody) -> Result<Vec3, CollisionError> {
@@ -5636,6 +5824,34 @@ mod tests {
             reprepare(&mut workspace_c, &bodies_c, constraint);
             solve_subset(&mut workspace_c, &mut bodies_c, 0..3);
             let c_after_full = residual(&bodies_c, constraint);
+
+            let mut bodies_d = make_bodies(angle);
+            let mut workspace_d = JointWorkspace::new();
+            JointSolver::begin_step(&mut workspace_d);
+            JointSolver::solve_position_joint(
+                &mut workspace_d,
+                &mut bodies_d,
+                constraint,
+                0,
+                0.01,
+                JointSolverOptions::legacy(),
+            )
+            .expect("incrementally refreshed fixed-joint projection");
+            for (reference, actual) in bodies_c.iter().zip(&bodies_d) {
+                let reference_transform = reference.state().transform();
+                let actual_transform = actual.state().transform();
+                assert!(
+                    (reference_transform.translation() - actual_transform.translation()).length()
+                        <= 1.0e-12
+                );
+                let reference_rotation = reference_transform.rotation();
+                let actual_rotation = actual_transform.rotation();
+                let rotation_dot = reference_rotation.x * actual_rotation.x
+                    + reference_rotation.y * actual_rotation.y
+                    + reference_rotation.z * actual_rotation.z
+                    + reference_rotation.w * actual_rotation.w;
+                assert!(rotation_dot.abs() >= 1.0 - 1.0e-13);
+            }
 
             let world_steps = run_world_steps(angle, constraint);
             println!(
