@@ -78,11 +78,14 @@ async fn snapshots_and_collision_batches_report_the_same_step() {
     let mut simulation = Simulation::new_from_config(config(120)).expect("simulation");
     let client = simulation.client();
     let mut events = client.subscribe_collision_events();
+    let mut second_events = client.subscribe_collision_events();
     simulation.start().expect("start");
 
     add_sphere(&client, Vec3::ZERO, false).await;
     let (dynamic_id, _) = add_sphere(&client, Vec3::new(0.9, 0.0, 0.0), true).await;
     let batch = next_batch_with(&mut events, CollisionEventKind::Begin).await;
+    let second_batch = next_batch_with(&mut second_events, CollisionEventKind::Begin).await;
+    assert_eq!(batch, second_batch);
     assert!(batch.step() > 0);
     let snapshot = client.snapshot();
     assert_eq!(batch.step(), snapshot.step());

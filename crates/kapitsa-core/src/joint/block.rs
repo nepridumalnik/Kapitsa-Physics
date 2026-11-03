@@ -69,7 +69,9 @@ pub(crate) fn prepare_block3(
 
     let mut entries = [[0.0; 3]; 3];
     for (row_index, row) in rows.iter().enumerate() {
-        for (column_index, column) in rows.iter().enumerate() {
+        // J M^-1 J^T is symmetric. Compute each independent entry once
+        // and mirror it so roundoff cannot make the assembled matrix asymmetric.
+        for (column_index, column) in rows.iter().enumerate().skip(row_index) {
             let value = masses[0].cross(
                 row.linear_a,
                 row.angular_a,
@@ -85,6 +87,7 @@ pub(crate) fn prepare_block3(
                 return Err(CollisionError::ArithmeticOverflow);
             }
             entries[row_index][column_index] = value;
+            entries[column_index][row_index] = value;
         }
     }
 
@@ -150,6 +153,7 @@ mod tests {
             max_impulse: f64::INFINITY,
             accumulated_multiplier: 0.0,
             accumulated_impulse: 0.0,
+            cached_velocity_effective_mass: 0.0,
         }
     }
 

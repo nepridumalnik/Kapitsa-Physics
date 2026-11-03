@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use kapitsa_core::{collision::CollisionEvent, joint::JointBreakEvent};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -10,12 +10,15 @@ use super::command::{BatchId, CommandRequest};
 #[derive(Clone, Debug, PartialEq)]
 pub struct CollisionEventBatch {
     step: u64,
-    events: Vec<CollisionEvent>,
+    events: Option<Arc<Vec<CollisionEvent>>>,
 }
 
 impl CollisionEventBatch {
     pub(crate) fn new(step: u64, events: Vec<CollisionEvent>) -> Self {
-        Self { step, events }
+        Self {
+            step,
+            events: (!events.is_empty()).then(|| Arc::new(events)),
+        }
     }
 
     /// Returns the successful physics step associated with this batch.
@@ -25,7 +28,7 @@ impl CollisionEventBatch {
 
     /// Returns the collision lifecycle events committed by this step.
     pub fn events(&self) -> &[CollisionEvent] {
-        &self.events
+        self.events.as_deref().map_or(&[], Vec::as_slice)
     }
 }
 
@@ -61,12 +64,15 @@ impl std::error::Error for CollisionEventStreamError {}
 #[derive(Clone, Debug, PartialEq)]
 pub struct JointBreakEventBatch {
     step: u64,
-    events: Vec<JointBreakEvent>,
+    events: Option<Arc<Vec<JointBreakEvent>>>,
 }
 
 impl JointBreakEventBatch {
     pub(crate) fn new(step: u64, events: Vec<JointBreakEvent>) -> Self {
-        Self { step, events }
+        Self {
+            step,
+            events: (!events.is_empty()).then(|| Arc::new(events)),
+        }
     }
 
     /// Returns the successful physics step associated with this batch.
@@ -76,7 +82,7 @@ impl JointBreakEventBatch {
 
     /// Returns the joint breaks committed by this step.
     pub fn events(&self) -> &[JointBreakEvent] {
-        &self.events
+        self.events.as_deref().map_or(&[], Vec::as_slice)
     }
 }
 

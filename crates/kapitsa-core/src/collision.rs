@@ -3,6 +3,7 @@ mod cache;
 mod ccd;
 mod ccd_island;
 mod config;
+mod constraint_coloring;
 mod contact;
 mod epa;
 mod error;
@@ -207,10 +208,9 @@ impl CollisionStepMetrics {
     };
 }
 pub(crate) use event::{CollisionInteraction, CollisionLifecycle};
-pub use query::{OverlapHit, QueryFilter, Ray, RayHit, ShapeHit};
+pub use query::{OverlapHit, QueryFilter, QueryScratch, Ray, RayHit, ShapeHit};
 pub(crate) use query::{
-    QueryScratch, QueryTarget, overlaps_shape_with_scratch, raycast_shape_with_scratch,
-    sweep_shape_with_scratch,
+    QueryTarget, overlaps_shape_with_scratch, raycast_shape_with_scratch, sweep_shape_with_scratch,
 };
 
 pub(crate) use broad_phase::CollisionProxy;

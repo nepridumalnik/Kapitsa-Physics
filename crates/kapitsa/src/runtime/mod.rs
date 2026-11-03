@@ -29,11 +29,13 @@ mod bench_counter_tests {
             .expect("baseline physics step");
         let counters = rocket.world.physics_step_metrics().joints;
 
-        assert_eq!(counters.prepared_rows, 99 * 6 * (3 + 8));
-        assert_eq!(counters.scalar_rows_solved, 99 * 6 * (3 + 8));
+        assert_eq!(counters.prepared_rows, 99 * 6 * 7);
+        assert_eq!(counters.scalar_rows_solved, 7_425);
         assert_eq!(counters.position_sweeps, 3);
         assert_eq!(counters.velocity_sweeps, 8);
-        assert_eq!(counters.inverse_inertia_updates, 0);
+        assert!(counters.inverse_inertia_updates > 0);
+        assert!(counters.solver_mass_cache_hits > 0);
+        assert!(counters.solver_mass_cache_misses > 0);
         assert_eq!(counters.block_rows_solved, 0);
         assert_eq!(counters.velocity_warm_starts, 0);
         assert_eq!(counters.color_batches_processed, 0);

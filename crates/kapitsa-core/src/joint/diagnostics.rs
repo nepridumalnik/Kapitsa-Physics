@@ -1,10 +1,53 @@
 //! Benchmark-only work counters owned by the joint solver.
 
+/// Kinetic and gravitational energy at a solver stage.
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EnergyComponents {
+    pub translational_j: f64,
+    pub rotational_j: f64,
+    pub potential_j: f64,
+}
+
+#[cfg(feature = "bench-internals")]
+impl EnergyComponents {
+    pub(crate) fn add_assign(&mut self, other: Self) {
+        self.translational_j += other.translational_j;
+        self.rotational_j += other.rotational_j;
+        self.potential_j += other.potential_j;
+    }
+
+    pub fn delta(self, before: Self) -> Self {
+        Self {
+            translational_j: self.translational_j - before.translational_j,
+            rotational_j: self.rotational_j - before.rotational_j,
+            potential_j: self.potential_j - before.potential_j,
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy)]
+pub(crate) enum EnergyStage {
+    BeforeVelocityPcg,
+    AfterVelocityPcg,
+    VelocityPcgDelta,
+    AfterVelocitySolver,
+    BeforePositionPcg,
+    AfterPositionPcg,
+    PositionPcgDelta,
+    AfterPositionSolver,
+}
+
 /// Work performed by the joint solver during one physics step.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(not(feature = "bench-internals"), derive(Eq))]
 pub struct JointSolverMetrics {
     /// Number of scalar constraint rows prepared.
     pub prepared_rows: u64,
+    /// Time spent preparing or refreshing joint constraint rows.
+    #[cfg(feature = "bench-internals")]
+    pub joint_row_preparation_time: std::time::Duration,
     /// Number of cached inverse inertia tensors recomputed.
     pub inverse_inertia_updates: u64,
     /// Solver mass cache hits retained for the joint stress benchmark.
@@ -23,15 +66,182 @@ pub struct JointSolverMetrics {
     pub color_batches_processed: u64,
     /// Maximum graph colors used by an island; zero if no colored pass runs.
     pub max_colors_per_island: u32,
+    /// Time spent preparing or validating the conflict graph for large islands.
+    pub constraint_coloring_prepare_time: std::time::Duration,
+    /// Constraint graph rebuilds; cache hits reuse the previous topology layout.
+    pub constraint_coloring_rebuilds: u64,
+    /// Constraint graph cache hits for unchanged body types and endpoints.
+    pub constraint_coloring_cache_hits: u64,
+    /// Constraints represented by the current step's graph plans.
+    pub constraint_coloring_constraints: u64,
     /// Number of position constraint sweeps actually executed.
     pub position_sweeps: u64,
     /// Number of velocity constraint sweeps actually executed.
     pub velocity_sweeps: u64,
+    /// Inner iterations used by the benchmark-only global velocity PCG solve.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_iterations: u64,
+    /// Inner iterations used by the benchmark-only global position PCG solve.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_iterations: u64,
+    /// Position PCG solves that met the configured geometric residual.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_converged_calls: u64,
+    /// Position PCG solves that reached the iteration cap above tolerance.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_iteration_limit_calls: u64,
+    /// Largest final linear residual reported by any position PCG call.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_linear_residual_m: f64,
+    /// Largest final angular residual reported by any position PCG call.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_angular_residual_rad: f64,
+    /// Time spent preparing position PCG masses, diagonals, and factorization.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_system_prepare_time: std::time::Duration,
+    /// Time spent in the position PCG matrix-free operator.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_matrix_vector_time: std::time::Duration,
+    /// Time spent applying the position PCG preconditioner.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_preconditioner_time: std::time::Duration,
+    /// Time spent in position PCG dot products and residual scans.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_reduction_time: std::time::Duration,
+    /// Time spent in matrix-free PCG operators.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_matrix_vector_time: std::time::Duration,
+    /// Time spent preparing masses, diagonals, and the PCG preconditioner.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_system_prepare_time: std::time::Duration,
+    /// Time spent applying the PCG preconditioner.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_preconditioner_time: std::time::Duration,
+    /// Time spent in deterministic PCG reductions.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_reduction_time: std::time::Duration,
+    /// PCG solves that met the configured physical residual before their cap.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_converged_calls: u64,
+    /// PCG solves that reached the iteration cap with a residual still above tolerance.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_iteration_limit_calls: u64,
+    /// Largest final linear residual reported by any velocity PCG call.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_linear_residual_mps: f64,
+    /// Largest final angular residual reported by any velocity PCG call.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_angular_residual_radps: f64,
+    /// Whole-world energy before prediction/integration.
+    #[cfg(feature = "bench-internals")]
+    pub energy_before_integration: EnergyComponents,
+    /// Whole-world energy after prediction/integration and before solving.
+    #[cfg(feature = "bench-internals")]
+    pub energy_after_integration: EnergyComponents,
+    /// Island energy before the first global velocity PCG invocation.
+    #[cfg(feature = "bench-internals")]
+    pub energy_before_velocity_pcg: EnergyComponents,
+    /// Island energy after the final global velocity PCG invocation.
+    #[cfg(feature = "bench-internals")]
+    pub energy_after_velocity_pcg: EnergyComponents,
+    /// Sum of signed component energy changes across individual velocity PCG calls.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_pcg_energy_delta: EnergyComponents,
+    /// Island energy after all velocity constraints.
+    #[cfg(feature = "bench-internals")]
+    pub energy_after_velocity_solver: EnergyComponents,
+    /// Island energy before the first global position PCG invocation.
+    #[cfg(feature = "bench-internals")]
+    pub energy_before_position_pcg: EnergyComponents,
+    /// Island energy after the final global position PCG invocation.
+    #[cfg(feature = "bench-internals")]
+    pub energy_after_position_pcg: EnergyComponents,
+    /// Sum of signed component energy changes across individual position PCG calls.
+    #[cfg(feature = "bench-internals")]
+    pub position_pcg_energy_delta: EnergyComponents,
+    /// First-order work v·Δp + ω·ΔL done by the velocity projection impulses.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_projection_impulse_work_j: f64,
+    /// Quadratic kinetic term 0.5·Δv·Δp + 0.5·Δω·ΔL of the velocity projection.
+    #[cfg(feature = "bench-internals")]
+    pub velocity_projection_quadratic_work_j: f64,
+    /// Island energy after all position constraints.
+    #[cfg(feature = "bench-internals")]
+    pub energy_after_position_solver: EnergyComponents,
+    /// Maximum anchor error before velocity constraints are solved.
+    #[cfg(feature = "bench-internals")]
+    pub pre_velocity_anchor_error_m: f64,
+    /// Maximum frame angle before velocity constraints are solved.
+    #[cfg(feature = "bench-internals")]
+    pub pre_velocity_frame_error_rad: f64,
+    /// Maximum connector residual after the velocity phase.
+    #[cfg(feature = "bench-internals")]
+    pub post_velocity_anchor_error_m: f64,
+    /// Maximum connector frame angle after the velocity phase.
+    #[cfg(feature = "bench-internals")]
+    pub post_velocity_frame_error_rad: f64,
+    /// Maximum connector residual after contact correction and before joint projection.
+    #[cfg(feature = "bench-internals")]
+    pub pre_joint_anchor_error_m: f64,
+    /// Maximum connector frame angle after contact correction and before joint projection.
+    #[cfg(feature = "bench-internals")]
+    pub pre_joint_frame_error_rad: f64,
+    /// Maximum connector residual after joint position projection.
+    #[cfg(feature = "bench-internals")]
+    pub post_joint_anchor_error_m: f64,
+    /// Maximum connector frame angle after joint position projection.
+    #[cfg(feature = "bench-internals")]
+    pub post_joint_frame_error_rad: f64,
+    /// Maximum linear velocity row residual after velocity solving.
+    #[cfg(feature = "bench-internals")]
+    pub post_velocity_linear_residual_mps: f64,
+    /// Maximum angular velocity row residual after velocity solving.
+    #[cfg(feature = "bench-internals")]
+    pub post_velocity_angular_residual_radps: f64,
+    /// Maximum linear velocity row residual after position projection.
+    #[cfg(feature = "bench-internals")]
+    pub post_position_linear_residual_mps: f64,
+    /// Maximum angular velocity row residual after position projection.
+    #[cfg(feature = "bench-internals")]
+    pub post_position_angular_residual_radps: f64,
+    /// Maximum linear velocity residual after contact solving, before joint solving.
+    #[cfg(feature = "bench-internals")]
+    pub pre_joint_velocity_linear_residual_mps: f64,
+    /// Maximum |Jv-target| immediately after integration, before solver impulses.
+    #[cfg(feature = "bench-internals")]
+    pub initial_velocity_linear_residual_mps: f64,
+    /// Maximum angular |Jv-target| immediately after integration, before solver impulses.
+    #[cfg(feature = "bench-internals")]
+    pub initial_velocity_angular_residual_radps: f64,
+    /// Maximum angular velocity residual after contact solving, before joint solving.
+    #[cfg(feature = "bench-internals")]
+    pub pre_joint_velocity_angular_residual_radps: f64,
+    /// Maximum linear velocity residual after the first velocity sweep.
+    #[cfg(feature = "bench-internals")]
+    pub first_velocity_linear_residual_mps: f64,
+    /// Maximum angular velocity residual after the first velocity sweep.
+    #[cfg(feature = "bench-internals")]
+    pub first_velocity_angular_residual_radps: f64,
+    /// Maximum anchor error after the first joint position sweep.
+    #[cfg(feature = "bench-internals")]
+    pub first_post_joint_anchor_error_m: f64,
+    /// Maximum frame angle after the first joint position sweep.
+    #[cfg(feature = "bench-internals")]
+    pub first_post_joint_frame_error_rad: f64,
+}
+
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct JointGeometryResidual {
+    pub(crate) anchor_error_m: f64,
+    pub(crate) frame_error_rad: f64,
 }
 
 impl JointSolverMetrics {
     pub(crate) const ZERO: Self = Self {
         prepared_rows: 0,
+        #[cfg(feature = "bench-internals")]
+        joint_row_preparation_time: std::time::Duration::ZERO,
         inverse_inertia_updates: 0,
         solver_mass_cache_hits: 0,
         solver_mass_cache_misses: 0,
@@ -41,12 +251,160 @@ impl JointSolverMetrics {
         velocity_warm_starts: 0,
         color_batches_processed: 0,
         max_colors_per_island: 0,
+        constraint_coloring_prepare_time: std::time::Duration::ZERO,
+        constraint_coloring_rebuilds: 0,
+        constraint_coloring_cache_hits: 0,
+        constraint_coloring_constraints: 0,
         position_sweeps: 0,
         velocity_sweeps: 0,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_iterations: 0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_iterations: 0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_converged_calls: 0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_iteration_limit_calls: 0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_linear_residual_m: 0.0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_angular_residual_rad: 0.0,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_system_prepare_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_matrix_vector_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_preconditioner_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        position_pcg_reduction_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_matrix_vector_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_system_prepare_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_preconditioner_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_reduction_time: std::time::Duration::ZERO,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_converged_calls: 0,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_iteration_limit_calls: 0,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_angular_residual_radps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        energy_before_integration: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_after_integration: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_before_velocity_pcg: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_after_velocity_pcg: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        velocity_pcg_energy_delta: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_after_velocity_solver: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_before_position_pcg: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        energy_after_position_pcg: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        position_pcg_energy_delta: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        velocity_projection_impulse_work_j: 0.0,
+        #[cfg(feature = "bench-internals")]
+        velocity_projection_quadratic_work_j: 0.0,
+        #[cfg(feature = "bench-internals")]
+        energy_after_position_solver: EnergyComponents {
+            translational_j: 0.0,
+            rotational_j: 0.0,
+            potential_j: 0.0,
+        },
+        #[cfg(feature = "bench-internals")]
+        pre_velocity_anchor_error_m: 0.0,
+        #[cfg(feature = "bench-internals")]
+        pre_velocity_frame_error_rad: 0.0,
+        #[cfg(feature = "bench-internals")]
+        post_velocity_anchor_error_m: 0.0,
+        #[cfg(feature = "bench-internals")]
+        post_velocity_frame_error_rad: 0.0,
+        #[cfg(feature = "bench-internals")]
+        pre_joint_anchor_error_m: 0.0,
+        #[cfg(feature = "bench-internals")]
+        pre_joint_frame_error_rad: 0.0,
+        #[cfg(feature = "bench-internals")]
+        post_joint_anchor_error_m: 0.0,
+        #[cfg(feature = "bench-internals")]
+        post_joint_frame_error_rad: 0.0,
+        #[cfg(feature = "bench-internals")]
+        post_velocity_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        post_velocity_angular_residual_radps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        post_position_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        post_position_angular_residual_radps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        pre_joint_velocity_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        initial_velocity_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        initial_velocity_angular_residual_radps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        pre_joint_velocity_angular_residual_radps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        first_velocity_linear_residual_mps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        first_velocity_angular_residual_radps: 0.0,
+        #[cfg(feature = "bench-internals")]
+        first_post_joint_anchor_error_m: 0.0,
+        #[cfg(feature = "bench-internals")]
+        first_post_joint_frame_error_rad: 0.0,
     };
 
     pub(crate) fn accumulate(&mut self, other: Self) {
         self.prepared_rows = self.prepared_rows.saturating_add(other.prepared_rows);
+        #[cfg(feature = "bench-internals")]
+        {
+            self.joint_row_preparation_time += other.joint_row_preparation_time;
+        }
         self.inverse_inertia_updates = self
             .inverse_inertia_updates
             .saturating_add(other.inverse_inertia_updates);
@@ -72,8 +430,144 @@ impl JointSolverMetrics {
             .color_batches_processed
             .saturating_add(other.color_batches_processed);
         self.max_colors_per_island = self.max_colors_per_island.max(other.max_colors_per_island);
+        self.constraint_coloring_prepare_time += other.constraint_coloring_prepare_time;
+        self.constraint_coloring_rebuilds = self
+            .constraint_coloring_rebuilds
+            .saturating_add(other.constraint_coloring_rebuilds);
+        self.constraint_coloring_cache_hits = self
+            .constraint_coloring_cache_hits
+            .saturating_add(other.constraint_coloring_cache_hits);
+        self.constraint_coloring_constraints = self
+            .constraint_coloring_constraints
+            .saturating_add(other.constraint_coloring_constraints);
         self.position_sweeps = self.position_sweeps.saturating_add(other.position_sweeps);
         self.velocity_sweeps = self.velocity_sweeps.saturating_add(other.velocity_sweeps);
+        #[cfg(feature = "bench-internals")]
+        {
+            self.velocity_pcg_iterations = self
+                .velocity_pcg_iterations
+                .saturating_add(other.velocity_pcg_iterations);
+            self.position_pcg_iterations = self
+                .position_pcg_iterations
+                .saturating_add(other.position_pcg_iterations);
+            self.position_pcg_converged_calls = self
+                .position_pcg_converged_calls
+                .saturating_add(other.position_pcg_converged_calls);
+            self.position_pcg_iteration_limit_calls = self
+                .position_pcg_iteration_limit_calls
+                .saturating_add(other.position_pcg_iteration_limit_calls);
+            self.position_pcg_linear_residual_m = self
+                .position_pcg_linear_residual_m
+                .max(other.position_pcg_linear_residual_m);
+            self.position_pcg_angular_residual_rad = self
+                .position_pcg_angular_residual_rad
+                .max(other.position_pcg_angular_residual_rad);
+            self.position_pcg_system_prepare_time += other.position_pcg_system_prepare_time;
+            self.position_pcg_matrix_vector_time += other.position_pcg_matrix_vector_time;
+            self.position_pcg_preconditioner_time += other.position_pcg_preconditioner_time;
+            self.position_pcg_reduction_time += other.position_pcg_reduction_time;
+            self.velocity_pcg_matrix_vector_time += other.velocity_pcg_matrix_vector_time;
+            self.velocity_pcg_system_prepare_time += other.velocity_pcg_system_prepare_time;
+            self.velocity_pcg_preconditioner_time += other.velocity_pcg_preconditioner_time;
+            self.velocity_pcg_reduction_time += other.velocity_pcg_reduction_time;
+            self.velocity_pcg_converged_calls = self
+                .velocity_pcg_converged_calls
+                .saturating_add(other.velocity_pcg_converged_calls);
+            self.velocity_pcg_iteration_limit_calls = self
+                .velocity_pcg_iteration_limit_calls
+                .saturating_add(other.velocity_pcg_iteration_limit_calls);
+            self.velocity_pcg_linear_residual_mps = self
+                .velocity_pcg_linear_residual_mps
+                .max(other.velocity_pcg_linear_residual_mps);
+            self.velocity_pcg_angular_residual_radps = self
+                .velocity_pcg_angular_residual_radps
+                .max(other.velocity_pcg_angular_residual_radps);
+            self.energy_before_integration
+                .add_assign(other.energy_before_integration);
+            self.energy_after_integration
+                .add_assign(other.energy_after_integration);
+            self.energy_before_velocity_pcg
+                .add_assign(other.energy_before_velocity_pcg);
+            self.energy_after_velocity_pcg
+                .add_assign(other.energy_after_velocity_pcg);
+            self.velocity_pcg_energy_delta
+                .add_assign(other.velocity_pcg_energy_delta);
+            self.energy_after_velocity_solver
+                .add_assign(other.energy_after_velocity_solver);
+            self.energy_before_position_pcg
+                .add_assign(other.energy_before_position_pcg);
+            self.energy_after_position_pcg
+                .add_assign(other.energy_after_position_pcg);
+            self.position_pcg_energy_delta
+                .add_assign(other.position_pcg_energy_delta);
+            self.velocity_projection_impulse_work_j += other.velocity_projection_impulse_work_j;
+            self.velocity_projection_quadratic_work_j += other.velocity_projection_quadratic_work_j;
+            self.energy_after_position_solver
+                .add_assign(other.energy_after_position_solver);
+        }
+        #[cfg(feature = "bench-internals")]
+        {
+            self.pre_velocity_anchor_error_m = self
+                .pre_velocity_anchor_error_m
+                .max(other.pre_velocity_anchor_error_m);
+            self.pre_velocity_frame_error_rad = self
+                .pre_velocity_frame_error_rad
+                .max(other.pre_velocity_frame_error_rad);
+            self.post_velocity_anchor_error_m = self
+                .post_velocity_anchor_error_m
+                .max(other.post_velocity_anchor_error_m);
+            self.post_velocity_frame_error_rad = self
+                .post_velocity_frame_error_rad
+                .max(other.post_velocity_frame_error_rad);
+            self.pre_joint_anchor_error_m = self
+                .pre_joint_anchor_error_m
+                .max(other.pre_joint_anchor_error_m);
+            self.pre_joint_frame_error_rad = self
+                .pre_joint_frame_error_rad
+                .max(other.pre_joint_frame_error_rad);
+            self.post_joint_anchor_error_m = self
+                .post_joint_anchor_error_m
+                .max(other.post_joint_anchor_error_m);
+            self.post_joint_frame_error_rad = self
+                .post_joint_frame_error_rad
+                .max(other.post_joint_frame_error_rad);
+            self.post_velocity_linear_residual_mps = self
+                .post_velocity_linear_residual_mps
+                .max(other.post_velocity_linear_residual_mps);
+            self.post_velocity_angular_residual_radps = self
+                .post_velocity_angular_residual_radps
+                .max(other.post_velocity_angular_residual_radps);
+            self.post_position_linear_residual_mps = self
+                .post_position_linear_residual_mps
+                .max(other.post_position_linear_residual_mps);
+            self.post_position_angular_residual_radps = self
+                .post_position_angular_residual_radps
+                .max(other.post_position_angular_residual_radps);
+            self.pre_joint_velocity_linear_residual_mps = self
+                .pre_joint_velocity_linear_residual_mps
+                .max(other.pre_joint_velocity_linear_residual_mps);
+            self.initial_velocity_linear_residual_mps = self
+                .initial_velocity_linear_residual_mps
+                .max(other.initial_velocity_linear_residual_mps);
+            self.initial_velocity_angular_residual_radps = self
+                .initial_velocity_angular_residual_radps
+                .max(other.initial_velocity_angular_residual_radps);
+            self.pre_joint_velocity_angular_residual_radps = self
+                .pre_joint_velocity_angular_residual_radps
+                .max(other.pre_joint_velocity_angular_residual_radps);
+            self.first_velocity_linear_residual_mps = self
+                .first_velocity_linear_residual_mps
+                .max(other.first_velocity_linear_residual_mps);
+            self.first_velocity_angular_residual_radps = self
+                .first_velocity_angular_residual_radps
+                .max(other.first_velocity_angular_residual_radps);
+            self.first_post_joint_anchor_error_m = self
+                .first_post_joint_anchor_error_m
+                .max(other.first_post_joint_anchor_error_m);
+            self.first_post_joint_frame_error_rad = self
+                .first_post_joint_frame_error_rad
+                .max(other.first_post_joint_frame_error_rad);
+        }
     }
 }
 
@@ -102,6 +596,7 @@ mod metrics_tests {
             max_colors_per_island: 2,
             position_sweeps: 8,
             velocity_sweeps: 9,
+            ..JointSolverMetrics::default()
         });
         assert_eq!(
             metrics,
@@ -118,6 +613,7 @@ mod metrics_tests {
                 max_colors_per_island: 2,
                 position_sweeps: 8,
                 velocity_sweeps: 9,
+                ..JointSolverMetrics::default()
             }
         );
     }
@@ -127,15 +623,21 @@ mod metrics_tests {
         let mut metrics = JointSolverMetrics {
             color_batches_processed: 2,
             max_colors_per_island: 2,
+            #[cfg(feature = "bench-internals")]
+            position_pcg_iterations: 4,
             ..JointSolverMetrics::default()
         };
         metrics.accumulate(JointSolverMetrics {
             color_batches_processed: 3,
             max_colors_per_island: 3,
+            #[cfg(feature = "bench-internals")]
+            position_pcg_iterations: 5,
             ..JointSolverMetrics::default()
         });
         assert_eq!(metrics.color_batches_processed, 5);
         assert_eq!(metrics.max_colors_per_island, 3);
+        #[cfg(feature = "bench-internals")]
+        assert_eq!(metrics.position_pcg_iterations, 9);
     }
 
     #[test]
@@ -153,6 +655,47 @@ mod metrics_tests {
             max_colors_per_island: u32::MAX,
             position_sweeps: u64::MAX,
             velocity_sweeps: u64::MAX,
+            #[cfg(feature = "bench-internals")]
+            velocity_pcg_iterations: u64::MAX,
+            #[cfg(feature = "bench-internals")]
+            position_pcg_iterations: u64::MAX,
+            #[cfg(feature = "bench-internals")]
+            pre_velocity_anchor_error_m: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            pre_velocity_frame_error_rad: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            post_velocity_anchor_error_m: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            post_velocity_frame_error_rad: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            pre_joint_anchor_error_m: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            pre_joint_frame_error_rad: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            post_joint_anchor_error_m: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            post_joint_frame_error_rad: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            post_velocity_linear_residual_mps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            post_velocity_angular_residual_radps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            post_position_linear_residual_mps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            post_position_angular_residual_radps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            first_velocity_linear_residual_mps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            first_velocity_angular_residual_radps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            first_post_joint_anchor_error_m: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            first_post_joint_frame_error_rad: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            pre_joint_velocity_linear_residual_mps: f64::MAX,
+            #[cfg(feature = "bench-internals")]
+            pre_joint_velocity_angular_residual_radps: f64::MAX,
+            ..JointSolverMetrics::default()
         };
         metrics.accumulate(JointSolverMetrics {
             prepared_rows: 1,
@@ -167,6 +710,7 @@ mod metrics_tests {
             max_colors_per_island: 1,
             position_sweeps: 1,
             velocity_sweeps: 1,
+            ..JointSolverMetrics::default()
         });
         assert_eq!(metrics.prepared_rows, u64::MAX);
         assert_eq!(metrics.inverse_inertia_updates, u64::MAX);
@@ -180,6 +724,28 @@ mod metrics_tests {
         assert_eq!(metrics.max_colors_per_island, u32::MAX);
         assert_eq!(metrics.position_sweeps, u64::MAX);
         assert_eq!(metrics.velocity_sweeps, u64::MAX);
+        #[cfg(feature = "bench-internals")]
+        {
+            assert_eq!(metrics.position_pcg_iterations, u64::MAX);
+            assert_eq!(metrics.pre_velocity_anchor_error_m, f64::MAX);
+            assert_eq!(metrics.pre_velocity_frame_error_rad, f64::MAX);
+            assert_eq!(metrics.post_velocity_anchor_error_m, f64::MAX);
+            assert_eq!(metrics.post_velocity_frame_error_rad, f64::MAX);
+            assert_eq!(metrics.pre_joint_anchor_error_m, f64::MAX);
+            assert_eq!(metrics.pre_joint_frame_error_rad, f64::MAX);
+            assert_eq!(metrics.post_joint_anchor_error_m, f64::MAX);
+            assert_eq!(metrics.post_joint_frame_error_rad, f64::MAX);
+            assert_eq!(metrics.post_velocity_linear_residual_mps, f64::MAX);
+            assert_eq!(metrics.post_velocity_angular_residual_radps, f64::MAX);
+            assert_eq!(metrics.post_position_linear_residual_mps, f64::MAX);
+            assert_eq!(metrics.post_position_angular_residual_radps, f64::MAX);
+            assert_eq!(metrics.first_velocity_linear_residual_mps, f64::MAX);
+            assert_eq!(metrics.first_velocity_angular_residual_radps, f64::MAX);
+            assert_eq!(metrics.first_post_joint_anchor_error_m, f64::MAX);
+            assert_eq!(metrics.first_post_joint_frame_error_rad, f64::MAX);
+            assert_eq!(metrics.pre_joint_velocity_linear_residual_mps, f64::MAX);
+            assert_eq!(metrics.pre_joint_velocity_angular_residual_radps, f64::MAX);
+        }
     }
 
     #[test]
@@ -190,6 +756,22 @@ mod metrics_tests {
                 color_batches_processed: 2,
                 max_colors_per_island: 2,
                 position_sweeps: 3,
+                #[cfg(feature = "bench-internals")]
+                pre_velocity_anchor_error_m: 0.25,
+                #[cfg(feature = "bench-internals")]
+                pre_velocity_frame_error_rad: 0.1,
+                #[cfg(feature = "bench-internals")]
+                post_velocity_anchor_error_m: 0.25,
+                #[cfg(feature = "bench-internals")]
+                post_joint_frame_error_rad: 0.5,
+                #[cfg(feature = "bench-internals")]
+                post_position_linear_residual_mps: 0.4,
+                #[cfg(feature = "bench-internals")]
+                first_velocity_linear_residual_mps: 0.8,
+                #[cfg(feature = "bench-internals")]
+                first_post_joint_anchor_error_m: 0.6,
+                #[cfg(feature = "bench-internals")]
+                pre_joint_velocity_linear_residual_mps: 0.9,
                 ..JointSolverMetrics::default()
             },
             JointSolverMetrics {
@@ -197,6 +779,22 @@ mod metrics_tests {
                 color_batches_processed: 5,
                 max_colors_per_island: 3,
                 velocity_sweeps: 7,
+                #[cfg(feature = "bench-internals")]
+                pre_velocity_anchor_error_m: 0.75,
+                #[cfg(feature = "bench-internals")]
+                pre_velocity_frame_error_rad: 0.2,
+                #[cfg(feature = "bench-internals")]
+                post_velocity_anchor_error_m: 0.75,
+                #[cfg(feature = "bench-internals")]
+                post_joint_frame_error_rad: 0.2,
+                #[cfg(feature = "bench-internals")]
+                post_position_linear_residual_mps: 0.2,
+                #[cfg(feature = "bench-internals")]
+                first_velocity_linear_residual_mps: 0.4,
+                #[cfg(feature = "bench-internals")]
+                first_post_joint_anchor_error_m: 0.7,
+                #[cfg(feature = "bench-internals")]
+                pre_joint_velocity_linear_residual_mps: 0.3,
                 ..JointSolverMetrics::default()
             },
             JointSolverMetrics {
@@ -216,5 +814,16 @@ mod metrics_tests {
             reverse.accumulate(island);
         }
         assert_eq!(forward, reverse);
+        #[cfg(feature = "bench-internals")]
+        {
+            assert_eq!(forward.pre_velocity_anchor_error_m, 0.75);
+            assert_eq!(forward.pre_velocity_frame_error_rad, 0.2);
+            assert_eq!(forward.post_velocity_anchor_error_m, 0.75);
+            assert_eq!(forward.post_position_linear_residual_mps, 0.4);
+            assert_eq!(forward.post_joint_frame_error_rad, 0.5);
+            assert_eq!(forward.first_velocity_linear_residual_mps, 0.8);
+            assert_eq!(forward.first_post_joint_anchor_error_m, 0.7);
+            assert_eq!(forward.pre_joint_velocity_linear_residual_mps, 0.9);
+        }
     }
 }

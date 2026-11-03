@@ -210,7 +210,7 @@ fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
             },
         }];
         if warm_start {
-            cache.warm_start_solver(&mut manifolds, 1.0).unwrap();
+            cache.warm_start_solver(&mut manifolds, 1.0, 0.01).unwrap();
         }
         let initial_energy = kinetic_energy(bodies[1].body());
         SolverWorkspace::default()
@@ -232,7 +232,7 @@ fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
 }
 
 #[test]
-fn solve_with_joints_prepares_each_joint_before_one_sweep_in_phase_order() {
+fn solve_with_joints_reuses_scalar_velocity_rows_across_sweeps_in_phase_order() {
     let mut id_world = PhysicsWorld::new();
     let id_a = id_world
         .add_body(RigidBody::new_static(Transform::identity()))
@@ -287,28 +287,31 @@ fn solve_with_joints_prepares_each_joint_before_one_sweep_in_phase_order() {
             &[joint],
             config,
             JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy()),
+            None,
+            &crate::execution::SequentialExecutor,
+            1,
         )
         .unwrap();
 
     assert_eq!(
         joint_workspace.solver_calls(),
         [
-            JointSolverCall::JointRowsPrepared(0),
             JointSolverCall::VelocitySweep {
-                preparing_rows: true,
+                preparing_rows: false,
                 row_count: 6,
             },
-            JointSolverCall::JointRowsCommitted(0),
-            JointSolverCall::JointRowsPrepared(0),
             JointSolverCall::VelocitySweep {
-                preparing_rows: true,
+                preparing_rows: false,
                 row_count: 6,
             },
-            JointSolverCall::JointRowsCommitted(0),
             JointSolverCall::JointRowsPrepared(0),
             JointSolverCall::PositionSweep {
                 preparing_rows: true,
-                row_count: 6,
+                row_count: 3,
+            },
+            JointSolverCall::PositionSweep {
+                preparing_rows: true,
+                row_count: 3,
             },
             JointSolverCall::JointRowsCommitted(0),
         ]
@@ -379,6 +382,9 @@ fn adaptive_joint_iterations_stop_at_minimum_or_report_the_max_residual() {
                 &[joint],
                 config,
                 JointSolverStep::new(1.0 / 60.0, options),
+                None,
+                &crate::execution::SequentialExecutor,
+                1,
             )
             .unwrap();
         let velocity_sweeps = joint_workspace
@@ -477,6 +483,9 @@ fn adaptive_joint_policy_leaves_contact_iteration_budget_unchanged() {
             &[joint],
             config,
             JointSolverStep::new(1.0 / 60.0, options),
+            None,
+            &crate::execution::SequentialExecutor,
+            1,
         )
         .unwrap();
 

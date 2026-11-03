@@ -1,6 +1,6 @@
 use kapitsa_core::{
     collider::{Collider, CollisionFilter, CollisionMode},
-    collision::{QueryError, QueryFilter, Ray},
+    collision::{QueryError, QueryFilter, QueryScratch, Ray},
     rigid_body::RigidBody,
     shape::{Shape, Sphere},
     transform::Transform,
@@ -110,12 +110,14 @@ fn sweep_returns_first_impact_and_overlap_lists_all_matching_colliders() {
     assert_eq!(overlaps.len(), 1);
     assert_eq!(overlaps[0].collider, first);
 
+    let mut scratch = QueryScratch::default();
     for _ in 0..2 {
         assert_eq!(
             world
-                .raycast(
+                .raycast_with_scratch(
                     Ray::new(Vec3::ZERO, Vec3::X, 10.0).expect("ray"),
                     QueryFilter::default(),
+                    &mut scratch,
                 )
                 .expect("reused raycast")
                 .expect("reused ray hit")
@@ -124,11 +126,12 @@ fn sweep_returns_first_impact_and_overlap_lists_all_matching_colliders() {
         );
         assert_eq!(
             world
-                .sweep(
+                .sweep_with_scratch(
                     &shape,
                     transform(Vec3::new(-3.0, 0.0, 0.0)),
                     Vec3::new(10.0, 0.0, 0.0),
                     QueryFilter::default(),
+                    &mut scratch,
                 )
                 .expect("reused sweep")
                 .expect("reused sweep hit")
@@ -137,11 +140,12 @@ fn sweep_returns_first_impact_and_overlap_lists_all_matching_colliders() {
         );
         let mut reused_overlaps = Vec::new();
         world
-            .overlaps(
+            .overlaps_with_scratch(
                 &shape,
                 transform(Vec3::new(2.0, 0.0, 0.0)),
                 QueryFilter::default(),
                 &mut reused_overlaps,
+                &mut scratch,
             )
             .expect("reused overlaps");
         assert_eq!(reused_overlaps.len(), 1);

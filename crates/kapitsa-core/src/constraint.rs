@@ -5,6 +5,90 @@ use crate::{
     rigid_body::{BodyType, RigidBody, solver_mass::SolverMass},
 };
 
+/// A staged body shared by the contact and joint solvers.
+#[derive(Clone, Copy)]
+pub(crate) struct SolverBody {
+    pub(crate) body: RigidBody,
+}
+
+impl SolverBody {
+    pub(crate) fn state(&self) -> crate::rigid_body::BodyState {
+        *self.body.state()
+    }
+
+    pub(crate) fn from_prediction(
+        mut body: RigidBody,
+        state: crate::rigid_body::BodyState,
+    ) -> Self {
+        body.commit_integrated_state(state);
+        Self { body }
+    }
+
+    pub(crate) fn body(&self) -> &RigidBody {
+        &self.body
+    }
+
+    pub(crate) fn body_mut(&mut self) -> &mut RigidBody {
+        &mut self.body
+    }
+}
+
+/// Read access to solver bodies with mutation limited to dynamic bodies.
+///
+/// The collision color scheduler also implements this for a checked local pair
+/// so independent constraints can update their island bodies in place.
+pub(crate) trait SolverBodyAccess {
+    fn len(&self) -> usize;
+    fn get(&self, index: usize) -> Option<&SolverBody>;
+    fn get_dynamic_mut(&mut self, index: usize) -> Option<&mut SolverBody>;
+}
+
+impl SolverBodyAccess for [SolverBody] {
+    fn len(&self) -> usize {
+        <[SolverBody]>::len(self)
+    }
+
+    fn get(&self, index: usize) -> Option<&SolverBody> {
+        <[SolverBody]>::get(self, index)
+    }
+
+    fn get_dynamic_mut(&mut self, index: usize) -> Option<&mut SolverBody> {
+        let body = <[SolverBody]>::get_mut(self, index)?;
+        (body.body().physics().body_type() == BodyType::Dynamic).then_some(body)
+    }
+}
+
+impl<const N: usize> SolverBodyAccess for [SolverBody; N] {
+    fn len(&self) -> usize {
+        N
+    }
+
+    fn get(&self, index: usize) -> Option<&SolverBody> {
+        <[SolverBody]>::get(self, index)
+    }
+
+    fn get_dynamic_mut(&mut self, index: usize) -> Option<&mut SolverBody> {
+        let body = <[SolverBody]>::get_mut(self, index)?;
+        (body.body().physics().body_type() == BodyType::Dynamic).then_some(body)
+    }
+}
+
+/// Builds an orthonormal tangent basis for a nonzero normal.
+pub(crate) fn tangent_basis(normal: Vec3) -> Option<(Vec3, Vec3)> {
+    let axis = if normal.x.abs() <= normal.y.abs() && normal.x.abs() <= normal.z.abs() {
+        Vec3::X
+    } else if normal.y.abs() <= normal.z.abs() {
+        Vec3::Y
+    } else {
+        Vec3::Z
+    };
+    let tangent_a = normal.checked_cross(axis).and_then(Vec3::try_normalize)?;
+    let tangent_b = normal
+        .checked_cross(tangent_a)
+        .and_then(Vec3::try_normalize)?;
+    Some((tangent_a, tangent_b))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConstraintError {
     InvalidMass,
@@ -171,105 +255,47 @@ pub(crate) fn relative_velocity_at(
         .ok_or(ConstraintError::ArithmeticOverflow)
 }
 
-pub(crate) fn apply_point_impulse_pair(
-    body_a: &mut RigidBody,
-    body_b: &mut RigidBody,
-    point_a: Vec3,
-    point_b: Vec3,
-    impulse_on_b: Vec3,
+pub(crate) fn apply_point_impulse(
+    body: &mut RigidBody,
+    point: Vec3,
+    impulse: Vec3,
 ) -> Result<(), ConstraintError> {
-    if body_a.physics().body_type() == BodyType::Dynamic {
-        body_a
-            .apply_impulse_at_point(-impulse_on_b, point_a)
-            .map_err(map_body_error)?;
-    }
-    if body_b.physics().body_type() == BodyType::Dynamic {
-        body_b
-            .apply_impulse_at_point(impulse_on_b, point_b)
-            .map_err(map_body_error)?;
-    }
-    Ok(())
+    body.apply_impulse_at_point(impulse, point)
+        .map_err(map_body_error)
 }
 
-pub(crate) fn apply_point_position_impulse_pair(
-    body_a: &mut RigidBody,
-    body_b: &mut RigidBody,
-    point_a: Vec3,
-    point_b: Vec3,
-    impulse_on_b: Vec3,
+pub(crate) fn apply_point_position_impulse(
+    body: &mut RigidBody,
+    point: Vec3,
+    impulse: Vec3,
 ) -> Result<(), ConstraintError> {
-    if body_a.physics().body_type() == BodyType::Dynamic {
-        body_a
-            .apply_position_impulse(-impulse_on_b, point_a)
-            .map_err(map_body_error)?;
-    }
-    if body_b.physics().body_type() == BodyType::Dynamic {
-        body_b
-            .apply_position_impulse(impulse_on_b, point_b)
-            .map_err(map_body_error)?;
-    }
-    Ok(())
+    body.apply_position_impulse(impulse, point)
+        .map_err(map_body_error)
 }
 
-pub(crate) fn apply_generalized_impulse_pair_cached(
-    body_a: &mut RigidBody,
-    body_b: &mut RigidBody,
-    masses: [SolverMass; 2],
-    impulses: [Jacobian; 2],
+pub(crate) fn apply_generalized_impulse_cached(
+    body: &mut RigidBody,
+    mass: SolverMass,
+    impulse: Jacobian,
 ) -> Result<(), ConstraintError> {
-    if body_a.physics().body_type() == BodyType::Dynamic {
-        body_a
-            .apply_constraint_impulse_cached(impulses[0].linear, impulses[0].angular, masses[0])
-            .map_err(map_body_error)?;
-    }
-    if body_b.physics().body_type() == BodyType::Dynamic {
-        body_b
-            .apply_constraint_impulse_cached(impulses[1].linear, impulses[1].angular, masses[1])
-            .map_err(map_body_error)?;
-    }
-    Ok(())
+    body.apply_constraint_impulse_cached(impulse.linear, impulse.angular, mass)
+        .map_err(map_body_error)
 }
 
-pub(crate) fn apply_generalized_impulse_pair(
-    body_a: &mut RigidBody,
-    body_b: &mut RigidBody,
-    linear_a: Vec3,
-    angular_a: Vec3,
-    linear_b: Vec3,
-    angular_b: Vec3,
+pub(crate) fn apply_generalized_impulse(
+    body: &mut RigidBody,
+    impulse: Jacobian,
 ) -> Result<(), ConstraintError> {
-    if body_a.physics().body_type() == BodyType::Dynamic {
-        body_a
-            .apply_constraint_impulse(linear_a, angular_a)
-            .map_err(map_body_error)?;
-    }
-    if body_b.physics().body_type() == BodyType::Dynamic {
-        body_b
-            .apply_constraint_impulse(linear_b, angular_b)
-            .map_err(map_body_error)?;
-    }
-    Ok(())
+    body.apply_constraint_impulse(impulse.linear, impulse.angular)
+        .map_err(map_body_error)
 }
 
-pub(crate) fn apply_generalized_position_impulse_pair(
-    body_a: &mut RigidBody,
-    body_b: &mut RigidBody,
-    linear_a: Vec3,
-    angular_a: Vec3,
-    linear_b: Vec3,
-    angular_b: Vec3,
+pub(crate) fn apply_generalized_position_impulse(
+    body: &mut RigidBody,
+    impulse: Jacobian,
 ) -> Result<(), ConstraintError> {
-    if body_a.physics().body_type() == BodyType::Dynamic {
-        body_a
-            .apply_constraint_position_impulse(linear_a, angular_a)
-            .map_err(map_body_error)?;
-    }
-    if body_b.physics().body_type() == BodyType::Dynamic {
-        body_b
-            .apply_constraint_position_impulse(linear_b, angular_b)
-            .map_err(map_body_error)?;
-    }
-    Ok(())
+    body.apply_constraint_position_impulse(impulse.linear, impulse.angular)
+        .map_err(map_body_error)
 }
 
 fn map_body_error(error: crate::rigid_body::BodyError) -> ConstraintError {

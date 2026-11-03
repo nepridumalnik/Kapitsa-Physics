@@ -7,6 +7,12 @@ use crate::rigid_body::solver_mass::SolverMassSlot;
 use crate::rigid_body::{BodyError, BodyType};
 use kapitsa_math::Vec3;
 
+type FixedRowBlocksMut<'a> = (
+    &'a mut [ConstraintRow; 3],
+    &'a mut [ConstraintRow; 3],
+    &'a mut [SolverMassSlot],
+);
+
 #[derive(Clone, Copy, Debug)]
 enum ReactionSide {
     A,
@@ -42,6 +48,10 @@ pub(crate) struct JointWorkspace {
     break_events: Vec<JointBreakEvent>,
     #[cfg(feature = "bench-internals")]
     metrics: super::diagnostics::JointSolverMetrics,
+    #[cfg(feature = "bench-internals")]
+    geometry_residual: super::diagnostics::JointGeometryResidual,
+    #[cfg(feature = "bench-internals")]
+    velocity_pcg_scratch: super::solver::VelocityPcgScratch,
     residual: super::solver::JointResidual,
     #[cfg(test)]
     solver_calls: Vec<JointSolverCall>,
@@ -83,6 +93,13 @@ impl JointWorkspace {
             break_events: Vec::new(),
             #[cfg(feature = "bench-internals")]
             metrics: super::diagnostics::JointSolverMetrics::ZERO,
+            #[cfg(feature = "bench-internals")]
+            geometry_residual: super::diagnostics::JointGeometryResidual {
+                anchor_error_m: 0.0,
+                frame_error_rad: 0.0,
+            },
+            #[cfg(feature = "bench-internals")]
+            velocity_pcg_scratch: super::solver::VelocityPcgScratch::new(),
             residual: super::solver::JointResidual::ZERO,
             #[cfg(test)]
             solver_calls: Vec::new(),
@@ -103,6 +120,8 @@ impl JointWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
+            self.geometry_residual = super::diagnostics::JointGeometryResidual::default();
+            self.velocity_pcg_scratch.begin_step();
         }
         self.residual = super::solver::JointResidual::ZERO;
         for row in &mut self.rows {
@@ -131,6 +150,7 @@ impl JointWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             self.metrics = super::diagnostics::JointSolverMetrics::ZERO;
+            self.geometry_residual = super::diagnostics::JointGeometryResidual::default();
         }
         self.residual = super::solver::JointResidual::ZERO;
     }
@@ -243,6 +263,64 @@ impl JointWorkspace {
         (rows, &mut self.solver_mass_slots)
     }
 
+    pub(crate) fn preparing_fixed_row_blocks_mut(
+        &mut self,
+    ) -> Result<FixedRowBlocksMut<'_>, CollisionError> {
+        let (rows, slots) = (&mut self.preparing_rows, &mut self.solver_mass_slots);
+        let rows: &mut [ConstraintRow; 6] = rows
+            .as_mut_slice()
+            .try_into()
+            .map_err(|_| CollisionError::InvalidContact)?;
+        let (anchor_rows, frame_rows) = rows.split_at_mut(3);
+        let anchor_rows = anchor_rows
+            .try_into()
+            .map_err(|_| CollisionError::InvalidContact)?;
+        let frame_rows = frame_rows
+            .try_into()
+            .map_err(|_| CollisionError::InvalidContact)?;
+        Ok((anchor_rows, frame_rows, slots))
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn velocity_pcg_rows_and_scratch_mut(
+        &mut self,
+    ) -> (
+        &mut [ConstraintRow],
+        &[usize],
+        &mut super::solver::VelocityPcgScratch,
+    ) {
+        (
+            &mut self.rows,
+            &self.row_joint_indices,
+            &mut self.velocity_pcg_scratch,
+        )
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn position_pcg_rows_slots_and_scratch_mut(
+        &mut self,
+    ) -> (
+        &mut [ConstraintRow],
+        &mut [SolverMassSlot],
+        &mut super::solver::VelocityPcgScratch,
+    ) {
+        (
+            &mut self.rows,
+            &mut self.solver_mass_slots,
+            &mut self.velocity_pcg_scratch,
+        )
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn velocity_pcg_rows_prepared(&self) -> bool {
+        self.velocity_pcg_scratch.rows_prepared
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn mark_velocity_pcg_rows_prepared(&mut self) {
+        self.velocity_pcg_scratch.rows_prepared = true;
+    }
+
     pub(crate) fn stage_impulses(
         &self,
         cache: &mut JointImpulseCache,
@@ -274,7 +352,6 @@ impl JointWorkspace {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn solver_rows_len(&self, preparing_rows: bool) -> usize {
         if preparing_rows {
             self.preparing_rows.len()
@@ -366,6 +443,228 @@ impl JointWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_color_batches(&mut self, batches: usize) {
+        self.metrics.color_batches_processed = self
+            .metrics
+            .color_batches_processed
+            .saturating_add(batches as u64);
+    }
+
+    pub(crate) fn merge_colored_joint_from(
+        &mut self,
+        source: &Self,
+        source_joint_index: usize,
+        destination_joint_index: usize,
+        joint_id: crate::world::JointId,
+        body_indices: [usize; 2],
+    ) -> Result<(), CollisionError> {
+        let start = source
+            .row_joint_indices
+            .partition_point(|&owner| owner < source_joint_index);
+        let end = source
+            .row_joint_indices
+            .partition_point(|&owner| owner <= source_joint_index);
+        let rows = source
+            .rows
+            .get(start..end)
+            .ok_or(CollisionError::InvalidContact)?;
+        #[cfg(feature = "bench-internals")]
+        let prepared_rows_before_merge = self.metrics.prepared_rows;
+        self.begin_joint_prepare(destination_joint_index, joint_id);
+        self.preparing_rows
+            .try_reserve(rows.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for row in rows.iter().copied() {
+            let mut row = row;
+            row.body_a = body_indices[0];
+            row.body_b = body_indices[1];
+            self.preparing_rows.push(row);
+        }
+        self.finish_joint_prepare()?;
+        #[cfg(feature = "bench-internals")]
+        {
+            self.metrics.prepared_rows = prepared_rows_before_merge;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn accumulate_colored_metrics_from(&mut self, source: &Self) {
+        #[cfg(feature = "bench-internals")]
+        self.metrics.accumulate(source.metrics);
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = source;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_velocity_pcg_result(&mut self, result: super::solver::VelocityPcgResult) {
+        self.metrics.velocity_pcg_iterations = self
+            .metrics
+            .velocity_pcg_iterations
+            .saturating_add(result.iterations as u64);
+        if result.converged {
+            self.metrics.velocity_pcg_converged_calls =
+                self.metrics.velocity_pcg_converged_calls.saturating_add(1);
+        } else {
+            self.metrics.velocity_pcg_iteration_limit_calls = self
+                .metrics
+                .velocity_pcg_iteration_limit_calls
+                .saturating_add(1);
+        }
+        self.metrics.velocity_pcg_linear_residual_mps = self
+            .metrics
+            .velocity_pcg_linear_residual_mps
+            .max(result.linear_residual_mps);
+        self.metrics.velocity_pcg_angular_residual_radps = self
+            .metrics
+            .velocity_pcg_angular_residual_radps
+            .max(result.angular_residual_radps);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_constraint_coloring(
+        &mut self,
+        elapsed: std::time::Duration,
+        constraint_count: usize,
+        color_count: usize,
+        rebuilt: bool,
+    ) {
+        self.metrics.constraint_coloring_prepare_time += elapsed;
+        self.metrics.constraint_coloring_constraints = self
+            .metrics
+            .constraint_coloring_constraints
+            .saturating_add(constraint_count as u64);
+        self.metrics.max_colors_per_island = self
+            .metrics
+            .max_colors_per_island
+            .max(color_count.min(u32::MAX as usize) as u32);
+        if rebuilt {
+            self.metrics.constraint_coloring_rebuilds =
+                self.metrics.constraint_coloring_rebuilds.saturating_add(1);
+        } else {
+            self.metrics.constraint_coloring_cache_hits = self
+                .metrics
+                .constraint_coloring_cache_hits
+                .saturating_add(1);
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_position_pcg_result(&mut self, result: super::solver::PositionPcgResult) {
+        self.metrics.position_pcg_iterations = self
+            .metrics
+            .position_pcg_iterations
+            .saturating_add(result.iterations as u64);
+        if result.converged {
+            self.metrics.position_pcg_converged_calls =
+                self.metrics.position_pcg_converged_calls.saturating_add(1);
+        } else {
+            self.metrics.position_pcg_iteration_limit_calls = self
+                .metrics
+                .position_pcg_iteration_limit_calls
+                .saturating_add(1);
+        }
+        self.metrics.position_pcg_linear_residual_m = self
+            .metrics
+            .position_pcg_linear_residual_m
+            .max(result.linear_residual_m);
+        self.metrics.position_pcg_angular_residual_rad = self
+            .metrics
+            .position_pcg_angular_residual_rad
+            .max(result.angular_residual_rad);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_velocity_pcg_timings(
+        &mut self,
+        system_prepare: std::time::Duration,
+        matrix_vector: std::time::Duration,
+        preconditioner: std::time::Duration,
+        reduction: std::time::Duration,
+    ) {
+        self.metrics.velocity_pcg_system_prepare_time += system_prepare;
+        self.metrics.velocity_pcg_matrix_vector_time += matrix_vector;
+        self.metrics.velocity_pcg_preconditioner_time += preconditioner;
+        self.metrics.velocity_pcg_reduction_time += reduction;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_position_pcg_timings(
+        &mut self,
+        system_prepare: std::time::Duration,
+        matrix_vector: std::time::Duration,
+        preconditioner: std::time::Duration,
+        reduction: std::time::Duration,
+    ) {
+        self.metrics.position_pcg_system_prepare_time += system_prepare;
+        self.metrics.position_pcg_matrix_vector_time += matrix_vector;
+        self.metrics.position_pcg_preconditioner_time += preconditioner;
+        self.metrics.position_pcg_reduction_time += reduction;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_energy(
+        &mut self,
+        stage: super::diagnostics::EnergyStage,
+        energy: super::diagnostics::EnergyComponents,
+    ) {
+        let target = match stage {
+            super::diagnostics::EnergyStage::BeforeVelocityPcg => {
+                &mut self.metrics.energy_before_velocity_pcg
+            }
+            super::diagnostics::EnergyStage::AfterVelocityPcg => {
+                &mut self.metrics.energy_after_velocity_pcg
+            }
+            super::diagnostics::EnergyStage::VelocityPcgDelta => {
+                &mut self.metrics.velocity_pcg_energy_delta
+            }
+            super::diagnostics::EnergyStage::AfterVelocitySolver => {
+                &mut self.metrics.energy_after_velocity_solver
+            }
+            super::diagnostics::EnergyStage::BeforePositionPcg => {
+                &mut self.metrics.energy_before_position_pcg
+            }
+            super::diagnostics::EnergyStage::AfterPositionPcg => {
+                &mut self.metrics.energy_after_position_pcg
+            }
+            super::diagnostics::EnergyStage::PositionPcgDelta => {
+                &mut self.metrics.position_pcg_energy_delta
+            }
+            super::diagnostics::EnergyStage::AfterPositionSolver => {
+                &mut self.metrics.energy_after_position_solver
+            }
+        };
+        if matches!(
+            stage,
+            super::diagnostics::EnergyStage::VelocityPcgDelta
+                | super::diagnostics::EnergyStage::PositionPcgDelta
+        ) {
+            target.add_assign(energy);
+        } else {
+            *target = energy;
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_energy_delta(
+        &mut self,
+        stage: super::diagnostics::EnergyStage,
+        before: super::diagnostics::EnergyComponents,
+        after: super::diagnostics::EnergyComponents,
+    ) {
+        self.record_energy(stage, after.delta(before));
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_velocity_projection_work(
+        &mut self,
+        impulse_work_j: f64,
+        quadratic_work_j: f64,
+    ) {
+        self.metrics.velocity_projection_impulse_work_j += impulse_work_j;
+        self.metrics.velocity_projection_quadratic_work_j += quadratic_work_j;
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_scalar_rows_solved(&mut self, rows: usize) {
         self.metrics.scalar_rows_solved =
             self.metrics.scalar_rows_solved.saturating_add(rows as u64);
@@ -400,6 +699,16 @@ impl JointWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_incremental_rows_prepared(&mut self, count: usize) {
+        self.metrics.prepared_rows = self.metrics.prepared_rows.saturating_add(count as u64);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_joint_row_preparation_time(&mut self, elapsed: std::time::Duration) {
+        self.metrics.joint_row_preparation_time += elapsed;
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn record_velocity_warm_starts(&mut self, count: usize) {
         self.metrics.velocity_warm_starts = self
             .metrics
@@ -410,6 +719,74 @@ impl JointWorkspace {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn metrics(&self) -> super::diagnostics::JointSolverMetrics {
         self.metrics
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn row_joint_indices(&self) -> &[usize] {
+        &self.row_joint_indices
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_geometry_residual(
+        &mut self,
+        residual: super::diagnostics::JointGeometryResidual,
+    ) {
+        self.geometry_residual = residual;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_pre_velocity_geometry(&mut self) {
+        self.metrics.pre_velocity_anchor_error_m = self.geometry_residual.anchor_error_m;
+        self.metrics.pre_velocity_frame_error_rad = self.geometry_residual.frame_error_rad;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_post_velocity_geometry(&mut self) {
+        self.metrics.post_velocity_anchor_error_m = self.geometry_residual.anchor_error_m;
+        self.metrics.post_velocity_frame_error_rad = self.geometry_residual.frame_error_rad;
+        self.metrics.post_velocity_linear_residual_mps = self.residual.max_velocity_mps;
+        self.metrics.post_velocity_angular_residual_radps =
+            self.residual.max_angular_velocity_radps;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_first_velocity_residual(&mut self) {
+        self.metrics.first_velocity_linear_residual_mps = self.residual.max_velocity_mps;
+        self.metrics.first_velocity_angular_residual_radps =
+            self.residual.max_angular_velocity_radps;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_pre_joint_velocity_residual(&mut self) {
+        self.metrics.pre_joint_velocity_linear_residual_mps = self.residual.max_velocity_mps;
+        self.metrics.pre_joint_velocity_angular_residual_radps =
+            self.residual.max_angular_velocity_radps;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_initial_velocity_residual(&mut self) {
+        self.metrics.initial_velocity_linear_residual_mps = self.residual.max_velocity_mps;
+        self.metrics.initial_velocity_angular_residual_radps =
+            self.residual.max_angular_velocity_radps;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_pre_joint_geometry(&mut self) {
+        self.metrics.pre_joint_anchor_error_m = self.geometry_residual.anchor_error_m;
+        self.metrics.pre_joint_frame_error_rad = self.geometry_residual.frame_error_rad;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_post_joint_geometry(&mut self, first_sweep: bool) {
+        self.metrics.post_joint_anchor_error_m = self.geometry_residual.anchor_error_m;
+        self.metrics.post_joint_frame_error_rad = self.geometry_residual.frame_error_rad;
+        self.metrics.post_position_linear_residual_mps = self.residual.max_velocity_mps;
+        self.metrics.post_position_angular_residual_radps =
+            self.residual.max_angular_velocity_radps;
+        if first_sweep {
+            self.metrics.first_post_joint_anchor_error_m = self.geometry_residual.anchor_error_m;
+            self.metrics.first_post_joint_frame_error_rad = self.geometry_residual.frame_error_rad;
+        }
     }
 
     #[cfg(feature = "bench-internals")]
@@ -451,7 +828,7 @@ impl JointWorkspace {
     pub(crate) fn collect_break_events(
         &mut self,
         joints: &[JointConstraint],
-        bodies: &[crate::collision::solver::SolverBody],
+        bodies: &[crate::constraint::SolverBody],
         dt: f64,
         mode: ReactionMode,
     ) -> Result<(), CollisionError> {
@@ -556,7 +933,7 @@ impl JointWorkspace {
 
 fn reaction_for_joint(
     joint: JointConstraint,
-    bodies: &[crate::collision::solver::SolverBody],
+    bodies: &[crate::constraint::SolverBody],
 ) -> Result<Option<JointReaction>, CollisionError> {
     let body_a = bodies
         .get(joint.body_a)
@@ -619,7 +996,7 @@ mod tests {
     use super::*;
     use crate::joint::row::RowDimension;
     use crate::{
-        collision::solver::SolverBody,
+        constraint::SolverBody,
         joint::{FixedJoint, Joint, JointCommon, JointFrame},
         mass::MassProperties,
         rigid_body::RigidBody,
@@ -670,6 +1047,7 @@ mod tests {
             max_impulse: f64::INFINITY,
             accumulated_multiplier: 0.0,
             accumulated_impulse: 0.0,
+            cached_velocity_effective_mass: 0.0,
         }
     }
 
@@ -730,6 +1108,7 @@ mod tests {
             max_impulse: f64::INFINITY,
             accumulated_multiplier: 1.0e12,
             accumulated_impulse: impulse,
+            cached_velocity_effective_mass: 0.0,
         }
     }
 
@@ -929,6 +1308,7 @@ mod tests {
                     max_impulse: f64::INFINITY,
                     accumulated_multiplier: 0.0,
                     accumulated_impulse: 0.0,
+                    cached_velocity_effective_mass: 0.0,
                 });
             }
             workspace.finish_prepare();

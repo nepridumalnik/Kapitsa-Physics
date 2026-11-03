@@ -5,16 +5,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+use kapitsa_core::execution::SequentialExecutor;
 use kapitsa_core::world::{BodyId, PhysicsStepMetrics, PhysicsWorld};
 use kapitsa_math::Vec3;
 
 #[path = "../src/runtime/modular_rocket_fixture.rs"]
 mod modular_rocket_fixture;
-#[path = "../../kapitsa-core/benches/support/scoped_executor.rs"]
-mod scoped_executor;
+#[path = "../../kapitsa-core/benches/support/rayon_executor.rs"]
+mod rayon_executor;
 
 use modular_rocket_fixture::ModularRocket;
-use scoped_executor::ScopedThreadExecutor;
+use rayon_executor::RayonExecutor;
 
 const SIZES: [usize; 4] = [100, 200, 500, 1000];
 const WORKERS: [usize; 4] = [1, 2, 4, 8];
@@ -72,6 +73,28 @@ struct EventSample {
     step: TimedSample,
 }
 
+enum BenchExecutor {
+    NoPool,
+    Rayon(RayonExecutor),
+}
+
+impl BenchExecutor {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::NoPool => "no_pool",
+            Self::Rayon(_) => "rayon",
+        }
+    }
+
+    fn step(&self, world: &mut PhysicsWorld, workers: usize) -> Result<(), Box<dyn Error>> {
+        match self {
+            Self::NoPool => world.step_with_executor(DT, &SequentialExecutor, 1)?,
+            Self::Rayon(executor) => world.step_with_executor(DT, executor, workers)?,
+        }
+        Ok(())
+    }
+}
+
 fn record_allocation(pointer: *mut u8, requested_bytes: usize) {
     if !pointer.is_null() && TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
         ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -94,57 +117,118 @@ fn end_allocation_sample() -> (usize, usize) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let parts_filter = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--parts="))
+        .map(str::parse::<usize>)
+        .transpose()?;
+    let workers_filter = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--workers="))
+        .map(str::parse::<usize>)
+        .transpose()?;
+    let no_pool = args.iter().any(|arg| arg == "--no-pool");
+    if parts_filter.is_some_and(|parts| !SIZES.contains(&parts)) {
+        return Err(format!("parts must be one of {SIZES:?}").into());
+    }
+    if workers_filter.is_some_and(|workers| !WORKERS.contains(&workers)) {
+        return Err(format!("workers must be one of {WORKERS:?}").into());
+    }
+    if no_pool && workers_filter.is_some_and(|workers| workers != 1) {
+        return Err("--no-pool can only be combined with --workers=1".into());
+    }
+    let mass_cache = !args.iter().any(|arg| arg == "--no-mass-cache");
+    let block3 = args.iter().any(|arg| arg == "--block3");
+    let steady_only = args.iter().any(|arg| arg == "--steady-only");
     println!(
-        "Large modular rocket Release benchmark: dt={DT:.9}s warmups={WARMUPS} steady_samples={SAMPLES} event_samples={EVENT_SAMPLES} workers={WORKERS:?}"
+        "Large modular rocket Release benchmark: dt={DT:.9}s warmups={WARMUPS} steady_samples={SAMPLES} event_samples={EVENT_SAMPLES} mass_cache={mass_cache} projection={} executor={} steady_only={steady_only}",
+        if block3 { "fixed_block3" } else { "scalar" },
+        if no_pool { "no_pool" } else { "rayon" }
     );
-    for parts in SIZES {
-        for workers in WORKERS {
-            report_steady(parts, workers)?;
-            report_start(parts, workers)?;
-            report_separation(parts, workers)?;
+    let worker_counts: &[usize] = if no_pool { &[1] } else { &WORKERS };
+    for &workers in worker_counts
+        .iter()
+        .filter(|workers| workers_filter.is_none_or(|selected| selected == **workers))
+    {
+        let executor = if no_pool {
+            BenchExecutor::NoPool
+        } else {
+            BenchExecutor::Rayon(RayonExecutor::new(workers)?)
+        };
+        for parts in SIZES
+            .into_iter()
+            .filter(|parts| parts_filter.is_none_or(|selected| selected == *parts))
+        {
+            report_steady(parts, workers, &executor, mass_cache, block3)?;
+            if !steady_only {
+                report_start(parts, workers, &executor, mass_cache, block3)?;
+                report_separation(parts, workers, &executor, mass_cache, block3)?;
+            }
         }
     }
     Ok(())
 }
 
-fn report_steady(parts: usize, workers: usize) -> Result<(), Box<dyn Error>> {
+fn report_steady(
+    parts: usize,
+    workers: usize,
+    executor: &BenchExecutor,
+    mass_cache: bool,
+    block3: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut rocket = ModularRocket::new(parts);
+    configure_solver(&mut rocket, mass_cache, block3);
     validate_fixture(&rocket, parts)?;
-    warm(&mut rocket.world, workers, WARMUPS)?;
+    warm(&mut rocket.world, executor, workers, WARMUPS)?;
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
-        samples.push(measure_step(&mut rocket.world, workers)?);
+        samples.push(measure_step(&mut rocket.world, executor, workers)?);
     }
     validate_world(&rocket.world)?;
-    report_samples("steady", parts, workers, &samples);
+    report_samples("steady", parts, workers, executor.name(), &samples);
     Ok(())
 }
 
-fn report_start(parts: usize, workers: usize) -> Result<(), Box<dyn Error>> {
+fn report_start(
+    parts: usize,
+    workers: usize,
+    executor: &BenchExecutor,
+    mass_cache: bool,
+    block3: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut samples = Vec::with_capacity(EVENT_SAMPLES);
     for _ in 0..EVENT_SAMPLES {
         let mut rocket = ModularRocket::new(parts);
+        configure_solver(&mut rocket, mass_cache, block3);
         validate_fixture(&rocket, parts)?;
-        warm(&mut rocket.world, workers, WARMUPS)?;
+        warm(&mut rocket.world, executor, workers, WARMUPS)?;
         let started = Instant::now();
         rocket
             .world
             .set_force_source_enabled(rocket.lower_engine, true)?;
         let action = started.elapsed();
-        let step = measure_step(&mut rocket.world, workers)?;
+        let step = measure_step(&mut rocket.world, executor, workers)?;
         validate_world(&rocket.world)?;
         samples.push(EventSample { action, step });
     }
-    report_events("start", parts, workers, &samples);
+    report_events("start", parts, workers, executor.name(), &samples);
     Ok(())
 }
 
-fn report_separation(parts: usize, workers: usize) -> Result<(), Box<dyn Error>> {
+fn report_separation(
+    parts: usize,
+    workers: usize,
+    executor: &BenchExecutor,
+    mass_cache: bool,
+    block3: bool,
+) -> Result<(), Box<dyn Error>> {
     let mut samples = Vec::with_capacity(EVENT_SAMPLES);
     for _ in 0..EVENT_SAMPLES {
         let mut rocket = ModularRocket::new(parts);
+        configure_solver(&mut rocket, mass_cache, block3);
         validate_fixture(&rocket, parts)?;
-        warm(&mut rocket.world, workers, WARMUPS)?;
+        warm(&mut rocket.world, executor, workers, WARMUPS)?;
         let started = Instant::now();
         rocket
             .world
@@ -159,7 +243,7 @@ fn report_separation(parts: usize, workers: usize) -> Result<(), Box<dyn Error>>
         apply_stage_impulse(&mut rocket.world, &rocket.lower_parts, -SEPARATION_IMPULSE)?;
         apply_stage_impulse(&mut rocket.world, &rocket.upper_parts, SEPARATION_IMPULSE)?;
         let action = started.elapsed();
-        let step = measure_step(&mut rocket.world, workers)?;
+        let step = measure_step(&mut rocket.world, executor, workers)?;
         if rocket.world.joint_count() != parts - 2 {
             return Err(
                 format!("separation left an unexpected joint count for {parts} parts").into(),
@@ -168,21 +252,35 @@ fn report_separation(parts: usize, workers: usize) -> Result<(), Box<dyn Error>>
         validate_world(&rocket.world)?;
         samples.push(EventSample { action, step });
     }
-    report_events("separation", parts, workers, &samples);
+    report_events("separation", parts, workers, executor.name(), &samples);
     Ok(())
 }
 
-fn warm(world: &mut PhysicsWorld, workers: usize, count: usize) -> Result<(), Box<dyn Error>> {
+fn configure_solver(rocket: &mut ModularRocket, mass_cache: bool, block3: bool) {
+    rocket.world.set_joint_mass_cache_for_bench(mass_cache);
+    rocket.world.set_joint_projection_for_bench(block3);
+}
+
+fn warm(
+    world: &mut PhysicsWorld,
+    executor: &BenchExecutor,
+    workers: usize,
+    count: usize,
+) -> Result<(), Box<dyn Error>> {
     for _ in 0..count {
-        world.step_with_executor(DT, &ScopedThreadExecutor, workers)?;
+        executor.step(world, workers)?;
     }
     Ok(())
 }
 
-fn measure_step(world: &mut PhysicsWorld, workers: usize) -> Result<TimedSample, Box<dyn Error>> {
+fn measure_step(
+    world: &mut PhysicsWorld,
+    executor: &BenchExecutor,
+    workers: usize,
+) -> Result<TimedSample, Box<dyn Error>> {
     begin_allocation_sample();
     let started = Instant::now();
-    let result = world.step_with_executor(DT, &ScopedThreadExecutor, workers);
+    let result = executor.step(world, workers);
     let elapsed = started.elapsed();
     let (allocations, requested_bytes) = end_allocation_sample();
     result?;
@@ -249,7 +347,13 @@ fn validate_fixture(rocket: &ModularRocket, expected_parts: usize) -> Result<(),
     Ok(())
 }
 
-fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSample]) {
+fn report_samples(
+    phase: &str,
+    parts: usize,
+    workers: usize,
+    executor: &str,
+    samples: &[TimedSample],
+) {
     let mut ordered = samples.to_vec();
     ordered.sort_unstable_by_key(|sample| sample.elapsed);
     let min = ordered[0];
@@ -265,7 +369,7 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
         .sum::<f64>()
         / samples.len() as f64;
     println!(
-        "phase={phase} parts={parts} joints={} workers={workers} step_ms_min/p50/p95/p99/max={:.4}/{:.4}/{:.4}/{:.4}/{:.4} sim_x={:.2} allocs_p50/p95={}/{} bytes_p50/p95={}/{} retained_kib={} peak_scratch_kib={} growth_bytes={} joint_prepare_us={:.2} solver_prepare_us={:.2} solver_iterations_us={:.2} joint_rows_prepared={} scalar_rows_solved={} inverse_inertia_updates={} block_rows_solved={} warm_starts={} color_batches={} max_colors_per_island={} joint_sweeps_pos/vel={}/{} collision_us={:.2} island_build_us={:.2} islands={} largest_island_bodies/joints/contacts={}/{}/{} candidates/contacts={}/{}",
+        "phase={phase} parts={parts} joints={} executor={executor} workers={workers} step_ms_min/p50/p95/p99/max={:.4}/{:.4}/{:.4}/{:.4}/{:.4} sim_x={:.2} allocs_p50/p95={}/{} bytes_p50/p95={}/{} retained_kib={} peak_scratch_kib={} growth_bytes={} joint_gather_us_p50/p95={:.2}/{:.2} joint_row_prepare_us_p50/p95={:.2}/{:.2} solver_prepare_us_p50/p95={:.2}/{:.2} solver_iterations_ms_p50/p95={:.4}/{:.4} joint_rows_prepared={} scalar_rows_solved={} inverse_inertia_updates={} block_rows_solved={} warm_starts={} color_batches={} max_colors_per_island={} joint_sweeps_pos/vel={}/{} collision_us={:.2} island_build_us={:.2} islands={} largest_island_bodies/joints/contacts={}/{}/{} candidates/contacts={}/{}",
         parts - 1,
         milliseconds(min.elapsed),
         milliseconds(p50.elapsed),
@@ -280,9 +384,30 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
         metrics.retained_scratch_bytes / 1024,
         metrics.peak_scratch_bytes / 1024,
         metrics.logical_capacity_growth_bytes,
-        micros(metrics.joint_constraint_prepare),
-        micros(metrics.solver_prepare),
-        micros(metrics.solver_iterations),
+        micros(sample_duration_quantile(samples, 0.50, |sample| {
+            sample.metrics.collision.joint_constraint_prepare
+        })),
+        micros(sample_duration_quantile(samples, 0.95, |sample| {
+            sample.metrics.collision.joint_constraint_prepare
+        })),
+        micros(sample_duration_quantile(samples, 0.50, |sample| {
+            sample.metrics.joints.joint_row_preparation_time
+        })),
+        micros(sample_duration_quantile(samples, 0.95, |sample| {
+            sample.metrics.joints.joint_row_preparation_time
+        })),
+        micros(sample_duration_quantile(samples, 0.50, |sample| {
+            sample.metrics.collision.solver_prepare
+        })),
+        micros(sample_duration_quantile(samples, 0.95, |sample| {
+            sample.metrics.collision.solver_prepare
+        })),
+        milliseconds(sample_duration_quantile(samples, 0.50, |sample| {
+            sample.metrics.collision.solver_iterations
+        })),
+        milliseconds(sample_duration_quantile(samples, 0.95, |sample| {
+            sample.metrics.collision.solver_iterations
+        })),
         joint_metrics.prepared_rows,
         joint_metrics.scalar_rows_solved,
         joint_metrics.inverse_inertia_updates,
@@ -303,7 +428,13 @@ fn report_samples(phase: &str, parts: usize, workers: usize, samples: &[TimedSam
     );
 }
 
-fn report_events(phase: &str, parts: usize, workers: usize, samples: &[EventSample]) {
+fn report_events(
+    phase: &str,
+    parts: usize,
+    workers: usize,
+    executor: &str,
+    samples: &[EventSample],
+) {
     let mut steps = samples.iter().map(|sample| sample.step).collect::<Vec<_>>();
     steps.sort_unstable_by_key(|sample| sample.elapsed);
     let actions = samples
@@ -311,7 +442,7 @@ fn report_events(phase: &str, parts: usize, workers: usize, samples: &[EventSamp
         .map(|sample| sample.action)
         .collect::<Vec<_>>();
     println!(
-        "phase={phase} parts={parts} joints={} workers={workers} action_us_min/p50/p95/p99/max={:.2}/{:.2}/{:.2}/{:.2}/{:.2}",
+        "phase={phase} parts={parts} joints={} executor={executor} workers={workers} action_us_min/p50/p95/p99/max={:.2}/{:.2}/{:.2}/{:.2}/{:.2}",
         parts - 1,
         actions
             .iter()
@@ -331,7 +462,7 @@ fn report_events(phase: &str, parts: usize, workers: usize, samples: &[EventSamp
             .as_secs_f64()
             * 1.0e6,
     );
-    report_samples(phase, parts, workers, &steps);
+    report_samples(phase, parts, workers, executor, &steps);
 }
 
 fn collision_time(metrics: kapitsa_core::collision::CollisionStepMetrics) -> Duration {
@@ -359,6 +490,17 @@ fn duration_quantile(values: &[Duration], percentile: f64) -> f64 {
     values.sort_unstable();
     let index = ((values.len() - 1) as f64 * percentile).round() as usize;
     values[index].as_secs_f64() * 1.0e6
+}
+
+fn sample_duration_quantile(
+    samples: &[TimedSample],
+    percentile: f64,
+    value: impl Fn(&TimedSample) -> Duration,
+) -> Duration {
+    let mut values = samples.iter().map(value).collect::<Vec<_>>();
+    values.sort_unstable();
+    let index = ((values.len() - 1) as f64 * percentile).round() as usize;
+    values[index]
 }
 
 fn milliseconds(duration: Duration) -> f64 {

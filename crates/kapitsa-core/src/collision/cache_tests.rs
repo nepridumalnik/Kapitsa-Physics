@@ -92,7 +92,7 @@ fn cached_impulses_restore_for_matching_pair_feature_and_normal() {
     cache.commit();
     let mut regenerated = solver_manifold(manifold(pair, Vec3::Y, 7, 0.0), 0.5, 0.5);
     cache
-        .warm_start_solver(std::slice::from_mut(&mut regenerated), 1.0)
+        .warm_start_solver(std::slice::from_mut(&mut regenerated), 1.0, 0.01)
         .unwrap();
     let point = regenerated.manifold.points().first().unwrap();
     assert_eq!(point.normal_impulse, 2.0);
@@ -110,7 +110,7 @@ fn warm_start_impulses_scale_with_timestep_and_staged_dt_is_transactional() {
 
     let mut regenerated = solver_manifold(manifold(pair, Vec3::Y, 7, 0.0), 0.5, 0.5);
     cache
-        .warm_start_solver(std::slice::from_mut(&mut regenerated), 0.02)
+        .warm_start_solver(std::slice::from_mut(&mut regenerated), 0.02, 0.01)
         .unwrap();
     let contact = regenerated.manifold.points().first().unwrap();
     assert_eq!(contact.normal_impulse, 4.0);
@@ -120,9 +120,51 @@ fn warm_start_impulses_scale_with_timestep_and_staged_dt_is_transactional() {
     cache.abort();
     let mut retry = solver_manifold(manifold(pair, Vec3::Y, 7, 0.0), 0.5, 0.5);
     cache
-        .warm_start_solver(std::slice::from_mut(&mut retry), 0.01)
+        .warm_start_solver(std::slice::from_mut(&mut retry), 0.01, 0.01)
         .unwrap();
     assert_eq!(retry.manifold.points().first().unwrap().normal_impulse, 2.0);
+}
+
+#[test]
+fn warm_start_discards_impulses_after_large_timestep_changes() {
+    let pair = pair();
+    let mut cache = ContactCache::new();
+    cache
+        .stage(&[manifold(pair, Vec3::Y, 7, 2.0)], 1.0)
+        .unwrap();
+    cache.commit();
+    for dt in [0.49, 2.01, f64::MAX] {
+        let mut regenerated = solver_manifold(manifold(pair, Vec3::Y, 7, 0.0), 0.5, 0.5);
+        cache
+            .warm_start_solver(std::slice::from_mut(&mut regenerated), dt, 0.01)
+            .unwrap();
+        let contact = regenerated.manifold.points().first().unwrap();
+        assert_eq!(contact.normal_impulse, 0.0);
+        assert_eq!(contact.tangent_impulse, [0.0; 2]);
+    }
+}
+
+#[test]
+fn warm_start_rejects_changed_local_contact_anchors() {
+    let pair = pair();
+    let mut cache = ContactCache::new();
+    cache
+        .stage(&[manifold(pair, Vec3::Y, 7, 2.0)], 1.0)
+        .unwrap();
+    cache.commit();
+    for move_a in [true, false] {
+        let mut regenerated = solver_manifold(manifold(pair, Vec3::Y, 7, 0.0), 0.5, 0.5);
+        let point = regenerated.manifold.point_mut(0).unwrap();
+        if move_a {
+            point.local_a = Vec3::X * 0.02;
+        } else {
+            point.local_b = Vec3::X * 0.02;
+        }
+        cache
+            .warm_start_solver(std::slice::from_mut(&mut regenerated), 1.0, 0.01)
+            .unwrap();
+        assert_eq!(regenerated.manifold.points()[0].normal_impulse, 0.0);
+    }
 }
 
 #[test]
@@ -136,7 +178,7 @@ fn cache_rejects_changed_normals_and_drops_absent_features_on_commit() {
 
     let mut changed = solver_manifold(manifold(pair, Vec3::X, 7, 0.0), 0.5, 0.5);
     cache
-        .warm_start_solver(std::slice::from_mut(&mut changed), 1.0)
+        .warm_start_solver(std::slice::from_mut(&mut changed), 1.0, 0.01)
         .unwrap();
     let changed_contact = changed.manifold.points().first().unwrap();
     assert_eq!(changed_contact.normal_impulse, 0.0);
@@ -166,7 +208,7 @@ fn warm_start_reprojects_world_tangent_impulse_as_contact_normal_rotates() {
     let regenerated = manifold(pair, normal, 7, 0.0);
     let mut regenerated = solver_manifold(regenerated, 1.0, 1.0);
     cache
-        .warm_start_solver(std::slice::from_mut(&mut regenerated), 1.0)
+        .warm_start_solver(std::slice::from_mut(&mut regenerated), 1.0, 0.01)
         .unwrap();
 
     let contact = regenerated.manifold.points().first().unwrap();
@@ -188,7 +230,7 @@ fn warm_start_drops_changed_features_and_clamps_to_the_new_friction_cone() {
 
     let mut changed_feature = solver_manifold(manifold(pair, Vec3::Y, 8, 0.0), 0.1, 0.1);
     cache
-        .warm_start_solver(std::slice::from_mut(&mut changed_feature), 1.0)
+        .warm_start_solver(std::slice::from_mut(&mut changed_feature), 1.0, 0.01)
         .unwrap();
     let changed = changed_feature.manifold.points().first().unwrap();
     assert_eq!(changed.normal_impulse, 0.0);
@@ -196,7 +238,7 @@ fn warm_start_drops_changed_features_and_clamps_to_the_new_friction_cone() {
 
     let mut same_feature = solver_manifold(manifold(pair, Vec3::Y, 7, 0.0), 0.1, 0.1);
     cache
-        .warm_start_solver(std::slice::from_mut(&mut same_feature), 1.0)
+        .warm_start_solver(std::slice::from_mut(&mut same_feature), 1.0, 0.01)
         .unwrap();
     let contact = same_feature.manifold.points().first().unwrap();
     assert_eq!(contact.normal_impulse, 2.0);

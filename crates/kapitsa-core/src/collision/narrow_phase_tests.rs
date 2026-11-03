@@ -49,6 +49,35 @@ fn at(x: f64, y: f64, z: f64) -> Transform {
 }
 
 #[test]
+fn manifold_merge_preserves_distinct_contacts_after_large_translation() {
+    use crate::collision::manifold::{ContactManifold, ContactPoint};
+    use crate::collision::narrow_phase::merge_contact_manifold;
+
+    for origin in [0.0, 1.0e12] {
+        let pair = pair();
+        let body = at(origin, 0.0, 0.0);
+        let mut merged = None;
+        for (feature, x) in [(0, origin), (1, origin + 0.01)] {
+            let world_point = Vec3::new(x, 0.0, 0.0);
+            let contact = ContactPoint::from_world(
+                &body,
+                &body,
+                world_point,
+                world_point,
+                Vec3::Y,
+                0.0,
+                feature,
+            )
+            .unwrap();
+            let mut source = ContactManifold::new(pair);
+            source.insert(contact, world_point).unwrap();
+            merge_contact_manifold(&mut merged, source, feature).unwrap();
+        }
+        assert_eq!(merged.unwrap().len(), 2, "origin={origin}");
+    }
+}
+
+#[test]
 fn plane_contacts_front_side_and_rejects_back_side() {
     let mut narrow = NarrowPhase::new();
     let pair = pair();

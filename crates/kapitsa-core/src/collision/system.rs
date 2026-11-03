@@ -99,6 +99,10 @@ impl CollisionSystem {
         self.joint_impulse_cache.invalidate(joint);
     }
 
+    pub(crate) fn joint_warm_start_enabled(&self) -> bool {
+        self.joint_solver_options.warm_start().enabled
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn set_joint_mass_cache_for_bench(&mut self, enabled: bool) {
         self.joint_solver_options = self.joint_solver_options.with_mass_cache(enabled);
@@ -106,6 +110,9 @@ impl CollisionSystem {
 
     #[cfg(feature = "bench-internals")]
     pub(crate) fn set_joint_warm_start_for_bench(&mut self, enabled: bool) {
+        if self.joint_solver_options.warm_start().enabled != enabled {
+            self.joint_impulse_cache.clear();
+        }
         let config = if enabled {
             crate::joint::WarmStartConfig::enabled()
         } else {
@@ -141,6 +148,66 @@ impl CollisionSystem {
             crate::joint::JointIterations::Fixed
         };
         self.joint_solver_options = self.joint_solver_options.with_iterations(iterations);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_alternating_velocity_sweeps_for_bench(&mut self, enabled: bool) {
+        self.joint_solver_options = self
+            .joint_solver_options
+            .with_alternating_velocity_sweeps(enabled);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_adaptive_velocity_max_for_bench(&mut self, max: u32) {
+        self.joint_solver_options =
+            self.joint_solver_options
+                .with_iterations(crate::joint::JointIterations::Adaptive {
+                    position: crate::joint::IterationRange::new(1, 8),
+                    velocity: crate::joint::IterationRange::new(1, max),
+                    tolerance: crate::joint::JointTolerance {
+                        linear_m: 1.0e-5,
+                        angular_rad: 1.0e-5,
+                        velocity_mps: 1.0e-4,
+                        angular_velocity_radps: 1.0e-4,
+                    },
+                });
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_global_velocity_pcg_for_bench(
+        &mut self,
+        max_iterations: u32,
+        incomplete_cholesky_preconditioner: bool,
+    ) {
+        self.joint_solver_options = self
+            .joint_solver_options
+            .with_global_velocity_pcg(max_iterations, incomplete_cholesky_preconditioner);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_global_velocity_block_pcg_for_bench(&mut self, max_iterations: u32) {
+        self.joint_solver_options = self
+            .joint_solver_options
+            .with_global_velocity_pcg_block_jacobi(max_iterations);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_velocity_relaxation_for_bench(&mut self, relaxation: f64) {
+        assert!(relaxation.is_finite() && relaxation > 0.0 && relaxation < 2.0);
+        self.joint_solver_options = self
+            .joint_solver_options
+            .with_velocity_relaxation(relaxation);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_global_position_pcg_for_bench(
+        &mut self,
+        max_iterations: u32,
+        incomplete_cholesky_preconditioner: bool,
+    ) {
+        self.joint_solver_options = self
+            .joint_solver_options
+            .with_global_position_pcg(max_iterations, incomplete_cholesky_preconditioner);
     }
 
     pub(crate) fn events(&self) -> &[CollisionEvent] {
@@ -439,6 +506,22 @@ impl CollisionSystem {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn joint_solver_metrics(&self) -> crate::joint::diagnostics::JointSolverMetrics {
         self.joint_metrics
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_energy_before_integration(
+        &mut self,
+        energy: crate::joint::diagnostics::EnergyComponents,
+    ) {
+        self.joint_metrics.energy_before_integration = energy;
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn record_energy_after_integration(
+        &mut self,
+        energy: crate::joint::diagnostics::EnergyComponents,
+    ) {
+        self.joint_metrics.energy_after_integration = energy;
     }
 
     #[cfg(feature = "bench-internals")]
@@ -947,10 +1030,15 @@ impl CollisionSystem {
         worker_count: usize,
         executor: &impl StepExecutor,
         dt: f64,
+        gravity: Option<crate::gravity::CentralGravity>,
     ) -> Result<(), CollisionError> {
         self.context.joint_break_events.clear();
         if let Some(cache) = self.contact_cache.as_ref() {
-            cache.warm_start_solver(&mut self.context.solver_manifolds, dt)?;
+            cache.warm_start_solver(
+                &mut self.context.solver_manifolds,
+                dt,
+                self.config.contact_offset,
+            )?;
         }
         #[cfg(feature = "bench-internals")]
         let island_started = std::time::Instant::now();
@@ -1112,6 +1200,7 @@ impl CollisionSystem {
         }
         let joint_solver_step = crate::joint::JointSolverStep::new(dt, self.joint_solver_options)
             .with_impulse_cache(&self.joint_impulse_cache);
+        let inner_worker_count = if island_count == 1 { worker_count } else { 1 };
         #[cfg(feature = "bench-internals")]
         let iterations_started = std::time::Instant::now();
         if worker_count <= 1 || island_count <= 1 {
@@ -1123,6 +1212,9 @@ impl CollisionSystem {
                     &island.joints,
                     config,
                     joint_solver_step,
+                    gravity,
+                    executor,
+                    inner_worker_count,
                 )?;
             }
         } else {
@@ -1141,6 +1233,9 @@ impl CollisionSystem {
                                 &island.joints,
                                 config,
                                 joint_solver_step,
+                                gravity,
+                                executor,
+                                inner_worker_count,
                             ) {
                                 island.worker_error = Some(error);
                                 break;

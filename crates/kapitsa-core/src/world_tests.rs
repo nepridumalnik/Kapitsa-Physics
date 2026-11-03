@@ -25,6 +25,8 @@ use std::{
 };
 
 #[cfg(feature = "bench-internals")]
+use crate::joint::diagnostics::JointSolverMetrics;
+#[cfg(feature = "bench-internals")]
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(feature = "bench-internals")]
 use std::sync::atomic::AtomicBool;
@@ -32,6 +34,21 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::execution::{ExecutionError, StepExecutor};
+
+#[cfg(feature = "bench-internals")]
+fn clear_joint_metric_timings(mut metrics: JointSolverMetrics) -> JointSolverMetrics {
+    metrics.joint_row_preparation_time = Duration::ZERO;
+    metrics.constraint_coloring_prepare_time = Duration::ZERO;
+    metrics.position_pcg_system_prepare_time = Duration::ZERO;
+    metrics.position_pcg_matrix_vector_time = Duration::ZERO;
+    metrics.position_pcg_preconditioner_time = Duration::ZERO;
+    metrics.position_pcg_reduction_time = Duration::ZERO;
+    metrics.velocity_pcg_system_prepare_time = Duration::ZERO;
+    metrics.velocity_pcg_matrix_vector_time = Duration::ZERO;
+    metrics.velocity_pcg_preconditioner_time = Duration::ZERO;
+    metrics.velocity_pcg_reduction_time = Duration::ZERO;
+    metrics
+}
 
 struct ScopedThreadExecutor;
 
@@ -231,8 +248,8 @@ fn physics_step_metrics_report_fixed_joint_solver_work() {
     world.step(1.0 / 60.0).expect("fixed-joint step");
 
     let metrics = world.physics_step_metrics();
-    assert_eq!(metrics.joints.prepared_rows, 6 * (3 + 8));
-    assert_eq!(metrics.joints.scalar_rows_solved, 6 * (3 + 8));
+    assert_eq!(metrics.joints.prepared_rows, 27);
+    assert_eq!(metrics.joints.scalar_rows_solved, 66);
     assert_eq!(metrics.joints.position_sweeps, 3);
     assert_eq!(metrics.joints.velocity_sweeps, 8);
     assert_eq!(metrics.collision.island_count, 1);
@@ -247,21 +264,23 @@ fn physics_step_metrics_report_fixed_joint_solver_work() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
-fn joint_mass_cache_is_opt_in_through_the_internal_benchmark_setting() {
-    let mut legacy = PhysicsWorld::new();
-    add_fixed_pair(&mut legacy, 0.0);
-    legacy.step(1.0 / 60.0).expect("legacy fixed-joint step");
-    let legacy_metrics = legacy.physics_step_metrics().joints;
-    assert_eq!(legacy_metrics.solver_mass_cache_hits, 0);
-    assert_eq!(legacy_metrics.solver_mass_cache_misses, 0);
-
+fn joint_mass_cache_is_enabled_by_default_and_can_be_disabled_for_comparison() {
     let mut cached = PhysicsWorld::new();
     add_fixed_pair(&mut cached, 0.0);
-    cached.set_joint_mass_cache_for_bench(true);
     cached.step(1.0 / 60.0).expect("cached fixed-joint step");
     let cached_metrics = cached.physics_step_metrics().joints;
     assert!(cached_metrics.solver_mass_cache_hits > 0);
     assert!(cached_metrics.solver_mass_cache_misses > 0);
+
+    let mut uncached = PhysicsWorld::new();
+    add_fixed_pair(&mut uncached, 0.0);
+    uncached.set_joint_mass_cache_for_bench(false);
+    uncached
+        .step(1.0 / 60.0)
+        .expect("uncached fixed-joint step");
+    let uncached_metrics = uncached.physics_step_metrics().joints;
+    assert_eq!(uncached_metrics.solver_mass_cache_hits, 0);
+    assert_eq!(uncached_metrics.solver_mass_cache_misses, 0);
 }
 
 #[cfg(feature = "bench-internals")]
@@ -382,7 +401,7 @@ fn joint_mass_cache_matches_legacy_for_anisotropic_fixed_joint() {
 
     let mut legacy = make_world();
     let mut cached = make_world();
-    cached.set_joint_mass_cache_for_bench(true);
+    legacy.set_joint_mass_cache_for_bench(false);
     for _ in 0..12 {
         legacy.step(1.0 / 120.0).expect("legacy step");
         cached.step(1.0 / 120.0).expect("cached step");
@@ -505,8 +524,8 @@ fn physics_step_metrics_sum_independent_islands_in_stable_order() {
     world.step(1.0 / 60.0).expect("multiple-island step");
 
     let metrics = world.physics_step_metrics().joints;
-    assert_eq!(metrics.prepared_rows, 2 * 6 * (3 + 8));
-    assert_eq!(metrics.scalar_rows_solved, 2 * 6 * (3 + 8));
+    assert_eq!(metrics.prepared_rows, 2 * 27);
+    assert_eq!(metrics.scalar_rows_solved, 2 * 66);
     assert_eq!(metrics.position_sweeps, 2 * 3);
     assert_eq!(metrics.velocity_sweeps, 2 * 8);
 }
@@ -519,9 +538,16 @@ fn physics_step_metrics_reset_for_each_step() {
 
     world.step(1.0 / 60.0).expect("first step");
     let first = world.physics_step_metrics().joints;
+    assert_eq!(first.prepared_rows, 27);
     world.step(1.0 / 60.0).expect("second step");
 
-    assert_eq!(world.physics_step_metrics().joints, first);
+    let second = world.physics_step_metrics().joints;
+    assert_eq!(second.prepared_rows, 24);
+    assert_eq!(second.scalar_rows_solved, first.scalar_rows_solved);
+    assert_eq!(second.position_sweeps, first.position_sweeps);
+    assert_eq!(second.velocity_sweeps, first.velocity_sweeps);
+    assert_eq!(second.solver_mass_cache_hits, 132);
+    assert_eq!(second.solver_mass_cache_misses, 0);
 }
 
 #[cfg(feature = "bench-internals")]
@@ -562,10 +588,9 @@ fn physics_step_joint_metrics_match_sequential_and_parallel_island_solves() {
         .step_with_executor(1.0 / 60.0, &ScopedThreadExecutor, 2)
         .expect("parallel step");
 
-    assert_eq!(
-        sequential.physics_step_metrics().joints,
-        parallel.physics_step_metrics().joints
-    );
+    let sequential_metrics = clear_joint_metric_timings(sequential.physics_step_metrics().joints);
+    let parallel_metrics = clear_joint_metric_timings(parallel.physics_step_metrics().joints);
+    assert_eq!(sequential_metrics, parallel_metrics);
 }
 
 #[cfg(feature = "bench-internals")]
@@ -3146,6 +3171,65 @@ fn tracked_world_allocations(mut operation: impl FnMut()) -> (usize, usize) {
         WORLD_ALLOCATION_COUNT.load(Ordering::Relaxed),
         WORLD_ALLOCATION_BYTES.load(Ordering::Relaxed),
     )
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Release allocation check for warm global velocity PCG steps"]
+fn diagnose_global_velocity_pcg_warm_step_allocations() {
+    const BODY_COUNT: usize = 100;
+    const SAMPLES: usize = 32;
+    let mut scalar = allocation_check_joint_chain(BODY_COUNT, false);
+    let (scalar_allocations, scalar_bytes) = warm_step_allocations(&mut scalar, SAMPLES);
+    let mut pcg = allocation_check_joint_chain(BODY_COUNT, true);
+    let (pcg_allocations, pcg_bytes) = warm_step_allocations(&mut pcg, SAMPLES);
+    println!(
+        "bodies={BODY_COUNT} samples={SAMPLES} scalar_allocations_per_step={:.3} scalar_bytes_per_step={:.1} pcg_allocations_per_step={:.3} pcg_bytes_per_step={:.1}",
+        scalar_allocations as f64 / SAMPLES as f64,
+        scalar_bytes as f64 / SAMPLES as f64,
+        pcg_allocations as f64 / SAMPLES as f64,
+        pcg_bytes as f64 / SAMPLES as f64,
+    );
+    assert_eq!(pcg_allocations, scalar_allocations);
+    assert_eq!(pcg_bytes, scalar_bytes);
+}
+
+#[cfg(feature = "bench-internals")]
+fn allocation_check_joint_chain(body_count: usize, pcg_enabled: bool) -> PhysicsWorld {
+    let mut world = PhysicsWorld::new();
+    let bodies = (0..body_count)
+        .map(|index| {
+            world
+                .add_body(body_at(Vec3::X * index as f64, 1.0))
+                .expect("body")
+        })
+        .collect::<Vec<_>>();
+    let common = JointCommon::new(
+        JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+        JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+    );
+    let joint = Joint::Fixed(FixedJoint::new(common));
+    for pair in bodies.windows(2) {
+        world
+            .add_joint(pair[0], pair[1], joint)
+            .expect("fixed joint");
+    }
+    if pcg_enabled {
+        world.set_joint_global_velocity_pcg_for_bench(64, true);
+    }
+    world
+}
+
+#[cfg(feature = "bench-internals")]
+fn warm_step_allocations(world: &mut PhysicsWorld, samples: usize) -> (usize, usize) {
+    for _ in 0..2 {
+        world.step(1.0 / 120.0).expect("warm solver step");
+    }
+    tracked_world_allocations(|| {
+        for _ in 0..samples {
+            world.step(1.0 / 120.0).expect("measured solver step");
+        }
+    })
 }
 
 #[cfg(feature = "bench-internals")]

@@ -95,6 +95,21 @@ impl PhysicsSnapshot {
 
     pub(crate) fn rebuild(&mut self, world: &PhysicsWorld, step: u64, simulation_time: Duration) {
         let body_count = world.body_count();
+        if body_count != 0 && body_count == self.entries.len() {
+            let mut same_order = true;
+            for (entry, (id, body)) in self.entries.iter_mut().zip(world.bodies()) {
+                if entry.id != id {
+                    same_order = false;
+                    break;
+                }
+                entry.state = *body.state();
+            }
+            if same_order {
+                self.step = step;
+                self.simulation_time = simulation_time;
+                return;
+            }
+        }
         prepare_entries(&mut self.entries, body_count);
         for (id, body) in world.bodies() {
             self.entries.push(SnapshotEntry {
@@ -553,6 +568,24 @@ mod tests {
             Some(Vec3::X)
         );
         assert!(snapshot.body(foreign).is_none());
+    }
+
+    #[test]
+    fn rebuild_refreshes_states_when_body_ids_are_unchanged() {
+        let mut world = PhysicsWorld::new();
+        let id = world
+            .add_body(RigidBody::new_kinematic(Transform::identity()))
+            .expect("body");
+        let mut snapshot = PhysicsSnapshot::from_world(&world, 0, Duration::ZERO);
+        world
+            .body_mut(id)
+            .unwrap()
+            .set_linear_velocity(Vec3::X)
+            .unwrap();
+        snapshot.rebuild(&world, 1, Duration::from_millis(10));
+        assert_eq!(snapshot.body(id).unwrap().linear_velocity(), Vec3::X);
+        assert_eq!(snapshot.step(), 1);
+        assert_eq!(snapshot.simulation_time(), Duration::from_millis(10));
     }
 
     #[test]

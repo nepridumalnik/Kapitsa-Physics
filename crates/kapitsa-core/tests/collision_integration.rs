@@ -2,7 +2,7 @@ use kapitsa_core::{
     collider::{Collider, CollisionMode},
     collision::{CollisionEventKind, CollisionPair},
     execution::{ExecutionError, SequentialExecutor, StepExecutor},
-    joint::{FixedJoint, Joint, JointCommon, JointFrame, SpringJoint},
+    joint::{BallJoint, FixedJoint, Joint, JointCommon, JointFrame, JointLimit, SpringJoint},
     mass::MassProperties,
     material::PhysicsMaterial,
     rigid_body::{CcdMode, RigidBody},
@@ -436,6 +436,40 @@ fn joint_only_world_solves_connected_bodies_without_contacts() {
         .transform()
         .translation();
     assert!((position_b - position_a).length() < 1.0e-10);
+}
+
+#[test]
+fn undefined_ball_joint_twist_does_not_abort_the_physics_step() {
+    let mut world = PhysicsWorld::new();
+    let body_a = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("static body");
+    let rotation = Quat::from_axis_angle(Vec3::X, std::f64::consts::PI).expect("180-degree swing");
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let body_b = world
+        .add_body(
+            RigidBody::new_dynamic(
+                Transform::new(Vec3::ZERO, rotation).expect("body transform"),
+                mass,
+            )
+            .expect("dynamic body"),
+        )
+        .expect("body");
+    let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    let mut joint = BallJoint::new(common);
+    joint.swing_limit = Some(0.5);
+    joint.twist_limit = Some(JointLimit::new(-0.25, 0.25));
+    world
+        .add_joint(body_a, body_b, Joint::Ball(joint))
+        .expect("ball joint");
+
+    world
+        .step(1.0 / 60.0)
+        .expect("singular twist coordinate must not abort the step");
+
+    let state = world.body(body_b).expect("dynamic body").state();
+    assert!(state.transform().rotation().is_normalized());
+    assert!(state.angular_velocity().is_finite());
 }
 
 #[test]
