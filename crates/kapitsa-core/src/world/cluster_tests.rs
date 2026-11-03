@@ -1,9 +1,11 @@
 use super::*;
 use crate::{
     cluster::{ClusterPart, RigidCluster, Weld, WeldDesc, WeldStiffness, WeldStrength},
+    collider::Collider,
     joint::JointFrame,
     mass::MassProperties,
     rigid_body::RigidBody,
+    shape::{Shape, Sphere},
     transform::Transform,
 };
 use kapitsa_math::{Mat3, Vec3};
@@ -179,4 +181,53 @@ fn managed_body_mutation_is_validated() {
         Some(Vec3::Y)
     );
     assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
+fn rebind_preserves_collider_identity_and_world_pose() {
+    let mut world = PhysicsWorld::new();
+    let origin = Transform::identity();
+    let translated = match Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY) {
+        Ok(value) => value,
+        Err(error) => panic!("transform: {error}"),
+    };
+    let a = match world.add_body(RigidBody::new_static(origin)) {
+        Ok(value) => value,
+        Err(error) => panic!("body: {error}"),
+    };
+    let b = match world.add_body(RigidBody::new_static(translated)) {
+        Ok(value) => value,
+        Err(error) => panic!("body: {error}"),
+    };
+    let sphere = match Sphere::new(1.0) {
+        Ok(value) => value,
+        Err(error) => panic!("sphere: {error}"),
+    };
+    let collider = match world.add_collider(a, Collider::new(Shape::Sphere(sphere), translated)) {
+        Ok(value) => value,
+        Err(error) => panic!("collider: {error}"),
+    };
+    assert_eq!(world.rebind_collider(collider, b, origin), Ok(()));
+    assert_eq!(world.collider_body(collider), Some(b));
+    assert_eq!(
+        world
+            .collider(collider)
+            .map(|shape| shape.local_transform()),
+        Some(origin)
+    );
+    assert_eq!(
+        world
+            .bodies
+            .get(a.dense)
+            .and_then(|entry| entry.first_collider),
+        None
+    );
+    assert_eq!(
+        world
+            .bodies
+            .get(b.dense)
+            .and_then(|entry| entry.first_collider),
+        Some(collider)
+    );
+    assert!(world.remove_collider(collider).is_some());
 }

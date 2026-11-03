@@ -1,5 +1,7 @@
 //! Metadata for rigid assemblies made up of parts and welds.
 
+#[allow(dead_code)]
+mod mass;
 mod part;
 mod weld;
 

@@ -62,6 +62,10 @@ impl Collider {
         self.local_transform
     }
 
+    pub(crate) fn set_local_transform(&mut self, transform: Transform) {
+        self.local_transform = transform;
+    }
+
     pub fn filter(&self) -> CollisionFilter {
         self.filter
     }

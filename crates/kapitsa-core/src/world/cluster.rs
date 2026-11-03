@@ -1,9 +1,100 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{BodyId, ClusterError, PartId, PhysicsWorld, WeldId};
-use crate::cluster::{ClusterPart, RigidCluster, Weld};
+use super::{BodyId, ClusterError, ColliderId, PartId, PhysicsWorld, WeldId};
+use crate::{
+    cluster::{ClusterPart, RigidCluster, Weld},
+    rigid_body::BodyType,
+    transform::Transform,
+};
 
 impl PhysicsWorld {
+    #[allow(dead_code)]
+    pub(crate) fn rebind_collider(
+        &mut self,
+        collider: ColliderId,
+        body: BodyId,
+        local_transform: Transform,
+    ) -> Result<(), ClusterError> {
+        if collider.world != self.world_id || body.world != self.world_id {
+            return Err(ClusterError::InvalidTopology);
+        }
+        let target = self
+            .bodies
+            .get(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        let target_first = target.first_collider;
+        let entry = self
+            .colliders
+            .get(collider.dense)
+            .ok_or(ClusterError::InvalidTopology)?;
+        let old = entry.body;
+        let prev = entry.prev;
+        let next = entry.next;
+        if target.body.physics().body_type() == BodyType::Dynamic
+            && !entry.collider.shape().is_convex()
+        {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
+        let old_body = self
+            .bodies
+            .get(old.dense)
+            .ok_or(ClusterError::InvalidTopology)?;
+        if old.world != self.world_id
+            || (prev.is_none() && old_body.first_collider != Some(collider))
+            || prev.is_some_and(|id| {
+                self.colliders
+                    .get(id.dense)
+                    .is_none_or(|other| other.body != old || other.next != Some(collider))
+            })
+            || next.is_some_and(|id| {
+                self.colliders
+                    .get(id.dense)
+                    .is_none_or(|other| other.body != old || other.prev != Some(collider))
+            })
+            || target_first.is_some_and(|id| {
+                self.colliders
+                    .get(id.dense)
+                    .is_none_or(|other| other.body != body || other.prev.is_some())
+            })
+        {
+            return Err(ClusterError::InvalidTopology);
+        }
+        if old != body {
+            if let Some(id) = prev {
+                if let Some(other) = self.colliders.get_mut(id.dense) {
+                    other.next = next;
+                }
+            } else if let Some(old_body) = self.bodies.get_mut(old.dense) {
+                old_body.first_collider = next;
+            }
+            if let Some(id) = next
+                && let Some(other) = self.colliders.get_mut(id.dense)
+            {
+                other.prev = prev;
+            }
+            if let Some(id) = target_first
+                && let Some(other) = self.colliders.get_mut(id.dense)
+            {
+                other.prev = Some(collider);
+            }
+            if let Some(target) = self.bodies.get_mut(body.dense) {
+                target.first_collider = Some(collider);
+            }
+        }
+        if let Some(entry) = self.colliders.get_mut(collider.dense) {
+            if old != body {
+                entry.body = body;
+                entry.prev = None;
+                entry.next = target_first;
+            }
+            entry.collider.set_local_transform(local_transform);
+        }
+        self.mark_query_index_dirty();
+        self.collision_system.mark_spatial_dirty();
+        self.collision_system.invalidate_collider_contacts(collider);
+        Ok(())
+    }
+
     pub fn cluster(&self, body: BodyId) -> Option<&RigidCluster> {
         if body.world != self.world_id {
             return None;
