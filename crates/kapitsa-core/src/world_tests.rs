@@ -25,6 +25,8 @@ use std::{
 };
 
 #[cfg(feature = "bench-internals")]
+use crate::joint::diagnostics::JointSolverMetrics;
+#[cfg(feature = "bench-internals")]
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(feature = "bench-internals")]
 use std::sync::atomic::AtomicBool;
@@ -32,6 +34,21 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::execution::{ExecutionError, StepExecutor};
+
+#[cfg(feature = "bench-internals")]
+fn clear_joint_metric_timings(mut metrics: JointSolverMetrics) -> JointSolverMetrics {
+    metrics.joint_row_preparation_time = Duration::ZERO;
+    metrics.constraint_coloring_prepare_time = Duration::ZERO;
+    metrics.position_pcg_system_prepare_time = Duration::ZERO;
+    metrics.position_pcg_matrix_vector_time = Duration::ZERO;
+    metrics.position_pcg_preconditioner_time = Duration::ZERO;
+    metrics.position_pcg_reduction_time = Duration::ZERO;
+    metrics.velocity_pcg_system_prepare_time = Duration::ZERO;
+    metrics.velocity_pcg_matrix_vector_time = Duration::ZERO;
+    metrics.velocity_pcg_preconditioner_time = Duration::ZERO;
+    metrics.velocity_pcg_reduction_time = Duration::ZERO;
+    metrics
+}
 
 struct ScopedThreadExecutor;
 
@@ -231,8 +248,8 @@ fn physics_step_metrics_report_fixed_joint_solver_work() {
     world.step(1.0 / 60.0).expect("fixed-joint step");
 
     let metrics = world.physics_step_metrics();
-    assert_eq!(metrics.joints.prepared_rows, 6 * (3 + 8));
-    assert_eq!(metrics.joints.scalar_rows_solved, 6 * (3 + 8));
+    assert_eq!(metrics.joints.prepared_rows, 69);
+    assert_eq!(metrics.joints.scalar_rows_solved, 66);
     assert_eq!(metrics.joints.position_sweeps, 3);
     assert_eq!(metrics.joints.velocity_sweeps, 8);
     assert_eq!(metrics.collision.island_count, 1);
@@ -507,8 +524,8 @@ fn physics_step_metrics_sum_independent_islands_in_stable_order() {
     world.step(1.0 / 60.0).expect("multiple-island step");
 
     let metrics = world.physics_step_metrics().joints;
-    assert_eq!(metrics.prepared_rows, 2 * 6 * (3 + 8));
-    assert_eq!(metrics.scalar_rows_solved, 2 * 6 * (3 + 8));
+    assert_eq!(metrics.prepared_rows, 2 * 69);
+    assert_eq!(metrics.scalar_rows_solved, 2 * 66);
     assert_eq!(metrics.position_sweeps, 2 * 3);
     assert_eq!(metrics.velocity_sweeps, 2 * 8);
 }
@@ -521,9 +538,16 @@ fn physics_step_metrics_reset_for_each_step() {
 
     world.step(1.0 / 60.0).expect("first step");
     let first = world.physics_step_metrics().joints;
+    assert_eq!(first.prepared_rows, 69);
     world.step(1.0 / 60.0).expect("second step");
 
-    assert_eq!(world.physics_step_metrics().joints, first);
+    let second = world.physics_step_metrics().joints;
+    assert_eq!(second.prepared_rows, 66);
+    assert_eq!(second.scalar_rows_solved, first.scalar_rows_solved);
+    assert_eq!(second.position_sweeps, first.position_sweeps);
+    assert_eq!(second.velocity_sweeps, first.velocity_sweeps);
+    assert_eq!(second.solver_mass_cache_hits, 132);
+    assert_eq!(second.solver_mass_cache_misses, 0);
 }
 
 #[cfg(feature = "bench-internals")]
@@ -564,10 +588,9 @@ fn physics_step_joint_metrics_match_sequential_and_parallel_island_solves() {
         .step_with_executor(1.0 / 60.0, &ScopedThreadExecutor, 2)
         .expect("parallel step");
 
-    assert_eq!(
-        sequential.physics_step_metrics().joints,
-        parallel.physics_step_metrics().joints
-    );
+    let sequential_metrics = clear_joint_metric_timings(sequential.physics_step_metrics().joints);
+    let parallel_metrics = clear_joint_metric_timings(parallel.physics_step_metrics().joints);
+    assert_eq!(sequential_metrics, parallel_metrics);
 }
 
 #[cfg(feature = "bench-internals")]

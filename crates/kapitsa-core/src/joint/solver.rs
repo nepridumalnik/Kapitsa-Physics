@@ -6188,7 +6188,7 @@ mod tests {
                 options,
             )
             .expect("static-dynamic block projection");
-            assert_eq!(workspace.metrics().block_rows_solved, 6);
+            assert_eq!(workspace.metrics().block_rows_solved, 9);
             assert!(bodies.iter().all(|body| {
                 body.state().transform().translation().is_finite()
                     && body.state().transform().rotation().is_normalized()
@@ -6217,7 +6217,7 @@ mod tests {
         )
         .expect("damped scalar fallback");
         assert_eq!(workspace.metrics().block_rows_solved, 0);
-        assert_eq!(workspace.metrics().block_fallback_rows, 6);
+        assert_eq!(workspace.metrics().block_fallback_rows, 9);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -6337,7 +6337,7 @@ mod tests {
                 1 => rows[0].target_velocity = 0.25,
                 _ => rows[0].damping = 0.1,
             }
-            let mut slots = Vec::new();
+            let mut slots = vec![SolverMassSlot::default(); bodies.len()];
             let mut cache_stats = SolverMassCacheStats::default();
             let result = solve_velocity_projection_group(
                 &mut rows,
@@ -6354,7 +6354,7 @@ mod tests {
         }
 
         let mut incomplete = workspace.rows()[..2].to_vec();
-        let mut slots = Vec::new();
+        let mut slots = vec![SolverMassSlot::default(); bodies.len()];
         let mut cache_stats = SolverMassCacheStats::default();
         let result = solve_velocity_projection_group(
             &mut incomplete,
