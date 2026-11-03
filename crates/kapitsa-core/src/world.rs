@@ -8,13 +8,14 @@ use std::{
 #[cfg(feature = "bench-internals")]
 use std::time::Instant;
 
+mod cluster;
 mod error;
 mod id;
 #[cfg(feature = "bench-internals")]
 mod metrics;
 
-pub use error::{ForceSourceError, StepError, WorldError};
-pub use id::{BodyId, ColliderId, ForceSourceId, JointId};
+pub use error::{ClusterError, ForceSourceError, StepError, WorldError};
+pub use id::{BodyId, ColliderId, ForceSourceId, JointId, PartId, WeldId};
 #[cfg(feature = "bench-internals")]
 pub use metrics::PhysicsStepMetrics;
 
@@ -30,6 +31,7 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 
 use crate::{
     aabb::Aabb,
+    cluster::{ClusterPart, RigidCluster, Weld},
     collider::Collider,
     collision::{
         CcdCandidateToi, CcdHit, CcdIslandBodyResult, CcdIslandCandidateResult,
@@ -52,6 +54,7 @@ use crate::{
 struct BodyEntry {
     body: RigidBody,
     first_collider: Option<ColliderId>,
+    cluster: Option<RigidCluster>,
 }
 
 /// Persistent force applied at a point expressed in body-local coordinates.
@@ -154,6 +157,8 @@ fn swept_bounds_for_trajectory(
 pub struct PhysicsWorld {
     world_id: u64,
     bodies: DensePool<BodyEntry>,
+    parts: DensePool<ClusterPart>,
+    welds: DensePool<Weld>,
     colliders: DensePool<ColliderEntry>,
     force_sources: DensePool<ForceSource>,
     joints: DensePool<JointEntry>,
@@ -213,6 +218,8 @@ impl PhysicsWorld {
         Self {
             world_id: 0,
             bodies: DensePool::new(),
+            parts: DensePool::new(),
+            welds: DensePool::new(),
             colliders: DensePool::new(),
             force_sources: DensePool::new(),
             joints: DensePool::new(),
@@ -744,6 +751,7 @@ impl PhysicsWorld {
             .insert(BodyEntry {
                 body,
                 first_collider: None,
+                cluster: None,
             })
             .map_err(WorldError::from)?;
         Ok(BodyId {

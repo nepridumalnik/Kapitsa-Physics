@@ -18,6 +18,10 @@ pub mod collision {
     };
 }
 
+pub mod cluster {
+    pub use kapitsa_core::cluster::*;
+}
+
 pub mod gravity {
     pub use kapitsa_core::gravity::{CentralGravity, GravityError};
 }
@@ -59,8 +63,8 @@ pub mod transform {
 
 pub mod world {
     pub use kapitsa_core::world::{
-        BodyId, ColliderId, ForceSource, ForceSourceError, ForceSourceId, JointId, StepError,
-        WorldError,
+        BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, JointId,
+        PartId, StepError, WeldId, WorldError,
     };
 }
 
@@ -77,7 +81,10 @@ pub use kapitsa_core::{
     rigid_body::{BodyState, CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
-    world::{BodyId, ColliderId, ForceSourceId, JointId, StepError, WorldError},
+    world::{
+        BodyId, ClusterError, ColliderId, ForceSourceId, JointId, PartId, StepError, WeldId,
+        WorldError,
+    },
 };
 
 pub use runtime::{

@@ -1,5 +1,39 @@
 use crate::containers::DenseId;
 
+/// Identifies a part in the world that created it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PartId {
+    pub(super) world: u64,
+    pub(super) dense: DenseId,
+}
+
+impl PartId {
+    pub fn index(self) -> u32 {
+        self.dense.index()
+    }
+
+    pub fn generation(self) -> u32 {
+        self.dense.generation()
+    }
+}
+
+/// Identifies a weld in the world that created it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WeldId {
+    pub(super) world: u64,
+    pub(super) dense: DenseId,
+}
+
+impl WeldId {
+    pub fn index(self) -> u32 {
+        self.dense.index()
+    }
+
+    pub fn generation(self) -> u32 {
+        self.dense.generation()
+    }
+}
+
 /// Identifies a rigid body in the [`super::PhysicsWorld`] that created it.
 ///
 /// The opaque owner identifier prevents IDs from resolving in another world.

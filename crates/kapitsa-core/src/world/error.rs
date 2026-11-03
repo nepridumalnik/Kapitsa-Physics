@@ -8,6 +8,55 @@ use crate::rigid_body::{BodyError, IntegrationError};
 use super::{BodyId, ForceSourceId};
 use crate::joint::JointError;
 
+/// Failure while configuring or editing a rigid cluster.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClusterError {
+    InvalidBodyId,
+    InvalidPartId,
+    InvalidWeldId,
+    AlreadyClustered,
+    NotClustered,
+    SamePart,
+    InvalidWeld,
+    InvalidMass,
+    InvalidMotion,
+    IncompatibleMotion,
+    IncompatibleAnchors,
+    UnsupportedGeometry,
+    InvalidTopology,
+    ManagedMass,
+    ArithmeticOverflow,
+    StorageCapacityExceeded,
+    Mass(crate::mass::MassError),
+    Body(BodyError),
+    Transform(crate::transform::TransformError),
+    Collision(CollisionError),
+}
+
+impl fmt::Display for ClusterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mass(error) => write!(formatter, "cluster mass: {error}"),
+            Self::Body(error) => write!(formatter, "cluster body: {error}"),
+            Self::Transform(error) => write!(formatter, "cluster transform: {error}"),
+            Self::Collision(error) => write!(formatter, "cluster collision: {error}"),
+            other => write!(formatter, "cluster operation failed: {other:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ClusterError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Mass(error) => Some(error),
+            Self::Body(error) => Some(error),
+            Self::Transform(error) => Some(error),
+            Self::Collision(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// Failure while configuring or applying a persistent body force.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForceSourceError {
