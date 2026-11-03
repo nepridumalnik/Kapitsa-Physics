@@ -1,6 +1,6 @@
 pub(crate) use crate::constraint::SolverBody;
 use crate::{
-    constraint,
+    constraint::{self, SolverBodyAccess},
     gravity::CentralGravity,
     joint::{
         IterationRange, JointConstraint, JointIterations, JointSolver, JointSolverOptions,
@@ -9,6 +9,7 @@ use crate::{
     rigid_body::RigidBody,
 };
 use kapitsa_math::Vec3;
+use std::marker::PhantomData;
 
 use super::{
     CollisionConfig, CollisionError,
@@ -65,7 +66,6 @@ enum ColoredConstraintPhase {
 struct ColoredConstraintTask {
     constraint_index: usize,
     body_indices: [usize; 2],
-    bodies: [SolverBody; 2],
     points: [SolverPoint; 4],
     point_count: usize,
     kind: ColoredConstraintKind,
@@ -74,7 +74,6 @@ struct ColoredConstraintTask {
 impl ColoredConstraintTask {
     fn new(
         constraint_index: usize,
-        bodies: &[SolverBody],
         manifolds: &[SolverManifold],
         joints: &[JointConstraint],
     ) -> Result<Self, CollisionError> {
@@ -96,19 +95,9 @@ impl ColoredConstraintTask {
                 ColoredConstraintKind::Joint(joint),
             )
         };
-        let body_a = bodies
-            .get(body_indices[0])
-            .ok_or(CollisionError::InvalidContact)?;
-        let body_b = bodies
-            .get(body_indices[1])
-            .ok_or(CollisionError::InvalidContact)?;
         Ok(Self {
             constraint_index,
             body_indices,
-            bodies: [
-                SolverBody::from_prediction(*body_a.body(), body_a.state()),
-                SolverBody::from_prediction(*body_b.body(), body_b.state()),
-            ],
             points: [SolverPoint::default(); 4],
             point_count: 0,
             kind,
@@ -117,7 +106,6 @@ impl ColoredConstraintTask {
 
     fn update(
         &mut self,
-        bodies: &[SolverBody],
         manifolds: &[SolverManifold],
         joints: &[JointConstraint],
     ) -> Result<(), CollisionError> {
@@ -135,14 +123,100 @@ impl ColoredConstraintTask {
             self.body_indices = [joint.body_a, joint.body_b];
             ColoredConstraintKind::Joint(joint)
         };
-        for endpoint in 0..2 {
-            let body = bodies
-                .get(self.body_indices[endpoint])
-                .ok_or(CollisionError::InvalidContact)?;
-            self.bodies[endpoint] = SolverBody::from_prediction(*body.body(), body.state());
-        }
         self.point_count = 0;
         Ok(())
+    }
+}
+
+/// Exclusive access to the island body array while one conflict-free color runs.
+struct SharedSolverBodies<'a> {
+    pointer: *mut SolverBody,
+    length: usize,
+    _borrow: PhantomData<&'a mut [SolverBody]>,
+}
+
+// Safety: every dynamic body appears in at most one constraint in a color and
+// coloring is validated unconditionally before this wrapper is used. Static
+// and kinematic bodies are only read. The executor joins all callbacks before
+// the wrapper or the color changes.
+unsafe impl Send for SharedSolverBodies<'_> {}
+unsafe impl Sync for SharedSolverBodies<'_> {}
+
+impl<'a> SharedSolverBodies<'a> {
+    fn new(bodies: &'a mut [SolverBody]) -> Self {
+        Self {
+            pointer: bodies.as_mut_ptr(),
+            length: bodies.len(),
+            _borrow: PhantomData,
+        }
+    }
+
+    /// # Safety
+    /// `indices` must identify one constraint in a validated color. No other
+    /// concurrent task in that color may reference either dynamic endpoint.
+    unsafe fn pair(
+        &self,
+        indices: [usize; 2],
+    ) -> Result<ColoredSolverBodyPair<'a>, CollisionError> {
+        if indices[0] == indices[1] || indices.iter().any(|index| *index >= self.length) {
+            return Err(CollisionError::InvalidContact);
+        }
+        // SAFETY: the caller processes only constraints in one validated color.
+        // That guarantees distinct dynamic endpoints; read-only endpoints may
+        // be shared between tasks. The pair is local to one task and never escapes it.
+        unsafe {
+            let body_a = self.pointer.add(indices[0]);
+            let body_b = self.pointer.add(indices[1]);
+            Ok(ColoredSolverBodyPair {
+                bodies: [colored_body_ref(body_a), colored_body_ref(body_b)],
+            })
+        }
+    }
+}
+
+enum ColoredSolverBodyRef<'a> {
+    ReadOnly(&'a SolverBody),
+    Dynamic(&'a mut SolverBody),
+}
+
+struct ColoredSolverBodyPair<'a> {
+    bodies: [ColoredSolverBodyRef<'a>; 2],
+}
+
+/// # Safety
+/// The pointer must identify a live body held by `SharedSolverBodies`, and
+/// mutable access must be unique for the active color.
+unsafe fn colored_body_ref<'a>(pointer: *mut SolverBody) -> ColoredSolverBodyRef<'a> {
+    // SAFETY: pointer comes from the bounded body array held by SharedSolverBodies.
+    let is_dynamic =
+        unsafe { (*pointer).body().physics().body_type() == crate::rigid_body::BodyType::Dynamic };
+    if is_dynamic {
+        // SAFETY: the color ownership invariant gives this task sole access to
+        // this dynamic body until the executor finishes the current color.
+        ColoredSolverBodyRef::Dynamic(unsafe { &mut *pointer })
+    } else {
+        // SAFETY: nondynamic bodies are never mutated by the solver.
+        ColoredSolverBodyRef::ReadOnly(unsafe { &*pointer })
+    }
+}
+
+impl SolverBodyAccess for ColoredSolverBodyPair<'_> {
+    fn len(&self) -> usize {
+        self.bodies.len()
+    }
+
+    fn get(&self, index: usize) -> Option<&SolverBody> {
+        match self.bodies.get(index)? {
+            ColoredSolverBodyRef::ReadOnly(body) => Some(body),
+            ColoredSolverBodyRef::Dynamic(body) => Some(body),
+        }
+    }
+
+    fn get_dynamic_mut(&mut self, index: usize) -> Option<&mut SolverBody> {
+        match self.bodies.get_mut(index)? {
+            ColoredSolverBodyRef::ReadOnly(_) => None,
+            ColoredSolverBodyRef::Dynamic(body) => Some(body),
+        }
     }
 }
 
@@ -413,7 +487,6 @@ impl SolverWorkspace {
 
     fn prepare_colored_batches(
         &mut self,
-        bodies: &[SolverBody],
         manifolds: &[SolverManifold],
         joints: &[JointConstraint],
         graph_rebuilt: bool,
@@ -475,7 +548,6 @@ impl SolverWorkspace {
                         let task_slot = batch.tasks.len();
                         batch.tasks.push(ColoredConstraintTask::new(
                             constraint_index,
-                            bodies,
                             manifolds,
                             joints,
                         )?);
@@ -500,7 +572,7 @@ impl SolverWorkspace {
                 batch.contact_points.clear();
                 batch.joint_workspace.begin_step();
                 for task in &mut batch.tasks {
-                    task.update(bodies, manifolds, joints)?;
+                    task.update(manifolds, joints)?;
                 }
             }
         }
@@ -513,9 +585,14 @@ impl SolverWorkspace {
         worker_count: usize,
         constraint_count: usize,
     ) -> bool {
+        // Global multi-color Gauss-Seidel changes the scalar constraint order.
+        // Keep it experimental until strict connected-island quality is proven.
+        if !cfg!(feature = "bench-internals") {
+            return false;
+        }
         if worker_count <= 1
             || constraint_count < LARGE_ISLAND_COLORING_THRESHOLD
-            || self.constraint_coloring.max_level_constraint_count() < SMALL_COLOR_MERGE_THRESHOLD
+            || self.constraint_coloring.max_color_constraint_count() < SMALL_COLOR_MERGE_THRESHOLD
             || !matches!(options.iterations(), JointIterations::Fixed)
         {
             return false;
@@ -715,6 +792,7 @@ impl SolverWorkspace {
         executor: &impl crate::execution::StepExecutor,
         worker_count: usize,
     ) -> Result<(), CollisionError> {
+        let shared_bodies = SharedSolverBodies::new(bodies);
         let group_count = self.color_batch_offsets.len().saturating_sub(1);
         for group in 0..group_count {
             let start = self.color_batch_offsets[group];
@@ -728,7 +806,13 @@ impl SolverWorkspace {
                 .sum::<usize>();
             if constraint_count < SMALL_COLOR_MERGE_THRESHOLD {
                 for batch in &mut self.colored_batches[start..end] {
-                    Self::process_colored_batch(batch, bodies, config, joint_solver_step, phase)?;
+                    Self::process_colored_batch(
+                        batch,
+                        &shared_bodies,
+                        config,
+                        joint_solver_step,
+                        phase,
+                    )?;
                 }
             } else {
                 let batch_count = end - start;
@@ -745,7 +829,7 @@ impl SolverWorkspace {
                         for batch in batches {
                             batch.error = Self::process_colored_batch(
                                 batch,
-                                bodies,
+                                &shared_bodies,
                                 config,
                                 joint_solver_step,
                                 phase,
@@ -768,17 +852,6 @@ impl SolverWorkspace {
             if !matches!(phase, ColoredConstraintPhase::PrepareContactPoints) {
                 for batch in &self.colored_batches[start..end] {
                     for task in &batch.tasks {
-                        for endpoint in 0..2 {
-                            let body_index = task.body_indices[endpoint];
-                            let destination = bodies
-                                .get_mut(body_index)
-                                .ok_or(CollisionError::InvalidContact)?;
-                            if destination.body().physics().body_type()
-                                == crate::rigid_body::BodyType::Dynamic
-                            {
-                                *destination = task.bodies[endpoint];
-                            }
-                        }
                         if let ColoredConstraintKind::Contact(manifold) = &task.kind {
                             let destination = manifolds
                                 .get_mut(task.constraint_index)
@@ -798,7 +871,7 @@ impl SolverWorkspace {
 
     fn process_colored_batch(
         batch: &mut ColoredConstraintBatch,
-        source_bodies: &[SolverBody],
+        source_bodies: &SharedSolverBodies<'_>,
         config: CollisionConfig,
         joint_solver_step: JointSolverStep<'_>,
         phase: ColoredConstraintPhase,
@@ -806,12 +879,8 @@ impl SolverWorkspace {
         let dt = joint_solver_step.dt();
         let options = joint_solver_step.options();
         for (task_slot, task) in batch.tasks.iter_mut().enumerate() {
-            for endpoint in 0..2 {
-                let source = source_bodies
-                    .get(task.body_indices[endpoint])
-                    .ok_or(CollisionError::InvalidContact)?;
-                task.bodies[endpoint] = SolverBody::from_prediction(*source.body(), source.state());
-            }
+            // SAFETY: tasks are grouped by the unconditional conflict-free color check.
+            let mut bodies = unsafe { source_bodies.pair(task.body_indices)? };
             match &mut task.kind {
                 ColoredConstraintKind::Contact(manifold) => {
                     let mut local_manifold = SolverManifold {
@@ -824,7 +893,7 @@ impl SolverWorkspace {
                         ColoredConstraintPhase::PrepareContactPoints => {
                             Self::prepare_points_into(
                                 &mut batch.contact_points,
-                                &task.bodies,
+                                &bodies,
                                 &local_manifolds,
                                 config,
                             )?;
@@ -837,14 +906,14 @@ impl SolverWorkspace {
                         ColoredConstraintPhase::WarmStartContacts => {
                             Self::warm_start_points(
                                 &task.points[..task.point_count],
-                                &mut task.bodies,
+                                &mut bodies,
                                 &local_manifolds,
                             )?;
                         }
                         ColoredConstraintPhase::Velocity { .. } => {
                             Self::solve_velocity_points(
                                 &task.points[..task.point_count],
-                                &mut task.bodies,
+                                &mut bodies,
                                 &mut local_manifolds,
                             )?;
                             local_manifold = local_manifolds[0];
@@ -853,7 +922,7 @@ impl SolverWorkspace {
                         ColoredConstraintPhase::Position => {
                             Self::solve_position_points(
                                 &task.points[..task.point_count],
-                                &mut task.bodies,
+                                &mut bodies,
                                 &local_manifolds,
                                 config,
                             )?;
@@ -874,7 +943,7 @@ impl SolverWorkspace {
                         } => {
                             JointSolver::solve_velocity_joint(
                                 &mut batch.joint_workspace,
-                                &mut task.bodies,
+                                &mut bodies,
                                 local_joint,
                                 task_slot,
                                 joint_solver_step,
@@ -884,7 +953,7 @@ impl SolverWorkspace {
                         ColoredConstraintPhase::Position => {
                             JointSolver::solve_position_joint(
                                 &mut batch.joint_workspace,
-                                &mut task.bodies,
+                                &mut bodies,
                                 local_joint,
                                 task_slot,
                                 dt,
@@ -993,7 +1062,10 @@ impl SolverWorkspace {
         }
         JointSolver::begin_step(joint_workspace);
         let coloring_constraint_count = manifolds.len().saturating_add(joints.len());
-        if worker_count > 1 && coloring_constraint_count >= LARGE_ISLAND_COLORING_THRESHOLD {
+        if cfg!(feature = "bench-internals")
+            && worker_count > 1
+            && coloring_constraint_count >= LARGE_ISLAND_COLORING_THRESHOLD
+        {
             #[cfg(feature = "bench-internals")]
             let coloring_started = std::time::Instant::now();
             let graph_rebuilt = self.prepare_constraint_coloring(bodies, manifolds, joints)?;
@@ -1009,7 +1081,7 @@ impl SolverWorkspace {
                 worker_count,
                 coloring_constraint_count,
             ) {
-                self.prepare_colored_batches(bodies, manifolds, joints, graph_rebuilt)?;
+                self.prepare_colored_batches(manifolds, joints, graph_rebuilt)?;
                 return self.solve_colored_constraints(
                     bodies,
                     manifolds,
@@ -1436,9 +1508,9 @@ impl SolverWorkspace {
         Self::prepare_points_into(&mut self.points, bodies, manifolds, config)
     }
 
-    fn prepare_points_into(
+    fn prepare_points_into<B: SolverBodyAccess + ?Sized>(
         points: &mut Vec<SolverPoint>,
-        bodies: &[SolverBody],
+        bodies: &B,
         manifolds: &[SolverManifold],
         config: CollisionConfig,
     ) -> Result<(), CollisionError> {
@@ -1524,9 +1596,9 @@ impl SolverWorkspace {
         Self::warm_start_points(&self.points, bodies, manifolds)
     }
 
-    fn warm_start_points(
+    fn warm_start_points<B: SolverBodyAccess + ?Sized>(
         points: &[SolverPoint],
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         manifolds: &[SolverManifold],
     ) -> Result<(), CollisionError> {
         for point in points.iter().copied() {
@@ -1554,9 +1626,9 @@ impl SolverWorkspace {
         Self::solve_velocity_points(&self.points, bodies, manifolds)
     }
 
-    fn solve_velocity_points(
+    fn solve_velocity_points<B: SolverBodyAccess + ?Sized>(
         points: &[SolverPoint],
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         manifolds: &mut [SolverManifold],
     ) -> Result<(), CollisionError> {
         for point in points.iter().copied() {
@@ -1663,9 +1735,9 @@ impl SolverWorkspace {
         Self::solve_position_points(&self.points, bodies, manifolds, config)
     }
 
-    fn solve_position_points(
+    fn solve_position_points<B: SolverBodyAccess + ?Sized>(
         points: &[SolverPoint],
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         manifolds: &[SolverManifold],
         config: CollisionConfig,
     ) -> Result<(), CollisionError> {
@@ -1851,40 +1923,86 @@ fn relative_velocity(
         .map_err(map_constraint_error)
 }
 
-fn apply_pair_impulse(
-    bodies: &mut [SolverBody],
+fn apply_pair_impulse<B: SolverBodyAccess + ?Sized>(
+    bodies: &mut B,
     body_a: usize,
     body_b: usize,
     point_a: Vec3,
     point_b: Vec3,
     impulse: Vec3,
 ) -> Result<(), CollisionError> {
-    let (a, b) = bodies_at_mut(bodies, body_a, body_b)?;
-    constraint::apply_point_impulse_pair(&mut a.body, &mut b.body, point_a, point_b, impulse)
-        .map_err(map_constraint_error)
+    let dynamic_a = bodies
+        .get(body_a)
+        .ok_or(CollisionError::InvalidContact)?
+        .body()
+        .physics()
+        .body_type()
+        == crate::rigid_body::BodyType::Dynamic;
+    let dynamic_b = bodies
+        .get(body_b)
+        .ok_or(CollisionError::InvalidContact)?
+        .body()
+        .physics()
+        .body_type()
+        == crate::rigid_body::BodyType::Dynamic;
+    if dynamic_a {
+        let body = bodies
+            .get_dynamic_mut(body_a)
+            .ok_or(CollisionError::InvalidContact)?;
+        constraint::apply_point_impulse(&mut body.body, point_a, -impulse)
+            .map_err(map_constraint_error)?;
+    }
+    if dynamic_b {
+        let body = bodies
+            .get_dynamic_mut(body_b)
+            .ok_or(CollisionError::InvalidContact)?;
+        constraint::apply_point_impulse(&mut body.body, point_b, impulse)
+            .map_err(map_constraint_error)?;
+    }
+    Ok(())
 }
 
-fn apply_pair_position_impulse(
-    bodies: &mut [SolverBody],
+fn apply_pair_position_impulse<B: SolverBodyAccess + ?Sized>(
+    bodies: &mut B,
     body_a: usize,
     body_b: usize,
     point_a: Vec3,
     point_b: Vec3,
     impulse: Vec3,
 ) -> Result<(), CollisionError> {
-    let (a, b) = bodies_at_mut(bodies, body_a, body_b)?;
-    constraint::apply_point_position_impulse_pair(
-        &mut a.body,
-        &mut b.body,
-        point_a,
-        point_b,
-        impulse,
-    )
-    .map_err(map_constraint_error)
+    let dynamic_a = bodies
+        .get(body_a)
+        .ok_or(CollisionError::InvalidContact)?
+        .body()
+        .physics()
+        .body_type()
+        == crate::rigid_body::BodyType::Dynamic;
+    let dynamic_b = bodies
+        .get(body_b)
+        .ok_or(CollisionError::InvalidContact)?
+        .body()
+        .physics()
+        .body_type()
+        == crate::rigid_body::BodyType::Dynamic;
+    if dynamic_a {
+        let body = bodies
+            .get_dynamic_mut(body_a)
+            .ok_or(CollisionError::InvalidContact)?;
+        constraint::apply_point_position_impulse(&mut body.body, point_a, -impulse)
+            .map_err(map_constraint_error)?;
+    }
+    if dynamic_b {
+        let body = bodies
+            .get_dynamic_mut(body_b)
+            .ok_or(CollisionError::InvalidContact)?;
+        constraint::apply_point_position_impulse(&mut body.body, point_b, impulse)
+            .map_err(map_constraint_error)?;
+    }
+    Ok(())
 }
 
-fn bodies_at(
-    bodies: &[SolverBody],
+fn bodies_at<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     body_a: usize,
     body_b: usize,
 ) -> Result<(&SolverBody, &SolverBody), CollisionError> {
@@ -1894,29 +2012,6 @@ fn bodies_at(
         return Err(CollisionError::InvalidContact);
     }
     Ok((a, b))
-}
-
-fn bodies_at_mut(
-    bodies: &mut [SolverBody],
-    body_a: usize,
-    body_b: usize,
-) -> Result<(&mut SolverBody, &mut SolverBody), CollisionError> {
-    if body_a == body_b {
-        return Err(CollisionError::InvalidContact);
-    }
-    if body_a < body_b {
-        let (left, right) = bodies.split_at_mut(body_b);
-        Ok((
-            left.get_mut(body_a).ok_or(CollisionError::InvalidContact)?,
-            right.first_mut().ok_or(CollisionError::InvalidContact)?,
-        ))
-    } else {
-        let (left, right) = bodies.split_at_mut(body_a);
-        Ok((
-            right.first_mut().ok_or(CollisionError::InvalidContact)?,
-            left.get_mut(body_b).ok_or(CollisionError::InvalidContact)?,
-        ))
-    }
 }
 
 fn contact_at(

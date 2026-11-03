@@ -11,7 +11,7 @@ use super::{
 use crate::execution::StepExecutor;
 use crate::{
     collision::CollisionError,
-    constraint::{self, SolverBody},
+    constraint::{self, SolverBody, SolverBodyAccess},
     rigid_body::solver_mass::{SolverMass, SolverMassCacheStatus, SolverMassSlot},
     transform::Transform,
 };
@@ -549,9 +549,9 @@ impl JointSolver {
         Ok(result)
     }
 
-    pub(crate) fn solve_position_joint(
+    pub(crate) fn solve_position_joint<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         constraint: JointConstraint,
         joint_index: usize,
         dt: f64,
@@ -590,9 +590,9 @@ impl JointSolver {
         Ok(())
     }
 
-    pub(crate) fn solve_velocity_joint(
+    pub(crate) fn solve_velocity_joint<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         constraint: JointConstraint,
         joint_index: usize,
         step: JointSolverStep<'_>,
@@ -626,9 +626,9 @@ impl JointSolver {
         Ok(())
     }
 
-    fn position_sweep(
+    fn position_sweep<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         dt: f64,
         options: JointSolverOptions,
         row_buffer: JointRowBuffer,
@@ -655,9 +655,9 @@ impl JointSolver {
         Ok(())
     }
 
-    fn position_sweep_fixed_block(
+    fn position_sweep_fixed_block<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         body_indices: [usize; 2],
         dt: f64,
         options: JointSolverOptions,
@@ -704,9 +704,9 @@ impl JointSolver {
         Ok(before_a != after_a || before_b != after_b)
     }
 
-    fn position_joint_fixed_scalar_sweep(
+    fn position_joint_fixed_scalar_sweep<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         constraint: JointConstraint,
         dt: f64,
         options: JointSolverOptions,
@@ -756,9 +756,9 @@ impl JointSolver {
         Ok(())
     }
 
-    fn velocity_sweep(
+    fn velocity_sweep<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         dt: f64,
         options: JointSolverOptions,
         row_buffer: JointRowBuffer,
@@ -785,9 +785,9 @@ impl JointSolver {
         Ok(())
     }
 
-    fn position_joint_block_sweep(
+    fn position_joint_block_sweep<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         constraint: JointConstraint,
         joint_index: usize,
         dt: f64,
@@ -835,9 +835,9 @@ impl JointSolver {
         Ok(())
     }
 
-    fn velocity_joint_block_sweep(
+    fn velocity_joint_block_sweep<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         constraint: JointConstraint,
         dt: f64,
         options: JointSolverOptions,
@@ -869,9 +869,9 @@ impl JointSolver {
         Ok(())
     }
 
-    fn position_projection_group(
+    fn position_projection_group<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         dt: f64,
         options: JointSolverOptions,
         keys: [u8; 3],
@@ -894,9 +894,9 @@ impl JointSolver {
         Ok(result)
     }
 
-    fn velocity_projection_group(
+    fn velocity_projection_group<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         dt: f64,
         options: JointSolverOptions,
         keys: [u8; 3],
@@ -919,9 +919,9 @@ impl JointSolver {
         Ok(())
     }
 
-    fn position_projection_remainder(
+    fn position_projection_remainder<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         dt: f64,
         options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
@@ -935,9 +935,9 @@ impl JointSolver {
         Ok(())
     }
 
-    fn velocity_projection_remainder(
+    fn velocity_projection_remainder<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
-        bodies: &mut [SolverBody],
+        bodies: &mut B,
         dt: f64,
         options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
@@ -1024,9 +1024,9 @@ fn measure_joint_geometry(
     Ok(residual)
 }
 
-fn apply_warm_start(
+fn apply_warm_start<B: SolverBodyAccess + ?Sized>(
     workspace: &mut JointWorkspace,
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     constraint: JointConstraint,
     dt: f64,
     config: WarmStartConfig,
@@ -2642,8 +2642,8 @@ pub(crate) fn prepare_joint_rows(
     Ok(())
 }
 
-fn prepare_joint_rows_for_constraint(
-    bodies: &[SolverBody],
+fn prepare_joint_rows_for_constraint<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     constraint: JointConstraint,
     dt: f64,
@@ -2741,8 +2741,8 @@ fn prepare_joint_rows_for_constraint(
     result
 }
 
-fn append_fixed_rows(
-    bodies: &[SolverBody],
+fn append_fixed_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
@@ -2769,8 +2769,8 @@ fn append_fixed_rows(
     Ok(())
 }
 
-fn fixed_joint_geometry(
-    bodies: &[SolverBody],
+fn fixed_joint_geometry<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     body_a: usize,
     body_b: usize,
     frame_a: super::JointFrame,
@@ -2791,8 +2791,8 @@ fn fixed_joint_geometry(
     })
 }
 
-fn fixed_anchor_rows(
-    bodies: &[SolverBody],
+fn fixed_anchor_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     settings: RowSettings,
     geometry: FixedJointGeometry,
 ) -> Result<[ConstraintRow; 3], CollisionError> {
@@ -2888,9 +2888,9 @@ fn fixed_frame_rows(
     ])
 }
 
-fn refresh_fixed_joint_row_block(
+fn refresh_fixed_joint_row_block<B: SolverBodyAccess + ?Sized>(
     workspace: &mut JointWorkspace,
-    bodies: &[SolverBody],
+    bodies: &B,
     constraint: JointConstraint,
     dt: f64,
     block: FixedJointRowBlock,
@@ -2937,8 +2937,8 @@ fn refresh_fixed_joint_row_block(
     Ok(())
 }
 
-fn append_ball_rows(
-    bodies: &[SolverBody],
+fn append_ball_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
@@ -3024,8 +3024,8 @@ fn append_ball_angular_limits(
     Ok(())
 }
 
-fn append_distance_rows(
-    bodies: &[SolverBody],
+fn append_distance_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
@@ -3071,8 +3071,8 @@ fn append_distance_rows(
     )
 }
 
-fn append_hinge_rows(
-    bodies: &[SolverBody],
+fn append_hinge_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
@@ -3107,8 +3107,8 @@ fn append_hinge_rows(
     Ok(())
 }
 
-fn append_slider_rows(
-    bodies: &[SolverBody],
+fn append_slider_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
@@ -3167,8 +3167,8 @@ fn append_slider_rows(
     Ok(())
 }
 
-fn append_cylindrical_rows(
-    bodies: &[SolverBody],
+fn append_cylindrical_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
@@ -3239,8 +3239,8 @@ fn append_cylindrical_rows(
     Ok(())
 }
 
-fn append_planar_rows(
-    bodies: &[SolverBody],
+fn append_planar_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
@@ -3321,8 +3321,8 @@ fn append_planar_rows(
     Ok(())
 }
 
-fn append_spring_rows(
-    bodies: &[SolverBody],
+fn append_spring_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
@@ -3380,8 +3380,8 @@ fn append_spring_rows(
     Ok(())
 }
 
-fn append_cone_twist_rows(
-    bodies: &[SolverBody],
+fn append_cone_twist_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
@@ -3506,8 +3506,8 @@ fn append_cone_twist_rows(
     Ok(())
 }
 
-fn append_d6_rows(
-    bodies: &[SolverBody],
+fn append_d6_rows<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
@@ -3609,8 +3609,8 @@ fn append_d6_rows(
     Ok(())
 }
 
-fn append_anchor_lock(
-    bodies: &[SolverBody],
+fn append_anchor_lock<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     settings: RowSettings,
     anchor_a: Vec3,
@@ -3629,8 +3629,8 @@ fn append_anchor_lock(
     )
 }
 
-fn append_linear_axes(
-    bodies: &[SolverBody],
+fn append_linear_axes<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     settings: RowSettings,
     anchor_a: Vec3,
@@ -3737,8 +3737,8 @@ fn append_axis_alignment(
 }
 
 #[allow(clippy::too_many_arguments)] // Keep limit inputs explicit at the solver call sites.
-fn append_linear_limit(
-    bodies: &[SolverBody],
+fn append_linear_limit<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     settings: RowSettings,
     anchors: [Vec3; 2],
@@ -3793,8 +3793,8 @@ fn append_linear_limit(
     Ok(())
 }
 
-fn append_angular_limit(
-    bodies: &[SolverBody],
+fn append_angular_limit<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     settings: RowSettings,
     rotation_a: Quat,
@@ -3808,8 +3808,8 @@ fn append_angular_limit(
     append_angular_axis_limit(bodies, workspace, settings, axis, angle, limit, key)
 }
 
-fn append_angular_axis_limit(
-    bodies: &[SolverBody],
+fn append_angular_axis_limit<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     settings: RowSettings,
     axis: Vec3,
@@ -3915,8 +3915,8 @@ fn drive_settings(
     Ok(Some(settings))
 }
 
-fn world_frame(
-    bodies: &[SolverBody],
+fn world_frame<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     body_index: usize,
     frame: super::JointFrame,
 ) -> Result<(Vec3, Quat), CollisionError> {
@@ -4025,8 +4025,8 @@ fn bilateral_bounds() -> (f64, f64) {
 }
 
 #[allow(clippy::too_many_arguments)] // Keep row geometry explicit in the hot path.
-fn push_linear_row(
-    bodies: &[SolverBody],
+fn push_linear_row<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     settings: RowSettings,
     anchors: [Vec3; 2],
@@ -4163,9 +4163,9 @@ fn center_of_mass(body: &SolverBody) -> Result<Vec3, CollisionError> {
         .map(|center| center.unwrap_or(body.state().transform().translation()))
 }
 
-fn solve_position_iteration(
+fn solve_position_iteration<B: SolverBodyAccess + ?Sized>(
     workspace: &mut JointWorkspace,
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
 ) -> Result<(), CollisionError> {
@@ -4181,10 +4181,10 @@ fn solve_position_iteration(
     result
 }
 
-fn solve_position_rows(
+fn solve_position_rows<B: SolverBodyAccess + ?Sized>(
     rows: &mut [ConstraintRow],
     slots: &mut [SolverMassSlot],
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
@@ -4200,10 +4200,10 @@ fn solve_position_rows(
     Ok(())
 }
 
-fn solve_position_row(
+fn solve_position_row<B: SolverBodyAccess + ?Sized>(
     row: &mut ConstraintRow,
     slots: &mut [SolverMassSlot],
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     alpha_scale: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
@@ -4239,9 +4239,9 @@ fn solve_position_row(
     Ok(applied != 0.0)
 }
 
-fn solve_velocity_iteration(
+fn solve_velocity_iteration<B: SolverBodyAccess + ?Sized>(
     workspace: &mut JointWorkspace,
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
 ) -> Result<(), CollisionError> {
@@ -4257,10 +4257,10 @@ fn solve_velocity_iteration(
     result
 }
 
-fn solve_velocity_rows(
+fn solve_velocity_rows<B: SolverBodyAccess + ?Sized>(
     rows: &mut [ConstraintRow],
     slots: &mut [SolverMassSlot],
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
@@ -4271,10 +4271,10 @@ fn solve_velocity_rows(
     Ok(())
 }
 
-fn solve_velocity_row(
+fn solve_velocity_row<B: SolverBodyAccess + ?Sized>(
     row: &mut ConstraintRow,
     slots: &mut [SolverMassSlot],
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
@@ -4326,10 +4326,10 @@ fn solve_velocity_row(
     Ok(())
 }
 
-fn solve_position_projection_group(
+fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
     rows: &mut [ConstraintRow],
     slots: &mut [SolverMassSlot],
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
     keys: [u8; 3],
@@ -4388,10 +4388,10 @@ fn solve_position_projection_group(
     })
 }
 
-fn solve_velocity_projection_group(
+fn solve_velocity_projection_group<B: SolverBodyAccess + ?Sized>(
     rows: &mut [ConstraintRow],
     slots: &mut [SolverMassSlot],
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
     keys: [u8; 3],
@@ -4448,10 +4448,10 @@ fn solve_velocity_projection_group(
     })
 }
 
-fn solve_position_projection_remainder(
+fn solve_position_projection_remainder<B: SolverBodyAccess + ?Sized>(
     rows: &mut [ConstraintRow],
     slots: &mut [SolverMassSlot],
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
@@ -4473,10 +4473,10 @@ fn solve_position_projection_remainder(
     })
 }
 
-fn solve_velocity_projection_remainder(
+fn solve_velocity_projection_remainder<B: SolverBodyAccess + ?Sized>(
     rows: &mut [ConstraintRow],
     slots: &mut [SolverMassSlot],
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
@@ -4550,8 +4550,8 @@ fn hard_bilateral_block(
     })
 }
 
-fn projection_masses(
-    bodies: &[SolverBody],
+fn projection_masses<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     slots: &mut [SolverMassSlot],
     rows: [ConstraintRow; 3],
     options: JointSolverOptions,
@@ -4586,11 +4586,11 @@ fn prepared_block(
     }
 }
 
-fn apply_position_block(
+fn apply_position_block<B: SolverBodyAccess + ?Sized>(
     rows: &mut [ConstraintRow],
     indices: [usize; 3],
     delta: Vec3,
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
 ) -> Result<bool, CollisionError> {
     if !delta.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
@@ -4628,17 +4628,22 @@ fn apply_position_block(
         .zip(next_multipliers)
         .any(|(index, next)| next != rows[index].accumulated_multiplier);
     if applied {
-        let (body_a, body_b) =
-            solver_bodies_at_mut(bodies, selected[0].body_a, selected[0].body_b)?;
-        constraint::apply_generalized_position_impulse_pair(
-            body_a.body_mut(),
-            body_b.body_mut(),
-            linear_a,
-            angular_a,
-            linear_b,
-            angular_b,
-        )
-        .map_err(map_constraint_error)?;
+        apply_position_impulse_at(
+            bodies,
+            selected[0].body_a,
+            constraint::Jacobian {
+                linear: linear_a,
+                angular: angular_a,
+            },
+        )?;
+        apply_position_impulse_at(
+            bodies,
+            selected[0].body_b,
+            constraint::Jacobian {
+                linear: linear_b,
+                angular: angular_b,
+            },
+        )?;
     }
     for (index, next) in indices.into_iter().zip(next_multipliers) {
         rows[index].accumulated_multiplier = next;
@@ -4646,11 +4651,11 @@ fn apply_position_block(
     Ok(applied)
 }
 
-fn apply_velocity_block(
+fn apply_velocity_block<B: SolverBodyAccess + ?Sized>(
     rows: &mut [ConstraintRow],
     indices: [usize; 3],
     delta: Vec3,
-    bodies: &mut [SolverBody],
+    bodies: &mut B,
     masses: Option<[SolverMass; 2]>,
 ) -> Result<(), CollisionError> {
     if !delta.is_finite() {
@@ -4689,33 +4694,26 @@ fn apply_velocity_block(
     if next_impulses.iter().any(|value| !value.is_finite()) {
         return Err(CollisionError::ArithmeticOverflow);
     }
-    let (body_a, body_b) = solver_bodies_at_mut(bodies, selected[0].body_a, selected[0].body_b)?;
-    let result = if let Some(masses) = masses {
-        constraint::apply_generalized_impulse_pair_cached(
-            body_a.body_mut(),
-            body_b.body_mut(),
-            masses,
-            impulses,
-        )
-    } else {
-        constraint::apply_generalized_impulse_pair(
-            body_a.body_mut(),
-            body_b.body_mut(),
-            impulses[0].linear,
-            impulses[0].angular,
-            impulses[1].linear,
-            impulses[1].angular,
-        )
-    };
-    result.map_err(map_constraint_error)?;
+    apply_velocity_impulse_at(
+        bodies,
+        selected[0].body_a,
+        impulses[0],
+        masses.map(|m| m[0]),
+    )?;
+    apply_velocity_impulse_at(
+        bodies,
+        selected[0].body_b,
+        impulses[1],
+        masses.map(|m| m[1]),
+    )?;
     for (index, next) in indices.into_iter().zip(next_impulses) {
         rows[index].accumulated_impulse = next;
     }
     Ok(())
 }
 
-fn effective_mass_for_row(
-    bodies: &[SolverBody],
+fn effective_mass_for_row<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     slots: &mut [SolverMassSlot],
     row: ConstraintRow,
     options: JointSolverOptions,
@@ -4744,7 +4742,10 @@ fn effective_mass_for_row(
     }
 }
 
-fn row_velocity(bodies: &[SolverBody], row: ConstraintRow) -> Result<f64, CollisionError> {
+fn row_velocity<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
+    row: ConstraintRow,
+) -> Result<f64, CollisionError> {
     let (body_a, body_b) = solver_bodies_at(bodies, row.body_a, row.body_b)?;
     let state_a = body_a.state();
     let state_b = body_b.state();
@@ -4758,30 +4759,35 @@ fn row_velocity(bodies: &[SolverBody], row: ConstraintRow) -> Result<f64, Collis
         .ok_or(CollisionError::ArithmeticOverflow)
 }
 
-fn apply_position_row(
-    bodies: &mut [SolverBody],
+fn apply_position_row<B: SolverBodyAccess + ?Sized>(
+    bodies: &mut B,
     row: ConstraintRow,
     multiplier: f64,
 ) -> Result<(), CollisionError> {
-    let (body_a, body_b) = solver_bodies_at_mut(bodies, row.body_a, row.body_b)?;
-    constraint::apply_generalized_position_impulse_pair(
-        body_a.body_mut(),
-        body_b.body_mut(),
-        row.linear_a * multiplier,
-        row.angular_a * multiplier,
-        row.linear_b * multiplier,
-        row.angular_b * multiplier,
+    apply_position_impulse_at(
+        bodies,
+        row.body_a,
+        constraint::Jacobian {
+            linear: row.linear_a * multiplier,
+            angular: row.angular_a * multiplier,
+        },
+    )?;
+    apply_position_impulse_at(
+        bodies,
+        row.body_b,
+        constraint::Jacobian {
+            linear: row.linear_b * multiplier,
+            angular: row.angular_b * multiplier,
+        },
     )
-    .map_err(map_constraint_error)
 }
 
-fn apply_velocity_row(
-    bodies: &mut [SolverBody],
+fn apply_velocity_row<B: SolverBodyAccess + ?Sized>(
+    bodies: &mut B,
     row: ConstraintRow,
     impulse: f64,
     masses: Option<[SolverMass; 2]>,
 ) -> Result<(), CollisionError> {
-    let (body_a, body_b) = solver_bodies_at_mut(bodies, row.body_a, row.body_b)?;
     let impulses = [
         constraint::Jacobian {
             linear: row.linear_a * impulse,
@@ -4792,28 +4798,61 @@ fn apply_velocity_row(
             angular: row.angular_b * impulse,
         },
     ];
-    let result = if let Some(masses) = masses {
-        constraint::apply_generalized_impulse_pair_cached(
-            body_a.body_mut(),
-            body_b.body_mut(),
-            masses,
-            impulses,
-        )
-    } else {
-        constraint::apply_generalized_impulse_pair(
-            body_a.body_mut(),
-            body_b.body_mut(),
-            impulses[0].linear,
-            impulses[0].angular,
-            impulses[1].linear,
-            impulses[1].angular,
-        )
-    };
-    result.map_err(map_constraint_error)
+    apply_velocity_impulse_at(bodies, row.body_a, impulses[0], masses.map(|m| m[0]))?;
+    apply_velocity_impulse_at(bodies, row.body_b, impulses[1], masses.map(|m| m[1]))
 }
 
-fn resolve_solver_mass_pair(
-    bodies: &[SolverBody],
+fn apply_position_impulse_at<B: SolverBodyAccess + ?Sized>(
+    bodies: &mut B,
+    body_index: usize,
+    impulse: constraint::Jacobian,
+) -> Result<(), CollisionError> {
+    let is_dynamic = bodies
+        .get(body_index)
+        .ok_or(CollisionError::InvalidContact)?
+        .body()
+        .physics()
+        .body_type()
+        == crate::rigid_body::BodyType::Dynamic;
+    if is_dynamic {
+        let body = bodies
+            .get_dynamic_mut(body_index)
+            .ok_or(CollisionError::InvalidContact)?;
+        constraint::apply_generalized_position_impulse(body.body_mut(), impulse)
+            .map_err(map_constraint_error)?;
+    }
+    Ok(())
+}
+
+fn apply_velocity_impulse_at<B: SolverBodyAccess + ?Sized>(
+    bodies: &mut B,
+    body_index: usize,
+    impulse: constraint::Jacobian,
+    mass: Option<SolverMass>,
+) -> Result<(), CollisionError> {
+    let is_dynamic = bodies
+        .get(body_index)
+        .ok_or(CollisionError::InvalidContact)?
+        .body()
+        .physics()
+        .body_type()
+        == crate::rigid_body::BodyType::Dynamic;
+    if is_dynamic {
+        let body = bodies
+            .get_dynamic_mut(body_index)
+            .ok_or(CollisionError::InvalidContact)?;
+        if let Some(mass) = mass {
+            constraint::apply_generalized_impulse_cached(body.body_mut(), mass, impulse)
+        } else {
+            constraint::apply_generalized_impulse(body.body_mut(), impulse)
+        }
+        .map_err(map_constraint_error)?;
+    }
+    Ok(())
+}
+
+fn resolve_solver_mass_pair<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     slots: &mut [SolverMassSlot],
     body_a: usize,
     body_b: usize,
@@ -4862,8 +4901,8 @@ fn solver_mass_slots_at_mut(
     }
 }
 
-fn solver_bodies_at(
-    bodies: &[SolverBody],
+fn solver_bodies_at<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     body_a: usize,
     body_b: usize,
 ) -> Result<(&SolverBody, &SolverBody), CollisionError> {
@@ -4874,29 +4913,6 @@ fn solver_bodies_at(
         bodies.get(body_a).ok_or(CollisionError::InvalidContact)?,
         bodies.get(body_b).ok_or(CollisionError::InvalidContact)?,
     ))
-}
-
-fn solver_bodies_at_mut(
-    bodies: &mut [SolverBody],
-    body_a: usize,
-    body_b: usize,
-) -> Result<(&mut SolverBody, &mut SolverBody), CollisionError> {
-    if body_a == body_b {
-        return Err(CollisionError::InvalidContact);
-    }
-    if body_a < body_b {
-        let (left, right) = bodies.split_at_mut(body_b);
-        Ok((
-            left.get_mut(body_a).ok_or(CollisionError::InvalidContact)?,
-            right.first_mut().ok_or(CollisionError::InvalidContact)?,
-        ))
-    } else {
-        let (left, right) = bodies.split_at_mut(body_a);
-        Ok((
-            right.first_mut().ok_or(CollisionError::InvalidContact)?,
-            left.get_mut(body_b).ok_or(CollisionError::InvalidContact)?,
-        ))
-    }
 }
 
 fn map_constraint_error(error: constraint::ConstraintError) -> CollisionError {
