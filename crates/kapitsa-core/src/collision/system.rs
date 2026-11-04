@@ -47,6 +47,8 @@ pub(crate) struct CollisionSystem {
     #[cfg(feature = "bench-internals")]
     joint_metrics: crate::joint::diagnostics::JointSolverMetrics,
     #[cfg(feature = "bench-internals")]
+    joint_light_diagnostics: bool,
+    #[cfg(feature = "bench-internals")]
     step_metrics_committed: bool,
     #[cfg(feature = "bench-internals")]
     benchmark_capacity_before_bytes: usize,
@@ -75,6 +77,8 @@ impl CollisionSystem {
             benchmark_metrics: CollisionStepMetrics::ZERO,
             #[cfg(feature = "bench-internals")]
             joint_metrics: crate::joint::diagnostics::JointSolverMetrics::ZERO,
+            #[cfg(feature = "bench-internals")]
+            joint_light_diagnostics: false,
             #[cfg(feature = "bench-internals")]
             step_metrics_committed: false,
             #[cfg(feature = "bench-internals")]
@@ -129,6 +133,11 @@ impl CollisionSystem {
             crate::joint::JointProjection::ScalarGaussSeidel
         };
         self.joint_solver_options = self.joint_solver_options.with_projection(projection);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_joint_light_diagnostics_for_bench(&mut self, enabled: bool) {
+        self.joint_light_diagnostics = enabled;
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1200,6 +1209,9 @@ impl CollisionSystem {
         }
         let joint_solver_step = crate::joint::JointSolverStep::new(dt, self.joint_solver_options)
             .with_impulse_cache(&self.joint_impulse_cache);
+        #[cfg(feature = "bench-internals")]
+        let joint_solver_step =
+            joint_solver_step.with_light_diagnostics(self.joint_light_diagnostics);
         let inner_worker_count = if island_count == 1 { worker_count } else { 1 };
         #[cfg(feature = "bench-internals")]
         let iterations_started = std::time::Instant::now();

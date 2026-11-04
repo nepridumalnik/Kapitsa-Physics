@@ -249,6 +249,8 @@ pub(crate) struct JointSolverStep<'a> {
     dt: f64,
     options: JointSolverOptions,
     impulse_cache: Option<&'a JointImpulseCache>,
+    #[cfg(feature = "bench-internals")]
+    light_diagnostics: bool,
 }
 
 impl<'a> JointSolverStep<'a> {
@@ -257,11 +259,19 @@ impl<'a> JointSolverStep<'a> {
             dt,
             options,
             impulse_cache: None,
+            #[cfg(feature = "bench-internals")]
+            light_diagnostics: false,
         }
     }
 
     pub(crate) const fn with_impulse_cache(mut self, impulse_cache: &'a JointImpulseCache) -> Self {
         self.impulse_cache = Some(impulse_cache);
+        self
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn with_light_diagnostics(mut self, enabled: bool) -> Self {
+        self.light_diagnostics = enabled;
         self
     }
 
@@ -275,6 +285,11 @@ impl<'a> JointSolverStep<'a> {
 
     pub(crate) const fn impulse_cache(self) -> Option<&'a JointImpulseCache> {
         self.impulse_cache
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn light_diagnostics(self) -> bool {
+        self.light_diagnostics
     }
 }
 

@@ -988,6 +988,24 @@ impl JointSolver {
         Ok(())
     }
 
+    /// Prepared-row residual measurement that still updates solver state but
+    /// skips the expensive bench-only geometry and work diagnostics.
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn measure_residual_light(
+        workspace: &mut JointWorkspace,
+        bodies: &[SolverBody],
+        joints: &[JointConstraint],
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        let metrics = workspace.metrics();
+        Self::prepare(workspace, bodies, joints, dt)?;
+        let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
+        // The preparation above is diagnostic noise, not solver work.
+        workspace.restore_metrics(metrics);
+        workspace.set_residual(residual);
+        Ok(())
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(crate) fn measure_current_residual(
         workspace: &mut JointWorkspace,

@@ -285,6 +285,47 @@ fn joint_mass_cache_is_enabled_by_default_and_can_be_disabled_for_comparison() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
+fn light_joint_diagnostics_preserve_state_and_break_events()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn simulate(
+        light: bool,
+        break_force: Option<f64>,
+    ) -> Result<(Vec<crate::rigid_body::BodyState>, usize), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        world.set_joint_light_diagnostics_for_bench(light);
+        let body_a = world.add_body(body_at(Vec3::ZERO, 1.0))?;
+        let rotation = Quat::from_axis_angle(Vec3::Z, 0.2).ok_or("valid rotation")?;
+        let mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut second =
+            RigidBody::new_dynamic(Transform::new(Vec3::new(0.8, 0.1, 0.0), rotation)?, mass)?;
+        second.set_linear_velocity(Vec3::new(0.0, -0.5, 0.0))?;
+        let body_b = world.add_body(second)?;
+        let mut common = JointCommon::new(
+            JointFrame::new(Vec3::new(0.1, 0.0, 0.0), Quat::IDENTITY),
+            JointFrame::new(Vec3::new(-0.1, 0.0, 0.0), Quat::IDENTITY),
+        );
+        common.break_force = break_force;
+        world.add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))?;
+        for _ in 0..6 {
+            world.step(1.0 / 60.0)?;
+        }
+        let states = world
+            .bodies()
+            .map(|(_, body)| *body.state())
+            .collect::<Vec<_>>();
+        Ok((states, world.joint_count()))
+    }
+
+    assert_eq!(simulate(false, None)?, simulate(true, None)?);
+    let full_break = simulate(false, Some(1.0e-6))?;
+    let light_break = simulate(true, Some(1.0e-6))?;
+    assert_eq!(full_break, light_break);
+    assert_eq!(full_break.1, 0, "break thresholds must still fire");
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 fn joint_warm_start_uses_committed_impulses_once_and_clears_disabled_joints() {
     let mut world = PhysicsWorld::new();
     let body_a = world

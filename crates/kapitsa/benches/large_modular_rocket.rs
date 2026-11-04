@@ -141,10 +141,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mass_cache = !args.iter().any(|arg| arg == "--no-mass-cache");
     let block3 = args.iter().any(|arg| arg == "--block3");
     let steady_only = args.iter().any(|arg| arg == "--steady-only");
+    let light_diagnostics = args.iter().any(|arg| arg == "--light-diagnostics");
     println!(
-        "Large modular rocket Release benchmark: dt={DT:.9}s warmups={WARMUPS} steady_samples={SAMPLES} event_samples={EVENT_SAMPLES} mass_cache={mass_cache} projection={} executor={} steady_only={steady_only}",
+        "Large modular rocket Release benchmark: dt={DT:.9}s warmups={WARMUPS} steady_samples={SAMPLES} event_samples={EVENT_SAMPLES} mass_cache={mass_cache} projection={} executor={} steady_only={steady_only} diagnostics={}",
         if block3 { "fixed_block3" } else { "scalar" },
-        if no_pool { "no_pool" } else { "rayon" }
+        if no_pool { "no_pool" } else { "rayon" },
+        if light_diagnostics { "light" } else { "full" }
     );
     let worker_counts: &[usize] = if no_pool { &[1] } else { &WORKERS };
     for &workers in worker_counts
@@ -160,10 +162,31 @@ fn main() -> Result<(), Box<dyn Error>> {
             .into_iter()
             .filter(|parts| parts_filter.is_none_or(|selected| selected == *parts))
         {
-            report_steady(parts, workers, &executor, mass_cache, block3)?;
+            report_steady(
+                parts,
+                workers,
+                &executor,
+                mass_cache,
+                block3,
+                light_diagnostics,
+            )?;
             if !steady_only {
-                report_start(parts, workers, &executor, mass_cache, block3)?;
-                report_separation(parts, workers, &executor, mass_cache, block3)?;
+                report_start(
+                    parts,
+                    workers,
+                    &executor,
+                    mass_cache,
+                    block3,
+                    light_diagnostics,
+                )?;
+                report_separation(
+                    parts,
+                    workers,
+                    &executor,
+                    mass_cache,
+                    block3,
+                    light_diagnostics,
+                )?;
             }
         }
     }
@@ -176,9 +199,10 @@ fn report_steady(
     executor: &BenchExecutor,
     mass_cache: bool,
     block3: bool,
+    light_diagnostics: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut rocket = ModularRocket::new(parts);
-    configure_solver(&mut rocket, mass_cache, block3);
+    configure_solver(&mut rocket, mass_cache, block3, light_diagnostics);
     validate_fixture(&rocket, parts)?;
     warm(&mut rocket.world, executor, workers, WARMUPS)?;
     let mut samples = Vec::with_capacity(SAMPLES);
@@ -196,11 +220,12 @@ fn report_start(
     executor: &BenchExecutor,
     mass_cache: bool,
     block3: bool,
+    light_diagnostics: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut samples = Vec::with_capacity(EVENT_SAMPLES);
     for _ in 0..EVENT_SAMPLES {
         let mut rocket = ModularRocket::new(parts);
-        configure_solver(&mut rocket, mass_cache, block3);
+        configure_solver(&mut rocket, mass_cache, block3, light_diagnostics);
         validate_fixture(&rocket, parts)?;
         warm(&mut rocket.world, executor, workers, WARMUPS)?;
         let started = Instant::now();
@@ -222,11 +247,12 @@ fn report_separation(
     executor: &BenchExecutor,
     mass_cache: bool,
     block3: bool,
+    light_diagnostics: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut samples = Vec::with_capacity(EVENT_SAMPLES);
     for _ in 0..EVENT_SAMPLES {
         let mut rocket = ModularRocket::new(parts);
-        configure_solver(&mut rocket, mass_cache, block3);
+        configure_solver(&mut rocket, mass_cache, block3, light_diagnostics);
         validate_fixture(&rocket, parts)?;
         warm(&mut rocket.world, executor, workers, WARMUPS)?;
         let started = Instant::now();
@@ -256,9 +282,17 @@ fn report_separation(
     Ok(())
 }
 
-fn configure_solver(rocket: &mut ModularRocket, mass_cache: bool, block3: bool) {
+fn configure_solver(
+    rocket: &mut ModularRocket,
+    mass_cache: bool,
+    block3: bool,
+    light_diagnostics: bool,
+) {
     rocket.world.set_joint_mass_cache_for_bench(mass_cache);
     rocket.world.set_joint_projection_for_bench(block3);
+    rocket
+        .world
+        .set_joint_light_diagnostics_for_bench(light_diagnostics);
 }
 
 fn warm(

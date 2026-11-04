@@ -322,6 +322,25 @@ struct VelocitySnapshot {
     angular: Vec3,
 }
 
+/// Residual measurement used by the adaptive iteration policy. The switch only
+/// removes bench-only geometry collection; solver state and the measured
+/// residual are identical in both modes.
+fn measure_joint_residual(
+    joint_workspace: &mut JointWorkspace,
+    bodies: &[SolverBody],
+    joints: &[JointConstraint],
+    dt: f64,
+    full_diagnostics: bool,
+) -> Result<(), CollisionError> {
+    #[cfg(feature = "bench-internals")]
+    if !full_diagnostics {
+        return JointSolver::measure_residual_light(joint_workspace, bodies, joints, dt);
+    }
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = full_diagnostics;
+    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)
+}
+
 #[cfg(feature = "bench-internals")]
 fn snapshot_velocities(
     bodies: &[SolverBody],
@@ -740,6 +759,8 @@ impl SolverWorkspace {
     ) -> Result<(), CollisionError> {
         #[cfg(not(feature = "bench-internals"))]
         let _ = gravity;
+        #[cfg(feature = "bench-internals")]
+        let full_diagnostics = !joint_solver_step.light_diagnostics();
         if !manifolds.is_empty() {
             self.execute_colored_phase(
                 bodies,
@@ -761,10 +782,12 @@ impl SolverWorkspace {
             )?;
         }
         #[cfg(feature = "bench-internals")]
-        snapshot_velocities(bodies, &mut self.velocity_snapshots)?;
+        if full_diagnostics {
+            snapshot_velocities(bodies, &mut self.velocity_snapshots)?;
+        }
         #[cfg(feature = "bench-internals")]
         {
-            if !joints.is_empty() {
+            if full_diagnostics && !joints.is_empty() {
                 JointSolver::measure_residual(
                     joint_workspace,
                     bodies,
@@ -780,7 +803,7 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             {
                 joint_workspace.record_velocity_iteration();
-                if !joints.is_empty() {
+                if full_diagnostics && !joints.is_empty() {
                     JointSolver::measure_residual(
                         joint_workspace,
                         bodies,
@@ -804,7 +827,7 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             {
                 joint_workspace.record_color_batches(self.active_colored_batches);
-                if !joints.is_empty() {
+                if full_diagnostics && !joints.is_empty() {
                     JointSolver::measure_residual(
                         joint_workspace,
                         bodies,
@@ -820,14 +843,16 @@ impl SolverWorkspace {
 
         #[cfg(feature = "bench-internals")]
         {
-            let (impulse_work, quadratic_work) =
-                velocity_projection_work(&self.velocity_snapshots, bodies)?;
-            joint_workspace.record_velocity_projection_work(impulse_work, quadratic_work);
+            if full_diagnostics {
+                let (impulse_work, quadratic_work) =
+                    velocity_projection_work(&self.velocity_snapshots, bodies)?;
+                joint_workspace.record_velocity_projection_work(impulse_work, quadratic_work);
+            }
             joint_workspace.record_energy(
                 crate::joint::diagnostics::EnergyStage::AfterVelocitySolver,
                 energy_components(bodies, gravity),
             );
-            if !joints.is_empty() {
+            if full_diagnostics && !joints.is_empty() {
                 JointSolver::measure_residual(
                     joint_workspace,
                     bodies,
@@ -842,7 +867,7 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             {
                 joint_workspace.record_position_iteration();
-                if !joints.is_empty() {
+                if full_diagnostics && !joints.is_empty() {
                     JointSolver::measure_residual(
                         joint_workspace,
                         bodies,
@@ -864,7 +889,7 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             {
                 joint_workspace.record_color_batches(self.active_colored_batches);
-                if !joints.is_empty() {
+                if full_diagnostics && !joints.is_empty() {
                     JointSolver::measure_residual(
                         joint_workspace,
                         bodies,
@@ -882,7 +907,7 @@ impl SolverWorkspace {
                 crate::joint::diagnostics::EnergyStage::AfterPositionSolver,
                 energy_components(bodies, gravity),
             );
-            if !joints.is_empty() {
+            if full_diagnostics && !joints.is_empty() {
                 JointSolver::measure_residual(
                     joint_workspace,
                     bodies,
@@ -1226,6 +1251,8 @@ impl SolverWorkspace {
     ) -> Result<(), CollisionError> {
         #[cfg(not(feature = "bench-internals"))]
         let _ = gravity;
+        #[cfg(feature = "bench-internals")]
+        let full_diagnostics = !joint_solver_step.light_diagnostics();
         config.validate()?;
         let dt = joint_solver_step.dt();
         let joint_solver_options = joint_solver_step.options();
@@ -1279,7 +1306,9 @@ impl SolverWorkspace {
         self.prepare_points(bodies, manifolds, config)?;
         self.warm_start(bodies, manifolds)?;
         #[cfg(feature = "bench-internals")]
-        snapshot_velocities(bodies, &mut self.velocity_snapshots)?;
+        if full_diagnostics {
+            snapshot_velocities(bodies, &mut self.velocity_snapshots)?;
+        }
         #[cfg(feature = "bench-internals")]
         let mut velocity_pcg_before_recorded = false;
         #[cfg(feature = "bench-internals")]
@@ -1327,13 +1356,15 @@ impl SolverWorkspace {
 
         #[cfg(feature = "bench-internals")]
         {
-            if reuse_scalar_velocity_rows {
-                JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
-            } else {
-                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            if full_diagnostics {
+                if reuse_scalar_velocity_rows {
+                    JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
+                } else {
+                    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                }
+                joint_workspace.record_initial_velocity_residual();
+                joint_workspace.record_pre_velocity_geometry();
             }
-            joint_workspace.record_initial_velocity_residual();
-            joint_workspace.record_pre_velocity_geometry();
         }
         for velocity_iteration in 0..config.velocity_iterations {
             #[cfg(feature = "bench-internals")]
@@ -1341,12 +1372,14 @@ impl SolverWorkspace {
             self.solve_velocity_iteration(bodies, manifolds)?;
             #[cfg(feature = "bench-internals")]
             {
-                if reuse_scalar_velocity_rows {
-                    JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
-                } else {
-                    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                if full_diagnostics {
+                    if reuse_scalar_velocity_rows {
+                        JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
+                    } else {
+                        JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                    }
+                    joint_workspace.record_pre_joint_velocity_residual();
                 }
-                joint_workspace.record_pre_joint_velocity_residual();
             }
             #[cfg(feature = "bench-internals")]
             let reverse_joint_sweep =
@@ -1440,21 +1473,25 @@ impl SolverWorkspace {
             }
             #[cfg(feature = "bench-internals")]
             {
-                if reuse_scalar_velocity_rows {
-                    JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
-                } else {
-                    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-                }
-                if velocity_iteration == 0 {
-                    joint_workspace.record_first_velocity_residual();
+                if full_diagnostics {
+                    if reuse_scalar_velocity_rows {
+                        JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
+                    } else {
+                        JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                    }
+                    if velocity_iteration == 0 {
+                        joint_workspace.record_first_velocity_residual();
+                    }
                 }
             }
         }
         #[cfg(feature = "bench-internals")]
         {
-            let (impulse_work, quadratic_work) =
-                velocity_projection_work(&self.velocity_snapshots, bodies)?;
-            joint_workspace.record_velocity_projection_work(impulse_work, quadratic_work);
+            if full_diagnostics {
+                let (impulse_work, quadratic_work) =
+                    velocity_projection_work(&self.velocity_snapshots, bodies)?;
+                joint_workspace.record_velocity_projection_work(impulse_work, quadratic_work);
+            }
         }
         #[cfg(feature = "bench-internals")]
         joint_workspace.record_energy(
@@ -1463,8 +1500,10 @@ impl SolverWorkspace {
         );
         #[cfg(feature = "bench-internals")]
         {
-            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-            joint_workspace.record_post_velocity_geometry();
+            if full_diagnostics {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.record_post_velocity_geometry();
+            }
         }
         for _position_iteration in 0..config.position_iterations {
             #[cfg(feature = "bench-internals")]
@@ -1472,8 +1511,10 @@ impl SolverWorkspace {
             self.solve_position_iteration(bodies, manifolds, config)?;
             #[cfg(feature = "bench-internals")]
             {
-                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-                joint_workspace.record_pre_joint_geometry();
+                if full_diagnostics {
+                    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                    joint_workspace.record_pre_joint_geometry();
+                }
             }
             #[cfg(feature = "bench-internals")]
             {
@@ -1540,8 +1581,10 @@ impl SolverWorkspace {
             )?;
             #[cfg(feature = "bench-internals")]
             {
-                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-                joint_workspace.record_post_joint_geometry(_position_iteration == 0);
+                if full_diagnostics {
+                    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                    joint_workspace.record_post_joint_geometry(_position_iteration == 0);
+                }
             }
         }
         #[cfg(feature = "bench-internals")]
@@ -1572,13 +1615,19 @@ impl SolverWorkspace {
         tolerance: JointTolerance,
     ) -> Result<(), CollisionError> {
         let dt = joint_solver_step.dt();
+        #[cfg(feature = "bench-internals")]
+        let full_diagnostics = !joint_solver_step.light_diagnostics();
+        #[cfg(not(feature = "bench-internals"))]
+        let full_diagnostics = true;
         let velocity_outer = config.velocity_iterations.max(velocity.max);
         let mut joint_velocity_sweeps = 0;
         #[cfg(feature = "bench-internals")]
         {
-            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-            joint_workspace.record_initial_velocity_residual();
-            joint_workspace.record_pre_velocity_geometry();
+            if full_diagnostics {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.record_initial_velocity_residual();
+                joint_workspace.record_pre_velocity_geometry();
+            }
         }
         for outer_iteration in 0..velocity_outer {
             if outer_iteration < config.velocity_iterations {
@@ -1586,11 +1635,13 @@ impl SolverWorkspace {
             }
             #[cfg(feature = "bench-internals")]
             {
-                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-                joint_workspace.record_pre_joint_velocity_residual();
+                if full_diagnostics {
+                    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                    joint_workspace.record_pre_joint_velocity_residual();
+                }
             }
             let residual_converged = if joint_velocity_sweeps >= velocity.min {
-                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                measure_joint_residual(joint_workspace, bodies, joints, dt, full_diagnostics)?;
                 joint_workspace.residual().velocity_converged(tolerance)
             } else {
                 false
@@ -1614,7 +1665,7 @@ impl SolverWorkspace {
                 reverse_joint_sweep,
             )?;
             joint_velocity_sweeps += 1;
-            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            measure_joint_residual(joint_workspace, bodies, joints, dt, full_diagnostics)?;
             #[cfg(feature = "bench-internals")]
             if joint_velocity_sweeps == 1 {
                 joint_workspace.record_first_velocity_residual();
@@ -1622,8 +1673,10 @@ impl SolverWorkspace {
         }
         #[cfg(feature = "bench-internals")]
         {
-            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-            joint_workspace.record_post_velocity_geometry();
+            if full_diagnostics {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.record_post_velocity_geometry();
+            }
         }
 
         let position_outer = config.position_iterations.max(position.max);
@@ -1634,11 +1687,13 @@ impl SolverWorkspace {
             }
             #[cfg(feature = "bench-internals")]
             {
-                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-                joint_workspace.record_pre_joint_geometry();
+                if full_diagnostics {
+                    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                    joint_workspace.record_pre_joint_geometry();
+                }
             }
             let residual_converged = if joint_position_sweeps >= position.min {
-                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                measure_joint_residual(joint_workspace, bodies, joints, dt, full_diagnostics)?;
                 joint_workspace.residual().position_converged(tolerance)
             } else {
                 false
@@ -1659,14 +1714,16 @@ impl SolverWorkspace {
                 )?;
             }
             joint_position_sweeps += 1;
-            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+            measure_joint_residual(joint_workspace, bodies, joints, dt, full_diagnostics)?;
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_post_joint_geometry(joint_position_sweeps == 1);
         }
         #[cfg(feature = "bench-internals")]
         {
-            JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-            joint_workspace.record_post_joint_geometry(false);
+            if full_diagnostics {
+                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                joint_workspace.record_post_joint_geometry(false);
+            }
         }
         Ok(())
     }
