@@ -1,6 +1,6 @@
 # Rigid cluster contract
 
-Status: design contract; the cluster API is not yet implemented.
+Status: design contract; core cluster lifecycle, targets, and weld splitting are implemented.
 
 ## Ownership and identity
 
