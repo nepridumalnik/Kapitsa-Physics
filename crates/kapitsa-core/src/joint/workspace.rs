@@ -464,6 +464,24 @@ impl JointWorkspace {
         (start, end)
     }
 
+    /// Owner joint index of a committed row.
+    pub(crate) fn row_owner(&self, index: usize) -> Option<usize> {
+        self.row_joint_indices.get(index).copied()
+    }
+
+    /// Mutable access to a committed row range together with the mass slots.
+    pub(crate) fn row_range_and_slots_mut(
+        &mut self,
+        start: usize,
+        end: usize,
+    ) -> Result<(&mut [ConstraintRow], &mut [SolverMassSlot]), CollisionError> {
+        let rows = self
+            .rows
+            .get_mut(start..end)
+            .ok_or(CollisionError::InvalidContact)?;
+        Ok((rows, &mut self.solver_mass_slots))
+    }
+
     pub(crate) fn fixed_geometry(&self, joint_index: usize) -> Option<FixedJointGeometryCache> {
         self.fixed_geometry.get(joint_index).copied().flatten()
     }

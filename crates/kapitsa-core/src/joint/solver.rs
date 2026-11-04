@@ -628,6 +628,43 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
+        Self::solve_position_joint_impl(
+            workspace,
+            bodies,
+            constraint,
+            joint_index,
+            dt,
+            options,
+            true,
+        )
+    }
+
+    fn solve_position_joint_impl<B: SolverBodyAccess + ?Sized>(
+        workspace: &mut JointWorkspace,
+        bodies: &mut B,
+        constraint: JointConstraint,
+        joint_index: usize,
+        dt: f64,
+        options: JointSolverOptions,
+        allow_in_place: bool,
+    ) -> Result<(), CollisionError> {
+        // A fixed joint with six committed rows can update those rows in place:
+        // the row count never changes, so the generic prepare/commit copy is
+        // redundant. The first call of a step (or any layout mismatch) falls
+        // back to the generic path below.
+        if allow_in_place
+            && options.projection() == super::JointProjection::FixedBlock3
+            && Self::position_fixed_block_in_place(
+                workspace,
+                bodies,
+                constraint,
+                joint_index,
+                dt,
+                options,
+            )?
+        {
+            return Ok(());
+        }
         workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
         #[cfg(test)]
@@ -912,6 +949,180 @@ impl JointSolver {
         Self::position_projection_group(workspace, bodies, dt, options, [0, 1, 2])?;
         Self::position_projection_remainder(workspace, bodies, dt, options)?;
         Ok(())
+    }
+
+    /// Updates the six committed FixedJoint rows in place for the block
+    /// projection. Returns `false` when the committed layout does not match so
+    /// the caller can use the generic prepare path.
+    fn position_fixed_block_in_place<B: SolverBodyAccess + ?Sized>(
+        workspace: &mut JointWorkspace,
+        bodies: &mut B,
+        constraint: JointConstraint,
+        joint_index: usize,
+        dt: f64,
+        options: JointSolverOptions,
+    ) -> Result<bool, CollisionError> {
+        let super::Joint::Fixed(joint) = constraint.joint else {
+            return Ok(false);
+        };
+        if !joint.common.enabled {
+            return Ok(false);
+        }
+        let (start, end) = workspace.joint_row_range(joint_index);
+        if end.saturating_sub(start) != 6 {
+            return Ok(false);
+        }
+        {
+            let Some(rows) = workspace.rows().get(start..end) else {
+                return Ok(false);
+            };
+            for (offset, row) in rows.iter().enumerate() {
+                if row.key != offset as u8
+                    || row.body_a != constraint.body_a
+                    || row.body_b != constraint.body_b
+                    || workspace.row_owner(start + offset) != Some(joint_index)
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        if options.mass_cache() {
+            workspace.ensure_solver_mass_slots(bodies.len())?;
+        }
+        workspace.set_active_joint_index(joint_index);
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::JointRowsPrepared(joint_index));
+
+        // Only the angular block is solved first after the linear rows; building
+        // the frame rows here and after the linear pass would duplicate work.
+        Self::write_fixed_position_block(
+            workspace,
+            bodies,
+            constraint,
+            dt,
+            start,
+            FixedJointRowBlock::Anchor,
+        )?;
+        Self::position_projection_group_range(
+            workspace,
+            bodies,
+            dt,
+            options,
+            [0, 1, 2],
+            start,
+            start + 3,
+        )?;
+        // The previous iteration's frame rows predate the last angular solve, so
+        // they must be rebuilt at the post-linear pose regardless of whether the
+        // linear pass moved the bodies.
+        Self::write_fixed_position_block(
+            workspace,
+            bodies,
+            constraint,
+            dt,
+            start + 3,
+            FixedJointRowBlock::Frame,
+        )?;
+        let angular = Self::position_projection_group_range(
+            workspace,
+            bodies,
+            dt,
+            options,
+            [3, 4, 5],
+            start + 3,
+            start + 6,
+        )?;
+        if angular.pose_changed {
+            // Angular correction changes offset connector positions; refresh only
+            // the anchor rows before the final linear pass.
+            Self::write_fixed_position_block(
+                workspace,
+                bodies,
+                constraint,
+                dt,
+                start,
+                FixedJointRowBlock::Anchor,
+            )?;
+        }
+        Self::position_projection_group_range(
+            workspace,
+            bodies,
+            dt,
+            options,
+            [0, 1, 2],
+            start,
+            start + 3,
+        )?;
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::JointRowsCommitted(joint_index));
+        Ok(true)
+    }
+
+    fn write_fixed_position_block<B: SolverBodyAccess + ?Sized>(
+        workspace: &mut JointWorkspace,
+        bodies: &B,
+        constraint: JointConstraint,
+        dt: f64,
+        start: usize,
+        block: FixedJointRowBlock,
+    ) -> Result<(), CollisionError> {
+        let super::Joint::Fixed(joint) = constraint.joint else {
+            return Err(CollisionError::InvalidContact);
+        };
+        #[cfg(feature = "bench-internals")]
+        let preparation_started = std::time::Instant::now();
+        let geometry = fixed_joint_geometry(
+            bodies,
+            workspace,
+            constraint.body_a,
+            constraint.body_b,
+            joint.common.frame_a,
+            joint.common.frame_b,
+        )?;
+        let mut settings = row_settings(constraint.body_a, constraint.body_b, joint.common, dt);
+        settings.velocity_bias = false;
+        let replacements = match block {
+            FixedJointRowBlock::Anchor => fixed_anchor_rows(bodies, settings, geometry)?,
+            FixedJointRowBlock::Frame => fixed_frame_rows(settings, geometry)?,
+        };
+        let rows = workspace
+            .rows_mut()
+            .get_mut(start..start + replacements.len())
+            .ok_or(CollisionError::InvalidContact)?;
+        write_fixed_rows(rows, replacements)?;
+        #[cfg(feature = "bench-internals")]
+        {
+            workspace.record_incremental_rows_prepared(replacements.len());
+            workspace.record_joint_row_preparation_time(preparation_started.elapsed());
+        }
+        Ok(())
+    }
+
+    fn position_projection_group_range<B: SolverBodyAccess + ?Sized>(
+        workspace: &mut JointWorkspace,
+        bodies: &mut B,
+        dt: f64,
+        options: JointSolverOptions,
+        keys: [u8; 3],
+        start: usize,
+        end: usize,
+    ) -> Result<ProjectionGroupResult, CollisionError> {
+        let mut cache_stats = SolverMassCacheStats::default();
+        let result = {
+            let (rows, slots) = workspace.row_range_and_slots_mut(start, end)?;
+            solve_position_projection_group(
+                rows,
+                slots,
+                bodies,
+                dt,
+                options,
+                keys,
+                &mut cache_stats,
+            )?
+        };
+        record_solver_mass_cache_stats(workspace, cache_stats);
+        record_projection_metrics(workspace, result);
+        Ok(result)
     }
 
     fn velocity_joint_block_sweep<B: SolverBodyAccess + ?Sized>(
@@ -3229,12 +3440,16 @@ fn fixed_frame_rows(
     settings: RowSettings,
     geometry: FixedJointGeometry,
 ) -> Result<[ConstraintRow; 3], CollisionError> {
+    // The log-rotation derivative coefficient depends only on the rotation
+    // error, so compute it once for all three axes.
+    let coefficient = fixed_rotation_coefficient(geometry.rotation_error)?;
+    let rotation_a = geometry.rotation_a;
+    let rotation_error = geometry.rotation_error;
     Ok([
         make_angular_row(
             settings,
-            fixed_rotation_row_axis(geometry.rotation_a, geometry.rotation_error, Vec3::X)?,
-            geometry
-                .rotation_error
+            fixed_rotation_row_axis(rotation_a, rotation_error, Vec3::X, coefficient)?,
+            rotation_error
                 .checked_dot(Vec3::X)
                 .ok_or(CollisionError::ArithmeticOverflow)?,
             3,
@@ -3242,9 +3457,8 @@ fn fixed_frame_rows(
         )?,
         make_angular_row(
             settings,
-            fixed_rotation_row_axis(geometry.rotation_a, geometry.rotation_error, Vec3::Y)?,
-            geometry
-                .rotation_error
+            fixed_rotation_row_axis(rotation_a, rotation_error, Vec3::Y, coefficient)?,
+            rotation_error
                 .checked_dot(Vec3::Y)
                 .ok_or(CollisionError::ArithmeticOverflow)?,
             4,
@@ -3252,9 +3466,8 @@ fn fixed_frame_rows(
         )?,
         make_angular_row(
             settings,
-            fixed_rotation_row_axis(geometry.rotation_a, geometry.rotation_error, Vec3::Z)?,
-            geometry
-                .rotation_error
+            fixed_rotation_row_axis(rotation_a, rotation_error, Vec3::Z, coefficient)?,
+            rotation_error
                 .checked_dot(Vec3::Z)
                 .ok_or(CollisionError::ArithmeticOverflow)?,
             5,
@@ -3296,19 +3509,31 @@ fn refresh_fixed_joint_row_block<B: SolverBodyAccess + ?Sized>(
             FixedJointRowBlock::Anchor => anchor_rows,
             FixedJointRowBlock::Frame => frame_rows,
         };
-        for (row, mut replacement) in rows.iter_mut().zip(replacements) {
-            if row.key != replacement.key {
-                return Err(CollisionError::InvalidContact);
-            }
-            replacement.accumulated_multiplier = row.accumulated_multiplier;
-            replacement.accumulated_impulse = row.accumulated_impulse;
-            *row = replacement;
-        }
+        write_fixed_rows(rows, replacements)?;
     }
     #[cfg(feature = "bench-internals")]
     {
         workspace.record_incremental_rows_prepared(3);
         workspace.record_joint_row_preparation_time(preparation_started.elapsed());
+    }
+    Ok(())
+}
+
+/// Overwrites a three-row block, keeping the accumulated projection state.
+fn write_fixed_rows(
+    rows: &mut [ConstraintRow],
+    replacements: [ConstraintRow; 3],
+) -> Result<(), CollisionError> {
+    if rows.len() != replacements.len() {
+        return Err(CollisionError::InvalidContact);
+    }
+    for (row, mut replacement) in rows.iter_mut().zip(replacements) {
+        if row.key != replacement.key {
+            return Err(CollisionError::InvalidContact);
+        }
+        replacement.accumulated_multiplier = row.accumulated_multiplier;
+        replacement.accumulated_impulse = row.accumulated_impulse;
+        *row = replacement;
     }
     Ok(())
 }
@@ -4334,15 +4559,11 @@ fn canonical_relative_rotation(rotation_a: Quat, rotation_b: Quat) -> Result<Qua
     Ok(relative)
 }
 
-fn fixed_rotation_row_axis(
-    rotation_a: Quat,
-    rotation_error: Vec3,
-    local_axis: Vec3,
-) -> Result<Vec3, CollisionError> {
+fn fixed_rotation_coefficient(rotation_error: Vec3) -> Result<f64, CollisionError> {
     let angle_squared = rotation_error
         .checked_dot(rotation_error)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    if !angle_squared.is_finite() || !local_axis.is_finite() {
+    if !angle_squared.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
 
@@ -4356,6 +4577,18 @@ fn fixed_rotation_row_axis(
         1.0 / angle_squared - half_angle.cos() / (2.0 * angle * half_angle.sin())
     };
     if !coefficient.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    Ok(coefficient)
+}
+
+fn fixed_rotation_row_axis(
+    rotation_a: Quat,
+    rotation_error: Vec3,
+    local_axis: Vec3,
+    coefficient: f64,
+) -> Result<Vec3, CollisionError> {
+    if !local_axis.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
 
@@ -5534,7 +5767,6 @@ mod tests {
         SolverBody::from_prediction(body, state)
     }
 
-    #[cfg(feature = "bench-internals")]
     fn solver_body_with_properties(
         position: Vec3,
         rotation: Quat,
@@ -6370,9 +6602,11 @@ mod tests {
             let relative = Quat::from_axis_angle(relative_axis, angle).expect("relative rotation");
             let rotation_b = rotation_a * relative;
             let error = relative_rotation_error(rotation_a, rotation_b).expect("log map");
+            let coefficient =
+                fixed_rotation_coefficient(error).expect("finite rotation coefficient");
 
             for (row_index, local_axis) in world_axes.into_iter().enumerate() {
-                let row_axis = fixed_rotation_row_axis(rotation_a, error, local_axis)
+                let row_axis = fixed_rotation_row_axis(rotation_a, error, local_axis, coefficient)
                     .expect("finite FixedJoint angular Jacobian");
 
                 for world_axis in world_axes {
@@ -6930,6 +7164,257 @@ mod tests {
         let block = iterations_to_tolerance(super::super::JointProjection::FixedBlock3);
         assert!(scalar <= 32, "scalar did not converge in 32 sweeps");
         assert!(block < scalar, "block={block} scalar={scalar}");
+    }
+
+    /// Builds an offset-anchor, rotated fixed joint pair with a large mass ratio
+    /// and unequal principal inertia so Jacobians and inertia tensors vary per body.
+    fn asymmetric_fixed_constraint() -> (JointConstraint, [SolverBody; 2]) {
+        let rotation_a = Quat::from_axis_angle(Vec3::Z, 0.31).expect("rotation");
+        let rotation_b = Quat::from_axis_angle(Vec3::new(0.4, -0.7, 0.2), 0.58).expect("rotation");
+        let bodies = [
+            solver_body_with_properties(
+                Vec3::new(0.3, -0.2, 0.1),
+                rotation_a,
+                1.0,
+                Vec3::new(0.07, -0.05, 0.03),
+                kapitsa_math::Mat3::from_diagonal(Vec3::new(0.4, 1.1, 1.4)),
+                Vec3::new(0.2, -0.1, 0.05),
+                Vec3::new(0.03, 0.02, -0.01),
+            ),
+            solver_body_with_properties(
+                Vec3::new(1.6, -0.9, 0.8),
+                rotation_b,
+                1_000.0,
+                Vec3::new(-0.05, 0.03, 0.02),
+                kapitsa_math::Mat3::from_diagonal(Vec3::new(450.0, 600.0, 950.0)),
+                Vec3::new(-0.1, 0.2, 0.0),
+                Vec3::new(-0.02, 0.01, 0.04),
+            ),
+        ];
+        let frame_a = JointFrame::new(
+            Vec3::new(0.2, -0.1, 0.08),
+            Quat::from_axis_angle(Vec3::Y, 0.17).expect("frame rotation"),
+        );
+        let frame_b = JointFrame::new(
+            Vec3::new(-0.15, 0.12, -0.04),
+            Quat::from_axis_angle(Vec3::X, -0.28).expect("frame rotation"),
+        );
+        let mut common = JointCommon::new(frame_a, frame_b);
+        common.compliance = 5.0e-4;
+        common.damping = 0.1;
+        common.break_force = Some(1.0e9);
+        common.break_torque = Some(1.0e9);
+        let constraint = JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: Joint::Fixed(super::super::FixedJoint::new(common)),
+        };
+        (constraint, bodies)
+    }
+
+    #[test]
+    fn in_place_fixed_position_projection_matches_generic_path() {
+        let dt = 1.0 / 60.0;
+        let (constraint, initial_bodies) = asymmetric_fixed_constraint();
+        let options = JointSolverOptions::legacy()
+            .with_projection(super::super::JointProjection::FixedBlock3);
+        let mut generic_bodies = initial_bodies;
+        let mut in_place_bodies = initial_bodies;
+        let mut generic = JointWorkspace::new();
+        let mut in_place = JointWorkspace::new();
+        JointSolver::begin_step(&mut generic);
+        JointSolver::begin_step(&mut in_place);
+
+        for sweep in 0..4 {
+            JointSolver::solve_position_joint_impl(
+                &mut generic,
+                &mut generic_bodies,
+                constraint,
+                0,
+                dt,
+                options,
+                false,
+            )
+            .expect("generic position projection");
+            // The first sweep has no committed rows yet, so the in-place path
+            // falls back to the generic builder exactly once per step.
+            JointSolver::solve_position_joint_impl(
+                &mut in_place,
+                &mut in_place_bodies,
+                constraint,
+                0,
+                dt,
+                options,
+                sweep > 0,
+            )
+            .expect("in-place position projection");
+
+            assert_eq!(generic.rows().len(), 6);
+            assert_eq!(in_place.rows().len(), 6);
+            for (expected, actual) in generic.rows().iter().zip(in_place.rows()) {
+                assert_eq!(expected, actual, "row state diverged on sweep {sweep}");
+            }
+            for (expected, actual) in generic_bodies.iter().zip(&in_place_bodies) {
+                let expected_transform = expected.state().transform();
+                let actual_transform = actual.state().transform();
+                let translation_error =
+                    (expected_transform.translation() - actual_transform.translation()).length();
+                assert!(translation_error <= 1.0e-14);
+                let expected_axis = expected_transform
+                    .rotation()
+                    .rotate_vector(Vec3::X)
+                    .expect("finite rotation");
+                let actual_axis = actual_transform
+                    .rotation()
+                    .rotate_vector(Vec3::X)
+                    .expect("finite rotation");
+                assert!((expected_axis - actual_axis).length() <= 1.0e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn in_place_fixed_position_refreshes_jacobians_after_pose_change() {
+        let dt = 1.0 / 60.0;
+        let (constraint, mut bodies) = asymmetric_fixed_constraint();
+        let options = JointSolverOptions::legacy()
+            .with_projection(super::super::JointProjection::FixedBlock3);
+        let mut workspace = JointWorkspace::new();
+        JointSolver::begin_step(&mut workspace);
+        JointSolver::solve_position_joint(&mut workspace, &mut bodies, constraint, 0, dt, options)
+            .expect("initial position projection");
+        let before = workspace.rows().to_vec();
+        assert_eq!(before.len(), 6);
+
+        // Move both props to a clearly different pose before the next sweep.
+        bodies[0] = solver_body_with_properties(
+            Vec3::new(-0.9, 0.7, -0.4),
+            Quat::from_axis_angle(Vec3::new(0.3, 0.9, -0.5), -0.42).expect("rotation"),
+            1.0,
+            Vec3::new(0.07, -0.05, 0.03),
+            kapitsa_math::Mat3::from_diagonal(Vec3::new(0.4, 1.1, 1.4)),
+            Vec3::ZERO,
+            Vec3::ZERO,
+        );
+        bodies[1] = solver_body_with_properties(
+            Vec3::new(2.4, 0.5, -1.1),
+            Quat::from_axis_angle(Vec3::new(-0.6, 0.2, 0.8), 0.71).expect("rotation"),
+            1_000.0,
+            Vec3::new(-0.05, 0.03, 0.02),
+            kapitsa_math::Mat3::from_diagonal(Vec3::new(450.0, 600.0, 950.0)),
+            Vec3::ZERO,
+            Vec3::ZERO,
+        );
+
+        JointSolver::solve_position_joint(&mut workspace, &mut bodies, constraint, 0, dt, options)
+            .expect("in-place position projection after pose change");
+
+        let after = workspace.rows();
+        assert_eq!(after.len(), 6);
+        assert!(after.iter().all(|row| {
+            row.error.is_finite()
+                && row.linear_a.is_finite()
+                && row.angular_a.is_finite()
+                && row.angular_b.is_finite()
+        }));
+        let jacobians_refreshed = before.iter().zip(after).any(|(old, new)| {
+            old.angular_a != new.angular_a
+                || old.angular_b != new.angular_b
+                || old.error != new.error
+        });
+        assert!(jacobians_refreshed, "pose change left stale joint rows");
+    }
+
+    #[test]
+    fn write_fixed_rows_updates_jacobians_and_preserves_accumulated_state() {
+        let make_row = |key: u8, linear_a: Vec3, error: f64| ConstraintRow {
+            key,
+            dimension: crate::joint::row::RowDimension::Linear,
+            body_a: 0,
+            body_b: 1,
+            linear_a,
+            angular_a: Vec3::ZERO,
+            linear_b: -linear_a,
+            angular_b: Vec3::ZERO,
+            error,
+            target_velocity: 0.0,
+            force_bias: 0.0,
+            position_enabled: true,
+            compliance: 0.0,
+            damping: 0.0,
+            min_multiplier: f64::NEG_INFINITY,
+            max_multiplier: f64::INFINITY,
+            min_impulse: f64::NEG_INFINITY,
+            max_impulse: f64::INFINITY,
+            accumulated_multiplier: 0.0,
+            accumulated_impulse: 0.0,
+            cached_velocity_effective_mass: 0.0,
+        };
+        let mut rows = [
+            make_row(0, Vec3::X, 1.0),
+            make_row(1, Vec3::Y, 2.0),
+            make_row(2, Vec3::Z, 3.0),
+        ];
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.accumulated_multiplier = 0.25 * (index as f64 + 1.0);
+            row.accumulated_impulse = -0.5 * (index as f64 + 1.0);
+        }
+        let replacements = [
+            make_row(0, Vec3::Z, 4.0),
+            make_row(1, Vec3::X, 5.0),
+            make_row(2, Vec3::Y, 6.0),
+        ];
+
+        write_fixed_rows(&mut rows, replacements).expect("rewrite block");
+
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row.linear_a, replacements[index].linear_a);
+            assert_eq!(row.error, replacements[index].error);
+            assert_eq!(row.accumulated_multiplier, 0.25 * (index as f64 + 1.0));
+            assert_eq!(row.accumulated_impulse, -0.5 * (index as f64 + 1.0));
+        }
+    }
+
+    #[test]
+    fn scalar_fixed_position_fallback_stays_convergent_with_committed_rows() {
+        let dt = 1.0 / 60.0;
+        let (mut constraint, mut bodies) = asymmetric_fixed_constraint();
+        // A hard constraint so the scalar fallback can drive the connector error
+        // to zero; compliance would leave a force-proportional residual.
+        if let Joint::Fixed(ref mut joint) = constraint.joint {
+            joint.common.compliance = 0.0;
+            joint.common.damping = 0.0;
+        }
+        let options = JointSolverOptions::legacy();
+        assert_eq!(
+            options.projection(),
+            super::super::JointProjection::ScalarGaussSeidel
+        );
+        let mut workspace = JointWorkspace::new();
+        JointSolver::begin_step(&mut workspace);
+        for _ in 0..32 {
+            JointSolver::solve_position_joint(
+                &mut workspace,
+                &mut bodies,
+                constraint,
+                0,
+                dt,
+                options,
+            )
+            .expect("scalar position projection");
+        }
+        assert_eq!(workspace.rows().len(), 6);
+        let residual = workspace
+            .rows()
+            .iter()
+            .map(|row| row.error.abs())
+            .fold(0.0_f64, f64::max);
+        assert!(residual < 1.0e-6, "scalar residual {residual}");
+        assert!(bodies.iter().all(|body| {
+            body.state().transform().translation().is_finite()
+                && body.state().transform().rotation().is_normalized()
+        }));
     }
 
     #[cfg(feature = "bench-internals")]
