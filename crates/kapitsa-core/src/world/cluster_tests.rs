@@ -798,6 +798,56 @@ fn merge_then_split_preserves_first_cluster_root() {
 }
 
 #[test]
+fn part_collider_ownership_rejects_legacy_structural_edits() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("body id");
+    let part = world.enable_cluster(body).expect("root");
+    let shape = Shape::Sphere(Sphere::new(0.5).expect("sphere"));
+    let collider_transform =
+        Transform::new(Vec3::new(0.0, 2.0, 0.0), kapitsa_math::Quat::IDENTITY).expect("collider");
+    let collider = Collider::new(shape, collider_transform);
+
+    let id = world
+        .add_part_collider(part, collider)
+        .expect("part collider");
+    assert_eq!(
+        world.cluster_part(part).map(ClusterPart::colliders),
+        Some(&[id][..])
+    );
+    assert_eq!(
+        world
+            .collider(id)
+            .map(Collider::local_transform)
+            .map(|transform| transform.translation()),
+        Some(Vec3::new(0.0, 2.0, 0.0))
+    );
+    assert!(
+        world
+            .add_collider(
+                body,
+                Collider::new(
+                    Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                    Transform::identity(),
+                ),
+            )
+            .is_err()
+    );
+    assert!(world.collider_mut(id).is_none());
+    assert!(world.remove_collider(id).is_none());
+    assert_eq!(world.validate_clusters(), Ok(()));
+
+    assert!(world.remove_part_collider(id).is_ok());
+    assert_eq!(
+        world.cluster_part(part).map(ClusterPart::colliders),
+        Some(&[][..])
+    );
+    assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
 fn breaking_weld_splits_chain_and_rebinds_part_targets() {
     let mut world = PhysicsWorld::new();
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");

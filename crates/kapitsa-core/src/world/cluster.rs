@@ -17,6 +17,70 @@ use crate::{
 };
 
 impl PhysicsWorld {
+    /// Adds a collider owned by a cluster part.
+    pub fn add_part_collider(
+        &mut self,
+        part: PartId,
+        mut collider: crate::collider::Collider,
+    ) -> Result<ColliderId, ClusterError> {
+        let part_entry = self.cluster_part(part).ok_or(ClusterError::InvalidPartId)?;
+        let body = part_entry.body();
+        let local_transform = part_entry
+            .local_transform()
+            .compose(&collider.local_transform())
+            .map_err(ClusterError::Transform)?;
+        let colliders = part_entry.colliders().len();
+        self.parts
+            .get_mut(part.dense)
+            .ok_or(ClusterError::InvalidPartId)?
+            .colliders
+            .try_reserve(1)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        collider.set_local_transform(local_transform);
+        let id = self
+            .add_collider_internal(body, collider)
+            .map_err(map_cluster_world_error)?;
+        if let Some(entry) = self.parts.get_mut(part.dense) {
+            if entry.colliders.len() != colliders {
+                return Err(ClusterError::InvalidTopology);
+            }
+            entry.colliders.push(id);
+        }
+        Ok(id)
+    }
+
+    /// Removes a collider from its owning cluster part.
+    pub fn remove_part_collider(
+        &mut self,
+        id: ColliderId,
+    ) -> Result<crate::collider::Collider, ClusterError> {
+        let body = self.collider_body(id).ok_or(ClusterError::InvalidPartId)?;
+        let part = self
+            .cluster(body)
+            .ok_or(ClusterError::NotClustered)?
+            .parts()
+            .iter()
+            .copied()
+            .find(|part| {
+                self.cluster_part(*part)
+                    .is_some_and(|entry| entry.colliders().contains(&id))
+            })
+            .ok_or(ClusterError::InvalidTopology)?;
+        let collider = self
+            .remove_collider_internal(id)
+            .ok_or(ClusterError::InvalidTopology)?;
+        let entry = self
+            .parts
+            .get_mut(part.dense)
+            .ok_or(ClusterError::InvalidTopology)?;
+        if let Some(index) = entry.colliders.iter().position(|value| *value == id) {
+            entry.colliders.remove(index);
+            Ok(collider)
+        } else {
+            Err(ClusterError::InvalidTopology)
+        }
+    }
+
     /// Converts an existing dynamic body into a one-part cluster.
     ///
     /// Existing colliders become owned by the identity-transform root part.
@@ -275,11 +339,11 @@ impl PhysicsWorld {
                 .compose(&collider.local_transform())
                 .map_err(ClusterError::Transform)?;
             collider.set_local_transform(local_transform);
-            match self.add_collider(body, collider) {
+            match self.add_collider_internal(body, collider) {
                 Ok(collider_id) => collider_ids.push(collider_id),
                 Err(error) => {
                     for collider_id in collider_ids {
-                        self.remove_collider(collider_id);
+                        self.remove_collider_internal(collider_id);
                     }
                     self.parts.remove(part_dense);
                     return Err(map_cluster_world_error(error));
@@ -303,7 +367,7 @@ impl PhysicsWorld {
                     .map(|entry| entry.colliders.clone())
                     .unwrap_or_default();
                 for collider_id in colliders {
-                    self.remove_collider(collider_id);
+                    self.remove_collider_internal(collider_id);
                 }
                 self.parts.remove(part_dense);
                 return Err(ClusterError::StorageCapacityExceeded);
@@ -494,7 +558,7 @@ impl PhysicsWorld {
             });
         }
         for collider in removed_colliders {
-            self.remove_collider(collider)
+            self.remove_collider_internal(collider)
                 .ok_or(ClusterError::InvalidTopology)?;
         }
         for weld in &removed_welds {
@@ -1378,6 +1442,7 @@ impl PhysicsWorld {
                 dense,
             };
             let mut adjacency = HashMap::new();
+            let mut part_colliders = HashSet::new();
             for &part_id in cluster.parts() {
                 let part = self
                     .cluster_part(part_id)
@@ -1389,6 +1454,9 @@ impl PhysicsWorld {
                 for &collider in part.colliders() {
                     if self.collider_body(collider) != Some(body) || !all_colliders.insert(collider)
                     {
+                        return Err(ClusterError::InvalidTopology);
+                    }
+                    if !part_colliders.insert(collider) {
                         return Err(ClusterError::InvalidTopology);
                     }
                 }
@@ -1443,13 +1511,7 @@ impl PhysicsWorld {
                 previous = Some(id);
                 collider = collider_entry.next;
             }
-            if adjacency
-                .keys()
-                .filter_map(|id| self.cluster_part(*id))
-                .map(|part| part.colliders().len())
-                .sum::<usize>()
-                != linked_colliders.len()
-            {
+            if part_colliders != linked_colliders {
                 return Err(ClusterError::InvalidTopology);
             }
         }

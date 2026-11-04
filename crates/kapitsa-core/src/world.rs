@@ -5151,6 +5151,21 @@ impl PhysicsWorld {
     pub fn add_collider(
         &mut self,
         body: BodyId,
+        collider: Collider,
+    ) -> Result<ColliderId, WorldError> {
+        if self
+            .bodies
+            .get(body.dense)
+            .is_some_and(|entry| entry.cluster.is_some())
+        {
+            return Err(WorldError::InvalidBodyId);
+        }
+        self.add_collider_internal(body, collider)
+    }
+
+    fn add_collider_internal(
+        &mut self,
+        body: BodyId,
         mut collider: Collider,
     ) -> Result<ColliderId, WorldError> {
         if body.world != self.world_id {
@@ -5251,6 +5266,14 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return None;
         }
+        let body = self.colliders.get(id.dense)?.body;
+        if self
+            .bodies
+            .get(body.dense)
+            .is_some_and(|entry| entry.cluster.is_some())
+        {
+            return None;
+        }
         if self.colliders.get(id.dense).is_some() {
             self.collision_system.invalidate_collider_contacts(id);
         }
@@ -5269,6 +5292,21 @@ impl PhysicsWorld {
     }
 
     pub fn remove_collider(&mut self, id: ColliderId) -> Option<Collider> {
+        if id.world != self.world_id {
+            return None;
+        }
+        let body = self.colliders.get(id.dense)?.body;
+        if self
+            .bodies
+            .get(body.dense)
+            .is_some_and(|entry| entry.cluster.is_some())
+        {
+            return None;
+        }
+        self.remove_collider_internal(id)
+    }
+
+    fn remove_collider_internal(&mut self, id: ColliderId) -> Option<Collider> {
         if id.world != self.world_id {
             return None;
         }
@@ -5334,7 +5372,7 @@ impl PhysicsWorld {
         let mut next = self.bodies.get(id.dense)?.first_collider;
         while let Some(collider) = next {
             next = self.colliders.get(collider.dense)?.next;
-            self.remove_collider(collider)?;
+            self.remove_collider_internal(collider)?;
         }
         loop {
             let joint = self.joints.iter().find_map(|(dense, entry)| {
