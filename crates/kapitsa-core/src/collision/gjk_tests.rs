@@ -6,7 +6,59 @@ use crate::{
     shape::{Capsule, Cuboid, Shape, Sphere},
     transform::Transform,
 };
-use kapitsa_math::Vec3;
+use kapitsa_math::{Quat, Vec3};
+
+#[test]
+fn large_planet_and_rocket_reproduce_gjk_nonconvergence() {
+    let planet = Shape::Sphere(Sphere::new(6_371_000.0).expect("planet"));
+    let rocket = Shape::Cuboid(Cuboid::new(1.2, 2.0, 1.2).expect("rocket"));
+    let planet_transform = Transform::identity();
+    let transforms = [
+        Transform::new(
+            Vec3::new(
+                -0.0005245512716641613,
+                6371001.009126276,
+                -0.00039424759536099496,
+            ),
+            Quat::new(
+                -0.00020082512214539218,
+                -4.921724644690514e-23,
+                0.00026720029352878623,
+                0.9999999441366352,
+            ),
+        )
+        .expect("transform"),
+        Transform::new(
+            Vec3::new(
+                -0.0007729592188626434,
+                6371001.005095873,
+                -0.002196058189796544,
+            ),
+            Quat::new(
+                -0.0009760598926848091,
+                1.3915610368588271e-8,
+                0.00020098223681638827,
+                0.9999995034564898,
+            ),
+        )
+        .expect("transform"),
+    ];
+    for rocket_transform in transforms {
+        assert!(matches!(
+            intersect(&planet, &planet_transform, &rocket, &rocket_transform),
+            Err(CollisionError::NonConvergent)
+        ));
+        assert!(matches!(
+            intersect(&rocket, &rocket_transform, &planet, &planet_transform),
+            Err(CollisionError::NonConvergent)
+        ));
+        let result = super::distance_to_point(&rocket, &rocket_transform, Vec3::ZERO)
+            .expect("distance to planet center");
+        assert!(!result.intersects);
+        assert!(result.distance.is_finite());
+        assert!(result.point_a.is_finite() && result.point_b.is_finite());
+    }
+}
 
 #[test]
 fn gjk_detects_separated_and_overlapping_spheres() {
