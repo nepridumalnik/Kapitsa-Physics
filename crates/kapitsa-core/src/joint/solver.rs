@@ -15,7 +15,7 @@ use crate::{
     rigid_body::solver_mass::{SolverMass, SolverMassCacheStatus, SolverMassSlot},
     transform::Transform,
 };
-use kapitsa_math::{Mat3, Quat, Vec3};
+use kapitsa_math::{Cholesky3, Quat, Vec3};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct JointResidual {
@@ -140,13 +140,14 @@ enum FixedJointRowBlock {
     Frame,
 }
 
-/// Cached `J M^-1 J^T` operator for one fixed-joint velocity block. The operator
-/// only depends on the block's row Jacobians and solver masses, so velocity
-/// sweeps that leave poses and masses unchanged can reuse it.
+/// Cached `J M^-1 J^T` operator for one fixed-joint velocity block, stored as a
+/// Cholesky factorization. The operator only depends on the block's row
+/// Jacobians and solver masses, so velocity sweeps that leave poses and masses
+/// unchanged can reuse the factorization and only substitute per iteration.
 #[derive(Clone, Copy, Debug)]
 struct FixedBlockVelocityOperator {
     masses: [SolverMass; 2],
-    inverse_effective_mass: Mat3,
+    factor: Cholesky3,
 }
 
 /// Per-joint velocity operators for the anchor (keys 0..=2) and frame (keys
@@ -4856,9 +4857,7 @@ fn solve_velocity_projection_group<B: SolverBodyAccess + ?Sized>(
             } else {
                 FixedJointRowBlock::Frame
             };
-            if let Some(inverse_effective_mass) =
-                velocity_block_operator(block_rows, masses, block, operators)?
-            {
+            if let Some(factor) = velocity_block_operator(block_rows, masses, block, operators)? {
                 let velocity_error = Vec3::new(
                     block_rows[0].target_velocity - row_velocity(bodies, block_rows[0])?,
                     block_rows[1].target_velocity - row_velocity(bodies, block_rows[1])?,
@@ -4867,7 +4866,7 @@ fn solve_velocity_projection_group<B: SolverBodyAccess + ?Sized>(
                 if !velocity_error.is_finite() {
                     return Err(CollisionError::ArithmeticOverflow);
                 }
-                match inverse_effective_mass.solve_spd(velocity_error) {
+                match factor.solve(velocity_error) {
                     Ok(delta) if delta.is_finite() => {
                         apply_velocity_block(
                             rows,
@@ -5038,40 +5037,37 @@ fn prepared_block(
     }
 }
 
-/// Returns the cached `J M^-1 J^T` operator for a velocity block, computing it
-/// once per step and reusing it while the solver masses stay unchanged. Mirrors
-/// `prepared_block` fallback semantics: invalid blocks yield `Ok(None)` so the
-/// caller drops to the scalar path, while unexpected errors propagate.
+/// Returns the cached Cholesky factorization of `J M^-1 J^T` for a velocity
+/// block, computing and factoring it once per step and reusing it while the
+/// solver masses stay unchanged. Mirrors `prepared_block` fallback semantics:
+/// invalid or non-SPD blocks yield `Ok(None)` so the caller drops to the scalar
+/// path, while unexpected errors propagate.
 fn velocity_block_operator(
     rows: [ConstraintRow; 3],
     masses: [SolverMass; 2],
     block: FixedJointRowBlock,
     operators: &mut FixedBlockVelocityOperators,
-) -> Result<Option<Mat3>, CollisionError> {
+) -> Result<Option<Cholesky3>, CollisionError> {
     if let Some(cached) = operators
         .slot(block)
         .filter(|cached| cached.masses == masses)
     {
-        return Ok(Some(cached.inverse_effective_mass));
+        return Ok(Some(cached.factor));
     }
-    match super::block::prepare_block3_operator(&rows, masses) {
-        Ok(inverse_effective_mass) => {
-            operators.set(
-                block,
-                FixedBlockVelocityOperator {
-                    masses,
-                    inverse_effective_mass,
-                },
-            );
-            Ok(Some(inverse_effective_mass))
-        }
+    let inverse_effective_mass = match super::block::prepare_block3_operator(&rows, masses) {
+        Ok(inverse_effective_mass) => inverse_effective_mass,
         Err(
             CollisionError::InvalidContact
             | CollisionError::InvalidConfig
             | CollisionError::NonConvergent,
-        ) => Ok(None),
-        Err(error) => Err(error),
-    }
+        ) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Ok(factor) = inverse_effective_mass.factor_spd() else {
+        return Ok(None);
+    };
+    operators.set(block, FixedBlockVelocityOperator { masses, factor });
+    Ok(Some(factor))
 }
 
 fn apply_position_block<B: SolverBodyAccess + ?Sized>(
@@ -5774,6 +5770,17 @@ mod tests {
             options,
         )
         .expect("prepared sweep");
+        assert_eq!(workspace.fixed_block_velocity_recomputes(), 2);
+
+        // A second prepared sweep reuses the cached factorizations.
+        JointSolver::solve_velocity_prepared_iteration(
+            &mut workspace,
+            &mut solved,
+            &constraints,
+            0.01,
+            options,
+        )
+        .expect("second prepared sweep");
         assert_eq!(workspace.fixed_block_velocity_recomputes(), 2);
 
         // A new step clears cached operators and accumulated impulses.

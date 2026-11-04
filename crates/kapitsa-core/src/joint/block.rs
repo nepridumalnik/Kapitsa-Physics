@@ -33,7 +33,8 @@ impl Block3 {
         if !rhs.is_finite() {
             return Err(CollisionError::ArithmeticOverflow);
         }
-        lhs.solve_spd(rhs)
+        lhs.factor_spd()
+            .and_then(|factor| factor.solve(rhs))
             .map_err(|_| CollisionError::NonConvergent)
     }
 }
