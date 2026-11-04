@@ -318,6 +318,230 @@ fn solve_with_joints_reuses_scalar_velocity_rows_across_sweeps_in_phase_order() 
     );
 }
 
+fn fixed_joint_constraint(body_a: usize, body_b: usize) -> JointConstraint {
+    let mut world = PhysicsWorld::new();
+    let id_a = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let id_b = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .unwrap();
+    let joint_id = world
+        .add_joint(
+            id_a,
+            id_b,
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .unwrap();
+    JointConstraint {
+        id: joint_id,
+        body_a,
+        body_b,
+        joint: Joint::Fixed(FixedJoint::new(JointCommon::new(
+            JointFrame::IDENTITY,
+            JointFrame::IDENTITY,
+        ))),
+    }
+}
+
+fn prepare_colored_workspace(
+    workspace: &mut SolverWorkspace,
+    bodies: &[SolverBody],
+    manifolds: &[SolverManifold],
+    joints: &[JointConstraint],
+) {
+    let rebuilt = workspace
+        .prepare_constraint_coloring(bodies, manifolds, joints)
+        .unwrap();
+    workspace
+        .prepare_colored_batches(manifolds, joints, rebuilt)
+        .unwrap();
+}
+
+fn solve_colored(
+    bodies: &mut Vec<SolverBody>,
+    manifolds: &mut Vec<SolverManifold>,
+    joints: &[JointConstraint],
+    config: super::CollisionConfig,
+) -> Result<(), crate::collision::CollisionError> {
+    let mut workspace = SolverWorkspace::new();
+    prepare_colored_workspace(&mut workspace, bodies, manifolds, joints);
+    let mut joint_workspace = JointWorkspace::new();
+    joint_workspace.begin_step();
+    workspace.solve_colored_constraints(
+        bodies,
+        manifolds,
+        &mut joint_workspace,
+        joints,
+        config,
+        JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy()),
+        None,
+        &crate::execution::SequentialExecutor,
+        8,
+    )
+}
+
+#[test]
+fn contact_only_phases_do_not_touch_joints() {
+    let bodies = [
+        dynamic_body(Vec3::ZERO),
+        dynamic_body(Vec3::new(1.5, 0.0, 0.0)),
+    ];
+    let mut solver_bodies = bodies
+        .into_iter()
+        .map(|body| {
+            let state = *body.state();
+            SolverBody::from_prediction(body, state)
+        })
+        .collect::<Vec<_>>();
+    let manifolds = Vec::new();
+    let joints = [fixed_joint_constraint(0, 1)];
+    let mut workspace = SolverWorkspace::new();
+    prepare_colored_workspace(&mut workspace, &solver_bodies, &manifolds, &joints);
+
+    let before = solver_bodies
+        .iter()
+        .map(|body| {
+            (
+                body.body().state().transform(),
+                body.body().state().linear_velocity(),
+                body.body().state().angular_velocity(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let step = JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy());
+    for phase in [
+        super::ColoredConstraintPhase::PrepareContactPoints,
+        super::ColoredConstraintPhase::WarmStartContacts,
+    ] {
+        workspace
+            .execute_colored_phase(
+                &mut solver_bodies,
+                &mut [],
+                super::CollisionConfig::default(),
+                step,
+                phase,
+                &crate::execution::SequentialExecutor,
+                8,
+            )
+            .unwrap();
+    }
+
+    for (body, (transform, linear, angular)) in solver_bodies.iter().zip(before) {
+        assert_eq!(body.body().state().transform(), transform);
+        assert_eq!(body.body().state().linear_velocity(), linear);
+        assert_eq!(body.body().state().angular_velocity(), angular);
+    }
+    assert!(
+        workspace
+            .colored_batches
+            .iter()
+            .all(|batch| batch.joint_workspace.solver_calls().is_empty())
+    );
+}
+
+#[test]
+fn contact_only_solution_matches_sequential_solver() {
+    let config = super::CollisionConfig {
+        velocity_iterations: 3,
+        position_iterations: 2,
+        ..super::CollisionConfig::default()
+    };
+    let (mut colored_bodies, mut colored_manifolds) = ball_on_plane(-Vec3::Y * 2.0);
+    let (mut sequential_bodies, mut sequential_manifolds) = ball_on_plane(-Vec3::Y * 2.0);
+
+    solve_colored(&mut colored_bodies, &mut colored_manifolds, &[], config).unwrap();
+    SolverWorkspace::new()
+        .solve(&mut sequential_bodies, &mut sequential_manifolds, config)
+        .unwrap();
+
+    let colored_velocity = colored_bodies[1].body().state().linear_velocity();
+    let sequential_velocity = sequential_bodies[1].body().state().linear_velocity();
+    assert!((colored_velocity - sequential_velocity).length() < 1.0e-12);
+    assert!(
+        (colored_bodies[1].body().state().transform().translation()
+            - sequential_bodies[1]
+                .body()
+                .state()
+                .transform()
+                .translation())
+        .length()
+            < 1.0e-12
+    );
+    assert_eq!(
+        colored_manifolds[0].manifold.points()[0].normal_impulse,
+        sequential_manifolds[0].manifold.points()[0].normal_impulse
+    );
+}
+
+#[test]
+fn mixed_joint_and_contact_solve_keeps_all_constraints_active() {
+    let (mut bodies, mut manifolds) = ball_on_plane(-Vec3::Y);
+    for position in [Vec3::ZERO, Vec3::new(1.5, 0.0, 0.0)] {
+        let body = dynamic_body(position);
+        let state = *body.state();
+        bodies.push(SolverBody::from_prediction(body, state));
+    }
+    let joints = [fixed_joint_constraint(2, 3)];
+    let initial_joint_distance = (bodies[3].body().state().transform().translation()
+        - bodies[2].body().state().transform().translation())
+    .length();
+
+    solve_colored(
+        &mut bodies,
+        &mut manifolds,
+        &joints,
+        super::CollisionConfig::default(),
+    )
+    .unwrap();
+
+    let ball = bodies[1].body();
+    assert!(ball.state().linear_velocity().is_finite());
+    assert!(ball.state().linear_velocity().y > 0.0);
+    assert!(manifolds[0].manifold.points()[0].normal_impulse > 0.0);
+    let joint_distance = (bodies[3].body().state().transform().translation()
+        - bodies[2].body().state().transform().translation())
+    .length();
+    assert!(joint_distance.is_finite());
+    assert!(joint_distance < initial_joint_distance);
+    assert!(bodies.iter().all(|body| {
+        body.body().state().transform().translation().is_finite()
+            && body.body().state().linear_velocity().is_finite()
+    }));
+}
+
+#[test]
+fn contacts_sharing_one_dynamic_body_are_solved_without_conflicts() {
+    let (mut bodies, mut manifolds) = ball_on_plane(-Vec3::Y * 2.0);
+    let mut second = manifolds[0];
+    second.manifold.point_mut(0).unwrap().normal_impulse = 0.0;
+    manifolds.push(second);
+    let config = super::CollisionConfig {
+        velocity_iterations: 2,
+        position_iterations: 1,
+        ..super::CollisionConfig::default()
+    };
+
+    solve_colored(&mut bodies, &mut manifolds, &[], config).unwrap();
+
+    let ball = bodies[1].body();
+    assert!(ball.state().linear_velocity().is_finite());
+    assert!(ball.state().transform().translation().is_finite());
+    assert!(
+        manifolds
+            .iter()
+            .all(|manifold| manifold.manifold.points()[0].normal_impulse >= 0.0)
+    );
+    assert!(
+        manifolds
+            .iter()
+            .any(|manifold| manifold.manifold.points()[0].normal_impulse > 0.0)
+    );
+}
+
 #[test]
 fn adaptive_joint_iterations_stop_at_minimum_or_report_the_max_residual() {
     fn solve(offset: Vec3) -> (usize, usize, crate::joint::JointResidual) {

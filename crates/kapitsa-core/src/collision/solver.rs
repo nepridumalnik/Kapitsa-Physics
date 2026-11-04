@@ -63,6 +63,12 @@ enum ColoredConstraintPhase {
     Position,
 }
 
+impl ColoredConstraintPhase {
+    const fn is_contact_only(self) -> bool {
+        matches!(self, Self::PrepareContactPoints | Self::WarmStartContacts)
+    }
+}
+
 struct ColoredConstraintTask {
     constraint_index: usize,
     body_indices: [usize; 2],
@@ -224,6 +230,7 @@ struct ColoredConstraintBatch {
     tasks: Vec<ColoredConstraintTask>,
     joint_workspace: JointWorkspace,
     contact_points: Vec<SolverPoint>,
+    contact_task_count: usize,
     error: Option<CollisionError>,
 }
 
@@ -233,8 +240,13 @@ impl ColoredConstraintBatch {
             tasks: Vec::new(),
             joint_workspace: JointWorkspace::new(),
             contact_points: Vec::new(),
+            contact_task_count: 0,
             error: None,
         }
+    }
+
+    fn has_contacts(&self) -> bool {
+        self.contact_task_count != 0
     }
 }
 
@@ -519,6 +531,7 @@ impl SolverWorkspace {
             for batch in &mut self.colored_batches {
                 batch.tasks.clear();
                 batch.contact_points.clear();
+                batch.contact_task_count = 0;
                 batch.error = None;
             }
             self.active_colored_batches = 0;
@@ -551,7 +564,9 @@ impl SolverWorkspace {
                             manifolds,
                             joints,
                         )?);
-                        if constraint_index >= manifolds.len() {
+                        if constraint_index < manifolds.len() {
+                            batch.contact_task_count += 1;
+                        } else {
                             let joint_index = constraint_index - manifolds.len();
                             self.joint_task_locations[joint_index] =
                                 [self.active_colored_batches, task_slot];
@@ -571,9 +586,14 @@ impl SolverWorkspace {
                 batch.error = None;
                 batch.contact_points.clear();
                 batch.joint_workspace.begin_step();
+                let mut contact_task_count = 0;
                 for task in &mut batch.tasks {
                     task.update(manifolds, joints)?;
+                    if matches!(task.kind, ColoredConstraintKind::Contact(_)) {
+                        contact_task_count += 1;
+                    }
                 }
+                batch.contact_task_count = contact_task_count;
             }
         }
         Ok(())
@@ -622,24 +642,26 @@ impl SolverWorkspace {
     ) -> Result<(), CollisionError> {
         #[cfg(not(feature = "bench-internals"))]
         let _ = gravity;
-        self.execute_colored_phase(
-            bodies,
-            manifolds,
-            config,
-            joint_solver_step,
-            ColoredConstraintPhase::PrepareContactPoints,
-            executor,
-            worker_count,
-        )?;
-        self.execute_colored_phase(
-            bodies,
-            manifolds,
-            config,
-            joint_solver_step,
-            ColoredConstraintPhase::WarmStartContacts,
-            executor,
-            worker_count,
-        )?;
+        if !manifolds.is_empty() {
+            self.execute_colored_phase(
+                bodies,
+                manifolds,
+                config,
+                joint_solver_step,
+                ColoredConstraintPhase::PrepareContactPoints,
+                executor,
+                worker_count,
+            )?;
+            self.execute_colored_phase(
+                bodies,
+                manifolds,
+                config,
+                joint_solver_step,
+                ColoredConstraintPhase::WarmStartContacts,
+                executor,
+                worker_count,
+            )?;
+        }
         #[cfg(feature = "bench-internals")]
         snapshot_velocities(bodies, &mut self.velocity_snapshots)?;
         #[cfg(feature = "bench-internals")]
@@ -793,6 +815,7 @@ impl SolverWorkspace {
         worker_count: usize,
     ) -> Result<(), CollisionError> {
         let shared_bodies = SharedSolverBodies::new(bodies);
+        let contact_only = phase.is_contact_only();
         let group_count = self.color_batch_offsets.len().saturating_sub(1);
         for group in 0..group_count {
             let start = self.color_batch_offsets[group];
@@ -800,12 +823,26 @@ impl SolverWorkspace {
             if start == end {
                 continue;
             }
-            let constraint_count = self.colored_batches[start..end]
+            let batches = &self.colored_batches[start..end];
+            if contact_only && !batches.iter().any(ColoredConstraintBatch::has_contacts) {
+                continue;
+            }
+            let constraint_count = batches
                 .iter()
-                .map(|batch| batch.tasks.len())
+                .filter(|batch| !contact_only || batch.has_contacts())
+                .map(|batch| {
+                    if contact_only {
+                        batch.contact_task_count
+                    } else {
+                        batch.tasks.len()
+                    }
+                })
                 .sum::<usize>();
             if constraint_count < SMALL_COLOR_MERGE_THRESHOLD {
                 for batch in &mut self.colored_batches[start..end] {
+                    if contact_only && !batch.has_contacts() {
+                        continue;
+                    }
                     Self::process_colored_batch(
                         batch,
                         &shared_bodies,
@@ -827,6 +864,10 @@ impl SolverWorkspace {
                     chunk_size,
                     |_, batches| {
                         for batch in batches {
+                            if contact_only && !batch.has_contacts() {
+                                batch.error = None;
+                                continue;
+                            }
                             batch.error = Self::process_colored_batch(
                                 batch,
                                 &shared_bodies,
@@ -878,7 +919,11 @@ impl SolverWorkspace {
     ) -> Result<(), CollisionError> {
         let dt = joint_solver_step.dt();
         let options = joint_solver_step.options();
+        let contact_only = phase.is_contact_only();
         for (task_slot, task) in batch.tasks.iter_mut().enumerate() {
+            if contact_only && !matches!(task.kind, ColoredConstraintKind::Contact(_)) {
+                continue;
+            }
             // SAFETY: tasks are grouped by the unconditional conflict-free color check.
             let mut bodies = unsafe { source_bodies.pair(task.body_indices)? };
             match &mut task.kind {
