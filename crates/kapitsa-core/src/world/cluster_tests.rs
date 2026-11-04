@@ -495,7 +495,10 @@ fn add_cluster_part_keeps_part_local_geometry_and_updates_mass() {
                     local_anchor: Vec3::X,
                     local_rotation: kapitsa_math::Quat::IDENTITY,
                 },
-                frame_b: JointFrame::IDENTITY,
+                frame_b: JointFrame {
+                    local_anchor: Vec3::X,
+                    local_rotation: kapitsa_math::Quat::IDENTITY,
+                },
                 strength: WeldStrength::Unbreakable,
                 stiffness: WeldStiffness {
                     linear: 1.0,
@@ -797,6 +800,86 @@ fn merge_then_split_preserves_first_cluster_root() {
             .map(RigidCluster::root),
         Some(second_root)
     );
+    assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
+fn split_preserves_root_identity_when_lower_part_exists() {
+    let mut world = PhysicsWorld::new();
+    let body = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("body");
+    let low = part(&mut world, body);
+    let middle = part(&mut world, body);
+    let root = part(&mut world, body);
+    let low_middle = weld(&mut world, low, middle);
+    let low_root = weld(&mut world, low, root);
+    if let Some(entry) = world.bodies.get_mut(body.dense) {
+        entry.cluster = Some(RigidCluster {
+            root,
+            parts: vec![low, middle, root],
+            welds: vec![low_middle, low_root],
+        });
+    } else {
+        panic!("missing body");
+    }
+
+    let bodies = world.break_weld(low_middle).expect("split");
+
+    assert_eq!(bodies[0], body);
+    assert_eq!(world.cluster(body).map(RigidCluster::root), Some(root));
+    assert_eq!(
+        world
+            .cluster(world.part_body(middle).expect("middle body"))
+            .map(RigidCluster::root),
+        Some(middle)
+    );
+    assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
+fn kinematic_merge_rejects_mismatched_angular_velocity() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let mut first_body = RigidBody::new_kinematic(Transform::identity());
+    first_body
+        .set_linear_velocity(Vec3::X)
+        .expect("first linear velocity");
+    first_body
+        .set_angular_velocity(Vec3::Z)
+        .expect("first angular velocity");
+    let mut second_body = RigidBody::new_kinematic(Transform::identity());
+    second_body
+        .set_linear_velocity(Vec3::X)
+        .expect("second linear velocity");
+    second_body
+        .set_angular_velocity(Vec3::ZERO)
+        .expect("second angular velocity");
+    let first = world.add_body(first_body).expect("first body");
+    let second = world.add_body(second_body).expect("second body");
+    world
+        .enable_cluster_with_mass(first, mass)
+        .expect("first root");
+    world
+        .enable_cluster_with_mass(second, mass)
+        .expect("second root");
+    let weld = WeldDesc {
+        frame_a: JointFrame::IDENTITY,
+        frame_b: JointFrame::IDENTITY,
+        strength: WeldStrength::Unbreakable,
+        stiffness: WeldStiffness {
+            linear: 1.0,
+            angular: 1.0,
+        },
+    };
+
+    assert_eq!(
+        world.merge_clusters(first, second, weld),
+        Err(ClusterError::IncompatibleMotion)
+    );
+    assert_eq!(world.body_count(), 2);
+    assert_eq!(world.cluster(first).map(RigidCluster::part_count), Some(1));
+    assert_eq!(world.cluster(second).map(RigidCluster::part_count), Some(1));
     assert_eq!(world.validate_clusters(), Ok(()));
 }
 

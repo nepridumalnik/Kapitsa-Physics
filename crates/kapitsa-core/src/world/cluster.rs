@@ -698,6 +698,21 @@ impl PhysicsWorld {
             {
                 return Err(ClusterError::IncompatibleMotion);
             }
+            let first_omega = first_body.state().angular_velocity();
+            let second_omega = second_body.state().angular_velocity();
+            let omega_scale = first_omega
+                .abs()
+                .max_element()
+                .max(second_omega.abs().max_element())
+                .max(1.0);
+            if first_omega
+                .checked_sub(second_omega)
+                .and_then(Vec3::checked_length)
+                .ok_or(ClusterError::ArithmeticOverflow)?
+                > 128.0 * f64::EPSILON * omega_scale
+            {
+                return Err(ClusterError::IncompatibleMotion);
+            }
         }
 
         let mut transformed_parts = Vec::new();
@@ -1110,7 +1125,7 @@ impl PhysicsWorld {
                 })
             })
             .collect::<Vec<_>>();
-        let root = root_component[0];
+        let root = original_root;
         if let Some(entry) = self.bodies.get_mut(body.dense) {
             entry.body = prepared_bodies[0];
             entry.cluster = Some(RigidCluster {
