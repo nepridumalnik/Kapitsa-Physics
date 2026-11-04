@@ -5163,6 +5163,7 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return None;
         }
+        let cluster = self.bodies.get(id.dense)?.cluster.clone();
         let mut next = self.bodies.get(id.dense)?.first_collider;
         while let Some(collider) = next {
             next = self.colliders.get(collider.dense)?.next;
@@ -5193,7 +5194,16 @@ impl PhysicsWorld {
             };
             self.force_sources.remove(source.dense)?;
         }
-        self.bodies.remove(id.dense).map(|entry| entry.body)
+        let removed = self.bodies.remove(id.dense).map(|entry| entry.body)?;
+        if let Some(cluster) = cluster {
+            for weld in cluster.welds {
+                self.welds.remove(weld.dense);
+            }
+            for part in cluster.parts {
+                self.parts.remove(part.dense);
+            }
+        }
+        Some(removed)
     }
 
     /// Iterates over bodies in dense storage order, which may change after removal.

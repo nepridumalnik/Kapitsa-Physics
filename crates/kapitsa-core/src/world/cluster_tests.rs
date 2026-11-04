@@ -557,3 +557,40 @@ fn add_cluster_part_rejects_mismatched_anchors_without_mutation() {
     assert_eq!(world.parts.len(), 1);
     assert_eq!(world.welds.len(), 0);
 }
+
+#[test]
+fn removing_cluster_body_removes_owned_parts_and_welds() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("body id");
+    let root = world.enable_cluster(body).expect("root");
+    let child = world
+        .add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::IDENTITY,
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )
+        .expect("child");
+    let weld = world.cluster(body).expect("cluster").welds()[0];
+    assert!(world.remove_body(body).is_some());
+    assert!(world.cluster_part(root).is_none());
+    assert!(world.cluster_part(child).is_none());
+    assert!(world.weld(weld).is_none());
+    assert_eq!(world.validate_clusters(), Ok(()));
+}
