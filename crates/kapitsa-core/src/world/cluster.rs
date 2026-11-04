@@ -13,6 +13,84 @@ use crate::{
 };
 
 impl PhysicsWorld {
+    /// Converts an existing dynamic body into a one-part cluster.
+    ///
+    /// Existing colliders become owned by the identity-transform root part.
+    /// Static and kinematic bodies can use [`Self::enable_cluster_with_mass`]
+    /// because they do not carry mass properties in `RigidBody`.
+    pub fn enable_cluster(&mut self, body: BodyId) -> Result<PartId, ClusterError> {
+        let mass = self
+            .body(body)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .physics()
+            .mass()
+            .ok_or(ClusterError::InvalidMass)?;
+        self.enable_cluster_with_mass(body, mass)
+    }
+
+    /// Converts an existing body into a one-part cluster with explicit root mass.
+    pub fn enable_cluster_with_mass(
+        &mut self,
+        body: BodyId,
+        mass: MassProperties,
+    ) -> Result<PartId, ClusterError> {
+        let body_entry = self
+            .bodies
+            .get(body.dense)
+            .filter(|_| body.world == self.world_id)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        if body_entry.cluster.is_some() {
+            return Err(ClusterError::AlreadyClustered);
+        }
+        if body_entry.body.physics().body_type() == BodyType::Dynamic
+            && body_entry.body.physics().mass() != Some(mass)
+        {
+            return Err(ClusterError::InvalidMass);
+        }
+
+        let mut colliders = Vec::new();
+        let mut next = body_entry.first_collider;
+        while let Some(collider) = next {
+            let entry = self
+                .colliders
+                .get(collider.dense)
+                .filter(|entry| entry.body == body)
+                .ok_or(ClusterError::InvalidTopology)?;
+            colliders.push(collider);
+            next = entry.next;
+        }
+        colliders
+            .try_reserve(1)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        self.parts
+            .try_reserve_insertions(1)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+
+        let dense = self
+            .parts
+            .insert(ClusterPart {
+                body,
+                local_transform: Transform::identity(),
+                mass,
+                colliders,
+            })
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let part = PartId {
+            world: self.world_id,
+            dense,
+        };
+        let entry = self
+            .bodies
+            .get_mut(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        entry.cluster = Some(RigidCluster {
+            root: part,
+            parts: vec![part],
+            welds: Vec::new(),
+        });
+        Ok(part)
+    }
+
     /// Changes a part's mass while preserving the body's world-space velocity field.
     ///
     /// `ConserveRemainingMomentum` requires explicit impulses and is rejected here;

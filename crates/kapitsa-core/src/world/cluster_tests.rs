@@ -413,3 +413,54 @@ fn rebind_preserves_collider_identity_and_world_pose() {
     );
     assert!(world.remove_collider(collider).is_some());
 }
+
+#[test]
+fn enable_cluster_assigns_existing_colliders_to_identity_root() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("body id");
+    let collider = world
+        .add_collider(
+            body,
+            Collider::new(
+                Shape::Sphere(Sphere::new(1.0).expect("sphere")),
+                Transform::identity(),
+            ),
+        )
+        .expect("collider");
+
+    let root = world.enable_cluster(body).expect("enable cluster");
+    assert_eq!(world.part_body(root), Some(body));
+    assert_eq!(world.cluster(body).map(RigidCluster::part_count), Some(1));
+    assert_eq!(
+        world.cluster_part(root).map(ClusterPart::colliders),
+        Some([collider].as_slice())
+    );
+    assert_eq!(world.validate_clusters(), Ok(()));
+    assert_eq!(
+        world.enable_cluster(body),
+        Err(ClusterError::AlreadyClustered)
+    );
+}
+
+#[test]
+fn enable_cluster_rejects_incompatible_mass_without_mutation() {
+    let mut world = PhysicsWorld::new();
+    let original = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let replacement = MassProperties::new(3.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), original).expect("body"))
+        .expect("body id");
+
+    assert_eq!(
+        world.enable_cluster_with_mass(body, replacement),
+        Err(ClusterError::InvalidMass)
+    );
+    assert!(world.cluster(body).is_none());
+    assert_eq!(
+        world.body(body).and_then(|body| body.physics().mass()),
+        Some(original)
+    );
+}
