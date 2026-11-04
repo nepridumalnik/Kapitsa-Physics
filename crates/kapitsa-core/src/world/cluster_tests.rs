@@ -723,6 +723,81 @@ fn removing_cluster_root_cleans_part_targets_and_selects_stable_root() {
 }
 
 #[test]
+fn removing_non_root_part_preserves_cluster_root() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("body id");
+    let root = world.enable_cluster(body).expect("root");
+    let child = world
+        .add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::IDENTITY,
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )
+        .expect("child");
+
+    assert_eq!(world.remove_cluster_part(child), Ok(()));
+    assert_eq!(world.cluster(body).map(RigidCluster::root), Some(root));
+    assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
+fn merge_then_split_preserves_first_cluster_root() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let second = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("second body");
+    let first = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("first body");
+    let first_root = world.enable_cluster(first).expect("first root");
+    let second_root = world.enable_cluster(second).expect("second root");
+    let weld = WeldDesc {
+        frame_a: JointFrame::IDENTITY,
+        frame_b: JointFrame::IDENTITY,
+        strength: WeldStrength::Unbreakable,
+        stiffness: WeldStiffness {
+            linear: 1.0,
+            angular: 1.0,
+        },
+    };
+
+    world.merge_clusters(first, second, weld).expect("merge");
+    let bridge = world.cluster(first).expect("merged cluster").welds()[0];
+    let bodies = world.break_weld(bridge).expect("split");
+
+    assert_eq!(bodies[0], first);
+    assert_eq!(
+        world.cluster(first).map(RigidCluster::root),
+        Some(first_root)
+    );
+    assert_eq!(
+        world
+            .cluster(world.part_body(second_root).expect("second body"))
+            .map(RigidCluster::root),
+        Some(second_root)
+    );
+    assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
 fn breaking_weld_splits_chain_and_rebinds_part_targets() {
     let mut world = PhysicsWorld::new();
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");

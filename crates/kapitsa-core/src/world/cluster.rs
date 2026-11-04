@@ -343,6 +343,7 @@ impl PhysicsWorld {
             .ok_or(ClusterError::InvalidPartId)?
             .body();
         let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+        let original_root = cluster.root();
         if !cluster.parts().contains(&part) {
             return Err(ClusterError::InvalidTopology);
         }
@@ -505,11 +506,15 @@ impl PhysicsWorld {
             .remove(part.dense)
             .ok_or(ClusterError::InvalidTopology)?;
 
-        let root = remaining_parts
-            .iter()
-            .copied()
-            .min()
-            .ok_or(ClusterError::InvalidTopology)?;
+        let root = if original_root == part {
+            remaining_parts
+                .iter()
+                .copied()
+                .min()
+                .ok_or(ClusterError::InvalidTopology)?
+        } else {
+            original_root
+        };
         let cluster = self
             .bodies
             .get_mut(body.dense)
