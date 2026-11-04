@@ -127,6 +127,31 @@ fn gjk_distance_tolerance_is_independent_of_world_translation() {
 }
 
 #[test]
+fn core_distance_is_invariant_under_common_scene_translation() {
+    let planet = Shape::Sphere(Sphere::new(1_000.0).expect("planet"));
+    let cuboid = Shape::Cuboid(Cuboid::new(2.0, 4.0, 2.0).expect("cuboid"));
+    let rotation = Quat::from_axis_angle(Vec3::Z, 0.35).expect("rotation");
+    let planet_transform = Transform::identity();
+    let cuboid_transform =
+        Transform::new(Vec3::new(0.75, 1_002.5, -0.5), rotation).expect("cuboid transform");
+    let translation = Vec3::new(1.0e9, -2.0e9, 3.0e9);
+    let translated_planet = Transform::new(translation, Quat::IDENTITY).expect("translated planet");
+    let translated_cuboid = Transform::new(translation + cuboid_transform.translation(), rotation)
+        .expect("translated cuboid");
+
+    let original = super::distance_core(&planet, &planet_transform, &cuboid, &cuboid_transform)
+        .expect("original core distance");
+    let translated = super::distance_core(&planet, &translated_planet, &cuboid, &translated_cuboid)
+        .expect("translated core distance");
+
+    assert_eq!(original.intersects, translated.intersects);
+    assert!((original.distance - translated.distance).abs() < 1.0e-9);
+    assert!((original.normal - translated.normal).length() < 1.0e-12);
+    assert!((original.point_a - translated.point_a).length() < 1.0e-9);
+    assert!((original.point_b - translated.point_b).length() < 1.0e-9);
+}
+
+#[test]
 fn gjk_handles_rotated_polyhedra_and_reports_bad_geometry() {
     let cuboid = Shape::Cuboid(Cuboid::new(2.0, 2.0, 2.0).expect("cuboid"));
     let first = Transform::identity();

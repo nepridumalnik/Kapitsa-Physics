@@ -828,13 +828,15 @@ impl NarrowPhase {
                 return Ok(None);
             }
             let normal = core_distance.normal;
-            let point_a = core_distance
-                .point_a
-                .checked_add(normal * radius_a)
+            let point_a = collider_a
+                .translation()
+                .checked_add(core_distance.point_a)
+                .and_then(|point| point.checked_add(normal * radius_a))
                 .ok_or(CollisionError::ArithmeticOverflow)?;
-            let point_b = core_distance
-                .point_b
-                .checked_sub(normal * radius_b)
+            let point_b = collider_a
+                .translation()
+                .checked_add(core_distance.point_b)
+                .and_then(|point| point.checked_sub(normal * radius_b))
                 .ok_or(CollisionError::ArithmeticOverflow)?;
             return make_manifold(
                 pair,

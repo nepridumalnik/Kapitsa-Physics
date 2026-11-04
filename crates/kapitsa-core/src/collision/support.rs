@@ -85,8 +85,6 @@ pub(crate) fn support_pair_core(
         .ok_or(CollisionError::ArithmeticOverflow)?;
     let local_a = support_local(shape_a, local_direction_a, false)?;
     let local_b = support_local(shape_b, local_direction_b, false)?;
-    let point_a = transform_a.transform_point(local_a.point);
-    let point_b = transform_b.transform_point(local_b.point);
     let relative_translation = transform_b
         .translation()
         .checked_sub(transform_a.translation())
@@ -106,13 +104,13 @@ pub(crate) fn support_pair_core(
     let difference = relative_a
         .checked_sub(relative_b)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    if !point_a.is_finite() || !point_b.is_finite() || !difference.is_finite() {
+    if !relative_a.is_finite() || !relative_b.is_finite() || !difference.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
     Ok(SupportPoint {
         difference,
-        point_a,
-        point_b,
+        point_a: relative_a,
+        point_b: relative_b,
         feature_a: local_a.feature,
         feature_b: local_b.feature,
     })
