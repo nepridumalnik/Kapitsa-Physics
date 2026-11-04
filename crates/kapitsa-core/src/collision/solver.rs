@@ -943,6 +943,7 @@ impl SolverWorkspace {
                         joints,
                         joint_solver_step.dt(),
                     )?;
+                    joint_workspace.record_post_joint_geometry(_position_iteration == 0);
                 }
             }
         }

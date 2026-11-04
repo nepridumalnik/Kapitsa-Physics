@@ -750,6 +750,7 @@ fn conflict_free_colored_solver_is_deterministic_and_reuses_batches() {
     assert!(first_step_metrics.color_batches_processed > 0);
     assert!(first_step_metrics.max_colors_per_island >= 2);
     assert!(first_step_metrics.constraint_coloring_constraints >= 199);
+    assert!(first_step_metrics.first_post_joint_anchor_error_m > 0.0);
 
     single_worker.step(DT).unwrap();
     multiple_workers
