@@ -945,8 +945,8 @@ impl JointSolver {
                 dt,
                 FixedJointRowBlock::Anchor,
             )?;
+            Self::position_projection_group(workspace, bodies, dt, options, [0, 1, 2])?;
         }
-        Self::position_projection_group(workspace, bodies, dt, options, [0, 1, 2])?;
         Self::position_projection_remainder(workspace, bodies, dt, options)?;
         Ok(())
     }
@@ -1043,16 +1043,16 @@ impl JointSolver {
                 start,
                 FixedJointRowBlock::Anchor,
             )?;
+            Self::position_projection_group_range(
+                workspace,
+                bodies,
+                dt,
+                options,
+                [0, 1, 2],
+                start,
+                start + 3,
+            )?;
         }
-        Self::position_projection_group_range(
-            workspace,
-            bodies,
-            dt,
-            options,
-            [0, 1, 2],
-            start,
-            start + 3,
-        )?;
         #[cfg(test)]
         workspace.record_solver_call(JointSolverCall::JointRowsCommitted(joint_index));
         Ok(true)
@@ -5790,7 +5790,6 @@ mod tests {
         SolverBody::from_prediction(body, state)
     }
 
-    #[cfg(feature = "bench-internals")]
     fn static_solver_body(position: Vec3, rotation: Quat) -> SolverBody {
         let body = RigidBody::new_static(Transform::new(position, rotation).expect("transform"));
         let state = *body.state();
@@ -7214,6 +7213,245 @@ mod tests {
     }
 
     #[test]
+    fn fixed_center_anchor_one_iteration_has_no_overshoot() {
+        let constraint = JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: Joint::Fixed(super::super::FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        };
+        let options = JointSolverOptions::legacy()
+            .with_projection(super::super::JointProjection::FixedBlock3);
+        for in_place in [true, false] {
+            let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::X)];
+            let mut workspace = JointWorkspace::new();
+            JointSolver::begin_step(&mut workspace);
+            if in_place {
+                JointSolver::prepare(&mut workspace, &bodies, &[constraint], 1.0 / 60.0)
+                    .expect("commit initial rows");
+            }
+            JointSolver::solve_position_joint_impl(
+                &mut workspace,
+                &mut bodies,
+                constraint,
+                0,
+                1.0 / 60.0,
+                options,
+                in_place,
+            )
+            .expect("position projection");
+            let error = (bodies[1].state().transform().translation()
+                - bodies[0].state().transform().translation())
+            .length();
+            assert!(error < 1.0e-12, "in_place={in_place}, residual={error}");
+        }
+    }
+
+    #[test]
+    fn compare_fixed_position_orders() {
+        let dt = 1.0 / 60.0;
+        let options = JointSolverOptions::legacy()
+            .with_projection(super::super::JointProjection::FixedBlock3);
+        let identity = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        let make_constraint = |a, b, common| JointConstraint {
+            id: test_joint_id(),
+            body_a: a,
+            body_b: b,
+            joint: Joint::Fixed(super::super::FixedJoint::new(common)),
+        };
+        let (asymmetric, asymmetric_bodies) = asymmetric_fixed_constraint();
+        let mut offset = identity;
+        offset.frame_a = JointFrame::new(Vec3::new(0.4, 0.2, 0.0), Quat::IDENTITY);
+        offset.frame_b = JointFrame::new(Vec3::new(-0.3, 0.1, 0.2), Quat::IDENTITY);
+        let rotation = Quat::from_axis_angle(Vec3::Z, 1.2).expect("rotation");
+        let big_rotation = Quat::from_axis_angle(Vec3::new(1.0, 0.4, 0.3), 2.6).expect("rotation");
+        let cases = [
+            (
+                "linear",
+                vec![solver_body(Vec3::ZERO), solver_body(Vec3::X)],
+                vec![make_constraint(0, 1, identity)],
+            ),
+            (
+                "rotation",
+                vec![
+                    solver_body(Vec3::ZERO),
+                    solver_body_with_rotation(Vec3::ZERO, rotation),
+                ],
+                vec![make_constraint(0, 1, identity)],
+            ),
+            (
+                "offset",
+                vec![
+                    solver_body(Vec3::ZERO),
+                    solver_body_with_rotation(Vec3::new(1.0, 0.5, -0.2), rotation),
+                ],
+                vec![make_constraint(0, 1, offset)],
+            ),
+            ("asymmetric", asymmetric_bodies.to_vec(), vec![asymmetric]),
+            (
+                "static",
+                vec![
+                    static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                    solver_body_with_rotation(Vec3::new(1.0, 0.5, -0.2), rotation),
+                ],
+                vec![make_constraint(0, 1, offset)],
+            ),
+            (
+                "large",
+                vec![
+                    asymmetric_bodies[0],
+                    solver_body_with_properties(
+                        Vec3::new(1.6, -0.9, 0.8),
+                        big_rotation,
+                        1000.0,
+                        Vec3::ZERO,
+                        kapitsa_math::Mat3::from_diagonal(Vec3::new(450.0, 600.0, 950.0)),
+                        Vec3::ZERO,
+                        Vec3::ZERO,
+                    ),
+                ],
+                vec![make_constraint(0, 1, offset)],
+            ),
+            (
+                "chain",
+                vec![
+                    solver_body(Vec3::ZERO),
+                    solver_body_with_rotation(Vec3::new(1.0, 0.3, 0.0), rotation),
+                    solver_body(Vec3::new(2.0, -0.2, 0.4)),
+                ],
+                vec![make_constraint(0, 1, offset), make_constraint(1, 2, offset)],
+            ),
+        ];
+        for (name, initial, constraints) in cases {
+            for order in 0..3 {
+                let mut bodies = initial.clone();
+                let mut workspace = JointWorkspace::new();
+                JointSolver::begin_step(&mut workspace);
+                workspace
+                    .ensure_solver_mass_slots(bodies.len())
+                    .expect("mass slots");
+                for iteration in 1..=8 {
+                    for (index, &constraint) in constraints.iter().enumerate() {
+                        if order == 0 {
+                            JointSolver::solve_position_joint_impl(
+                                &mut workspace,
+                                bodies.as_mut_slice(),
+                                constraint,
+                                index,
+                                dt,
+                                options,
+                                false,
+                            )
+                            .expect("production order");
+                        } else {
+                            workspace.begin_joint_prepare(index, constraint.id);
+                            prepare_joint_rows_for_constraint(
+                                bodies.as_slice(),
+                                &mut workspace,
+                                constraint,
+                                dt,
+                            )
+                            .expect("prepare");
+                            if order == 2 {
+                                JointSolver::position_projection_group(
+                                    &mut workspace,
+                                    bodies.as_mut_slice(),
+                                    dt,
+                                    options,
+                                    [0, 1, 2],
+                                )
+                                .expect("anchor");
+                                refresh_fixed_joint_row_block(
+                                    &mut workspace,
+                                    bodies.as_slice(),
+                                    constraint,
+                                    dt,
+                                    FixedJointRowBlock::Frame,
+                                )
+                                .expect("frame refresh");
+                            }
+                            JointSolver::position_projection_group(
+                                &mut workspace,
+                                bodies.as_mut_slice(),
+                                dt,
+                                options,
+                                [3, 4, 5],
+                            )
+                            .expect("frame");
+                            refresh_fixed_joint_row_block(
+                                &mut workspace,
+                                bodies.as_slice(),
+                                constraint,
+                                dt,
+                                FixedJointRowBlock::Anchor,
+                            )
+                            .expect("anchor refresh");
+                            JointSolver::position_projection_group(
+                                &mut workspace,
+                                bodies.as_mut_slice(),
+                                dt,
+                                options,
+                                [0, 1, 2],
+                            )
+                            .expect("anchor");
+                            workspace.finish_joint_prepare().expect("commit");
+                        }
+                    }
+                    assert!(
+                        bodies.iter().all(|body| {
+                            body.state().transform().translation().is_finite()
+                                && body.state().transform().rotation().is_normalized()
+                        }),
+                        "invalid pose in {name} order {order} iteration {iteration}"
+                    );
+                    if iteration == 1 || iteration == 8 {
+                        let mut linear = 0.0_f64;
+                        let mut angular = 0.0_f64;
+                        for &constraint in &constraints {
+                            let mut measure = JointWorkspace::new();
+                            JointSolver::prepare(
+                                &mut measure,
+                                bodies.as_slice(),
+                                &[constraint],
+                                dt,
+                            )
+                            .expect("measure");
+                            let rows = measure.rows();
+                            linear = linear.max(
+                                rows[0..3]
+                                    .iter()
+                                    .map(|r| r.error * r.error)
+                                    .sum::<f64>()
+                                    .sqrt(),
+                            );
+                            angular = angular.max(
+                                rows[3..6]
+                                    .iter()
+                                    .map(|r| r.error * r.error)
+                                    .sum::<f64>()
+                                    .sqrt(),
+                            );
+                        }
+                        assert!(
+                            linear.is_finite()
+                                && angular.is_finite()
+                                && linear < 100.0
+                                && angular < 10.0,
+                            "unstable {name} order {order}"
+                        );
+                        println!(
+                            "{name} order={order} iteration={iteration} linear={linear:.9e} angular={angular:.9e}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn in_place_fixed_position_projection_matches_generic_path() {
         let dt = 1.0 / 60.0;
         let (constraint, initial_bodies) = asymmetric_fixed_constraint();
@@ -7495,7 +7733,7 @@ mod tests {
         )
         .expect("damped scalar fallback");
         assert_eq!(workspace.metrics().block_rows_solved, 0);
-        assert_eq!(workspace.metrics().block_fallback_rows, 9);
+        assert_eq!(workspace.metrics().block_fallback_rows, 6);
     }
 
     #[cfg(feature = "bench-internals")]
