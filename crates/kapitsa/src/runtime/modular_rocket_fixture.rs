@@ -573,6 +573,161 @@ mod stability_tests {
 
     #[cfg(feature = "bench-internals")]
     #[test]
+    #[ignore = "one-step position convergence from identical rocket poses"]
+    fn diagnose_fixed_block_iterations_from_same_pose() {
+        let workers = std::env::var("KAPITSA_PARTIAL_WORKERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
+        let executor =
+            workers.map(|count| experiment_executor::RayonExecutor::new(count).expect("rayon"));
+        let mut initial_errors = None;
+        for position_iterations in 1..=12 {
+            let mut rocket = ModularRocket::new(1000);
+            rocket.world.set_joint_projection_for_bench(true);
+            rocket
+                .world
+                .set_partial_coloring_for_bench(workers.is_some());
+            for _ in 0..12 {
+                if let (Some(executor), Some(workers)) = (&executor, workers) {
+                    rocket
+                        .world
+                        .step_with_executor(DT, executor, workers)
+                        .expect("warm step");
+                } else {
+                    rocket.world.step(DT).expect("warm step");
+                }
+            }
+            let before = joint_errors(&rocket)
+                .into_iter()
+                .map(|(_, a, b)| (a, b))
+                .collect::<Vec<_>>();
+            if let Some(ref expected) = initial_errors {
+                assert_eq!(&before, expected, "initial joint errors changed");
+            } else {
+                initial_errors = Some(before);
+            }
+            let mut config = rocket.world.collision_config();
+            config.velocity_iterations = 8;
+            config.position_iterations = position_iterations;
+            rocket
+                .world
+                .set_collision_config(config)
+                .expect("iterations");
+            rocket
+                .world
+                .set_force_source_enabled(rocket.lower_engine, true)
+                .expect("ignition");
+            if let (Some(executor), Some(workers)) = (&executor, workers) {
+                rocket
+                    .world
+                    .step_with_executor(DT, executor, workers)
+                    .expect("measured step");
+            } else {
+                rocket.world.step(DT).expect("measured step");
+            }
+            let errors = joint_errors(&rocket);
+            let linear = errors.iter().map(|entry| entry.1).fold(0.0_f64, f64::max);
+            let angular = errors.iter().map(|entry| entry.2).fold(0.0_f64, f64::max);
+            let metrics = rocket.world.physics_step_metrics().joints;
+            println!(
+                "same_pose workers={workers:?} position={position_iterations} anchor={linear:.9e} frame={angular:.9e} velocity={:.9e}/{:.9e}",
+                metrics.post_velocity_linear_residual_mps,
+                metrics.post_velocity_angular_residual_radps
+            );
+            assert!(linear.is_finite() && angular.is_finite());
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "compare rocket stability with and without the solver mass cache"]
+    fn diagnose_fixed_block_rocket_mass_cache() {
+        let run = run_fixed_scenario(1000, true);
+        println!(
+            "mass_cache={} ticks={} anchor={:.9e}/{:.9e} frame={:.9e}/{:.9e} first={:?}/{:?} failure={:?}",
+            std::env::var_os("KAPITSA_ROCKET_NO_MASS_CACHE").is_none(),
+            run.completed_ticks,
+            run.max_anchor_error,
+            run.rms_anchor_error,
+            run.max_frame_error,
+            run.rms_frame_error,
+            run.first_anchor_limit_tick,
+            run.first_frame_limit_tick,
+            run.step_failure,
+        );
+        assert_eq!(run.completed_ticks, TICKS);
+        assert!(run.step_failure.is_none());
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "diagnostic FixedBlock3 loading and iteration convergence"]
+    fn diagnose_fixed_block_rocket_loading_and_convergence() {
+        for (parts, mode, position) in [
+            (1000, ScenarioMode::NoLoads, 3),
+            (1000, ScenarioMode::GravityWithoutContact, 3),
+            (1000, ScenarioMode::GravityWithContact, 3),
+            (1000, ScenarioMode::ThrustWithoutGravityOrContact, 3),
+            (1000, ScenarioMode::Full, 3),
+            (1000, ScenarioMode::Full, 6),
+            (1000, ScenarioMode::Full, 12),
+        ] {
+            let run = run_scenario(
+                parts,
+                true,
+                mode,
+                false,
+                Some((8, position)),
+                false,
+                None,
+                None,
+                None,
+            );
+            println!(
+                "parts={parts} mode={mode:?} velocity=8 position={position} ticks={} first_anchor={:?} first_frame={:?} max_anchor={:.8e} rms_anchor={:.8e} max_frame={:.8e} rms_frame={:.8e} drift={:.8e} separation_dp={:.8e} joints={} failure={:?}",
+                run.completed_ticks,
+                run.first_anchor_limit_tick,
+                run.first_frame_limit_tick,
+                run.max_anchor_error,
+                run.rms_anchor_error,
+                run.max_frame_error,
+                run.rms_frame_error,
+                run.max_coast_energy_drift,
+                run.separation_momentum_error,
+                run.joints_after_separation,
+                run.step_failure
+            );
+            for sample in run.solver_stage_trace.iter().filter(|sample| {
+                [0, 10, 11, 12, 13, 53, 54, 55, 89, 90, 179].contains(&sample.tick)
+                    || Some(sample.tick) == run.first_anchor_limit_tick
+                    || Some(sample.tick) == run.first_frame_limit_tick
+            }) {
+                println!(
+                    "stage {mode:?} p={position} tick={} anchor={:.6e} frame={:.6e} pre_velocity={:.6e}/{:.6e} post_velocity={:.6e}/{:.6e} pre_position={:.6e}/{:.6e} first_position={:.6e}/{:.6e} final_position={:.6e}/{:.6e} velocity_residual={:.6e}/{:.6e}",
+                    sample.tick,
+                    sample.anchor_error_m,
+                    sample.frame_error_rad,
+                    sample.pre_velocity_anchor_error_m,
+                    sample.pre_velocity_frame_error_rad,
+                    sample.post_velocity_anchor_error_m,
+                    sample.post_velocity_frame_error_rad,
+                    sample.pre_joint_anchor_error_m,
+                    sample.pre_joint_frame_error_rad,
+                    sample.first_post_joint_anchor_error_m,
+                    sample.first_post_joint_frame_error_rad,
+                    sample.post_joint_anchor_error_m,
+                    sample.post_joint_frame_error_rad,
+                    sample.post_velocity_linear_residual_mps,
+                    sample.post_velocity_angular_residual_radps
+                );
+            }
+            assert!(run.step_failure.is_none());
+            assert_eq!(run.completed_ticks, TICKS);
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
     #[ignore = "300-step FixedBlock3 partial coloring stability comparison"]
     fn partial_coloring_rocket_stability() {
         let first = run_fixed_scenario(1000, true);
@@ -2020,6 +2175,10 @@ mod stability_tests {
         }
         #[cfg(feature = "bench-internals")]
         rocket.world.set_joint_projection_for_bench(block3);
+        #[cfg(feature = "bench-internals")]
+        if std::env::var_os("KAPITSA_ROCKET_NO_MASS_CACHE").is_some() {
+            rocket.world.set_joint_mass_cache_for_bench(false);
+        }
         #[cfg(not(feature = "bench-internals"))]
         assert!(!block3, "FixedBlock3 comparison requires bench-internals");
         let initial_lower_mass = stage_mass(&rocket, &rocket.lower_parts);
@@ -2043,6 +2202,10 @@ mod stability_tests {
         let mut max_altitude: f64 = 0.0;
         let mut max_angular_speed: f64 = 0.0;
         let trace_flight = std::env::var_os("KAPITSA_ROCKET_TRACE_FLIGHT").is_some();
+        #[cfg(feature = "bench-internals")]
+        let trace_joint = std::env::var_os("KAPITSA_ROCKET_TRACE_JOINTS").is_some();
+        #[cfg(feature = "bench-internals")]
+        let tracked_joint = rocket.world.joints().next().map(|(id, _, _, _)| id);
         let mut separation_momentum_error = 0.0;
         let mut surface_begins = 0;
         let mut surface_ends = 0;
@@ -2222,7 +2385,43 @@ mod stability_tests {
 
             let mut tick_anchor_error: f64 = 0.0;
             let mut tick_frame_error: f64 = 0.0;
-            for (_, anchor_error, frame_error) in joint_errors(&rocket) {
+            let errors = joint_errors(&rocket);
+            #[cfg(feature = "bench-internals")]
+            if trace_joint
+                && [0, 10, 11, 12, 13, 19, 20, 40, 41, 53, 54, 55, 89, 90, 179].contains(&tick)
+            {
+                let worst = errors.iter().max_by(|a, b| a.1.total_cmp(&b.1));
+                let worst_frame = errors.iter().max_by(|a, b| a.2.total_cmp(&b.2));
+                let tracked = errors.iter().find(|row| Some(row.0) == tracked_joint);
+                if let Some(worst) = worst {
+                    if let Some((_, body_a, body_b, joint)) =
+                        rocket.world.joints().find(|row| row.0 == worst.0)
+                    {
+                        let transform_a = rocket
+                            .world
+                            .body(body_a)
+                            .expect("body A")
+                            .state()
+                            .transform();
+                        let transform_b = rocket
+                            .world
+                            .body(body_b)
+                            .expect("body B")
+                            .state()
+                            .transform();
+                        let anchor_a =
+                            transform_a.transform_point(joint.common().frame_a.local_anchor);
+                        let anchor_b =
+                            transform_b.transform_point(joint.common().frame_b.local_anchor);
+                        println!(
+                            "joint_trace tick={tick} tracked={tracked:?} worst_anchor={worst:?} worst_frame={worst_frame:?} body_a={body_a:?} body_b={body_b:?} local_a={:?} local_b={:?} world_a={anchor_a:?} world_b={anchor_b:?}",
+                            joint.common().frame_a.local_anchor,
+                            joint.common().frame_b.local_anchor
+                        );
+                    }
+                }
+            }
+            for (_, anchor_error, frame_error) in errors {
                 tick_anchor_error = tick_anchor_error.max(anchor_error);
                 tick_frame_error = tick_frame_error.max(frame_error);
                 max_anchor_error = max_anchor_error.max(anchor_error);
