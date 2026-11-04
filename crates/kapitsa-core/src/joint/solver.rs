@@ -117,6 +117,17 @@ struct FixedJointGeometry {
     rotation_error: Vec3,
 }
 
+/// Geometry keyed by the connector frames and both body poses it was derived
+/// from. A cached entry stays valid until one of these inputs changes.
+#[derive(Clone, Copy)]
+pub(crate) struct FixedJointGeometryCache {
+    frame_a: super::JointFrame,
+    frame_b: super::JointFrame,
+    transform_a: Transform,
+    transform_b: Transform,
+    geometry: FixedJointGeometry,
+}
+
 #[derive(Clone, Copy)]
 enum JointRowBuffer {
     Current,
@@ -562,14 +573,7 @@ impl JointSolver {
         #[cfg(test)]
         workspace.record_solver_call(JointSolverCall::JointRowsPrepared(joint_index));
         if options.projection() == super::JointProjection::FixedBlock3 {
-            Self::position_joint_block_sweep(
-                workspace,
-                bodies,
-                constraint,
-                joint_index,
-                dt,
-                options,
-            )?;
+            Self::position_joint_block_sweep(workspace, bodies, constraint, dt, options)?;
         } else if matches!(constraint.joint, super::Joint::Fixed(_))
             && workspace.solver_buffers_mut(true).0.len() == 6
             && [constraint.body_a, constraint.body_b]
@@ -789,7 +793,6 @@ impl JointSolver {
         workspace: &mut JointWorkspace,
         bodies: &mut B,
         constraint: JointConstraint,
-        joint_index: usize,
         dt: f64,
         options: JointSolverOptions,
     ) -> Result<(), CollisionError> {
@@ -816,19 +819,27 @@ impl JointSolver {
 
         let linear = Self::position_projection_group(workspace, bodies, dt, options, [0, 1, 2])?;
         if linear.pose_changed {
-            // A positional correction may rotate either body. Rebuild angular
-            // Jacobians before the next group, preserving multipliers by row key.
-            workspace.finish_joint_prepare()?;
-            workspace.begin_joint_prepare(joint_index, constraint.id);
-            prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+            // A positional correction may rotate either body. Rebuild only the
+            // angular block before the next group, preserving other rows.
+            refresh_fixed_joint_row_block(
+                workspace,
+                bodies,
+                constraint,
+                dt,
+                FixedJointRowBlock::Frame,
+            )?;
         }
         let angular = Self::position_projection_group(workspace, bodies, dt, options, [3, 4, 5])?;
         if angular.pose_changed {
             // Angular correction changes offset connector positions. Refresh
-            // point Jacobians and effective masses before the final linear pass.
-            workspace.finish_joint_prepare()?;
-            workspace.begin_joint_prepare(joint_index, constraint.id);
-            prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+            // only the point block before the final linear pass.
+            refresh_fixed_joint_row_block(
+                workspace,
+                bodies,
+                constraint,
+                dt,
+                FixedJointRowBlock::Anchor,
+            )?;
         }
         Self::position_projection_group(workspace, bodies, dt, options, [0, 1, 2])?;
         Self::position_projection_remainder(workspace, bodies, dt, options)?;
@@ -2797,6 +2808,7 @@ fn append_fixed_rows<B: SolverBodyAccess + ?Sized>(
 ) -> Result<(), CollisionError> {
     let geometry = fixed_joint_geometry(
         bodies,
+        workspace,
         body_a,
         body_b,
         joint.common.frame_a,
@@ -2817,24 +2829,57 @@ fn append_fixed_rows<B: SolverBodyAccess + ?Sized>(
 
 fn fixed_joint_geometry<B: SolverBodyAccess + ?Sized>(
     bodies: &B,
+    workspace: &mut JointWorkspace,
     body_a: usize,
     body_b: usize,
     frame_a: super::JointFrame,
     frame_b: super::JointFrame,
 ) -> Result<FixedJointGeometry, CollisionError> {
+    let transform_a = bodies
+        .get(body_a)
+        .ok_or(CollisionError::InvalidContact)?
+        .state()
+        .transform();
+    let transform_b = bodies
+        .get(body_b)
+        .ok_or(CollisionError::InvalidContact)?
+        .state()
+        .transform();
+    let joint_index = workspace.active_joint_index();
+    if let Some(cached) = workspace.fixed_geometry(joint_index) {
+        if cached.frame_a == frame_a
+            && cached.frame_b == frame_b
+            && cached.transform_a == transform_a
+            && cached.transform_b == transform_b
+        {
+            return Ok(cached.geometry);
+        }
+    }
+
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, frame_b)?;
     let position_error = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
     let rotation_error = relative_rotation_error(rotation_a, rotation_b)?;
-    Ok(FixedJointGeometry {
+    let geometry = FixedJointGeometry {
         anchor_a,
         anchor_b,
         rotation_a,
         position_error,
         rotation_error,
-    })
+    };
+    workspace.set_fixed_geometry(
+        joint_index,
+        FixedJointGeometryCache {
+            frame_a,
+            frame_b,
+            transform_a,
+            transform_b,
+            geometry,
+        },
+    )?;
+    Ok(geometry)
 }
 
 fn fixed_anchor_rows<B: SolverBodyAccess + ?Sized>(
@@ -2949,6 +2994,7 @@ fn refresh_fixed_joint_row_block<B: SolverBodyAccess + ?Sized>(
     let preparation_started = std::time::Instant::now();
     let geometry = fixed_joint_geometry(
         bodies,
+        workspace,
         constraint.body_a,
         constraint.body_b,
         joint.common.frame_a,
@@ -5194,6 +5240,63 @@ mod tests {
                 ))),
             )
             .expect("joint")
+    }
+
+    #[test]
+    fn fixed_joint_geometry_is_reused_until_a_body_pose_changes() -> Result<(), CollisionError> {
+        let constraint = JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: super::super::Joint::Fixed(super::super::FixedJoint::new(JointCommon::new(
+                JointFrame::new(
+                    Vec3::new(0.3, 0.0, 0.1),
+                    Quat::from_axis_angle(Vec3::Z, 0.2).ok_or(CollisionError::InvalidContact)?,
+                ),
+                JointFrame::new(Vec3::new(-0.2, 0.1, 0.0), Quat::IDENTITY),
+            ))),
+        };
+        let constraints = [constraint];
+        let mut bodies = [
+            solver_body_with_rotation(
+                Vec3::ZERO,
+                Quat::from_axis_angle(Vec3::X, 0.15).ok_or(CollisionError::InvalidContact)?,
+            ),
+            solver_body_with_rotation(
+                Vec3::new(1.0, 0.2, -0.1),
+                Quat::from_axis_angle(Vec3::Y, -0.25).ok_or(CollisionError::InvalidContact)?,
+            ),
+        ];
+        let mut workspace = JointWorkspace::new();
+        let prepare = |bodies: &[SolverBody], workspace: &mut JointWorkspace| {
+            workspace.begin_prepare();
+            prepare_joint_rows(bodies, workspace, &constraints, 0.01)?;
+            workspace.finish_prepare();
+            Ok::<(), CollisionError>(())
+        };
+
+        prepare(&bodies, &mut workspace)?;
+        assert_eq!(workspace.fixed_geometry_recomputes(), 1);
+        let first_rows = workspace.rows().to_vec();
+
+        prepare(&bodies, &mut workspace)?;
+        assert_eq!(workspace.fixed_geometry_recomputes(), 1);
+        assert_eq!(workspace.rows(), first_rows.as_slice());
+
+        bodies[1]
+            .body_mut()
+            .set_transform(
+                Transform::new(
+                    Vec3::new(1.05, 0.25, -0.1),
+                    Quat::from_axis_angle(Vec3::Y, -0.35).ok_or(CollisionError::InvalidContact)?,
+                )
+                .map_err(|_| CollisionError::InvalidContact)?,
+            )
+            .map_err(|_| CollisionError::InvalidContact)?;
+        prepare(&bodies, &mut workspace)?;
+        assert_eq!(workspace.fixed_geometry_recomputes(), 2);
+        assert_ne!(workspace.rows(), first_rows.as_slice());
+        Ok(())
     }
 
     #[test]

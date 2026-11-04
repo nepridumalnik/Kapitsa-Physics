@@ -1,6 +1,9 @@
 use super::{
-    JointBreakEvent, ReactionMode, reaction::wrench_from_impulse, row::ConstraintRow,
-    solver::JointConstraint, warm_start::JointImpulseCache,
+    JointBreakEvent, ReactionMode,
+    reaction::wrench_from_impulse,
+    row::ConstraintRow,
+    solver::{FixedJointGeometryCache, JointConstraint},
+    warm_start::JointImpulseCache,
 };
 use crate::collision::CollisionError;
 use crate::rigid_body::solver_mass::SolverMassSlot;
@@ -38,6 +41,7 @@ pub(crate) struct JointWorkspace {
     solver_mass_slots: Vec<SolverMassSlot>,
     preparing_joint_indices: Vec<usize>,
     preparing_joint_ids: Vec<Option<crate::world::JointId>>,
+    fixed_geometry: Vec<Option<FixedJointGeometryCache>>,
     prepared_rows: usize,
     active_joint_index: usize,
     active_joint_id: Option<crate::world::JointId>,
@@ -55,6 +59,8 @@ pub(crate) struct JointWorkspace {
     residual: super::solver::JointResidual,
     #[cfg(test)]
     solver_calls: Vec<JointSolverCall>,
+    #[cfg(test)]
+    fixed_geometry_recomputes: usize,
 }
 
 #[cfg(test)]
@@ -83,6 +89,7 @@ impl JointWorkspace {
             solver_mass_slots: Vec::new(),
             preparing_joint_indices: Vec::new(),
             preparing_joint_ids: Vec::new(),
+            fixed_geometry: Vec::new(),
             prepared_rows: 0,
             active_joint_index: 0,
             active_joint_id: None,
@@ -103,6 +110,8 @@ impl JointWorkspace {
             residual: super::solver::JointResidual::ZERO,
             #[cfg(test)]
             solver_calls: Vec::new(),
+            #[cfg(test)]
+            fixed_geometry_recomputes: 0,
         }
     }
 
@@ -137,6 +146,7 @@ impl JointWorkspace {
         self.preparing_rows.clear();
         self.preparing_joint_indices.clear();
         self.preparing_joint_ids.clear();
+        self.fixed_geometry.clear();
         self.prepared_rows = 0;
         self.active_joint_index = 0;
         self.active_joint_id = None;
@@ -358,6 +368,38 @@ impl JointWorkspace {
         } else {
             self.rows.len()
         }
+    }
+
+    pub(crate) const fn active_joint_index(&self) -> usize {
+        self.active_joint_index
+    }
+
+    pub(crate) fn fixed_geometry(&self, joint_index: usize) -> Option<FixedJointGeometryCache> {
+        self.fixed_geometry.get(joint_index).copied().flatten()
+    }
+
+    pub(crate) fn set_fixed_geometry(
+        &mut self,
+        joint_index: usize,
+        geometry: FixedJointGeometryCache,
+    ) -> Result<(), CollisionError> {
+        if joint_index >= self.fixed_geometry.len() {
+            self.fixed_geometry
+                .try_reserve(joint_index + 1 - self.fixed_geometry.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.fixed_geometry.resize(joint_index + 1, None);
+        }
+        self.fixed_geometry[joint_index] = Some(geometry);
+        #[cfg(test)]
+        {
+            self.fixed_geometry_recomputes = self.fixed_geometry_recomputes.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn fixed_geometry_recomputes(&self) -> usize {
+        self.fixed_geometry_recomputes
     }
 
     #[cfg(test)]
@@ -926,6 +968,8 @@ impl JointWorkspace {
             + self.preparing_joint_indices.capacity() * std::mem::size_of::<usize>()
             + self.preparing_joint_ids.capacity()
                 * std::mem::size_of::<Option<crate::world::JointId>>()
+            + self.fixed_geometry.capacity()
+                * std::mem::size_of::<Option<FixedJointGeometryCache>>()
             + self.reactions.capacity() * std::mem::size_of::<Option<JointReaction>>()
             + self.break_events.capacity() * std::mem::size_of::<JointBreakEvent>()
     }
