@@ -645,3 +645,61 @@ fn removing_cluster_body_removes_owned_parts_and_welds() {
     assert!(world.weld(weld).is_none());
     assert_eq!(world.validate_clusters(), Ok(()));
 }
+
+#[test]
+fn removing_cluster_root_cleans_part_targets_and_selects_stable_root() {
+    let mut world = PhysicsWorld::new();
+    let root_mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("root mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), root_mass).expect("body"))
+        .expect("body id");
+    let root = world.enable_cluster(body).expect("root");
+    let child_mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).expect("child mass");
+    let child = world
+        .add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY)
+                    .expect("part transform"),
+                mass: child_mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame {
+                    local_anchor: Vec3::X,
+                    local_rotation: kapitsa_math::Quat::IDENTITY,
+                },
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )
+        .expect("child");
+    let source = world
+        .add_force_source_for_part(root, Vec3::ZERO, Vec3::Y)
+        .expect("root force source");
+
+    assert_eq!(world.remove_cluster_part(root), Ok(()));
+    assert!(world.cluster_part(root).is_none());
+    assert_eq!(world.cluster(body).map(RigidCluster::root), Some(child));
+    assert_eq!(world.cluster(body).map(RigidCluster::weld_count), Some(0));
+    assert_eq!(
+        world
+            .body(body)
+            .and_then(|body| body.physics().mass())
+            .map(|mass| mass.mass()),
+        Some(2.0)
+    );
+    assert!(world.force_source(source).is_none());
+    assert_eq!(world.validate_clusters(), Ok(()));
+    assert_eq!(
+        world.remove_cluster_part(child),
+        Err(ClusterError::InvalidTopology)
+    );
+    assert_eq!(world.cluster(body).map(RigidCluster::root), Some(child));
+}

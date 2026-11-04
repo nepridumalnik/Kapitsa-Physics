@@ -1,7 +1,7 @@
 use kapitsa_math::Vec3;
 use std::collections::{HashMap, HashSet};
 
-use super::{BodyId, ClusterError, ColliderId, PartId, PhysicsWorld, WeldId};
+use super::{BodyId, ClusterError, ColliderId, ForceTarget, PartId, PhysicsWorld, WeldId};
 use crate::{
     cluster::{
         ClusterPart, MassChangeMode, MassTransfer, RigidCluster, Weld,
@@ -328,6 +328,182 @@ impl PhysicsWorld {
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         Ok(part)
+    }
+
+    /// Removes a part and its incident welds from a rigid cluster.
+    ///
+    /// The remaining parts must stay connected. Removing the final part is
+    /// rejected so the owning body cannot outlive an empty cluster.
+    pub fn remove_cluster_part(&mut self, part: PartId) -> Result<(), ClusterError> {
+        let body = self
+            .cluster_part(part)
+            .ok_or(ClusterError::InvalidPartId)?
+            .body();
+        let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+        if !cluster.parts().contains(&part) {
+            return Err(ClusterError::InvalidTopology);
+        }
+        if cluster.parts().len() == 1 {
+            return Err(ClusterError::InvalidTopology);
+        }
+
+        let mut remaining_parts = Vec::new();
+        remaining_parts
+            .try_reserve(cluster.parts().len() - 1)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for &id in cluster.parts() {
+            if id != part {
+                remaining_parts.push(id);
+            }
+        }
+        let remaining_set = remaining_parts.iter().copied().collect::<HashSet<_>>();
+
+        let mut removed_welds = Vec::new();
+        let mut remaining_welds = Vec::new();
+        remaining_welds
+            .try_reserve(cluster.welds().len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for &weld_id in cluster.welds() {
+            let weld = self.weld(weld_id).ok_or(ClusterError::InvalidTopology)?;
+            let (a, b) = weld.parts();
+            if a == part || b == part {
+                removed_welds.push(weld_id);
+            } else if remaining_set.contains(&a) && remaining_set.contains(&b) {
+                remaining_welds.push(weld_id);
+            } else {
+                return Err(ClusterError::InvalidTopology);
+            }
+        }
+
+        let mut adjacency = HashMap::new();
+        for &id in &remaining_parts {
+            adjacency.insert(id, Vec::new());
+        }
+        for &weld_id in &remaining_welds {
+            let weld = self.weld(weld_id).ok_or(ClusterError::InvalidTopology)?;
+            let (a, b) = weld.parts();
+            adjacency
+                .get_mut(&a)
+                .ok_or(ClusterError::InvalidTopology)?
+                .push(b);
+            adjacency
+                .get_mut(&b)
+                .ok_or(ClusterError::InvalidTopology)?
+                .push(a);
+        }
+        let mut visited = HashSet::new();
+        let mut pending = vec![remaining_parts[0]];
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            if let Some(neighbors) = adjacency.get(&id) {
+                pending.extend(neighbors.iter().copied());
+            }
+        }
+        if visited.len() != remaining_parts.len() {
+            return Err(ClusterError::InvalidTopology);
+        }
+
+        let removed_entry = self
+            .cluster_part(part)
+            .ok_or(ClusterError::InvalidTopology)?;
+        let removed_colliders = removed_entry.colliders().to_vec();
+        for &collider in &removed_colliders {
+            if self.collider_body(collider) != Some(body) {
+                return Err(ClusterError::InvalidTopology);
+            }
+        }
+
+        let mut values = Vec::new();
+        values
+            .try_reserve(remaining_parts.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for &id in &remaining_parts {
+            let entry = self.cluster_part(id).ok_or(ClusterError::InvalidTopology)?;
+            values.push((entry.mass(), entry.local_transform()));
+        }
+        let aggregate = aggregate_mass(values.iter().map(|(mass, transform)| (mass, transform)))?;
+        let original = *self.body(body).ok_or(ClusterError::InvalidBodyId)?;
+        let new_center = original
+            .state()
+            .transform()
+            .transform_point(aggregate.center_of_mass());
+        if !new_center.is_finite() {
+            return Err(ClusterError::ArithmeticOverflow);
+        }
+        let mut prepared = original;
+        if original.physics().body_type() == BodyType::Dynamic {
+            let old_center = original
+                .world_center_of_mass()
+                .map_err(ClusterError::Body)?
+                .ok_or(ClusterError::InvalidMass)?;
+            let (velocity, omega) = velocity_field(
+                old_center,
+                original.state().linear_velocity(),
+                original.state().angular_velocity(),
+                new_center,
+            )?;
+            let force = original.forces().force();
+            let torque = old_center
+                .checked_sub(new_center)
+                .and_then(|offset| offset.checked_cross(force))
+                .and_then(|shift| original.forces().torque().checked_add(shift))
+                .ok_or(ClusterError::ArithmeticOverflow)?;
+            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+            prepared
+                .set_linear_velocity(velocity)
+                .map_err(ClusterError::Body)?;
+            prepared
+                .set_angular_velocity(omega)
+                .map_err(ClusterError::Body)?;
+            if original.physics().mass() != Some(aggregate) {
+                prepared.apply_force(force).map_err(ClusterError::Body)?;
+                prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+            }
+        }
+
+        let removed_sources = self
+            .force_sources
+            .iter()
+            .filter_map(|(dense, source)| {
+                (source.target == ForceTarget::Part(part)).then_some(dense)
+            })
+            .collect::<Vec<_>>();
+        for dense in removed_sources {
+            self.force_sources.remove(dense);
+        }
+        for collider in removed_colliders {
+            self.remove_collider(collider)
+                .ok_or(ClusterError::InvalidTopology)?;
+        }
+        for weld in &removed_welds {
+            self.welds
+                .remove(weld.dense)
+                .ok_or(ClusterError::InvalidTopology)?;
+        }
+        self.parts
+            .remove(part.dense)
+            .ok_or(ClusterError::InvalidTopology)?;
+
+        let root = remaining_parts
+            .iter()
+            .copied()
+            .min()
+            .ok_or(ClusterError::InvalidTopology)?;
+        let cluster = self
+            .bodies
+            .get_mut(body.dense)
+            .and_then(|entry| entry.cluster.as_mut())
+            .ok_or(ClusterError::NotClustered)?;
+        cluster.root = root;
+        cluster.parts.retain(|id| *id != part);
+        cluster.welds.retain(|id| !removed_welds.contains(id));
+        if let Some(entry) = self.bodies.get_mut(body.dense) {
+            entry.body = prepared;
+        }
+        self.invalidate_body_edit(body);
+        Ok(())
     }
 
     /// Changes a part's mass while preserving the body's world-space velocity field.
