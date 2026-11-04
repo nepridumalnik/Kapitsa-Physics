@@ -920,6 +920,82 @@ fn updating_joint_targets_keeps_part_frame_locality() {
 }
 
 #[test]
+fn weld_anchor_validation_uses_local_coordinates_at_large_world_offsets() {
+    for translation in [Vec3::ZERO, Vec3::splat(1.0e12)] {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+        let rotation = kapitsa_math::Quat::from_axis_angle(Vec3::Z, 0.7).expect("rotation");
+        let body = world
+            .add_body(RigidBody::new_static(
+                Transform::new(translation, rotation).expect("body transform"),
+            ))
+            .expect("body id");
+        let root = world.enable_cluster_with_mass(body, mass).expect("root");
+        let frame_rotation = kapitsa_math::Quat::from_axis_angle(Vec3::X, 0.3).expect("frame");
+        let child = world
+            .add_cluster_part(
+                root,
+                ClusterPartDesc {
+                    local_transform: Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY)
+                        .expect("part transform"),
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    frame_a: JointFrame {
+                        local_anchor: Vec3::X,
+                        local_rotation: frame_rotation,
+                    },
+                    frame_b: JointFrame {
+                        local_anchor: Vec3::ZERO,
+                        local_rotation: kapitsa_math::Quat::new(
+                            -frame_rotation.x,
+                            -frame_rotation.y,
+                            -frame_rotation.z,
+                            -frame_rotation.w,
+                        ),
+                    },
+                    strength: WeldStrength::Unbreakable,
+                    stiffness: WeldStiffness {
+                        linear: 1.0,
+                        angular: 1.0,
+                    },
+                },
+            )
+            .expect("matching weld");
+        assert!(world.cluster_part(child).is_some());
+        assert_eq!(
+            world.add_cluster_part(
+                root,
+                ClusterPartDesc {
+                    local_transform: Transform::new(
+                        Vec3::new(2.0, 0.0, 0.0),
+                        kapitsa_math::Quat::IDENTITY,
+                    )
+                    .expect("part transform"),
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    frame_a: JointFrame::IDENTITY,
+                    frame_b: JointFrame::IDENTITY,
+                    strength: WeldStrength::Unbreakable,
+                    stiffness: WeldStiffness {
+                        linear: 1.0,
+                        angular: 1.0,
+                    },
+                },
+            ),
+            Err(ClusterError::IncompatibleAnchors)
+        );
+    }
+}
+
+#[test]
 fn breaking_weld_splits_chain_and_rebinds_part_targets() {
     let mut world = PhysicsWorld::new();
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");

@@ -191,31 +191,14 @@ impl PhysicsWorld {
             .ok_or(ClusterError::InvalidBodyId)?
             .state()
             .transform();
-        let parent_pose = body_pose
-            .compose(
-                &self
-                    .cluster_part(parent)
-                    .ok_or(ClusterError::InvalidPartId)?
-                    .local_transform(),
-            )
-            .map_err(ClusterError::Transform)?;
+        let parent_transform = self
+            .cluster_part(parent)
+            .ok_or(ClusterError::InvalidPartId)?
+            .local_transform();
         let part_pose = body_pose
             .compose(&desc.local_transform)
             .map_err(ClusterError::Transform)?;
-        let anchor_a = parent_pose.transform_point(weld_desc.frame_a.local_anchor);
-        let anchor_b = part_pose.transform_point(weld_desc.frame_b.local_anchor);
-        let anchor_error = anchor_a
-            .checked_sub(anchor_b)
-            .and_then(Vec3::checked_length)
-            .ok_or(ClusterError::ArithmeticOverflow)?;
-        let anchor_scale = anchor_a
-            .abs()
-            .max_element()
-            .max(anchor_b.abs().max_element())
-            .max(1.0);
-        if anchor_error > 128.0 * f64::EPSILON * anchor_scale {
-            return Err(ClusterError::IncompatibleAnchors);
-        }
+        validate_weld_frames(parent_transform, desc.local_transform, weld_desc)?;
 
         let original = *self.body(body).ok_or(ClusterError::InvalidBodyId)?;
         let mut values = Vec::new();
@@ -666,35 +649,18 @@ impl PhysicsWorld {
             .compose(&second_pose)
             .map_err(ClusterError::Transform)?;
 
-        let first_root_pose = first_pose
-            .compose(
-                &self
-                    .cluster_part(first_root)
-                    .ok_or(ClusterError::InvalidTopology)?
-                    .local_transform(),
-            )
+        let first_root_transform = self
+            .cluster_part(first_root)
+            .ok_or(ClusterError::InvalidTopology)?
+            .local_transform();
+        let second_root_transform = self
+            .cluster_part(second_root)
+            .ok_or(ClusterError::InvalidTopology)?
+            .local_transform();
+        let second_root_in_first = relative
+            .compose(&second_root_transform)
             .map_err(ClusterError::Transform)?;
-        let second_root_pose = second_pose
-            .compose(
-                &self
-                    .cluster_part(second_root)
-                    .ok_or(ClusterError::InvalidTopology)?
-                    .local_transform(),
-            )
-            .map_err(ClusterError::Transform)?;
-        let anchor_a = first_root_pose.transform_point(weld_desc.frame_a.local_anchor);
-        let anchor_b = second_root_pose.transform_point(weld_desc.frame_b.local_anchor);
-        let anchor_delta = anchor_b
-            .checked_sub(anchor_a)
-            .ok_or(ClusterError::ArithmeticOverflow)?;
-        let scale = anchor_a
-            .abs()
-            .max_element()
-            .max(anchor_b.abs().max_element())
-            .max(1.0);
-        if anchor_delta.length() > 128.0 * f64::EPSILON * scale {
-            return Err(ClusterError::IncompatibleAnchors);
-        }
+        validate_weld_frames(first_root_transform, second_root_in_first, weld_desc)?;
 
         let mut transformed_parts = Vec::new();
         let mut transformed_colliders = Vec::new();
@@ -1520,6 +1486,45 @@ impl PhysicsWorld {
         }
         Ok(())
     }
+}
+
+fn validate_weld_frames(
+    transform_a: Transform,
+    transform_b: Transform,
+    weld: crate::cluster::WeldDesc,
+) -> Result<(), ClusterError> {
+    let frame_a =
+        super::transform_joint_frame(transform_a, weld.frame_a).map_err(ClusterError::Transform)?;
+    let frame_b =
+        super::transform_joint_frame(transform_b, weld.frame_b).map_err(ClusterError::Transform)?;
+    let anchor_delta = frame_a
+        .local_anchor
+        .checked_sub(frame_b.local_anchor)
+        .ok_or(ClusterError::ArithmeticOverflow)?;
+    let anchor_scale = frame_a
+        .local_anchor
+        .abs()
+        .max_element()
+        .max(frame_b.local_anchor.abs().max_element())
+        .max(1.0);
+    let tolerance = 128.0 * f64::EPSILON * anchor_scale;
+    if anchor_delta.length() > tolerance {
+        return Err(ClusterError::IncompatibleAnchors);
+    }
+    let rotation_dot = frame_a.local_rotation.x.mul_add(
+        frame_b.local_rotation.x,
+        frame_a.local_rotation.y.mul_add(
+            frame_b.local_rotation.y,
+            frame_a.local_rotation.z.mul_add(
+                frame_b.local_rotation.z,
+                frame_a.local_rotation.w * frame_b.local_rotation.w,
+            ),
+        ),
+    );
+    if (rotation_dot.abs() - 1.0).abs() > 128.0 * f64::EPSILON {
+        return Err(ClusterError::IncompatibleAnchors);
+    }
+    Ok(())
 }
 
 fn map_cluster_world_error(error: super::WorldError) -> ClusterError {
