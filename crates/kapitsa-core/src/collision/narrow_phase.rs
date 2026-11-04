@@ -819,10 +819,36 @@ impl NarrowPhase {
         collider_b: &Transform,
         body_b: &Transform,
     ) -> Result<Option<ContactManifold>, CollisionError> {
-        let result = gjk::intersect(shape_a, collider_a, shape_b, collider_b)?;
-        if !result.intersects {
-            return Ok(None);
+        let core_distance = gjk::distance_core(shape_a, collider_a, shape_b, collider_b)?;
+        let radius_a = super::support::convex_radius(shape_a);
+        let radius_b = super::support::convex_radius(shape_b);
+        let radius = radius_a + radius_b;
+        if !core_distance.intersects {
+            if core_distance.distance > radius {
+                return Ok(None);
+            }
+            let normal = core_distance.normal;
+            let point_a = core_distance
+                .point_a
+                .checked_add(normal * radius_a)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let point_b = core_distance
+                .point_b
+                .checked_sub(normal * radius_b)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            return make_manifold(
+                pair,
+                body_a,
+                body_b,
+                point_a,
+                point_b,
+                normal,
+                (radius - core_distance.distance).max(0.0),
+                combine_feature_ids(0, 0),
+            )
+            .map(Some);
         }
+        let result = gjk::intersect(shape_a, collider_a, shape_b, collider_b)?;
         // Use a support contact when GJK confirms overlap without a tetrahedron.
         let contact = if result.simplex.count == 4 {
             self.epa

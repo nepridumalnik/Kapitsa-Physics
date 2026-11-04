@@ -32,7 +32,7 @@ pub(crate) fn support_world(
         .conjugate()
         .rotate_vector(direction)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    let local = support_local(shape, local_direction)?;
+    let local = support_local(shape, local_direction, true)?;
     let world = transform.transform_point(local.point);
     if world.is_finite() {
         Ok((world, local.feature))
@@ -62,12 +62,83 @@ pub(crate) fn support_pair(
     })
 }
 
-fn support_local(shape: &Shape, direction: Vec3) -> Result<LocalSupport, CollisionError> {
+pub(crate) fn support_pair_core(
+    shape_a: &Shape,
+    transform_a: &Transform,
+    shape_b: &Shape,
+    transform_b: &Transform,
+    direction: Vec3,
+) -> Result<SupportPoint, CollisionError> {
+    if !direction.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    let direction = direction.try_normalize().unwrap_or(Vec3::X);
+    let local_direction_a = transform_a
+        .rotation()
+        .conjugate()
+        .rotate_vector(direction)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let local_direction_b = transform_b
+        .rotation()
+        .conjugate()
+        .rotate_vector(-direction)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let local_a = support_local(shape_a, local_direction_a, false)?;
+    let local_b = support_local(shape_b, local_direction_b, false)?;
+    let point_a = transform_a.transform_point(local_a.point);
+    let point_b = transform_b.transform_point(local_b.point);
+    let relative_translation = transform_b
+        .translation()
+        .checked_sub(transform_a.translation())
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let relative_a = transform_a
+        .rotation()
+        .rotate_vector(local_a.point)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let relative_b = relative_translation
+        .checked_add(
+            transform_b
+                .rotation()
+                .rotate_vector(local_b.point)
+                .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let difference = relative_a
+        .checked_sub(relative_b)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    if !point_a.is_finite() || !point_b.is_finite() || !difference.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    Ok(SupportPoint {
+        difference,
+        point_a,
+        point_b,
+        feature_a: local_a.feature,
+        feature_b: local_b.feature,
+    })
+}
+
+pub(crate) fn convex_radius(shape: &Shape) -> f64 {
+    match shape {
+        Shape::Sphere(sphere) => sphere.radius(),
+        _ => 0.0,
+    }
+}
+
+fn support_local(
+    shape: &Shape,
+    direction: Vec3,
+    include_radius: bool,
+) -> Result<LocalSupport, CollisionError> {
     let support = match shape {
         Shape::Sphere(shape) => {
-            let point = direction
-                .checked_mul_scalar(shape.radius())
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let point = if include_radius {
+                direction
+                    .checked_mul_scalar(shape.radius())
+                    .ok_or(CollisionError::ArithmeticOverflow)?
+            } else {
+                Vec3::ZERO
+            };
             LocalSupport { point, feature: 0 }
         }
         Shape::Cuboid(shape) => {

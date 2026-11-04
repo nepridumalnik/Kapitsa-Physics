@@ -1,7 +1,11 @@
 use crate::{shape::Shape, transform::Transform};
 use kapitsa_math::Vec3;
 
-use super::{CollisionError, support::SupportPoint, support::support_pair};
+use super::{
+    CollisionError,
+    support::SupportPoint,
+    support::{support_pair, support_pair_core},
+};
 
 const MAX_GJK_ITERATIONS: usize = 64;
 const MAX_GJK_DISTANCE_ITERATIONS: usize = 128;
@@ -88,6 +92,21 @@ pub(crate) fn distance(
         .ok_or(CollisionError::ArithmeticOverflow)?;
     distance_with_support(direction, |direction| {
         support_pair(shape_a, transform_a, shape_b, transform_b, direction)
+    })
+}
+
+pub(crate) fn distance_core(
+    shape_a: &Shape,
+    transform_a: &Transform,
+    shape_b: &Shape,
+    transform_b: &Transform,
+) -> Result<GjkDistance, CollisionError> {
+    let direction = transform_b
+        .translation()
+        .checked_sub(transform_a.translation())
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    distance_with_support(direction, |direction| {
+        support_pair_core(shape_a, transform_a, shape_b, transform_b, direction)
     })
 }
 

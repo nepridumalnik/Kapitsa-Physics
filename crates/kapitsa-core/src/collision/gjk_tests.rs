@@ -52,6 +52,12 @@ fn large_planet_and_rocket_reproduce_gjk_nonconvergence() {
             intersect(&rocket, &rocket_transform, &planet, &planet_transform),
             Err(CollisionError::NonConvergent)
         ));
+        let first = super::distance_core(&planet, &planet_transform, &rocket, &rocket_transform)
+            .expect("core GJK");
+        let second = super::distance_core(&rocket, &rocket_transform, &planet, &planet_transform)
+            .expect("core GJK reversed");
+        assert!(!first.intersects && !second.intersects);
+        assert!(first.distance.is_finite() && second.distance.is_finite());
         let result = super::distance_to_point(&rocket, &rocket_transform, Vec3::ZERO)
             .expect("distance to planet center");
         assert!(!result.intersects);
