@@ -448,6 +448,22 @@ impl JointWorkspace {
         self.active_joint_index
     }
 
+    /// Selects the joint whose cached block operators a prepared sweep uses.
+    pub(crate) const fn set_active_joint_index(&mut self, index: usize) {
+        self.active_joint_index = index;
+    }
+
+    /// Row range `[start, end)` committed for `joint_index`.
+    pub(crate) fn joint_row_range(&self, joint_index: usize) -> (usize, usize) {
+        let start = self
+            .row_joint_indices
+            .partition_point(|&owner| owner < joint_index);
+        let end = self
+            .row_joint_indices
+            .partition_point(|&owner| owner <= joint_index);
+        (start, end)
+    }
+
     pub(crate) fn fixed_geometry(&self, joint_index: usize) -> Option<FixedJointGeometryCache> {
         self.fixed_geometry.get(joint_index).copied().flatten()
     }

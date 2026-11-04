@@ -1128,7 +1128,18 @@ impl SolverWorkspace {
                         ColoredConstraintPhase::Velocity {
                             first_iteration, ..
                         } => {
-                            JointSolver::solve_velocity_joint(
+                            // Poses stay fixed during the velocity phase, so rows
+                            // are built once and every later iteration reuses them.
+                            if first_iteration {
+                                JointSolver::prepare_velocity_joint(
+                                    &mut batch.joint_workspace,
+                                    &bodies,
+                                    local_joint,
+                                    task_slot,
+                                    dt,
+                                )?;
+                            }
+                            JointSolver::solve_velocity_joint_prepared(
                                 &mut batch.joint_workspace,
                                 &mut bodies,
                                 local_joint,
@@ -1341,24 +1352,30 @@ impl SolverWorkspace {
             return Ok(());
         }
 
+        // Velocity sweeps leave poses, masses, and the constraint set unchanged,
+        // so rows can be prepared once and reused across every iteration.
         #[cfg(feature = "bench-internals")]
-        let reuse_scalar_velocity_rows = joint_solver_options.projection()
-            == crate::joint::JointProjection::ScalarGaussSeidel
-            && !joint_solver_options.warm_start().enabled
+        let reuse_velocity_rows = matches!(
+            joint_solver_options.projection(),
+            crate::joint::JointProjection::ScalarGaussSeidel
+                | crate::joint::JointProjection::FixedBlock3
+        ) && !joint_solver_options.warm_start().enabled
             && !joint_solver_options.alternates_velocity_sweeps()
             && joint_solver_options.global_velocity_pcg_max_iterations() == 0;
         #[cfg(not(feature = "bench-internals"))]
-        let reuse_scalar_velocity_rows = joint_solver_options.projection()
-            == crate::joint::JointProjection::ScalarGaussSeidel
-            && !joint_solver_options.warm_start().enabled;
-        if reuse_scalar_velocity_rows {
+        let reuse_velocity_rows = matches!(
+            joint_solver_options.projection(),
+            crate::joint::JointProjection::ScalarGaussSeidel
+                | crate::joint::JointProjection::FixedBlock3
+        ) && !joint_solver_options.warm_start().enabled;
+        if reuse_velocity_rows {
             JointSolver::prepare(joint_workspace, bodies, joints, dt)?;
         }
 
         #[cfg(feature = "bench-internals")]
         {
             if full_diagnostics {
-                if reuse_scalar_velocity_rows {
+                if reuse_velocity_rows {
                     JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
                 } else {
                     JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
@@ -1376,7 +1393,7 @@ impl SolverWorkspace {
                 if full_diagnostics {
                     // Velocity sweeps leave poses unchanged, so rows prepared by
                     // the previous sweep (or the one-time preparation) are current.
-                    if reuse_scalar_velocity_rows || velocity_iteration > 0 {
+                    if reuse_velocity_rows || velocity_iteration > 0 {
                         JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
                     } else {
                         JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
@@ -1390,10 +1407,11 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             {
                 let pcg_max_iterations = joint_solver_options.global_velocity_pcg_max_iterations();
-                if reuse_scalar_velocity_rows {
-                    JointSolver::solve_velocity_iteration(
+                if reuse_velocity_rows {
+                    JointSolver::solve_velocity_prepared_iteration(
                         joint_workspace,
                         bodies,
+                        joints,
                         dt,
                         joint_solver_options,
                     )?;
@@ -1457,10 +1475,11 @@ impl SolverWorkspace {
                 }
             }
             #[cfg(not(feature = "bench-internals"))]
-            if reuse_scalar_velocity_rows {
-                JointSolver::solve_velocity_iteration(
+            if reuse_velocity_rows {
+                JointSolver::solve_velocity_prepared_iteration(
                     joint_workspace,
                     bodies,
+                    joints,
                     dt,
                     joint_solver_options,
                 )?;

@@ -311,6 +311,19 @@ impl VelocityPcgScratch {
 }
 
 impl SolverMassCacheStats {
+    fn accumulate(&mut self, other: Self) {
+        #[cfg(feature = "bench-internals")]
+        {
+            self.hits = self.hits.saturating_add(other.hits);
+            self.misses = self.misses.saturating_add(other.misses);
+            self.inverse_inertia_updates = self
+                .inverse_inertia_updates
+                .saturating_add(other.inverse_inertia_updates);
+        }
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = other;
+    }
+
     fn record(&mut self, status: SolverMassCacheStatus) {
         #[cfg(feature = "bench-internals")]
         match status {
@@ -663,10 +676,18 @@ impl JointSolver {
                 dt,
                 options.warm_start(),
                 warm_start_cache,
+                JointRowBuffer::Preparing,
             )?;
         }
         if options.projection() == super::JointProjection::FixedBlock3 {
-            Self::velocity_joint_block_sweep(workspace, bodies, constraint, dt, options)?;
+            Self::velocity_joint_block_sweep(
+                workspace,
+                bodies,
+                constraint,
+                dt,
+                options,
+                JointRowBuffer::Preparing,
+            )?;
         } else {
             Self::velocity_sweep(workspace, bodies, dt, options, JointRowBuffer::Preparing)?;
         }
@@ -898,16 +919,17 @@ impl JointSolver {
         constraint: JointConstraint,
         dt: f64,
         options: JointSolverOptions,
+        row_buffer: JointRowBuffer,
     ) -> Result<(), CollisionError> {
         if options.mass_cache() {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
         let super::Joint::Fixed(_) = constraint.joint else {
             #[cfg(feature = "bench-internals")]
-            let count = workspace.solver_buffers_mut(true).0.len();
+            let count = workspace.solver_rows_len(row_buffer.is_preparing());
             let mut cache_stats = SolverMassCacheStats::default();
             let result = {
-                let (rows, slots) = workspace.solver_buffers_mut(true);
+                let (rows, slots) = workspace.solver_buffers_mut(row_buffer.is_preparing());
                 solve_velocity_rows(rows, slots, bodies, dt, options, &mut cache_stats)
             };
             record_solver_mass_cache_stats(workspace, cache_stats);
@@ -921,9 +943,192 @@ impl JointSolver {
         };
 
         workspace.ensure_fixed_velocity_operators(workspace.active_joint_index())?;
-        Self::velocity_projection_group(workspace, bodies, dt, options, [0, 1, 2])?;
-        Self::velocity_projection_group(workspace, bodies, dt, options, [3, 4, 5])?;
-        Self::velocity_projection_remainder(workspace, bodies, dt, options)?;
+        Self::velocity_projection_group(workspace, bodies, dt, options, [0, 1, 2], row_buffer)?;
+        Self::velocity_projection_group(workspace, bodies, dt, options, [3, 4, 5], row_buffer)?;
+        Self::velocity_projection_remainder(workspace, bodies, dt, options, row_buffer)?;
+        Ok(())
+    }
+
+    /// Prepares one joint's velocity rows and commits them without solving.
+    pub(crate) fn prepare_velocity_joint<B: SolverBodyAccess + ?Sized>(
+        workspace: &mut JointWorkspace,
+        bodies: &B,
+        constraint: JointConstraint,
+        joint_index: usize,
+        dt: f64,
+    ) -> Result<(), CollisionError> {
+        workspace.begin_joint_prepare(joint_index, constraint.id);
+        prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
+        workspace.finish_joint_prepare()?;
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::JointRowsPrepared(joint_index));
+        #[cfg(test)]
+        workspace.record_solver_call(JointSolverCall::JointRowsCommitted(joint_index));
+        Ok(())
+    }
+
+    /// Solves one velocity iteration against rows committed earlier in the step.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_velocity_joint_prepared<B: SolverBodyAccess + ?Sized>(
+        workspace: &mut JointWorkspace,
+        bodies: &mut B,
+        constraint: JointConstraint,
+        joint_index: usize,
+        step: JointSolverStep<'_>,
+        first_velocity_iteration: bool,
+    ) -> Result<(), CollisionError> {
+        let dt = step.dt();
+        let options = step.options();
+        workspace.set_active_joint_index(joint_index);
+        if first_velocity_iteration && options.warm_start().enabled {
+            let warm_start_cache = step.impulse_cache().ok_or(CollisionError::InvalidConfig)?;
+            apply_warm_start(
+                workspace,
+                bodies,
+                constraint,
+                dt,
+                options.warm_start(),
+                warm_start_cache,
+                JointRowBuffer::Current,
+            )?;
+        }
+        let mut cache_stats = SolverMassCacheStats::default();
+        Self::velocity_prepared_joint_rows(
+            workspace,
+            bodies,
+            joint_index,
+            matches!(constraint.joint, super::Joint::Fixed(_)),
+            dt,
+            options,
+            &mut cache_stats,
+        )?;
+        record_solver_mass_cache_stats(workspace, cache_stats);
+        Ok(())
+    }
+
+    /// Solves one velocity iteration against rows prepared once for the step.
+    pub(crate) fn solve_velocity_prepared_iteration<B: SolverBodyAccess + ?Sized>(
+        workspace: &mut JointWorkspace,
+        bodies: &mut B,
+        joints: &[JointConstraint],
+        dt: f64,
+        options: JointSolverOptions,
+    ) -> Result<(), CollisionError> {
+        if options.projection() == super::JointProjection::FixedBlock3 {
+            Self::velocity_block_prepared_sweep(workspace, bodies, joints, dt, options)
+        } else {
+            Self::velocity_sweep(workspace, bodies, dt, options, JointRowBuffer::Current)
+        }
+    }
+
+    /// Applies cached 3x3 block solves to the prepared rows of every joint.
+    fn velocity_block_prepared_sweep<B: SolverBodyAccess + ?Sized>(
+        workspace: &mut JointWorkspace,
+        bodies: &mut B,
+        joints: &[JointConstraint],
+        dt: f64,
+        options: JointSolverOptions,
+    ) -> Result<(), CollisionError> {
+        if options.mass_cache() {
+            workspace.ensure_solver_mass_slots(bodies.len())?;
+        }
+        let mut cache_stats = SolverMassCacheStats::default();
+        for (joint_index, constraint) in joints.iter().copied().enumerate() {
+            let use_block = matches!(constraint.joint, super::Joint::Fixed(_));
+            Self::velocity_prepared_joint_rows(
+                workspace,
+                bodies,
+                joint_index,
+                use_block,
+                dt,
+                options,
+                &mut cache_stats,
+            )?;
+        }
+        record_solver_mass_cache_stats(workspace, cache_stats);
+        Ok(())
+    }
+
+    /// Solves the already-prepared row slice of one joint, using the 3x3 block
+    /// path for fixed joints and the scalar fallback otherwise.
+    fn velocity_prepared_joint_rows<B: SolverBodyAccess + ?Sized>(
+        workspace: &mut JointWorkspace,
+        bodies: &mut B,
+        joint_index: usize,
+        is_fixed: bool,
+        dt: f64,
+        options: JointSolverOptions,
+        cache_stats: &mut SolverMassCacheStats,
+    ) -> Result<(), CollisionError> {
+        let (start, end) = workspace.joint_row_range(joint_index);
+        if start == end {
+            return Ok(());
+        }
+        if options.mass_cache() {
+            workspace.ensure_solver_mass_slots(bodies.len())?;
+        }
+        workspace.set_active_joint_index(joint_index);
+        let row_count = end - start;
+        if is_fixed && options.projection() == super::JointProjection::FixedBlock3 && row_count == 6
+        {
+            workspace.ensure_fixed_velocity_operators(joint_index)?;
+            let (joint_stats, linear, angular, remainder) = {
+                let (rows, slots, operators) =
+                    workspace.solver_buffers_and_velocity_operators_mut(false);
+                let rows = rows
+                    .get_mut(start..end)
+                    .ok_or(CollisionError::InvalidContact)?;
+                let mut joint_stats = SolverMassCacheStats::default();
+                let linear = solve_velocity_projection_group(
+                    rows,
+                    slots,
+                    bodies,
+                    dt,
+                    options,
+                    [0, 1, 2],
+                    &mut joint_stats,
+                    operators,
+                )?;
+                let angular = solve_velocity_projection_group(
+                    rows,
+                    slots,
+                    bodies,
+                    dt,
+                    options,
+                    [3, 4, 5],
+                    &mut joint_stats,
+                    operators,
+                )?;
+                let remainder = solve_velocity_projection_remainder(
+                    rows,
+                    slots,
+                    bodies,
+                    dt,
+                    options,
+                    &mut joint_stats,
+                )?;
+                (joint_stats, linear, angular, remainder)
+            };
+            cache_stats.accumulate(joint_stats);
+            record_projection_metrics(workspace, linear);
+            record_projection_metrics(workspace, angular);
+            record_projection_metrics(workspace, remainder);
+        } else {
+            let mut joint_stats = SolverMassCacheStats::default();
+            {
+                let (rows, slots) = workspace.solver_buffers_mut(false);
+                let rows = rows
+                    .get_mut(start..end)
+                    .ok_or(CollisionError::InvalidContact)?;
+                solve_velocity_rows(rows, slots, bodies, dt, options, &mut joint_stats)?;
+            }
+            cache_stats.accumulate(joint_stats);
+            #[cfg(feature = "bench-internals")]
+            {
+                workspace.record_scalar_rows_solved(row_count);
+                workspace.record_block_fallback_rows(row_count);
+            }
+        }
         Ok(())
     }
 
@@ -958,11 +1163,12 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
         keys: [u8; 3],
+        row_buffer: JointRowBuffer,
     ) -> Result<(), CollisionError> {
         let mut cache_stats = SolverMassCacheStats::default();
         let result = {
             let (rows, slots, operators) =
-                workspace.solver_buffers_and_velocity_operators_mut(true);
+                workspace.solver_buffers_and_velocity_operators_mut(row_buffer.is_preparing());
             solve_velocity_projection_group(
                 rows,
                 slots,
@@ -1000,10 +1206,11 @@ impl JointSolver {
         bodies: &mut B,
         dt: f64,
         options: JointSolverOptions,
+        row_buffer: JointRowBuffer,
     ) -> Result<(), CollisionError> {
         let mut cache_stats = SolverMassCacheStats::default();
         let stats = {
-            let (rows, slots) = workspace.solver_buffers_mut(true);
+            let (rows, slots) = workspace.solver_buffers_mut(row_buffer.is_preparing());
             solve_velocity_projection_remainder(rows, slots, bodies, dt, options, &mut cache_stats)?
         };
         record_solver_mass_cache_stats(workspace, cache_stats);
@@ -1147,13 +1354,14 @@ fn apply_warm_start<B: SolverBodyAccess + ?Sized>(
     dt: f64,
     config: WarmStartConfig,
     cache: &JointImpulseCache,
+    row_buffer: JointRowBuffer,
 ) -> Result<(), CollisionError> {
     if !config.validate() || !dt.is_finite() || dt <= 0.0 {
         return Err(CollisionError::InvalidConfig);
     }
     let mut applied_count = 0;
     {
-        let (rows, _) = workspace.solver_buffers_mut(true);
+        let (rows, _) = workspace.solver_buffers_mut(row_buffer.is_preparing());
         for index in 0..rows.len() {
             let row = *rows.get(index).ok_or(CollisionError::InvalidContact)?;
             if !row.is_valid(bodies.len()) {
@@ -5457,6 +5665,139 @@ mod tests {
         assert_eq!(workspace.fixed_geometry_recomputes(), 2);
         assert_ne!(workspace.rows(), first_rows.as_slice());
         Ok(())
+    }
+
+    #[test]
+    fn prepared_velocity_reuse_matches_preparing_each_sweep_for_scalar_and_block3() {
+        for projection in [
+            super::super::JointProjection::ScalarGaussSeidel,
+            super::super::JointProjection::FixedBlock3,
+        ] {
+            let constraints = [JointConstraint {
+                id: test_joint_id(),
+                body_a: 0,
+                body_b: 1,
+                joint: super::super::Joint::Fixed(super::super::FixedJoint::new(JointCommon::new(
+                    JointFrame::new(
+                        Vec3::new(0.2, -0.1, 0.05),
+                        Quat::from_axis_angle(Vec3::Z, 0.3).expect("rotation"),
+                    ),
+                    JointFrame::new(Vec3::new(-0.1, 0.15, 0.0), Quat::IDENTITY),
+                ))),
+            }];
+            let bodies = [
+                solver_body_with_velocities(
+                    Vec3::ZERO,
+                    Quat::from_axis_angle(Vec3::X, 0.2).expect("rotation"),
+                    Vec3::new(0.4, -0.2, 0.3),
+                    Vec3::new(0.1, 0.5, -0.2),
+                ),
+                solver_body_with_velocities(
+                    Vec3::new(1.1, 0.2, -0.1),
+                    Quat::from_axis_angle(Vec3::Y, -0.4).expect("rotation"),
+                    Vec3::new(-0.3, 0.1, 0.2),
+                    Vec3::new(-0.2, 0.3, 0.4),
+                ),
+            ];
+            let options = JointSolverOptions::legacy().with_projection(projection);
+            let step = JointSolverStep::new(0.01, options);
+
+            // Reuse: prepare once, then run only prepared velocity sweeps.
+            let mut reused = bodies.clone();
+            let mut reuse_workspace = JointWorkspace::new();
+            JointSolver::prepare(&mut reuse_workspace, &reused, &constraints, 0.01)
+                .expect("prepare once");
+            for _ in 0..6 {
+                JointSolver::solve_velocity_prepared_iteration(
+                    &mut reuse_workspace,
+                    &mut reused,
+                    &constraints,
+                    0.01,
+                    options,
+                )
+                .expect("prepared velocity sweep");
+            }
+
+            // Reference: rebuild and solve each sweep, as the incompatible path does.
+            let mut rebuilt = bodies;
+            let mut rebuild_workspace = JointWorkspace::new();
+            for _ in 0..6 {
+                JointSolver::solve_velocity_joint(
+                    &mut rebuild_workspace,
+                    &mut rebuilt,
+                    constraints[0],
+                    0,
+                    step,
+                    false,
+                )
+                .expect("per-sweep velocity solve");
+            }
+
+            for (reused_body, rebuilt_body) in reused.iter().zip(rebuilt.iter()) {
+                let reused_state = reused_body.state();
+                let rebuilt_state = rebuilt_body.state();
+                assert_eq!(
+                    reused_state.linear_velocity(),
+                    rebuilt_state.linear_velocity()
+                );
+                assert_eq!(
+                    reused_state.angular_velocity(),
+                    rebuilt_state.angular_velocity()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn new_step_invalidates_prepared_velocity_rows_and_operators() {
+        let constraints = [JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: super::super::Joint::Fixed(super::super::FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        }];
+        let bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::X * 1.2)];
+        let options = JointSolverOptions::legacy()
+            .with_projection(super::super::JointProjection::FixedBlock3);
+        let mut workspace = JointWorkspace::new();
+
+        JointSolver::prepare(&mut workspace, &bodies, &constraints, 0.01).expect("prepare");
+        let mut solved = bodies.clone();
+        JointSolver::solve_velocity_prepared_iteration(
+            &mut workspace,
+            &mut solved,
+            &constraints,
+            0.01,
+            options,
+        )
+        .expect("prepared sweep");
+        assert_eq!(workspace.fixed_block_velocity_recomputes(), 2);
+
+        // A new step clears cached operators and accumulated impulses.
+        JointSolver::begin_step(&mut workspace);
+        assert_eq!(workspace.fixed_block_velocity_recomputes(), 0);
+        assert!(
+            workspace
+                .rows()
+                .iter()
+                .all(|row| row.accumulated_impulse == 0.0)
+        );
+
+        JointSolver::prepare(&mut workspace, &bodies, &constraints, 0.01).expect("prepare again");
+        let mut solved_again = bodies;
+        JointSolver::solve_velocity_prepared_iteration(
+            &mut workspace,
+            &mut solved_again,
+            &constraints,
+            0.01,
+            options,
+        )
+        .expect("prepared sweep after reset");
+        // Operators were rebuilt from scratch for the new step, not reused.
+        assert_eq!(workspace.fixed_block_velocity_recomputes(), 2);
     }
 
     #[test]
