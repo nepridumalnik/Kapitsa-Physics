@@ -5016,7 +5016,7 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
         };
         if hard_bilateral_block(block_rows, keys, dimension, bodies.len()) {
             let masses = projection_masses(bodies, slots, block_rows, options, cache_stats)?;
-            if let Some(block) = prepared_block(block_rows, masses, dt)? {
+            if let Some(block) = prepared_block(block_rows, masses, dt, keys[0] == 0)? {
                 match block.solve_position(dt) {
                     Ok(delta) => {
                         let pose_changed = apply_position_block(
@@ -5259,8 +5259,9 @@ fn prepared_block(
     rows: [ConstraintRow; 3],
     masses: [SolverMass; 2],
     dt: f64,
+    anchor: bool,
 ) -> Result<Option<super::block::Block3>, CollisionError> {
-    match super::block::prepare_block3(&rows, masses, dt) {
+    match super::block::prepare_fixed_block3(&rows, masses, dt, anchor) {
         Ok(block) => Ok(Some(block)),
         Err(
             CollisionError::InvalidContact
@@ -7450,6 +7451,116 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fixed_specialized_mass_matches_generic_operator_and_projection() {
+        let dt = 1.0 / 60.0;
+        let (constraint, asymmetric) = asymmetric_fixed_constraint();
+        let cases = [
+            [solver_body(Vec3::ZERO), solver_body(Vec3::X)],
+            [
+                static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                asymmetric[1],
+            ],
+            asymmetric,
+            [
+                asymmetric[0],
+                solver_body_with_properties(
+                    Vec3::X,
+                    Quat::from_axis_angle(Vec3::Y, 2.5).expect("rotation"),
+                    1.0e-6,
+                    Vec3::ZERO,
+                    kapitsa_math::Mat3::from_diagonal(Vec3::new(1.0e-6, 2.0e-6, 3.0e-6)),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                ),
+            ],
+        ];
+        for initial in cases {
+            let mut workspace = JointWorkspace::new();
+            JointSolver::prepare(&mut workspace, &initial, &[constraint], dt).expect("rows");
+            let masses = initial.map(|body| SolverMass::from_body(body.body()).expect("mass"));
+            for start in [0, 3] {
+                let rows = [
+                    workspace.rows()[start],
+                    workspace.rows()[start + 1],
+                    workspace.rows()[start + 2],
+                ];
+                let reference =
+                    super::super::block::prepare_block3(&rows, masses, dt).expect("generic block");
+                let specialized =
+                    super::super::block::prepare_fixed_block3(&rows, masses, dt, start == 0)
+                        .expect("fixed block");
+                for i in 0..3 {
+                    let expected = reference.inverse_effective_mass.row(i).expect("row");
+                    let actual = specialized.inverse_effective_mass.row(i).expect("row");
+                    for (a, b) in [
+                        (actual.x, expected.x),
+                        (actual.y, expected.y),
+                        (actual.z, expected.z),
+                    ] {
+                        assert!((a - b).abs() <= 1.0e-12 + 1.0e-12 * b.abs(), "{a} vs {b}");
+                    }
+                }
+                assert!(specialized.inverse_effective_mass.factor_spd().is_ok());
+                let expected_delta = reference.solve_position(dt).expect("generic solve");
+                let actual_delta = specialized.solve_position(dt).expect("fixed solve");
+                assert!(
+                    (actual_delta - expected_delta).length()
+                        <= 1.0e-11 * (1.0 + expected_delta.length())
+                );
+                let mut expected_bodies = initial;
+                let mut actual_bodies = initial;
+                let mut expected_rows = rows;
+                let mut actual_rows = rows;
+                apply_position_block(
+                    &mut expected_rows,
+                    [0, 1, 2],
+                    expected_delta,
+                    &mut expected_bodies,
+                    Some(masses),
+                )
+                .expect("generic apply");
+                apply_position_block(
+                    &mut actual_rows,
+                    [0, 1, 2],
+                    actual_delta,
+                    &mut actual_bodies,
+                    Some(masses),
+                )
+                .expect("fixed apply");
+                for (actual, expected) in actual_bodies.iter().zip(expected_bodies) {
+                    let a = actual.state().transform();
+                    let b = expected.state().transform();
+                    assert!((a.translation() - b.translation()).length() < 1.0e-10);
+                    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                        assert!(
+                            (a.rotation().rotate_vector(axis).expect("rotation")
+                                - b.rotation().rotate_vector(axis).expect("rotation"))
+                            .length()
+                                < 1.0e-10
+                        );
+                    }
+                }
+            }
+        }
+        let static_bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            static_solver_body(Vec3::X, Quat::IDENTITY),
+        ];
+        let mut workspace = JointWorkspace::new();
+        JointSolver::prepare(&mut workspace, &static_bodies, &[constraint], dt)
+            .expect("static rows");
+        let rows = [
+            workspace.rows()[0],
+            workspace.rows()[1],
+            workspace.rows()[2],
+        ];
+        let singular =
+            super::super::block::prepare_fixed_block3(&rows, [SolverMass::STATIC; 2], dt, true)
+                .expect("singular block");
+        assert!(singular.inverse_effective_mass.factor_spd().is_err());
     }
 
     #[test]

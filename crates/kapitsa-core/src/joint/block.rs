@@ -48,23 +48,7 @@ pub(crate) fn prepare_block3_operator(
     rows: &[ConstraintRow; 3],
     masses: [SolverMass; 2],
 ) -> Result<Mat3, CollisionError> {
-    let body_a = rows[0].body_a;
-    let body_b = rows[0].body_b;
-    let body_count = body_a
-        .max(body_b)
-        .checked_add(1)
-        .ok_or(CollisionError::InvalidContact)?;
-    if rows
-        .iter()
-        .any(|row| row.body_a != body_a || row.body_b != body_b || !row.is_valid(body_count))
-    {
-        return Err(CollisionError::InvalidContact);
-    }
-
-    let compliance = rows[0].compliance;
-    if rows.iter().any(|row| row.compliance != compliance) {
-        return Err(CollisionError::InvalidConfig);
-    }
+    validate_block3_rows(rows)?;
 
     let mut entries = [[0.0; 3]; 3];
     for (row_index, row) in rows.iter().enumerate() {
@@ -91,6 +75,96 @@ pub(crate) fn prepare_block3_operator(
     }
 
     Ok(Mat3::from_rows(entries))
+}
+
+fn validate_block3_rows(rows: &[ConstraintRow; 3]) -> Result<(), CollisionError> {
+    let body_a = rows[0].body_a;
+    let body_b = rows[0].body_b;
+    let body_count = body_a
+        .max(body_b)
+        .checked_add(1)
+        .ok_or(CollisionError::InvalidContact)?;
+    if rows
+        .iter()
+        .any(|row| row.body_a != body_a || row.body_b != body_b || !row.is_valid(body_count))
+    {
+        return Err(CollisionError::InvalidContact);
+    }
+
+    let compliance = rows[0].compliance;
+    if rows.iter().any(|row| row.compliance != compliance) {
+        return Err(CollisionError::InvalidConfig);
+    }
+
+    Ok(())
+}
+
+/// Fixed rows use either world-space unit linear axes or zero linear axes.
+/// Reuse each body's inverse-inertia response for all entries in its column.
+pub(crate) fn prepare_fixed_block3(
+    rows: &[ConstraintRow; 3],
+    masses: [SolverMass; 2],
+    dt: f64,
+    anchor: bool,
+) -> Result<Block3, CollisionError> {
+    if !dt.is_finite() || dt <= 0.0 {
+        return Err(CollisionError::InvalidConfig);
+    }
+    validate_block3_rows(rows)?;
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z];
+    if rows.iter().zip(axes).any(|(row, axis)| {
+        let linear = if anchor { axis } else { Vec3::ZERO };
+        row.linear_a != -linear || row.linear_b != linear
+    }) {
+        return prepare_block3(rows, masses, dt);
+    }
+    let mut entries = [[0.0; 3]; 3];
+    for column in 0..3 {
+        let response_a = masses[0]
+            .inverse_inertia
+            .checked_mul_vector(rows[column].angular_a)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let response_b = masses[1]
+            .inverse_inertia
+            .checked_mul_vector(rows[column].angular_b)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        for row in 0..=column {
+            let linear_a = if anchor && row == column {
+                masses[0].inverse_mass
+            } else {
+                0.0
+            };
+            let linear_b = if anchor && row == column {
+                masses[1].inverse_mass
+            } else {
+                0.0
+            };
+            let a = rows[row]
+                .angular_a
+                .checked_dot(response_a)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let b = rows[row]
+                .angular_b
+                .checked_dot(response_b)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let value = (linear_a + a) + (linear_b + b);
+            if !value.is_finite() {
+                return Err(CollisionError::ArithmeticOverflow);
+            }
+            entries[row][column] = value;
+            entries[column][row] = value;
+        }
+    }
+    Ok(Block3 {
+        inverse_effective_mass: Mat3::from_rows(entries),
+        errors: Vec3::new(rows[0].error, rows[1].error, rows[2].error),
+        multipliers: Vec3::new(
+            rows[0].accumulated_multiplier,
+            rows[1].accumulated_multiplier,
+            rows[2].accumulated_multiplier,
+        ),
+        compliance: rows[0].compliance,
+    })
 }
 
 /// Builds the position-projection state for three rows on one body pair.

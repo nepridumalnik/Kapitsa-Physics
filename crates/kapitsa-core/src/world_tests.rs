@@ -3249,6 +3249,19 @@ fn diagnose_global_velocity_pcg_warm_step_allocations() {
 }
 
 #[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "run alone because allocation tracking is process-wide"]
+fn fixed_block_warm_step_allocations() {
+    let mut scalar = allocation_check_joint_chain(8, false);
+    let mut block = allocation_check_joint_chain(8, false);
+    block.set_joint_projection_for_bench(true);
+    let scalar_allocations = warm_step_allocations(&mut scalar, 32);
+    let block_allocations = warm_step_allocations(&mut block, 32);
+    assert_eq!(block_allocations, scalar_allocations);
+    println!("scalar={scalar_allocations:?} fixed_block={block_allocations:?}");
+}
+
+#[cfg(feature = "bench-internals")]
 fn allocation_check_joint_chain(body_count: usize, pcg_enabled: bool) -> PhysicsWorld {
     let mut world = PhysicsWorld::new();
     let bodies = (0..body_count)
