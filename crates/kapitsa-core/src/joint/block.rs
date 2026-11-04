@@ -38,17 +38,15 @@ impl Block3 {
     }
 }
 
-/// Builds the 3x3 generalized inverse-mass matrix for three rows on one body pair.
-/// `masses` is ordered as the rows' body A and body B. `dt` must match the step
-/// passed later to `Block3::solve_position`.
-pub(crate) fn prepare_block3(
+/// Builds the 3x3 generalized inverse-mass operator `J M^-1 J^T` for three rows
+/// on one body pair. `masses` is ordered as the rows' body A and body B.
+///
+/// The operator depends only on the row Jacobians and the solver masses, so a
+/// velocity sweep may reuse it while poses, Jacobians, and masses stay fixed.
+pub(crate) fn prepare_block3_operator(
     rows: &[ConstraintRow; 3],
     masses: [SolverMass; 2],
-    dt: f64,
-) -> Result<Block3, CollisionError> {
-    if !dt.is_finite() || dt <= 0.0 {
-        return Err(CollisionError::InvalidConfig);
-    }
+) -> Result<Mat3, CollisionError> {
     let body_a = rows[0].body_a;
     let body_b = rows[0].body_b;
     let body_count = body_a
@@ -91,21 +89,36 @@ pub(crate) fn prepare_block3(
         }
     }
 
+    Ok(Mat3::from_rows(entries))
+}
+
+/// Builds the position-projection state for three rows on one body pair.
+/// `masses` is ordered as the rows' body A and body B. `dt` must match the step
+/// passed later to `Block3::solve_position`.
+pub(crate) fn prepare_block3(
+    rows: &[ConstraintRow; 3],
+    masses: [SolverMass; 2],
+    dt: f64,
+) -> Result<Block3, CollisionError> {
+    if !dt.is_finite() || dt <= 0.0 {
+        return Err(CollisionError::InvalidConfig);
+    }
+    let inverse_effective_mass = prepare_block3_operator(rows, masses)?;
     Ok(Block3 {
-        inverse_effective_mass: Mat3::from_rows(entries),
+        inverse_effective_mass,
         errors: Vec3::new(rows[0].error, rows[1].error, rows[2].error),
         multipliers: Vec3::new(
             rows[0].accumulated_multiplier,
             rows[1].accumulated_multiplier,
             rows[2].accumulated_multiplier,
         ),
-        compliance,
+        compliance: rows[0].compliance,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Block3, prepare_block3};
+    use super::{Block3, prepare_block3, prepare_block3_operator};
     use crate::{
         collision::CollisionError,
         joint::row::{ConstraintRow, RowDimension},
@@ -357,6 +370,36 @@ mod tests {
             Mat3::from_rows([[4.0, 2.0, 4.0], [2.0, 7.0, 2.0], [4.0, 2.0, 7.0]])
         );
         assert_eq!(block.errors, Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn prepare_block3_operator_matches_the_position_block_matrix() {
+        let rows = [
+            row(0, Vec3::X, Vec3::Y, -Vec3::X, Vec3::ZERO, 1.0),
+            row(1, Vec3::X + Vec3::Y, Vec3::Z, -Vec3::Y, Vec3::ZERO, 2.0),
+            row(
+                2,
+                Vec3::X + Vec3::Z,
+                Vec3::X + Vec3::Y,
+                -Vec3::Z,
+                Vec3::ZERO,
+                3.0,
+            ),
+        ];
+        let masses = [
+            SolverMass {
+                inverse_mass: 2.0,
+                inverse_inertia: Mat3::from_diagonal(Vec3::new(1.0, 2.0, 3.0)),
+                center: Vec3::ZERO,
+            },
+            SolverMass::STATIC,
+        ];
+
+        let operator =
+            prepare_block3_operator(&rows, masses).expect("valid velocity block operator");
+        let block = prepare_block3(&rows, masses, 0.01).expect("valid effective mass block");
+
+        assert_eq!(operator, block.inverse_effective_mass);
     }
 
     #[test]

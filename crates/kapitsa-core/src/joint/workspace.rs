@@ -2,7 +2,7 @@ use super::{
     JointBreakEvent, ReactionMode,
     reaction::wrench_from_impulse,
     row::ConstraintRow,
-    solver::{FixedJointGeometryCache, JointConstraint},
+    solver::{FixedBlockVelocityOperators, FixedJointGeometryCache, JointConstraint},
     warm_start::JointImpulseCache,
 };
 use crate::collision::CollisionError;
@@ -42,6 +42,7 @@ pub(crate) struct JointWorkspace {
     preparing_joint_indices: Vec<usize>,
     preparing_joint_ids: Vec<Option<crate::world::JointId>>,
     fixed_geometry: Vec<Option<FixedJointGeometryCache>>,
+    fixed_velocity_operators: Vec<FixedBlockVelocityOperators>,
     prepared_rows: usize,
     active_joint_index: usize,
     active_joint_id: Option<crate::world::JointId>,
@@ -90,6 +91,7 @@ impl JointWorkspace {
             preparing_joint_indices: Vec::new(),
             preparing_joint_ids: Vec::new(),
             fixed_geometry: Vec::new(),
+            fixed_velocity_operators: Vec::new(),
             prepared_rows: 0,
             active_joint_index: 0,
             active_joint_id: None,
@@ -137,6 +139,11 @@ impl JointWorkspace {
             row.accumulated_multiplier = 0.0;
             row.accumulated_impulse = 0.0;
         }
+        // Velocity block operators depend on row Jacobians and masses, which a
+        // new step may change, so drop them; the first velocity sweep rebuilds.
+        for operators in &mut self.fixed_velocity_operators {
+            *operators = FixedBlockVelocityOperators::default();
+        }
     }
 
     pub(crate) fn clear(&mut self) {
@@ -147,6 +154,7 @@ impl JointWorkspace {
         self.preparing_joint_indices.clear();
         self.preparing_joint_ids.clear();
         self.fixed_geometry.clear();
+        self.fixed_velocity_operators.clear();
         self.prepared_rows = 0;
         self.active_joint_index = 0;
         self.active_joint_id = None;
@@ -271,6 +279,40 @@ impl JointWorkspace {
             &mut self.rows
         };
         (rows, &mut self.solver_mass_slots)
+    }
+
+    /// Grows the per-joint velocity operator cache so `joint_index` is addressable.
+    pub(crate) fn ensure_fixed_velocity_operators(
+        &mut self,
+        joint_index: usize,
+    ) -> Result<(), CollisionError> {
+        if joint_index >= self.fixed_velocity_operators.len() {
+            self.fixed_velocity_operators
+                .try_reserve(joint_index + 1 - self.fixed_velocity_operators.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.fixed_velocity_operators
+                .resize_with(joint_index + 1, FixedBlockVelocityOperators::default);
+        }
+        Ok(())
+    }
+
+    /// Rows, mass slots, and the active joint's velocity operator cache. The
+    /// caller must have sized the cache with `ensure_fixed_velocity_operators`.
+    pub(crate) fn solver_buffers_and_velocity_operators_mut(
+        &mut self,
+        preparing_rows: bool,
+    ) -> (
+        &mut [ConstraintRow],
+        &mut [SolverMassSlot],
+        &mut FixedBlockVelocityOperators,
+    ) {
+        let rows = if preparing_rows {
+            &mut self.preparing_rows
+        } else {
+            &mut self.rows
+        };
+        let operators = &mut self.fixed_velocity_operators[self.active_joint_index];
+        (rows, &mut self.solver_mass_slots, operators)
     }
 
     pub(crate) fn preparing_fixed_row_blocks_mut(
@@ -400,6 +442,14 @@ impl JointWorkspace {
     #[cfg(test)]
     pub(crate) const fn fixed_geometry_recomputes(&self) -> usize {
         self.fixed_geometry_recomputes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixed_block_velocity_recomputes(&self) -> usize {
+        self.fixed_velocity_operators
+            .iter()
+            .map(FixedBlockVelocityOperators::recomputes)
+            .sum()
     }
 
     #[cfg(test)]
@@ -970,6 +1020,8 @@ impl JointWorkspace {
                 * std::mem::size_of::<Option<crate::world::JointId>>()
             + self.fixed_geometry.capacity()
                 * std::mem::size_of::<Option<FixedJointGeometryCache>>()
+            + self.fixed_velocity_operators.capacity()
+                * std::mem::size_of::<FixedBlockVelocityOperators>()
             + self.reactions.capacity() * std::mem::size_of::<Option<JointReaction>>()
             + self.break_events.capacity() * std::mem::size_of::<JointBreakEvent>()
     }

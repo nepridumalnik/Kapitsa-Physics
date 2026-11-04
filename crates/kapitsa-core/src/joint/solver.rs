@@ -15,7 +15,7 @@ use crate::{
     rigid_body::solver_mass::{SolverMass, SolverMassCacheStatus, SolverMassSlot},
     transform::Transform,
 };
-use kapitsa_math::{Quat, Vec3};
+use kapitsa_math::{Mat3, Quat, Vec3};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct JointResidual {
@@ -138,6 +138,52 @@ enum JointRowBuffer {
 enum FixedJointRowBlock {
     Anchor,
     Frame,
+}
+
+/// Cached `J M^-1 J^T` operator for one fixed-joint velocity block. The operator
+/// only depends on the block's row Jacobians and solver masses, so velocity
+/// sweeps that leave poses and masses unchanged can reuse it.
+#[derive(Clone, Copy, Debug)]
+struct FixedBlockVelocityOperator {
+    masses: [SolverMass; 2],
+    inverse_effective_mass: Mat3,
+}
+
+/// Per-joint velocity operators for the anchor (keys 0..=2) and frame (keys
+/// 3..=5) blocks. Populated on the first velocity sweep of a step and cleared
+/// when the step or joint geometry resets.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FixedBlockVelocityOperators {
+    anchor: Option<FixedBlockVelocityOperator>,
+    frame: Option<FixedBlockVelocityOperator>,
+    #[cfg(test)]
+    recomputes: usize,
+}
+
+impl FixedBlockVelocityOperators {
+    const fn slot(&self, block: FixedJointRowBlock) -> Option<FixedBlockVelocityOperator> {
+        match block {
+            FixedJointRowBlock::Anchor => self.anchor,
+            FixedJointRowBlock::Frame => self.frame,
+        }
+    }
+
+    fn set(&mut self, block: FixedJointRowBlock, operator: FixedBlockVelocityOperator) {
+        let slot = match block {
+            FixedJointRowBlock::Anchor => &mut self.anchor,
+            FixedJointRowBlock::Frame => &mut self.frame,
+        };
+        *slot = Some(operator);
+        #[cfg(test)]
+        {
+            self.recomputes = self.recomputes.saturating_add(1);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn recomputes(&self) -> usize {
+        self.recomputes
+    }
 }
 
 impl JointRowBuffer {
@@ -874,6 +920,7 @@ impl JointSolver {
             return Ok(());
         };
 
+        workspace.ensure_fixed_velocity_operators(workspace.active_joint_index())?;
         Self::velocity_projection_group(workspace, bodies, dt, options, [0, 1, 2])?;
         Self::velocity_projection_group(workspace, bodies, dt, options, [3, 4, 5])?;
         Self::velocity_projection_remainder(workspace, bodies, dt, options)?;
@@ -914,7 +961,8 @@ impl JointSolver {
     ) -> Result<(), CollisionError> {
         let mut cache_stats = SolverMassCacheStats::default();
         let result = {
-            let (rows, slots) = workspace.solver_buffers_mut(true);
+            let (rows, slots, operators) =
+                workspace.solver_buffers_and_velocity_operators_mut(true);
             solve_velocity_projection_group(
                 rows,
                 slots,
@@ -923,6 +971,7 @@ impl JointSolver {
                 options,
                 keys,
                 &mut cache_stats,
+                operators,
             )?
         };
         record_solver_mass_cache_stats(workspace, cache_stats);
@@ -4546,6 +4595,7 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn solve_velocity_projection_group<B: SolverBodyAccess + ?Sized>(
     rows: &mut [ConstraintRow],
     slots: &mut [SolverMassSlot],
@@ -4554,6 +4604,7 @@ fn solve_velocity_projection_group<B: SolverBodyAccess + ?Sized>(
     options: JointSolverOptions,
     keys: [u8; 3],
     cache_stats: &mut SolverMassCacheStats,
+    operators: &mut FixedBlockVelocityOperators,
 ) -> Result<ProjectionGroupResult, CollisionError> {
     validate_projection_rows(rows, bodies.len())?;
     let indices = projection_group_indices(rows, keys);
@@ -4566,7 +4617,14 @@ fn solve_velocity_projection_group<B: SolverBodyAccess + ?Sized>(
         };
         if hard_bilateral_block(block_rows, keys, dimension, bodies.len()) {
             let masses = projection_masses(bodies, slots, block_rows, options, cache_stats)?;
-            if let Some(block) = prepared_block(block_rows, masses, dt)? {
+            let block = if keys[0] == 0 {
+                FixedJointRowBlock::Anchor
+            } else {
+                FixedJointRowBlock::Frame
+            };
+            if let Some(inverse_effective_mass) =
+                velocity_block_operator(block_rows, masses, block, operators)?
+            {
                 let velocity_error = Vec3::new(
                     block_rows[0].target_velocity - row_velocity(bodies, block_rows[0])?,
                     block_rows[1].target_velocity - row_velocity(bodies, block_rows[1])?,
@@ -4575,7 +4633,7 @@ fn solve_velocity_projection_group<B: SolverBodyAccess + ?Sized>(
                 if !velocity_error.is_finite() {
                     return Err(CollisionError::ArithmeticOverflow);
                 }
-                match block.inverse_effective_mass.solve_spd(velocity_error) {
+                match inverse_effective_mass.solve_spd(velocity_error) {
                     Ok(delta) if delta.is_finite() => {
                         apply_velocity_block(
                             rows,
@@ -4737,6 +4795,42 @@ fn prepared_block(
 ) -> Result<Option<super::block::Block3>, CollisionError> {
     match super::block::prepare_block3(&rows, masses, dt) {
         Ok(block) => Ok(Some(block)),
+        Err(
+            CollisionError::InvalidContact
+            | CollisionError::InvalidConfig
+            | CollisionError::NonConvergent,
+        ) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Returns the cached `J M^-1 J^T` operator for a velocity block, computing it
+/// once per step and reusing it while the solver masses stay unchanged. Mirrors
+/// `prepared_block` fallback semantics: invalid blocks yield `Ok(None)` so the
+/// caller drops to the scalar path, while unexpected errors propagate.
+fn velocity_block_operator(
+    rows: [ConstraintRow; 3],
+    masses: [SolverMass; 2],
+    block: FixedJointRowBlock,
+    operators: &mut FixedBlockVelocityOperators,
+) -> Result<Option<Mat3>, CollisionError> {
+    if let Some(cached) = operators
+        .slot(block)
+        .filter(|cached| cached.masses == masses)
+    {
+        return Ok(Some(cached.inverse_effective_mass));
+    }
+    match super::block::prepare_block3_operator(&rows, masses) {
+        Ok(inverse_effective_mass) => {
+            operators.set(
+                block,
+                FixedBlockVelocityOperator {
+                    masses,
+                    inverse_effective_mass,
+                },
+            );
+            Ok(Some(inverse_effective_mass))
+        }
         Err(
             CollisionError::InvalidContact
             | CollisionError::InvalidConfig
@@ -6632,6 +6726,65 @@ mod tests {
 
     #[cfg(feature = "bench-internals")]
     #[test]
+    fn fixed_block_velocity_operators_are_reused_across_velocity_sweeps() {
+        let mut bodies = [
+            solver_body_with_velocities(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Vec3::new(0.3, -0.4, 0.1),
+                Vec3::new(-0.2, 0.5, 0.4),
+            ),
+            solver_body_with_velocities(
+                Vec3::new(1.2, -0.6, 0.8),
+                Quat::from_axis_angle(Vec3::Y, 0.31).expect("rotation"),
+                Vec3::new(-0.6, 0.2, 0.3),
+                Vec3::new(0.3, -0.1, 0.2),
+            ),
+        ];
+        let constraint = JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: Joint::Fixed(super::super::FixedJoint::new(JointCommon::new(
+                JointFrame::new(Vec3::new(0.1, -0.05, 0.04), Quat::IDENTITY),
+                JointFrame::new(
+                    Vec3::new(-0.08, 0.03, 0.06),
+                    Quat::from_axis_angle(Vec3::X, 0.18).expect("frame rotation"),
+                ),
+            ))),
+        };
+        let mut workspace = JointWorkspace::new();
+        JointSolver::begin_step(&mut workspace);
+        JointSolver::prepare(&mut workspace, &bodies, &[constraint], 1.0 / 60.0)
+            .expect("prepare fixed rows");
+
+        let cache = JointImpulseCache::new();
+        let options = JointSolverOptions::legacy()
+            .with_projection(super::super::JointProjection::FixedBlock3);
+        let step = JointSolverStep::new(1.0 / 60.0, options).with_impulse_cache(&cache);
+        for _ in 0..4 {
+            JointSolver::solve_velocity_joint(
+                &mut workspace,
+                &mut bodies,
+                constraint,
+                0,
+                step,
+                true,
+            )
+            .expect("fixed block velocity sweep");
+        }
+
+        // Velocity sweeps do not move bodies, so the anchor and frame block
+        // operators are each prepared once and then reused across every sweep.
+        assert_eq!(workspace.fixed_block_velocity_recomputes(), 2);
+        assert!(bodies.iter().all(|body| {
+            body.state().linear_velocity().is_finite()
+                && body.state().angular_velocity().is_finite()
+        }));
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
     fn fixed_block_velocity_falls_back_for_limits_motors_damping_and_incomplete_groups() {
         let mut bodies = [
             solver_body_with_velocities(
@@ -6672,6 +6825,7 @@ mod tests {
                 JointSolverOptions::legacy(),
                 [0, 1, 2],
                 &mut cache_stats,
+                &mut FixedBlockVelocityOperators::default(),
             )
             .expect("scalar fallback");
             assert_eq!(result.block_rows, 0);
@@ -6689,6 +6843,7 @@ mod tests {
             JointSolverOptions::legacy(),
             [0, 1, 2],
             &mut cache_stats,
+            &mut FixedBlockVelocityOperators::default(),
         )
         .expect("incomplete scalar fallback");
         assert_eq!(result.block_rows, 0);
