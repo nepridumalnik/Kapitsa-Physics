@@ -1,3 +1,4 @@
+use kapitsa_math::Vec3;
 use std::collections::{HashMap, HashSet};
 
 use super::{BodyId, ClusterError, ColliderId, PartId, PhysicsWorld, WeldId};
@@ -88,6 +89,244 @@ impl PhysicsWorld {
             parts: vec![part],
             welds: Vec::new(),
         });
+        Ok(part)
+    }
+
+    /// Adds a part and welds it to an existing cluster part.
+    ///
+    /// The velocity fields in `desc` describe the new part before attachment.
+    /// They must already agree with the receiving body's rigid velocity field;
+    /// a different incoming state belongs to the explicit merge operation.
+    pub fn add_cluster_part(
+        &mut self,
+        parent: PartId,
+        mut desc: crate::cluster::ClusterPartDesc,
+        weld_desc: crate::cluster::WeldDesc,
+    ) -> Result<PartId, ClusterError> {
+        weld_desc.validate()?;
+        if !desc.local_transform.translation().is_finite()
+            || !desc.local_transform.rotation().is_normalized()
+            || !desc.linear_velocity.is_finite()
+            || !desc.angular_velocity.is_finite()
+        {
+            return Err(ClusterError::InvalidMotion);
+        }
+        let body = self
+            .cluster_part(parent)
+            .ok_or(ClusterError::InvalidPartId)?
+            .body();
+        let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+        if !cluster.parts().contains(&parent) {
+            return Err(ClusterError::InvalidTopology);
+        }
+        let body_pose = self
+            .body(body)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .state()
+            .transform();
+        let parent_pose = body_pose
+            .compose(
+                &self
+                    .cluster_part(parent)
+                    .ok_or(ClusterError::InvalidPartId)?
+                    .local_transform(),
+            )
+            .map_err(ClusterError::Transform)?;
+        let part_pose = body_pose
+            .compose(&desc.local_transform)
+            .map_err(ClusterError::Transform)?;
+        let anchor_a = parent_pose.transform_point(weld_desc.frame_a.local_anchor);
+        let anchor_b = part_pose.transform_point(weld_desc.frame_b.local_anchor);
+        let anchor_error = anchor_a
+            .checked_sub(anchor_b)
+            .and_then(Vec3::checked_length)
+            .ok_or(ClusterError::ArithmeticOverflow)?;
+        let anchor_scale = anchor_a
+            .abs()
+            .max_element()
+            .max(anchor_b.abs().max_element())
+            .max(1.0);
+        if anchor_error > 128.0 * f64::EPSILON * anchor_scale {
+            return Err(ClusterError::IncompatibleAnchors);
+        }
+
+        let original = *self.body(body).ok_or(ClusterError::InvalidBodyId)?;
+        let mut values = Vec::new();
+        values
+            .try_reserve(cluster.parts().len().saturating_add(1))
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for &id in cluster.parts() {
+            let part = self.cluster_part(id).ok_or(ClusterError::InvalidTopology)?;
+            values.push((part.mass(), part.local_transform()));
+        }
+        values.push((desc.mass, desc.local_transform));
+        let aggregate = aggregate_mass(values.iter().map(|(mass, transform)| (mass, transform)))?;
+
+        let prepared_body = if original.physics().body_type() == BodyType::Dynamic {
+            let old_center = original
+                .world_center_of_mass()
+                .map_err(ClusterError::Body)?
+                .ok_or(ClusterError::InvalidMass)?;
+            let new_center = body_pose.transform_point(aggregate.center_of_mass());
+            if !new_center.is_finite() {
+                return Err(ClusterError::ArithmeticOverflow);
+            }
+            let (velocity, omega) = velocity_field(
+                old_center,
+                original.state().linear_velocity(),
+                original.state().angular_velocity(),
+                new_center,
+            )?;
+            let force = original.forces().force();
+            let torque = old_center
+                .checked_sub(new_center)
+                .and_then(|offset| offset.checked_cross(force))
+                .and_then(|shift| original.forces().torque().checked_add(shift))
+                .ok_or(ClusterError::ArithmeticOverflow)?;
+            let mut prepared = original;
+            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+            prepared
+                .set_linear_velocity(velocity)
+                .map_err(ClusterError::Body)?;
+            prepared
+                .set_angular_velocity(omega)
+                .map_err(ClusterError::Body)?;
+            prepared.apply_force(force).map_err(ClusterError::Body)?;
+            prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+            Some(prepared)
+        } else {
+            None
+        };
+
+        if original.physics().body_type() == BodyType::Dynamic {
+            let old_center = original
+                .world_center_of_mass()
+                .map_err(ClusterError::Body)?
+                .ok_or(ClusterError::InvalidMass)?;
+            let part_center = part_pose.transform_point(desc.mass.center_of_mass());
+            let expected_linear = part_center
+                .checked_sub(old_center)
+                .and_then(|offset| original.state().angular_velocity().checked_cross(offset))
+                .and_then(|relative| original.state().linear_velocity().checked_add(relative))
+                .ok_or(ClusterError::ArithmeticOverflow)?;
+            if (desc.linear_velocity - expected_linear).length()
+                > 128.0 * f64::EPSILON * expected_linear.abs().max_element().max(1.0)
+                || (desc.angular_velocity - original.state().angular_velocity()).length()
+                    > 128.0
+                        * f64::EPSILON
+                        * original
+                            .state()
+                            .angular_velocity()
+                            .abs()
+                            .max_element()
+                            .max(1.0)
+            {
+                return Err(ClusterError::IncompatibleMotion);
+            }
+        }
+
+        self.parts
+            .try_reserve_insertions(1)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        self.welds
+            .try_reserve_insertions(1)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        if let Some(cluster) = self
+            .bodies
+            .get_mut(body.dense)
+            .and_then(|entry| entry.cluster.as_mut())
+        {
+            cluster
+                .parts
+                .try_reserve(1)
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+            cluster
+                .welds
+                .try_reserve(1)
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        } else {
+            return Err(ClusterError::NotClustered);
+        }
+        if desc.colliders.len() > 0 {
+            self.colliders
+                .try_reserve_insertions(desc.colliders.len())
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        }
+        let part_dense = self
+            .parts
+            .insert(ClusterPart {
+                body,
+                local_transform: desc.local_transform,
+                mass: desc.mass,
+                colliders: Vec::new(),
+            })
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let part = PartId {
+            world: self.world_id,
+            dense: part_dense,
+        };
+        let mut collider_ids = Vec::new();
+        for mut collider in desc.colliders.drain(..) {
+            let local_transform = desc
+                .local_transform
+                .compose(&collider.local_transform())
+                .map_err(ClusterError::Transform)?;
+            collider.set_local_transform(local_transform);
+            match self.add_collider(body, collider) {
+                Ok(collider_id) => collider_ids.push(collider_id),
+                Err(error) => {
+                    for collider_id in collider_ids {
+                        self.remove_collider(collider_id);
+                    }
+                    self.parts.remove(part_dense);
+                    return Err(map_cluster_world_error(error));
+                }
+            }
+        }
+        if let Some(entry) = self.parts.get_mut(part_dense) {
+            entry.colliders = collider_ids;
+        }
+
+        let weld_dense = match self.welds.insert(Weld {
+            part_a: parent,
+            part_b: part,
+            desc: weld_desc,
+        }) {
+            Ok(value) => value,
+            Err(_) => {
+                let colliders = self
+                    .parts
+                    .get(part_dense)
+                    .map(|entry| entry.colliders.clone())
+                    .unwrap_or_default();
+                for collider_id in colliders {
+                    self.remove_collider(collider_id);
+                }
+                self.parts.remove(part_dense);
+                return Err(ClusterError::StorageCapacityExceeded);
+            }
+        };
+        let weld = WeldId {
+            world: self.world_id,
+            dense: weld_dense,
+        };
+
+        if let Some(prepared) = prepared_body {
+            self.invalidate_body_edit(body);
+            if let Some(entry) = self.bodies.get_mut(body.dense) {
+                entry.body = prepared;
+            }
+        }
+        if let Some(cluster) = self
+            .bodies
+            .get_mut(body.dense)
+            .and_then(|entry| entry.cluster.as_mut())
+        {
+            cluster.parts.push(part);
+            cluster.welds.push(weld);
+        }
+        self.mark_query_index_dirty();
+        self.collision_system.mark_spatial_dirty();
         Ok(part)
     }
 
@@ -432,6 +671,18 @@ impl PhysicsWorld {
             return Err(ClusterError::InvalidTopology);
         }
         Ok(())
+    }
+}
+
+fn map_cluster_world_error(error: super::WorldError) -> ClusterError {
+    match error {
+        super::WorldError::Collision(error) => ClusterError::Collision(error),
+        super::WorldError::DensePoolCapacityExceeded
+        | super::WorldError::DensePoolIndexOverflow
+        | super::WorldError::DensePoolInvalidFreeList
+        | super::WorldError::WorldIdExhausted => ClusterError::StorageCapacityExceeded,
+        super::WorldError::InvalidBodyId => ClusterError::InvalidBodyId,
+        _ => ClusterError::InvalidTopology,
     }
 }
 

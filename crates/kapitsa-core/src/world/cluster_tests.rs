@@ -1,6 +1,8 @@
 use super::*;
 use crate::{
-    cluster::{ClusterPart, RigidCluster, Weld, WeldDesc, WeldStiffness, WeldStrength},
+    cluster::{
+        ClusterPart, ClusterPartDesc, RigidCluster, Weld, WeldDesc, WeldStiffness, WeldStrength,
+    },
     collider::Collider,
     joint::JointFrame,
     mass::MassProperties,
@@ -463,4 +465,95 @@ fn enable_cluster_rejects_incompatible_mass_without_mutation() {
         world.body(body).and_then(|body| body.physics().mass()),
         Some(original)
     );
+}
+
+#[test]
+fn add_cluster_part_keeps_part_local_geometry_and_updates_mass() {
+    let mut world = PhysicsWorld::new();
+    let root_mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).expect("root mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), root_mass).expect("body"))
+        .expect("body id");
+    let root = world.enable_cluster(body).expect("root");
+    let part_mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("part mass");
+    let part = world
+        .add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass: part_mass,
+                colliders: vec![Collider::new(
+                    Shape::Sphere(Sphere::new(0.5).expect("sphere")),
+                    Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY).expect("collider pose"),
+                )],
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::IDENTITY,
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )
+        .expect("part");
+
+    let collider = world
+        .cluster_part(part)
+        .and_then(|part| part.colliders().first().copied())
+        .expect("part collider");
+    assert_eq!(world.collider_body(collider), Some(body));
+    assert_eq!(
+        world
+            .collider(collider)
+            .map(|value| value.local_transform().translation()),
+        Some(Vec3::X)
+    );
+    assert_eq!(world.cluster(body).map(RigidCluster::part_count), Some(2));
+    assert_eq!(world.cluster(body).map(RigidCluster::weld_count), Some(1));
+    assert_eq!(
+        world
+            .body(body)
+            .and_then(|body| body.physics().mass())
+            .map(|mass| mass.mass()),
+        Some(3.0)
+    );
+    assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
+fn add_cluster_part_rejects_mismatched_anchors_without_mutation() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("body id");
+    let root = world.enable_cluster(body).expect("root");
+    let before = world.cluster(body).cloned();
+    let result = world.add_cluster_part(
+        root,
+        ClusterPartDesc {
+            local_transform: Transform::identity(),
+            mass,
+            colliders: Vec::new(),
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        },
+        WeldDesc {
+            frame_a: JointFrame::new(Vec3::ZERO, kapitsa_math::Quat::IDENTITY),
+            frame_b: JointFrame::new(Vec3::X, kapitsa_math::Quat::IDENTITY),
+            strength: WeldStrength::Unbreakable,
+            stiffness: WeldStiffness {
+                linear: 1.0,
+                angular: 1.0,
+            },
+        },
+    );
+    assert_eq!(result, Err(ClusterError::IncompatibleAnchors));
+    assert_eq!(world.cluster(body).cloned(), before);
+    assert_eq!(world.parts.len(), 1);
+    assert_eq!(world.welds.len(), 0);
 }
