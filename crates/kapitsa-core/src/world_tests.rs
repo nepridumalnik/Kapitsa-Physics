@@ -289,10 +289,12 @@ fn light_joint_diagnostics_preserve_state_and_break_events()
 -> Result<(), Box<dyn std::error::Error>> {
     fn simulate(
         light: bool,
+        block3: bool,
         break_force: Option<f64>,
     ) -> Result<(Vec<crate::rigid_body::BodyState>, usize), Box<dyn std::error::Error>> {
         let mut world = PhysicsWorld::new();
         world.set_joint_light_diagnostics_for_bench(light);
+        world.set_joint_projection_for_bench(block3);
         let body_a = world.add_body(body_at(Vec3::ZERO, 1.0))?;
         let rotation = Quat::from_axis_angle(Vec3::Z, 0.2).ok_or("valid rotation")?;
         let mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY)?;
@@ -316,11 +318,20 @@ fn light_joint_diagnostics_preserve_state_and_break_events()
         Ok((states, world.joint_count()))
     }
 
-    assert_eq!(simulate(false, None)?, simulate(true, None)?);
-    let full_break = simulate(false, Some(1.0e-6))?;
-    let light_break = simulate(true, Some(1.0e-6))?;
-    assert_eq!(full_break, light_break);
-    assert_eq!(full_break.1, 0, "break thresholds must still fire");
+    for block3 in [false, true] {
+        assert_eq!(
+            simulate(false, block3, None)?,
+            simulate(true, block3, None)?,
+            "diagnostics changed body state with block3={block3}"
+        );
+        let full_break = simulate(false, block3, Some(1.0e-6))?;
+        let light_break = simulate(true, block3, Some(1.0e-6))?;
+        assert_eq!(
+            full_break, light_break,
+            "break events differ with block3={block3}"
+        );
+        assert_eq!(full_break.1, 0, "break thresholds must still fire");
+    }
     Ok(())
 }
 

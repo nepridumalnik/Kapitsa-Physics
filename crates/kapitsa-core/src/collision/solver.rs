@@ -804,12 +804,8 @@ impl SolverWorkspace {
             {
                 joint_workspace.record_velocity_iteration();
                 if full_diagnostics && !joints.is_empty() {
-                    JointSolver::measure_residual(
-                        joint_workspace,
-                        bodies,
-                        joints,
-                        joint_solver_step.dt(),
-                    )?;
+                    // Nothing changed since the previous measurement (the last
+                    // post-velocity read or the initial one), so reuse it.
                     joint_workspace.record_pre_joint_velocity_residual();
                 }
             }
@@ -828,10 +824,12 @@ impl SolverWorkspace {
             {
                 joint_workspace.record_color_batches(self.active_colored_batches);
                 if full_diagnostics && !joints.is_empty() {
-                    JointSolver::measure_residual(
+                    // Velocity sweeps keep poses fixed, so the rows committed by
+                    // each batch already describe the current geometry.
+                    self.merge_colored_joint_rows(joint_workspace, joints)?;
+                    JointSolver::measure_current_residual(
                         joint_workspace,
                         bodies,
-                        joints,
                         joint_solver_step.dt(),
                     )?;
                     if velocity_iteration == 0 {
@@ -853,12 +851,7 @@ impl SolverWorkspace {
                 energy_components(bodies, gravity),
             );
             if full_diagnostics && !joints.is_empty() {
-                JointSolver::measure_residual(
-                    joint_workspace,
-                    bodies,
-                    joints,
-                    joint_solver_step.dt(),
-                )?;
+                // The last post-velocity read already reflects the final state.
                 joint_workspace.record_post_velocity_geometry();
             }
         }
@@ -868,12 +861,7 @@ impl SolverWorkspace {
             {
                 joint_workspace.record_position_iteration();
                 if full_diagnostics && !joints.is_empty() {
-                    JointSolver::measure_residual(
-                        joint_workspace,
-                        bodies,
-                        joints,
-                        joint_solver_step.dt(),
-                    )?;
+                    // Nothing changed since the previous post-position read.
                     joint_workspace.record_pre_joint_geometry();
                 }
             }
@@ -908,12 +896,14 @@ impl SolverWorkspace {
                 energy_components(bodies, gravity),
             );
             if full_diagnostics && !joints.is_empty() {
-                JointSolver::measure_residual(
-                    joint_workspace,
-                    bodies,
-                    joints,
-                    joint_solver_step.dt(),
-                )?;
+                if config.position_iterations == 0 {
+                    JointSolver::measure_residual(
+                        joint_workspace,
+                        bodies,
+                        joints,
+                        joint_solver_step.dt(),
+                    )?;
+                }
                 joint_workspace.record_post_joint_geometry(false);
             }
         }
@@ -1164,11 +1154,12 @@ impl SolverWorkspace {
         Ok(())
     }
 
-    fn merge_colored_joints(
+    /// Copies the latest per-batch joint rows into the island workspace so
+    /// diagnostics can measure them without rebuilding geometry.
+    fn merge_colored_joint_rows(
         &self,
         destination: &mut JointWorkspace,
         joints: &[JointConstraint],
-        manifold_count: usize,
     ) -> Result<(), CollisionError> {
         for (joint_index, joint) in joints.iter().copied().enumerate() {
             let [batch_index, task_slot] = *self
@@ -1187,6 +1178,16 @@ impl SolverWorkspace {
                 [joint.body_a, joint.body_b],
             )?;
         }
+        Ok(())
+    }
+
+    fn merge_colored_joints(
+        &self,
+        destination: &mut JointWorkspace,
+        joints: &[JointConstraint],
+        manifold_count: usize,
+    ) -> Result<(), CollisionError> {
+        self.merge_colored_joint_rows(destination, joints)?;
         for batch in self
             .colored_batches
             .iter()
@@ -1373,7 +1374,9 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             {
                 if full_diagnostics {
-                    if reuse_scalar_velocity_rows {
+                    // Velocity sweeps leave poses unchanged, so rows prepared by
+                    // the previous sweep (or the one-time preparation) are current.
+                    if reuse_scalar_velocity_rows || velocity_iteration > 0 {
                         JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
                     } else {
                         JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
@@ -1474,11 +1477,8 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             {
                 if full_diagnostics {
-                    if reuse_scalar_velocity_rows {
-                        JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
-                    } else {
-                        JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
-                    }
+                    // The sweep just committed rows for the current poses.
+                    JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
                     if velocity_iteration == 0 {
                         joint_workspace.record_first_velocity_residual();
                     }
@@ -1501,7 +1501,8 @@ impl SolverWorkspace {
         #[cfg(feature = "bench-internals")]
         {
             if full_diagnostics {
-                JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
+                // The last velocity sweep committed rows without changing poses.
+                JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
                 joint_workspace.record_post_velocity_geometry();
             }
         }
@@ -1512,6 +1513,7 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             {
                 if full_diagnostics {
+                    // Contact position corrections may already have moved bodies.
                     JointSolver::measure_residual(joint_workspace, bodies, joints, dt)?;
                     joint_workspace.record_pre_joint_geometry();
                 }

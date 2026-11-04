@@ -1027,6 +1027,8 @@ impl JointSolver {
         Ok(())
     }
 
+    /// Rebuilds rows into the scratch buffer and measures them without touching
+    /// the working rows, accumulated impulses, or velocity operator caches.
     pub(crate) fn measure_residual(
         workspace: &mut JointWorkspace,
         bodies: &[SolverBody],
@@ -1034,22 +1036,37 @@ impl JointSolver {
         dt: f64,
     ) -> Result<(), CollisionError> {
         #[cfg(feature = "bench-internals")]
-        let metrics = workspace.metrics();
-        Self::prepare(workspace, bodies, joints, dt)?;
-        let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
-        #[cfg(feature = "bench-internals")]
-        let geometry_residual =
-            measure_joint_geometry(workspace.rows(), workspace.row_joint_indices())?;
-        #[cfg(feature = "bench-internals")]
-        workspace.restore_metrics(metrics);
-        #[cfg(feature = "bench-internals")]
-        workspace.set_geometry_residual(geometry_residual);
-        workspace.set_residual(residual);
-        Ok(())
+        {
+            let metrics = workspace.metrics();
+            workspace.begin_diagnostic_prepare();
+            let result = prepare_joint_rows(bodies, workspace, joints, dt).and_then(|()| {
+                let residual = measure_prepared_rows(workspace.preparing_rows(), bodies, dt)?;
+                let geometry = measure_joint_geometry(
+                    workspace.preparing_rows(),
+                    workspace.preparing_row_joint_indices(),
+                )?;
+                Ok((residual, geometry))
+            });
+            workspace.abandon_prepare();
+            let (residual, geometry) = result?;
+            workspace.restore_metrics(metrics);
+            workspace.set_geometry_residual(geometry);
+            workspace.set_residual(residual);
+            Ok(())
+        }
+        #[cfg(not(feature = "bench-internals"))]
+        {
+            workspace.begin_diagnostic_prepare();
+            let result = prepare_joint_rows(bodies, workspace, joints, dt)
+                .and_then(|()| measure_prepared_rows(workspace.preparing_rows(), bodies, dt));
+            workspace.abandon_prepare();
+            workspace.set_residual(result?);
+            Ok(())
+        }
     }
 
-    /// Prepared-row residual measurement that still updates solver state but
-    /// skips the expensive bench-only geometry and work diagnostics.
+    /// Scratch-buffer residual measurement for adaptive convergence that skips
+    /// the expensive bench-only geometry and work diagnostics.
     #[cfg(feature = "bench-internals")]
     pub(crate) fn measure_residual_light(
         workspace: &mut JointWorkspace,
@@ -1058,25 +1075,32 @@ impl JointSolver {
         dt: f64,
     ) -> Result<(), CollisionError> {
         let metrics = workspace.metrics();
-        Self::prepare(workspace, bodies, joints, dt)?;
-        let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
+        workspace.begin_diagnostic_prepare();
+        let result = prepare_joint_rows(bodies, workspace, joints, dt)
+            .and_then(|()| measure_prepared_rows(workspace.preparing_rows(), bodies, dt));
+        workspace.abandon_prepare();
+        let residual = result?;
         // The preparation above is diagnostic noise, not solver work.
         workspace.restore_metrics(metrics);
         workspace.set_residual(residual);
         Ok(())
     }
 
-    #[cfg(feature = "bench-internals")]
+    /// Measures the already-prepared working rows. Callers must only use this
+    /// while row geometry still matches the current body poses.
     pub(crate) fn measure_current_residual(
         workspace: &mut JointWorkspace,
         bodies: &[SolverBody],
         dt: f64,
     ) -> Result<(), CollisionError> {
         let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
-        let geometry_residual =
-            measure_joint_geometry(workspace.rows(), workspace.row_joint_indices())?;
+        #[cfg(feature = "bench-internals")]
+        {
+            let geometry_residual =
+                measure_joint_geometry(workspace.rows(), workspace.row_joint_indices())?;
+            workspace.set_geometry_residual(geometry_residual);
+        }
         workspace.set_residual(residual);
-        workspace.set_geometry_residual(geometry_residual);
         Ok(())
     }
 }
@@ -2918,16 +2942,18 @@ fn fixed_joint_geometry<B: SolverBodyAccess + ?Sized>(
         position_error,
         rotation_error,
     };
-    workspace.set_fixed_geometry(
-        joint_index,
-        FixedJointGeometryCache {
-            frame_a,
-            frame_b,
-            transform_a,
-            transform_b,
-            geometry,
-        },
-    )?;
+    if !workspace.diagnostic_prepare() {
+        workspace.set_fixed_geometry(
+            joint_index,
+            FixedJointGeometryCache {
+                frame_a,
+                frame_b,
+                transform_a,
+                transform_b,
+                geometry,
+            },
+        )?;
+    }
     Ok(geometry)
 }
 

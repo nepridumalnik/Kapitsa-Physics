@@ -47,6 +47,7 @@ pub(crate) struct JointWorkspace {
     active_joint_index: usize,
     active_joint_id: Option<crate::world::JointId>,
     sequential_joint_prepare: bool,
+    diagnostic_prepare: bool,
     previous_row_start: usize,
     previous_row_end: usize,
     reactions: Vec<Option<JointReaction>>,
@@ -96,6 +97,7 @@ impl JointWorkspace {
             active_joint_index: 0,
             active_joint_id: None,
             sequential_joint_prepare: false,
+            diagnostic_prepare: false,
             previous_row_start: 0,
             previous_row_end: 0,
             reactions: Vec::new(),
@@ -122,6 +124,7 @@ impl JointWorkspace {
         self.active_joint_index = 0;
         self.active_joint_id = None;
         self.sequential_joint_prepare = false;
+        self.diagnostic_prepare = false;
         self.previous_row_start = 0;
         self.previous_row_end = 0;
         self.reactions.clear();
@@ -159,6 +162,7 @@ impl JointWorkspace {
         self.active_joint_index = 0;
         self.active_joint_id = None;
         self.sequential_joint_prepare = false;
+        self.diagnostic_prepare = false;
         self.previous_row_start = 0;
         self.previous_row_end = 0;
         self.reactions.clear();
@@ -171,6 +175,34 @@ impl JointWorkspace {
             self.geometry_residual = super::diagnostics::JointGeometryResidual::default();
         }
         self.residual = super::solver::JointResidual::ZERO;
+    }
+
+    /// Starts a diagnostic-only preparation. Rows are built in the scratch
+    /// buffer and geometry caching is disabled so no solver state is touched.
+    pub(crate) fn begin_diagnostic_prepare(&mut self) {
+        self.begin_prepare();
+        self.diagnostic_prepare = true;
+    }
+
+    /// Discards the diagnostic scratch rows without committing them.
+    pub(crate) fn abandon_prepare(&mut self) {
+        self.preparing_rows.clear();
+        self.preparing_joint_indices.clear();
+        self.preparing_joint_ids.clear();
+        self.sequential_joint_prepare = false;
+        self.diagnostic_prepare = false;
+    }
+
+    pub(crate) const fn diagnostic_prepare(&self) -> bool {
+        self.diagnostic_prepare
+    }
+
+    pub(crate) fn preparing_rows(&self) -> &[ConstraintRow] {
+        &self.preparing_rows
+    }
+
+    pub(crate) fn preparing_row_joint_indices(&self) -> &[usize] {
+        &self.preparing_joint_indices
     }
 
     pub(crate) fn begin_prepare(&mut self) {
