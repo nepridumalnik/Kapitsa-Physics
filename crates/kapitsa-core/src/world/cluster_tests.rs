@@ -721,3 +721,94 @@ fn removing_cluster_root_cleans_part_targets_and_selects_stable_root() {
     );
     assert_eq!(world.cluster(body).map(RigidCluster::root), Some(child));
 }
+
+#[test]
+fn breaking_weld_splits_chain_and_rebinds_part_targets() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("body id");
+    let root = world.enable_cluster(body).expect("root");
+    let weld_desc = || WeldDesc {
+        frame_a: JointFrame::IDENTITY,
+        frame_b: JointFrame::IDENTITY,
+        strength: WeldStrength::Unbreakable,
+        stiffness: WeldStiffness {
+            linear: 1.0,
+            angular: 1.0,
+        },
+    };
+    let child = world
+        .add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            weld_desc(),
+        )
+        .expect("child");
+    let tail = world
+        .add_cluster_part(
+            child,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            weld_desc(),
+        )
+        .expect("tail");
+    let weld = world.cluster(body).expect("cluster").welds()[1];
+    let source = world
+        .add_force_source_for_part(tail, Vec3::ZERO, Vec3::X)
+        .expect("force source");
+    let external = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("external body");
+    let joint = world
+        .add_joint_targets(
+            JointTarget::Part(tail),
+            JointTarget::Body(external),
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .expect("joint");
+
+    let bodies = world.break_weld(weld).expect("split");
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0], body);
+    assert_ne!(world.part_body(tail), Some(body));
+    assert_eq!(
+        world.cluster_part(tail).map(ClusterPart::body),
+        world.part_body(tail)
+    );
+    assert_eq!(
+        world.force_source(source).map(ForceSource::body),
+        world.part_body(tail)
+    );
+    assert_eq!(
+        world.joint_bodies(joint).map(|(_, second)| second),
+        Some(external)
+    );
+    assert_eq!(
+        world.joint_bodies(joint).map(|(first, _)| first),
+        world.part_body(tail)
+    );
+    assert_eq!(world.cluster(body).map(RigidCluster::part_count), Some(2));
+    assert_eq!(
+        world
+            .cluster(world.part_body(tail).expect("tail body"))
+            .map(RigidCluster::part_count),
+        Some(1)
+    );
+    assert_eq!(world.validate_clusters(), Ok(()));
+}
