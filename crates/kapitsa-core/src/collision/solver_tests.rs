@@ -677,11 +677,27 @@ fn workload(constraints_per_color: &[usize], worker_count: usize) -> super::Colo
         workload.constraint_count = workload.constraint_count.saturating_add(constraint_count);
         workload.batch_count = workload.batch_count.saturating_add(batch_count);
         workload.max_color_batch_count = workload.max_color_batch_count.max(batch_count);
+        if batch_count >= super::COLORED_MIN_PARALLEL_BATCHES
+            && constraint_count > super::SMALL_COLOR_MERGE_THRESHOLD
+        {
+            workload.parallel_constraint_count += constraint_count;
+        }
         workload.useful_batch_count = workload
             .useful_batch_count
             .saturating_add(batch_count.min(worker_count));
     }
     workload
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn partial_schedule_accepts_useful_wide_colors_and_rejects_narrow_work() {
+    let mixed = workload(&[40, 40, 40, 40, 8, 8], 8);
+    assert!(!mixed.can_use_parallel_schedule(8));
+    assert!(mixed.can_use_partial_schedule(8));
+    assert!(!mixed.can_use_partial_schedule(1));
+    assert!(!workload(&[16; 64], 8).can_use_partial_schedule(8));
+    assert!(!workload(&[40, 40, 40], 8).can_use_partial_schedule(8));
 }
 
 fn static_contact_fixture(count: usize) -> (Vec<SolverBody>, Vec<SolverManifold>) {

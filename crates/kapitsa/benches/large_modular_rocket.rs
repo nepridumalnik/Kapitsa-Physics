@@ -140,10 +140,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mass_cache = !args.iter().any(|arg| arg == "--no-mass-cache");
     let block3 = args.iter().any(|arg| arg == "--block3");
+    let partial = args.iter().any(|arg| arg == "--partial-coloring");
     let steady_only = args.iter().any(|arg| arg == "--steady-only");
     let light_diagnostics = args.iter().any(|arg| arg == "--light-diagnostics");
     println!(
-        "Large modular rocket Release benchmark: dt={DT:.9}s warmups={WARMUPS} steady_samples={SAMPLES} event_samples={EVENT_SAMPLES} mass_cache={mass_cache} projection={} executor={} steady_only={steady_only} diagnostics={}",
+        "Large modular rocket Release benchmark: dt={DT:.9}s warmups={WARMUPS} steady_samples={SAMPLES} event_samples={EVENT_SAMPLES} mass_cache={mass_cache} projection={} executor={} steady_only={steady_only} partial_coloring={partial} diagnostics={}",
         if block3 { "fixed_block3" } else { "scalar" },
         if no_pool { "no_pool" } else { "rayon" },
         if light_diagnostics { "light" } else { "full" }
@@ -169,6 +170,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 mass_cache,
                 block3,
                 light_diagnostics,
+                partial,
             )?;
             if !steady_only {
                 report_start(
@@ -178,6 +180,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     mass_cache,
                     block3,
                     light_diagnostics,
+                    partial,
                 )?;
                 report_separation(
                     parts,
@@ -186,6 +189,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     mass_cache,
                     block3,
                     light_diagnostics,
+                    partial,
                 )?;
             }
         }
@@ -200,9 +204,10 @@ fn report_steady(
     mass_cache: bool,
     block3: bool,
     light_diagnostics: bool,
+    partial: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut rocket = ModularRocket::new(parts);
-    configure_solver(&mut rocket, mass_cache, block3, light_diagnostics);
+    configure_solver(&mut rocket, mass_cache, block3, light_diagnostics, partial);
     validate_fixture(&rocket, parts)?;
     warm(&mut rocket.world, executor, workers, WARMUPS)?;
     let mut samples = Vec::with_capacity(SAMPLES);
@@ -221,11 +226,12 @@ fn report_start(
     mass_cache: bool,
     block3: bool,
     light_diagnostics: bool,
+    partial: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut samples = Vec::with_capacity(EVENT_SAMPLES);
     for _ in 0..EVENT_SAMPLES {
         let mut rocket = ModularRocket::new(parts);
-        configure_solver(&mut rocket, mass_cache, block3, light_diagnostics);
+        configure_solver(&mut rocket, mass_cache, block3, light_diagnostics, partial);
         validate_fixture(&rocket, parts)?;
         warm(&mut rocket.world, executor, workers, WARMUPS)?;
         let started = Instant::now();
@@ -248,11 +254,12 @@ fn report_separation(
     mass_cache: bool,
     block3: bool,
     light_diagnostics: bool,
+    partial: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut samples = Vec::with_capacity(EVENT_SAMPLES);
     for _ in 0..EVENT_SAMPLES {
         let mut rocket = ModularRocket::new(parts);
-        configure_solver(&mut rocket, mass_cache, block3, light_diagnostics);
+        configure_solver(&mut rocket, mass_cache, block3, light_diagnostics, partial);
         validate_fixture(&rocket, parts)?;
         warm(&mut rocket.world, executor, workers, WARMUPS)?;
         let started = Instant::now();
@@ -287,7 +294,9 @@ fn configure_solver(
     mass_cache: bool,
     block3: bool,
     light_diagnostics: bool,
+    partial: bool,
 ) {
+    rocket.world.set_partial_coloring_for_bench(partial);
     rocket.world.set_joint_mass_cache_for_bench(mass_cache);
     rocket.world.set_joint_projection_for_bench(block3);
     rocket
@@ -398,6 +407,18 @@ fn report_samples(
     let metrics = p50.metrics.collision;
     let joint_metrics = p50.metrics.joints;
     let schedule = metrics.colored_schedule;
+    println!(
+        "allocation_samples_nonzero={} allocation_max={}",
+        samples
+            .iter()
+            .filter(|sample| sample.allocations != 0)
+            .count(),
+        samples
+            .iter()
+            .map(|sample| sample.allocations)
+            .max()
+            .unwrap_or(0)
+    );
     println!(
         "schedule rejection={} constraints={} colors={} batches={} useful_batches={} parallel_colors={} parallel_constraints={} sequential_constraints={} tasks_started={} velocity_ms={:.4} position_ms={:.4}",
         schedule.rejection,

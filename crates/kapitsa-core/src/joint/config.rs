@@ -85,6 +85,8 @@ pub(crate) struct JointSolverOptions {
     #[cfg(feature = "bench-internals")]
     alternate_velocity_sweeps: bool,
     #[cfg(feature = "bench-internals")]
+    partial_coloring: bool,
+    #[cfg(feature = "bench-internals")]
     global_velocity_pcg_max_iterations: u32,
     #[cfg(feature = "bench-internals")]
     global_velocity_pcg_incomplete_cholesky: bool,
@@ -107,6 +109,8 @@ impl JointSolverOptions {
             velocity_relaxation: 1.0,
             #[cfg(feature = "bench-internals")]
             alternate_velocity_sweeps: false,
+            #[cfg(feature = "bench-internals")]
+            partial_coloring: false,
             #[cfg(feature = "bench-internals")]
             global_velocity_pcg_max_iterations: 0,
             #[cfg(feature = "bench-internals")]
@@ -174,6 +178,17 @@ impl JointSolverOptions {
 
     pub(crate) const fn velocity_relaxation(self) -> f64 {
         self.velocity_relaxation
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn with_partial_coloring(mut self, enabled: bool) -> Self {
+        self.partial_coloring = enabled;
+        self
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn partial_coloring(self) -> bool {
+        self.partial_coloring
     }
 
     #[cfg(feature = "bench-internals")]

@@ -35,6 +35,7 @@ struct ColoredWorkload {
     batch_count: usize,
     max_color_batch_count: usize,
     useful_batch_count: usize,
+    parallel_constraint_count: usize,
 }
 
 impl ColoredWorkload {
@@ -70,6 +71,13 @@ impl ColoredWorkload {
 
     fn can_use_parallel_schedule(self, worker_count: usize) -> bool {
         self.rejection_reason(worker_count).is_none()
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn can_use_partial_schedule(self, worker_count: usize) -> bool {
+        worker_count > 1
+            && self.parallel_constraint_count >= LARGE_ISLAND_COLORING_THRESHOLD
+            && self.parallel_constraint_count >= self.constraint_count.div_ceil(2)
     }
 }
 
@@ -736,6 +744,13 @@ impl SolverWorkspace {
                 .constraints_in_schedule_group(group)?;
             let batch_count = constraints.len().div_ceil(LARGE_ISLAND_BATCH_SIZE);
             workload.constraint_count = workload.constraint_count.saturating_add(constraints.len());
+            if batch_count >= COLORED_MIN_PARALLEL_BATCHES
+                && constraints.len() > SMALL_COLOR_MERGE_THRESHOLD
+            {
+                workload.parallel_constraint_count = workload
+                    .parallel_constraint_count
+                    .saturating_add(constraints.len());
+            }
             workload.batch_count = workload.batch_count.saturating_add(batch_count);
             workload.max_color_batch_count = workload.max_color_batch_count.max(batch_count);
             workload.useful_batch_count = workload
@@ -773,6 +788,10 @@ impl SolverWorkspace {
         let Some(workload) = self.colored_workload(worker_count) else {
             return false;
         };
+        #[cfg(feature = "bench-internals")]
+        if options.partial_coloring() {
+            return workload.can_use_partial_schedule(worker_count);
+        }
         workload.can_use_parallel_schedule(worker_count)
     }
 

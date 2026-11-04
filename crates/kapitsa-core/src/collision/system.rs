@@ -126,6 +126,11 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_partial_coloring_for_bench(&mut self, enabled: bool) {
+        self.joint_solver_options = self.joint_solver_options.with_partial_coloring(enabled);
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn set_joint_projection_for_bench(&mut self, enabled: bool) {
         let projection = if enabled {
             crate::joint::JointProjection::FixedBlock3
@@ -1215,7 +1220,12 @@ impl CollisionSystem {
         let inner_worker_count = if island_count == 1 { worker_count } else { 1 };
         #[cfg(feature = "bench-internals")]
         let iterations_started = std::time::Instant::now();
-        if worker_count <= 1 || island_count <= 1 {
+        #[cfg(feature = "bench-internals")]
+        let enter_executor =
+            self.joint_solver_options.partial_coloring() && worker_count > 1 && island_count == 1;
+        #[cfg(not(feature = "bench-internals"))]
+        let enter_executor = false;
+        if worker_count <= 1 || (island_count <= 1 && !enter_executor) {
             for island in self.solver_islands.iter_mut().take(island_count) {
                 island.workspace.solve_with_joints(
                     &mut island.bodies,

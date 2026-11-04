@@ -332,6 +332,14 @@ mod stability_tests {
     const DT: f64 = 1.0 / 120.0;
     const TICKS: usize = 180;
 
+    #[cfg(feature = "bench-internals")]
+    mod experiment_executor {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../kapitsa-core/benches/support/rayon_executor.rs"
+        ));
+    }
+
     #[derive(Debug, PartialEq)]
     struct PartState {
         position: Vec3,
@@ -561,6 +569,48 @@ mod stability_tests {
             report_only || all_stable,
             "rocket stability criteria failed"
         );
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "300-step FixedBlock3 partial coloring stability comparison"]
+    fn partial_coloring_rocket_stability() {
+        let first = run_fixed_scenario(1000, true);
+        let second = run_fixed_scenario(1000, true);
+        assert_eq!(first.states, second.states, "repeat must be deterministic");
+        let velocity = first
+            .solver_stage_trace
+            .iter()
+            .map(|s| s.post_velocity_linear_residual_mps)
+            .fold(0.0_f64, f64::max);
+        let angular_velocity = first
+            .solver_stage_trace
+            .iter()
+            .map(|s| s.post_velocity_angular_residual_radps)
+            .fold(0.0_f64, f64::max);
+        println!(
+            "ticks={} error={:?} anchor={:.6e}/{:.6e} frame={:.6e}/{:.6e} energy_drift={:.6e} velocity={:.6e}/{:.6e} separation_dp={:.6e} joints={} breaks={}",
+            first.completed_ticks,
+            first.step_failure,
+            first.max_anchor_error,
+            first.rms_anchor_error,
+            first.max_frame_error,
+            first.rms_frame_error,
+            first.max_coast_energy_drift,
+            velocity,
+            angular_velocity,
+            first.separation_momentum_error,
+            first.joints_after_separation,
+            first.joint_break_events
+        );
+        assert_eq!(first.completed_ticks, 300);
+        assert!(first.step_failure.is_none());
+        assert_eq!(first.joints_after_separation, 998);
+        assert_eq!(first.joint_break_events, 0);
+        assert!(first.separation_momentum_error < 1.0e-9);
+        assert!(first.max_anchor_error < 0.03 && first.rms_anchor_error < 0.01);
+        assert!(first.max_frame_error < 0.1 && first.rms_frame_error < 0.03);
+        assert!(first.max_coast_energy_drift < 0.1);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1816,6 +1866,22 @@ mod stability_tests {
         let started = Instant::now();
         let mut rocket = ModularRocket::new(part_count);
         #[cfg(feature = "bench-internals")]
+        let partial_workers = std::env::var("KAPITSA_PARTIAL_WORKERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        #[cfg(feature = "bench-internals")]
+        let experiment_executor = partial_workers
+            .map(|workers| experiment_executor::RayonExecutor::new(workers).expect("rayon"));
+        #[cfg(feature = "bench-internals")]
+        rocket
+            .world
+            .set_partial_coloring_for_bench(partial_workers.is_some());
+        let ticks = if std::env::var_os("KAPITSA_ROCKET_300_TICKS").is_some() {
+            300
+        } else {
+            TICKS
+        };
+        #[cfg(feature = "bench-internals")]
         if reverse_joint_order {
             reverse_joint_storage_order(&mut rocket);
         }
@@ -1994,11 +2060,11 @@ mod stability_tests {
         let mut first_anchor_limit_tick = None;
         let mut first_frame_limit_tick = None;
         #[cfg(feature = "bench-internals")]
-        let mut solver_stage_trace = Vec::with_capacity(TICKS);
+        let mut solver_stage_trace = Vec::with_capacity(ticks);
         #[cfg(feature = "bench-internals")]
-        let mut energy_trace = Vec::with_capacity(TICKS);
+        let mut energy_trace = Vec::with_capacity(ticks);
 
-        for tick in 0..TICKS {
+        for tick in 0..ticks {
             match mode {
                 ScenarioMode::Full => match tick {
                     12 => rocket
@@ -2102,7 +2168,16 @@ mod stability_tests {
                 | ScenarioMode::RocketFreeAssemblyWithoutLoads => {}
             }
 
-            if let Err(error) = rocket.world.step(DT) {
+            #[cfg(feature = "bench-internals")]
+            let result =
+                if let (Some(executor), Some(workers)) = (&experiment_executor, partial_workers) {
+                    rocket.world.step_with_executor(DT, executor, workers)
+                } else {
+                    rocket.world.step(DT)
+                };
+            #[cfg(not(feature = "bench-internals"))]
+            let result = rocket.world.step(DT);
+            if let Err(error) = result {
                 step_failure = Some(format!("tick={tick}: {error:?}"));
                 break;
             }
@@ -2298,7 +2373,7 @@ mod stability_tests {
             }
         }
 
-        if completed_ticks == TICKS && matches!(mode, ScenarioMode::Full) {
+        if completed_ticks == ticks && matches!(mode, ScenarioMode::Full) {
             assert!(initial_lower_mass > stage_mass(&rocket, &rocket.lower_parts));
             assert!(initial_upper_mass > stage_mass(&rocket, &rocket.upper_parts));
         }
