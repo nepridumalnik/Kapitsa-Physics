@@ -595,6 +595,124 @@ fn contact_impulses_warm_start_the_next_solver_step() {
     );
 }
 
+fn workload(constraints_per_color: &[usize], worker_count: usize) -> super::ColoredWorkload {
+    let mut workload = super::ColoredWorkload {
+        color_count: constraints_per_color.len(),
+        ..super::ColoredWorkload::default()
+    };
+    for &constraint_count in constraints_per_color {
+        let batch_count = constraint_count.div_ceil(super::LARGE_ISLAND_BATCH_SIZE);
+        workload.constraint_count = workload.constraint_count.saturating_add(constraint_count);
+        workload.batch_count = workload.batch_count.saturating_add(batch_count);
+        workload.max_color_batch_count = workload.max_color_batch_count.max(batch_count);
+        workload.useful_batch_count = workload
+            .useful_batch_count
+            .saturating_add(batch_count.min(worker_count));
+    }
+    workload
+}
+
+#[test]
+fn workload_heuristic_rejects_small_or_narrow_schedules() {
+    let small = workload(&[16, 16], 8);
+    assert!(!small.can_use_parallel_schedule(8));
+
+    let narrow = workload(&[32; 64], 8);
+    assert!(!narrow.can_use_parallel_schedule(8));
+
+    let wide = workload(&[64; 64], 8);
+    assert!(wide.can_use_parallel_schedule(8));
+
+    assert!(!wide.can_use_parallel_schedule(1));
+}
+
+#[test]
+fn workload_heuristic_thresholds_follow_available_workers() {
+    let two_batches_per_color = workload(&[32; 64], 8);
+    assert_eq!(two_batches_per_color.parallel_fraction_percent(), 50);
+    assert!(!two_batches_per_color.can_use_parallel_schedule(8));
+    assert!(two_batches_per_color.can_use_parallel_schedule(4));
+
+    let three_batches_per_color = workload(&[48; 64], 8);
+    assert!(!three_batches_per_color.can_use_parallel_schedule(8));
+    assert!(three_batches_per_color.can_use_parallel_schedule(4));
+
+    let four_batches_per_color = workload(&[64; 64], 8);
+    assert!(four_batches_per_color.can_use_parallel_schedule(8));
+
+    let single_batch_per_color = workload(&[8; 64], 2);
+    assert!(!single_batch_per_color.can_use_parallel_schedule(2));
+}
+
+#[test]
+fn colored_solver_choice_respects_compatibility_configuration() {
+    let bodies = (0..256)
+        .map(|_| {
+            let body = RigidBody::new_static(Transform::identity());
+            let state = *body.state();
+            SolverBody::from_prediction(body, state)
+        })
+        .collect::<Vec<_>>();
+    let empty_manifold = ContactManifold::new(pair());
+    let manifolds = (0..128)
+        .map(|index| SolverManifold {
+            body_a: index * 2,
+            body_b: index * 2 + 1,
+            manifold: empty_manifold,
+            material: SolverMaterial {
+                restitution: 0.0,
+                static_friction: 0.0,
+                dynamic_friction: 0.0,
+            },
+        })
+        .collect::<Vec<_>>();
+    let mut solver = SolverWorkspace::new();
+    let rebuilt = solver
+        .prepare_constraint_coloring(&bodies, &manifolds, &[])
+        .unwrap();
+    assert!(rebuilt);
+
+    let legacy = JointSolverOptions::legacy();
+    let expected = cfg!(feature = "bench-internals");
+    assert_eq!(
+        solver.can_solve_colored_constraints(legacy, 8, manifolds.len()),
+        expected
+    );
+    assert!(!solver.can_solve_colored_constraints(legacy, 1, manifolds.len()));
+    assert!(!solver.can_solve_colored_constraints(legacy, 8, 64));
+
+    let adaptive = legacy.with_iterations(JointIterations::Adaptive {
+        position: IterationRange::new(1, 1),
+        velocity: IterationRange::new(1, 1),
+        tolerance: JointTolerance {
+            linear_m: 1.0e-6,
+            angular_rad: 1.0e-6,
+            velocity_mps: 1.0e-6,
+            angular_velocity_radps: 1.0e-6,
+        },
+    });
+    assert!(!solver.can_solve_colored_constraints(adaptive, 8, manifolds.len()));
+
+    #[cfg(feature = "bench-internals")]
+    {
+        assert!(!solver.can_solve_colored_constraints(
+            legacy.with_alternating_velocity_sweeps(true),
+            8,
+            manifolds.len()
+        ));
+        assert!(!solver.can_solve_colored_constraints(
+            legacy.with_global_velocity_pcg(2, false),
+            8,
+            manifolds.len()
+        ));
+        assert!(!solver.can_solve_colored_constraints(
+            legacy.with_global_position_pcg(2, false),
+            8,
+            manifolds.len()
+        ));
+    }
+}
+
 #[test]
 fn mixed_joint_and_contact_solve_keeps_all_constraints_active() {
     let (mut bodies, mut manifolds) = ball_on_plane(-Vec3::Y);

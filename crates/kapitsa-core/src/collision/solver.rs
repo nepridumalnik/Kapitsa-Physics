@@ -20,6 +20,49 @@ const POSITION_CORRECTION_FRACTION: f64 = 0.2;
 const LARGE_ISLAND_COLORING_THRESHOLD: usize = 128;
 const LARGE_ISLAND_BATCH_SIZE: usize = 16;
 const SMALL_COLOR_MERGE_THRESHOLD: usize = 32;
+/// A color should expose at least `worker_count / this` parallel batches.
+const COLORED_MIN_WIDTH_DIVISOR: usize = 2;
+/// Minimum share of batches that must overlap with another batch in their color.
+const COLORED_MIN_PARALLEL_FRACTION_PERCENT: usize = 50;
+
+/// Cheap deterministic estimate of how well the color schedule maps to workers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ColoredWorkload {
+    constraint_count: usize,
+    color_count: usize,
+    batch_count: usize,
+    max_color_batch_count: usize,
+    useful_batch_count: usize,
+}
+
+impl ColoredWorkload {
+    fn parallel_fraction_percent(self) -> usize {
+        if self.batch_count == 0 {
+            return 0;
+        }
+        self.batch_count
+            .saturating_sub(self.color_count)
+            .saturating_mul(100)
+            / self.batch_count
+    }
+
+    fn can_use_parallel_schedule(self, worker_count: usize) -> bool {
+        if worker_count <= 1 || self.constraint_count < LARGE_ISLAND_COLORING_THRESHOLD {
+            return false;
+        }
+        if self.color_count == 0 || self.batch_count == 0 {
+            return false;
+        }
+        let min_color_width = worker_count.div_ceil(COLORED_MIN_WIDTH_DIVISOR).max(1);
+        if self.max_color_batch_count < min_color_width {
+            return false;
+        }
+        if self.useful_batch_count < self.color_count.saturating_mul(min_color_width) {
+            return false;
+        }
+        self.parallel_fraction_percent() >= COLORED_MIN_PARALLEL_FRACTION_PERCENT
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SolverMaterial {
@@ -599,6 +642,28 @@ impl SolverWorkspace {
         Ok(())
     }
 
+    fn colored_workload(&self, worker_count: usize) -> Option<ColoredWorkload> {
+        let color_count = self.constraint_coloring.schedule_group_count();
+        let worker_count = worker_count.max(1);
+        let mut workload = ColoredWorkload {
+            color_count,
+            ..ColoredWorkload::default()
+        };
+        for group in 0..color_count {
+            let constraints = self
+                .constraint_coloring
+                .constraints_in_schedule_group(group)?;
+            let batch_count = constraints.len().div_ceil(LARGE_ISLAND_BATCH_SIZE);
+            workload.constraint_count = workload.constraint_count.saturating_add(constraints.len());
+            workload.batch_count = workload.batch_count.saturating_add(batch_count);
+            workload.max_color_batch_count = workload.max_color_batch_count.max(batch_count);
+            workload.useful_batch_count = workload
+                .useful_batch_count
+                .saturating_add(batch_count.min(worker_count));
+        }
+        Some(workload)
+    }
+
     fn can_solve_colored_constraints(
         &self,
         options: JointSolverOptions,
@@ -624,7 +689,10 @@ impl SolverWorkspace {
         {
             return false;
         }
-        true
+        let Some(workload) = self.colored_workload(worker_count) else {
+            return false;
+        };
+        workload.can_use_parallel_schedule(worker_count)
     }
 
     #[allow(clippy::too_many_arguments)]
