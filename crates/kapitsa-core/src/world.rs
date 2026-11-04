@@ -971,6 +971,32 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    /// Replaces a joint using frames expressed in the current target spaces.
+    pub fn update_joint_targets(&mut self, id: JointId, joint: Joint) -> Result<(), WorldError> {
+        joint.validate()?;
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidJointId);
+        }
+        let (target_a, target_b) = self
+            .joints
+            .get(id.dense)
+            .map(|entry| (entry.target_a, entry.target_b))
+            .ok_or(WorldError::InvalidJointId)?;
+        let (_, frame_a_target) = self.resolve_joint_target(target_a)?;
+        let (_, frame_b_target) = self.resolve_joint_target(target_b)?;
+        let frame_a = transform_joint_frame(frame_a_target, joint.common().frame_a)
+            .map_err(|_| WorldError::InvalidJointTarget)?;
+        let frame_b = transform_joint_frame(frame_b_target, joint.common().frame_b)
+            .map_err(|_| WorldError::InvalidJointTarget)?;
+        let entry = self
+            .joints
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidJointId)?;
+        entry.joint = joint.with_frames(frame_a, frame_b);
+        self.collision_system.invalidate_joint_warm_start(id);
+        Ok(())
+    }
+
     /// Enables or disables a live joint without changing its settings.
     pub fn set_joint_enabled(&mut self, id: JointId, enabled: bool) -> Result<(), WorldError> {
         if id.world != self.world_id {

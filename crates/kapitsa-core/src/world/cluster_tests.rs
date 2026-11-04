@@ -491,7 +491,10 @@ fn add_cluster_part_keeps_part_local_geometry_and_updates_mass() {
                 angular_velocity: Vec3::ZERO,
             },
             WeldDesc {
-                frame_a: JointFrame::IDENTITY,
+                frame_a: JointFrame {
+                    local_anchor: Vec3::X,
+                    local_rotation: kapitsa_math::Quat::IDENTITY,
+                },
                 frame_b: JointFrame::IDENTITY,
                 strength: WeldStrength::Unbreakable,
                 stiffness: WeldStiffness {
@@ -845,6 +848,75 @@ fn part_collider_ownership_rejects_legacy_structural_edits() {
         Some(&[][..])
     );
     assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
+fn updating_joint_targets_keeps_part_frame_locality() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("body id");
+    let root = world.enable_cluster(body).expect("root");
+    let part = world
+        .add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY)
+                    .expect("part transform"),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame {
+                    local_anchor: Vec3::X,
+                    local_rotation: kapitsa_math::Quat::IDENTITY,
+                },
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )
+        .expect("part");
+    let external = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("external body");
+    let joint = world
+        .add_joint_targets(
+            JointTarget::Part(part),
+            JointTarget::Body(external),
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .expect("joint");
+    let frame = JointFrame {
+        local_anchor: Vec3::new(0.0, 2.0, 0.0),
+        local_rotation: kapitsa_math::Quat::IDENTITY,
+    };
+
+    world
+        .update_joint_targets(
+            joint,
+            Joint::Fixed(FixedJoint::new(JointCommon::new(frame, frame))),
+        )
+        .expect("update joint");
+    assert_eq!(
+        world
+            .joint(joint)
+            .map(|joint| joint.common().frame_a.local_anchor),
+        Some(Vec3::X + frame.local_anchor)
+    );
+    assert_eq!(
+        world.joint_targets(joint),
+        Some((JointTarget::Part(part), JointTarget::Body(external)))
+    );
 }
 
 #[test]
