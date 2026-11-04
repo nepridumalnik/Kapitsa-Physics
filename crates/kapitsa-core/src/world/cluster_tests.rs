@@ -9,6 +9,7 @@ use crate::{
     rigid_body::RigidBody,
     shape::{Shape, Sphere},
     transform::Transform,
+    world::{ForceSource, ForceTarget},
 };
 use kapitsa_math::{Mat3, Vec3};
 
@@ -556,6 +557,56 @@ fn add_cluster_part_rejects_mismatched_anchors_without_mutation() {
     assert_eq!(world.cluster(body).cloned(), before);
     assert_eq!(world.parts.len(), 1);
     assert_eq!(world.welds.len(), 0);
+}
+
+#[test]
+fn part_force_source_uses_part_transform_and_keeps_target_identity() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
+        .expect("body id");
+    let root = world.enable_cluster(body).expect("root");
+    let part = world
+        .add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY)
+                    .expect("part transform"),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame {
+                    local_anchor: Vec3::X,
+                    local_rotation: kapitsa_math::Quat::IDENTITY,
+                },
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )
+        .expect("part");
+    let source = world
+        .add_force_source_for_part(part, Vec3::ZERO, Vec3::Y)
+        .expect("force source");
+
+    assert_eq!(
+        world.force_source(source).map(ForceSource::target),
+        Some(ForceTarget::Part(part))
+    );
+    world
+        .prepare_force_source_updates()
+        .expect("prepare force source");
+    assert_eq!(
+        world.body(body).map(|body| body.forces().torque()),
+        Some(Vec3::Z * 0.5)
+    );
 }
 
 #[test]

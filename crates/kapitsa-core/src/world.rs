@@ -57,10 +57,18 @@ struct BodyEntry {
     cluster: Option<RigidCluster>,
 }
 
+/// Object receiving a persistent force source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForceTarget {
+    Body(BodyId),
+    Part(PartId),
+}
+
 /// Persistent force applied at a point expressed in body-local coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ForceSource {
     body: BodyId,
+    target: ForceTarget,
     local_point: Vec3,
     local_force: Vec3,
     enabled: bool,
@@ -70,6 +78,11 @@ impl ForceSource {
     /// Returns the dynamic body receiving this force.
     pub fn body(&self) -> BodyId {
         self.body
+    }
+
+    /// Returns the body or cluster part receiving this force.
+    pub fn target(&self) -> ForceTarget {
+        self.target
     }
 
     /// Returns the application point relative to the body's origin, in meters.
@@ -951,6 +964,47 @@ impl PhysicsWorld {
             .force_sources
             .insert(ForceSource {
                 body,
+                target: ForceTarget::Body(body),
+                local_point,
+                local_force,
+                enabled: true,
+            })
+            .map_err(|_| ForceSourceError::StorageCapacityExceeded)?;
+        Ok(ForceSourceId {
+            world: self.world_id,
+            dense,
+        })
+    }
+
+    /// Adds a persistent force source attached to a part of a rigid cluster.
+    pub fn add_force_source_for_part(
+        &mut self,
+        part: PartId,
+        local_point: Vec3,
+        local_force: Vec3,
+    ) -> Result<ForceSourceId, ForceSourceError> {
+        let part_entry = self
+            .cluster_part(part)
+            .ok_or(ForceSourceError::InvalidPartId)?;
+        let body = part_entry.body();
+        let Some(cluster) = self.cluster(body) else {
+            return Err(ForceSourceError::InvalidPartId);
+        };
+        if !cluster.parts().contains(&part) {
+            return Err(ForceSourceError::InvalidPartId);
+        }
+        let Some(body_state) = self.body(body) else {
+            return Err(ForceSourceError::InvalidBodyId);
+        };
+        if body_state.physics().body_type() != BodyType::Dynamic {
+            return Err(ForceSourceError::BodyMustBeDynamic);
+        }
+        validate_force_source_values(local_point, local_force)?;
+        let dense = self
+            .force_sources
+            .insert(ForceSource {
+                body,
+                target: ForceTarget::Part(part),
                 local_point,
                 local_force,
                 enabled: true,
@@ -1336,8 +1390,43 @@ impl PhysicsWorld {
                 }
             };
 
+            let transform = match source.target {
+                ForceTarget::Body(target) if target == source.body => self
+                    .force_source_body_updates[update_index]
+                    .prepared
+                    .state()
+                    .transform(),
+                ForceTarget::Part(part) => {
+                    let Some(part_entry) = self.cluster_part(part) else {
+                        self.force_source_body_updates.clear();
+                        if let Some(indices) = &mut self.force_source_body_indices {
+                            indices.clear();
+                        }
+                        return Err((source_id, ForceSourceError::InvalidPartId));
+                    };
+                    if part_entry.body() != source.body {
+                        self.force_source_body_updates.clear();
+                        if let Some(indices) = &mut self.force_source_body_indices {
+                            indices.clear();
+                        }
+                        return Err((source_id, ForceSourceError::InvalidPartId));
+                    }
+                    self.force_source_body_updates[update_index]
+                        .prepared
+                        .state()
+                        .transform()
+                        .compose(&part_entry.local_transform())
+                        .map_err(|_| (source_id, ForceSourceError::ArithmeticOverflow))?
+                }
+                ForceTarget::Body(_) => {
+                    self.force_source_body_updates.clear();
+                    if let Some(indices) = &mut self.force_source_body_indices {
+                        indices.clear();
+                    }
+                    return Err((source_id, ForceSourceError::InvalidBodyId));
+                }
+            };
             let body = &mut self.force_source_body_updates[update_index].prepared;
-            let transform = body.state().transform();
             let force = transform.transform_vector(source.local_force);
             let point = transform.transform_point(source.local_point);
             if let Err(error) = body.apply_force_at_point(force, point) {

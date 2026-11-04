@@ -61,6 +61,7 @@ impl std::error::Error for ClusterError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForceSourceError {
     InvalidBodyId,
+    InvalidPartId,
     InvalidForceSourceId,
     BodyMustBeDynamic,
     NonFiniteValue,
@@ -72,6 +73,7 @@ impl fmt::Display for ForceSourceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidBodyId => "force source body ID is invalid",
+            Self::InvalidPartId => "force source part ID is invalid",
             Self::InvalidForceSourceId => "force source ID is invalid",
             Self::BodyMustBeDynamic => "force sources require a dynamic body",
             Self::NonFiniteValue => "force source values must be finite",
