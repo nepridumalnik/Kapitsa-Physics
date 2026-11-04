@@ -302,6 +302,18 @@ impl PhysicsWorld {
                 .try_reserve_insertions(desc.colliders.len())
                 .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         }
+        let mut prepared_colliders = Vec::new();
+        prepared_colliders
+            .try_reserve(desc.colliders.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for mut collider in desc.colliders.drain(..) {
+            let local_transform = desc
+                .local_transform
+                .compose(&collider.local_transform())
+                .map_err(ClusterError::Transform)?;
+            collider.set_local_transform(local_transform);
+            prepared_colliders.push(collider);
+        }
         let part_dense = self
             .parts
             .insert(ClusterPart {
@@ -316,12 +328,7 @@ impl PhysicsWorld {
             dense: part_dense,
         };
         let mut collider_ids = Vec::new();
-        for mut collider in desc.colliders.drain(..) {
-            let local_transform = desc
-                .local_transform
-                .compose(&collider.local_transform())
-                .map_err(ClusterError::Transform)?;
-            collider.set_local_transform(local_transform);
+        for collider in prepared_colliders {
             match self.add_collider_internal(body, collider) {
                 Ok(collider_id) => collider_ids.push(collider_id),
                 Err(error) => {
@@ -836,6 +843,41 @@ impl PhysicsWorld {
             prepared.apply_torque(torque).map_err(ClusterError::Body)?;
         }
 
+        for &(part, _) in &transformed_parts {
+            if self.parts.get(part.dense).is_none() {
+                return Err(ClusterError::InvalidTopology);
+            }
+        }
+        if self
+            .bodies
+            .get(first.dense)
+            .and_then(|entry| entry.cluster.as_ref())
+            .is_none()
+        {
+            return Err(ClusterError::NotClustered);
+        }
+        let mut joint_updates = Vec::new();
+        for (dense, entry) in self.joints.iter() {
+            let target_a_moves = entry.target_a == JointTarget::Body(second)
+                || matches!(entry.target_a, JointTarget::Part(part) if second_parts.contains(&part));
+            let target_b_moves = entry.target_b == JointTarget::Body(second)
+                || matches!(entry.target_b, JointTarget::Part(part) if second_parts.contains(&part));
+            if !target_a_moves && !target_b_moves {
+                continue;
+            }
+            let mut frame_a = entry.joint.common().frame_a;
+            let mut frame_b = entry.joint.common().frame_b;
+            if target_a_moves {
+                frame_a = super::transform_joint_frame(relative, frame_a)
+                    .map_err(ClusterError::Transform)?;
+            }
+            if target_b_moves {
+                frame_b = super::transform_joint_frame(relative, frame_b)
+                    .map_err(ClusterError::Transform)?;
+            }
+            joint_updates.push((dense, target_a_moves, target_b_moves, frame_a, frame_b));
+        }
+
         self.welds
             .try_reserve_insertions(1)
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
@@ -867,40 +909,28 @@ impl PhysicsWorld {
             dense: bridge_dense,
         };
         for &(part, local_transform) in &transformed_parts {
-            let entry = self
-                .parts
-                .get_mut(part.dense)
-                .ok_or(ClusterError::InvalidTopology)?;
-            entry.body = first;
-            entry.local_transform = local_transform;
+            if let Some(entry) = self.parts.get_mut(part.dense) {
+                entry.body = first;
+                entry.local_transform = local_transform;
+            }
         }
         for &(collider, local_transform) in &transformed_colliders {
             self.rebind_collider_prepared(collider, first, local_transform);
         }
-        for (_, entry) in self.joints.iter_mut() {
-            let mut frame_a = entry.joint.common().frame_a;
-            let mut frame_b = entry.joint.common().frame_b;
-            let target_a_moves = entry.target_a == JointTarget::Body(second)
-                || matches!(entry.target_a, JointTarget::Part(part) if second_parts.contains(&part));
-            let target_b_moves = entry.target_b == JointTarget::Body(second)
-                || matches!(entry.target_b, JointTarget::Part(part) if second_parts.contains(&part));
-            if target_a_moves {
-                frame_a = super::transform_joint_frame(relative, frame_a)
-                    .map_err(ClusterError::Transform)?;
-                if entry.target_a == JointTarget::Body(second) {
-                    entry.target_a = JointTarget::Body(first);
+        for (dense, target_a_moves, target_b_moves, frame_a, frame_b) in joint_updates {
+            if let Some(entry) = self.joints.get_mut(dense) {
+                if target_a_moves {
+                    if entry.target_a == JointTarget::Body(second) {
+                        entry.target_a = JointTarget::Body(first);
+                    }
+                    entry.body_a = first;
                 }
-                entry.body_a = first;
-            }
-            if target_b_moves {
-                frame_b = super::transform_joint_frame(relative, frame_b)
-                    .map_err(ClusterError::Transform)?;
-                if entry.target_b == JointTarget::Body(second) {
-                    entry.target_b = JointTarget::Body(first);
+                if target_b_moves {
+                    if entry.target_b == JointTarget::Body(second) {
+                        entry.target_b = JointTarget::Body(first);
+                    }
+                    entry.body_b = first;
                 }
-                entry.body_b = first;
-            }
-            if target_a_moves || target_b_moves {
                 entry.joint = entry.joint.with_frames(frame_a, frame_b);
             }
         }
@@ -916,20 +946,20 @@ impl PhysicsWorld {
                 source.body = first;
             }
         }
-        let cluster = self
+        if let Some(cluster) = self
             .bodies
             .get_mut(first.dense)
             .and_then(|entry| entry.cluster.as_mut())
-            .ok_or(ClusterError::NotClustered)?;
-        cluster.parts.extend(second_parts);
-        cluster.welds.extend(second_welds);
-        cluster.welds.push(bridge);
+        {
+            cluster.parts.extend(second_parts);
+            cluster.welds.extend(second_welds);
+            cluster.welds.push(bridge);
+        }
         if let Some(entry) = self.bodies.get_mut(first.dense) {
             entry.body = prepared;
         }
-        self.bodies
-            .remove(second.dense)
-            .ok_or(ClusterError::InvalidBodyId)?;
+        let removed = self.bodies.remove(second.dense);
+        debug_assert!(removed.is_some());
         self.synchronize_cluster_physics_state(&[first]);
         Ok(())
     }
@@ -1062,6 +1092,26 @@ impl PhysicsWorld {
             prepared_bodies.push(prepared);
         }
 
+        let mut part_rebinds = Vec::new();
+        for (component_index, component) in components.iter().enumerate().skip(1) {
+            for &part in component {
+                let colliders = self
+                    .cluster_part(part)
+                    .ok_or(ClusterError::InvalidTopology)?
+                    .colliders()
+                    .to_vec();
+                let mut collider_transforms = Vec::with_capacity(colliders.len());
+                for collider in colliders {
+                    let local_transform = self
+                        .collider(collider)
+                        .ok_or(ClusterError::InvalidTopology)?
+                        .local_transform();
+                    collider_transforms.push((collider, local_transform));
+                }
+                part_rebinds.push((component_index - 1, part, collider_transforms));
+            }
+        }
+
         self.bodies
             .try_reserve_insertions(components.len().saturating_sub(1))
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
@@ -1090,28 +1140,16 @@ impl PhysicsWorld {
         }
 
         for &weld in removed_welds {
-            self.welds
-                .remove(weld.dense)
-                .ok_or(ClusterError::InvalidTopology)?;
+            let removed = self.welds.remove(weld.dense);
+            debug_assert!(removed.is_some());
         }
-        for (component_index, component) in components.iter().enumerate().skip(1) {
-            let target_body = new_bodies[component_index - 1];
-            for &part in component {
-                let colliders = self
-                    .cluster_part(part)
-                    .ok_or(ClusterError::InvalidTopology)?
-                    .colliders()
-                    .to_vec();
-                if let Some(entry) = self.parts.get_mut(part.dense) {
-                    entry.body = target_body;
-                }
-                for collider in colliders {
-                    let local_transform = self
-                        .collider(collider)
-                        .ok_or(ClusterError::InvalidTopology)?
-                        .local_transform();
-                    self.rebind_collider_prepared(collider, target_body, local_transform);
-                }
+        for (target_index, part, collider_transforms) in part_rebinds {
+            let target_body = new_bodies[target_index];
+            if let Some(entry) = self.parts.get_mut(part.dense) {
+                entry.body = target_body;
+            }
+            for (collider, local_transform) in collider_transforms {
+                self.rebind_collider_prepared(collider, target_body, local_transform);
             }
         }
         let root_component = &components[0];
