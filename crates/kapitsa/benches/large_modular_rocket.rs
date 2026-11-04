@@ -144,7 +144,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let steady_only = args.iter().any(|arg| arg == "--steady-only");
     let light_diagnostics = args.iter().any(|arg| arg == "--light-diagnostics");
     println!(
-        "Large modular rocket Release benchmark: dt={DT:.9}s warmups={WARMUPS} steady_samples={SAMPLES} event_samples={EVENT_SAMPLES} mass_cache={mass_cache} projection={} executor={} steady_only={steady_only} partial_coloring={partial} diagnostics={}",
+        "Large modular rocket Release benchmark: dt={DT:.9}s event_samples={EVENT_SAMPLES} mass_cache={mass_cache} projection={} executor={} steady_only={steady_only} partial_coloring={partial} diagnostics={}",
         if block3 { "fixed_block3" } else { "scalar" },
         if no_pool { "no_pool" } else { "rayon" },
         if light_diagnostics { "light" } else { "full" }
@@ -209,9 +209,30 @@ fn report_steady(
     let mut rocket = ModularRocket::new(parts);
     configure_solver(&mut rocket, mass_cache, block3, light_diagnostics, partial);
     validate_fixture(&rocket, parts)?;
-    warm(&mut rocket.world, executor, workers, WARMUPS)?;
-    let mut samples = Vec::with_capacity(SAMPLES);
-    for _ in 0..SAMPLES {
+    let no_contact = std::env::var_os("KAPITSA_BENCH_NO_CONTACT").is_some();
+    if no_contact {
+        rocket
+            .world
+            .remove_collider(rocket.surface_collider)
+            .ok_or("missing surface")?;
+    }
+    let warmups = std::env::var("KAPITSA_BENCH_WARMUPS")
+        .ok()
+        .map(|s| s.parse::<usize>())
+        .transpose()?
+        .unwrap_or(WARMUPS);
+    let sample_count = std::env::var("KAPITSA_BENCH_SAMPLES")
+        .ok()
+        .map(|s| s.parse::<usize>())
+        .transpose()?
+        .unwrap_or(SAMPLES);
+    if sample_count == 0 {
+        return Err("steady sample count must be positive".into());
+    }
+    println!("steady_warmups={warmups} steady_samples={sample_count} no_contact={no_contact}");
+    warm(&mut rocket.world, executor, workers, warmups)?;
+    let mut samples = Vec::with_capacity(sample_count);
+    for _ in 0..sample_count {
         samples.push(measure_step(&mut rocket.world, executor, workers)?);
     }
     validate_world(&rocket.world)?;
