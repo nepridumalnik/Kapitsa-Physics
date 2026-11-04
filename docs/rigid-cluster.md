@@ -1,6 +1,6 @@
 # Rigid cluster contract
 
-Status: design contract; core cluster lifecycle, targets, and weld splitting are implemented.
+Status: design contract; core lifecycle, targets, merge, and weld splitting are implemented.
 
 ## Ownership and identity
 
