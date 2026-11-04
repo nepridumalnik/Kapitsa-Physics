@@ -9,7 +9,7 @@ use crate::{
     cluster::{
         ClusterPart, MassChangeMode, MassTransfer, RigidCluster, Weld,
         mass::aggregate_mass,
-        motion::{transfer_motion, velocity_field},
+        motion::{transfer_motion, velocity_field, world_properties},
     },
     mass::MassProperties,
     rigid_body::BodyType,
@@ -564,6 +564,286 @@ impl PhysicsWorld {
             })
             .collect::<Vec<_>>();
         self.split_after_weld_removal(body, &welds)
+    }
+
+    /// Merges two existing clusters into the first body's cluster.
+    pub fn merge_clusters(
+        &mut self,
+        first: BodyId,
+        second: BodyId,
+        weld_desc: crate::cluster::WeldDesc,
+    ) -> Result<(), ClusterError> {
+        if first == second {
+            return Err(ClusterError::InvalidBodyId);
+        }
+        weld_desc.validate()?;
+        let first_cluster = self.cluster(first).ok_or(ClusterError::NotClustered)?;
+        let second_cluster = self.cluster(second).ok_or(ClusterError::NotClustered)?;
+        let first_root = first_cluster.root();
+        let second_root = second_cluster.root();
+        let first_parts = first_cluster.parts().to_vec();
+        let second_parts = second_cluster.parts().to_vec();
+        let second_welds = second_cluster.welds().to_vec();
+        let first_body = *self.body(first).ok_or(ClusterError::InvalidBodyId)?;
+        let second_body = *self.body(second).ok_or(ClusterError::InvalidBodyId)?;
+        let first_type = first_body.physics().body_type();
+        if first_type != second_body.physics().body_type() {
+            return Err(ClusterError::IncompatibleMotion);
+        }
+        let first_pose = first_body.state().transform();
+        let second_pose = second_body.state().transform();
+        let inverse_first = first_pose.inverse().map_err(ClusterError::Transform)?;
+        let relative = inverse_first
+            .compose(&second_pose)
+            .map_err(ClusterError::Transform)?;
+
+        let first_root_pose = first_pose
+            .compose(
+                &self
+                    .cluster_part(first_root)
+                    .ok_or(ClusterError::InvalidTopology)?
+                    .local_transform(),
+            )
+            .map_err(ClusterError::Transform)?;
+        let second_root_pose = second_pose
+            .compose(
+                &self
+                    .cluster_part(second_root)
+                    .ok_or(ClusterError::InvalidTopology)?
+                    .local_transform(),
+            )
+            .map_err(ClusterError::Transform)?;
+        let anchor_a = first_root_pose.transform_point(weld_desc.frame_a.local_anchor);
+        let anchor_b = second_root_pose.transform_point(weld_desc.frame_b.local_anchor);
+        let anchor_delta = anchor_b
+            .checked_sub(anchor_a)
+            .ok_or(ClusterError::ArithmeticOverflow)?;
+        let scale = anchor_a
+            .abs()
+            .max_element()
+            .max(anchor_b.abs().max_element())
+            .max(1.0);
+        if anchor_delta.length() > 128.0 * f64::EPSILON * scale {
+            return Err(ClusterError::IncompatibleAnchors);
+        }
+
+        let mut transformed_parts = Vec::new();
+        let mut transformed_colliders = Vec::new();
+        transformed_parts
+            .try_reserve(second_parts.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for &part in &second_parts {
+            let entry = self
+                .cluster_part(part)
+                .ok_or(ClusterError::InvalidTopology)?;
+            let local_transform = relative
+                .compose(&entry.local_transform())
+                .map_err(ClusterError::Transform)?;
+            transformed_parts.push((part, local_transform));
+            for &collider in entry.colliders() {
+                let collider_entry = self
+                    .colliders
+                    .get(collider.dense)
+                    .filter(|entry| entry.body == second)
+                    .ok_or(ClusterError::InvalidTopology)?;
+                if first_type == BodyType::Dynamic && !collider_entry.collider.shape().is_convex() {
+                    return Err(ClusterError::UnsupportedGeometry);
+                }
+                let local_transform = relative
+                    .compose(&collider_entry.collider.local_transform())
+                    .map_err(ClusterError::Transform)?;
+                transformed_colliders.push((collider, local_transform));
+            }
+        }
+
+        let mut values = Vec::new();
+        values
+            .try_reserve(first_parts.len() + second_parts.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for &part in &first_parts {
+            let entry = self
+                .cluster_part(part)
+                .ok_or(ClusterError::InvalidTopology)?;
+            values.push((entry.mass(), entry.local_transform()));
+        }
+        for &(part, local_transform) in &transformed_parts {
+            let entry = self
+                .cluster_part(part)
+                .ok_or(ClusterError::InvalidTopology)?;
+            values.push((entry.mass(), local_transform));
+        }
+        let aggregate = aggregate_mass(values.iter().map(|(mass, transform)| (mass, transform)))?;
+        let mut prepared = first_body;
+        if first_type == BodyType::Dynamic {
+            let first_mass = first_body
+                .physics()
+                .mass()
+                .ok_or(ClusterError::InvalidMass)?;
+            let second_mass = second_body
+                .physics()
+                .mass()
+                .ok_or(ClusterError::InvalidMass)?;
+            let (second_center, second_inertia) = world_properties(second_mass, second_pose)?;
+            let second_p = second_body
+                .state()
+                .linear_velocity()
+                .checked_mul_scalar(second_mass.mass())
+                .ok_or(ClusterError::ArithmeticOverflow)?;
+            let second_h = second_inertia
+                .checked_mul_vector(second_body.state().angular_velocity())
+                .and_then(|spin| {
+                    second_center
+                        .checked_cross(second_p)
+                        .and_then(|orbital| spin.checked_add(orbital))
+                })
+                .ok_or(ClusterError::ArithmeticOverflow)?;
+            let (velocity, omega) = transfer_motion(
+                first_mass,
+                first_pose,
+                first_body.state().linear_velocity(),
+                first_body.state().angular_velocity(),
+                aggregate,
+                first_pose,
+                Vec3::ZERO,
+                second_p,
+                second_h,
+            )?;
+            let first_center = first_body
+                .world_center_of_mass()
+                .map_err(ClusterError::Body)?
+                .ok_or(ClusterError::InvalidMass)?;
+            let new_center = first_pose.transform_point(aggregate.center_of_mass());
+            let force = first_body
+                .forces()
+                .force()
+                .checked_add(second_body.forces().force())
+                .ok_or(ClusterError::ArithmeticOverflow)?;
+            let torque = first_body
+                .forces()
+                .torque()
+                .checked_add(second_body.forces().torque())
+                .and_then(|value| {
+                    first_center
+                        .checked_sub(new_center)
+                        .and_then(|offset| offset.checked_cross(first_body.forces().force()))
+                        .and_then(|shift| value.checked_add(shift))
+                })
+                .and_then(|value| {
+                    second_center
+                        .checked_sub(new_center)
+                        .and_then(|offset| offset.checked_cross(second_body.forces().force()))
+                        .and_then(|shift| value.checked_add(shift))
+                })
+                .ok_or(ClusterError::ArithmeticOverflow)?;
+            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+            prepared
+                .set_linear_velocity(velocity)
+                .map_err(ClusterError::Body)?;
+            prepared
+                .set_angular_velocity(omega)
+                .map_err(ClusterError::Body)?;
+            prepared.apply_force(force).map_err(ClusterError::Body)?;
+            prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+        }
+
+        self.welds
+            .try_reserve_insertions(1)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        self.bodies
+            .get_mut(first.dense)
+            .and_then(|entry| entry.cluster.as_mut())
+            .ok_or(ClusterError::NotClustered)?
+            .parts
+            .try_reserve(second_parts.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        self.bodies
+            .get_mut(first.dense)
+            .and_then(|entry| entry.cluster.as_mut())
+            .ok_or(ClusterError::NotClustered)?
+            .welds
+            .try_reserve(second_welds.len() + 1)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+
+        let bridge_dense = self
+            .welds
+            .insert(Weld {
+                part_a: first_root,
+                part_b: second_root,
+                desc: weld_desc,
+            })
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let bridge = WeldId {
+            world: self.world_id,
+            dense: bridge_dense,
+        };
+        for &(part, local_transform) in &transformed_parts {
+            let entry = self
+                .parts
+                .get_mut(part.dense)
+                .ok_or(ClusterError::InvalidTopology)?;
+            entry.body = first;
+            entry.local_transform = local_transform;
+        }
+        for &(collider, local_transform) in &transformed_colliders {
+            self.rebind_collider(collider, first, local_transform)?;
+        }
+        for (_, entry) in self.joints.iter_mut() {
+            let mut frame_a = entry.joint.common().frame_a;
+            let mut frame_b = entry.joint.common().frame_b;
+            let target_a_moves = entry.target_a == JointTarget::Body(second)
+                || matches!(entry.target_a, JointTarget::Part(part) if second_parts.contains(&part));
+            let target_b_moves = entry.target_b == JointTarget::Body(second)
+                || matches!(entry.target_b, JointTarget::Part(part) if second_parts.contains(&part));
+            if target_a_moves {
+                frame_a = super::transform_joint_frame(relative, frame_a)
+                    .map_err(ClusterError::Transform)?;
+                if entry.target_a == JointTarget::Body(second) {
+                    entry.target_a = JointTarget::Body(first);
+                }
+                entry.body_a = first;
+            }
+            if target_b_moves {
+                frame_b = super::transform_joint_frame(relative, frame_b)
+                    .map_err(ClusterError::Transform)?;
+                if entry.target_b == JointTarget::Body(second) {
+                    entry.target_b = JointTarget::Body(first);
+                }
+                entry.body_b = first;
+            }
+            if target_a_moves || target_b_moves {
+                entry.joint = entry.joint.with_frames(frame_a, frame_b);
+            }
+        }
+        for (_, source) in self.force_sources.iter_mut() {
+            if source.target == ForceTarget::Body(second) {
+                let world_point = second_pose.transform_point(source.local_point);
+                let world_force = second_pose.transform_vector(source.local_force);
+                source.local_point = inverse_first.transform_point(world_point);
+                source.local_force = inverse_first.transform_vector(world_force);
+                source.target = ForceTarget::Body(first);
+                source.body = first;
+            } else if source.body == second {
+                source.body = first;
+            }
+        }
+        let cluster = self
+            .bodies
+            .get_mut(first.dense)
+            .and_then(|entry| entry.cluster.as_mut())
+            .ok_or(ClusterError::NotClustered)?;
+        cluster.parts.extend(second_parts);
+        cluster.welds.extend(second_welds);
+        cluster.welds.push(bridge);
+        if let Some(entry) = self.bodies.get_mut(first.dense) {
+            entry.body = prepared;
+        }
+        self.bodies
+            .remove(second.dense)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        self.invalidate_body_edit(first);
+        self.mark_query_index_dirty();
+        self.collision_system.mark_spatial_dirty();
+        Ok(())
     }
 
     fn split_after_weld_removal(

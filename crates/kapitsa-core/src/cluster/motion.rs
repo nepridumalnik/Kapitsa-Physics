@@ -26,7 +26,10 @@ pub(crate) fn velocity_field(
     Ok((velocity, omega))
 }
 
-fn world_properties(mass: MassProperties, pose: Transform) -> Result<(Vec3, Mat3), ClusterError> {
+pub(crate) fn world_properties(
+    mass: MassProperties,
+    pose: Transform,
+) -> Result<(Vec3, Mat3), ClusterError> {
     let rotation = pose
         .rotation()
         .to_mat3()

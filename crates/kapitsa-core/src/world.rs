@@ -5442,7 +5442,7 @@ fn validate_force_source_values(
     Ok(())
 }
 
-fn transform_joint_frame(
+pub(crate) fn transform_joint_frame(
     target_transform: crate::transform::Transform,
     frame: JointFrame,
 ) -> Result<JointFrame, crate::transform::TransformError> {
