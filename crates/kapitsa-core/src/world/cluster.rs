@@ -661,6 +661,46 @@ impl PhysicsWorld {
             .compose(&second_root_transform)
             .map_err(ClusterError::Transform)?;
         validate_weld_frames(first_root_transform, second_root_in_first, weld_desc)?;
+        if first_type == BodyType::Kinematic {
+            let weld_point = first_pose.transform_point(
+                super::transform_joint_frame(first_root_transform, weld_desc.frame_a)
+                    .map_err(ClusterError::Transform)?
+                    .local_anchor,
+            );
+            let first_velocity = first_body
+                .state()
+                .angular_velocity()
+                .checked_cross(
+                    weld_point
+                        .checked_sub(first_pose.translation())
+                        .ok_or(ClusterError::ArithmeticOverflow)?,
+                )
+                .and_then(|value| first_body.state().linear_velocity().checked_add(value))
+                .ok_or(ClusterError::ArithmeticOverflow)?;
+            let second_velocity = second_body
+                .state()
+                .angular_velocity()
+                .checked_cross(
+                    weld_point
+                        .checked_sub(second_pose.translation())
+                        .ok_or(ClusterError::ArithmeticOverflow)?,
+                )
+                .and_then(|value| second_body.state().linear_velocity().checked_add(value))
+                .ok_or(ClusterError::ArithmeticOverflow)?;
+            let scale = first_velocity
+                .abs()
+                .max_element()
+                .max(second_velocity.abs().max_element())
+                .max(1.0);
+            if first_velocity
+                .checked_sub(second_velocity)
+                .and_then(Vec3::checked_length)
+                .ok_or(ClusterError::ArithmeticOverflow)?
+                > 128.0 * f64::EPSILON * scale
+            {
+                return Err(ClusterError::IncompatibleMotion);
+            }
+        }
 
         let mut transformed_parts = Vec::new();
         let mut transformed_colliders = Vec::new();
@@ -718,6 +758,10 @@ impl PhysicsWorld {
                 .physics()
                 .mass()
                 .ok_or(ClusterError::InvalidMass)?;
+            let origin = first_body
+                .world_center_of_mass()
+                .map_err(ClusterError::Body)?
+                .ok_or(ClusterError::InvalidMass)?;
             let (second_center, second_inertia) = world_properties(second_mass, second_pose)?;
             let second_p = second_body
                 .state()
@@ -728,7 +772,8 @@ impl PhysicsWorld {
                 .checked_mul_vector(second_body.state().angular_velocity())
                 .and_then(|spin| {
                     second_center
-                        .checked_cross(second_p)
+                        .checked_sub(origin)
+                        .and_then(|offset| offset.checked_cross(second_p))
                         .and_then(|orbital| spin.checked_add(orbital))
                 })
                 .ok_or(ClusterError::ArithmeticOverflow)?;
@@ -739,14 +784,11 @@ impl PhysicsWorld {
                 first_body.state().angular_velocity(),
                 aggregate,
                 first_pose,
-                Vec3::ZERO,
+                origin,
                 second_p,
                 second_h,
             )?;
-            let first_center = first_body
-                .world_center_of_mass()
-                .map_err(ClusterError::Body)?
-                .ok_or(ClusterError::InvalidMass)?;
+            let first_center = origin;
             let new_center = first_pose.transform_point(aggregate.center_of_mass());
             let force = first_body
                 .forces()
