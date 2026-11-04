@@ -477,6 +477,124 @@ fn contact_only_solution_matches_sequential_solver() {
     );
 }
 
+fn manifold_impulses(manifolds: &[SolverManifold]) -> Vec<(f64, [f64; 2])> {
+    manifolds
+        .iter()
+        .map(|manifold| {
+            let point = &manifold.manifold.points()[0];
+            (point.normal_impulse, point.tangent_impulse)
+        })
+        .collect()
+}
+
+#[test]
+fn only_velocity_phase_writes_contact_impulses_back() {
+    let (mut bodies, mut manifolds) = ball_on_plane(-Vec3::Y * 2.0);
+    {
+        let point = manifolds[0].manifold.point_mut(0).unwrap();
+        point.normal_impulse = 0.25;
+        point.tangent_impulse = [0.05, 0.02];
+    }
+    let mut workspace = SolverWorkspace::new();
+    prepare_colored_workspace(&mut workspace, &bodies, &manifolds, &[]);
+    let step = JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy());
+    let config = super::CollisionConfig::default();
+    let initial = manifold_impulses(&manifolds);
+
+    for phase in [
+        super::ColoredConstraintPhase::PrepareContactPoints,
+        super::ColoredConstraintPhase::WarmStartContacts,
+    ] {
+        workspace
+            .execute_colored_phase(
+                &mut bodies,
+                &mut manifolds,
+                config,
+                step,
+                phase,
+                &crate::execution::SequentialExecutor,
+                8,
+            )
+            .unwrap();
+        assert_eq!(manifold_impulses(&manifolds), initial);
+    }
+
+    workspace
+        .execute_colored_phase(
+            &mut bodies,
+            &mut manifolds,
+            config,
+            step,
+            super::ColoredConstraintPhase::Velocity {
+                first_iteration: true,
+            },
+            &crate::execution::SequentialExecutor,
+            8,
+        )
+        .unwrap();
+    let after_velocity = manifold_impulses(&manifolds);
+    assert_ne!(after_velocity, initial);
+
+    workspace
+        .execute_colored_phase(
+            &mut bodies,
+            &mut manifolds,
+            config,
+            step,
+            super::ColoredConstraintPhase::Position,
+            &crate::execution::SequentialExecutor,
+            8,
+        )
+        .unwrap();
+    assert_eq!(manifold_impulses(&manifolds), after_velocity);
+}
+
+#[test]
+fn contact_impulses_warm_start_the_next_solver_step() {
+    let (mut bodies, mut manifolds) = ball_on_plane(-Vec3::Y * 2.0);
+    solve_colored(
+        &mut bodies,
+        &mut manifolds,
+        &[],
+        super::CollisionConfig::default(),
+    )
+    .unwrap();
+    let cached = manifold_impulses(&manifolds);
+    assert!(cached[0].0 > 0.0);
+
+    let mut next_workspace = SolverWorkspace::new();
+    prepare_colored_workspace(&mut next_workspace, &bodies, &manifolds, &[]);
+    let step = JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy());
+    let config = super::CollisionConfig::default();
+    next_workspace
+        .execute_colored_phase(
+            &mut bodies,
+            &mut manifolds,
+            config,
+            step,
+            super::ColoredConstraintPhase::PrepareContactPoints,
+            &crate::execution::SequentialExecutor,
+            8,
+        )
+        .unwrap();
+    let velocity_before_warm_start = bodies[1].body().state().linear_velocity();
+    next_workspace
+        .execute_colored_phase(
+            &mut bodies,
+            &mut manifolds,
+            config,
+            step,
+            super::ColoredConstraintPhase::WarmStartContacts,
+            &crate::execution::SequentialExecutor,
+            8,
+        )
+        .unwrap();
+    assert!(
+        (bodies[1].body().state().linear_velocity() - velocity_before_warm_start).length()
+            > 1.0e-12
+    );
+}
+
 #[test]
 fn mixed_joint_and_contact_solve_keeps_all_constraints_active() {
     let (mut bodies, mut manifolds) = ball_on_plane(-Vec3::Y);

@@ -890,7 +890,7 @@ impl SolverWorkspace {
                 }
             }
 
-            if !matches!(phase, ColoredConstraintPhase::PrepareContactPoints) {
+            if matches!(phase, ColoredConstraintPhase::Velocity { .. }) {
                 for batch in &self.colored_batches[start..end] {
                     for task in &batch.tasks {
                         if let ColoredConstraintKind::Contact(manifold) = &task.kind {
