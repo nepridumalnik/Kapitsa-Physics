@@ -9,7 +9,7 @@ use crate::{
     rigid_body::RigidBody,
 };
 #[cfg(feature = "bench-internals")]
-use crate::{rigid_body::BodyType, transform::Transform};
+use crate::{mass::MassProperties, rigid_body::BodyType, transform::Transform};
 #[cfg(feature = "bench-internals")]
 use kapitsa_math::Mat3;
 use kapitsa_math::Vec3;
@@ -343,9 +343,17 @@ pub(crate) struct SolverWorkspace {
     #[cfg(feature = "bench-internals")]
     reduced_fixed_tree_assigned: Vec<bool>,
     #[cfg(feature = "bench-internals")]
+    reduced_fixed_tree_mass: Option<MassProperties>,
+    #[cfg(feature = "bench-internals")]
     reduced_fixed_tree_centers: Vec<Vec3>,
     #[cfg(feature = "bench-internals")]
     reduced_fixed_tree_target_centers: Vec<Vec3>,
+    #[cfg(feature = "bench-internals")]
+    reduced_contact_bodies: Vec<SolverBody>,
+    #[cfg(feature = "bench-internals")]
+    reduced_contact_manifolds: Vec<SolverManifold>,
+    #[cfg(feature = "bench-internals")]
+    reduced_contact_body_map: Vec<usize>,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -582,9 +590,17 @@ impl SolverWorkspace {
             #[cfg(feature = "bench-internals")]
             reduced_fixed_tree_assigned: Vec::new(),
             #[cfg(feature = "bench-internals")]
+            reduced_fixed_tree_mass: None,
+            #[cfg(feature = "bench-internals")]
             reduced_fixed_tree_centers: Vec::new(),
             #[cfg(feature = "bench-internals")]
             reduced_fixed_tree_target_centers: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            reduced_contact_bodies: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            reduced_contact_manifolds: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            reduced_contact_body_map: Vec::new(),
         }
     }
 
@@ -820,8 +836,51 @@ impl SolverWorkspace {
 
         let root_index = self.reduced_fixed_tree_dynamic_indices[0];
         let root_transform = bodies[root_index].state().transform();
-        let mut total_mass = 0.0_f64;
-        let mut momentum = Vec3::ZERO;
+        let root_inverse = root_transform
+            .inverse()
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        let mut total_mass = 0.0;
+        let mut center_numerator = Vec3::ZERO;
+        for &body_index in &self.reduced_fixed_tree_dynamic_indices {
+            let mass = bodies[body_index]
+                .body()
+                .physics()
+                .mass()
+                .ok_or(CollisionError::InvalidContact)?;
+            let center =
+                self.reduced_fixed_tree_offsets[body_index].transform_point(mass.center_of_mass());
+            total_mass += mass.mass();
+            center_numerator += center * mass.mass();
+        }
+        if !total_mass.is_finite() || total_mass <= 0.0 {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        let center_of_mass = center_numerator / total_mass;
+        let mut inertia_about_root = Mat3::ZERO;
+        for &body_index in &self.reduced_fixed_tree_dynamic_indices {
+            let mass = bodies[body_index]
+                .body()
+                .physics()
+                .mass()
+                .ok_or(CollisionError::InvalidContact)?;
+            let offset = self.reduced_fixed_tree_offsets[body_index];
+            let rotation = offset
+                .rotation()
+                .to_mat3()
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let center = offset.transform_point(mass.center_of_mass());
+            let inertia = rotation * mass.inertia() * rotation.transpose();
+            inertia_about_root = inertia_about_root + inertia + parallel_axis(center, mass.mass());
+        }
+        let inertia_about_com = inertia_about_root - parallel_axis(center_of_mass, total_mass);
+        self.reduced_fixed_tree_mass = Some(
+            MassProperties::new(total_mass, center_of_mass, inertia_about_com)
+                .map_err(|_| CollisionError::ArithmeticOverflow)?,
+        );
+        let aggregate_mass = self
+            .reduced_fixed_tree_mass
+            .ok_or(CollisionError::InvalidContact)?;
+        let mut total_momentum = Vec3::ZERO;
         let mut current_com_numerator = Vec3::ZERO;
         self.reduced_fixed_tree_centers.clear();
         for &body_index in &self.reduced_fixed_tree_dynamic_indices {
@@ -836,20 +895,15 @@ impl SolverWorkspace {
                 .world_center_of_mass()
                 .map_err(|_| CollisionError::ArithmeticOverflow)?
                 .ok_or(CollisionError::InvalidContact)?;
-            total_mass += mass.mass();
-            momentum += body.state().linear_velocity() * mass.mass();
+            total_momentum += body.state().linear_velocity() * mass.mass();
             current_com_numerator += center * mass.mass();
             self.reduced_fixed_tree_centers.push(center);
         }
-        if !total_mass.is_finite() || total_mass <= 0.0 {
-            return Err(CollisionError::ArithmeticOverflow);
-        }
+        let total_mass = aggregate_mass.mass();
         let current_com = current_com_numerator / total_mass;
-        let linear_velocity = momentum / total_mass;
-
+        let target_com = root_transform.transform_point(aggregate_mass.center_of_mass());
+        let linear_velocity = total_momentum / total_mass;
         let mut angular_momentum = Vec3::ZERO;
-        self.reduced_fixed_tree_target_centers.clear();
-        let mut target_com_numerator = Vec3::ZERO;
         for (index, &body_index) in self.reduced_fixed_tree_dynamic_indices.iter().enumerate() {
             let body = &bodies[body_index];
             let mass = body
@@ -857,58 +911,165 @@ impl SolverWorkspace {
                 .physics()
                 .mass()
                 .ok_or(CollisionError::InvalidContact)?;
-            let center = self.reduced_fixed_tree_centers[index];
-            let rotation = body.state().transform().rotation();
-            let rotation_matrix = rotation
+            let rotation_matrix = body
+                .state()
+                .transform()
+                .rotation()
                 .to_mat3()
                 .ok_or(CollisionError::ArithmeticOverflow)?;
             let inertia_world = rotation_matrix * mass.inertia() * rotation_matrix.transpose();
             angular_momentum += inertia_world * body.state().angular_velocity();
-            angular_momentum +=
-                (center - current_com).cross(body.state().linear_velocity() * mass.mass());
-
-            let target_transform = root_transform
-                .compose(&self.reduced_fixed_tree_offsets[body_index])
-                .map_err(|_| CollisionError::ArithmeticOverflow)?;
-            let target_center = target_transform.transform_point(mass.center_of_mass());
-            target_com_numerator += target_center * mass.mass();
-            self.reduced_fixed_tree_target_centers.push(target_center);
+            angular_momentum += (self.reduced_fixed_tree_centers[index] - current_com)
+                .cross(body.state().linear_velocity() * mass.mass());
         }
-        let target_com = target_com_numerator / total_mass;
-        angular_momentum -= (target_com - current_com).cross(momentum);
-
-        let mut target_inertia = Mat3::ZERO;
-        for (index, &body_index) in self.reduced_fixed_tree_dynamic_indices.iter().enumerate() {
-            let body = &bodies[body_index];
-            let mass = body
-                .body()
-                .physics()
-                .mass()
-                .ok_or(CollisionError::InvalidContact)?;
-            let rotation_matrix = self.reduced_fixed_tree_offsets[body_index]
-                .rotation()
-                .to_mat3()
-                .ok_or(CollisionError::ArithmeticOverflow)?;
-            let body_inertia = rotation_matrix * mass.inertia() * rotation_matrix.transpose();
-            target_inertia = target_inertia
-                + body_inertia
-                + parallel_axis(
-                    self.reduced_fixed_tree_target_centers[index] - target_com,
-                    mass.mass(),
-                );
-        }
-        let angular_velocity = target_inertia
+        angular_momentum -= (target_com - current_com).cross(total_momentum);
+        let root_rotation = root_transform
+            .rotation()
+            .to_mat3()
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let aggregate_inertia_world =
+            root_rotation * aggregate_mass.inertia() * root_rotation.transpose();
+        let angular_velocity = aggregate_inertia_world
             .solve_spd(angular_momentum)
             .map_err(|_| CollisionError::ArithmeticOverflow)?;
-        for (index, &body_index) in self.reduced_fixed_tree_dynamic_indices.iter().enumerate() {
-            let body = &mut bodies[body_index];
-            let transform = root_transform
+        let mut aggregate_body = RigidBody::new_dynamic(root_transform, aggregate_mass)
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        aggregate_body
+            .set_linear_velocity(linear_velocity)
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        aggregate_body
+            .set_angular_velocity(angular_velocity)
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+
+        self.reduced_contact_bodies.clear();
+        self.reduced_contact_bodies
+            .try_reserve(1)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        self.reduced_contact_bodies
+            .push(SolverBody::from_prediction(
+                aggregate_body,
+                *aggregate_body.state(),
+            ));
+        if self.reduced_contact_body_map.len() < bodies.len() {
+            self.reduced_contact_body_map
+                .try_reserve(bodies.len() - self.reduced_contact_body_map.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        }
+        self.reduced_contact_body_map.clear();
+        self.reduced_contact_body_map
+            .resize(bodies.len(), usize::MAX);
+        for &body_index in &self.reduced_fixed_tree_dynamic_indices {
+            self.reduced_contact_body_map[body_index] = 0;
+        }
+        self.reduced_contact_manifolds.clear();
+        self.reduced_contact_manifolds
+            .try_reserve(manifolds.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for source in manifolds.iter().copied() {
+            if source.body_a >= bodies.len() || source.body_b >= bodies.len() {
+                return Ok(false);
+            }
+            let mut reduced = source;
+            for original_index in [source.body_a, source.body_b] {
+                if self.reduced_contact_body_map[original_index] != usize::MAX {
+                    continue;
+                }
+                if bodies[original_index].body().physics().body_type() != BodyType::Static {
+                    return Ok(false);
+                }
+                self.reduced_contact_body_map[original_index] = self.reduced_contact_bodies.len();
+                self.reduced_contact_bodies
+                    .push(SolverBody::from_prediction(
+                        bodies[original_index].body,
+                        bodies[original_index].state(),
+                    ));
+            }
+            reduced.body_a = self.reduced_contact_body_map[source.body_a];
+            reduced.body_b = self.reduced_contact_body_map[source.body_b];
+            if reduced.body_a == reduced.body_b {
+                return Ok(false);
+            }
+            for point_index in 0..reduced.manifold.len() {
+                let point = reduced
+                    .manifold
+                    .point_mut(point_index)
+                    .ok_or(CollisionError::InvalidContact)?;
+                if self.reduced_contact_body_map[source.body_a] == 0 {
+                    let target_transform = root_transform
+                        .compose(&self.reduced_fixed_tree_offsets[source.body_a])
+                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                    let world_point = target_transform.transform_point(point.local_a);
+                    point.local_a = root_inverse.transform_point(world_point);
+                }
+                if self.reduced_contact_body_map[source.body_b] == 0 {
+                    let target_transform = root_transform
+                        .compose(&self.reduced_fixed_tree_offsets[source.body_b])
+                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                    let world_point = target_transform.transform_point(point.local_b);
+                    point.local_b = root_inverse.transform_point(world_point);
+                }
+            }
+            self.reduced_contact_manifolds.push(reduced);
+        }
+        if !self.reduced_contact_manifolds.is_empty() {
+            let mut reduced_bodies = std::mem::take(&mut self.reduced_contact_bodies);
+            let mut reduced_manifolds = std::mem::take(&mut self.reduced_contact_manifolds);
+            let solve_result = self.solve(&mut reduced_bodies, &mut reduced_manifolds, config);
+            self.reduced_contact_bodies = reduced_bodies;
+            self.reduced_contact_manifolds = reduced_manifolds;
+            solve_result?;
+            for (source, solved) in manifolds
+                .iter_mut()
+                .zip(self.reduced_contact_manifolds.iter())
+            {
+                for point_index in 0..source.manifold.len() {
+                    let Some(source_point) = source.manifold.point_mut(point_index) else {
+                        return Err(CollisionError::InvalidContact);
+                    };
+                    let solved_point = solved
+                        .manifold
+                        .point(point_index)
+                        .ok_or(CollisionError::InvalidContact)?;
+                    source_point.normal_impulse = solved_point.normal_impulse;
+                    source_point.normal_impulse_increase_sum =
+                        solved_point.normal_impulse_increase_sum;
+                    source_point.tangent_impulse = solved_point.tangent_impulse;
+                }
+            }
+        }
+
+        let aggregate_state = self.reduced_contact_bodies[0].state();
+        let target_com = aggregate_state
+            .transform()
+            .transform_point(aggregate_mass.center_of_mass());
+        self.reduced_fixed_tree_target_centers.clear();
+        for &body_index in &self.reduced_fixed_tree_dynamic_indices {
+            let transform = aggregate_state
+                .transform()
                 .compose(&self.reduced_fixed_tree_offsets[body_index])
                 .map_err(|_| CollisionError::ArithmeticOverflow)?;
-            let velocity = linear_velocity
-                + angular_velocity
+            self.reduced_fixed_tree_target_centers.push(
+                transform.transform_point(
+                    bodies[body_index]
+                        .body()
+                        .physics()
+                        .mass()
+                        .ok_or(CollisionError::InvalidContact)?
+                        .center_of_mass(),
+                ),
+            );
+        }
+        for (index, &body_index) in self.reduced_fixed_tree_dynamic_indices.iter().enumerate() {
+            let body = &mut bodies[body_index];
+            let transform = aggregate_state
+                .transform()
+                .compose(&self.reduced_fixed_tree_offsets[body_index])
+                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            let velocity = aggregate_state.linear_velocity()
+                + aggregate_state
+                    .angular_velocity()
                     .cross(self.reduced_fixed_tree_target_centers[index] - target_com);
-            body.set_rigid_state(transform, velocity, angular_velocity)
+            body.set_rigid_state(transform, velocity, aggregate_state.angular_velocity())
                 .map_err(|_| CollisionError::ArithmeticOverflow)?;
         }
         Ok(true)
