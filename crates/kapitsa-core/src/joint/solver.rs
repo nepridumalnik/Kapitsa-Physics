@@ -965,7 +965,8 @@ impl JointSolver {
         let super::Joint::Fixed(joint) = constraint.joint else {
             return Ok(false);
         };
-        if !joint.common.enabled {
+        if !joint.common.enabled || workspace.committed_joint_id(joint_index) != Some(constraint.id)
+        {
             return Ok(false);
         }
         let (start, end) = workspace.joint_row_range(joint_index);
@@ -7447,6 +7448,67 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_in_place_respects_committed_joint_identity() {
+        let dt = 1.0 / 60.0;
+        let (old, initial) = asymmetric_fixed_constraint();
+        let options = JointSolverOptions::legacy()
+            .with_projection(super::super::JointProjection::FixedBlock3);
+        for replace in [true, false] {
+            let mut constraint = old;
+            if replace {
+                constraint.id = test_joint_id();
+                assert_ne!(constraint.id, old.id);
+            }
+            let mut actual = JointWorkspace::new();
+            let mut generic = JointWorkspace::new();
+            for workspace in [&mut actual, &mut generic] {
+                JointSolver::begin_step(workspace);
+                JointSolver::prepare(workspace, &initial, &[old], dt).expect("commit old joint");
+                for row in workspace.rows_mut() {
+                    row.accumulated_multiplier = 0.01 * (f64::from(row.key) + 1.0);
+                    row.accumulated_impulse = 2.0 + f64::from(row.key);
+                }
+            }
+            let mut actual_bodies = initial;
+            let mut generic_bodies = initial;
+            JointSolver::solve_position_joint_impl(
+                &mut actual,
+                &mut actual_bodies,
+                constraint,
+                0,
+                dt,
+                options,
+                true,
+            )
+            .expect("in-place or fallback");
+            JointSolver::solve_position_joint_impl(
+                &mut generic,
+                &mut generic_bodies,
+                constraint,
+                0,
+                dt,
+                options,
+                false,
+            )
+            .expect("generic");
+            assert_eq!(actual.rows(), generic.rows(), "replace={replace}");
+            for (a, b) in actual_bodies.iter().zip(generic_bodies) {
+                assert_eq!(a.state().transform(), b.state().transform());
+                assert!(a.state().transform().translation().is_finite());
+                assert!(a.state().transform().rotation().is_normalized());
+            }
+            for row in actual.rows() {
+                let impulse = if replace {
+                    0.0
+                } else {
+                    2.0 + f64::from(row.key)
+                };
+                assert_eq!(row.accumulated_impulse, impulse);
             }
         }
     }

@@ -464,6 +464,10 @@ impl JointWorkspace {
         (start, end)
     }
 
+    pub(crate) fn committed_joint_id(&self, joint_index: usize) -> Option<crate::world::JointId> {
+        self.joint_ids.get(joint_index).copied().flatten()
+    }
+
     /// Owner joint index of a committed row.
     pub(crate) fn row_owner(&self, index: usize) -> Option<usize> {
         self.row_joint_indices.get(index).copied()
