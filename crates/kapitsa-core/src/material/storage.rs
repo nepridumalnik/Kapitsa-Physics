@@ -30,7 +30,7 @@ static NEXT_STORAGE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn allocate_storage_id() -> Result<u64, DensePoolError> {
     NEXT_STORAGE_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
             next.checked_add(1)
         })
         .map_err(|_| DensePoolError::IdentifierExhausted)

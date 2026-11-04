@@ -318,6 +318,7 @@ fn configure_solver(
     partial: bool,
 ) {
     rocket.world.set_partial_coloring_for_bench(partial);
+    rocket.world.set_reduced_fixed_tree_for_bench(block3);
     rocket.world.set_joint_mass_cache_for_bench(mass_cache);
     rocket.world.set_joint_projection_for_bench(block3);
     rocket

@@ -23,7 +23,7 @@ static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
 fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
             next.checked_add(1)
         })
         .map_err(|_| WorldError::WorldIdExhausted)
@@ -1955,6 +1955,13 @@ impl PhysicsWorld {
     pub fn set_partial_coloring_for_bench(&mut self, enabled: bool) {
         self.collision_system
             .set_partial_coloring_for_bench(enabled);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn set_reduced_fixed_tree_for_bench(&mut self, enabled: bool) {
+        self.collision_system
+            .set_reduced_fixed_tree_for_bench(enabled);
     }
 
     #[cfg(feature = "bench-internals")]

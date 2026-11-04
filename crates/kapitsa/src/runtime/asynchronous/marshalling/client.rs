@@ -84,14 +84,15 @@ impl PhysicsClient {
             Some(sender) => sender,
             None => return Err(PhysicsSubmitError::NotRunning(buffer)),
         };
-        let id = match self.batch_id_sequence.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |next| next.checked_add(1),
-        ) {
-            Ok(id) => BatchId::new(id),
-            Err(_) => return Err(PhysicsSubmitError::BatchIdExhausted(buffer)),
-        };
+        let id =
+            match self
+                .batch_id_sequence
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                    next.checked_add(1)
+                }) {
+                Ok(id) => BatchId::new(id),
+                Err(_) => return Err(PhysicsSubmitError::BatchIdExhausted(buffer)),
+            };
 
         let request = CommandRequest::Batch { id, buffer };
         match sender.try_send(request) {

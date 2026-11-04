@@ -131,6 +131,11 @@ impl CollisionSystem {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_reduced_fixed_tree_for_bench(&mut self, enabled: bool) {
+        self.joint_solver_options = self.joint_solver_options.with_reduced_fixed_tree(enabled);
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn set_joint_projection_for_bench(&mut self, enabled: bool) {
         let projection = if enabled {
             crate::joint::JointProjection::FixedBlock3

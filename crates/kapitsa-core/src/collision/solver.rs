@@ -8,6 +8,10 @@ use crate::{
     },
     rigid_body::RigidBody,
 };
+#[cfg(feature = "bench-internals")]
+use crate::{rigid_body::BodyType, transform::Transform};
+#[cfg(feature = "bench-internals")]
+use kapitsa_math::Mat3;
 use kapitsa_math::Vec3;
 use std::marker::PhantomData;
 
@@ -330,6 +334,18 @@ pub(crate) struct SolverWorkspace {
     colored_groups_dispatched: usize,
     #[cfg(feature = "bench-internals")]
     colored_parallel_batches: usize,
+    #[cfg(feature = "bench-internals")]
+    reduced_fixed_tree_offsets: Vec<Transform>,
+    #[cfg(feature = "bench-internals")]
+    reduced_fixed_tree_signature: Vec<[usize; 2]>,
+    #[cfg(feature = "bench-internals")]
+    reduced_fixed_tree_dynamic_indices: Vec<usize>,
+    #[cfg(feature = "bench-internals")]
+    reduced_fixed_tree_assigned: Vec<bool>,
+    #[cfg(feature = "bench-internals")]
+    reduced_fixed_tree_centers: Vec<Vec3>,
+    #[cfg(feature = "bench-internals")]
+    reduced_fixed_tree_target_centers: Vec<Vec3>,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -557,6 +573,18 @@ impl SolverWorkspace {
             colored_groups_dispatched: 0,
             #[cfg(feature = "bench-internals")]
             colored_parallel_batches: 0,
+            #[cfg(feature = "bench-internals")]
+            reduced_fixed_tree_offsets: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            reduced_fixed_tree_signature: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            reduced_fixed_tree_dynamic_indices: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            reduced_fixed_tree_assigned: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            reduced_fixed_tree_centers: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            reduced_fixed_tree_target_centers: Vec::new(),
         }
     }
 
@@ -589,6 +617,301 @@ impl SolverWorkspace {
         self.points.clear();
         #[cfg(feature = "bench-internals")]
         self.velocity_snapshots.clear();
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn solve_reduced_fixed_tree(
+        &mut self,
+        bodies: &mut [SolverBody],
+        manifolds: &mut [SolverManifold],
+        joints: &[JointConstraint],
+        config: CollisionConfig,
+    ) -> Result<bool, CollisionError> {
+        self.reduced_fixed_tree_dynamic_indices.clear();
+        self.reduced_fixed_tree_dynamic_indices
+            .extend(bodies.iter().enumerate().filter_map(|(index, body)| {
+                (body.body().physics().body_type() == BodyType::Dynamic).then_some(index)
+            }));
+        let dynamic_count = self.reduced_fixed_tree_dynamic_indices.len();
+        if dynamic_count < 2
+            || joints.len() != dynamic_count - 1
+            || bodies.iter().any(|body| {
+                !matches!(
+                    body.body().physics().body_type(),
+                    BodyType::Dynamic | BodyType::Static
+                )
+            })
+            || joints.iter().any(|constraint| {
+                !self
+                    .reduced_fixed_tree_dynamic_indices
+                    .contains(&constraint.body_a)
+                    || !self
+                        .reduced_fixed_tree_dynamic_indices
+                        .contains(&constraint.body_b)
+                    || !matches!(constraint.joint, crate::joint::Joint::Fixed(_))
+                    || !constraint.joint.common().enabled
+                    || constraint.body_a >= bodies.len()
+                    || constraint.body_b >= bodies.len()
+                    || constraint.body_a == constraint.body_b
+            })
+        {
+            return Ok(false);
+        }
+        if manifolds.iter().any(|manifold| {
+            self.reduced_fixed_tree_dynamic_indices
+                .contains(&manifold.body_a)
+                && self
+                    .reduced_fixed_tree_dynamic_indices
+                    .contains(&manifold.body_b)
+        }) {
+            return Ok(false);
+        }
+        if !manifolds.is_empty() {
+            self.solve(bodies, manifolds, config)?;
+        }
+
+        let topology_changed = self.reduced_fixed_tree_signature.len() != joints.len()
+            || joints.iter().enumerate().any(|(index, constraint)| {
+                self.reduced_fixed_tree_signature.get(index)
+                    != Some(&[constraint.body_a, constraint.body_b])
+            })
+            || self.reduced_fixed_tree_offsets.len() != bodies.len();
+        if topology_changed {
+            let mut roots = (0..dynamic_count).collect::<Vec<_>>();
+            for constraint in joints {
+                let a = constraint.body_a;
+                let b = constraint.body_b;
+                let Some(local_a) = self
+                    .reduced_fixed_tree_dynamic_indices
+                    .iter()
+                    .position(|index| *index == a)
+                else {
+                    return Ok(false);
+                };
+                let Some(local_b) = self
+                    .reduced_fixed_tree_dynamic_indices
+                    .iter()
+                    .position(|index| *index == b)
+                else {
+                    return Ok(false);
+                };
+                let mut root_a = local_a;
+                while roots[root_a] != root_a {
+                    root_a = roots[root_a];
+                }
+                let mut root_b = local_b;
+                while roots[root_b] != root_b {
+                    root_b = roots[root_b];
+                }
+                if root_a == root_b {
+                    return Ok(false);
+                }
+                roots[root_b] = root_a;
+            }
+            let mut connected_root = 0;
+            while roots[connected_root] != connected_root {
+                connected_root = roots[connected_root];
+            }
+            for index in 0..roots.len() {
+                let mut root = index;
+                while roots[root] != root {
+                    root = roots[root];
+                }
+                if root != connected_root {
+                    return Ok(false);
+                }
+            }
+            self.reduced_fixed_tree_offsets.clear();
+            self.reduced_fixed_tree_offsets
+                .try_reserve(bodies.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.reduced_fixed_tree_offsets
+                .resize(bodies.len(), Transform::identity());
+            self.reduced_fixed_tree_assigned.clear();
+            self.reduced_fixed_tree_assigned
+                .resize(dynamic_count, false);
+            self.reduced_fixed_tree_assigned[0] = true;
+            let mut assigned_count = 1;
+            while assigned_count < dynamic_count {
+                let mut progress = false;
+                for constraint in joints {
+                    let Some(local_a) = self
+                        .reduced_fixed_tree_dynamic_indices
+                        .iter()
+                        .position(|index| *index == constraint.body_a)
+                    else {
+                        return Ok(false);
+                    };
+                    let Some(local_b) = self
+                        .reduced_fixed_tree_dynamic_indices
+                        .iter()
+                        .position(|index| *index == constraint.body_b)
+                    else {
+                        return Ok(false);
+                    };
+                    let crate::joint::Joint::Fixed(fixed) = constraint.joint else {
+                        return Ok(false);
+                    };
+                    if self.reduced_fixed_tree_assigned[local_a]
+                        && !self.reduced_fixed_tree_assigned[local_b]
+                    {
+                        let frame_a = Transform::new(
+                            fixed.common.frame_a.local_anchor,
+                            fixed.common.frame_a.local_rotation,
+                        )
+                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        let frame_b = Transform::new(
+                            fixed.common.frame_b.local_anchor,
+                            fixed.common.frame_b.local_rotation,
+                        )
+                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        let frame_b_inverse = frame_b
+                            .inverse()
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        let relative = frame_a
+                            .compose(&frame_b_inverse)
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        self.reduced_fixed_tree_offsets[constraint.body_b] = self
+                            .reduced_fixed_tree_offsets[constraint.body_a]
+                            .compose(&relative)
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        self.reduced_fixed_tree_assigned[local_b] = true;
+                        assigned_count += 1;
+                        progress = true;
+                    } else if self.reduced_fixed_tree_assigned[local_b]
+                        && !self.reduced_fixed_tree_assigned[local_a]
+                    {
+                        let frame_a = Transform::new(
+                            fixed.common.frame_a.local_anchor,
+                            fixed.common.frame_a.local_rotation,
+                        )
+                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        let frame_b = Transform::new(
+                            fixed.common.frame_b.local_anchor,
+                            fixed.common.frame_b.local_rotation,
+                        )
+                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        let frame_a_inverse = frame_a
+                            .inverse()
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        let relative = frame_b
+                            .compose(&frame_a_inverse)
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        self.reduced_fixed_tree_offsets[constraint.body_a] = self
+                            .reduced_fixed_tree_offsets[constraint.body_b]
+                            .compose(&relative)
+                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        self.reduced_fixed_tree_assigned[local_a] = true;
+                        assigned_count += 1;
+                        progress = true;
+                    }
+                }
+                if !progress {
+                    return Ok(false);
+                }
+            }
+            self.reduced_fixed_tree_signature.clear();
+            self.reduced_fixed_tree_signature.extend(
+                joints
+                    .iter()
+                    .map(|constraint| [constraint.body_a, constraint.body_b]),
+            );
+        }
+
+        let root_index = self.reduced_fixed_tree_dynamic_indices[0];
+        let root_transform = bodies[root_index].state().transform();
+        let mut total_mass = 0.0_f64;
+        let mut momentum = Vec3::ZERO;
+        let mut current_com_numerator = Vec3::ZERO;
+        self.reduced_fixed_tree_centers.clear();
+        for &body_index in &self.reduced_fixed_tree_dynamic_indices {
+            let body = &bodies[body_index];
+            let mass = body
+                .body()
+                .physics()
+                .mass()
+                .ok_or(CollisionError::InvalidContact)?;
+            let center = body
+                .body()
+                .world_center_of_mass()
+                .map_err(|_| CollisionError::ArithmeticOverflow)?
+                .ok_or(CollisionError::InvalidContact)?;
+            total_mass += mass.mass();
+            momentum += body.state().linear_velocity() * mass.mass();
+            current_com_numerator += center * mass.mass();
+            self.reduced_fixed_tree_centers.push(center);
+        }
+        if !total_mass.is_finite() || total_mass <= 0.0 {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        let current_com = current_com_numerator / total_mass;
+        let linear_velocity = momentum / total_mass;
+
+        let mut angular_momentum = Vec3::ZERO;
+        self.reduced_fixed_tree_target_centers.clear();
+        let mut target_com_numerator = Vec3::ZERO;
+        for (index, &body_index) in self.reduced_fixed_tree_dynamic_indices.iter().enumerate() {
+            let body = &bodies[body_index];
+            let mass = body
+                .body()
+                .physics()
+                .mass()
+                .ok_or(CollisionError::InvalidContact)?;
+            let center = self.reduced_fixed_tree_centers[index];
+            let rotation = body.state().transform().rotation();
+            let rotation_matrix = rotation
+                .to_mat3()
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let inertia_world = rotation_matrix * mass.inertia() * rotation_matrix.transpose();
+            angular_momentum += inertia_world * body.state().angular_velocity();
+            angular_momentum +=
+                (center - current_com).cross(body.state().linear_velocity() * mass.mass());
+
+            let target_transform = root_transform
+                .compose(&self.reduced_fixed_tree_offsets[body_index])
+                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            let target_center = target_transform.transform_point(mass.center_of_mass());
+            target_com_numerator += target_center * mass.mass();
+            self.reduced_fixed_tree_target_centers.push(target_center);
+        }
+        let target_com = target_com_numerator / total_mass;
+        angular_momentum -= (target_com - current_com).cross(momentum);
+
+        let mut target_inertia = Mat3::ZERO;
+        for (index, &body_index) in self.reduced_fixed_tree_dynamic_indices.iter().enumerate() {
+            let body = &bodies[body_index];
+            let mass = body
+                .body()
+                .physics()
+                .mass()
+                .ok_or(CollisionError::InvalidContact)?;
+            let rotation_matrix = self.reduced_fixed_tree_offsets[body_index]
+                .rotation()
+                .to_mat3()
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let body_inertia = rotation_matrix * mass.inertia() * rotation_matrix.transpose();
+            target_inertia = target_inertia
+                + body_inertia
+                + parallel_axis(
+                    self.reduced_fixed_tree_target_centers[index] - target_com,
+                    mass.mass(),
+                );
+        }
+        let angular_velocity = target_inertia
+            .solve_spd(angular_momentum)
+            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        for (index, &body_index) in self.reduced_fixed_tree_dynamic_indices.iter().enumerate() {
+            let body = &mut bodies[body_index];
+            let transform = root_transform
+                .compose(&self.reduced_fixed_tree_offsets[body_index])
+                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            let velocity = linear_velocity
+                + angular_velocity
+                    .cross(self.reduced_fixed_tree_target_centers[index] - target_com);
+            body.set_rigid_state(transform, velocity, angular_velocity)
+                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        }
+        Ok(true)
     }
 
     fn prepare_constraint_coloring(
@@ -1347,6 +1670,14 @@ impl SolverWorkspace {
         #[cfg(feature = "bench-internals")]
         self.reset_colored_dispatch_metrics();
         JointSolver::begin_step(joint_workspace);
+        #[cfg(feature = "bench-internals")]
+        if joint_solver_options.reduced_fixed_tree()
+            && self.solve_reduced_fixed_tree(bodies, manifolds, joints, config)?
+        {
+            self.colored_schedule.constraints = manifolds.len().saturating_add(joints.len());
+            self.colored_schedule.rejection = "reduced-fixed-tree";
+            return Ok(());
+        }
         let coloring_constraint_count = manifolds.len().saturating_add(joints.len());
         #[cfg(feature = "bench-internals")]
         {
@@ -2204,6 +2535,29 @@ impl SolverWorkspace {
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "bench-internals")]
+fn parallel_axis(offset: Vec3, mass: f64) -> Mat3 {
+    let squared = offset.length_squared() * mass;
+    Mat3::from_diagonal(Vec3::splat(squared))
+        - Mat3::from_rows([
+            [
+                offset.x * offset.x * mass,
+                offset.x * offset.y * mass,
+                offset.x * offset.z * mass,
+            ],
+            [
+                offset.y * offset.x * mass,
+                offset.y * offset.y * mass,
+                offset.y * offset.z * mass,
+            ],
+            [
+                offset.z * offset.x * mass,
+                offset.z * offset.y * mass,
+                offset.z * offset.z * mass,
+            ],
+        ])
 }
 
 fn solve_tangent_impulse(

@@ -87,6 +87,8 @@ pub(crate) struct JointSolverOptions {
     #[cfg(feature = "bench-internals")]
     partial_coloring: bool,
     #[cfg(feature = "bench-internals")]
+    reduced_fixed_tree: bool,
+    #[cfg(feature = "bench-internals")]
     global_velocity_pcg_max_iterations: u32,
     #[cfg(feature = "bench-internals")]
     global_velocity_pcg_incomplete_cholesky: bool,
@@ -111,6 +113,8 @@ impl JointSolverOptions {
             alternate_velocity_sweeps: false,
             #[cfg(feature = "bench-internals")]
             partial_coloring: false,
+            #[cfg(feature = "bench-internals")]
+            reduced_fixed_tree: false,
             #[cfg(feature = "bench-internals")]
             global_velocity_pcg_max_iterations: 0,
             #[cfg(feature = "bench-internals")]
@@ -189,6 +193,17 @@ impl JointSolverOptions {
     #[cfg(feature = "bench-internals")]
     pub(crate) const fn partial_coloring(self) -> bool {
         self.partial_coloring
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn with_reduced_fixed_tree(mut self, enabled: bool) -> Self {
+        self.reduced_fixed_tree = enabled;
+        self
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) const fn reduced_fixed_tree(self) -> bool {
+        self.reduced_fixed_tree
     }
 
     #[cfg(feature = "bench-internals")]

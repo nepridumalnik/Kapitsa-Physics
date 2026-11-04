@@ -31,6 +31,25 @@ impl SolverBody {
     pub(crate) fn body_mut(&mut self) -> &mut RigidBody {
         &mut self.body
     }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_rigid_state(
+        &mut self,
+        transform: crate::transform::Transform,
+        linear_velocity: Vec3,
+        angular_velocity: Vec3,
+    ) -> Result<(), ConstraintError> {
+        self.body
+            .set_transform(transform)
+            .map_err(|_| ConstraintError::ArithmeticOverflow)?;
+        self.body
+            .set_linear_velocity(linear_velocity)
+            .map_err(|_| ConstraintError::ArithmeticOverflow)?;
+        self.body
+            .set_angular_velocity(angular_velocity)
+            .map_err(|_| ConstraintError::ArithmeticOverflow)?;
+        Ok(())
+    }
 }
 
 /// Read access to solver bodies with mutation limited to dynamic bodies.
