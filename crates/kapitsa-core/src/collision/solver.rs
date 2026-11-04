@@ -48,21 +48,28 @@ impl ColoredWorkload {
             / self.batch_count
     }
 
-    fn can_use_parallel_schedule(self, worker_count: usize) -> bool {
+    fn rejection_reason(self, worker_count: usize) -> Option<&'static str> {
         if worker_count <= 1 || self.constraint_count < LARGE_ISLAND_COLORING_THRESHOLD {
-            return false;
+            return Some("small-or-single-worker");
         }
         if self.color_count == 0 || self.batch_count == 0 {
-            return false;
+            return Some("empty");
         }
         let min_color_width = worker_count.div_ceil(COLORED_MIN_WIDTH_DIVISOR).max(1);
         if self.max_color_batch_count < min_color_width {
-            return false;
+            return Some("max-width");
         }
         if self.useful_batch_count < self.color_count.saturating_mul(min_color_width) {
-            return false;
+            return Some("total-width");
         }
-        self.parallel_fraction_percent() >= COLORED_MIN_PARALLEL_FRACTION_PERCENT
+        if self.parallel_fraction_percent() < COLORED_MIN_PARALLEL_FRACTION_PERCENT {
+            return Some("parallel-fraction");
+        }
+        None
+    }
+
+    fn can_use_parallel_schedule(self, worker_count: usize) -> bool {
+        self.rejection_reason(worker_count).is_none()
     }
 }
 
@@ -308,6 +315,8 @@ pub(crate) struct SolverWorkspace {
     joint_task_locations: Vec<[usize; 2]>,
     active_colored_batches: usize,
     #[cfg(feature = "bench-internals")]
+    colored_schedule: super::ColoredScheduleMetrics,
+    #[cfg(feature = "bench-internals")]
     colored_solver_selected: bool,
     #[cfg(feature = "bench-internals")]
     colored_groups_dispatched: usize,
@@ -521,6 +530,20 @@ impl SolverWorkspace {
             joint_task_locations: Vec::new(),
             active_colored_batches: 0,
             #[cfg(feature = "bench-internals")]
+            colored_schedule: super::ColoredScheduleMetrics {
+                rejection: "not-evaluated",
+                constraints: 0,
+                colors: 0,
+                batches: 0,
+                useful_batches: 0,
+                parallel_colors: 0,
+                parallel_constraints: 0,
+                sequential_constraints: 0,
+                tasks_started: 0,
+                velocity_sweeps: std::time::Duration::ZERO,
+                position_sweeps: std::time::Duration::ZERO,
+            },
+            #[cfg(feature = "bench-internals")]
             colored_solver_selected: false,
             #[cfg(feature = "bench-internals")]
             colored_groups_dispatched: 0,
@@ -539,7 +562,16 @@ impl SolverWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn colored_schedule_metrics(&self) -> super::ColoredScheduleMetrics {
+        self.colored_schedule
+    }
+
+    #[cfg(feature = "bench-internals")]
     fn reset_colored_dispatch_metrics(&mut self) {
+        self.colored_schedule = super::ColoredScheduleMetrics {
+            rejection: "not-evaluated",
+            ..Default::default()
+        };
         self.colored_solver_selected = false;
         self.colored_groups_dispatched = 0;
         self.colored_parallel_batches = 0;
@@ -799,6 +831,8 @@ impl SolverWorkspace {
             }
         }
 
+        #[cfg(feature = "bench-internals")]
+        let sweep_started = std::time::Instant::now();
         for velocity_iteration in 0..config.velocity_iterations {
             #[cfg(feature = "bench-internals")]
             {
@@ -838,6 +872,10 @@ impl SolverWorkspace {
                 }
             }
         }
+        #[cfg(feature = "bench-internals")]
+        {
+            self.colored_schedule.velocity_sweeps += sweep_started.elapsed();
+        }
 
         #[cfg(feature = "bench-internals")]
         {
@@ -856,6 +894,8 @@ impl SolverWorkspace {
             }
         }
 
+        #[cfg(feature = "bench-internals")]
+        let sweep_started = std::time::Instant::now();
         for _position_iteration in 0..config.position_iterations {
             #[cfg(feature = "bench-internals")]
             {
@@ -886,6 +926,10 @@ impl SolverWorkspace {
                     )?;
                 }
             }
+        }
+        #[cfg(feature = "bench-internals")]
+        {
+            self.colored_schedule.position_sweeps += sweep_started.elapsed();
         }
 
         self.merge_colored_joints(joint_workspace, joints, manifolds.len())?;
@@ -1001,10 +1045,14 @@ impl SolverWorkspace {
                     .min(batch_count)
                     .max(1);
                 let chunk_size = batch_count.div_ceil(task_count);
+                #[cfg(feature = "bench-internals")]
+                let started = std::sync::atomic::AtomicUsize::new(0);
                 let batch_result = executor.for_each_chunk_mut(
                     &mut self.colored_batches[start..process_end],
                     chunk_size,
                     |_, batches| {
+                        #[cfg(feature = "bench-internals")]
+                        started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         for batch in batches {
                             if contact_only && !batch.has_contacts() {
                                 batch.error = None;
@@ -1021,6 +1069,11 @@ impl SolverWorkspace {
                         }
                     },
                 );
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.colored_schedule.tasks_started +=
+                        started.load(std::sync::atomic::Ordering::Relaxed);
+                }
                 if batch_result.is_err() {
                     return Err(CollisionError::WorkerFailed);
                 }
@@ -1275,6 +1328,11 @@ impl SolverWorkspace {
         self.reset_colored_dispatch_metrics();
         JointSolver::begin_step(joint_workspace);
         let coloring_constraint_count = manifolds.len().saturating_add(joints.len());
+        #[cfg(feature = "bench-internals")]
+        {
+            self.colored_schedule.constraints = coloring_constraint_count;
+            self.colored_schedule.rejection = "small-or-single-worker";
+        }
         if cfg!(feature = "bench-internals")
             && worker_count > 1
             && coloring_constraint_count >= LARGE_ISLAND_COLORING_THRESHOLD
@@ -1289,6 +1347,36 @@ impl SolverWorkspace {
                 self.constraint_coloring.color_count(),
                 graph_rebuilt,
             );
+            #[cfg(feature = "bench-internals")]
+            if let Some(workload) = self.colored_workload(worker_count) {
+                let mut report = super::ColoredScheduleMetrics {
+                    rejection: workload
+                        .rejection_reason(worker_count)
+                        .unwrap_or("configuration"),
+                    constraints: workload.constraint_count,
+                    colors: workload.color_count,
+                    batches: workload.batch_count,
+                    useful_batches: workload.useful_batch_count,
+                    ..self.colored_schedule
+                };
+                for group in 0..workload.color_count {
+                    if let Some(constraints) = self
+                        .constraint_coloring
+                        .constraints_in_schedule_group(group)
+                    {
+                        if constraints.len().div_ceil(LARGE_ISLAND_BATCH_SIZE)
+                            >= COLORED_MIN_PARALLEL_BATCHES
+                            && constraints.len() > SMALL_COLOR_MERGE_THRESHOLD
+                        {
+                            report.parallel_colors += 1;
+                            report.parallel_constraints += constraints.len();
+                        } else {
+                            report.sequential_constraints += constraints.len();
+                        }
+                    }
+                }
+                self.colored_schedule = report;
+            }
             if self.can_solve_colored_constraints(
                 joint_solver_options,
                 worker_count,
@@ -1297,6 +1385,7 @@ impl SolverWorkspace {
                 #[cfg(feature = "bench-internals")]
                 {
                     self.colored_solver_selected = true;
+                    self.colored_schedule.rejection = "selected";
                 }
                 self.prepare_colored_batches(manifolds, joints, graph_rebuilt)?;
                 return self.solve_colored_constraints(
@@ -1384,6 +1473,8 @@ impl SolverWorkspace {
                 joint_workspace.record_pre_velocity_geometry();
             }
         }
+        #[cfg(feature = "bench-internals")]
+        let sweep_started = std::time::Instant::now();
         for velocity_iteration in 0..config.velocity_iterations {
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_velocity_iteration();
@@ -1506,6 +1597,10 @@ impl SolverWorkspace {
         }
         #[cfg(feature = "bench-internals")]
         {
+            self.colored_schedule.velocity_sweeps += sweep_started.elapsed();
+        }
+        #[cfg(feature = "bench-internals")]
+        {
             if full_diagnostics {
                 let (impulse_work, quadratic_work) =
                     velocity_projection_work(&self.velocity_snapshots, bodies)?;
@@ -1525,6 +1620,8 @@ impl SolverWorkspace {
                 joint_workspace.record_post_velocity_geometry();
             }
         }
+        #[cfg(feature = "bench-internals")]
+        let sweep_started = std::time::Instant::now();
         for _position_iteration in 0..config.position_iterations {
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_position_iteration();
@@ -1607,6 +1704,10 @@ impl SolverWorkspace {
                     joint_workspace.record_post_joint_geometry(_position_iteration == 0);
                 }
             }
+        }
+        #[cfg(feature = "bench-internals")]
+        {
+            self.colored_schedule.position_sweeps += sweep_started.elapsed();
         }
         #[cfg(feature = "bench-internals")]
         joint_workspace.record_energy(

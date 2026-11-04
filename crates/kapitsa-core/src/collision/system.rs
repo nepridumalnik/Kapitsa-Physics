@@ -1277,6 +1277,10 @@ impl CollisionSystem {
             for island in self.solver_islands.iter().take(island_count) {
                 let (island_selected, island_groups, island_batches) =
                     island.workspace.colored_dispatch_metrics();
+                let schedule = island.workspace.colored_schedule_metrics();
+                if schedule.constraints > self.benchmark_metrics.colored_schedule.constraints {
+                    self.benchmark_metrics.colored_schedule = schedule;
+                }
                 selected |= island_selected;
                 groups = groups.saturating_add(island_groups);
                 batches = batches.saturating_add(island_batches);

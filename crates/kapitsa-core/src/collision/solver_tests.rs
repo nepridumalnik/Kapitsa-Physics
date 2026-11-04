@@ -770,6 +770,31 @@ fn workload_heuristic_rejects_small_or_narrow_schedules() {
 }
 
 #[test]
+fn thousand_constraints_in_27_colors_cannot_meet_eight_worker_width() {
+    // ceil(n/16) <= (n+15)/16 for each of 27 nonempty colors.
+    let max_batches = (1000 + 27 * 15) / super::LARGE_ISLAND_BATCH_SIZE;
+    assert!(max_batches < 27 * 4);
+    for counts in [
+        {
+            let mut c = [37; 27];
+            c[0] = 38;
+            c
+        },
+        {
+            let mut c = [1; 27];
+            c[0] = 974;
+            c
+        },
+    ] {
+        let schedule = workload(&counts, 8);
+        assert_eq!(schedule.constraint_count, 1000);
+        assert!(schedule.batch_count <= max_batches);
+        assert!(schedule.useful_batch_count < 27 * 4);
+        assert!(!schedule.can_use_parallel_schedule(8));
+    }
+}
+
+#[test]
 fn workload_heuristic_thresholds_follow_available_workers() {
     let two_batches_per_color = workload(&[32; 64], 8);
     assert_eq!(two_batches_per_color.parallel_fraction_percent(), 50);

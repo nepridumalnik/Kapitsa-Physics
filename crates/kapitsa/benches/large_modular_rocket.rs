@@ -397,6 +397,21 @@ fn report_samples(
     let max = ordered[ordered.len() - 1];
     let metrics = p50.metrics.collision;
     let joint_metrics = p50.metrics.joints;
+    let schedule = metrics.colored_schedule;
+    println!(
+        "schedule rejection={} constraints={} colors={} batches={} useful_batches={} parallel_colors={} parallel_constraints={} sequential_constraints={} tasks_started={} velocity_ms={:.4} position_ms={:.4}",
+        schedule.rejection,
+        schedule.constraints,
+        schedule.colors,
+        schedule.batches,
+        schedule.useful_batches,
+        schedule.parallel_colors,
+        schedule.parallel_constraints,
+        schedule.sequential_constraints,
+        schedule.tasks_started,
+        milliseconds(schedule.velocity_sweeps),
+        milliseconds(schedule.position_sweeps)
+    );
     let mean_wall = samples
         .iter()
         .map(|sample| sample.elapsed.as_secs_f64())

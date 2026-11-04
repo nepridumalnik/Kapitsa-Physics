@@ -32,6 +32,23 @@ pub use contact::CollisionPair;
 pub use error::{CollisionError, QueryError};
 pub use event::{CollisionEvent, CollisionEventKind, ContactInfo};
 
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ColoredScheduleMetrics {
+    pub rejection: &'static str,
+    pub constraints: usize,
+    pub colors: usize,
+    pub batches: usize,
+    pub useful_batches: usize,
+    pub parallel_colors: usize,
+    pub parallel_constraints: usize,
+    pub sequential_constraints: usize,
+    pub tasks_started: usize,
+    pub velocity_sweeps: Duration,
+    pub position_sweeps: Duration,
+}
+
 /// Benchmark-only timings and workload counts from the most recent world step.
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]
@@ -146,6 +163,7 @@ pub struct CollisionStepMetrics {
     /// Logical solver-manifold value copies across build and write-back.
     pub solver_manifold_copies: usize,
     /// Whether any island selected the colored Gauss-Seidel solver.
+    pub colored_schedule: ColoredScheduleMetrics,
     pub colored_solver_selected: bool,
     /// Color groups actually submitted to the step executor.
     pub colored_groups_dispatched: usize,
@@ -211,6 +229,19 @@ impl CollisionStepMetrics {
         logical_capacity_growth_bytes: 0,
         solver_body_copies: 0,
         solver_manifold_copies: 0,
+        colored_schedule: ColoredScheduleMetrics {
+            rejection: "not-evaluated",
+            constraints: 0,
+            colors: 0,
+            batches: 0,
+            useful_batches: 0,
+            parallel_colors: 0,
+            parallel_constraints: 0,
+            sequential_constraints: 0,
+            tasks_started: 0,
+            velocity_sweeps: Duration::ZERO,
+            position_sweeps: Duration::ZERO,
+        },
         colored_solver_selected: false,
         colored_groups_dispatched: 0,
         colored_parallel_batches: 0,
