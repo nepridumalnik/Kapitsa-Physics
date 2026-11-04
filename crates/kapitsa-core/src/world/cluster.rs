@@ -862,7 +862,7 @@ impl PhysicsWorld {
             entry.local_transform = local_transform;
         }
         for &(collider, local_transform) in &transformed_colliders {
-            self.rebind_collider(collider, first, local_transform)?;
+            self.rebind_collider_prepared(collider, first, local_transform);
         }
         for (_, entry) in self.joints.iter_mut() {
             let mut frame_a = entry.joint.common().frame_a;
@@ -1099,7 +1099,7 @@ impl PhysicsWorld {
                         .collider(collider)
                         .ok_or(ClusterError::InvalidTopology)?
                         .local_transform();
-                    self.rebind_collider(collider, target_body, local_transform)?;
+                    self.rebind_collider_prepared(collider, target_body, local_transform);
                 }
             }
         }
@@ -1376,6 +1376,27 @@ impl PhysicsWorld {
         {
             return Err(ClusterError::InvalidTopology);
         }
+        self.rebind_collider_prepared(collider, body, local_transform);
+        Ok(())
+    }
+
+    fn rebind_collider_prepared(
+        &mut self,
+        collider: ColliderId,
+        body: BodyId,
+        local_transform: Transform,
+    ) {
+        let (old, prev, next, target_first) = match self.colliders.get(collider.dense) {
+            Some(entry) => (
+                entry.body,
+                entry.prev,
+                entry.next,
+                self.bodies
+                    .get(body.dense)
+                    .and_then(|value| value.first_collider),
+            ),
+            None => return,
+        };
         if old != body {
             if let Some(id) = prev {
                 if let Some(other) = self.colliders.get_mut(id.dense) {
@@ -1409,7 +1430,6 @@ impl PhysicsWorld {
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.collision_system.invalidate_collider_contacts(collider);
-        Ok(())
     }
 
     pub fn cluster(&self, body: BodyId) -> Option<&RigidCluster> {

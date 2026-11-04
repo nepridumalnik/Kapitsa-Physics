@@ -996,6 +996,59 @@ fn weld_anchor_validation_uses_local_coordinates_at_large_world_offsets() {
 }
 
 #[test]
+fn invalid_merge_leaves_cluster_topology_unchanged() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+    let first = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("first body");
+    let second = world
+        .add_body(RigidBody::new_static(Transform::identity()))
+        .expect("second body");
+    let first_part = world
+        .enable_cluster_with_mass(first, mass)
+        .expect("first root");
+    let second_part = world
+        .enable_cluster_with_mass(second, mass)
+        .expect("second root");
+    let before = (
+        world.body_count(),
+        world.cluster(first).cloned(),
+        world.cluster(second).cloned(),
+    );
+
+    let result = world.merge_clusters(
+        first,
+        second,
+        WeldDesc {
+            frame_a: JointFrame::IDENTITY,
+            frame_b: JointFrame {
+                local_anchor: Vec3::X,
+                local_rotation: kapitsa_math::Quat::IDENTITY,
+            },
+            strength: WeldStrength::Unbreakable,
+            stiffness: WeldStiffness {
+                linear: 1.0,
+                angular: 1.0,
+            },
+        },
+    );
+
+    assert_eq!(result, Err(ClusterError::IncompatibleAnchors));
+    assert_eq!(
+        (
+            world.body_count(),
+            world.cluster(first).cloned(),
+            world.cluster(second).cloned()
+        ),
+        before
+    );
+    assert_eq!(world.part_body(first_part), Some(first));
+    assert_eq!(world.part_body(second_part), Some(second));
+    assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
 fn breaking_weld_splits_chain_and_rebinds_part_targets() {
     let mut world = PhysicsWorld::new();
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
