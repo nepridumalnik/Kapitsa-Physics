@@ -168,6 +168,52 @@ impl Joint {
             Self::D6(joint) => joint.common.enabled = enabled,
         }
     }
+
+    pub(crate) fn with_frames(mut self, frame_a: JointFrame, frame_b: JointFrame) -> Self {
+        match &mut self {
+            Self::Fixed(joint) => {
+                joint.common.frame_a = frame_a;
+                joint.common.frame_b = frame_b;
+            }
+            Self::Hinge(joint) => {
+                joint.common.frame_a = frame_a;
+                joint.common.frame_b = frame_b;
+            }
+            Self::Slider(joint) => {
+                joint.common.frame_a = frame_a;
+                joint.common.frame_b = frame_b;
+            }
+            Self::Ball(joint) => {
+                joint.common.frame_a = frame_a;
+                joint.common.frame_b = frame_b;
+            }
+            Self::Cylindrical(joint) => {
+                joint.common.frame_a = frame_a;
+                joint.common.frame_b = frame_b;
+            }
+            Self::Planar(joint) => {
+                joint.common.frame_a = frame_a;
+                joint.common.frame_b = frame_b;
+            }
+            Self::Distance(joint) => {
+                joint.common.frame_a = frame_a;
+                joint.common.frame_b = frame_b;
+            }
+            Self::Spring(joint) => {
+                joint.common.frame_a = frame_a;
+                joint.common.frame_b = frame_b;
+            }
+            Self::ConeTwist(joint) => {
+                joint.common.frame_a = frame_a;
+                joint.common.frame_b = frame_b;
+            }
+            Self::D6(joint) => {
+                joint.common.frame_a = frame_a;
+                joint.common.frame_b = frame_b;
+            }
+        }
+        self
+    }
 }
 
 fn validate_limit(limit: Option<JointLimit>) -> Result<(), JointError> {

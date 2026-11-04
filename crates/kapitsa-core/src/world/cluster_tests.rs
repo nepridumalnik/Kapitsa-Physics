@@ -4,12 +4,12 @@ use crate::{
         ClusterPart, ClusterPartDesc, RigidCluster, Weld, WeldDesc, WeldStiffness, WeldStrength,
     },
     collider::Collider,
-    joint::JointFrame,
+    joint::{FixedJoint, Joint, JointCommon, JointFrame},
     mass::MassProperties,
     rigid_body::RigidBody,
     shape::{Shape, Sphere},
     transform::Transform,
-    world::{ForceSource, ForceTarget},
+    world::{ForceSource, ForceTarget, JointTarget},
 };
 use kapitsa_math::{Mat3, Vec3};
 
@@ -683,6 +683,23 @@ fn removing_cluster_root_cleans_part_targets_and_selects_stable_root() {
     let source = world
         .add_force_source_for_part(root, Vec3::ZERO, Vec3::Y)
         .expect("root force source");
+    let external = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), root_mass).expect("body"))
+        .expect("external body");
+    let joint = world
+        .add_joint_targets(
+            JointTarget::Part(root),
+            JointTarget::Body(external),
+            Joint::Fixed(FixedJoint::new(JointCommon::new(
+                JointFrame::IDENTITY,
+                JointFrame::IDENTITY,
+            ))),
+        )
+        .expect("targeted joint");
+    assert_eq!(
+        world.joint_targets(joint),
+        Some((JointTarget::Part(root), JointTarget::Body(external)))
+    );
 
     assert_eq!(world.remove_cluster_part(root), Ok(()));
     assert!(world.cluster_part(root).is_none());
@@ -696,6 +713,7 @@ fn removing_cluster_root_cleans_part_targets_and_selects_stable_root() {
         Some(2.0)
     );
     assert!(world.force_source(source).is_none());
+    assert!(world.joint(joint).is_none());
     assert_eq!(world.validate_clusters(), Ok(()));
     assert_eq!(
         world.remove_cluster_part(child),

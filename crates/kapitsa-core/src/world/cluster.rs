@@ -1,7 +1,7 @@
 use kapitsa_math::Vec3;
 use std::collections::{HashMap, HashSet};
 
-use super::{BodyId, ClusterError, ColliderId, ForceTarget, PartId, PhysicsWorld, WeldId};
+use super::{BodyId, ClusterError, ColliderId, ForceTarget, JointId, PartId, PhysicsWorld, WeldId};
 use crate::{
     cluster::{
         ClusterPart, MassChangeMode, MassTransfer, RigidCluster, Weld,
@@ -472,6 +472,22 @@ impl PhysicsWorld {
             .collect::<Vec<_>>();
         for dense in removed_sources {
             self.force_sources.remove(dense);
+        }
+        let removed_joints = self
+            .joints
+            .iter()
+            .filter_map(|(dense, entry)| {
+                (entry.target_a == super::JointTarget::Part(part)
+                    || entry.target_b == super::JointTarget::Part(part))
+                .then_some(dense)
+            })
+            .collect::<Vec<_>>();
+        for dense in removed_joints {
+            self.joints.remove(dense);
+            self.collision_system.invalidate_joint_warm_start(JointId {
+                world: self.world_id,
+                dense,
+            });
         }
         for collider in removed_colliders {
             self.remove_collider(collider)

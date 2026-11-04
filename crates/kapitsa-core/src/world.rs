@@ -45,7 +45,7 @@ use crate::{
     containers::DensePool,
     execution::{SequentialExecutor, StepExecutor},
     gravity::{CentralGravity, GravityError},
-    joint::{Joint, JointBreakEvent},
+    joint::{Joint, JointBreakEvent, JointFrame},
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
     rigid_body::{BodyState, BodyType, CcdMode, RigidBody, predict, predict_from_state},
     shape::Shape,
@@ -108,9 +108,18 @@ struct ForceSourceBodyUpdate {
 }
 
 struct JointEntry {
+    target_a: JointTarget,
+    target_b: JointTarget,
     body_a: BodyId,
     body_b: BodyId,
     joint: Joint,
+}
+
+/// Object used as one endpoint of a persistent joint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JointTarget {
+    Body(BodyId),
+    Part(PartId),
 }
 
 struct GravityBodyUpdate {
@@ -855,6 +864,8 @@ impl PhysicsWorld {
         let dense = self
             .joints
             .insert(JointEntry {
+                target_a: JointTarget::Body(body_a),
+                target_b: JointTarget::Body(body_b),
                 body_a,
                 body_b,
                 joint,
@@ -864,6 +875,58 @@ impl PhysicsWorld {
             world: self.world_id,
             dense,
         })
+    }
+
+    /// Adds a constraint between two body or cluster-part targets.
+    pub fn add_joint_targets(
+        &mut self,
+        target_a: JointTarget,
+        target_b: JointTarget,
+        joint: Joint,
+    ) -> Result<JointId, WorldError> {
+        let (body_a, frame_a) = self.resolve_joint_target(target_a)?;
+        let (body_b, frame_b) = self.resolve_joint_target(target_b)?;
+        if target_a == target_b {
+            return Err(WorldError::InvalidJointBodies);
+        }
+        joint.validate()?;
+        let frame_a = transform_joint_frame(frame_a, joint.common().frame_a)
+            .map_err(|_| WorldError::InvalidJointTarget)?;
+        let frame_b = transform_joint_frame(frame_b, joint.common().frame_b)
+            .map_err(|_| WorldError::InvalidJointTarget)?;
+        let dense = self
+            .joints
+            .insert(JointEntry {
+                target_a,
+                target_b,
+                body_a,
+                body_b,
+                joint: joint.with_frames(frame_a, frame_b),
+            })
+            .map_err(WorldError::from)?;
+        Ok(JointId {
+            world: self.world_id,
+            dense,
+        })
+    }
+
+    fn resolve_joint_target(
+        &self,
+        target: JointTarget,
+    ) -> Result<(BodyId, crate::transform::Transform), WorldError> {
+        match target {
+            JointTarget::Body(body) => self
+                .body(body)
+                .map(|_| (body, crate::transform::Transform::identity()))
+                .ok_or(WorldError::InvalidJointTarget),
+            JointTarget::Part(part) => self
+                .cluster_part(part)
+                .and_then(|entry| {
+                    self.cluster(entry.body())
+                        .map(|_| (entry.body(), entry.local_transform()))
+                })
+                .ok_or(WorldError::InvalidJointTarget),
+        }
     }
 
     /// Returns the configuration of a live joint in this world.
@@ -882,6 +945,15 @@ impl PhysicsWorld {
         self.joints
             .get(id.dense)
             .map(|entry| (entry.body_a, entry.body_b))
+    }
+
+    pub fn joint_targets(&self, id: JointId) -> Option<(JointTarget, JointTarget)> {
+        if id.world != self.world_id {
+            return None;
+        }
+        self.joints
+            .get(id.dense)
+            .map(|entry| (entry.target_a, entry.target_b))
     }
 
     /// Replaces a joint's settings while retaining its ID and attached bodies.
@@ -1728,7 +1800,10 @@ impl PhysicsWorld {
             .try_reserve(self.joints.len())
             .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
         for (_, entry) in self.joints.iter() {
-            if !entry.joint.common().enabled || entry.joint.common().collide_connected {
+            if entry.body_a == entry.body_b
+                || !entry.joint.common().enabled
+                || entry.joint.common().collide_connected
+            {
                 continue;
             }
             let pair = if entry.body_a < entry.body_b {
@@ -1757,6 +1832,9 @@ impl PhysicsWorld {
         for (dense, entry) in joints.iter() {
             let (body_a_id, body_b_id, joint) = (entry.body_a, entry.body_b, entry.joint);
             if !joint.common().enabled {
+                continue;
+            }
+            if body_a_id == body_b_id {
                 continue;
             }
             let body_type_a = bodies
@@ -5362,6 +5440,19 @@ fn validate_force_source_values(
         return Err(ForceSourceError::NonFiniteValue);
     }
     Ok(())
+}
+
+fn transform_joint_frame(
+    target_transform: crate::transform::Transform,
+    frame: JointFrame,
+) -> Result<JointFrame, crate::transform::TransformError> {
+    let frame_transform =
+        crate::transform::Transform::new(frame.local_anchor, frame.local_rotation)?;
+    let transformed = target_transform.compose(&frame_transform)?;
+    Ok(JointFrame::new(
+        transformed.translation(),
+        transformed.rotation(),
+    ))
 }
 
 fn body_point_velocity(
