@@ -832,9 +832,27 @@ impl PhysicsWorld {
     }
 
     fn invalidate_body_edit(&mut self, id: BodyId) {
+        self.synchronize_cluster_physics_state(&[id]);
+    }
+
+    pub(crate) fn synchronize_cluster_physics_state(&mut self, bodies: &[BodyId]) {
+        let mut colliders = Vec::new();
+        for &body in bodies {
+            let mut next = self
+                .bodies
+                .get(body.dense)
+                .and_then(|entry| entry.first_collider);
+            while let Some(id) = next {
+                colliders.push(id);
+                next = self.colliders.get(id.dense).and_then(|entry| entry.next);
+            }
+        }
+        for collider in colliders {
+            self.collision_system.invalidate_collider_contacts(collider);
+        }
         if self.collision_system.joint_warm_start_enabled() {
             for (dense, entry) in self.joints.iter() {
-                if entry.body_a == id || entry.body_b == id {
+                if bodies.contains(&entry.body_a) || bodies.contains(&entry.body_b) {
                     self.collision_system.invalidate_joint_warm_start(JointId {
                         world: self.world_id,
                         dense,

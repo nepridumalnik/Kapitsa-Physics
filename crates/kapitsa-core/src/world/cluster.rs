@@ -362,7 +362,6 @@ impl PhysicsWorld {
         };
 
         if let Some(prepared) = prepared_body {
-            self.invalidate_body_edit(body);
             if let Some(entry) = self.bodies.get_mut(body.dense) {
                 entry.body = prepared;
             }
@@ -375,8 +374,7 @@ impl PhysicsWorld {
             cluster.parts.push(part);
             cluster.welds.push(weld);
         }
-        self.mark_query_index_dirty();
-        self.collision_system.mark_spatial_dirty();
+        self.synchronize_cluster_physics_state(&[body]);
         Ok(part)
     }
 
@@ -573,7 +571,7 @@ impl PhysicsWorld {
         if let Some(entry) = self.bodies.get_mut(body.dense) {
             entry.body = prepared;
         }
-        self.invalidate_body_edit(body);
+        self.synchronize_cluster_physics_state(&[body]);
         Ok(())
     }
 
@@ -917,9 +915,7 @@ impl PhysicsWorld {
         self.bodies
             .remove(second.dense)
             .ok_or(ClusterError::InvalidBodyId)?;
-        self.invalidate_body_edit(first);
-        self.mark_query_index_dirty();
-        self.collision_system.mark_spatial_dirty();
+        self.synchronize_cluster_physics_state(&[first]);
         Ok(())
     }
 
@@ -1176,12 +1172,10 @@ impl PhysicsWorld {
                 }
             }
         }
-        self.invalidate_body_edit(body);
-        for &new_body in &new_bodies {
-            self.invalidate_body_edit(new_body);
-        }
-        self.mark_query_index_dirty();
-        self.collision_system.mark_spatial_dirty();
+        let mut affected_bodies = Vec::with_capacity(new_bodies.len() + 1);
+        affected_bodies.push(body);
+        affected_bodies.extend(new_bodies.iter().copied());
+        self.synchronize_cluster_physics_state(&affected_bodies);
         let mut result = Vec::with_capacity(new_bodies.len() + 1);
         result.push(body);
         result.extend(new_bodies);
@@ -1321,7 +1315,7 @@ impl PhysicsWorld {
             collider = self.colliders.get(id.dense).and_then(|entry| entry.next);
             self.collision_system.invalidate_collider_contacts(id);
         }
-        self.invalidate_body_edit(body);
+        self.synchronize_cluster_physics_state(&[body]);
         Ok(())
     }
 
