@@ -207,6 +207,23 @@ impl<T> DensePool<T> {
         &mut self,
         values: Vec<T>,
     ) -> Result<Vec<DenseId>, DensePoolError> {
+        self.try_insert_many_inner(values, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_insert_many_failing_after(
+        &mut self,
+        values: Vec<T>,
+        fail_after: usize,
+    ) -> Result<Vec<DenseId>, DensePoolError> {
+        self.try_insert_many_inner(values, Some(fail_after))
+    }
+
+    fn try_insert_many_inner(
+        &mut self,
+        values: Vec<T>,
+        fail_after: Option<usize>,
+    ) -> Result<Vec<DenseId>, DensePoolError> {
         let count = values.len();
         if count == 0 {
             return Ok(Vec::new());
@@ -224,7 +241,11 @@ impl<T> DensePool<T> {
         ids.try_reserve(count)
             .map_err(|_| DensePoolError::CapacityExceeded)?;
 
-        for value in values {
+        for (index, value) in values.into_iter().enumerate() {
+            if fail_after == Some(index) {
+                self.rollback_batch(start_values, start_slots, start_free_head, &consumed_slots);
+                return Err(DensePoolError::CapacityExceeded);
+            }
             match self.insert_batch_value(value, &mut consumed_slots) {
                 Ok(id) => ids.push(id),
                 Err(error) => {

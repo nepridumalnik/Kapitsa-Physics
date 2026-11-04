@@ -29,7 +29,6 @@ impl PhysicsWorld {
             .local_transform()
             .compose(&collider.local_transform())
             .map_err(ClusterError::Transform)?;
-        let colliders = part_entry.colliders().len();
         self.parts
             .get_mut(part.dense)
             .ok_or(ClusterError::InvalidPartId)?
@@ -40,14 +39,11 @@ impl PhysicsWorld {
         let id = self
             .add_collider_internal(body, collider)
             .map_err(map_cluster_world_error)?;
-        let entry = self
-            .parts
+        self.parts
             .get_mut(part.dense)
-            .expect("validated cluster part must exist");
-        if entry.colliders.len() != colliders {
-            return Err(ClusterError::InvalidTopology);
-        }
-        entry.colliders.push(id);
+            .expect("validated cluster part must exist")
+            .colliders
+            .push(id);
         Ok(id)
     }
 
