@@ -24,6 +24,8 @@ const SMALL_COLOR_MERGE_THRESHOLD: usize = 32;
 const COLORED_MIN_WIDTH_DIVISOR: usize = 2;
 /// Minimum share of batches that must overlap with another batch in their color.
 const COLORED_MIN_PARALLEL_FRACTION_PERCENT: usize = 50;
+/// Dispatching a single batch through an executor only adds scheduling cost.
+const COLORED_MIN_PARALLEL_BATCHES: usize = 2;
 
 /// Cheap deterministic estimate of how well the color schedule maps to workers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -305,6 +307,12 @@ pub(crate) struct SolverWorkspace {
     color_batch_offsets: Vec<usize>,
     joint_task_locations: Vec<[usize; 2]>,
     active_colored_batches: usize,
+    #[cfg(feature = "bench-internals")]
+    colored_solver_selected: bool,
+    #[cfg(feature = "bench-internals")]
+    colored_groups_dispatched: usize,
+    #[cfg(feature = "bench-internals")]
+    colored_parallel_batches: usize,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -493,7 +501,29 @@ impl SolverWorkspace {
             color_batch_offsets: Vec::new(),
             joint_task_locations: Vec::new(),
             active_colored_batches: 0,
+            #[cfg(feature = "bench-internals")]
+            colored_solver_selected: false,
+            #[cfg(feature = "bench-internals")]
+            colored_groups_dispatched: 0,
+            #[cfg(feature = "bench-internals")]
+            colored_parallel_batches: 0,
         }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn colored_dispatch_metrics(&self) -> (bool, usize, usize) {
+        (
+            self.colored_solver_selected,
+            self.colored_groups_dispatched,
+            self.colored_parallel_batches,
+        )
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn reset_colored_dispatch_metrics(&mut self) {
+        self.colored_solver_selected = false;
+        self.colored_groups_dispatched = 0;
+        self.colored_parallel_batches = 0;
     }
 
     pub(crate) fn clear(&mut self) {
@@ -892,7 +922,11 @@ impl SolverWorkspace {
                 continue;
             }
             let batches = &self.colored_batches[start..end];
-            if contact_only && !batches.iter().any(ColoredConstraintBatch::has_contacts) {
+            let active_batch_count = batches
+                .iter()
+                .filter(|batch| !contact_only || batch.has_contacts())
+                .count();
+            if active_batch_count == 0 {
                 continue;
             }
             let constraint_count = batches
@@ -906,8 +940,25 @@ impl SolverWorkspace {
                     }
                 })
                 .sum::<usize>();
-            if constraint_count < SMALL_COLOR_MERGE_THRESHOLD {
-                for batch in &mut self.colored_batches[start..end] {
+            // Contact constraints precede joints in each color, so inactive
+            // joint batches form a suffix that does not need to be dispatched.
+            let process_end = if contact_only {
+                let prefix = batches
+                    .iter()
+                    .take_while(|batch| batch.has_contacts())
+                    .count();
+                if prefix == active_batch_count {
+                    start + prefix
+                } else {
+                    end
+                }
+            } else {
+                end
+            };
+            let use_parallel = active_batch_count >= COLORED_MIN_PARALLEL_BATCHES
+                && constraint_count > SMALL_COLOR_MERGE_THRESHOLD;
+            if !use_parallel {
+                for batch in &mut self.colored_batches[start..process_end] {
                     if contact_only && !batch.has_contacts() {
                         continue;
                     }
@@ -920,7 +971,15 @@ impl SolverWorkspace {
                     )?;
                 }
             } else {
-                let batch_count = end - start;
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.colored_groups_dispatched =
+                        self.colored_groups_dispatched.saturating_add(1);
+                    self.colored_parallel_batches = self
+                        .colored_parallel_batches
+                        .saturating_add(active_batch_count);
+                }
+                let batch_count = process_end - start;
                 let task_count = worker_count
                     .min(31)
                     .saturating_mul(2)
@@ -928,7 +987,7 @@ impl SolverWorkspace {
                     .max(1);
                 let chunk_size = batch_count.div_ceil(task_count);
                 let batch_result = executor.for_each_chunk_mut(
-                    &mut self.colored_batches[start..end],
+                    &mut self.colored_batches[start..process_end],
                     chunk_size,
                     |_, batches| {
                         for batch in batches {
@@ -950,7 +1009,7 @@ impl SolverWorkspace {
                 if batch_result.is_err() {
                     return Err(CollisionError::WorkerFailed);
                 }
-                if let Some(error) = self.colored_batches[start..end]
+                if let Some(error) = self.colored_batches[start..process_end]
                     .iter_mut()
                     .find_map(|batch| batch.error.take())
                 {
@@ -1173,6 +1232,8 @@ impl SolverWorkspace {
         if !dt.is_finite() || dt <= 0.0 || !joint_solver_options.iterations().validate() {
             return Err(CollisionError::InvalidConfig);
         }
+        #[cfg(feature = "bench-internals")]
+        self.reset_colored_dispatch_metrics();
         JointSolver::begin_step(joint_workspace);
         let coloring_constraint_count = manifolds.len().saturating_add(joints.len());
         if cfg!(feature = "bench-internals")
@@ -1194,6 +1255,10 @@ impl SolverWorkspace {
                 worker_count,
                 coloring_constraint_count,
             ) {
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.colored_solver_selected = true;
+                }
                 self.prepare_colored_batches(manifolds, joints, graph_rebuilt)?;
                 return self.solve_colored_constraints(
                     bodies,

@@ -145,6 +145,12 @@ pub struct CollisionStepMetrics {
     pub solver_body_copies: usize,
     /// Logical solver-manifold value copies across build and write-back.
     pub solver_manifold_copies: usize,
+    /// Whether any island selected the colored Gauss-Seidel solver.
+    pub colored_solver_selected: bool,
+    /// Color groups actually submitted to the step executor.
+    pub colored_groups_dispatched: usize,
+    /// Batches processed by the step executor in parallel color groups.
+    pub colored_parallel_batches: usize,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -205,6 +211,9 @@ impl CollisionStepMetrics {
         logical_capacity_growth_bytes: 0,
         solver_body_copies: 0,
         solver_manifold_copies: 0,
+        colored_solver_selected: false,
+        colored_groups_dispatched: 0,
+        colored_parallel_batches: 0,
     };
 }
 pub(crate) use event::{CollisionInteraction, CollisionLifecycle};

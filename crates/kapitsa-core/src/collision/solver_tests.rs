@@ -1,3 +1,4 @@
+use crate::execution::{ExecutionError, StepExecutor};
 use crate::{
     collider::Collider,
     collision::{
@@ -18,6 +19,75 @@ use crate::{
     world::PhysicsWorld,
 };
 use kapitsa_math::{Mat3, Vec3};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Default)]
+struct CountingExecutor {
+    calls: AtomicUsize,
+    chunks: AtomicUsize,
+}
+
+impl CountingExecutor {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+
+    fn chunks(&self) -> usize {
+        self.chunks.load(Ordering::Relaxed)
+    }
+}
+
+impl StepExecutor for CountingExecutor {
+    fn for_each_chunk_mut<T, F>(
+        &self,
+        values: &mut [T],
+        chunk_size: usize,
+        operation: F,
+    ) -> Result<(), ExecutionError>
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Send + Sync,
+    {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if chunk_size == 0 {
+            return Err(ExecutionError::InvalidChunkLayout);
+        }
+        for (index, chunk) in values.chunks_mut(chunk_size).enumerate() {
+            self.chunks.fetch_add(1, Ordering::Relaxed);
+            operation(index, chunk);
+        }
+        Ok(())
+    }
+
+    fn for_each_chunk_layout_mut<T, F>(
+        &self,
+        values: &mut [T],
+        chunk_sizes: &[usize],
+        operation: F,
+    ) -> Result<(), ExecutionError>
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Send + Sync,
+    {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let mut remaining = values;
+        let mut start = 0;
+        for &chunk_size in chunk_sizes {
+            if chunk_size == 0 || chunk_size > remaining.len() {
+                return Err(ExecutionError::InvalidChunkLayout);
+            }
+            let (chunk, tail) = remaining.split_at_mut(chunk_size);
+            self.chunks.fetch_add(1, Ordering::Relaxed);
+            operation(start, chunk);
+            start += chunk_size;
+            remaining = tail;
+        }
+        if !remaining.is_empty() {
+            return Err(ExecutionError::InvalidChunkLayout);
+        }
+        Ok(())
+    }
+}
 
 fn pair() -> CollisionPair {
     let mut world = PhysicsWorld::new();
@@ -413,6 +483,7 @@ fn contact_only_phases_do_not_touch_joints() {
         })
         .collect::<Vec<_>>();
     let step = JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy());
+    let executor = CountingExecutor::default();
     for phase in [
         super::ColoredConstraintPhase::PrepareContactPoints,
         super::ColoredConstraintPhase::WarmStartContacts,
@@ -424,11 +495,12 @@ fn contact_only_phases_do_not_touch_joints() {
                 super::CollisionConfig::default(),
                 step,
                 phase,
-                &crate::execution::SequentialExecutor,
+                &executor,
                 8,
             )
             .unwrap();
     }
+    assert_eq!(executor.calls(), 0);
 
     for (body, (transform, linear, angular)) in solver_bodies.iter().zip(before) {
         assert_eq!(body.body().state().transform(), transform);
@@ -610,6 +682,77 @@ fn workload(constraints_per_color: &[usize], worker_count: usize) -> super::Colo
             .saturating_add(batch_count.min(worker_count));
     }
     workload
+}
+
+fn static_contact_fixture(count: usize) -> (Vec<SolverBody>, Vec<SolverManifold>) {
+    let bodies = (0..count * 2)
+        .map(|_| {
+            let body = RigidBody::new_static(Transform::identity());
+            let state = *body.state();
+            SolverBody::from_prediction(body, state)
+        })
+        .collect::<Vec<_>>();
+    let contact = ContactPoint::from_world(
+        &Transform::identity(),
+        &Transform::identity(),
+        Vec3::ZERO,
+        Vec3::new(0.0, -0.1, 0.0),
+        Vec3::Y,
+        0.1,
+        1,
+    )
+    .unwrap();
+    let mut manifolds = Vec::with_capacity(count);
+    for index in 0..count {
+        let mut manifold = ContactManifold::new(pair());
+        manifold.insert(contact, Vec3::ZERO).unwrap();
+        manifolds.push(SolverManifold {
+            body_a: index * 2,
+            body_b: index * 2 + 1,
+            manifold,
+            material: SolverMaterial {
+                restitution: 0.0,
+                static_friction: 0.0,
+                dynamic_friction: 0.0,
+            },
+        });
+    }
+    (bodies, manifolds)
+}
+
+#[test]
+fn colored_dispatch_uses_executor_only_for_multi_batch_groups() {
+    for (contact_count, expected_calls) in [(1, 0), (20, 0), (33, 1)] {
+        let (mut bodies, mut manifolds) = static_contact_fixture(contact_count);
+        let mut workspace = SolverWorkspace::new();
+        prepare_colored_workspace(&mut workspace, &bodies, &manifolds, &[]);
+        let executor = CountingExecutor::default();
+        workspace
+            .execute_colored_phase(
+                &mut bodies,
+                &mut manifolds,
+                super::CollisionConfig::default(),
+                JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy()),
+                super::ColoredConstraintPhase::PrepareContactPoints,
+                &executor,
+                8,
+            )
+            .unwrap();
+        assert_eq!(
+            executor.calls(),
+            expected_calls,
+            "unexpected dispatch for {contact_count} contacts"
+        );
+        if expected_calls > 0 {
+            assert!(executor.chunks() > 1);
+            #[cfg(feature = "bench-internals")]
+            {
+                let (_, groups, batches) = workspace.colored_dispatch_metrics();
+                assert_eq!(groups, 1);
+                assert_eq!(batches, 3);
+            }
+        }
+    }
 }
 
 #[test]

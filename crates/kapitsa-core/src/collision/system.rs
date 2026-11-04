@@ -1257,6 +1257,23 @@ impl CollisionSystem {
             }
         }
 
+        #[cfg(feature = "bench-internals")]
+        {
+            let mut selected = false;
+            let mut groups = 0_usize;
+            let mut batches = 0_usize;
+            for island in self.solver_islands.iter().take(island_count) {
+                let (island_selected, island_groups, island_batches) =
+                    island.workspace.colored_dispatch_metrics();
+                selected |= island_selected;
+                groups = groups.saturating_add(island_groups);
+                batches = batches.saturating_add(island_batches);
+            }
+            self.benchmark_metrics.colored_solver_selected = selected;
+            self.benchmark_metrics.colored_groups_dispatched = groups;
+            self.benchmark_metrics.colored_parallel_batches = batches;
+        }
+
         for island_index in 0..island_count {
             #[cfg(feature = "bench-internals")]
             self.record_joint_solver_counters(
