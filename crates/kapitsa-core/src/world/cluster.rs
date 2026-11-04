@@ -40,12 +40,14 @@ impl PhysicsWorld {
         let id = self
             .add_collider_internal(body, collider)
             .map_err(map_cluster_world_error)?;
-        if let Some(entry) = self.parts.get_mut(part.dense) {
-            if entry.colliders.len() != colliders {
-                return Err(ClusterError::InvalidTopology);
-            }
-            entry.colliders.push(id);
+        let entry = self
+            .parts
+            .get_mut(part.dense)
+            .expect("validated cluster part must exist");
+        if entry.colliders.len() != colliders {
+            return Err(ClusterError::InvalidTopology);
         }
+        entry.colliders.push(id);
         Ok(id)
     }
 
@@ -340,9 +342,10 @@ impl PhysicsWorld {
                 }
             }
         }
-        if let Some(entry) = self.parts.get_mut(part_dense) {
-            entry.colliders = collider_ids;
-        }
+        self.parts
+            .get_mut(part_dense)
+            .expect("inserted cluster part must exist")
+            .colliders = collider_ids.clone();
 
         let weld_dense = match self.welds.insert(Weld {
             part_a: parent,
@@ -351,12 +354,7 @@ impl PhysicsWorld {
         }) {
             Ok(value) => value,
             Err(_) => {
-                let colliders = self
-                    .parts
-                    .get(part_dense)
-                    .map(|entry| entry.colliders.clone())
-                    .unwrap_or_default();
-                for collider_id in colliders {
+                for collider_id in collider_ids {
                     self.remove_collider_internal(collider_id);
                 }
                 self.parts.remove(part_dense);
@@ -369,18 +367,18 @@ impl PhysicsWorld {
         };
 
         if let Some(prepared) = prepared_body {
-            if let Some(entry) = self.bodies.get_mut(body.dense) {
-                entry.body = prepared;
-            }
+            self.bodies
+                .get_mut(body.dense)
+                .expect("cluster body must exist")
+                .body = prepared;
         }
-        if let Some(cluster) = self
+        let cluster = self
             .bodies
             .get_mut(body.dense)
             .and_then(|entry| entry.cluster.as_mut())
-        {
-            cluster.parts.push(part);
-            cluster.welds.push(weld);
-        }
+            .expect("validated cluster must exist");
+        cluster.parts.push(part);
+        cluster.welds.push(weld);
         self.synchronize_cluster_physics_state(&[body]);
         Ok(part)
     }
@@ -575,9 +573,10 @@ impl PhysicsWorld {
         cluster.root = root;
         cluster.parts.retain(|id| *id != part);
         cluster.welds.retain(|id| !removed_welds.contains(id));
-        if let Some(entry) = self.bodies.get_mut(body.dense) {
-            entry.body = prepared;
-        }
+        self.bodies
+            .get_mut(body.dense)
+            .expect("cluster body must exist")
+            .body = prepared;
         self.synchronize_cluster_physics_state(&[body]);
         Ok(())
     }
@@ -744,6 +743,7 @@ impl PhysicsWorld {
                 if first_type == BodyType::Dynamic && !collider_entry.collider.shape().is_convex() {
                     return Err(ClusterError::UnsupportedGeometry);
                 }
+                self.validate_collider_rebind(collider, first)?;
                 let local_transform = relative
                     .compose(&collider_entry.collider.local_transform())
                     .map_err(ClusterError::Transform)?;
@@ -909,30 +909,34 @@ impl PhysicsWorld {
             dense: bridge_dense,
         };
         for &(part, local_transform) in &transformed_parts {
-            if let Some(entry) = self.parts.get_mut(part.dense) {
-                entry.body = first;
-                entry.local_transform = local_transform;
-            }
+            let entry = self
+                .parts
+                .get_mut(part.dense)
+                .expect("cluster part must be validated before commit");
+            entry.body = first;
+            entry.local_transform = local_transform;
         }
         for &(collider, local_transform) in &transformed_colliders {
             self.rebind_collider_prepared(collider, first, local_transform);
         }
         for (dense, target_a_moves, target_b_moves, frame_a, frame_b) in joint_updates {
-            if let Some(entry) = self.joints.get_mut(dense) {
-                if target_a_moves {
-                    if entry.target_a == JointTarget::Body(second) {
-                        entry.target_a = JointTarget::Body(first);
-                    }
-                    entry.body_a = first;
+            let entry = self
+                .joints
+                .get_mut(dense)
+                .expect("joint must exist during merge commit");
+            if target_a_moves {
+                if entry.target_a == JointTarget::Body(second) {
+                    entry.target_a = JointTarget::Body(first);
                 }
-                if target_b_moves {
-                    if entry.target_b == JointTarget::Body(second) {
-                        entry.target_b = JointTarget::Body(first);
-                    }
-                    entry.body_b = first;
-                }
-                entry.joint = entry.joint.with_frames(frame_a, frame_b);
+                entry.body_a = first;
             }
+            if target_b_moves {
+                if entry.target_b == JointTarget::Body(second) {
+                    entry.target_b = JointTarget::Body(first);
+                }
+                entry.body_b = first;
+            }
+            entry.joint = entry.joint.with_frames(frame_a, frame_b);
         }
         for (_, source) in self.force_sources.iter_mut() {
             if source.target == ForceTarget::Body(second) {
@@ -946,20 +950,21 @@ impl PhysicsWorld {
                 source.body = first;
             }
         }
-        if let Some(cluster) = self
+        let cluster = self
             .bodies
             .get_mut(first.dense)
             .and_then(|entry| entry.cluster.as_mut())
-        {
-            cluster.parts.extend(second_parts);
-            cluster.welds.extend(second_welds);
-            cluster.welds.push(bridge);
-        }
-        if let Some(entry) = self.bodies.get_mut(first.dense) {
-            entry.body = prepared;
-        }
-        let removed = self.bodies.remove(second.dense);
-        debug_assert!(removed.is_some());
+            .expect("first cluster must be validated before merge commit");
+        cluster.parts.extend(second_parts);
+        cluster.welds.extend(second_welds);
+        cluster.welds.push(bridge);
+        self.bodies
+            .get_mut(first.dense)
+            .expect("first body must exist during merge commit")
+            .body = prepared;
+        self.bodies
+            .remove(second.dense)
+            .expect("second body must exist during merge commit");
         self.synchronize_cluster_physics_state(&[first]);
         Ok(())
     }
@@ -1106,48 +1111,45 @@ impl PhysicsWorld {
                         .collider(collider)
                         .ok_or(ClusterError::InvalidTopology)?
                         .local_transform();
+                    self.validate_collider_source(collider)?;
                     collider_transforms.push((collider, local_transform));
                 }
                 part_rebinds.push((component_index - 1, part, collider_transforms));
             }
         }
 
-        self.bodies
-            .try_reserve_insertions(components.len().saturating_sub(1))
-            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
-        let mut new_bodies = Vec::<BodyId>::new();
-        new_bodies
-            .try_reserve(components.len().saturating_sub(1))
-            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
-        for prepared in prepared_bodies.iter().skip(1).copied() {
-            let dense = match self.bodies.insert(BodyEntry {
-                body: prepared,
+        let entries = prepared_bodies
+            .iter()
+            .skip(1)
+            .copied()
+            .map(|body| BodyEntry {
+                body,
                 first_collider: None,
                 cluster: None,
-            }) {
-                Ok(dense) => dense,
-                Err(_) => {
-                    for id in new_bodies {
-                        self.bodies.remove(id.dense);
-                    }
-                    return Err(ClusterError::StorageCapacityExceeded);
-                }
-            };
-            new_bodies.push(BodyId {
+            })
+            .collect::<Vec<_>>();
+        let new_bodies = self
+            .bodies
+            .try_insert_many(entries)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?
+            .into_iter()
+            .map(|dense| BodyId {
                 world: self.world_id,
                 dense,
-            });
-        }
+            })
+            .collect::<Vec<_>>();
 
         for &weld in removed_welds {
-            let removed = self.welds.remove(weld.dense);
-            debug_assert!(removed.is_some());
+            self.welds
+                .remove(weld.dense)
+                .expect("weld must be validated before split commit");
         }
         for (target_index, part, collider_transforms) in part_rebinds {
             let target_body = new_bodies[target_index];
-            if let Some(entry) = self.parts.get_mut(part.dense) {
-                entry.body = target_body;
-            }
+            self.parts
+                .get_mut(part.dense)
+                .expect("cluster part must be validated before split commit")
+                .body = target_body;
             for (collider, local_transform) in collider_transforms {
                 self.rebind_collider_prepared(collider, target_body, local_transform);
             }
@@ -1164,14 +1166,16 @@ impl PhysicsWorld {
             })
             .collect::<Vec<_>>();
         let root = original_root;
-        if let Some(entry) = self.bodies.get_mut(body.dense) {
-            entry.body = prepared_bodies[0];
-            entry.cluster = Some(RigidCluster {
-                root,
-                parts: root_component.clone(),
-                welds: root_welds,
-            });
-        }
+        let entry = self
+            .bodies
+            .get_mut(body.dense)
+            .expect("root body must exist during split commit");
+        entry.body = prepared_bodies[0];
+        entry.cluster = Some(RigidCluster {
+            root,
+            parts: root_component.clone(),
+            welds: root_welds,
+        });
         for (component_index, component) in components.iter().enumerate().skip(1) {
             let target_body = new_bodies[component_index - 1];
             let welds = remaining_welds
@@ -1183,13 +1187,15 @@ impl PhysicsWorld {
                     })
                 })
                 .collect::<Vec<_>>();
-            if let Some(entry) = self.bodies.get_mut(target_body.dense) {
-                entry.cluster = Some(RigidCluster {
-                    root: component[0],
-                    parts: component.clone(),
-                    welds,
-                });
-            }
+            let entry = self
+                .bodies
+                .get_mut(target_body.dense)
+                .expect("split body must exist during commit");
+            entry.cluster = Some(RigidCluster {
+                root: component[0],
+                parts: component.clone(),
+                welds,
+            });
         }
         let part_body = components
             .iter()
@@ -1379,14 +1385,15 @@ impl PhysicsWorld {
         body: BodyId,
         local_transform: Transform,
     ) -> Result<(), ClusterError> {
-        if collider.world != self.world_id || body.world != self.world_id {
+        self.validate_collider_rebind(collider, body)?;
+        self.rebind_collider_prepared(collider, body, local_transform);
+        Ok(())
+    }
+
+    fn validate_collider_source(&self, collider: ColliderId) -> Result<(), ClusterError> {
+        if collider.world != self.world_id {
             return Err(ClusterError::InvalidTopology);
         }
-        let target = self
-            .bodies
-            .get(body.dense)
-            .ok_or(ClusterError::InvalidBodyId)?;
-        let target_first = target.first_collider;
         let entry = self
             .colliders
             .get(collider.dense)
@@ -1394,11 +1401,6 @@ impl PhysicsWorld {
         let old = entry.body;
         let prev = entry.prev;
         let next = entry.next;
-        if target.body.physics().body_type() == BodyType::Dynamic
-            && !entry.collider.shape().is_convex()
-        {
-            return Err(ClusterError::UnsupportedGeometry);
-        }
         let old_body = self
             .bodies
             .get(old.dense)
@@ -1415,65 +1417,113 @@ impl PhysicsWorld {
                     .get(id.dense)
                     .is_none_or(|other| other.body != old || other.prev != Some(collider))
             })
-            || target_first.is_some_and(|id| {
-                self.colliders
-                    .get(id.dense)
-                    .is_none_or(|other| other.body != body || other.prev.is_some())
-            })
         {
             return Err(ClusterError::InvalidTopology);
         }
-        self.rebind_collider_prepared(collider, body, local_transform);
         Ok(())
     }
 
+    fn validate_collider_rebind(
+        &self,
+        collider: ColliderId,
+        body: BodyId,
+    ) -> Result<(), ClusterError> {
+        if collider.world != self.world_id || body.world != self.world_id {
+            return Err(ClusterError::InvalidTopology);
+        }
+        let target = self
+            .bodies
+            .get(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        let target_first = target.first_collider;
+        let entry = self
+            .colliders
+            .get(collider.dense)
+            .ok_or(ClusterError::InvalidTopology)?;
+        if target.body.physics().body_type() == BodyType::Dynamic
+            && !entry.collider.shape().is_convex()
+        {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
+        self.validate_collider_source(collider)?;
+        if target_first.is_some_and(|id| {
+            self.colliders
+                .get(id.dense)
+                .is_none_or(|other| other.body != body || other.prev.is_some())
+        }) {
+            return Err(ClusterError::InvalidTopology);
+        }
+        Ok(())
+    }
+
+    /// Rebinds a collider whose existence, ownership, and links were validated
+    /// by the caller before the commit phase.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the collider, one of its linked-list neighbours, or the
+    /// target body is missing. This enforces the preconditions instead of
+    /// silently leaving the world in a partially updated state.
     fn rebind_collider_prepared(
         &mut self,
         collider: ColliderId,
         body: BodyId,
         local_transform: Transform,
     ) {
-        let (old, prev, next, target_first) = match self.colliders.get(collider.dense) {
-            Some(entry) => (
+        let (old, prev, next, target_first) = {
+            let entry = self
+                .colliders
+                .get(collider.dense)
+                .expect("collider must be validated before rebinding");
+            (
                 entry.body,
                 entry.prev,
                 entry.next,
                 self.bodies
                     .get(body.dense)
-                    .and_then(|value| value.first_collider),
-            ),
-            None => return,
+                    .expect("rebind target body must exist")
+                    .first_collider,
+            )
         };
         if old != body {
             if let Some(id) = prev {
-                if let Some(other) = self.colliders.get_mut(id.dense) {
-                    other.next = next;
-                }
-            } else if let Some(old_body) = self.bodies.get_mut(old.dense) {
-                old_body.first_collider = next;
+                self.colliders
+                    .get_mut(id.dense)
+                    .expect("previous collider link must exist")
+                    .next = next;
+            } else {
+                self.bodies
+                    .get_mut(old.dense)
+                    .expect("collider source body must exist")
+                    .first_collider = next;
             }
-            if let Some(id) = next
-                && let Some(other) = self.colliders.get_mut(id.dense)
-            {
-                other.prev = prev;
+            if let Some(id) = next {
+                self.colliders
+                    .get_mut(id.dense)
+                    .expect("next collider link must exist")
+                    .prev = prev;
             }
-            if let Some(id) = target_first
-                && let Some(other) = self.colliders.get_mut(id.dense)
-            {
-                other.prev = Some(collider);
+            if let Some(id) = target_first {
+                self.colliders
+                    .get_mut(id.dense)
+                    .expect("target collider link must exist")
+                    .prev = Some(collider);
             }
-            if let Some(target) = self.bodies.get_mut(body.dense) {
-                target.first_collider = Some(collider);
-            }
+            self.bodies
+                .get_mut(body.dense)
+                .expect("rebind target body must exist")
+                .first_collider = Some(collider);
         }
-        if let Some(entry) = self.colliders.get_mut(collider.dense) {
-            if old != body {
-                entry.body = body;
-                entry.prev = None;
-                entry.next = target_first;
-            }
-            entry.collider.set_local_transform(local_transform);
+        let entry = self
+            .colliders
+            .get_mut(collider.dense)
+            .expect("collider must be validated before rebinding");
+        if old != body {
+            entry.body = body;
+            entry.prev = None;
+            entry.next = target_first;
         }
+        entry.collider.set_local_transform(local_transform);
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.collision_system.invalidate_collider_contacts(collider);
