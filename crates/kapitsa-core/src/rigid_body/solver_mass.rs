@@ -234,6 +234,64 @@ fn map_cholesky_error(error: CholeskyError) -> CollisionError {
 }
 
 impl RigidBody {
+    /// Position correction driven by a mass resolved for the current pose.
+    ///
+    /// The caller must guarantee that `cached` belongs to this body's current
+    /// transform; otherwise the correction uses stale centers or inertia.
+    pub(crate) fn apply_constraint_position_impulse_cached(
+        &mut self,
+        linear_impulse: Vec3,
+        angular_impulse: Vec3,
+        cached: SolverMass,
+    ) -> Result<(), BodyError> {
+        if self.physics.body_type != BodyType::Dynamic {
+            return Ok(());
+        }
+        if !linear_impulse.is_finite() || !angular_impulse.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+        if linear_impulse == Vec3::ZERO && angular_impulse == Vec3::ZERO {
+            return Ok(());
+        }
+
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
+        let rotation = self.state.transform.rotation();
+        let rotation_delta = cached
+            .inverse_inertia
+            .checked_mul_vector(angular_impulse)
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let angle = rotation_delta
+            .checked_length()
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let rotation_delta = if angle > 0.0 {
+            Quat::from_axis_angle(rotation_delta / angle, angle)
+                .ok_or(BodyError::ArithmeticOverflow)?
+        } else {
+            Quat::IDENTITY
+        };
+        let next_rotation = (rotation_delta * rotation)
+            .try_normalize()
+            .filter(|rotation| rotation.is_normalized())
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let linear_delta = linear_impulse
+            .checked_mul_scalar(cached.inverse_mass)
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_center = cached
+            .center
+            .checked_add(linear_delta)
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_translation = next_center
+            .checked_sub(
+                next_rotation
+                    .rotate_vector(mass.center_of_mass())
+                    .ok_or(BodyError::ArithmeticOverflow)?,
+            )
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_transform = Transform::new(next_translation, next_rotation)
+            .map_err(|_| BodyError::ArithmeticOverflow)?;
+        self.set_transform(next_transform)
+    }
+
     pub(crate) fn apply_constraint_impulse_cached(
         &mut self,
         linear_impulse: Vec3,
@@ -299,6 +357,20 @@ mod tests {
             error <= tolerance,
             "actual={actual}, expected={expected}, error={error}"
         );
+    }
+
+    fn assert_transform_close(actual: Transform, expected: Transform) {
+        for (actual, expected) in [
+            (actual.translation().x, expected.translation().x),
+            (actual.translation().y, expected.translation().y),
+            (actual.translation().z, expected.translation().z),
+            (actual.rotation().x, expected.rotation().x),
+            (actual.rotation().y, expected.rotation().y),
+            (actual.rotation().z, expected.rotation().z),
+            (actual.rotation().w, expected.rotation().w),
+        ] {
+            assert_close(actual, expected);
+        }
     }
 
     fn assert_solver_mass_close(actual: SolverMass, expected: SolverMass) {
@@ -658,6 +730,149 @@ mod tests {
             actual,
             SolverMass::from_body(&second).expect("reference mass"),
         );
+    }
+
+    #[test]
+    fn cached_position_impulse_matches_reference_for_rotated_off_center_bodies() {
+        let inertia = Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0));
+        let rotation =
+            Quat::from_axis_angle(Vec3::new(0.2, 1.0, -0.3), 0.91).expect("valid rotation");
+        let initial = dynamic_body(
+            Transform::new(Vec3::new(1.0, -2.0, 0.5), rotation).expect("transform"),
+            mass(inertia, Vec3::new(0.2, -0.4, 0.3)),
+        );
+        let cached = SolverMass::from_body(&initial).expect("cached mass");
+        let linear_impulse = Vec3::new(0.7, -0.1, 0.3);
+        let angular_impulse = Vec3::new(-0.4, 0.6, 0.2);
+        let mut reference = initial;
+        let mut optimized = initial;
+
+        reference
+            .apply_constraint_position_impulse(linear_impulse, angular_impulse)
+            .expect("reference position impulse");
+        optimized
+            .apply_constraint_position_impulse_cached(linear_impulse, angular_impulse, cached)
+            .expect("cached position impulse");
+
+        assert_transform_close(optimized.state().transform(), reference.state().transform());
+        assert_eq!(
+            optimized.state().linear_velocity(),
+            reference.state().linear_velocity()
+        );
+        assert_eq!(
+            optimized.state().angular_velocity(),
+            reference.state().angular_velocity()
+        );
+    }
+
+    #[test]
+    fn cached_position_impulse_ignores_static_and_kinematic_bodies() {
+        let transform = Transform::new(
+            Vec3::new(1.0, 2.0, 3.0),
+            Quat::from_axis_angle(Vec3::Y, 0.4).expect("rotation"),
+        )
+        .expect("transform");
+        let mut static_body = RigidBody::new_static(transform);
+        let mut kinematic_body = RigidBody::new_kinematic(transform);
+
+        static_body
+            .apply_constraint_position_impulse_cached(Vec3::X, Vec3::Y, SolverMass::STATIC)
+            .expect("static body ignores position impulses");
+        kinematic_body
+            .apply_constraint_position_impulse_cached(Vec3::X, Vec3::Y, SolverMass::STATIC)
+            .expect("kinematic body ignores position impulses");
+
+        assert_eq!(static_body.state().transform(), transform);
+        assert_eq!(kinematic_body.state().transform(), transform);
+    }
+
+    #[test]
+    fn cached_position_impulse_tracks_sequential_corrections_across_mass_ratios() {
+        let inertia = Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0));
+        let rotation =
+            Quat::from_axis_angle(Vec3::new(0.3, -0.7, 0.2), 1.13).expect("valid rotation");
+        let corrections = [
+            (Vec3::new(0.03, -0.02, 0.01), Vec3::new(0.04, 0.01, -0.02)),
+            (
+                Vec3::new(-0.01, 0.025, -0.005),
+                Vec3::new(-0.02, 0.03, 0.01),
+            ),
+        ];
+
+        for body_mass in [1.0e-3, 1.0, 1.0e3] {
+            let initial = dynamic_body(
+                Transform::new(Vec3::new(-0.4, 1.2, 0.8), rotation).expect("transform"),
+                MassProperties::new(body_mass, Vec3::new(-0.3, 0.15, 0.25), inertia * body_mass)
+                    .expect("mass"),
+            );
+            let mut reference = initial;
+            let mut optimized = initial;
+
+            for (linear_impulse, angular_impulse) in corrections {
+                let cached = SolverMass::from_body(&optimized).expect("fresh cached mass");
+                reference
+                    .apply_constraint_position_impulse(linear_impulse, angular_impulse)
+                    .expect("reference correction");
+                optimized
+                    .apply_constraint_position_impulse_cached(
+                        linear_impulse,
+                        angular_impulse,
+                        cached,
+                    )
+                    .expect("cached correction");
+            }
+
+            assert_transform_close(optimized.state().transform(), reference.state().transform());
+        }
+    }
+
+    #[test]
+    fn cached_position_impulse_rejects_the_same_invalid_inputs() {
+        let body = dynamic_body(
+            Transform::identity(),
+            mass(Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0)), Vec3::ZERO),
+        );
+        let cached = SolverMass::from_body(&body).expect("cached mass");
+        let invalid = [
+            (Vec3::new(f64::NAN, 0.0, 0.0), Vec3::ZERO),
+            (Vec3::ZERO, Vec3::new(0.0, f64::INFINITY, 0.0)),
+        ];
+
+        for (linear_impulse, angular_impulse) in invalid {
+            let mut reference = body;
+            let mut optimized = body;
+            let expected =
+                reference.apply_constraint_position_impulse(linear_impulse, angular_impulse);
+            let actual = optimized.apply_constraint_position_impulse_cached(
+                linear_impulse,
+                angular_impulse,
+                cached,
+            );
+            assert_eq!(actual, expected);
+            assert_eq!(optimized.state().transform(), reference.state().transform());
+        }
+    }
+
+    #[test]
+    fn cached_position_impulse_leaves_zero_impulses_untouched() {
+        let mut body = dynamic_body(
+            Transform::new(
+                Vec3::new(0.4, -0.6, 0.8),
+                Quat::from_axis_angle(Vec3::X, 0.37).expect("rotation"),
+            )
+            .expect("transform"),
+            mass(
+                Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0)),
+                Vec3::new(0.1, 0.2, -0.3),
+            ),
+        );
+        let cached = SolverMass::from_body(&body).expect("cached mass");
+        let before = body.state().transform();
+
+        body.apply_constraint_position_impulse_cached(Vec3::ZERO, Vec3::ZERO, cached)
+            .expect("zero impulse");
+
+        assert_eq!(body.state().transform(), before);
     }
 
     #[test]

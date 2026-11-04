@@ -1338,13 +1338,17 @@ fn solve_position_pcg_prepared(
     }
 
     global_velocity_impulse(rows, &scratch.solution, &mut scratch.body_impulses)?;
-    for (body, impulse) in bodies.iter_mut().zip(scratch.body_impulses.iter().copied()) {
+    for ((body, impulse), mass) in bodies
+        .iter_mut()
+        .zip(scratch.body_impulses.iter().copied())
+        .zip(scratch.masses.iter().copied())
+    {
         if impulse.linear == Vec3::ZERO && impulse.angular == Vec3::ZERO {
             continue;
         }
         if body.body().physics().body_type() == crate::rigid_body::BodyType::Dynamic {
             body.body_mut()
-                .apply_constraint_position_impulse(impulse.linear, impulse.angular)
+                .apply_constraint_position_impulse_cached(impulse.linear, impulse.angular, mass)
                 .map_err(map_rigid_body_error)?;
         }
     }
@@ -4258,7 +4262,8 @@ fn solve_position_row<B: SolverBodyAccess + ?Sized>(
     if !row.position_enabled {
         return Ok(false);
     }
-    let (effective_mass, _) = effective_mass_for_row(bodies, slots, *row, options, cache_stats)?;
+    let (effective_mass, masses) =
+        effective_mass_for_row(bodies, slots, *row, options, cache_stats)?;
     let alpha = row.compliance * alpha_scale;
     if !alpha.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
@@ -4274,7 +4279,7 @@ fn solve_position_row<B: SolverBodyAccess + ?Sized>(
         return Err(CollisionError::ArithmeticOverflow);
     }
     if applied != 0.0 {
-        apply_position_row(bodies, *row, applied)?;
+        apply_position_row(bodies, *row, applied, masses)?;
         if options.mass_cache() {
             invalidate_solver_mass_pair(slots, row.body_a, row.body_b)?;
         }
@@ -4412,7 +4417,13 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
             if let Some(block) = prepared_block(block_rows, masses, dt)? {
                 match block.solve_position(dt) {
                     Ok(delta) => {
-                        let pose_changed = apply_position_block(rows, indices, delta, bodies)?;
+                        let pose_changed = apply_position_block(
+                            rows,
+                            indices,
+                            delta,
+                            bodies,
+                            options.mass_cache().then_some(masses),
+                        )?;
                         if options.mass_cache() && pose_changed {
                             invalidate_solver_mass_pair(
                                 slots,
@@ -4654,6 +4665,7 @@ fn apply_position_block<B: SolverBodyAccess + ?Sized>(
     indices: [usize; 3],
     delta: Vec3,
     bodies: &mut B,
+    masses: Option<[SolverMass; 2]>,
 ) -> Result<bool, CollisionError> {
     if !delta.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
@@ -4698,6 +4710,7 @@ fn apply_position_block<B: SolverBodyAccess + ?Sized>(
                 linear: linear_a,
                 angular: angular_a,
             },
+            masses.map(|m| m[0]),
         )?;
         apply_position_impulse_at(
             bodies,
@@ -4706,6 +4719,7 @@ fn apply_position_block<B: SolverBodyAccess + ?Sized>(
                 linear: linear_b,
                 angular: angular_b,
             },
+            masses.map(|m| m[1]),
         )?;
     }
     for (index, next) in indices.into_iter().zip(next_multipliers) {
@@ -4837,6 +4851,7 @@ fn apply_position_row<B: SolverBodyAccess + ?Sized>(
     bodies: &mut B,
     row: ConstraintRow,
     multiplier: f64,
+    masses: Option<[SolverMass; 2]>,
 ) -> Result<(), CollisionError> {
     apply_position_impulse_at(
         bodies,
@@ -4845,6 +4860,7 @@ fn apply_position_row<B: SolverBodyAccess + ?Sized>(
             linear: row.linear_a * multiplier,
             angular: row.angular_a * multiplier,
         },
+        masses.map(|m| m[0]),
     )?;
     apply_position_impulse_at(
         bodies,
@@ -4853,6 +4869,7 @@ fn apply_position_row<B: SolverBodyAccess + ?Sized>(
             linear: row.linear_b * multiplier,
             angular: row.angular_b * multiplier,
         },
+        masses.map(|m| m[1]),
     )
 }
 
@@ -4880,6 +4897,7 @@ fn apply_position_impulse_at<B: SolverBodyAccess + ?Sized>(
     bodies: &mut B,
     body_index: usize,
     impulse: constraint::Jacobian,
+    mass: Option<SolverMass>,
 ) -> Result<(), CollisionError> {
     let is_dynamic = bodies
         .get(body_index)
@@ -4892,8 +4910,12 @@ fn apply_position_impulse_at<B: SolverBodyAccess + ?Sized>(
         let body = bodies
             .get_dynamic_mut(body_index)
             .ok_or(CollisionError::InvalidContact)?;
-        constraint::apply_generalized_position_impulse(body.body_mut(), impulse)
-            .map_err(map_constraint_error)?;
+        if let Some(mass) = mass {
+            constraint::apply_generalized_position_impulse_cached(body.body_mut(), mass, impulse)
+        } else {
+            constraint::apply_generalized_position_impulse(body.body_mut(), impulse)
+        }
+        .map_err(map_constraint_error)?;
     }
     Ok(())
 }

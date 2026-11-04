@@ -298,6 +298,15 @@ pub(crate) fn apply_generalized_position_impulse(
         .map_err(map_body_error)
 }
 
+pub(crate) fn apply_generalized_position_impulse_cached(
+    body: &mut RigidBody,
+    mass: SolverMass,
+    impulse: Jacobian,
+) -> Result<(), ConstraintError> {
+    body.apply_constraint_position_impulse_cached(impulse.linear, impulse.angular, mass)
+        .map_err(map_body_error)
+}
+
 fn map_body_error(error: crate::rigid_body::BodyError) -> ConstraintError {
     match error {
         crate::rigid_body::BodyError::ArithmeticOverflow
