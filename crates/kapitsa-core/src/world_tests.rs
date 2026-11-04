@@ -587,7 +587,9 @@ fn physics_step_metrics_reset_for_each_step() {
     assert_eq!(second.scalar_rows_solved, first.scalar_rows_solved);
     assert_eq!(second.position_sweeps, first.position_sweeps);
     assert_eq!(second.velocity_sweeps, first.velocity_sweeps);
-    assert_eq!(second.solver_mass_cache_hits, 132);
+    // A fixed joint resolves each body pair once per sweep, so the shared
+    // velocity response drops the per-step cache hits from the former 132.
+    assert_eq!(second.solver_mass_cache_hits, 52);
     assert_eq!(second.solver_mass_cache_misses, 0);
 }
 

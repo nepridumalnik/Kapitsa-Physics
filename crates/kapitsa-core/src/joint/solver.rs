@@ -4360,12 +4360,24 @@ fn solve_velocity_rows<B: SolverBodyAccess + ?Sized>(
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
 ) -> Result<(), CollisionError> {
+    // Rows of one joint share the same body pair and the velocity pass never
+    // changes poses, so resolve each pair's mass response once per sweep.
+    let mut pair = None;
     for row in rows {
-        solve_velocity_row(row, slots, bodies, dt, options, cache_stats)?;
+        solve_velocity_row_with_pair(row, slots, bodies, dt, options, cache_stats, &mut pair)?;
     }
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct VelocityMassPair {
+    body_a: usize,
+    body_b: usize,
+    masses: [SolverMass; 2],
+    statuses: [SolverMassCacheStatus; 2],
+}
+
+#[cfg(test)]
 fn solve_velocity_row<B: SolverBodyAccess + ?Sized>(
     row: &mut ConstraintRow,
     slots: &mut [SolverMassSlot],
@@ -4374,17 +4386,43 @@ fn solve_velocity_row<B: SolverBodyAccess + ?Sized>(
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
 ) -> Result<(), CollisionError> {
+    solve_velocity_row_with_pair(row, slots, bodies, dt, options, cache_stats, &mut None)
+}
+
+fn solve_velocity_row_with_pair<B: SolverBodyAccess + ?Sized>(
+    row: &mut ConstraintRow,
+    slots: &mut [SolverMassSlot],
+    bodies: &mut B,
+    dt: f64,
+    options: JointSolverOptions,
+    cache_stats: &mut SolverMassCacheStats,
+    pair: &mut Option<VelocityMassPair>,
+) -> Result<(), CollisionError> {
     if !row.is_valid(bodies.len()) {
         return Err(CollisionError::InvalidContact);
     }
     let (effective_mass, masses) = if options.mass_cache() {
-        let (masses, statuses) = resolve_solver_mass_pair_with_status(
-            bodies,
-            slots,
-            row.body_a,
-            row.body_b,
-            cache_stats,
-        )?;
+        let (masses, statuses) = match *pair {
+            Some(cached) if cached.body_a == row.body_a && cached.body_b == row.body_b => {
+                (cached.masses, cached.statuses)
+            }
+            _ => {
+                let (masses, statuses) = resolve_solver_mass_pair_with_status(
+                    bodies,
+                    slots,
+                    row.body_a,
+                    row.body_b,
+                    cache_stats,
+                )?;
+                *pair = Some(VelocityMassPair {
+                    body_a: row.body_a,
+                    body_b: row.body_b,
+                    masses,
+                    statuses,
+                });
+                (masses, statuses)
+            }
+        };
         let unchanged = statuses == [SolverMassCacheStatus::Hit; 2];
         let effective_mass = if unchanged && row.cached_velocity_effective_mass > 0.0 {
             row.cached_velocity_effective_mass
@@ -4558,8 +4596,9 @@ fn solve_velocity_projection_group<B: SolverBodyAccess + ?Sized>(
     }
 
     let mut fallback_rows = 0;
+    let mut pair = None;
     for row in rows.iter_mut().filter(|row| keys.contains(&row.key)) {
-        solve_velocity_row(row, slots, bodies, dt, options, cache_stats)?;
+        solve_velocity_row_with_pair(row, slots, bodies, dt, options, cache_stats, &mut pair)?;
         fallback_rows += 1;
     }
     Ok(ProjectionGroupResult {
@@ -4603,8 +4642,9 @@ fn solve_velocity_projection_remainder<B: SolverBodyAccess + ?Sized>(
 ) -> Result<ProjectionGroupResult, CollisionError> {
     validate_projection_rows(rows, bodies.len())?;
     let mut fallback_rows = 0;
+    let mut pair = None;
     for row in rows.iter_mut().filter(|row| row.key > 5) {
-        solve_velocity_row(row, slots, bodies, dt, options, cache_stats)?;
+        solve_velocity_row_with_pair(row, slots, bodies, dt, options, cache_stats, &mut pair)?;
         fallback_rows += 1;
     }
     Ok(ProjectionGroupResult {
