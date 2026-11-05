@@ -4443,16 +4443,18 @@ fn append_axis_alignment(
         let component = error
             .checked_dot(axis)
             .ok_or(CollisionError::ArithmeticOverflow)?;
-        if component != 0.0 {
-            push_angular_row(
-                workspace,
-                settings,
-                axis,
-                component,
-                first_key + axis_index as u8,
-                bilateral_bounds(),
-            )?;
-        }
+        // A zero position error still leaves the relative angular velocity
+        // unconstrained: the aligned axis must keep matching velocity around
+        // both tangent axes. Emit both rows unconditionally so the velocity
+        // solve cannot inject a forbidden angular velocity.
+        push_angular_row(
+            workspace,
+            settings,
+            axis,
+            component,
+            first_key + axis_index as u8,
+            bilateral_bounds(),
+        )?;
     }
     Ok(())
 }
@@ -5820,7 +5822,6 @@ fn map_rigid_body_error(error: crate::rigid_body::BodyError) -> CollisionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "bench-internals")]
     use crate::joint::row::RowDimension;
     use crate::joint::workspace::JointSolverCall;
     use crate::{
@@ -9057,6 +9058,170 @@ mod tests {
         assert!(rotation_error.x.abs() < 1.0e-10);
         assert!(rotation_error.y.abs() < 1.0e-10);
         assert!((rotation_error.z - 0.25).abs() < 1.0e-10);
+    }
+
+    /// Runs only the velocity sweep of a joint so angular/linear constraints
+    /// can be inspected without the position projection perturbing the poses.
+    fn solve_joint_velocity_only(joint: super::super::Joint, bodies: &mut [SolverBody]) {
+        let constraints = [JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint,
+        }];
+        let dt = 0.01;
+        let mut workspace = JointWorkspace::new();
+        JointSolver::prepare(&mut workspace, bodies, &constraints, dt).expect("prepare rows");
+        let options = JointSolverOptions::legacy();
+        for _ in 0..8 {
+            JointSolver::solve_velocity_prepared_iteration(
+                &mut workspace,
+                bodies,
+                &constraints,
+                dt,
+                options,
+            )
+            .expect("velocity sweep");
+        }
+    }
+
+    fn aligned_axis_common() -> super::super::JointCommon {
+        super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        )
+    }
+
+    #[test]
+    fn aligned_axis_rows_exist_for_zero_orientation_error() {
+        let bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        let constraints = [JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: super::super::Joint::Hinge(super::super::HingeJoint::new(aligned_axis_common())),
+        }];
+        let mut workspace = JointWorkspace::new();
+        JointSolver::prepare(&mut workspace, &bodies, &constraints, 0.01).expect("prepare rows");
+        let angular_keys = workspace
+            .rows()
+            .iter()
+            .filter(|row| matches!(row.dimension, RowDimension::Angular))
+            .map(|row| row.key)
+            .collect::<Vec<_>>();
+        assert!(
+            angular_keys.contains(&3) && angular_keys.contains(&4),
+            "expected tangent rows 3 and 4, got {angular_keys:?}"
+        );
+    }
+
+    #[test]
+    fn hinge_aligned_axis_constrains_forbidden_angular_velocity() {
+        let mut bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Vec3::ZERO,
+                Vec3::new(5.0, -3.0, 2.0),
+            ),
+        ];
+        solve_joint_velocity_only(
+            super::super::Joint::Hinge(super::super::HingeJoint::new(aligned_axis_common())),
+            &mut bodies,
+        );
+        let angular_velocity = bodies[1].state().angular_velocity();
+        assert!(
+            angular_velocity.x.abs() <= 1.0e-10,
+            "forbidden x velocity {}",
+            angular_velocity.x
+        );
+        assert!(
+            angular_velocity.y.abs() <= 1.0e-10,
+            "forbidden y velocity {}",
+            angular_velocity.y
+        );
+        assert!(
+            (angular_velocity.z - 2.0).abs() <= 1.0e-10,
+            "allowed z velocity should remain, got {}",
+            angular_velocity.z
+        );
+    }
+
+    #[test]
+    fn cylindrical_aligned_axis_constrains_forbidden_angular_velocity() {
+        let mut bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Vec3::ZERO,
+                Vec3::new(-4.0, 6.0, 1.5),
+            ),
+        ];
+        solve_joint_velocity_only(
+            super::super::Joint::Cylindrical(super::super::CylindricalJoint::new(
+                aligned_axis_common(),
+            )),
+            &mut bodies,
+        );
+        let angular_velocity = bodies[1].state().angular_velocity();
+        assert!(
+            angular_velocity.x.abs() <= 1.0e-10,
+            "forbidden x velocity {}",
+            angular_velocity.x
+        );
+        assert!(
+            angular_velocity.y.abs() <= 1.0e-10,
+            "forbidden y velocity {}",
+            angular_velocity.y
+        );
+        assert!(
+            (angular_velocity.z - 1.5).abs() <= 1.0e-10,
+            "allowed z velocity should remain, got {}",
+            angular_velocity.z
+        );
+    }
+
+    #[test]
+    fn aligned_axis_solve_is_equivalent_under_body_swap() {
+        let run = |swap: bool| {
+            let (mut bodies, joint) = if swap {
+                (
+                    [
+                        solver_body_with_velocities(
+                            Vec3::ZERO,
+                            Quat::IDENTITY,
+                            Vec3::ZERO,
+                            Vec3::new(5.0, -3.0, 2.0),
+                        ),
+                        static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                    ],
+                    super::super::Joint::Hinge(super::super::HingeJoint::new(aligned_axis_common())),
+                )
+            } else {
+                (
+                    [
+                        static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                        solver_body_with_velocities(
+                            Vec3::ZERO,
+                            Quat::IDENTITY,
+                            Vec3::ZERO,
+                            Vec3::new(5.0, -3.0, 2.0),
+                        ),
+                    ],
+                    super::super::Joint::Hinge(super::super::HingeJoint::new(aligned_axis_common())),
+                )
+            };
+            solve_joint_velocity_only(joint, &mut bodies);
+            let dynamic = if swap { 0 } else { 1 };
+            bodies[dynamic].state().angular_velocity()
+        };
+        let forward = run(false);
+        let swapped = run(true);
+        assert!((forward.x - swapped.x).abs() <= 1.0e-10);
+        assert!((forward.y - swapped.y).abs() <= 1.0e-10);
+        assert!((forward.z - swapped.z).abs() <= 1.0e-10);
     }
 
     #[test]
