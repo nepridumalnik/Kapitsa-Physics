@@ -1979,7 +1979,29 @@ impl SolverWorkspace {
         }
         #[cfg(feature = "bench-internals")]
         let sweep_started = std::time::Instant::now();
+        let direct_velocity = manifolds.is_empty()
+            && reuse_velocity_rows
+            && joint_solver_options.projection()
+                == crate::joint::JointProjection::ScalarGaussSeidel
+            && JointSolver::solve_direct_velocity(
+                joint_workspace,
+                bodies,
+                joint_solver_options.mass_cache(),
+            )?;
+        #[cfg(feature = "bench-internals")]
+        if direct_velocity {
+            joint_workspace.record_velocity_iteration();
+            joint_workspace.record_scalar_rows_solved(joint_workspace.rows().len());
+            if full_diagnostics {
+                joint_workspace.record_pre_joint_velocity_residual();
+                JointSolver::measure_current_residual(joint_workspace, bodies, dt)?;
+                joint_workspace.record_first_velocity_residual();
+            }
+        }
         for velocity_iteration in 0..config.velocity_iterations {
+            if direct_velocity {
+                break;
+            }
             #[cfg(feature = "bench-internals")]
             joint_workspace.record_velocity_iteration();
             self.solve_velocity_iteration(bodies, manifolds)?;

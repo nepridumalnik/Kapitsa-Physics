@@ -7,6 +7,7 @@ mod cylindrical;
 mod d6;
 #[cfg(feature = "bench-internals")]
 pub mod diagnostics;
+mod direct;
 mod distance;
 mod error;
 mod event;

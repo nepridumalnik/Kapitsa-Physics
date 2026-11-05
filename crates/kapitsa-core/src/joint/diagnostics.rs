@@ -76,7 +76,7 @@ pub struct JointSolverMetrics {
     pub constraint_coloring_constraints: u64,
     /// Number of position constraint sweeps actually executed.
     pub position_sweeps: u64,
-    /// Number of velocity constraint sweeps actually executed.
+    /// Number of velocity passes, counting a direct coupled solve as one pass.
     pub velocity_sweeps: u64,
     /// Inner iterations used by the benchmark-only global velocity PCG solve.
     #[cfg(feature = "bench-internals")]

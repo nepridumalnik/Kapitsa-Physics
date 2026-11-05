@@ -3321,6 +3321,53 @@ fn coupled_velocity_solve_reduces_slider_residual_without_external_impulse() {
     }
     let original = graph_metrics(&world);
     let (result, residual) = coupled_hard_constraint_snapshot(&world, false);
+    // The production factorization must agree with the independent LDL reference
+    // on the real snapshot, including physical invariants and row residuals.
+    use crate::{
+        constraint::SolverBody,
+        joint::{
+            solver::{JointConstraint, JointSolver},
+            workspace::JointWorkspace,
+        },
+    };
+    let indexed: Vec<_> = world.bodies().map(|(id, body)| (id, *body)).collect();
+    let mut bodies: Vec<_> = indexed
+        .iter()
+        .map(|(_, body)| SolverBody::from_prediction(*body, *body.state()))
+        .collect();
+    let constraints: Vec<_> = world
+        .joints()
+        .map(|(id, a, b, joint)| JointConstraint {
+            id,
+            body_a: indexed.iter().position(|(id, _)| *id == a).unwrap(),
+            body_b: indexed.iter().position(|(id, _)| *id == b).unwrap(),
+            joint: *joint,
+        })
+        .collect();
+    let mut workspace = JointWorkspace::new();
+    JointSolver::prepare(&mut workspace, &bodies, &constraints, DT).unwrap();
+    assert!(JointSolver::solve_direct_velocity(&mut workspace, &mut bodies, true).unwrap());
+    let mut actual_world = PhysicsWorld::new();
+    let ids: Vec<_> = bodies
+        .iter()
+        .map(|body| actual_world.add_body(*body.body()).unwrap())
+        .collect();
+    for constraint in &constraints {
+        actual_world
+            .add_joint(
+                ids[constraint.body_a],
+                ids[constraint.body_b],
+                constraint.joint,
+            )
+            .unwrap();
+    }
+    let actual = graph_metrics(&actual_world);
+    assert!((actual.linear_momentum - result.linear_momentum).length() < 1.0e-10);
+    assert!((actual.angular_momentum - result.angular_momentum).length() < 1.0e-9);
+    assert!((actual.kinetic_energy - result.kinetic_energy).abs() < 1.0e-10);
+    assert!(
+        (actual.linear_velocity_residual_max - result.linear_velocity_residual_max).abs() < 1.0e-9
+    );
     assert!(result.linear_velocity_residual_max < 1.0e-8);
     assert!((result.linear_momentum - original.linear_momentum).length() < 1.0e-10);
     assert!((result.angular_momentum - original.angular_momentum).length() < 1.0e-9);
@@ -3332,4 +3379,206 @@ fn coupled_velocity_solve_reduces_slider_residual_without_external_impulse() {
         (result.angular_momentum - original.angular_momentum).length(),
         result.kinetic_energy - original.kinetic_energy
     );
+}
+
+#[test]
+fn direct_velocity_solver_falls_back_without_mutation_for_unsupported_or_singular_rows() {
+    use crate::{
+        constraint::SolverBody,
+        joint::{
+            solver::{JointConstraint, JointSolver},
+            workspace::JointWorkspace,
+        },
+    };
+    let world = slider_chain(3);
+    let indexed: Vec<_> = world.bodies().map(|(id, body)| (id, *body)).collect();
+    let constraints: Vec<_> = world
+        .joints()
+        .map(|(id, a, b, joint)| JointConstraint {
+            id,
+            body_a: indexed.iter().position(|(id, _)| *id == a).unwrap(),
+            body_b: indexed.iter().position(|(id, _)| *id == b).unwrap(),
+            joint: *joint,
+        })
+        .collect();
+    let mut bodies: Vec<_> = indexed
+        .iter()
+        .map(|(_, body)| SolverBody::from_prediction(*body, *body.state()))
+        .collect();
+    let mut workspace = JointWorkspace::new();
+    JointSolver::prepare(&mut workspace, &bodies, &constraints, DT).unwrap();
+    let mut rows = workspace.rows().to_vec();
+    rows[0].compliance = 0.1;
+    let initial_rows = rows.clone();
+    let initial_states: Vec<_> = bodies.iter().map(SolverBody::state).collect();
+    let mut scratch = super::direct::DirectVelocityScratch::new();
+    let mut slots = vec![crate::rigid_body::solver_mass::SolverMassSlot::default(); bodies.len()];
+    let mut stats = super::solver::SolverMassCacheStats::default();
+    assert!(
+        !scratch
+            .solve(&mut rows, &mut bodies, &mut slots, true, &mut stats)
+            .unwrap()
+    );
+    assert_eq!(rows, initial_rows);
+    assert_eq!(
+        bodies.iter().map(SolverBody::state).collect::<Vec<_>>(),
+        initial_states
+    );
+    // The same geometry with only static bodies has a zero effective-mass
+    // matrix. It must take the original fallback without mutating anything.
+    rows[0].compliance = 0.0;
+    rows[0].position_enabled = false;
+    let initial_rows = rows.clone();
+    assert!(
+        !scratch
+            .solve(&mut rows, &mut bodies, &mut slots, true, &mut stats)
+            .unwrap()
+    );
+    assert_eq!(rows, initial_rows);
+    assert_eq!(
+        bodies.iter().map(SolverBody::state).collect::<Vec<_>>(),
+        initial_states
+    );
+    rows[0].position_enabled = true;
+    let initial_rows = rows.clone();
+    let mut static_bodies: Vec<_> = bodies
+        .iter()
+        .map(|body| {
+            let body = RigidBody::new_static(body.state().transform());
+            SolverBody::from_prediction(body, *body.state())
+        })
+        .collect();
+    let initial_static: Vec<_> = static_bodies.iter().map(SolverBody::state).collect();
+    assert!(
+        !scratch
+            .solve(&mut rows, &mut static_bodies, &mut slots, true, &mut stats)
+            .unwrap()
+    );
+    assert_eq!(rows, initial_rows);
+    assert_eq!(
+        static_bodies
+            .iter()
+            .map(SolverBody::state)
+            .collect::<Vec<_>>(),
+        initial_static
+    );
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn direct_velocity_solve_is_included_in_solver_metrics() {
+    let mut world = slider_chain(3);
+    world.step(DT).unwrap();
+    let metrics = world.physics_step_metrics().joints;
+    assert_eq!(metrics.velocity_sweeps, 1);
+    assert_eq!(
+        metrics.position_sweeps,
+        world.collision_config().position_iterations as u64
+    );
+    assert!(metrics.scalar_rows_solved >= 10);
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn direct_velocity_cached_and_reference_mass_paths_match() {
+    let mut cached = slider_chain(6);
+    let mut reference = slider_chain(6);
+    reference.set_joint_mass_cache_for_bench(false);
+    for _ in 0..20 {
+        apply_root_force(&mut cached, Vec3::new(0.0, 2.0, 3.0));
+        apply_root_force(&mut reference, Vec3::new(0.0, 2.0, 3.0));
+        cached.step(DT).unwrap();
+        reference.step(DT).unwrap();
+        let a: Vec<_> = cached.bodies().map(|(_, body)| *body.state()).collect();
+        let b: Vec<_> = reference.bodies().map(|(_, body)| *body.state()).collect();
+        for (a, b) in a.iter().zip(&b) {
+            assert!((a.transform().translation() - b.transform().translation()).length() < 1.0e-10);
+            assert!((a.linear_velocity() - b.linear_velocity()).length() < 1.0e-10);
+            assert!((a.angular_velocity() - b.angular_velocity()).length() < 1.0e-10);
+        }
+        assert_eq!(cached.physics_step_metrics().joints.velocity_sweeps, 1);
+        assert_eq!(reference.physics_step_metrics().joints.velocity_sweeps, 1);
+        assert_eq!(
+            reference
+                .physics_step_metrics()
+                .joints
+                .solver_mass_cache_hits,
+            0
+        );
+        assert_eq!(
+            reference
+                .physics_step_metrics()
+                .joints
+                .solver_mass_cache_misses,
+            0
+        );
+    }
+}
+
+#[test]
+fn consistent_free_hinge_and_slider_chains_have_convergent_energy() {
+    for slider in [false, true] {
+        let mut previous_error = f64::INFINITY;
+        for (subdivision, dt) in [(1, 1.0 / 60.0), (2, 1.0 / 120.0), (4, 1.0 / 240.0)] {
+            let mut world = PhysicsWorld::new();
+            let omega = Vec3::Z * 0.1;
+            let mut ids = Vec::new();
+            for index in 0..6 {
+                let position = if slider {
+                    Vec3::Z * index as f64
+                } else {
+                    Vec3::X * index as f64
+                };
+                let mut body = articulated_body(index, position, Quat::IDENTITY);
+                let center = body.world_center_of_mass().unwrap().unwrap();
+                let sliding = if slider {
+                    Vec3::Z * (index as f64 * 0.02)
+                } else {
+                    Vec3::ZERO
+                };
+                body.set_linear_velocity(
+                    Vec3::new(0.2, -0.1, 0.05) + omega.cross(center) + sliding,
+                )
+                .unwrap();
+                body.set_angular_velocity(omega).unwrap();
+                ids.push(world.add_body(body).unwrap());
+            }
+            for pair in ids.windows(2) {
+                let joint = if slider {
+                    Joint::Slider(SliderJoint::new(JointCommon::new(
+                        JointFrame::IDENTITY,
+                        JointFrame::IDENTITY,
+                    )))
+                } else {
+                    Joint::Hinge(HingeJoint::new(JointCommon::new(
+                        JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+                        JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+                    )))
+                };
+                world.add_joint(pair[0], pair[1], joint).unwrap();
+            }
+            let initial = graph_metrics(&world);
+            assert!(initial.position_error_max < 1.0e-14);
+            assert!(initial.linear_velocity_residual_max < 1.0e-14);
+            assert!(initial.angular_velocity_residual_max < 1.0e-14);
+            for _ in 0..300 * subdivision {
+                world.step(dt).unwrap();
+                assert_finite_body_states(&world);
+            }
+            let final_metrics = graph_metrics(&world);
+            let error = (final_metrics.kinetic_energy - initial.kinetic_energy).abs();
+            let relative_energy =
+                (final_metrics.kinetic_energy - initial.kinetic_energy) / initial.kinetic_energy;
+            let p_drift = (final_metrics.linear_momentum - initial.linear_momentum).length();
+            let l_drift = (final_metrics.angular_momentum - initial.angular_momentum).length();
+            println!(
+                "consistent slider={slider} dt={dt:.6}: dE/E={relative_energy:.9e} dP={p_drift:.9e} dL={l_drift:.9e} anchor={:.9e} velocity={:.9e}",
+                final_metrics.position_error_max, final_metrics.linear_velocity_residual_max
+            );
+            assert!(p_drift < 1.0e-9);
+            assert!(relative_energy.abs() < 1.0e-3);
+            assert!(error < 0.6 * previous_error);
+            previous_error = error;
+        }
+    }
 }

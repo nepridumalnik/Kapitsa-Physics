@@ -39,6 +39,7 @@ pub(crate) struct JointWorkspace {
     joint_ids: Vec<Option<crate::world::JointId>>,
     preparing_rows: Vec<ConstraintRow>,
     solver_mass_slots: Vec<SolverMassSlot>,
+    direct_velocity_scratch: super::direct::DirectVelocityScratch,
     preparing_joint_indices: Vec<usize>,
     preparing_joint_ids: Vec<Option<crate::world::JointId>>,
     fixed_geometry: Vec<Option<FixedJointGeometryCache>>,
@@ -89,6 +90,7 @@ impl JointWorkspace {
             joint_ids: Vec::new(),
             preparing_rows: Vec::new(),
             solver_mass_slots: Vec::new(),
+            direct_velocity_scratch: super::direct::DirectVelocityScratch::new(),
             preparing_joint_indices: Vec::new(),
             preparing_joint_ids: Vec::new(),
             fixed_geometry: Vec::new(),
@@ -299,6 +301,20 @@ impl JointWorkspace {
             self.solver_mass_slots.truncate(body_count);
         }
         Ok(())
+    }
+
+    pub(super) fn direct_velocity_buffers_mut(
+        &mut self,
+    ) -> (
+        &mut [ConstraintRow],
+        &mut [SolverMassSlot],
+        &mut super::direct::DirectVelocityScratch,
+    ) {
+        (
+            &mut self.rows,
+            &mut self.solver_mass_slots,
+            &mut self.direct_velocity_scratch,
+        )
     }
 
     pub(crate) fn solver_buffers_mut(
@@ -1085,6 +1101,7 @@ impl JointWorkspace {
             + self.joint_ids.capacity() * std::mem::size_of::<Option<crate::world::JointId>>()
             + self.preparing_rows.capacity() * std::mem::size_of::<ConstraintRow>()
             + self.solver_mass_slots.capacity() * std::mem::size_of::<SolverMassSlot>()
+            + self.direct_velocity_scratch.retained_capacity_bytes()
             + self.preparing_joint_indices.capacity() * std::mem::size_of::<usize>()
             + self.preparing_joint_ids.capacity()
                 * std::mem::size_of::<Option<crate::world::JointId>>()

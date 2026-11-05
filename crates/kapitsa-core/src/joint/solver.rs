@@ -204,7 +204,7 @@ impl JointRowBuffer {
 }
 
 #[derive(Default)]
-struct SolverMassCacheStats {
+pub(super) struct SolverMassCacheStats {
     #[cfg(feature = "bench-internals")]
     hits: u64,
     #[cfg(feature = "bench-internals")]
@@ -335,7 +335,7 @@ impl SolverMassCacheStats {
         let _ = other;
     }
 
-    fn record(&mut self, status: SolverMassCacheStatus) {
+    pub(super) fn record(&mut self, status: SolverMassCacheStatus) {
         #[cfg(feature = "bench-internals")]
         match status {
             SolverMassCacheStatus::Hit => {
@@ -508,6 +508,23 @@ impl JointSolver {
         prepare_joint_rows(bodies, workspace, joints, dt)?;
         workspace.finish_prepare();
         Ok(())
+    }
+
+    pub(crate) fn solve_direct_velocity(
+        workspace: &mut JointWorkspace,
+        bodies: &mut [SolverBody],
+        mass_cache: bool,
+    ) -> Result<bool, CollisionError> {
+        if mass_cache {
+            workspace.ensure_solver_mass_slots(bodies.len())?;
+        }
+        let mut cache_stats = SolverMassCacheStats::default();
+        let result = {
+            let (rows, slots, scratch) = workspace.direct_velocity_buffers_mut();
+            scratch.solve(rows, bodies, slots, mass_cache, &mut cache_stats)
+        };
+        record_solver_mass_cache_stats(workspace, cache_stats);
+        result
     }
 
     pub(crate) fn solve_position_iteration(
@@ -5763,7 +5780,7 @@ fn row_jacobians(row: ConstraintRow) -> [constraint::Jacobian; 2] {
     ]
 }
 
-fn row_velocity<B: SolverBodyAccess + ?Sized>(
+pub(super) fn row_velocity<B: SolverBodyAccess + ?Sized>(
     bodies: &B,
     row: ConstraintRow,
 ) -> Result<f64, CollisionError> {
@@ -5963,8 +5980,7 @@ fn map_constraint_error(error: constraint::ConstraintError) -> CollisionError {
     }
 }
 
-#[cfg(feature = "bench-internals")]
-fn map_rigid_body_error(error: crate::rigid_body::BodyError) -> CollisionError {
+pub(super) fn map_rigid_body_error(error: crate::rigid_body::BodyError) -> CollisionError {
     match error {
         crate::rigid_body::BodyError::ArithmeticOverflow
         | crate::rigid_body::BodyError::NonFiniteValue => CollisionError::ArithmeticOverflow,
