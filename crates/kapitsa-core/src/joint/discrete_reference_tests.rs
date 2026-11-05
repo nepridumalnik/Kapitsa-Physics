@@ -309,3 +309,351 @@ fn two_body_constrained_reference_conserves_momentum_and_converges_in_time() {
         }
     }
 }
+
+#[derive(Clone, Copy)]
+struct BallLink {
+    a: usize,
+    b: usize,
+    anchor_a: Vec3,
+    anchor_b: Vec3,
+}
+
+fn tree_anchor(body: Body, local: Vec3) -> Vec3 {
+    body.center
+        + body
+            .rotation
+            .rotate_vector(local - body.mass.center_of_mass())
+            .unwrap()
+}
+
+fn tree_anchor_velocity(body: Body, local: Vec3) -> Vec3 {
+    body.momentum / body.mass.mass() + body.omega().cross(tree_anchor(body, local) - body.center)
+}
+
+fn tree_kick(bodies: &mut [Body], link: BallLink, impulse: Vec3, point: Vec3) {
+    let (left, right) = bodies.split_at_mut(link.b);
+    left[link.a].kick(-impulse, point);
+    right[0].kick(impulse, point);
+}
+
+fn tree_values(bodies: &[Body], links: &[BallLink], velocity: bool) -> Vec<f64> {
+    let mut result = Vec::with_capacity(links.len() * 3);
+    for &link in links {
+        let value = if velocity {
+            tree_anchor_velocity(bodies[link.b], link.anchor_b)
+                - tree_anchor_velocity(bodies[link.a], link.anchor_a)
+        } else {
+            tree_anchor(bodies[link.b], link.anchor_b) - tree_anchor(bodies[link.a], link.anchor_a)
+        };
+        result.extend([value.x, value.y, value.z]);
+    }
+    result
+}
+
+fn solve_dense(mut matrix: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Vec<f64> {
+    let n = rhs.len();
+    for column in 0..n {
+        let pivot = (column..n)
+            .max_by(|&a, &b| matrix[a][column].abs().total_cmp(&matrix[b][column].abs()))
+            .unwrap();
+        matrix.swap(column, pivot);
+        rhs.swap(column, pivot);
+        assert!(
+            matrix[column][column].abs() > 1.0e-16,
+            "singular reference system"
+        );
+        let pivot_row = matrix[column].clone();
+        for row in column + 1..n {
+            let factor = matrix[row][column] / pivot_row[column];
+            rhs[row] -= factor * rhs[column];
+            for index in column + 1..n {
+                matrix[row][index] -= factor * pivot_row[index];
+            }
+        }
+    }
+    let mut result = vec![0.0; n];
+    for row in (0..n).rev() {
+        let rest: f64 = (row + 1..n)
+            .map(|column| matrix[row][column] * result[column])
+            .sum();
+        result[row] = (rhs[row] - rest) / matrix[row][row];
+        assert!(result[row].is_finite());
+    }
+    result
+}
+
+fn tree_predict(start: &[Body], links: &[BallLink], impulses: &[f64], dt: f64) -> Vec<Body> {
+    let mut bodies = start.to_vec();
+    for (index, &link) in links.iter().enumerate() {
+        let point = (tree_anchor(start[link.a], link.anchor_a)
+            + tree_anchor(start[link.b], link.anchor_b))
+            * 0.5;
+        let impulse = Vec3::new(
+            impulses[3 * index],
+            impulses[3 * index + 1],
+            impulses[3 * index + 2],
+        );
+        tree_kick(&mut bodies, link, impulse, point);
+    }
+    for body in &mut bodies {
+        body.drift(dt);
+    }
+    bodies
+}
+
+fn tree_constrained_step(start: &[Body], links: &[BallLink], dt: f64) -> Vec<Body> {
+    let dimensions = links.len() * 3;
+    let mut impulses = vec![0.0; dimensions];
+    let mut next = Vec::new();
+    let epsilon = 1.0e-5;
+    let mut converged = false;
+    for _ in 0..12 {
+        next = tree_predict(start, links, &impulses, dt);
+        let error = tree_values(&next, links, false);
+        if error.iter().all(|value| value.abs() < 1.0e-13) {
+            converged = true;
+            break;
+        }
+        let mut jacobian = vec![vec![0.0; dimensions]; dimensions];
+        for column in 0..dimensions {
+            impulses[column] += epsilon;
+            let plus = tree_values(&tree_predict(start, links, &impulses, dt), links, false);
+            impulses[column] -= 2.0 * epsilon;
+            let minus = tree_values(&tree_predict(start, links, &impulses, dt), links, false);
+            impulses[column] += epsilon;
+            for row in 0..dimensions {
+                jacobian[row][column] = (plus[row] - minus[row]) / (2.0 * epsilon);
+            }
+        }
+        let delta = solve_dense(jacobian, error.iter().map(|value| -*value).collect());
+        for (value, correction) in impulses.iter_mut().zip(delta) {
+            *value += correction;
+        }
+    }
+    assert!(converged, "tree position constraints did not converge");
+    let residual = tree_values(&next, links, true);
+    let mut jacobian = vec![vec![0.0; dimensions]; dimensions];
+    for column in 0..dimensions {
+        let link = links[column / 3];
+        let axis = [Vec3::X, Vec3::Y, Vec3::Z][column % 3];
+        let point = (tree_anchor(next[link.a], link.anchor_a)
+            + tree_anchor(next[link.b], link.anchor_b))
+            * 0.5;
+        let mut displaced = next.clone();
+        tree_kick(&mut displaced, link, axis, point);
+        let changed = tree_values(&displaced, links, true);
+        for row in 0..dimensions {
+            jacobian[row][column] = changed[row] - residual[row];
+        }
+    }
+    let impulses = solve_dense(jacobian, residual.iter().map(|value| -*value).collect());
+    for (index, &link) in links.iter().enumerate() {
+        let point = (tree_anchor(next[link.a], link.anchor_a)
+            + tree_anchor(next[link.b], link.anchor_b))
+            * 0.5;
+        tree_kick(
+            &mut next,
+            link,
+            Vec3::new(
+                impulses[3 * index],
+                impulses[3 * index + 1],
+                impulses[3 * index + 2],
+            ),
+            point,
+        );
+    }
+    next
+}
+
+fn tree_fixture(count: usize) -> (Vec<Body>, Vec<BallLink>) {
+    let mut bodies: Vec<Body> = Vec::with_capacity(count);
+    let mut origins = vec![Vec3::ZERO; count];
+    let mut links = Vec::new();
+    let omega = Vec3::new(0.05, 0.1, 0.02);
+    for index in 0..count {
+        if index > 0 {
+            origins[index] = origins[(index - 1) / 2]
+                + if index.is_multiple_of(2) {
+                    Vec3::X
+                } else {
+                    Vec3::Y
+                };
+        }
+        let angle = if index.is_multiple_of(2) {
+            0.001
+        } else {
+            -0.001
+        };
+        let rotation = Quat::from_axis_angle(Vec3::new(0.2, 0.7, -0.3), angle).unwrap();
+        let mass_value = 0.8 + (index % 7) as f64 * 0.17;
+        let center_local = Vec3::new(
+            (index % 3) as f64 * 0.002,
+            -((index % 5) as f64) * 0.001,
+            (index % 2) as f64 * 0.0015,
+        );
+        let scale = 0.7 + (index % 5) as f64 * 0.13;
+        let mass = MassProperties::new(
+            mass_value,
+            center_local,
+            Mat3::from_diagonal(Vec3::new(scale * 0.6, scale * 0.8, scale)),
+        )
+        .unwrap();
+        let center = origins[index] + rotation.rotate_vector(center_local).unwrap();
+        let local_omega = rotation.conjugate().rotate_vector(omega).unwrap();
+        let spin = rotation
+            .rotate_vector(mass.inertia() * local_omega)
+            .unwrap();
+        bodies.push(Body {
+            center,
+            rotation,
+            momentum: (Vec3::new(0.2, -0.1, 0.05) + omega.cross(center)) * mass_value,
+            spin,
+            mass,
+            anchor: Vec3::ZERO,
+        });
+        if index > 0 {
+            let parent = (index - 1) / 2;
+            let anchor_a = bodies[parent]
+                .rotation
+                .conjugate()
+                .rotate_vector(origins[index] - origins[parent])
+                .unwrap();
+            links.push(BallLink {
+                a: parent,
+                b: index,
+                anchor_a,
+                anchor_b: Vec3::ZERO,
+            });
+        }
+    }
+    (bodies, links)
+}
+
+fn tree_invariants(bodies: &[Body], links: &[BallLink]) -> (Vec3, Vec3, f64, f64, f64) {
+    let mut linear = Vec3::ZERO;
+    let mut angular = Vec3::ZERO;
+    let mut energy = 0.0;
+    for &body in bodies {
+        linear += body.momentum;
+        angular += body.center.cross(body.momentum) + body.spin;
+        energy += 0.5 * body.momentum.length_squared() / body.mass.mass()
+            + 0.5 * body.omega().dot(body.spin);
+    }
+    let position = tree_values(bodies, links, false)
+        .into_iter()
+        .fold(0.0_f64, |max, value| max.max(value.abs()));
+    let velocity = tree_values(bodies, links, true)
+        .into_iter()
+        .fold(0.0_f64, |max, value| max.max(value.abs()));
+    (linear, angular, energy, position, velocity)
+}
+
+fn tree_production_world(bodies: &[Body], links: &[BallLink]) -> crate::world::PhysicsWorld {
+    use crate::{
+        joint::{BallJoint, Joint, JointCommon, JointFrame},
+        rigid_body::RigidBody,
+        transform::Transform,
+    };
+    let mut world = crate::world::PhysicsWorld::new();
+    let ids: Vec<_> = bodies
+        .iter()
+        .map(|body| {
+            let origin = body.center
+                - body
+                    .rotation
+                    .rotate_vector(body.mass.center_of_mass())
+                    .unwrap();
+            let mut rigid =
+                RigidBody::new_dynamic(Transform::new(origin, body.rotation).unwrap(), body.mass)
+                    .unwrap();
+            rigid
+                .set_linear_velocity(body.momentum / body.mass.mass())
+                .unwrap();
+            rigid.set_angular_velocity(body.omega()).unwrap();
+            world.add_body(rigid).unwrap()
+        })
+        .collect();
+    for link in links {
+        world
+            .add_joint(
+                ids[link.a],
+                ids[link.b],
+                Joint::Ball(BallJoint::new(JointCommon::new(
+                    JointFrame::new(link.anchor_a, Quat::IDENTITY),
+                    JointFrame::new(link.anchor_b, Quat::IDENTITY),
+                ))),
+            )
+            .unwrap();
+    }
+    world
+}
+
+fn tree_production_state(world: &crate::world::PhysicsWorld, template: &[Body]) -> Vec<Body> {
+    world
+        .bodies()
+        .zip(template)
+        .map(|((_, rigid), initial)| {
+            let state = rigid.state();
+            let rotation = state.transform().rotation();
+            let local_omega = rotation
+                .conjugate()
+                .rotate_vector(state.angular_velocity())
+                .unwrap();
+            Body {
+                center: rigid.world_center_of_mass().unwrap().unwrap(),
+                rotation,
+                momentum: state.linear_velocity() * initial.mass.mass(),
+                spin: rotation
+                    .rotate_vector(initial.mass.inertia() * local_omega)
+                    .unwrap(),
+                mass: initial.mass,
+                anchor: initial.anchor,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn ball_trees_constrained_reference_preserves_momentum_and_converges() {
+    for count in [10usize, 31] {
+        let mut previous_error = f64::INFINITY;
+        for (subdivision, dt) in [(1, 1.0 / 60.0), (2, 1.0 / 120.0), (4, 1.0 / 240.0)] {
+            let (mut bodies, links) = tree_fixture(count);
+            let template = bodies.clone();
+            let mut world = tree_production_world(&bodies, &links);
+            let initial = tree_invariants(&bodies, &links);
+            assert!(initial.3 < 1.0e-14 && initial.4 < 1.0e-14);
+            // One fixed physical second, independent of dt.
+            for _ in 0..60 * subdivision {
+                bodies = tree_constrained_step(&bodies, &links, dt);
+                world.step(dt).unwrap();
+            }
+            let end = tree_invariants(&bodies, &links);
+            let production = tree_invariants(&tree_production_state(&world, &template), &links);
+            println!(
+                "production tree n={count} dt={dt:.6}: dP={:.6e} dL={:.6e} dE/E={:.6e} anchor={:.3e} velocity={:.3e}",
+                (production.0 - initial.0).length(),
+                (production.1 - initial.1).length(),
+                (production.2 - initial.2) / initial.2,
+                production.3,
+                production.4
+            );
+            assert!(
+                production.0.is_finite() && production.1.is_finite() && production.2.is_finite()
+            );
+            let p_drift = (end.0 - initial.0).length();
+            let l_drift = (end.1 - initial.1).length();
+            let energy_error = (end.2 - initial.2).abs();
+            println!(
+                "reference tree n={count} dt={dt:.6}: dP={p_drift:.6e} dL={l_drift:.6e} dE/E={:.6e} anchor={:.3e} velocity={:.3e}",
+                (end.2 - initial.2) / initial.2,
+                end.3,
+                end.4
+            );
+            assert!(p_drift < 1.0e-9 && l_drift < 1.0e-9);
+            assert!(end.3 < 1.0e-12 && end.4 < 1.0e-12);
+            assert!(energy_error / initial.2 < 1.0e-3 && energy_error < 0.35 * previous_error);
+            previous_error = energy_error;
+        }
+    }
+}
