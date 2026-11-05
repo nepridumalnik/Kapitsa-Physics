@@ -3732,6 +3732,22 @@ fn append_ball_angular_limits<B: SolverBodyAccess + ?Sized>(
         }
     }
     if let (Some(limit), Some(twist)) = (joint.twist_limit, twist_angle(relative)?) {
+        let axis = rotation_a
+            .rotate_vector(Vec3::Z)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        // A collapsed twist limit is a bilateral equality; lock it every step
+        // rather than relying on a predicted crossing.
+        if let Some(value) = collapsed_limit_value(limit) {
+            push_angular_row(
+                workspace,
+                lock_settings(settings),
+                axis,
+                twist - value,
+                4,
+                bilateral_bounds(),
+            )?;
+            return Ok(());
+        }
         let (error, bounds) = if twist < limit.lower {
             (twist - limit.lower, (0.0, f64::INFINITY))
         } else if twist > limit.upper {
@@ -3739,9 +3755,6 @@ fn append_ball_angular_limits<B: SolverBodyAccess + ?Sized>(
         } else {
             return Ok(());
         };
-        let axis = rotation_a
-            .rotate_vector(Vec3::Z)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
         // A violated twist limit is corrected by position projection; adding a
         // Baumgarte velocity target would correct it a second time.
         push_angular_row(workspace, lock_settings(settings), axis, error, 4, bounds)?;
@@ -4525,6 +4538,22 @@ fn append_linear_limit<B: SolverBodyAccess + ?Sized>(
     limit: super::JointLimit,
     key: u8,
 ) -> Result<(), CollisionError> {
+    // When the two unilateral bounds coincide, their intersection is a
+    // bilateral equality. Emit a hard, bias-free lock every step so the
+    // collapsed limit cannot be pushed through by another row sharing the
+    // degree of freedom.
+    if let Some(value) = collapsed_limit_value(limit) {
+        return push_linear_row(
+            bodies,
+            workspace,
+            lock_settings(settings),
+            anchors,
+            axis,
+            coordinate - value,
+            key,
+            bilateral_bounds(),
+        );
+    }
     let mut row_settings = settings;
     let active = if let Some(violation) = limit_error(coordinate, limit) {
         // Position projection removes an existing violation. Disable the
@@ -4598,6 +4627,19 @@ fn append_angular_axis_limit<B: SolverBodyAccess + ?Sized>(
     limit: super::JointLimit,
     key: u8,
 ) -> Result<(), CollisionError> {
+    // A collapsed angular limit is a bilateral equality, exactly as for the
+    // linear case: lock the angle every step instead of waiting for a
+    // predicted crossing.
+    if let Some(value) = collapsed_limit_value(limit) {
+        return push_angular_row(
+            workspace,
+            lock_settings(settings),
+            axis,
+            angle - value,
+            key,
+            bilateral_bounds(),
+        );
+    }
     let mut row_settings = settings;
     let active = if let Some(violation) = limit_error(angle, limit) {
         // Position projection removes an existing violation. Disable the
@@ -4647,6 +4689,13 @@ fn limit_error(value: f64, limit: super::JointLimit) -> Option<(f64, (f64, f64))
     } else {
         None
     }
+}
+
+/// A limit whose lower and upper bounds coincide is the intersection of the two
+/// unilateral constraints, i.e. a bilateral equality. Returns the fixed value
+/// so callers can emit an unconditional lock row.
+fn collapsed_limit_value(limit: super::JointLimit) -> Option<f64> {
+    (limit.lower == limit.upper).then_some(limit.lower)
 }
 
 fn row_settings(body_a: usize, body_b: usize, common: super::JointCommon, dt: f64) -> RowSettings {
@@ -9428,6 +9477,123 @@ mod tests {
             "interior motion should not be constrained, got {}",
             bodies[1].state().linear_velocity().z
         );
+    }
+
+    #[test]
+    fn fixed_length_distance_joint_emits_bilateral_lock_at_exact_length() {
+        // `fixed_length` collapses the distance interval to a single point.
+        // The intersection of the lower and upper bounds is a bilateral
+        // equality, so a row must exist even when the coordinate sits exactly
+        // at the bound and the radial velocity is zero.
+        let bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                Vec3::new(0.0, 0.0, 2.0),
+                Quat::IDENTITY,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ),
+        ];
+        let constraints = [JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: super::super::Joint::Distance(super::super::DistanceJoint::fixed_length(
+                aligned_axis_common(),
+                2.0,
+            )),
+        }];
+        let mut workspace = JointWorkspace::new();
+        JointSolver::prepare(&mut workspace, &bodies, &constraints, 0.01).expect("prepare rows");
+        let row = workspace
+            .rows()
+            .iter()
+            .find(|row| row.key == 0)
+            .expect("fixed-length distance must emit a lock row");
+        assert_eq!(row.dimension, RowDimension::Linear);
+        assert!(row.position_enabled);
+        assert_eq!(row.min_multiplier, f64::NEG_INFINITY);
+        assert_eq!(row.max_multiplier, f64::INFINITY);
+        assert_eq!(
+            row.target_velocity, 0.0,
+            "the lock must not add a Baumgarte bias"
+        );
+    }
+
+    #[test]
+    fn degenerate_translation_limit_locks_against_spring_for_prepared_rows() {
+        // A single prepare builds the rows the velocity-only sweep reuses. A
+        // spring force producer on the same degree of freedom must not push
+        // through a collapsed (`lower == upper`) limit: the intersection of the
+        // two unilateral bounds is a rigid lock and must be present from the
+        // first prepared row.
+        let common = aligned_axis_common();
+        let mut spring = super::super::SpringJoint::new(common, 1.0, 500.0, 0.0);
+        spring.distance_limit = Some(super::super::JointLimit::new(2.0, 2.0));
+        let mut bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                Vec3::new(0.0, 0.0, 2.0),
+                Quat::IDENTITY,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ),
+        ];
+        solve_joint_velocity_only_with_dt(super::super::Joint::Spring(spring), &mut bodies, 0.01);
+        let radial_speed =
+            bodies[1].state().linear_velocity().z - bodies[0].state().linear_velocity().z;
+        assert!(
+            radial_speed.abs() < 1.0e-9,
+            "collapsed distance limit must block the spring, got {radial_speed}"
+        );
+    }
+
+    #[test]
+    fn degenerate_angular_limit_locks_against_drive_for_prepared_rows() {
+        let common = aligned_axis_common();
+        let mut hinge = super::super::HingeJoint::new(common);
+        hinge.angle_limit = Some(super::super::JointLimit::new(0.0, 0.0));
+        hinge.drive = super::super::JointDrive {
+            enabled: true,
+            target_position: 0.0,
+            target_velocity: 5.0,
+            stiffness: 0.0,
+            damping: 0.0,
+            max_force: 1.0e7,
+        };
+        let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        solve_joint_velocity_only_with_dt(super::super::Joint::Hinge(hinge), &mut bodies, 0.01);
+        let angular_speed =
+            bodies[1].state().angular_velocity().z - bodies[0].state().angular_velocity().z;
+        assert!(
+            angular_speed.abs() < 1.0e-9,
+            "collapsed angle limit must block the drive, got {angular_speed}"
+        );
+    }
+
+    #[test]
+    fn degenerate_ball_twist_limit_emits_bilateral_lock() {
+        let mut ball = super::super::BallJoint::new(aligned_axis_common());
+        ball.twist_limit = Some(super::super::JointLimit::new(0.0, 0.0));
+        let bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        let constraints = [JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint: super::super::Joint::Ball(ball),
+        }];
+        let mut workspace = JointWorkspace::new();
+        JointSolver::prepare(&mut workspace, &bodies, &constraints, 0.01).expect("prepare rows");
+        let row = workspace
+            .rows()
+            .iter()
+            .find(|row| row.key == 4)
+            .expect("collapsed twist limit must emit a lock row");
+        assert_eq!(row.dimension, RowDimension::Angular);
+        assert!(row.position_enabled);
+        assert_eq!(row.min_multiplier, f64::NEG_INFINITY);
+        assert_eq!(row.max_multiplier, f64::INFINITY);
+        assert_eq!(row.target_velocity, 0.0);
     }
 
     #[test]
