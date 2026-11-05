@@ -10554,6 +10554,200 @@ mod tests {
         assert!(separation > 0.99, "driven separation={separation}");
     }
 
+    fn d6_free_x_joint(drive: super::super::JointDrive) -> super::super::Joint {
+        let mut joint = super::super::D6Joint::new(aligned_axis_common());
+        joint.linear_motion[0] = super::super::JointMotion::Free;
+        joint.linear_drives[0] = drive;
+        super::super::Joint::D6(joint)
+    }
+
+    #[test]
+    fn disabled_and_zero_force_drives_leave_free_axes_unmoved() {
+        // A disabled drive and an enabled drive with zero force budget must both
+        // emit no row, so a free axis keeps its initial separation and velocity.
+        let disabled = super::super::JointDrive {
+            enabled: false,
+            target_position: 5.0,
+            target_velocity: 5.0,
+            stiffness: 1.0e6,
+            damping: 10.0,
+            max_force: 1.0e8,
+        };
+        let zero_force = super::super::JointDrive {
+            max_force: 0.0,
+            ..disabled
+        };
+        for drive in [disabled, zero_force] {
+            let mut bodies = [
+                solver_body(Vec3::ZERO),
+                solver_body_with_velocities(
+                    Vec3::new(0.3, 0.0, 0.0),
+                    Quat::IDENTITY,
+                    Vec3::new(2.0, 0.0, 0.0),
+                    Vec3::ZERO,
+                ),
+            ];
+            solve_joint(d6_free_x_joint(drive), &mut bodies);
+            let separation = bodies[1].state().transform().translation().x
+                - bodies[0].state().transform().translation().x;
+            assert!(
+                (separation - 0.3).abs() <= 1.0e-12,
+                "disabled drive moved a free axis to {separation}"
+            );
+            assert!(
+                (bodies[1].state().linear_velocity().x - 2.0).abs() <= 1.0e-12,
+                "disabled drive changed a free-axis velocity to {}",
+                bodies[1].state().linear_velocity().x
+            );
+        }
+    }
+
+    #[test]
+    fn d6_linear_drive_moves_toward_negative_target() {
+        let drive = super::super::JointDrive {
+            enabled: true,
+            target_position: -1.0,
+            target_velocity: 0.0,
+            stiffness: 1.0e6,
+            damping: 0.0,
+            max_force: 1.0e8,
+        };
+        let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        solve_joint(d6_free_x_joint(drive), &mut bodies);
+        let separation = bodies[1].state().transform().translation().x
+            - bodies[0].state().transform().translation().x;
+        assert!(separation < -0.99, "driven separation={separation}");
+    }
+
+    #[test]
+    fn cylindrical_translation_drive_respects_signed_target() {
+        let drive = super::super::JointDrive {
+            enabled: true,
+            target_position: -0.6,
+            target_velocity: 0.0,
+            stiffness: 1.0e6,
+            damping: 0.0,
+            max_force: 1.0e8,
+        };
+        let mut joint = super::super::CylindricalJoint::new(aligned_axis_common());
+        joint.translation_drive = drive;
+        let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+        solve_joint(super::super::Joint::Cylindrical(joint), &mut bodies);
+        let axial = bodies[1].state().transform().translation().z
+            - bodies[0].state().transform().translation().z;
+        assert!(axial < -0.59, "cylindrical axial drive={axial}");
+    }
+
+    #[test]
+    fn drive_reaches_signed_target_with_asymmetric_masses() {
+        // With two dynamic bodies of very different mass the drive must still
+        // reach its target in the relative coordinate while conserving the
+        // center of mass.
+        let drive = super::super::JointDrive {
+            enabled: true,
+            target_position: 0.5,
+            target_velocity: 0.0,
+            stiffness: 1.0e6,
+            damping: 0.0,
+            max_force: 1.0e9,
+        };
+        let inertia = kapitsa_math::Mat3::from_diagonal(Vec3::new(1.0, 1.0, 1.0));
+        let mut bodies = [
+            solver_body_with_properties(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                1.0,
+                Vec3::ZERO,
+                inertia,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ),
+            solver_body_with_properties(
+                Vec3::new(0.1, 0.0, 0.0),
+                Quat::IDENTITY,
+                5.0,
+                Vec3::ZERO,
+                inertia,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ),
+        ];
+        solve_joint(d6_free_x_joint(drive), &mut bodies);
+        let separation = bodies[1].state().transform().translation().x
+            - bodies[0].state().transform().translation().x;
+        assert!(
+            separation > 0.49,
+            "asymmetric driven separation={separation}"
+        );
+        // The drive changes only the relative coordinate, so the mass-weighted
+        // center of mass (m_a = 1, m_b = 5) must stay where it started.
+        let com = (bodies[0].state().transform().translation().x
+            + 5.0 * bodies[1].state().transform().translation().x)
+            / 6.0;
+        let initial_com = 5.0 * 0.1 / 6.0;
+        assert!(
+            (com - initial_com).abs() <= 1.0e-9,
+            "drive moved the center of mass by {}",
+            com - initial_com
+        );
+    }
+
+    #[test]
+    fn compliant_drive_leaves_more_residual_than_rigid_drive() {
+        let target = 1.0;
+        let run = |stiffness: f64| -> f64 {
+            let drive = super::super::JointDrive {
+                enabled: true,
+                target_position: target,
+                target_velocity: 0.0,
+                stiffness,
+                damping: 0.0,
+                max_force: 1.0e9,
+            };
+            let mut bodies = [solver_body(Vec3::ZERO), solver_body(Vec3::ZERO)];
+            solve_joint(d6_free_x_joint(drive), &mut bodies);
+            bodies[1].state().transform().translation().x
+                - bodies[0].state().transform().translation().x
+        };
+        let rigid = run(1.0e7);
+        let compliant = run(20.0);
+        assert!(
+            rigid > compliant + 0.05,
+            "rigid drive residual {rigid} was not tighter than compliant {compliant}"
+        );
+        assert!(
+            compliant.abs() > 1.0e-6,
+            "compliant drive unexpectedly reached the target exactly: {compliant}"
+        );
+    }
+
+    #[test]
+    fn spring_pulls_along_nonzero_anchor_line() {
+        // Anchors are offset so the spring direction is the anchor-to-anchor
+        // line, not the body-centre line. A stretched spring must pull body B
+        // toward body A along that line.
+        let mut common = super::super::JointCommon::new(
+            super::super::JointFrame::new(Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY),
+            super::super::JointFrame::new(Vec3::new(-1.0, 0.0, 0.0), Quat::IDENTITY),
+        );
+        common.break_force = None;
+        // Anchor A sits at (1,0,0); anchor B, with body B at (2,0,0), sits at
+        // (1,0,0) too, so the anchors coincide: build the separation via body B.
+        let spring = super::super::SpringJoint::new(common, 0.5, 100.0, 0.0);
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body(Vec3::new(3.0, 0.0, 0.0)),
+        ];
+        solve_joint(super::super::Joint::Spring(spring), &mut bodies);
+        // anchor A = (1,0,0); anchor B = (2,0,0); distance 1.0 > rest 0.5.
+        let relative_speed =
+            bodies[1].state().linear_velocity().x - bodies[0].state().linear_velocity().x;
+        assert!(
+            relative_speed < -1.0e-6,
+            "stretched anchored spring must pull B toward A, got {relative_speed}"
+        );
+    }
+
     fn hard_lock_row_targets_zero_velocity(joint: Joint) {
         let constraints = [JointConstraint {
             id: test_joint_id(),

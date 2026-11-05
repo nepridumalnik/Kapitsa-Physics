@@ -728,6 +728,142 @@ fn joint_ids_validate_world_and_generation_and_body_removal_cascades() {
     assert_eq!(world.joint(joint_id), None);
 }
 
+fn fixed_pair_with_relative_velocity(
+    velocity_b: Vec3,
+    angular_velocity_b: Vec3,
+    common: crate::joint::JointCommon,
+    dt: f64,
+) -> PhysicsWorld {
+    let mut world = PhysicsWorld::new();
+    let body_a = world
+        .add_body(body_at(Vec3::ZERO, 1.0))
+        .expect("first body");
+    let mut second = body_at(Vec3::ZERO, 1.0);
+    second
+        .set_linear_velocity(velocity_b)
+        .expect("finite linear velocity");
+    second
+        .set_angular_velocity(angular_velocity_b)
+        .expect("finite angular velocity");
+    let body_b = world.add_body(second).expect("second body");
+    world
+        .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
+        .expect("fixed joint");
+    world.step(dt).expect("break step");
+    world
+}
+
+#[test]
+fn joint_break_force_is_in_newtons_and_removes_the_joint() {
+    // Equal masses with a 1 m/s relative velocity need a 0.5 kg*m/s impulse to
+    // stop. At dt = 1/60 s that is a 30 N reaction, so a 0.1 N threshold must
+    // fire and the joint must be removed.
+    let common = crate::joint::JointCommon {
+        break_force: Some(0.1),
+        ..crate::joint::JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY)
+    };
+    let world = fixed_pair_with_relative_velocity(Vec3::X, Vec3::ZERO, common, 1.0 / 60.0);
+
+    assert_eq!(world.joint_count(), 0, "broken joint must be removed");
+    let events = world.joint_events();
+    assert_eq!(events.len(), 1, "exactly one break event expected");
+    let force = events[0].force();
+    assert!(force.is_finite() && force > 0.1, "reaction force={force}");
+    assert!(
+        (force - 30.0).abs() <= 1.0e-6,
+        "expected the 0.5 kg*m/s impulse over 1/60 s to read as 30 N, got {force}"
+    );
+}
+
+#[test]
+fn broken_joint_releases_bodies_and_does_not_break_again() {
+    let common = crate::joint::JointCommon {
+        break_force: Some(0.1),
+        ..crate::joint::JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY)
+    };
+    let mut world = fixed_pair_with_relative_velocity(Vec3::X, Vec3::ZERO, common, 1.0 / 60.0);
+    assert_eq!(world.joint_count(), 0);
+    assert_eq!(world.joint_events().len(), 1);
+
+    world.step(1.0 / 60.0).expect("post-break step");
+
+    assert_eq!(world.joint_count(), 0);
+    assert!(
+        world.joint_events().is_empty(),
+        "a removed joint must not emit a second break event"
+    );
+}
+
+#[test]
+fn joint_break_torque_uses_newton_meters() {
+    // A hinge keeps twist about Z but locks the X and Y rotation axes, so a
+    // relative angular velocity about X produces a pure reaction torque. With a
+    // huge break_force and a small break_torque only the torque can fire.
+    let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    common.break_force = Some(1.0e12);
+    common.break_torque = Some(1.0e-3);
+    let mut world = PhysicsWorld::new();
+    let body_a = world
+        .add_body(body_at(Vec3::ZERO, 1.0))
+        .expect("first body");
+    let mut second = body_at(Vec3::ZERO, 1.0);
+    second
+        .set_angular_velocity(Vec3::X * 4.0)
+        .expect("finite angular velocity");
+    let body_b = world.add_body(second).expect("second body");
+    world
+        .add_joint(
+            body_a,
+            body_b,
+            Joint::Hinge(crate::joint::HingeJoint::new(common)),
+        )
+        .expect("hinge joint");
+
+    world.step(1.0 / 60.0).expect("torque break step");
+
+    assert_eq!(
+        world.joint_count(),
+        0,
+        "torque threshold must remove the joint"
+    );
+    let events = world.joint_events();
+    assert_eq!(events.len(), 1);
+    assert!(
+        events[0].torque() > 1.0e-3,
+        "reaction torque={} did not exceed the threshold",
+        events[0].torque()
+    );
+    assert!(
+        events[0].force() < 1.0e12,
+        "force unexpectedly reached the huge threshold: {}",
+        events[0].force()
+    );
+}
+
+#[test]
+fn joint_break_impulse_is_timestep_invariant() {
+    // For the same initial relative velocity the accumulated impulse that stops
+    // it is independent of the timestep, so the reported force times dt must be
+    // equal even though the force itself scales as 1/dt.
+    let impulse_for = |dt: f64| -> f64 {
+        let common = crate::joint::JointCommon {
+            break_force: Some(1.0e-9),
+            ..crate::joint::JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY)
+        };
+        let world = fixed_pair_with_relative_velocity(Vec3::X, Vec3::ZERO, common, dt);
+        let events = world.joint_events();
+        assert_eq!(events.len(), 1, "joint must break at dt={dt}");
+        events[0].force() * dt
+    };
+    let coarse = impulse_for(1.0 / 60.0);
+    let fine = impulse_for(1.0 / 240.0);
+    assert!((coarse - 0.5).abs() <= 1.0e-9, "coarse impulse={coarse}");
+    assert!(
+        (fine - coarse).abs() <= 1.0e-9,
+        "impulse changed with the timestep: coarse={coarse} fine={fine}"
+    );
+}
+
 #[test]
 fn central_gravity_accelerates_dynamic_bodies_and_ignores_static_bodies() {
     let mut world = PhysicsWorld::new();
