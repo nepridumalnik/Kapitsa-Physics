@@ -823,7 +823,9 @@ fn dominant_and_small_islands_remain_deterministic_across_topology_change() {
         a.step_with_executor(DT, &ScopedPcgTestExecutor, 4).unwrap();
         b.step_with_executor(DT, &ScopedPcgTestExecutor, 4).unwrap();
         assert_eq!(a.joint_count(), b.joint_count());
-        assert!(a.physics_step_metrics().collision.island_count >= 4);
+        let metrics = a.physics_step_metrics();
+        assert!(metrics.collision.island_count >= 4);
+        assert!(metrics.joints.color_batches_processed > 0);
         for ((_, a), (_, b)) in a.bodies().zip(b.bodies()) {
             assert_eq!(a.state(), b.state());
         }
