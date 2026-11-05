@@ -110,10 +110,20 @@ struct RowSettings {
 
 #[derive(Clone, Copy)]
 struct FixedJointGeometry {
+    anchor: FixedAnchorGeometry,
+    frame: FixedFrameGeometry,
+}
+
+#[derive(Clone, Copy)]
+struct FixedAnchorGeometry {
     anchor_a: Vec3,
     anchor_b: Vec3,
-    rotation_a: Quat,
     position_error: Vec3,
+}
+
+#[derive(Clone, Copy)]
+struct FixedFrameGeometry {
+    rotation_a: Quat,
     rotation_error: Vec3,
 }
 
@@ -1072,19 +1082,18 @@ impl JointSolver {
         };
         #[cfg(feature = "bench-internals")]
         let preparation_started = std::time::Instant::now();
-        let geometry = fixed_joint_geometry(
-            bodies,
-            workspace,
-            constraint.body_a,
-            constraint.body_b,
-            joint.common.frame_a,
-            joint.common.frame_b,
-        )?;
         let mut settings = row_settings(constraint.body_a, constraint.body_b, joint.common, dt);
         settings.velocity_bias = false;
+        let frames = [joint.common.frame_a, joint.common.frame_b];
         let replacements = match block {
-            FixedJointRowBlock::Anchor => fixed_anchor_rows(bodies, settings, geometry)?,
-            FixedJointRowBlock::Frame => fixed_frame_rows(settings, geometry)?,
+            FixedJointRowBlock::Anchor => fixed_anchor_rows(
+                bodies,
+                settings,
+                fixed_anchor_geometry(bodies, settings, frames)?,
+            )?,
+            FixedJointRowBlock::Frame => {
+                fixed_frame_rows(settings, fixed_frame_geometry(bodies, settings, frames)?)?
+            }
         };
         let rows = workspace
             .rows_mut()
@@ -3312,10 +3321,10 @@ fn append_fixed_rows<B: SolverBodyAccess + ?Sized>(
     // Fixed-joint position projection already corrects connector drift. A
     // Baumgarte velocity target on the same error can add energy to large trees.
     settings.velocity_bias = false;
-    for row in fixed_anchor_rows(bodies, settings, geometry)?.into_iter() {
+    for row in fixed_anchor_rows(bodies, settings, geometry.anchor)?.into_iter() {
         workspace.push(row);
     }
-    for row in fixed_frame_rows(settings, geometry)?.into_iter() {
+    for row in fixed_frame_rows(settings, geometry.frame)?.into_iter() {
         workspace.push(row);
     }
     Ok(())
@@ -3357,11 +3366,15 @@ fn fixed_joint_geometry<B: SolverBodyAccess + ?Sized>(
         .ok_or(CollisionError::ArithmeticOverflow)?;
     let rotation_error = relative_rotation_error(rotation_a, rotation_b)?;
     let geometry = FixedJointGeometry {
-        anchor_a,
-        anchor_b,
-        rotation_a,
-        position_error,
-        rotation_error,
+        anchor: FixedAnchorGeometry {
+            anchor_a,
+            anchor_b,
+            position_error,
+        },
+        frame: FixedFrameGeometry {
+            rotation_a,
+            rotation_error,
+        },
     };
     if !workspace.diagnostic_prepare() {
         workspace.set_fixed_geometry(
@@ -3378,10 +3391,64 @@ fn fixed_joint_geometry<B: SolverBodyAccess + ?Sized>(
     Ok(geometry)
 }
 
+fn fixed_anchor_geometry<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
+    settings: RowSettings,
+    frames: [super::JointFrame; 2],
+) -> Result<FixedAnchorGeometry, CollisionError> {
+    let anchor = |index, frame: super::JointFrame| {
+        Transform::new(frame.local_anchor, frame.local_rotation)
+            .map_err(|_| CollisionError::InvalidContact)?;
+        let point = bodies
+            .get(index)
+            .ok_or(CollisionError::InvalidContact)?
+            .state()
+            .transform()
+            .transform_point(frame.local_anchor);
+        if !point.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        Ok(point)
+    };
+    let anchor_a = anchor(settings.body_a, frames[0])?;
+    let anchor_b = anchor(settings.body_b, frames[1])?;
+    let position_error = anchor_b
+        .checked_sub(anchor_a)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    Ok(FixedAnchorGeometry {
+        anchor_a,
+        anchor_b,
+        position_error,
+    })
+}
+
+fn fixed_frame_geometry<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
+    settings: RowSettings,
+    frames: [super::JointFrame; 2],
+) -> Result<FixedFrameGeometry, CollisionError> {
+    let rotation = |index, frame: super::JointFrame| {
+        Transform::new(frame.local_anchor, frame.local_rotation)
+            .map_err(|_| CollisionError::InvalidContact)?;
+        let body = bodies.get(index).ok_or(CollisionError::InvalidContact)?;
+        (body.state().transform().rotation() * frame.local_rotation)
+            .try_normalize()
+            .filter(|rotation| rotation.is_normalized())
+            .ok_or(CollisionError::ArithmeticOverflow)
+    };
+    let rotation_a = rotation(settings.body_a, frames[0])?;
+    let rotation_b = rotation(settings.body_b, frames[1])?;
+    let rotation_error = relative_rotation_error(rotation_a, rotation_b)?;
+    Ok(FixedFrameGeometry {
+        rotation_a,
+        rotation_error,
+    })
+}
+
 fn fixed_anchor_rows<B: SolverBodyAccess + ?Sized>(
     bodies: &B,
     settings: RowSettings,
-    geometry: FixedJointGeometry,
+    geometry: FixedAnchorGeometry,
 ) -> Result<[ConstraintRow; 3], CollisionError> {
     // These rows share centers and anchors, so resolve them once per block.
     let centers = [
@@ -3439,7 +3506,7 @@ fn fixed_anchor_rows<B: SolverBodyAccess + ?Sized>(
 
 fn fixed_frame_rows(
     settings: RowSettings,
-    geometry: FixedJointGeometry,
+    geometry: FixedFrameGeometry,
 ) -> Result<[ConstraintRow; 3], CollisionError> {
     // The log-rotation derivative coefficient depends only on the rotation
     // error, so compute it once for all three axes.
@@ -3501,8 +3568,8 @@ fn refresh_fixed_joint_row_block<B: SolverBodyAccess + ?Sized>(
     let mut settings = row_settings(constraint.body_a, constraint.body_b, joint.common, dt);
     settings.velocity_bias = false;
     let replacements = match block {
-        FixedJointRowBlock::Anchor => fixed_anchor_rows(bodies, settings, geometry)?,
-        FixedJointRowBlock::Frame => fixed_frame_rows(settings, geometry)?,
+        FixedJointRowBlock::Anchor => fixed_anchor_rows(bodies, settings, geometry.anchor)?,
+        FixedJointRowBlock::Frame => fixed_frame_rows(settings, geometry.frame)?,
     };
     {
         let (anchor_rows, frame_rows, _) = workspace.preparing_fixed_row_blocks_mut()?;
@@ -7620,6 +7687,54 @@ mod tests {
                     2.0 + f64::from(row.key)
                 };
                 assert_eq!(row.accumulated_impulse, impulse);
+            }
+        }
+    }
+
+    #[test]
+    fn specialized_fixed_geometry_matches_full_rows() {
+        let (constraint, initial) = asymmetric_fixed_constraint();
+        let Joint::Fixed(joint) = constraint.joint else {
+            panic!("fixed joint")
+        };
+        let settings = row_settings(0, 1, joint.common, 1.0 / 60.0);
+        let frames = [joint.common.frame_a, joint.common.frame_b];
+        for static_a in [false, true] {
+            for large_rotation in [false, true] {
+                let mut bodies = initial;
+                if static_a {
+                    bodies[0] = static_solver_body(
+                        Vec3::new(0.3, -0.2, 0.1),
+                        Quat::from_axis_angle(Vec3::Z, 0.31).expect("rotation"),
+                    );
+                }
+                if large_rotation {
+                    bodies[1] = solver_body_with_properties(
+                        Vec3::new(1.6, -0.9, 0.8),
+                        Quat::from_axis_angle(Vec3::Y, 2.8).expect("rotation"),
+                        1000.0,
+                        Vec3::new(-0.05, 0.03, 0.02),
+                        kapitsa_math::Mat3::from_diagonal(Vec3::new(450.0, 600.0, 950.0)),
+                        Vec3::ZERO,
+                        Vec3::ZERO,
+                    );
+                }
+                let mut workspace = JointWorkspace::new();
+                let full =
+                    fixed_joint_geometry(&bodies, &mut workspace, 0, 1, frames[0], frames[1])
+                        .expect("full geometry");
+                let anchor =
+                    fixed_anchor_geometry(&bodies, settings, frames).expect("anchor geometry");
+                let frame =
+                    fixed_frame_geometry(&bodies, settings, frames).expect("frame geometry");
+                assert_eq!(
+                    fixed_anchor_rows(&bodies, settings, full.anchor).expect("full anchor rows"),
+                    fixed_anchor_rows(&bodies, settings, anchor).expect("anchor rows")
+                );
+                assert_eq!(
+                    fixed_frame_rows(settings, full.frame).expect("full frame rows"),
+                    fixed_frame_rows(settings, frame).expect("frame rows")
+                );
             }
         }
     }
