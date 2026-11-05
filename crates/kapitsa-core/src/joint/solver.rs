@@ -104,6 +104,7 @@ struct RowSettings {
     velocity_bias: bool,
     velocity_target: f64,
     force_bias: f64,
+    force_driven: bool,
     multiplier_bounds: Option<(f64, f64)>,
     impulse_bounds: Option<(f64, f64)>,
 }
@@ -1748,7 +1749,7 @@ fn solve_position_pcg_prepared(
             !row.position_enabled
                 || row.compliance != 0.0
                 || row.damping != 0.0
-                || row.force_bias != 0.0
+                || row.force_driven
                 || row.min_multiplier != f64::NEG_INFINITY
                 || row.max_multiplier != f64::INFINITY
         })
@@ -1963,7 +1964,7 @@ fn solve_velocity_pcg_prepared(
         || rows.iter().any(|row| {
             row.compliance != 0.0
                 || row.damping != 0.0
-                || row.force_bias != 0.0
+                || row.force_driven
                 || row.min_impulse != f64::NEG_INFINITY
                 || row.max_impulse != f64::INFINITY
         })
@@ -4090,6 +4091,7 @@ fn append_spring_rows<B: SolverBodyAccess + ?Sized>(
             return Err(CollisionError::ArithmeticOverflow);
         }
         spring_settings.common.damping = joint.spring_damping;
+        spring_settings.force_driven = true;
         spring_settings.position_enabled = false;
         spring_settings.velocity_bias = false;
         push_linear_row(
@@ -4725,6 +4727,7 @@ fn row_settings(body_a: usize, body_b: usize, common: super::JointCommon, dt: f6
         velocity_bias: true,
         velocity_target: 0.0,
         force_bias: 0.0,
+        force_driven: false,
         multiplier_bounds: None,
         impulse_bounds: None,
     }
@@ -4993,6 +4996,7 @@ fn make_linear_row(
             settings.velocity_target
         },
         force_bias: settings.force_bias,
+        force_driven: settings.force_driven,
         position_enabled: settings.position_enabled,
         compliance: settings.common.compliance,
         damping: settings.common.damping,
@@ -5045,6 +5049,7 @@ fn make_angular_row(
             settings.velocity_target
         },
         force_bias: settings.force_bias,
+        force_driven: settings.force_driven,
         position_enabled: settings.position_enabled,
         compliance: settings.common.compliance,
         damping: settings.common.damping,
@@ -5258,7 +5263,7 @@ fn solve_velocity_row_with_pair<B: SolverBodyAccess + ?Sized>(
     if !alpha.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
-    let delta = if row.force_bias != 0.0 {
+    let delta = if row.force_driven {
         // Integrate Hooke force and implicit viscous damping in this GS row.
         let damping = row.damping * dt;
         let spring_impulse = row.force_bias * dt;
@@ -5531,7 +5536,7 @@ fn hard_bilateral_block(
             && (row.body_a, row.body_b) == body_pair
             && row.compliance == 0.0
             && row.damping == 0.0
-            && row.force_bias == 0.0
+            && !row.force_driven
             && row.target_velocity == 0.0
             && row.min_multiplier == f64::NEG_INFINITY
             && row.max_multiplier == f64::INFINITY
@@ -6024,6 +6029,7 @@ mod tests {
             error,
             target_velocity: 0.0,
             force_bias: 0.0,
+            force_driven: false,
             position_enabled: true,
             compliance: 0.0,
             damping: 0.0,
@@ -6494,6 +6500,7 @@ mod tests {
             error,
             target_velocity: 0.0,
             force_bias: 0.0,
+            force_driven: false,
             position_enabled: true,
             compliance: 0.0,
             damping: 0.0,
@@ -6845,6 +6852,7 @@ mod tests {
             workspace.push(ConstraintRow {
                 error: distance - 1.0,
                 force_bias: 0.0,
+                force_driven: false,
                 ..row
             });
             Ok(())
@@ -8652,6 +8660,7 @@ mod tests {
             error,
             target_velocity: 0.0,
             force_bias: 0.0,
+            force_driven: false,
             position_enabled: true,
             compliance: 0.0,
             damping: 0.0,
@@ -10592,6 +10601,129 @@ mod tests {
     }
 
     #[test]
+    fn undamped_spring_at_rest_length_preserves_radial_velocity() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let spring = super::super::SpringJoint::new(common, 1.0, 100.0, 0.0);
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_velocities(Vec3::X, Quat::IDENTITY, Vec3::X * 2.0, Vec3::ZERO),
+        ];
+        let before = [bodies[0].state(), bodies[1].state()];
+        solve_joint_velocity_only_with_dt(super::super::Joint::Spring(spring), &mut bodies, 0.01);
+        assert_eq!(
+            bodies[0].state().linear_velocity(),
+            before[0].linear_velocity()
+        );
+        assert_eq!(
+            bodies[1].state().linear_velocity(),
+            before[1].linear_velocity()
+        );
+    }
+
+    #[test]
+    fn zero_force_spring_keeps_radial_velocity_in_fixed_block_mode() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let joint =
+            super::super::Joint::Spring(super::super::SpringJoint::new(common, 1.0, 100.0, 0.0));
+        let constraint = JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint,
+        };
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_velocities(Vec3::X, Quat::IDENTITY, Vec3::X * 2.0, Vec3::ZERO),
+        ];
+        let mut workspace = JointWorkspace::new();
+        JointSolver::prepare(&mut workspace, &bodies, &[constraint], 0.01).unwrap();
+        let options = JointSolverOptions::legacy()
+            .with_projection(super::super::JointProjection::FixedBlock3);
+        JointSolver::solve_velocity_prepared_iteration(
+            &mut workspace,
+            &mut bodies,
+            &[constraint],
+            0.01,
+            options,
+        )
+        .unwrap();
+        assert_eq!(bodies[0].state().linear_velocity(), Vec3::ZERO);
+        assert_eq!(bodies[1].state().linear_velocity(), Vec3::X * 2.0);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn global_velocity_pcg_rejects_zero_force_spring_row() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let joint =
+            super::super::Joint::Spring(super::super::SpringJoint::new(common, 1.0, 100.0, 0.0));
+        let constraint = JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint,
+        };
+        let mut bodies = [
+            solver_body(Vec3::ZERO),
+            solver_body_with_velocities(Vec3::X, Quat::IDENTITY, Vec3::X * 2.0, Vec3::ZERO),
+        ];
+        let before = [bodies[0].state(), bodies[1].state()];
+        let mut workspace = JointWorkspace::new();
+        let result = JointSolver::solve_velocity_pcg(
+            &mut workspace,
+            &mut bodies,
+            &[constraint],
+            0.01,
+            8,
+            false,
+            false,
+            &crate::execution::SequentialExecutor,
+            1,
+        )
+        .unwrap();
+        assert!(result.is_none());
+        assert_eq!([bodies[0].state(), bodies[1].state()], before);
+    }
+
+    #[test]
+    fn undamped_spring_impulse_is_continuous_at_rest_length() {
+        let common = super::super::JointCommon::new(
+            super::super::JointFrame::IDENTITY,
+            super::super::JointFrame::IDENTITY,
+        );
+        let spring =
+            super::super::Joint::Spring(super::super::SpringJoint::new(common, 1.0, 100.0, 0.0));
+        for offset in [-1.0e-8, 0.0, 1.0e-8] {
+            let mut bodies = [
+                solver_body(Vec3::ZERO),
+                solver_body_with_velocities(
+                    Vec3::X * (1.0 + offset),
+                    Quat::IDENTITY,
+                    Vec3::X * 2.0,
+                    Vec3::ZERO,
+                ),
+            ];
+            solve_joint_velocity_only_with_dt(spring, &mut bodies, 0.01);
+            let actual =
+                bodies[1].state().linear_velocity().x - bodies[0].state().linear_velocity().x;
+            let expected = 2.0 - 2.0 * 100.0 * offset * 0.01;
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "offset={offset} actual={actual} expected={expected}"
+            );
+        }
+    }
+
+    #[test]
     fn spring_joint_applies_hooke_impulse_and_damping() {
         let common = super::super::JointCommon::new(
             super::super::JointFrame::IDENTITY,
@@ -10627,9 +10759,12 @@ mod tests {
         solve_joint(super::super::Joint::Spring(damper), &mut bodies);
         let relative_speed =
             bodies[1].state().linear_velocity().x - bodies[0].state().linear_velocity().x;
+        // One implicit damping impulse is shared by all solver sweeps:
+        // v_after = v_before / (1 + dt * damping * inverse_effective_mass).
+        let expected = 10.0 / (1.0 + 0.01 * 100.0 * 2.0);
         assert!(
-            relative_speed.abs() < 0.002,
-            "damped speed={relative_speed}"
+            (relative_speed - expected).abs() < 1.0e-10,
+            "damped speed={relative_speed}, expected={expected}"
         );
     }
 

@@ -233,6 +233,7 @@ mod tests {
             error,
             target_velocity: 0.0,
             force_bias: 0.0,
+            force_driven: false,
             position_enabled: true,
             compliance: 0.0,
             damping: 0.0,

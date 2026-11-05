@@ -34,6 +34,8 @@ pub(crate) struct ConstraintRow {
     pub(crate) target_velocity: f64,
     /// Constant force along the constraint axis, in newtons or newton-meters.
     pub(crate) force_bias: f64,
+    /// This row integrates a force even when its instantaneous value is zero.
+    pub(crate) force_driven: bool,
     pub(crate) position_enabled: bool,
     pub(crate) compliance: f64,
     /// Viscous damping in N·s/m or N·m·s/rad.

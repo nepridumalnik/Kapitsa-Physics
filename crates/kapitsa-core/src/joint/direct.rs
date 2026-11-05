@@ -85,7 +85,7 @@ impl DirectVelocityScratch {
                 !row.position_enabled
                     || row.compliance != 0.0
                     || row.damping != 0.0
-                    || row.force_bias != 0.0
+                    || row.force_driven
                     || row.target_velocity != 0.0
                     || row.min_impulse != f64::NEG_INFINITY
                     || row.max_impulse != f64::INFINITY
