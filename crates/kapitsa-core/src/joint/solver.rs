@@ -7545,6 +7545,7 @@ mod tests {
     }
 
     /// A/B on repeated, purely translational steps; no contacts or CCD.
+    #[cfg(feature = "bench-internals")]
     #[test]
     #[ignore = "compare loaded graph integration order over 180 steps"]
     fn diagnose_loaded_graph_integration_order_trajectory() {
@@ -7592,9 +7593,10 @@ mod tests {
                         }
                     })
                     .collect::<Vec<_>>();
-                for projection in [
-                    super::super::JointProjection::ScalarGaussSeidel,
-                    super::super::JointProjection::FixedBlock3,
+                for (projection, pcg) in [
+                    (super::super::JointProjection::ScalarGaussSeidel, false),
+                    (super::super::JointProjection::FixedBlock3, false),
+                    (super::super::JointProjection::ScalarGaussSeidel, true),
                 ] {
                     for early_pose in [true, false] {
                         let started = std::time::Instant::now();
@@ -7608,6 +7610,8 @@ mod tests {
                         let mut anchor_square_sum = 0.0;
                         let mut max_velocity = 0.0_f64;
                         let mut first_limit = None;
+                        let mut pcg_iterations = 0;
+                        let mut pcg_limits = 0;
                         for tick in 0..180 {
                             let velocity = bodies[0].state().linear_velocity() + Vec3::X * 10.0;
                             bodies[0]
@@ -7637,14 +7641,32 @@ mod tests {
                             JointSolver::prepare(&mut workspace, &bodies, &joints, dt)
                                 .expect("rows");
                             for _ in 0..8 {
-                                JointSolver::solve_velocity_prepared_iteration(
-                                    &mut workspace,
-                                    &mut bodies[..],
-                                    &joints,
-                                    dt,
-                                    options,
-                                )
-                                .expect("velocity");
+                                if pcg {
+                                    let result = JointSolver::solve_velocity_pcg(
+                                        &mut workspace,
+                                        &mut bodies,
+                                        &joints,
+                                        dt,
+                                        64,
+                                        true,
+                                        false,
+                                        &crate::execution::SequentialExecutor,
+                                        1,
+                                    )
+                                    .expect("pcg")
+                                    .expect("eligible bilateral constraints");
+                                    pcg_iterations += result.iterations;
+                                    pcg_limits += usize::from(!result.converged);
+                                } else {
+                                    JointSolver::solve_velocity_prepared_iteration(
+                                        &mut workspace,
+                                        &mut bodies[..],
+                                        &joints,
+                                        dt,
+                                        options,
+                                    )
+                                    .expect("velocity");
+                                }
                             }
                             if !early_pose {
                                 integrate(&mut bodies);
@@ -7690,12 +7712,13 @@ mod tests {
                             .sum::<f64>();
                         let rms = (anchor_square_sum / ((count - 1) * 180) as f64).sqrt();
                         println!(
-                            "topology={topology} count={count} projection={projection:?} early_pose={early_pose} anchor_max/rms={max_anchor:.9e}/{rms:.9e} frame=0 velocity_residual_max={max_velocity:.9e} momentum={momentum:.9e} kinetic={kinetic:.9e} com_accel={:.9e} first_limit={first_limit:?} elapsed_ms={}",
+                            "topology={topology} count={count} projection={projection:?} pcg={pcg} early_pose={early_pose} anchor_max/rms={max_anchor:.9e}/{rms:.9e} frame=0 velocity_residual_max={max_velocity:.9e} momentum={momentum:.9e} kinetic={kinetic:.9e} com_accel={:.9e} first_limit={first_limit:?} pcg_iterations={pcg_iterations} pcg_limits={pcg_limits} elapsed_ms={}",
                             momentum / count as f64 / (180.0 * dt),
                             started.elapsed().as_millis()
                         );
                         assert!((momentum - 1800.0).abs() < 1.0e-7);
                         if early_pose
+                            && !pcg
                             && projection == super::super::JointProjection::ScalarGaussSeidel
                         {
                             for _ in 0..180 {
