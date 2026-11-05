@@ -417,6 +417,22 @@ mod tests {
     }
 
     #[test]
+    fn resumed_ccd_segment_applies_force_only_for_remaining_time() {
+        let properties = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
+        let mut body = body(properties);
+        body.apply_force(Vec3::X * 4.0).expect("force");
+        let mut impact =
+            super::predict_from_state(&body, *body.state(), 0.25).expect("first segment");
+        assert_vec3_close(impact.linear_velocity(), Vec3::X * 0.5);
+        // An impact changes velocity, while the force remains active for the
+        // remaining segment. Reapplying a full-step force would yield 1.8 m/s.
+        impact.linear_velocity += Vec3::X * 0.3;
+        let resumed = super::predict_from_state(&body, impact, 0.25).expect("remaining segment");
+        assert_vec3_close(resumed.linear_velocity(), Vec3::X * 1.3);
+        assert_vec3_close(resumed.transform().translation(), Vec3::X * 0.45);
+    }
+
+    #[test]
     fn constant_torque_updates_angular_velocity_and_orientation() {
         let mut body = body(mass(Vec3::ZERO, Mat3::IDENTITY));
         body.apply_torque(Vec3::Z * 2.0).expect("finite torque");
