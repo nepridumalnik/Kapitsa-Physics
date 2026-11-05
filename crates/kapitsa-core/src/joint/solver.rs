@@ -7343,6 +7343,214 @@ mod tests {
         (constraint, bodies)
     }
 
+    /// Controlled one-step comparison. External impulse is along the connector
+    /// axis, so torque is zero and the exact assembly COM speed is 10/N m/s.
+    #[test]
+    #[ignore = "baseline A/B diagnostic for pose integration order"]
+    fn loaded_fixed_joint_prediction_precedes_velocity_projection() {
+        let dt = 1.0 / 120.0;
+        for count in [2_usize, 10, 50, 100, 1000] {
+            for projection in [
+                super::super::JointProjection::ScalarGaussSeidel,
+                super::super::JointProjection::FixedBlock3,
+            ] {
+                let common = JointCommon::new(
+                    JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+                    JointFrame::new(-Vec3::X * 0.5, Quat::IDENTITY),
+                );
+                let joint = Joint::Fixed(super::super::FixedJoint::new(common));
+                let mut world = crate::world::PhysicsWorld::new();
+                let ids = (0..count)
+                    .map(|index| {
+                        let body = solver_body(Vec3::X * index as f64);
+                        world.add_body(*body.body()).expect("world body")
+                    })
+                    .collect::<Vec<_>>();
+                world
+                    .body_mut(ids[0])
+                    .expect("root")
+                    .apply_force_at_point(Vec3::X * 1200.0, Vec3::ZERO)
+                    .expect("force");
+                let joints = (0..count - 1)
+                    .map(|index| {
+                        let id = world
+                            .add_joint(ids[index], ids[index + 1], joint)
+                            .expect("world joint");
+                        JointConstraint {
+                            id,
+                            body_a: index,
+                            body_b: index + 1,
+                            joint,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let options = JointSolverOptions::legacy().with_projection(projection);
+                let mut outputs = Vec::new();
+                for early_pose in [true, false] {
+                    let mut bodies = (0..count)
+                        .map(|index| {
+                            solver_body_with_velocities(
+                                Vec3::X
+                                    * (index as f64
+                                        + if early_pose && index == 0 {
+                                            10.0 * dt
+                                        } else {
+                                            0.0
+                                        }),
+                                Quat::IDENTITY,
+                                if index == 0 {
+                                    Vec3::X * 10.0
+                                } else {
+                                    Vec3::ZERO
+                                },
+                                Vec3::ZERO,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let mut workspace = JointWorkspace::new();
+                    JointSolver::begin_step(&mut workspace);
+                    JointSolver::prepare(&mut workspace, &bodies, &joints, dt)
+                        .expect("prepare velocity");
+                    for _ in 0..8 {
+                        JointSolver::solve_velocity_prepared_iteration(
+                            &mut workspace,
+                            &mut bodies[..],
+                            &joints,
+                            dt,
+                            options,
+                        )
+                        .expect("velocity sweep");
+                    }
+                    if !early_pose {
+                        for body in &mut bodies {
+                            let state = body.state();
+                            let transform = state.transform();
+                            let next = Transform::new(
+                                transform.translation() + state.linear_velocity() * dt,
+                                transform.rotation(),
+                            )
+                            .expect("transform");
+                            body.body_mut().set_transform(next).expect("integrate pose");
+                        }
+                    }
+                    let max_anchor = |bodies: &[SolverBody]| {
+                        bodies
+                            .windows(2)
+                            .map(|pair| {
+                                (pair[1].state().transform().translation()
+                                    - pair[0].state().transform().translation()
+                                    - Vec3::X)
+                                    .length()
+                            })
+                            .fold(0.0_f64, f64::max)
+                    };
+                    let pre_position = max_anchor(&bodies);
+                    for _ in 0..3 {
+                        for (index, constraint) in joints.iter().copied().enumerate() {
+                            JointSolver::solve_position_joint(
+                                &mut workspace,
+                                &mut bodies[..],
+                                constraint,
+                                index,
+                                dt,
+                                options,
+                            )
+                            .expect("position sweep");
+                        }
+                    }
+                    let post_position = max_anchor(&bodies);
+                    let momentum = bodies
+                        .iter()
+                        .map(|body| body.state().linear_velocity().x)
+                        .sum::<f64>();
+                    println!(
+                        "count={count} projection={projection:?} early_pose={early_pose} pre_position={pre_position:.9e} post_position={post_position:.9e} momentum={momentum:.9e}"
+                    );
+                    assert!((momentum - 10.0).abs() < 1.0e-10);
+                    outputs.push((pre_position, post_position));
+                }
+                if projection == super::super::JointProjection::ScalarGaussSeidel {
+                    world.step(dt).expect("world step");
+                    let positions = ids
+                        .iter()
+                        .map(|id| {
+                            world
+                                .body(*id)
+                                .expect("body")
+                                .state()
+                                .transform()
+                                .translation()
+                        })
+                        .collect::<Vec<_>>();
+                    let world_error = positions
+                        .windows(2)
+                        .map(|pair| (pair[1] - pair[0] - Vec3::X).length())
+                        .fold(0.0_f64, f64::max);
+                    assert!(
+                        (world_error - outputs[0].1).abs() < 1.0e-10,
+                        "world={world_error} test={}",
+                        outputs[0].1
+                    );
+                }
+                assert!(outputs[0].0 > 0.08);
+                assert!(outputs[1].0 < 0.003);
+                if count == 2 {
+                    assert!(outputs[1].1 < 1.0e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "known loaded-chain drift before pose integration is corrected"]
+    fn loaded_fixed_joint_chain_stays_close_after_root_force() {
+        let mut world = crate::world::PhysicsWorld::new();
+        let ids = (0..10)
+            .map(|index| {
+                world
+                    .add_body(*solver_body(Vec3::X * index as f64).body())
+                    .expect("body")
+            })
+            .collect::<Vec<_>>();
+        let common = JointCommon::new(
+            JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+            JointFrame::new(-Vec3::X * 0.5, Quat::IDENTITY),
+        );
+        for pair in ids.windows(2) {
+            world
+                .add_joint(
+                    pair[0],
+                    pair[1],
+                    Joint::Fixed(super::super::FixedJoint::new(common)),
+                )
+                .expect("joint");
+        }
+        world
+            .body_mut(ids[0])
+            .expect("root")
+            .apply_force_at_point(Vec3::X * 1200.0, Vec3::ZERO)
+            .expect("force");
+        world.step(1.0 / 120.0).expect("step");
+        let positions = ids
+            .iter()
+            .map(|id| {
+                world
+                    .body(*id)
+                    .expect("body")
+                    .state()
+                    .transform()
+                    .translation()
+            })
+            .collect::<Vec<_>>();
+        let max_error = positions
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0] - Vec3::X).length())
+            .fold(0.0_f64, f64::max);
+        // For one-metre links, limit the drift to 0.3% of link length;
+        // the exact hard-constraint value is zero.
+        assert!(max_error < 0.003, "max anchor error {max_error:.9e} m");
+    }
+
     #[test]
     fn fixed_center_anchor_one_iteration_has_no_overshoot() {
         let constraint = JointConstraint {
