@@ -1248,34 +1248,23 @@ impl CollisionSystem {
         #[cfg(not(feature = "bench-internals"))]
         let dominant: Option<usize> = None;
         if let Some(index) = dominant {
-            let (left, right) = self.solver_islands[..island_count].split_at_mut(index);
-            let (large, right) = right.split_at_mut(1);
             solve_island_group(
-                large,
+                &mut self.solver_islands[index..index + 1],
                 config,
                 joint_solver_step,
                 gravity,
                 executor,
-                1,
-                worker_count,
+                [1, worker_count],
+                None,
             )?;
             solve_island_group(
-                left,
+                &mut self.solver_islands[..island_count],
                 config,
                 joint_solver_step,
                 gravity,
                 executor,
-                worker_count,
-                1,
-            )?;
-            solve_island_group(
-                right,
-                config,
-                joint_solver_step,
-                gravity,
-                executor,
-                worker_count,
-                1,
+                [worker_count, 1],
+                Some(index),
             )?;
         } else if worker_count <= 1 || (island_count <= 1 && !enter_executor) {
             for island in self.solver_islands.iter_mut().take(island_count) {
@@ -1576,9 +1565,10 @@ fn solve_island_group(
     step: crate::joint::JointSolverStep<'_>,
     gravity: Option<crate::gravity::CentralGravity>,
     executor: &impl StepExecutor,
-    workers: usize,
-    inner_workers: usize,
+    workers: [usize; 2],
+    skip: Option<usize>,
 ) -> Result<(), CollisionError> {
+    let [workers, inner_workers] = workers;
     let solve = |island: &mut SolverIsland| {
         island.workspace.solve_with_joints(
             &mut island.bodies,
@@ -1593,14 +1583,19 @@ fn solve_island_group(
         )
     };
     if workers <= 1 || islands.len() <= 1 {
-        for island in islands {
-            solve(island)?;
+        for (index, island) in islands.iter_mut().enumerate() {
+            if Some(index) != skip {
+                solve(island)?;
+            }
         }
     } else {
         let chunk_size = islands.len().div_ceil(workers.min(islands.len()));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            executor.for_each_chunk_mut(islands, chunk_size, |_, chunk| {
-                for island in chunk {
+            executor.for_each_chunk_mut(islands, chunk_size, |chunk_index, chunk| {
+                for (offset, island) in chunk.iter_mut().enumerate() {
+                    if Some(chunk_index * chunk_size + offset) == skip {
+                        continue;
+                    }
                     if let Err(error) = solve(island) {
                         island.worker_error = Some(error);
                         break;
