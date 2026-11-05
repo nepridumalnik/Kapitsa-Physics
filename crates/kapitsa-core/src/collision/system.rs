@@ -1226,8 +1226,13 @@ impl CollisionSystem {
         #[cfg(feature = "bench-internals")]
         let iterations_started = std::time::Instant::now();
         #[cfg(feature = "bench-internals")]
-        let enter_executor =
-            self.joint_solver_options.partial_coloring() && worker_count > 1 && island_count == 1;
+        let enter_executor = worker_count > 1
+            && island_count == 1
+            && (self.joint_solver_options.partial_coloring()
+                || self.solver_islands[0]
+                    .workspace
+                    .colored_dispatch_metrics()
+                    .0);
         #[cfg(not(feature = "bench-internals"))]
         let enter_executor = false;
         if worker_count <= 1 || (island_count <= 1 && !enter_executor) {
