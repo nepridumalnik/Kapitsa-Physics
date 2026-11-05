@@ -1133,6 +1133,87 @@ fn diagnose_parallel_velocity_pcg_scaling() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
+#[ignore = "compare finite sweeps with the analytic velocity projection of equal-mass graphs"]
+fn diagnose_equal_mass_graph_against_analytic_projection() {
+    for topology in ["chain", "tree", "star"] {
+        for count in [2_usize, 10, 50, 100, 500, 1000] {
+            for (label, block3, pcg) in [
+                ("Scalar", false, false),
+                ("FixedBlock3", true, false),
+                ("PCG-IC0", false, true),
+            ] {
+                for iterations in [8, 16, 32] {
+                    if pcg && (iterations != 8 || (topology == "star" && count == 1000)) {
+                        continue;
+                    }
+                    let mut world = PhysicsWorld::new();
+                    let mut bodies = Vec::with_capacity(count);
+                    for index in 0..count {
+                        let mut body = dynamic_body(Vec3::ZERO, Quat::IDENTITY);
+                        if index == 0 {
+                            body.set_linear_velocity(Vec3::X).unwrap();
+                        }
+                        bodies.push(world.add_body(body).unwrap());
+                    }
+                    for index in 1..count {
+                        let parent = match topology {
+                            "chain" => index - 1,
+                            "tree" => (index - 1) / 2,
+                            _ => 0,
+                        };
+                        world
+                            .add_joint(
+                                bodies[parent],
+                                bodies[index],
+                                Joint::Fixed(FixedJoint::new(JointCommon::new(
+                                    JointFrame::IDENTITY,
+                                    JointFrame::IDENTITY,
+                                ))),
+                            )
+                            .unwrap();
+                    }
+                    world
+                        .set_collision_config(CollisionConfig {
+                            velocity_iterations: iterations,
+                            ..CollisionConfig::default()
+                        })
+                        .unwrap();
+                    world.set_joint_projection_for_bench(block3);
+                    if pcg {
+                        world.set_joint_global_velocity_pcg_for_bench(64, true);
+                    }
+                    world.step(DT).unwrap();
+                    let mut momentum = Vec3::ZERO;
+                    let mut energy = 0.0;
+                    let mut max_error = 0.0_f64;
+                    for (_, body) in world.bodies() {
+                        let velocity = body.state().linear_velocity();
+                        momentum += velocity;
+                        energy += 0.5 * velocity.length_squared();
+                        max_error = max_error.max((velocity - Vec3::X / count as f64).length());
+                    }
+                    let metrics = world.physics_step_metrics().joints;
+                    println!(
+                        "topology={topology} count={count} projection={label} sweeps={iterations} analytic_max_error={max_error:.9e} residual_first/final={:.9e}/{:.9e} momentum_error={:.9e} energy={energy:.9e} exact_energy={:.9e} pcg_iterations={} pcg_converged/limit={}/{}",
+                        metrics.first_velocity_linear_residual_mps,
+                        metrics.post_velocity_linear_residual_mps,
+                        (momentum - Vec3::X).length(),
+                        0.5 / count as f64,
+                        metrics.velocity_pcg_iterations,
+                        metrics.velocity_pcg_converged_calls,
+                        metrics.velocity_pcg_iteration_limit_calls
+                    );
+                    assert!((momentum - Vec3::X).length() < 1.0e-10);
+                    assert!(energy <= 0.5 + 1.0e-10);
+                    assert_eq!(metrics.velocity_sweeps, iterations as u64);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 #[ignore = "diagnostic of loaded velocity convergence on joint graphs without contacts"]
 fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
     for (name, count, branching) in [
