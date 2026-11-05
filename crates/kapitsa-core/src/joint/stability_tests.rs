@@ -1733,10 +1733,10 @@ fn joint_violation(body_a: &RigidBody, body_b: &RigidBody, joint: &Joint) -> Joi
         Joint::Hinge(joint) => {
             let tilt = tilt_angle(rotation_a, rotation_b);
             let mut angular = tilt;
-            if let Some(limit) = joint.angle_limit {
-                if let Some(twist) = twist_angle(rotation_a, rotation_b) {
-                    angular = angular.max(interval_violation(twist, limit));
-                }
+            if let Some(limit) = joint.angle_limit
+                && let Some(twist) = twist_angle(rotation_a, rotation_b)
+            {
+                angular = angular.max(interval_violation(twist, limit));
             }
             let perpendicular_angular = angular_velocity - axis_a * angular_velocity.dot(axis_a);
             JointViolation {
@@ -1768,10 +1768,10 @@ fn joint_violation(body_a: &RigidBody, body_b: &RigidBody, joint: &Joint) -> Joi
                 let swing = axis_a.dot(axis_b).clamp(-1.0, 1.0).acos();
                 angular = angular.max((swing - limit).max(0.0));
             }
-            if let Some(limit) = joint.twist_limit {
-                if let Some(twist) = twist_angle(rotation_a, rotation_b) {
-                    angular = angular.max(interval_violation(twist, limit));
-                }
+            if let Some(limit) = joint.twist_limit
+                && let Some(twist) = twist_angle(rotation_a, rotation_b)
+            {
+                angular = angular.max(interval_violation(twist, limit));
             }
             JointViolation {
                 position: delta.length(),
@@ -1790,10 +1790,10 @@ fn joint_violation(body_a: &RigidBody, body_b: &RigidBody, joint: &Joint) -> Joi
                 position = position.max(interval_violation(delta.dot(axis_a), limit));
             }
             let mut angular = tilt_angle(rotation_a, rotation_b);
-            if let Some(limit) = joint.angle_limit {
-                if let Some(twist) = twist_angle(rotation_a, rotation_b) {
-                    angular = angular.max(interval_violation(twist, limit));
-                }
+            if let Some(limit) = joint.angle_limit
+                && let Some(twist) = twist_angle(rotation_a, rotation_b)
+            {
+                angular = angular.max(interval_violation(twist, limit));
             }
             JointViolation {
                 position,
@@ -1812,10 +1812,10 @@ fn joint_violation(body_a: &RigidBody, body_b: &RigidBody, joint: &Joint) -> Joi
                 }
             }
             let mut angular = tilt_angle(rotation_a, rotation_b);
-            if let Some(limit) = joint.rotation_limit {
-                if let Some(twist) = twist_angle(rotation_a, rotation_b) {
-                    angular = angular.max(interval_violation(twist, limit));
-                }
+            if let Some(limit) = joint.rotation_limit
+                && let Some(twist) = twist_angle(rotation_a, rotation_b)
+            {
+                angular = angular.max(interval_violation(twist, limit));
             }
             let perpendicular_angular = angular_velocity - normal * angular_velocity.dot(normal);
             JointViolation {
@@ -2001,7 +2001,11 @@ fn apply_root_force(world: &mut PhysicsWorld, force: Vec3) {
 }
 
 fn perturbed_joint_rotation(index: usize) -> Quat {
-    let angle = if index % 2 == 0 { 0.001 } else { -0.001 };
+    let angle = if index.is_multiple_of(2) {
+        0.001
+    } else {
+        -0.001
+    };
     Quat::from_axis_angle(Vec3::new(0.2, 0.7, -0.3), angle).unwrap()
 }
 
@@ -2422,7 +2426,9 @@ fn free_floating_ball_tree_conserves_momentum() {
         momentum_drift <= 1.0e-9,
         "linear momentum drifted by {momentum_drift}"
     );
-    assert!(final_metrics.linear_velocity_residual_max < initial.linear_velocity_residual_max * 0.01);
+    assert!(
+        final_metrics.linear_velocity_residual_max < initial.linear_velocity_residual_max * 0.01
+    );
     assert!(final_metrics.kinetic_energy < initial.kinetic_energy);
     assert!(peak_energy <= initial.kinetic_energy * (1.0 + 1.0e-12));
     // Position projection on an articulated tree is not an exactly
@@ -2545,6 +2551,89 @@ fn consistent_free_system_conservation() {
                     assert!(energy_change.abs() < 0.01);
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn ball_pair_stage_momentum() {
+    use crate::{
+        constraint::SolverBody,
+        joint::{
+            JointSolverOptions,
+            solver::{JointConstraint, JointSolver},
+            workspace::JointWorkspace,
+        },
+        rigid_body::integrator,
+    };
+    fn metrics(bodies: &[SolverBody]) -> GraphMetrics {
+        let mut world = PhysicsWorld::new();
+        for body in bodies {
+            world.add_body(*body.body()).unwrap();
+        }
+        graph_metrics(&world)
+    }
+    for consistent in [true, false] {
+        let world = if consistent {
+            consistent_ball_tree(2)
+        } else {
+            free_floating_graph(2)
+        };
+        let mut bodies: Vec<_> = world
+            .bodies()
+            .map(|(_, b)| SolverBody::from_prediction(*b, *b.state()))
+            .collect();
+        let constraints: Vec<_> = world
+            .joints()
+            .map(|(id, _, _, joint)| JointConstraint {
+                id,
+                body_a: 0,
+                body_b: 1,
+                joint: *joint,
+            })
+            .collect();
+        let mut workspace = JointWorkspace::new();
+        let initial = metrics(&bodies);
+        for step in 1..=300 {
+            let before = metrics(&bodies);
+            for body in &mut bodies {
+                let state = integrator::predict(body.body(), DT).unwrap();
+                *body = SolverBody::from_prediction(*body.body(), state);
+            }
+            let integrated = metrics(&bodies);
+            JointSolver::begin_step(&mut workspace);
+            for _ in 0..3 {
+                JointSolver::prepare(&mut workspace, &bodies, &constraints, DT).unwrap();
+                JointSolver::solve_position_iteration(
+                    &mut workspace,
+                    &mut bodies,
+                    DT,
+                    JointSolverOptions::legacy(),
+                )
+                .unwrap();
+            }
+            let projected = metrics(&bodies);
+            for _ in 0..8 {
+                JointSolver::prepare(&mut workspace, &bodies, &constraints, DT).unwrap();
+                JointSolver::solve_velocity_iteration(
+                    &mut workspace,
+                    &mut bodies,
+                    DT,
+                    JointSolverOptions::legacy(),
+                )
+                .unwrap();
+            }
+            let solved = metrics(&bodies);
+            if step == 1 || step == 300 {
+                println!(
+                    "stages consistent={consistent} step={step}: integration dL={:.9e}, projection dL={:.9e}, velocity dL={:.9e}, total dL={:.9e}",
+                    (integrated.angular_momentum - before.angular_momentum).length(),
+                    (projected.angular_momentum - integrated.angular_momentum).length(),
+                    (solved.angular_momentum - projected.angular_momentum).length(),
+                    (solved.angular_momentum - initial.angular_momentum).length()
+                );
+            }
+            assert!((solved.linear_momentum - initial.linear_momentum).length() < 1.0e-10);
         }
     }
 }
