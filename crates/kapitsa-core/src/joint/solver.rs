@@ -1006,6 +1006,7 @@ impl JointSolver {
 
         // Only the angular block is solved first after the linear rows; building
         // the frame rows here and after the linear pass would duplicate work.
+        let masses = Self::fixed_position_masses(workspace, bodies, start, options)?;
         Self::write_fixed_position_block(
             workspace,
             bodies,
@@ -1013,6 +1014,7 @@ impl JointSolver {
             dt,
             start,
             FixedJointRowBlock::Anchor,
+            masses,
         )?;
         Self::position_projection_group_range(
             workspace,
@@ -1022,10 +1024,12 @@ impl JointSolver {
             [0, 1, 2],
             start,
             start + 3,
+            masses,
         )?;
         // The previous iteration's frame rows predate the last angular solve, so
         // they must be rebuilt at the post-linear pose regardless of whether the
         // linear pass moved the bodies.
+        let masses = Self::fixed_position_masses(workspace, bodies, start + 3, options)?;
         Self::write_fixed_position_block(
             workspace,
             bodies,
@@ -1033,6 +1037,7 @@ impl JointSolver {
             dt,
             start + 3,
             FixedJointRowBlock::Frame,
+            masses,
         )?;
         let angular = Self::position_projection_group_range(
             workspace,
@@ -1042,10 +1047,12 @@ impl JointSolver {
             [3, 4, 5],
             start + 3,
             start + 6,
+            masses,
         )?;
         if angular.pose_changed {
             // Angular correction changes offset connector positions; refresh only
             // the anchor rows before the final linear pass.
+            let masses = Self::fixed_position_masses(workspace, bodies, start, options)?;
             Self::write_fixed_position_block(
                 workspace,
                 bodies,
@@ -1053,6 +1060,7 @@ impl JointSolver {
                 dt,
                 start,
                 FixedJointRowBlock::Anchor,
+                masses,
             )?;
             Self::position_projection_group_range(
                 workspace,
@@ -1062,6 +1070,7 @@ impl JointSolver {
                 [0, 1, 2],
                 start,
                 start + 3,
+                masses,
             )?;
         }
         #[cfg(test)]
@@ -1076,6 +1085,7 @@ impl JointSolver {
         dt: f64,
         start: usize,
         block: FixedJointRowBlock,
+        masses: [SolverMass; 2],
     ) -> Result<(), CollisionError> {
         let super::Joint::Fixed(joint) = constraint.joint else {
             return Err(CollisionError::InvalidContact);
@@ -1086,11 +1096,21 @@ impl JointSolver {
         settings.velocity_bias = false;
         let frames = [joint.common.frame_a, joint.common.frame_b];
         let replacements = match block {
-            FixedJointRowBlock::Anchor => fixed_anchor_rows(
-                bodies,
-                settings,
-                fixed_anchor_geometry(bodies, settings, frames)?,
-            )?,
+            FixedJointRowBlock::Anchor => {
+                let mut centers = [Vec3::ZERO; 2];
+                for (i, index) in [settings.body_a, settings.body_b].into_iter().enumerate() {
+                    centers[i] = if masses[i].inverse_mass > 0.0 {
+                        masses[i].center
+                    } else {
+                        center_of_mass(bodies.get(index).ok_or(CollisionError::InvalidContact)?)?
+                    };
+                }
+                fixed_anchor_rows_with_centers(
+                    settings,
+                    fixed_anchor_geometry(bodies, settings, frames)?,
+                    centers,
+                )?
+            }
             FixedJointRowBlock::Frame => {
                 fixed_frame_rows(settings, fixed_frame_geometry(bodies, settings, frames)?)?
             }
@@ -1108,6 +1128,27 @@ impl JointSolver {
         Ok(())
     }
 
+    fn fixed_position_masses<B: SolverBodyAccess + ?Sized>(
+        workspace: &mut JointWorkspace,
+        bodies: &B,
+        start: usize,
+        options: JointSolverOptions,
+    ) -> Result<[SolverMass; 2], CollisionError> {
+        let mut stats = SolverMassCacheStats::default();
+        let masses = {
+            let (rows, slots) = workspace.row_range_and_slots_mut(start, start + 3)?;
+            projection_masses(
+                bodies,
+                slots,
+                [rows[0], rows[1], rows[2]],
+                options,
+                &mut stats,
+            )?
+        };
+        record_solver_mass_cache_stats(workspace, stats);
+        Ok(masses)
+    }
+
     fn position_projection_group_range<B: SolverBodyAccess + ?Sized>(
         workspace: &mut JointWorkspace,
         bodies: &mut B,
@@ -1116,6 +1157,7 @@ impl JointSolver {
         keys: [u8; 3],
         start: usize,
         end: usize,
+        masses: [SolverMass; 2],
     ) -> Result<ProjectionGroupResult, CollisionError> {
         let mut cache_stats = SolverMassCacheStats::default();
         let result = {
@@ -1128,6 +1170,7 @@ impl JointSolver {
                 options,
                 keys,
                 &mut cache_stats,
+                Some(masses),
             )?
         };
         record_solver_mass_cache_stats(workspace, cache_stats);
@@ -1372,6 +1415,7 @@ impl JointSolver {
                 options,
                 keys,
                 &mut cache_stats,
+                None,
             )?
         };
         record_solver_mass_cache_stats(workspace, cache_stats);
@@ -3463,6 +3507,14 @@ fn fixed_anchor_rows<B: SolverBodyAccess + ?Sized>(
                 .ok_or(CollisionError::InvalidContact)?,
         )?,
     ];
+    fixed_anchor_rows_with_centers(settings, geometry, centers)
+}
+
+fn fixed_anchor_rows_with_centers(
+    settings: RowSettings,
+    geometry: FixedAnchorGeometry,
+    centers: [Vec3; 2],
+) -> Result<[ConstraintRow; 3], CollisionError> {
     let anchors = [geometry.anchor_a, geometry.anchor_b];
     Ok([
         make_linear_row(
@@ -5071,6 +5123,7 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
     options: JointSolverOptions,
     keys: [u8; 3],
     cache_stats: &mut SolverMassCacheStats,
+    resolved_masses: Option<[SolverMass; 2]>,
 ) -> Result<ProjectionGroupResult, CollisionError> {
     validate_projection_rows(rows, bodies.len())?;
     let indices = projection_group_indices(rows, keys);
@@ -5082,7 +5135,10 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
             RowDimension::Angular
         };
         if hard_bilateral_block(block_rows, keys, dimension, bodies.len()) {
-            let masses = projection_masses(bodies, slots, block_rows, options, cache_stats)?;
+            let masses = match resolved_masses {
+                Some(masses) => masses,
+                None => projection_masses(bodies, slots, block_rows, options, cache_stats)?,
+            };
             if let Some(block) = prepared_block(block_rows, masses, dt, keys[0] == 0)? {
                 match block.solve_position(dt) {
                     Ok(delta) => {
@@ -5091,7 +5147,7 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
                             indices,
                             delta,
                             bodies,
-                            options.mass_cache().then_some(masses),
+                            (resolved_masses.is_some() || options.mass_cache()).then_some(masses),
                         )?;
                         if options.mass_cache() && pose_changed {
                             invalidate_solver_mass_pair(
@@ -7796,6 +7852,93 @@ mod tests {
                     .rotate_vector(Vec3::X)
                     .expect("finite rotation");
                 assert!((expected_axis - actual_axis).length() <= 1.0e-14);
+            }
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn fixed_in_place_mass_reuse_matches_generic_for_static_and_dynamic_bodies() {
+        let dt = 1.0 / 60.0;
+        for mass_cache in [false, true] {
+            for static_a in [false, true] {
+                for compliant in [false, true] {
+                    let (mut constraint, mut bodies) = asymmetric_fixed_constraint();
+                    if static_a {
+                        bodies[0] = static_solver_body(
+                            Vec3::new(0.3, -0.2, 0.1),
+                            Quat::from_axis_angle(Vec3::Z, 0.31).expect("rotation"),
+                        );
+                    }
+                    if let Joint::Fixed(ref mut joint) = constraint.joint {
+                        if !compliant {
+                            joint.common.compliance = 0.0;
+                            joint.common.damping = 0.0;
+                        }
+                    }
+                    let options = JointSolverOptions::legacy()
+                        .with_mass_cache(mass_cache)
+                        .with_projection(super::super::JointProjection::FixedBlock3);
+                    let mut generic_bodies = bodies;
+                    let mut fast_bodies = bodies;
+                    let mut generic = JointWorkspace::new();
+                    let mut fast = JointWorkspace::new();
+                    JointSolver::begin_step(&mut generic);
+                    JointSolver::begin_step(&mut fast);
+                    for sweep in 0..4 {
+                        JointSolver::solve_position_joint_impl(
+                            &mut generic,
+                            &mut generic_bodies,
+                            constraint,
+                            0,
+                            dt,
+                            options,
+                            false,
+                        )
+                        .expect("generic");
+                        JointSolver::solve_position_joint_impl(
+                            &mut fast,
+                            &mut fast_bodies,
+                            constraint,
+                            0,
+                            dt,
+                            options,
+                            sweep > 0,
+                        )
+                        .expect("in-place");
+                        for (a, b) in generic.rows().iter().zip(fast.rows()) {
+                            for (x, y) in [
+                                (a.linear_a, b.linear_a),
+                                (a.angular_a, b.angular_a),
+                                (a.linear_b, b.linear_b),
+                                (a.angular_b, b.angular_b),
+                            ] {
+                                assert!((x - y).length() <= 1.0e-12);
+                            }
+                            assert!((a.error - b.error).abs() <= 1.0e-12);
+                            assert!(
+                                (a.accumulated_multiplier - b.accumulated_multiplier).abs()
+                                    <= 1.0e-12
+                            );
+                            assert!(
+                                (a.accumulated_impulse - b.accumulated_impulse).abs() <= 1.0e-12
+                            );
+                        }
+                        for (a, b) in generic_bodies.iter().zip(fast_bodies.iter()) {
+                            let a = a.state().transform();
+                            let b = b.state().transform();
+                            assert!((a.translation() - b.translation()).length() <= 1.0e-12);
+                            for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                                assert!(
+                                    (a.rotation().rotate_vector(axis).expect("rotation")
+                                        - b.rotation().rotate_vector(axis).expect("rotation"))
+                                    .length()
+                                        <= 1.0e-12
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }
