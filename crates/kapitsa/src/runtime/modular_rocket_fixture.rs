@@ -661,6 +661,70 @@ mod stability_tests {
 
     #[cfg(feature = "bench-internals")]
     #[test]
+    #[ignore = "trace initial divergence in the 1000-part loaded rocket"]
+    fn diagnose_rocket_first_fixed_joint_divergence() {
+        for block3 in [false, true] {
+            let run = run_scenario(
+                1000,
+                block3,
+                ScenarioMode::Full,
+                false,
+                None,
+                false,
+                None,
+                None,
+                None,
+            );
+            println!(
+                "projection={} ticks={} first_anchor={:?} first_frame={:?} max_anchor/rms={:.9e}/{:.9e} max_frame/rms={:.9e}/{:.9e} coast_drift={:.9e} separation_dp={:.9e} failure={:?}",
+                if block3 { "FixedBlock3" } else { "Scalar" },
+                run.completed_ticks,
+                run.first_anchor_limit_tick,
+                run.first_frame_limit_tick,
+                run.max_anchor_error,
+                run.rms_anchor_error,
+                run.max_frame_error,
+                run.rms_frame_error,
+                run.max_coast_energy_drift,
+                run.separation_momentum_error,
+                run.step_failure
+            );
+            for sample in run.solver_stage_trace.iter().filter(|s| {
+                s.tick <= 20
+                    || Some(s.tick) == run.first_anchor_limit_tick
+                    || Some(s.tick) == run.first_frame_limit_tick
+            }) {
+                println!(
+                    "projection={} tick={} anchor/frame={:.9e}/{:.9e} pre_velocity={:.9e}/{:.9e} post_velocity={:.9e}/{:.9e} pre_position={:.9e}/{:.9e} first_position={:.9e}/{:.9e} final_position={:.9e}/{:.9e} velocity_first={:.9e}/{:.9e} velocity_final={:.9e}/{:.9e} velocity_after_position={:.9e}/{:.9e}",
+                    if block3 { "FixedBlock3" } else { "Scalar" },
+                    sample.tick,
+                    sample.anchor_error_m,
+                    sample.frame_error_rad,
+                    sample.pre_velocity_anchor_error_m,
+                    sample.pre_velocity_frame_error_rad,
+                    sample.post_velocity_anchor_error_m,
+                    sample.post_velocity_frame_error_rad,
+                    sample.pre_joint_anchor_error_m,
+                    sample.pre_joint_frame_error_rad,
+                    sample.first_post_joint_anchor_error_m,
+                    sample.first_post_joint_frame_error_rad,
+                    sample.post_joint_anchor_error_m,
+                    sample.post_joint_frame_error_rad,
+                    sample.first_velocity_linear_residual_mps,
+                    sample.first_velocity_angular_residual_radps,
+                    sample.post_velocity_linear_residual_mps,
+                    sample.post_velocity_angular_residual_radps,
+                    sample.post_position_linear_residual_mps,
+                    sample.post_position_angular_residual_radps
+                );
+            }
+            assert_eq!(run.completed_ticks, TICKS);
+            assert!(run.step_failure.is_none());
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
     #[ignore = "diagnostic FixedBlock3 loading and iteration convergence"]
     fn diagnose_fixed_block_rocket_loading_and_convergence() {
         for (parts, mode, position) in [
@@ -2392,7 +2456,10 @@ mod stability_tests {
             let errors = joint_errors(&rocket);
             #[cfg(feature = "bench-internals")]
             if trace_joint
-                && [0, 10, 11, 12, 13, 19, 20, 40, 41, 53, 54, 55, 89, 90, 179].contains(&tick)
+                && ([0, 10, 11, 12, 13, 19, 20, 40, 41, 53, 54, 55, 89, 90, 179].contains(&tick)
+                    || (first_anchor_limit_tick.is_none()
+                        && errors.iter().any(|row| row.1 >= 0.03))
+                    || (first_frame_limit_tick.is_none() && errors.iter().any(|row| row.2 >= 0.1)))
             {
                 let worst = errors.iter().max_by(|a, b| a.1.total_cmp(&b.1));
                 let worst_frame = errors.iter().max_by(|a, b| a.2.total_cmp(&b.2));
