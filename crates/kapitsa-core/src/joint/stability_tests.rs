@@ -582,7 +582,6 @@ fn diagnose_free_asymmetric_fixed_joint_velocity_projection_work() {
     }
 }
 
-#[cfg(feature = "bench-internals")]
 fn physical_kinetic_energy(world: &PhysicsWorld) -> f64 {
     world
         .bodies()
@@ -1630,17 +1629,7 @@ fn assert_finite_body_states(world: &PhysicsWorld) {
 }
 
 fn kinetic_energy(world: &PhysicsWorld) -> f64 {
-    world
-        .bodies()
-        .map(|(_, body)| {
-            let Some(mass) = body.physics().mass() else {
-                return 0.0;
-            };
-            let state = body.state();
-            0.5 * mass.mass() * state.linear_velocity().length_squared()
-                + 0.5 * state.angular_velocity().length_squared()
-        })
-        .sum()
+    physical_kinetic_energy(world)
 }
 
 // ---------------------------------------------------------------------------
@@ -1648,7 +1637,7 @@ fn kinetic_energy(world: &PhysicsWorld) -> f64 {
 //
 // These helpers measure constraint violations against the degrees of freedom
 // each joint actually locks, then run small graphs as regression tests and large
-// graphs as an opt-in diagnostic. The measurement uses only public geometry so
+// graphs as mandatory stress regressions. The measurement uses only public geometry so
 // it stays valid even if the solver internals change.
 // ---------------------------------------------------------------------------
 
@@ -1682,10 +1671,7 @@ fn world_frame(body: &RigidBody, frame: JointFrame) -> (Vec3, Quat) {
     let rotation = (transform.rotation() * frame.local_rotation)
         .try_normalize()
         .unwrap_or(Quat::IDENTITY);
-    (
-        transform.transform_point(frame.local_anchor),
-        rotation,
-    )
+    (transform.transform_point(frame.local_anchor), rotation)
 }
 
 fn relative_rotation_error(rotation_a: Quat, rotation_b: Quat) -> Vec3 {
@@ -1739,11 +1725,7 @@ fn joint_violation(body_a: &RigidBody, body_b: &RigidBody, joint: &Joint) -> Joi
     let relative_velocity = anchor_velocity(body_b, anchor_b) - anchor_velocity(body_a, anchor_a);
     // Axes in these joint frames rotate with body A.  The derivative of a
     // frame-coordinate delta therefore contains the rotating-axis term.
-    let coordinate_velocity = relative_velocity
-        - body_a
-            .state()
-            .angular_velocity()
-            .cross(delta);
+    let coordinate_velocity = relative_velocity - body_a.state().angular_velocity().cross(delta);
     let angular_velocity = body_b.state().angular_velocity() - body_a.state().angular_velocity();
     let axis_a = rotation_a.rotate_vector(Vec3::Z).unwrap_or(Vec3::Z);
 
@@ -1926,7 +1908,6 @@ fn graph_metrics(world: &PhysicsWorld) -> GraphMetrics {
     let divisor = violation_count.max(1) as f64;
     let mut linear_momentum = Vec3::ZERO;
     let mut angular_momentum = Vec3::ZERO;
-    let mut kinetic = 0.0_f64;
     for (_, body) in world.bodies() {
         let Some(mass) = body.physics().mass() else {
             continue;
@@ -1945,8 +1926,6 @@ fn graph_metrics(world: &PhysicsWorld) -> GraphMetrics {
             .unwrap_or(Vec3::ZERO);
         linear_momentum += linear_velocity * mass.mass();
         angular_momentum += center.cross(linear_velocity * mass.mass()) + world_angular_momentum;
-        kinetic += 0.5 * mass.mass() * linear_velocity.length_squared()
-            + 0.5 * local_angular_velocity.dot(local_angular_momentum);
     }
 
     GraphMetrics {
@@ -1955,10 +1934,10 @@ fn graph_metrics(world: &PhysicsWorld) -> GraphMetrics {
         angular_error_max: angular_max,
         angular_error_rms: (angular_squared / divisor).sqrt(),
         linear_velocity_residual_max: linear_velocity_max,
-            angular_velocity_residual_max: angular_velocity_max,
+        angular_velocity_residual_max: angular_velocity_max,
         linear_momentum,
         angular_momentum,
-        kinetic_energy: kinetic,
+        kinetic_energy: physical_kinetic_energy(world),
     }
 }
 
@@ -2120,7 +2099,11 @@ fn ball_tree(count: usize) -> PhysicsWorld {
                 JointFrame::IDENTITY,
             );
             world
-                .add_joint(bodies[parent], bodies[index], Joint::Ball(BallJoint::new(common)))
+                .add_joint(
+                    bodies[parent],
+                    bodies[index],
+                    Joint::Ball(BallJoint::new(common)),
+                )
                 .unwrap();
         }
     }
@@ -2267,72 +2250,6 @@ fn free_floating_graph(count: usize) -> PhysicsWorld {
     world
 }
 
-fn articulated_diagnostic_enabled() -> bool {
-    std::env::var_os("KAPITSA_ARTICULATED_DIAGNOSTIC").is_some()
-}
-
-#[test]
-fn probe_slider_chain_mode() {
-    let iterations: Option<(u32, u32)> = std::env::var("KAPITSA_PROBE_ITERATIONS")
-        .ok()
-        .and_then(|value| {
-            let mut parts = value.split(',');
-            let velocity = parts.next()?.parse().ok()?;
-            let position = parts.next()?.parse().ok()?;
-            Some((velocity, position))
-        });
-    for (label, load) in [
-        ("axial", Vec3::new(0.0, 0.0, 10.0)),
-        ("transverse_y", Vec3::new(0.0, 5.0, 0.0)),
-        ("mixed", Vec3::new(0.0, 5.0, 10.0)),
-    ] {
-        for steps in [60usize, 240, 1000, 2000, 4000, 8000] {
-            let mut world = PhysicsWorld::new();
-            if let Some((velocity, position)) = iterations {
-                let mut config = world.collision_config();
-                config.velocity_iterations = velocity;
-                config.position_iterations = position;
-                world.set_collision_config(config).unwrap();
-            }
-            let bodies: Vec<_> = (0..16)
-                .map(|index| {
-                    let position = Vec3::new(0.0, 0.0, index as f64);
-                    world
-                        .add_body(articulated_body(
-                            index,
-                            position,
-                            perturbed_joint_rotation(index),
-                        ))
-                        .unwrap()
-                })
-                .collect();
-            let joint = Joint::Slider(SliderJoint::new(JointCommon::new(
-                JointFrame::IDENTITY,
-                JointFrame::IDENTITY,
-            )));
-            for pair in bodies.windows(2) {
-                world.add_joint(pair[0], pair[1], joint).unwrap();
-            }
-            // Push for 60 steps, then measure free drift at increasing horizons.
-            for _ in 0..60 {
-                apply_root_force(&mut world, load);
-                world.step(DT).unwrap();
-            }
-            for _ in 60..steps {
-                world.step(DT).unwrap();
-            }
-            let metrics = graph_metrics(&world);
-            println!(
-                "probe slider {label} steps={steps}: pos_max={:.3e} ang_max={:.3e} lin_res={:.3e} ang_res={:.3e}",
-                metrics.position_error_max,
-                metrics.angular_error_max,
-                metrics.linear_velocity_residual_max,
-                metrics.angular_velocity_residual_max,
-            );
-        }
-    }
-}
-
 fn assert_articulated_regression(
     label: &str,
     initial: GraphMetrics,
@@ -2404,7 +2321,13 @@ fn hinge_chain_settles_without_drift() {
         run_articulated_graph(world, 60, 240, DT, |world| {
             apply_root_force(world, Vec3::Y * 10.0);
         });
-    assert_articulated_regression("hinge_chain_16", initial, final_metrics, peak_energy, elapsed);
+    assert_articulated_regression(
+        "hinge_chain_16",
+        initial,
+        final_metrics,
+        peak_energy,
+        elapsed,
+    );
 }
 
 #[test]
@@ -2509,18 +2432,20 @@ fn free_floating_ball_tree_conserves_momentum() {
 
 #[test]
 fn articulated_graph_large_diagnostic() {
-    // Not run by default: set KAPITSA_ARTICULATED_DIAGNOSTIC=1 to exercise the
-    // 100/1000-body graphs. Kept as a normal (non-ignored) test so it is easy to
-    // reproduce and so it never silently rots.
-    if !articulated_diagnostic_enabled() {
-        return;
-    }
     for count in [100usize, 1000] {
         let cases: [(&str, PhysicsWorld, Vec3); 5] = [
             ("hinge_chain", hinge_chain(count), Vec3::Y * 40.0),
-            ("slider_chain", slider_chain(count), Vec3::new(0.0, 5.0, 20.0)),
+            (
+                "slider_chain",
+                slider_chain(count),
+                Vec3::new(0.0, 5.0, 20.0),
+            ),
             ("ball_tree", ball_tree(count), Vec3::Y * 60.0),
-            ("mixed_graph", mixed_graph(count), Vec3::new(10.0, 30.0, 0.0)),
+            (
+                "mixed_graph",
+                mixed_graph(count),
+                Vec3::new(10.0, 30.0, 0.0),
+            ),
             ("closed_loop", closed_loop(count), Vec3::Y * 50.0),
         ];
         for (name, world, force) in cases {
@@ -2542,275 +2467,4 @@ fn articulated_graph_large_diagnostic() {
             assert_articulated_regression(name, initial, final_metrics, peak_energy, elapsed);
         }
     }
-}
-
-// --- temporary probes -------------------------------------------------------
-
-#[test]
-fn probe_slider_rotating_axis() {
-    // Two bodies joined by a slider, the pair rotating rigidly about X while
-    // sliding axially. Rigid motion keeps the perpendicular error at zero.
-    for steps in [60usize, 240, 1000, 2000, 4000, 8000, 16000] {
-        let mut world = PhysicsWorld::new();
-        let a = world
-            .add_body(articulated_body(0, Vec3::ZERO, Quat::IDENTITY))
-            .unwrap();
-        let b = world
-            .add_body(articulated_body(1, Vec3::new(0.0, 0.0, 1.0), Quat::IDENTITY))
-            .unwrap();
-        world
-            .add_joint(
-                a,
-                b,
-                Joint::Slider(SliderJoint::new(JointCommon::new(
-                    JointFrame::IDENTITY,
-                    JointFrame::IDENTITY,
-                ))),
-            )
-            .unwrap();
-        for id in [a, b] {
-            let body = world.body_mut(id).unwrap();
-            body.set_angular_velocity(Vec3::new(1.0, 0.0, 0.0)).unwrap();
-        }
-        world.body_mut(b).unwrap().set_linear_velocity(Vec3::new(0.0, 0.0, 1.0)).unwrap();
-        for _ in 0..steps {
-            world.step(DT).unwrap();
-        }
-        let metrics = graph_metrics(&world);
-        let delta = world.body(b).unwrap().state().transform().translation()
-            - world.body(a).unwrap().state().transform().translation();
-        println!(
-            "probe rotating slider steps={steps}: pos_max={:.3e} ang_max={:.3e} \
-             lin_res={:.3e} ang_res={:.3e} |delta|={:.6} axial={:.6}",
-            metrics.position_error_max,
-            metrics.angular_error_max,
-            metrics.linear_velocity_residual_max,
-            metrics.angular_velocity_residual_max,
-            delta.length(),
-            metrics.kinetic_energy,
-        );
-    }
-}
-
-#[test]
-fn probe_single_body_momentum() {
-    // One anisotropic free body: the integrator alone must conserve momentum.
-    let mut world = PhysicsWorld::new();
-    world
-        .add_body(articulated_body(3, Vec3::ZERO, Quat::IDENTITY))
-        .unwrap();
-    let id = world.bodies().next().unwrap().0;
-    world.body_mut(id).unwrap().set_angular_velocity(Vec3::new(0.075, 0.125, 0.05)).unwrap();
-    let initial = graph_metrics(&world);
-    for _ in 0..300 {
-        world.step(DT).unwrap();
-    }
-    let final_metrics = graph_metrics(&world);
-    println!(
-        "probe single body: |L0|={:.6e} linear_drift={:.3e} angular_drift={:.3e}",
-        initial.angular_momentum.length(),
-        (final_metrics.linear_momentum - initial.linear_momentum).length(),
-        (final_metrics.angular_momentum - initial.angular_momentum).length(),
-    );
-}
-
-#[test]
-fn probe_ball_tree_momentum_steps() {
-    for &(velocity, position) in &[(8u32, 3u32), (64, 3), (8, 16)] {
-        let mut world = free_floating_graph(31);
-        {
-            let mut config = world.collision_config();
-            config.velocity_iterations = velocity;
-            config.position_iterations = position;
-            world.set_collision_config(config).unwrap();
-        }
-        let initial = graph_metrics(&world);
-        let mut last = initial.angular_momentum;
-        for step in 0..240 {
-            world.step(DT).unwrap();
-            let current = graph_metrics(&world).angular_momentum;
-            if step == 0 || step == 59 || step == 239 {
-                println!(
-                    "probe ball tree v={velocity} p={position} step={}: \
-                     per-interval drift={:.3e} pos_max={:.3e}",
-                    step + 1,
-                    (current - last).length(),
-                    graph_metrics(&world).position_error_max,
-                );
-                last = current;
-            }
-        }
-    }
-}
-
-#[test]
-fn probe_ball_pair_momentum() {
-    // Two ball-joined bodies, consistent anchors, no external forces.
-    for &(label, consistent, with_joint) in &[
-        ("inconsistent", false, true),
-        ("rigid-consistent", true, true),
-        ("rigid-consistent-no-joint", true, false),
-    ] {
-        let mut world = PhysicsWorld::new();
-        let a = world
-            .add_body(articulated_body(0, Vec3::ZERO, Quat::IDENTITY))
-            .unwrap();
-        let b = world
-            .add_body(articulated_body(1, Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY))
-            .unwrap();
-        if with_joint {
-            world
-                .add_joint(
-                    a,
-                    b,
-                    Joint::Ball(BallJoint::new(JointCommon::new(
-                        JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
-                        JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
-                    ))),
-                )
-                .unwrap();
-        }
-        if consistent {
-            // Rigid rotation of the whole pair about the origin keeps the
-            // anchors' relative velocity exactly zero: the solve should be a
-            // no-op and momentum must match the single-body baseline.
-            let omega = Vec3::new(0.05, 0.1, 0.02);
-            for (id, position) in [(a, Vec3::ZERO), (b, Vec3::new(1.0, 0.0, 0.0))] {
-                let body = world.body_mut(id).unwrap();
-                body.set_angular_velocity(omega).unwrap();
-                body.set_linear_velocity(omega.cross(position)).unwrap();
-            }
-        } else {
-            world.body_mut(a).unwrap().set_angular_velocity(Vec3::new(0.05, 0.1, 0.02)).unwrap();
-            world.body_mut(b).unwrap().set_linear_velocity(Vec3::new(0.1, 0.05, 0.0)).unwrap();
-            world.body_mut(b).unwrap().set_angular_velocity(Vec3::new(0.02, 0.05, 0.1)).unwrap();
-        }
-        let initial = graph_metrics(&world);
-        let mut last = initial.angular_momentum;
-        for step in 0..300 {
-            world.step(DT).unwrap();
-            if step == 0 || step == 1 || step == 59 {
-                let current = graph_metrics(&world).angular_momentum;
-                println!("  {label} step={}: per-step drift={:.3e}", step + 1, (current - last).length());
-                last = current;
-            }
-        }
-        let final_metrics = graph_metrics(&world);
-        println!(
-            "probe ball pair ({label}): |L0|={:.6e} linear_drift={:.3e} angular_drift={:.3e} \
-             pos_max={:.3e}",
-            initial.angular_momentum.length(),
-            (final_metrics.linear_momentum - initial.linear_momentum).length(),
-            (final_metrics.angular_momentum - initial.angular_momentum).length(),
-            final_metrics.position_error_max,
-        );
-    }
-}
-
-#[test]
-fn probe_ball_pair_iteration_scaling() {
-    // Momentum drift versus solver iteration counts: if the leak scales
-    // superlinearly with the unconverged residual it comes from the repair
-    // passes, not from a systematic bias.
-    for &(velocity, position) in &[(8u32, 3u32), (8, 1), (64, 3), (64, 16), (256, 64)] {
-        let mut world = PhysicsWorld::new();
-        let mut config = world.collision_config();
-        config.velocity_iterations = velocity;
-        config.position_iterations = position;
-        world.set_collision_config(config).unwrap();
-        let a = world
-            .add_body(articulated_body(0, Vec3::ZERO, Quat::IDENTITY))
-            .unwrap();
-        let b = world
-            .add_body(articulated_body(1, Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY))
-            .unwrap();
-        world
-            .add_joint(
-                a,
-                b,
-                Joint::Ball(BallJoint::new(JointCommon::new(
-                    JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
-                    JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
-                ))),
-            )
-            .unwrap();
-        world.body_mut(a).unwrap().set_angular_velocity(Vec3::new(0.05, 0.1, 0.02)).unwrap();
-        world.body_mut(b).unwrap().set_linear_velocity(Vec3::new(0.1, 0.05, 0.0)).unwrap();
-        world.body_mut(b).unwrap().set_angular_velocity(Vec3::new(0.02, 0.05, 0.1)).unwrap();
-        let initial = graph_metrics(&world);
-        for _ in 0..300 {
-            world.step(DT).unwrap();
-        }
-        let final_metrics = graph_metrics(&world);
-        println!(
-            "probe ball pair v={velocity} p={position}: \
-             linear_drift={:.3e} angular_drift={:.3e} pos_max={:.3e}",
-            (final_metrics.linear_momentum - initial.linear_momentum).length(),
-            (final_metrics.angular_momentum - initial.angular_momentum).length(),
-            final_metrics.position_error_max,
-        );
-    }
-}
-
-#[test]
-fn probe_ball_tree_consistent_momentum() {
-    let mut consistent = {
-        let mut w = PhysicsWorld::new();
-        let mut positions = vec![Vec3::ZERO; 31];
-        let directions = [Vec3::X, Vec3::new(0.5, 0.866_025_403_784_438_6, 0.0)];
-        let mut bodies = Vec::new();
-        for index in 0..31 {
-            let anchor = if index == 0 {
-                Vec3::ZERO
-            } else {
-                let parent = (index - 1) / 2;
-                let direction = directions[index % 2];
-                positions[index] = positions[parent] + direction;
-                direction
-            };
-            bodies.push(
-                w.add_body(articulated_body(index, positions[index], Quat::IDENTITY))
-                    .unwrap(),
-            );
-            if index > 0 {
-                let parent = (index - 1) / 2;
-                let common =
-                    JointCommon::new(JointFrame::new(anchor, Quat::IDENTITY), JointFrame::IDENTITY);
-                w.add_joint(bodies[parent], bodies[index], Joint::Ball(BallJoint::new(common)))
-                    .unwrap();
-            }
-        }
-        let ids: Vec<_> = w.bodies().map(|(id, _)| id).collect();
-        for (index, id) in ids.into_iter().enumerate() {
-            let body = w.body_mut(id).unwrap();
-            let linear = Vec3::new(
-                0.2 * ((index % 5) as f64 - 2.0),
-                0.15 * ((index % 3) as f64 - 1.0),
-                0.1 * ((index % 7) as f64 - 3.0),
-            );
-            let angular = Vec3::new(
-                0.05 * ((index % 4) as f64 - 1.5),
-                0.05 * ((index % 6) as f64 - 2.5),
-                0.05 * ((index % 2) as f64 - 0.5),
-            );
-            body.set_linear_velocity(linear).unwrap();
-            body.set_angular_velocity(angular).unwrap();
-        }
-        w
-    };
-    let initial = graph_metrics(&consistent);
-    for _ in 0..300 {
-        consistent.step(DT).unwrap();
-    }
-    let final_metrics = graph_metrics(&consistent);
-    let linear_drift = (final_metrics.linear_momentum - initial.linear_momentum).length();
-    let angular_drift = (final_metrics.angular_momentum - initial.angular_momentum).length();
-    println!(
-        "probe consistent ball tree: |L0|={:.6e} linear_drift={:.3e} angular_drift={:.3e} \
-         pos_max={:.3e}",
-        initial.angular_momentum.length(),
-        linear_drift,
-        angular_drift,
-        final_metrics.position_error_max,
-    );
 }
