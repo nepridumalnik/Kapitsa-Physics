@@ -673,18 +673,7 @@ fn workload(constraints_per_color: &[usize], worker_count: usize) -> super::Colo
         ..super::ColoredWorkload::default()
     };
     for &constraint_count in constraints_per_color {
-        let batch_count = constraint_count.div_ceil(super::LARGE_ISLAND_BATCH_SIZE);
-        workload.constraint_count = workload.constraint_count.saturating_add(constraint_count);
-        workload.batch_count = workload.batch_count.saturating_add(batch_count);
-        workload.max_color_batch_count = workload.max_color_batch_count.max(batch_count);
-        if batch_count >= super::COLORED_MIN_PARALLEL_BATCHES
-            && constraint_count > super::SMALL_COLOR_MERGE_THRESHOLD
-        {
-            workload.parallel_constraint_count += constraint_count;
-        }
-        workload.useful_batch_count = workload
-            .useful_batch_count
-            .saturating_add(batch_count.min(worker_count));
+        workload.add_color(constraint_count, worker_count);
     }
     workload
 }
@@ -693,7 +682,7 @@ fn workload(constraints_per_color: &[usize], worker_count: usize) -> super::Colo
 #[test]
 fn partial_schedule_accepts_useful_wide_colors_and_rejects_narrow_work() {
     let mixed = workload(&[40, 40, 40, 40, 8, 8], 8);
-    assert!(!mixed.can_use_parallel_schedule(8));
+    assert!(mixed.can_use_parallel_schedule(8));
     assert!(mixed.can_use_partial_schedule(8));
     assert!(!mixed.can_use_partial_schedule(1));
     assert!(!workload(&[16; 64], 8).can_use_partial_schedule(8));
@@ -786,46 +775,18 @@ fn workload_heuristic_rejects_small_or_narrow_schedules() {
 }
 
 #[test]
-fn thousand_constraints_in_27_colors_cannot_meet_eight_worker_width() {
-    // ceil(n/16) <= (n+15)/16 for each of 27 nonempty colors.
-    let max_batches = (1000 + 27 * 15) / super::LARGE_ISLAND_BATCH_SIZE;
-    assert!(max_batches < 27 * 4);
-    for counts in [
-        {
-            let mut c = [37; 27];
-            c[0] = 38;
-            c
-        },
-        {
-            let mut c = [1; 27];
-            c[0] = 974;
-            c
-        },
-    ] {
-        let schedule = workload(&counts, 8);
-        assert_eq!(schedule.constraint_count, 1000);
-        assert!(schedule.batch_count <= max_batches);
-        assert!(schedule.useful_batch_count < 27 * 4);
-        assert!(!schedule.can_use_parallel_schedule(8));
-    }
-}
-
-#[test]
-fn workload_heuristic_thresholds_follow_available_workers() {
-    let two_batches_per_color = workload(&[32; 64], 8);
-    assert_eq!(two_batches_per_color.parallel_fraction_percent(), 50);
-    assert!(!two_batches_per_color.can_use_parallel_schedule(8));
-    assert!(two_batches_per_color.can_use_parallel_schedule(4));
-
-    let three_batches_per_color = workload(&[48; 64], 8);
-    assert!(!three_batches_per_color.can_use_parallel_schedule(8));
-    assert!(three_batches_per_color.can_use_parallel_schedule(4));
-
-    let four_batches_per_color = workload(&[64; 64], 8);
-    assert!(four_batches_per_color.can_use_parallel_schedule(8));
-
-    let single_batch_per_color = workload(&[8; 64], 2);
-    assert!(!single_batch_per_color.can_use_parallel_schedule(2));
+fn workload_cost_model_accepts_mixed_width_and_rejects_dispatch_heavy_work() {
+    let mut rocket = [37; 27];
+    rocket[0] = 38;
+    let schedule = workload(&rocket, 8);
+    assert_eq!(schedule.constraint_count, 1000);
+    assert!(schedule.useful_batch_count < 27 * 4);
+    assert!(schedule.can_use_parallel_schedule(8));
+    assert!(!workload(&[33; 64], 2).can_use_parallel_schedule(2));
+    assert!(workload(&[64; 64], 2).can_use_parallel_schedule(2));
+    assert!(workload(&[48; 64], 8).can_use_parallel_schedule(8));
+    assert!(!workload(&[8; 64], 2).can_use_parallel_schedule(2));
+    assert!(!workload(&[48; 2], 8).can_use_parallel_schedule(8));
 }
 
 #[test]

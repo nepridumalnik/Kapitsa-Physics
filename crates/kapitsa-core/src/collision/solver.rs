@@ -24,10 +24,8 @@ const POSITION_CORRECTION_FRACTION: f64 = 0.2;
 const LARGE_ISLAND_COLORING_THRESHOLD: usize = 128;
 const LARGE_ISLAND_BATCH_SIZE: usize = 16;
 const SMALL_COLOR_MERGE_THRESHOLD: usize = 32;
-/// A color should expose at least `worker_count / this` parallel batches.
-const COLORED_MIN_WIDTH_DIVISOR: usize = 2;
-/// Minimum share of batches that must overlap with another batch in their color.
-const COLORED_MIN_PARALLEL_FRACTION_PERCENT: usize = 50;
+/// Estimated dispatch and barrier cost, in units of one constraint solve.
+const COLORED_DISPATCH_COST: usize = 16;
 /// Dispatching a single batch through an executor only adds scheduling cost.
 const COLORED_MIN_PARALLEL_BATCHES: usize = 2;
 
@@ -37,20 +35,34 @@ struct ColoredWorkload {
     constraint_count: usize,
     color_count: usize,
     batch_count: usize,
-    max_color_batch_count: usize,
     useful_batch_count: usize,
     parallel_constraint_count: usize,
+    estimated_saved_work: usize,
+    dispatch_count: usize,
 }
 
 impl ColoredWorkload {
-    fn parallel_fraction_percent(self) -> usize {
-        if self.batch_count == 0 {
-            return 0;
+    fn add_color(&mut self, constraints: usize, worker_count: usize) {
+        let batches = constraints.div_ceil(LARGE_ISLAND_BATCH_SIZE);
+        self.constraint_count = self.constraint_count.saturating_add(constraints);
+        self.batch_count = self.batch_count.saturating_add(batches);
+        self.useful_batch_count = self
+            .useful_batch_count
+            .saturating_add(batches.min(worker_count));
+        if batches >= COLORED_MIN_PARALLEL_BATCHES && constraints > SMALL_COLOR_MERGE_THRESHOLD {
+            self.parallel_constraint_count =
+                self.parallel_constraint_count.saturating_add(constraints);
+            let active_workers = batches.min(worker_count).max(1);
+            // The slowest worker determines when the next color can begin.
+            let waves = batches.div_ceil(active_workers);
+            let parallel_work = waves
+                .saturating_mul(LARGE_ISLAND_BATCH_SIZE)
+                .min(constraints);
+            self.estimated_saved_work = self
+                .estimated_saved_work
+                .saturating_add(constraints - parallel_work);
+            self.dispatch_count = self.dispatch_count.saturating_add(1);
         }
-        self.batch_count
-            .saturating_sub(self.color_count)
-            .saturating_mul(100)
-            / self.batch_count
     }
 
     fn rejection_reason(self, worker_count: usize) -> Option<&'static str> {
@@ -60,15 +72,8 @@ impl ColoredWorkload {
         if self.color_count == 0 || self.batch_count == 0 {
             return Some("empty");
         }
-        let min_color_width = worker_count.div_ceil(COLORED_MIN_WIDTH_DIVISOR).max(1);
-        if self.max_color_batch_count < min_color_width {
-            return Some("max-width");
-        }
-        if self.useful_batch_count < self.color_count.saturating_mul(min_color_width) {
-            return Some("total-width");
-        }
-        if self.parallel_fraction_percent() < COLORED_MIN_PARALLEL_FRACTION_PERCENT {
-            return Some("parallel-fraction");
+        if self.estimated_saved_work <= self.dispatch_count.saturating_mul(COLORED_DISPATCH_COST) {
+            return Some("dispatch-cost");
         }
         None
     }
@@ -1226,20 +1231,7 @@ impl SolverWorkspace {
             let constraints = self
                 .constraint_coloring
                 .constraints_in_schedule_group(group)?;
-            let batch_count = constraints.len().div_ceil(LARGE_ISLAND_BATCH_SIZE);
-            workload.constraint_count = workload.constraint_count.saturating_add(constraints.len());
-            if batch_count >= COLORED_MIN_PARALLEL_BATCHES
-                && constraints.len() > SMALL_COLOR_MERGE_THRESHOLD
-            {
-                workload.parallel_constraint_count = workload
-                    .parallel_constraint_count
-                    .saturating_add(constraints.len());
-            }
-            workload.batch_count = workload.batch_count.saturating_add(batch_count);
-            workload.max_color_batch_count = workload.max_color_batch_count.max(batch_count);
-            workload.useful_batch_count = workload
-                .useful_batch_count
-                .saturating_add(batch_count.min(worker_count));
+            workload.add_color(constraints.len(), worker_count);
         }
         Some(workload)
     }
