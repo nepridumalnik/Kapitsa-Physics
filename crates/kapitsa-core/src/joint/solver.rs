@@ -5126,7 +5126,13 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
     resolved_masses: Option<[SolverMass; 2]>,
 ) -> Result<ProjectionGroupResult, CollisionError> {
     validate_projection_rows(rows, bodies.len())?;
-    let indices = projection_group_indices(rows, keys);
+    // Resolved masses are passed only by the in-place FixedJoint path, whose
+    // six-row layout and ownership were checked before selecting this slice.
+    let indices = if resolved_masses.is_some() {
+        Some([0, 1, 2])
+    } else {
+        projection_group_indices(rows, keys)
+    };
     if let Some(indices) = indices {
         let block_rows = [rows[indices[0]], rows[indices[1]], rows[indices[2]]];
         let dimension = if keys[0] == 0 {
