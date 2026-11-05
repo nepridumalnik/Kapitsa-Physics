@@ -3681,7 +3681,7 @@ fn append_ball_rows<B: SolverBodyAccess + ?Sized>(
             lock,
             [anchor_a, anchor_b],
             axis,
-            anchor_a, // World axes do not rotate with either body.
+            anchor_b, // Apply equal/opposite velocity impulses at one world point.
             error,
             axis_index as u8,
             bilateral_bounds(),
@@ -4918,7 +4918,7 @@ fn push_linear_row<B: SolverBodyAccess + ?Sized>(
 /// the axis motion then contributes the exact `delta * (omega_a x axis)`
 /// derivative term, and the impulse pair acts on both bodies at that one
 /// point, which conserves angular momentum exactly. For world-aligned axes
-/// (ball locks, distance/spring directions) it is body A's anchor and the row
+/// (distance/spring directions) it is body A's anchor and the row
 /// reduces to the classic anchor-pair Jacobian.
 #[allow(clippy::too_many_arguments)] // Row construction stays explicit at call sites.
 fn make_linear_row(

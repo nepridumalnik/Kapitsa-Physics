@@ -2624,6 +2624,7 @@ fn ball_pair_stage_momentum() {
                 .unwrap();
             }
             let solved = metrics(&bodies);
+            assert!((solved.angular_momentum - projected.angular_momentum).length() < 1.0e-12);
             if step == 1 || step == 300 {
                 println!(
                     "stages consistent={consistent} step={step}: integration dL={:.9e}, projection dL={:.9e}, velocity dL={:.9e}, total dL={:.9e}",
