@@ -17,6 +17,21 @@ mod bench_counter_tests {
     use super::modular_rocket_fixture::ModularRocket;
 
     #[test]
+    fn fixed_block3_runs_iterative_solver_by_default() {
+        let mut rocket = ModularRocket::new(100);
+        rocket.world.set_joint_projection_for_bench(true);
+        rocket.world.step(1.0 / 120.0).expect("physics step");
+        let metrics = rocket.world.physics_step_metrics();
+        assert_ne!(
+            metrics.collision.colored_schedule.rejection,
+            "reduced-fixed-tree"
+        );
+        assert!(metrics.joints.position_sweeps > 0);
+        assert!(metrics.joints.velocity_sweeps > 0);
+        assert!(metrics.joints.block_rows_solved > 0);
+    }
+
+    #[test]
     fn fixed_joint_baseline_reports_scalar_solver_work() {
         let mut rocket = ModularRocket::new(100);
         assert!(rocket.world.collider(rocket.surface_collider).is_some());

@@ -144,7 +144,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let steady_only = args.iter().any(|arg| arg == "--steady-only");
     let light_diagnostics = args.iter().any(|arg| arg == "--light-diagnostics");
     println!(
-        "Large modular rocket Release benchmark: dt={DT:.9}s event_samples={EVENT_SAMPLES} mass_cache={mass_cache} projection={} executor={} steady_only={steady_only} partial_coloring={partial} diagnostics={}",
+        "Large modular rocket Release benchmark: dt={DT:.9}s event_samples={EVENT_SAMPLES} mass_cache={mass_cache} requested_reduced_fixed_tree={} projection={} executor={} steady_only={steady_only} partial_coloring={partial} diagnostics={}",
+        reduced_fixed_tree_requested(),
         if block3 { "fixed_block3" } else { "scalar" },
         if no_pool { "no_pool" } else { "rayon" },
         if light_diagnostics { "light" } else { "full" }
@@ -318,12 +319,18 @@ fn configure_solver(
     partial: bool,
 ) {
     rocket.world.set_partial_coloring_for_bench(partial);
-    rocket.world.set_reduced_fixed_tree_for_bench(block3);
+    rocket
+        .world
+        .set_reduced_fixed_tree_for_bench(reduced_fixed_tree_requested());
     rocket.world.set_joint_mass_cache_for_bench(mass_cache);
     rocket.world.set_joint_projection_for_bench(block3);
     rocket
         .world
         .set_joint_light_diagnostics_for_bench(light_diagnostics);
+}
+
+fn reduced_fixed_tree_requested() -> bool {
+    std::env::var("KAPITSA_BENCH_REDUCED_FIXED_TREE").as_deref() == Ok("1")
 }
 
 fn warm(
@@ -429,6 +436,14 @@ fn report_samples(
     let metrics = p50.metrics.collision;
     let joint_metrics = p50.metrics.joints;
     let schedule = metrics.colored_schedule;
+    println!(
+        "actual_solver={}",
+        if schedule.rejection == "reduced-fixed-tree" {
+            "reduced-fixed-tree"
+        } else {
+            "iterative-xpbd"
+        }
+    );
     println!(
         "allocation_samples_nonzero={} allocation_max={}",
         samples
