@@ -3687,11 +3687,12 @@ fn append_ball_rows<B: SolverBodyAccess + ?Sized>(
             bilateral_bounds(),
         )?;
     }
-    append_ball_angular_limits(workspace, settings, rotation_a, rotation_b, joint)?;
+    append_ball_angular_limits(bodies, workspace, settings, rotation_a, rotation_b, joint)?;
     Ok(())
 }
 
-fn append_ball_angular_limits(
+fn append_ball_angular_limits<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
     workspace: &mut JointWorkspace,
     settings: RowSettings,
     rotation_a: Quat,
@@ -3711,21 +3712,19 @@ fn append_ball_angular_limits(
             .ok_or(CollisionError::ArithmeticOverflow)?
             .clamp(-1.0, 1.0);
         let angle = cosine.acos();
-        if angle > limit {
-            let swing_axis = axis_a.checked_cross(axis_b);
-            let axis = match swing_axis.and_then(Vec3::try_normalize) {
-                Some(axis) => axis,
-                None => rotation_a
-                    .rotate_vector(Vec3::X)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
-            };
-            push_angular_row(
+        // A swing upper bound is unilateral. Derive its direction from the
+        // relative orientation; when the swing is degenerate (zero or
+        // antiparallel) fall back to the projected relative angular velocity
+        // and then to a deterministic tangent so the row stays finite.
+        if let Some(axis) = ball_swing_axis(bodies, settings, axis_a, axis_b, cosine)? {
+            append_angular_axis_limit(
+                bodies,
                 workspace,
                 settings,
                 axis,
-                angle - limit,
+                angle,
+                super::JointLimit::new(f64::NEG_INFINITY, limit),
                 3,
-                (f64::NEG_INFINITY, 0.0),
             )?;
         }
     }
@@ -3762,17 +3761,6 @@ fn append_distance_rows<B: SolverBodyAccess + ?Sized>(
     let distance = delta
         .checked_length()
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    let (error, lower, upper) = if distance < joint.distance_limit.lower {
-        (distance - joint.distance_limit.lower, 0.0, f64::INFINITY)
-    } else if distance > joint.distance_limit.upper {
-        (
-            distance - joint.distance_limit.upper,
-            f64::NEG_INFINITY,
-            0.0,
-        )
-    } else {
-        return Ok(());
-    };
     let axis = if distance > f64::MIN_POSITIVE {
         delta / distance
     } else {
@@ -3780,15 +3768,20 @@ fn append_distance_rows<B: SolverBodyAccess + ?Sized>(
             .rotate_vector(Vec3::Z)
             .ok_or(CollisionError::ArithmeticOverflow)?
     };
-    push_linear_row(
+    // Route the distance interval through the shared unilateral limit so that
+    // the row activates both on an existing violation and when the radial
+    // velocity is predicted to cross a boundary this step. The sign is chosen
+    // so an upper bound never pushes the bodies together and a lower bound
+    // never pulls them apart.
+    append_linear_limit(
         bodies,
         workspace,
         settings,
         [anchor_a, anchor_b],
         axis,
-        error,
+        distance,
+        joint.distance_limit,
         0,
-        (lower, upper),
     )
 }
 
@@ -4404,6 +4397,57 @@ fn append_rotation_lock(
         )?;
     }
     Ok(())
+}
+
+/// Deterministic swing axis for a ball joint. When `axis_a` and `axis_b` are
+/// not parallel the cross product gives the rotation axis. In the degenerate
+/// cases the direction comes from the component of the relative angular
+/// velocity perpendicular to `axis_a`, or from a fixed tangent basis when no
+/// motion distinguishes a direction. Returns `None` only when there is no
+/// swing and no outward angular velocity, so no constraint is needed.
+fn ball_swing_axis<B: SolverBodyAccess + ?Sized>(
+    bodies: &B,
+    settings: RowSettings,
+    axis_a: Vec3,
+    axis_b: Vec3,
+    cosine: f64,
+) -> Result<Option<Vec3>, CollisionError> {
+    let cross = axis_a
+        .checked_cross(axis_b)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    if let Some(axis) = cross.try_normalize() {
+        return Ok(Some(axis));
+    }
+    if cosine < 0.0 {
+        // Antiparallel swing: the rotation axis is undefined, so pick a
+        // deterministic perpendicular to keep the limit well posed.
+        let (first, _) =
+            constraint::tangent_basis(axis_a).ok_or(CollisionError::InvalidContact)?;
+        return Ok(Some(first));
+    }
+    let relative_velocity = bodies
+        .get(settings.body_b)
+        .ok_or(CollisionError::InvalidContact)?
+        .state()
+        .angular_velocity()
+        .checked_sub(
+            bodies
+                .get(settings.body_a)
+                .ok_or(CollisionError::InvalidContact)?
+                .state()
+                .angular_velocity(),
+        )
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let perpendicular = relative_velocity
+        .checked_sub(axis_a * relative_velocity.checked_dot(axis_a).ok_or(
+            CollisionError::ArithmeticOverflow,
+        )?)
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    if let Some(axis) = perpendicular.try_normalize() {
+        return Ok(Some(axis));
+    }
+    // No swing and no defined swing motion: nothing to constrain.
+    Ok(None)
 }
 
 fn append_axis_alignment(
@@ -9222,6 +9266,215 @@ mod tests {
         assert!((forward.x - swapped.x).abs() <= 1.0e-10);
         assert!((forward.y - swapped.y).abs() <= 1.0e-10);
         assert!((forward.z - swapped.z).abs() <= 1.0e-10);
+    }
+
+    fn solve_joint_velocity_only_with_dt(
+        joint: super::super::Joint,
+        bodies: &mut [SolverBody],
+        dt: f64,
+    ) {
+        let constraints = [JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint,
+        }];
+        let mut workspace = JointWorkspace::new();
+        JointSolver::prepare(&mut workspace, bodies, &constraints, dt).expect("prepare rows");
+        let options = JointSolverOptions::legacy();
+        for _ in 0..8 {
+            JointSolver::solve_velocity_prepared_iteration(
+                &mut workspace,
+                bodies,
+                &constraints,
+                dt,
+                options,
+            )
+            .expect("velocity sweep");
+        }
+    }
+
+    fn distance_joint_with_limit(lower: f64, upper: f64) -> super::super::Joint {
+        super::super::Joint::Distance(super::super::DistanceJoint::new(
+            aligned_axis_common(),
+            super::super::JointLimit::new(lower, upper),
+        ))
+    }
+
+    fn distance_between(bodies: &[SolverBody; 2]) -> f64 {
+        bodies[1]
+            .state()
+            .transform()
+            .translation()
+            .checked_sub(bodies[0].state().transform().translation())
+            .expect("finite delta")
+            .length()
+    }
+
+    #[test]
+    fn distance_limit_predicts_boundary_crossing_for_all_timesteps() {
+        for dt in [1.0 / 60.0, 1.0 / 120.0, 1.0 / 240.0] {
+            // Upper bound: fast outward motion must be braked before it crosses.
+            let mut bodies = [
+                static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                solver_body_with_velocities(
+                    Vec3::new(0.0, 0.0, 1.9),
+                    Quat::IDENTITY,
+                    Vec3::new(0.0, 0.0, 100.0),
+                    Vec3::ZERO,
+                ),
+            ];
+            solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, dt);
+            let predicted = distance_between(&bodies)
+                + bodies[1].state().linear_velocity().z * dt;
+            assert!(
+                predicted <= 2.0 + 1.0e-9,
+                "dt={dt} predicted upper {predicted}"
+            );
+
+            // Lower bound: fast inward motion must be braked before it crosses.
+            let mut bodies = [
+                static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                solver_body_with_velocities(
+                    Vec3::new(0.0, 0.0, 1.1),
+                    Quat::IDENTITY,
+                    Vec3::new(0.0, 0.0, -100.0),
+                    Vec3::ZERO,
+                ),
+            ];
+            solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, dt);
+            let predicted = distance_between(&bodies)
+                + bodies[1].state().linear_velocity().z * dt;
+            assert!(
+                predicted >= 1.0 - 1.0e-9,
+                "dt={dt} predicted lower {predicted}"
+            );
+        }
+    }
+
+    #[test]
+    fn distance_limit_at_exact_boundary_is_enforced() {
+        let mut bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                Vec3::new(0.0, 0.0, 2.0),
+                Quat::IDENTITY,
+                Vec3::new(0.0, 0.0, 5.0),
+                Vec3::ZERO,
+            ),
+        ];
+        solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, 1.0 / 60.0);
+        assert!(
+            bodies[1].state().linear_velocity().z <= 1.0e-9,
+            "outward velocity at the upper boundary {}",
+            bodies[1].state().linear_velocity().z
+        );
+    }
+
+    #[test]
+    fn distance_limit_ignores_motion_inside_the_interval() {
+        let mut bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                Vec3::new(0.0, 0.0, 1.5),
+                Quat::IDENTITY,
+                Vec3::new(0.0, 0.0, -1.0),
+                Vec3::ZERO,
+            ),
+        ];
+        solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, 1.0 / 60.0);
+        assert!(
+            (bodies[1].state().linear_velocity().z + 1.0).abs() <= 1.0e-10,
+            "interior motion should not be constrained, got {}",
+            bodies[1].state().linear_velocity().z
+        );
+    }
+
+    #[test]
+    fn distance_limit_corrects_existing_violation() {
+        let mut bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                Vec3::new(0.0, 0.0, 2.5),
+                Quat::IDENTITY,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ),
+        ];
+        solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, 1.0 / 60.0);
+        assert!(
+            bodies[1].state().linear_velocity().z < 0.0,
+            "violation should drive an inward correction, got {}",
+            bodies[1].state().linear_velocity().z
+        );
+    }
+
+    #[test]
+    fn distance_limit_predicts_for_dynamic_dynamic_pair() {
+        let mut bodies = [
+            solver_body_with_velocities(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Vec3::new(0.0, 0.0, -3.0),
+                Vec3::ZERO,
+            ),
+            solver_body_with_velocities(
+                Vec3::new(0.0, 0.0, 1.9),
+                Quat::IDENTITY,
+                Vec3::new(0.0, 0.0, 3.0),
+                Vec3::ZERO,
+            ),
+        ];
+        let dt = 1.0 / 60.0;
+        solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, dt);
+        let relative = bodies[1]
+            .state()
+            .linear_velocity()
+            .checked_sub(bodies[0].state().linear_velocity())
+            .expect("finite velocity");
+        let predicted = distance_between(&bodies) + relative.z * dt;
+        assert!(predicted <= 2.0 + 1.0e-9, "dynamic pair predicted {predicted}");
+        // Linear momentum is preserved: the pair has no external forces.
+        let momentum = bodies[0].state().linear_velocity() + bodies[1].state().linear_velocity();
+        assert!(momentum.length() <= 1.0e-10, "momentum {momentum:?}");
+    }
+
+    #[test]
+    fn ball_swing_limit_predicts_and_stays_finite_at_degenerate_swing() {
+        for dt in [1.0 / 60.0, 1.0 / 120.0, 1.0 / 240.0] {
+            // Near-zero swing with a fast outward swing velocity.
+            let mut bodies = [
+                static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                solver_body_with_velocities(
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    Vec3::ZERO,
+                    Vec3::new(50.0, 0.0, 0.0),
+                ),
+            ];
+            let mut joint = super::super::BallJoint::new(aligned_axis_common());
+            joint.swing_limit = Some(0.1);
+            solve_joint_velocity_only_with_dt(super::super::Joint::Ball(joint), &mut bodies, dt);
+            let angular_velocity = bodies[1].state().angular_velocity();
+            assert!(angular_velocity.is_finite(), "angular velocity {angular_velocity:?}");
+
+            // Near-pi swing must not fail on the degenerate cross product.
+            let swing = Quat::from_axis_angle(Vec3::X, std::f64::consts::PI - 1.0e-9)
+                .expect("near-pi swing");
+            let mut bodies = [
+                static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                solver_body_with_velocities(Vec3::ZERO, swing, Vec3::ZERO, Vec3::ZERO),
+            ];
+            let mut joint = super::super::BallJoint::new(aligned_axis_common());
+            joint.swing_limit = Some(0.1);
+            solve_joint_velocity_only_with_dt(super::super::Joint::Ball(joint), &mut bodies, dt);
+            assert!(bodies[1].state().angular_velocity().is_finite());
+            assert!(bodies[1]
+                .state()
+                .transform()
+                .translation()
+                .is_finite());
+        }
     }
 
     #[test]
