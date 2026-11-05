@@ -2227,8 +2227,7 @@ fn driven_graph(count: usize) -> PhysicsWorld {
     world
 }
 
-/// A ball tree given an initial velocity field and left alone: total linear and
-/// angular momentum and the kinetic energy must stay put.
+/// Independent velocities intentionally require an inelastic constraint projection.
 fn free_floating_graph(count: usize) -> PhysicsWorld {
     let mut world = ball_tree(count);
     let ids: Vec<_> = world.bodies().map(|(id, _)| id).collect();
@@ -2423,6 +2422,9 @@ fn free_floating_ball_tree_conserves_momentum() {
         momentum_drift <= 1.0e-9,
         "linear momentum drifted by {momentum_drift}"
     );
+    assert!(final_metrics.linear_velocity_residual_max < initial.linear_velocity_residual_max * 0.01);
+    assert!(final_metrics.kinetic_energy < initial.kinetic_energy);
+    assert!(peak_energy <= initial.kinetic_energy * (1.0 + 1.0e-12));
     // Position projection on an articulated tree is not an exactly
     // angular-momentum-preserving operation.  Keep this value diagnostic;
     // linear momentum remains the invariant asserted by this regression.
@@ -2465,6 +2467,84 @@ fn articulated_graph_large_diagnostic() {
                 elapsed,
             );
             assert_articulated_regression(name, initial, final_metrics, peak_energy, elapsed);
+        }
+    }
+}
+
+/// Exact anchor geometry and a rigid velocity field, including offset COMs.
+fn consistent_ball_tree(count: usize) -> PhysicsWorld {
+    let mut world = PhysicsWorld::new();
+    let mut bodies = Vec::with_capacity(count);
+    let mut positions = vec![Vec3::ZERO; count];
+    let omega = Vec3::new(0.05, 0.1, 0.02);
+    for index in 0..count {
+        if index > 0 {
+            positions[index] =
+                positions[(index - 1) / 2] + if index % 2 == 0 { Vec3::X } else { Vec3::Y };
+        }
+        let rotation = perturbed_joint_rotation(index);
+        let mut body = articulated_body(index, positions[index], rotation);
+        let center = body.world_center_of_mass().unwrap().unwrap();
+        body.set_angular_velocity(omega).unwrap();
+        body.set_linear_velocity(Vec3::new(0.2, -0.1, 0.05) + omega.cross(center))
+            .unwrap();
+        bodies.push(world.add_body(body).unwrap());
+        if index > 0 {
+            let parent = (index - 1) / 2;
+            let parent_transform = world.body(bodies[parent]).unwrap().state().transform();
+            let anchor = parent_transform
+                .rotation()
+                .conjugate()
+                .rotate_vector(positions[index] - positions[parent])
+                .unwrap();
+            world
+                .add_joint(
+                    bodies[parent],
+                    bodies[index],
+                    Joint::Ball(BallJoint::new(JointCommon::new(
+                        JointFrame::new(anchor, Quat::IDENTITY),
+                        JointFrame::IDENTITY,
+                    ))),
+                )
+                .unwrap();
+        }
+    }
+    world
+}
+
+#[test]
+fn consistent_free_system_conservation() {
+    for count in [1, 2, 10, 31] {
+        for dt in [1.0 / 60.0, 1.0 / 120.0, 1.0 / 240.0] {
+            let mut world = consistent_ball_tree(count);
+            let initial = graph_metrics(&world);
+            assert!(initial.position_error_max < 1.0e-14);
+            assert!(initial.linear_velocity_residual_max < 1.0e-14);
+            for step in 1..=300 {
+                world.step(dt).unwrap();
+                assert_finite_body_states(&world);
+                if step == 1 || step == 300 {
+                    let current = graph_metrics(&world);
+                    let energy_change =
+                        (current.kinetic_energy - initial.kinetic_energy) / initial.kinetic_energy;
+                    let p_drift = (current.linear_momentum - initial.linear_momentum).length();
+                    let l_drift = (current.angular_momentum - initial.angular_momentum).length();
+                    println!(
+                        "consistent n={count} dt={dt:.6} step={step} E0={:.9e} E={:.9e} dE={energy_change:.6e} P0={:?} P={:?} dP={p_drift:.6e} L0={:?} L={:?} dL={l_drift:.6e} relL={:.6e} anchor={:.6e} velocity={:.6e}",
+                        initial.kinetic_energy,
+                        current.kinetic_energy,
+                        initial.linear_momentum,
+                        current.linear_momentum,
+                        initial.angular_momentum,
+                        current.angular_momentum,
+                        l_drift / initial.angular_momentum.length(),
+                        current.position_error_max,
+                        current.linear_velocity_residual_max
+                    );
+                    assert!(p_drift < 1.0e-9);
+                    assert!(energy_change.abs() < 0.01);
+                }
+            }
         }
     }
 }
