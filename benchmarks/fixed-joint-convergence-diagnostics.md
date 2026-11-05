@@ -43,3 +43,14 @@ Both options are diagnostic-only. Neither changes the production default, and ne
 
 
 After the diagnostic-only changes, the strict 300-step sequential FixedBlock3 scenario was rerun: it completed 300 ticks with no step error, 998 joints after separation and zero break events, but FAILED the 0.03 m maximum / 0.01 m RMS anchor criteria. Measured anchor max/RMS was 2.6480/0.1686 m, frame max/RMS 3.1415/0.4397 rad, velocity residual max 10.92 m/s / 17.44 rad/s, and stage separation linear-momentum delta 5.68e-14. The test's two runs had identical body states before reaching its strict assertion.
+
+
+## Controlled integration-order comparison
+
+`loaded_fixed_joint_prediction_precedes_velocity_projection` is an ignored baseline A/B diagnostic, not a production step. It compares one step of equal unit masses in chains and binary trees of 2, 10, 50, 100 and 1000 bodies, with hard FixedJoints and no collisions. A 1200 N force acts along the root connector for dt=1/120 s (root velocity increment 10 m/s, no torque). Both paths use the same force, 8 velocity sweeps and 3 position sweeps. Path A advances the root before velocity projection; path B solves velocity on the original pose, then advances all bodies using the solved velocities. The A result is checked against a real `PhysicsWorld::step` for Scalar. It is deliberately a restricted linear experiment; it does not model CCD, rotating inertia or contact generation.
+
+For the 1000-body chain, A/B maximum anchor error before position is 0.083333/0.002248 m and after position 0.006510/0.001624 m. For the 1000-body tree, A/B after position is 0.003418/0.000154 m. In both orders the total linear momentum is 10 kg m/s and COM acceleration is the analytical 1.2 m/s?. The velocities remain underconverged: maximum residual for the 1000-body tree after 8 sweeps is 0.04870 m/s in both orders. Thus late integration removes a confirmed source of initial displacement in this restricted input but does not fix iterative velocity convergence.
+
+`loaded_fixed_joint_chain_stays_close_after_root_force` is an ignored known-failing regression gate for a real 10-body `PhysicsWorld` step: actual maximum anchor error 0.006510 m exceeds the 0.003 m criterion, which is 0.3% of the one-meter link length; exact hard-constraint error is zero. It must not be marked as passing until the physical correction is implemented and verified.
+
+The requested Jolt reference revision describes velocity constraint solving followed by integration and CCD in [Architecture.md](https://github.com/jrouwe/JoltPhysics/blob/0f69a6b8f0bd562f23a29b27a665d2dab1524917/Docs/Architecture.md#the-simulation-step-in-detail). Jolt's FixedConstraint uses separately prepared point and rotation constraint parts and recalculates them for position solving. This comparison is not sufficient to establish equivalence with Kapitsa's contact or CCD pipeline.

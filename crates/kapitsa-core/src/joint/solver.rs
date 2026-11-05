@@ -7350,152 +7350,195 @@ mod tests {
     fn loaded_fixed_joint_prediction_precedes_velocity_projection() {
         let dt = 1.0 / 120.0;
         for count in [2_usize, 10, 50, 100, 1000] {
-            for projection in [
-                super::super::JointProjection::ScalarGaussSeidel,
-                super::super::JointProjection::FixedBlock3,
-            ] {
-                let common = JointCommon::new(
-                    JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
-                    JointFrame::new(-Vec3::X * 0.5, Quat::IDENTITY),
-                );
-                let joint = Joint::Fixed(super::super::FixedJoint::new(common));
-                let mut world = crate::world::PhysicsWorld::new();
-                let ids = (0..count)
-                    .map(|index| {
-                        let body = solver_body(Vec3::X * index as f64);
-                        world.add_body(*body.body()).expect("world body")
-                    })
-                    .collect::<Vec<_>>();
-                world
-                    .body_mut(ids[0])
-                    .expect("root")
-                    .apply_force_at_point(Vec3::X * 1200.0, Vec3::ZERO)
-                    .expect("force");
-                let joints = (0..count - 1)
-                    .map(|index| {
-                        let id = world
-                            .add_joint(ids[index], ids[index + 1], joint)
-                            .expect("world joint");
-                        JointConstraint {
-                            id,
-                            body_a: index,
-                            body_b: index + 1,
-                            joint,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let options = JointSolverOptions::legacy().with_projection(projection);
-                let mut outputs = Vec::new();
-                for early_pose in [true, false] {
-                    let mut bodies = (0..count)
+            for topology in ["chain", "tree"] {
+                let mut initial_x = vec![0.0; count];
+                for index in 1..count {
+                    let parent = if topology == "tree" {
+                        (index - 1) / 2
+                    } else {
+                        index - 1
+                    };
+                    initial_x[index] = initial_x[parent] + 1.0;
+                }
+                for projection in [
+                    super::super::JointProjection::ScalarGaussSeidel,
+                    super::super::JointProjection::FixedBlock3,
+                ] {
+                    let common = JointCommon::new(
+                        JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+                        JointFrame::new(-Vec3::X * 0.5, Quat::IDENTITY),
+                    );
+                    let joint = Joint::Fixed(super::super::FixedJoint::new(common));
+                    let mut world = crate::world::PhysicsWorld::new();
+                    let ids = (0..count)
                         .map(|index| {
-                            solver_body_with_velocities(
-                                Vec3::X
-                                    * (index as f64
-                                        + if early_pose && index == 0 {
-                                            10.0 * dt
-                                        } else {
-                                            0.0
-                                        }),
-                                Quat::IDENTITY,
-                                if index == 0 {
-                                    Vec3::X * 10.0
-                                } else {
-                                    Vec3::ZERO
-                                },
-                                Vec3::ZERO,
-                            )
+                            let body = solver_body(Vec3::X * initial_x[index]);
+                            world.add_body(*body.body()).expect("world body")
                         })
                         .collect::<Vec<_>>();
-                    let mut workspace = JointWorkspace::new();
-                    JointSolver::begin_step(&mut workspace);
-                    JointSolver::prepare(&mut workspace, &bodies, &joints, dt)
-                        .expect("prepare velocity");
-                    for _ in 0..8 {
-                        JointSolver::solve_velocity_prepared_iteration(
-                            &mut workspace,
-                            &mut bodies[..],
-                            &joints,
-                            dt,
-                            options,
-                        )
-                        .expect("velocity sweep");
-                    }
-                    if !early_pose {
-                        for body in &mut bodies {
-                            let state = body.state();
-                            let transform = state.transform();
-                            let next = Transform::new(
-                                transform.translation() + state.linear_velocity() * dt,
-                                transform.rotation(),
-                            )
-                            .expect("transform");
-                            body.body_mut().set_transform(next).expect("integrate pose");
-                        }
-                    }
-                    let max_anchor = |bodies: &[SolverBody]| {
-                        bodies
-                            .windows(2)
-                            .map(|pair| {
-                                (pair[1].state().transform().translation()
-                                    - pair[0].state().transform().translation()
-                                    - Vec3::X)
-                                    .length()
+                    world
+                        .body_mut(ids[0])
+                        .expect("root")
+                        .apply_force_at_point(Vec3::X * 1200.0, Vec3::ZERO)
+                        .expect("force");
+                    let joints = (1..count)
+                        .map(|index| {
+                            let parent = if topology == "tree" {
+                                (index - 1) / 2
+                            } else {
+                                index - 1
+                            };
+                            let id = world
+                                .add_joint(ids[parent], ids[index], joint)
+                                .expect("world joint");
+                            JointConstraint {
+                                id,
+                                body_a: parent,
+                                body_b: index,
+                                joint,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let options = JointSolverOptions::legacy().with_projection(projection);
+                    let mut outputs = Vec::new();
+                    for early_pose in [true, false] {
+                        let mut bodies = (0..count)
+                            .map(|index| {
+                                solver_body_with_velocities(
+                                    Vec3::X
+                                        * (initial_x[index]
+                                            + if early_pose && index == 0 {
+                                                10.0 * dt
+                                            } else {
+                                                0.0
+                                            }),
+                                    Quat::IDENTITY,
+                                    if index == 0 {
+                                        Vec3::X * 10.0
+                                    } else {
+                                        Vec3::ZERO
+                                    },
+                                    Vec3::ZERO,
+                                )
                             })
-                            .fold(0.0_f64, f64::max)
-                    };
-                    let pre_position = max_anchor(&bodies);
-                    for _ in 0..3 {
-                        for (index, constraint) in joints.iter().copied().enumerate() {
-                            JointSolver::solve_position_joint(
+                            .collect::<Vec<_>>();
+                        let mut workspace = JointWorkspace::new();
+                        JointSolver::begin_step(&mut workspace);
+                        JointSolver::prepare(&mut workspace, &bodies, &joints, dt)
+                            .expect("prepare velocity");
+                        for _ in 0..8 {
+                            JointSolver::solve_velocity_prepared_iteration(
                                 &mut workspace,
                                 &mut bodies[..],
-                                constraint,
-                                index,
+                                &joints,
                                 dt,
                                 options,
                             )
-                            .expect("position sweep");
+                            .expect("velocity sweep");
                         }
+                        if !early_pose {
+                            for body in &mut bodies {
+                                let state = body.state();
+                                let transform = state.transform();
+                                let next = Transform::new(
+                                    transform.translation() + state.linear_velocity() * dt,
+                                    transform.rotation(),
+                                )
+                                .expect("transform");
+                                body.body_mut().set_transform(next).expect("integrate pose");
+                            }
+                        }
+                        let max_anchor = |bodies: &[SolverBody]| {
+                            joints
+                                .iter()
+                                .map(|joint| {
+                                    (bodies[joint.body_b].state().transform().translation()
+                                        - bodies[joint.body_a].state().transform().translation()
+                                        - Vec3::X)
+                                        .length()
+                                })
+                                .fold(0.0_f64, f64::max)
+                        };
+                        let pre_position = max_anchor(&bodies);
+                        for _ in 0..3 {
+                            for (index, constraint) in joints.iter().copied().enumerate() {
+                                JointSolver::solve_position_joint(
+                                    &mut workspace,
+                                    &mut bodies[..],
+                                    constraint,
+                                    index,
+                                    dt,
+                                    options,
+                                )
+                                .expect("position sweep");
+                            }
+                        }
+                        let post_position = max_anchor(&bodies);
+                        let momentum = bodies
+                            .iter()
+                            .map(|body| body.state().linear_velocity().x)
+                            .sum::<f64>();
+                        let kinetic = bodies
+                            .iter()
+                            .map(|body| 0.5 * body.state().linear_velocity().length_squared())
+                            .sum::<f64>();
+                        let velocity_residual = joints
+                            .iter()
+                            .map(|joint| {
+                                (bodies[joint.body_b].state().linear_velocity()
+                                    - bodies[joint.body_a].state().linear_velocity())
+                                .length()
+                            })
+                            .fold(0.0_f64, f64::max);
+                        let rms_anchor = (joints
+                            .iter()
+                            .map(|joint| {
+                                (bodies[joint.body_b].state().transform().translation()
+                                    - bodies[joint.body_a].state().transform().translation()
+                                    - Vec3::X)
+                                    .length_squared()
+                            })
+                            .sum::<f64>()
+                            / joints.len() as f64)
+                            .sqrt();
+                        println!(
+                            "topology={topology} count={count} projection={projection:?} early_pose={early_pose} pre_position={pre_position:.9e} post_max/rms={post_position:.9e}/{rms_anchor:.9e} velocity_residual={velocity_residual:.9e} momentum={momentum:.9e} com_accel={:.9e} kinetic={kinetic:.9e}",
+                            momentum / count as f64 / dt
+                        );
+                        assert!((momentum - 10.0).abs() < 1.0e-10);
+                        outputs.push((pre_position, post_position));
                     }
-                    let post_position = max_anchor(&bodies);
-                    let momentum = bodies
-                        .iter()
-                        .map(|body| body.state().linear_velocity().x)
-                        .sum::<f64>();
-                    println!(
-                        "count={count} projection={projection:?} early_pose={early_pose} pre_position={pre_position:.9e} post_position={post_position:.9e} momentum={momentum:.9e}"
-                    );
-                    assert!((momentum - 10.0).abs() < 1.0e-10);
-                    outputs.push((pre_position, post_position));
-                }
-                if projection == super::super::JointProjection::ScalarGaussSeidel {
-                    world.step(dt).expect("world step");
-                    let positions = ids
-                        .iter()
-                        .map(|id| {
-                            world
-                                .body(*id)
-                                .expect("body")
-                                .state()
-                                .transform()
-                                .translation()
-                        })
-                        .collect::<Vec<_>>();
-                    let world_error = positions
-                        .windows(2)
-                        .map(|pair| (pair[1] - pair[0] - Vec3::X).length())
-                        .fold(0.0_f64, f64::max);
-                    assert!(
-                        (world_error - outputs[0].1).abs() < 1.0e-10,
-                        "world={world_error} test={}",
-                        outputs[0].1
-                    );
-                }
-                assert!(outputs[0].0 > 0.08);
-                assert!(outputs[1].0 < 0.003);
-                if count == 2 {
-                    assert!(outputs[1].1 < 1.0e-12);
+                    if projection == super::super::JointProjection::ScalarGaussSeidel {
+                        world.step(dt).expect("world step");
+                        let positions = ids
+                            .iter()
+                            .map(|id| {
+                                world
+                                    .body(*id)
+                                    .expect("body")
+                                    .state()
+                                    .transform()
+                                    .translation()
+                            })
+                            .collect::<Vec<_>>();
+                        let world_error = joints
+                            .iter()
+                            .map(|joint| {
+                                (positions[joint.body_b] - positions[joint.body_a] - Vec3::X)
+                                    .length()
+                            })
+                            .fold(0.0_f64, f64::max);
+                        assert!(
+                            (world_error - outputs[0].1).abs() < 1.0e-10,
+                            "world={world_error} test={}",
+                            outputs[0].1
+                        );
+                    }
+                    assert!(outputs[0].0 > 0.08);
+                    assert!(outputs[1].0 < 0.003);
+                    if count == 2 {
+                        assert!(outputs[1].1 < 1.0e-12);
+                    }
                 }
             }
         }
