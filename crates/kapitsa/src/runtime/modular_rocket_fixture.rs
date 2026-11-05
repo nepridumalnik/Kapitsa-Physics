@@ -725,6 +725,76 @@ mod stability_tests {
 
     #[cfg(feature = "bench-internals")]
     #[test]
+    #[ignore = "diagnostic FixedBlock3 sweep matrix for the loaded 1000-part rocket"]
+    fn diagnose_fixed_block_rocket_sweep_matrix() {
+        for velocity in [8, 16, 32] {
+            for position in [3, 6, 12] {
+                let run = run_scenario(
+                    1000,
+                    true,
+                    ScenarioMode::Full,
+                    false,
+                    Some((velocity, position)),
+                    false,
+                    None,
+                    None,
+                    None,
+                );
+                let first = run
+                    .solver_stage_trace
+                    .iter()
+                    .find(|s| Some(s.tick) == run.first_anchor_limit_tick);
+                println!(
+                    "velocity={velocity} position={position} ticks={} anchor_max/rms={:.9e}/{:.9e} frame_max/rms={:.9e}/{:.9e} first_anchor={:?} first_frame={:?} crossing_pre/post_position={:.9e}/{:.9e} crossing_velocity_first/final={:.9e}/{:.9e} energy_drift={:.9e} separation_dp={:.9e} failure={:?}",
+                    run.completed_ticks,
+                    run.max_anchor_error,
+                    run.rms_anchor_error,
+                    run.max_frame_error,
+                    run.rms_frame_error,
+                    run.first_anchor_limit_tick,
+                    run.first_frame_limit_tick,
+                    first.map_or(0.0, |s| s.pre_joint_anchor_error_m),
+                    first.map_or(0.0, |s| s.post_joint_anchor_error_m),
+                    first.map_or(0.0, |s| s.first_velocity_linear_residual_mps),
+                    first.map_or(0.0, |s| s.post_velocity_linear_residual_mps),
+                    run.max_coast_energy_drift,
+                    run.separation_momentum_error,
+                    run.step_failure
+                );
+                assert_eq!(run.completed_ticks, TICKS);
+                assert!(run.step_failure.is_none());
+            }
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    #[ignore = "compare centered and offset thrust in the same 1000-part FixedBlock3 fixture"]
+    fn diagnose_fixed_block_centered_and_offset_thrust() {
+        for mode in [
+            ScenarioMode::CenteredThrustWithoutGravityOrContact,
+            ScenarioMode::ThrustWithoutGravityOrContact,
+        ] {
+            let run = run_scenario(1000, true, mode, false, None, false, None, None, None);
+            println!(
+                "mode={mode:?} ticks={} first_anchor={:?} first_frame={:?} anchor_max/rms={:.9e}/{:.9e} frame_max/rms={:.9e}/{:.9e} coast_drift={:.9e} failure={:?}",
+                run.completed_ticks,
+                run.first_anchor_limit_tick,
+                run.first_frame_limit_tick,
+                run.max_anchor_error,
+                run.rms_anchor_error,
+                run.max_frame_error,
+                run.rms_frame_error,
+                run.max_coast_energy_drift,
+                run.step_failure
+            );
+            assert_eq!(run.completed_ticks, TICKS);
+            assert!(run.step_failure.is_none());
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
     #[ignore = "diagnostic FixedBlock3 loading and iteration convergence"]
     fn diagnose_fixed_block_rocket_loading_and_convergence() {
         for (parts, mode, position) in [

@@ -18,4 +18,17 @@ The experimental global velocity PCG with IC(0) on the same 1000-body chain reac
 
 The free asymmetric 100-body fixture at dt=1/120 s for 180 steps reports kinetic energy change -1.046% with Scalar, -0.0172% with diagnostic global PCG. The recorded velocity impulse work plus quadratic work agrees with measured kinetic-energy change to 3.2e-12 J for Scalar and 1.1e-12 J for PCG. Energy is not expected to remain unchanged through an inelastic velocity projection; these figures are a diagnostic, not a general conservation proof.
 
-Existing finite-difference tests cover fixed rotation and offset-COM point Jacobians, block effective mass, in-place vs generic rows, and mass-cache comparisons. They do not prove correctness for every loaded graph, contact, topology change or force history. Per-sweep residuals beyond first/final, a 3/6/12 by 8/16/32 matrix on the full 1000-part fixture, and a production-quality fix remain outstanding. Do not enable diagnostic PCG or experimental coloring solely based on these results.
+Existing finite-difference tests cover fixed rotation and offset-COM point Jacobians, block effective mass, in-place vs generic rows, and mass-cache comparisons. They do not prove correctness for every loaded graph, contact, topology change or force history. Per-sweep residuals beyond first/final and a production-quality fix remain outstanding. Do not enable diagnostic PCG or experimental coloring solely based on these results.
+
+
+The full FixedBlock3 1000-body sweep matrix (`diagnose_fixed_block_rocket_sweep_matrix`, 180 ticks) produced the following maximum anchor errors in meters. These runs change iteration counts only for diagnosis:
+
+| Velocity sweeps | Position 3 | Position 6 | Position 12 |
+| ---: | ---: | ---: | ---: |
+| 8 | 2.4983 | 1.0406 | 0.5411 |
+| 16 | 1.0691 | 0.6309 | 0.3438 |
+| 32 | 0.6844 | 0.5407 | 0.2533 |
+
+All nine runs cross the 3 cm anchor limit by tick 12 or 13; none meets the strict threshold. At 32/12, maximum frame error is 1.418 rad and RMS anchor error is 0.0190 m. This does not justify changing the default sweeps.
+
+A diagnostic error was found in the pre-existing `CenteredThrustWithoutGravityOrContact` mode: it used local point `(0,0,0)` even though the root COM is `(-0.05,0,0)`. `centered_diagnostic_thrust_uses_root_center_of_mass` failed before the fix and passes after it. Earlier centered-thrust measurements are invalid. With the corrected diagnostic and FixedBlock3 on 1000 bodies, centered thrust without gravity/contact gives first 3 cm crossing at tick 13, maximum/RMS anchor 2.3949/0.1557 m, maximum/RMS frame 3.1409/0.4373 rad, normalized coast drift 0.4787. Original offset thrust gives tick 13, 2.4033/0.1568 m, 3.1415/0.4059 rad and normalized coast drift 0.4694. Initial state and force magnitude are the same, but these are distinct physical load locations.
