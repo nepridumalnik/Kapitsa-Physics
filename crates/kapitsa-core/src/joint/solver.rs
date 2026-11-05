@@ -5869,7 +5869,11 @@ mod tests {
     use crate::joint::row::RowDimension;
     use crate::joint::workspace::JointSolverCall;
     use crate::{
-        joint::{D6Joint, Joint, JointCommon, JointDrive, JointFrame, JointLimit, JointMotion},
+        joint::{
+            BallJoint, ConeTwistJoint, CylindricalJoint, D6Joint, DistanceJoint, HingeJoint, Joint,
+            JointCommon, JointDrive, JointFrame, JointLimit, JointMotion, PlanarJoint, SliderJoint,
+            SpringJoint,
+        },
         mass::MassProperties,
         rigid_body::RigidBody,
         transform::Transform,
@@ -9475,6 +9479,306 @@ mod tests {
                 .translation()
                 .is_finite());
         }
+    }
+
+    fn assert_vec_close(actual: Vec3, expected: Vec3, tol: f64, context: &str) {
+        let diff = actual - expected;
+        assert!(
+            diff.length() <= tol,
+            "{context}: actual {actual:?} expected {expected:?}"
+        );
+    }
+
+    fn velocity_only_bodies() -> [SolverBody; 2] {
+        [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Vec3::new(1.0, 2.0, 3.0),
+                Vec3::new(4.0, 5.0, 6.0),
+            ),
+        ]
+    }
+
+    fn run_velocity_only(joint: Joint) -> [SolverBody; 2] {
+        let mut bodies = velocity_only_bodies();
+        solve_joint_velocity_only_with_dt(joint, &mut bodies, 1.0 / 60.0);
+        bodies
+    }
+
+    #[test]
+    fn hinge_locks_translation_and_two_rotations_keeping_twist() {
+        let bodies = run_velocity_only(Joint::Hinge(HingeJoint::new(aligned_axis_common())));
+        assert_vec_close(
+            bodies[1].state().linear_velocity(),
+            Vec3::ZERO,
+            1.0e-10,
+            "hinge translation",
+        );
+        assert_vec_close(
+            bodies[1].state().angular_velocity(),
+            Vec3::new(0.0, 0.0, 6.0),
+            1.0e-10,
+            "hinge rotation",
+        );
+    }
+
+    #[test]
+    fn slider_locks_two_translations_and_all_rotations_keeping_axis() {
+        let bodies = run_velocity_only(Joint::Slider(SliderJoint::new(aligned_axis_common())));
+        assert_vec_close(
+            bodies[1].state().linear_velocity(),
+            Vec3::new(0.0, 0.0, 3.0),
+            1.0e-10,
+            "slider translation",
+        );
+        assert_vec_close(
+            bodies[1].state().angular_velocity(),
+            Vec3::ZERO,
+            1.0e-10,
+            "slider rotation",
+        );
+    }
+
+    #[test]
+    fn ball_locks_translation_and_keeps_all_rotations() {
+        let bodies = run_velocity_only(Joint::Ball(BallJoint::new(aligned_axis_common())));
+        assert_vec_close(
+            bodies[1].state().linear_velocity(),
+            Vec3::ZERO,
+            1.0e-10,
+            "ball translation",
+        );
+        assert_vec_close(
+            bodies[1].state().angular_velocity(),
+            Vec3::new(4.0, 5.0, 6.0),
+            1.0e-10,
+            "ball rotation should stay free",
+        );
+    }
+
+    #[test]
+    fn cylindrical_locks_two_translations_and_two_rotations_keeping_axis() {
+        let bodies =
+            run_velocity_only(Joint::Cylindrical(CylindricalJoint::new(aligned_axis_common())));
+        assert_vec_close(
+            bodies[1].state().linear_velocity(),
+            Vec3::new(0.0, 0.0, 3.0),
+            1.0e-10,
+            "cylindrical translation",
+        );
+        assert_vec_close(
+            bodies[1].state().angular_velocity(),
+            Vec3::new(0.0, 0.0, 6.0),
+            1.0e-10,
+            "cylindrical rotation",
+        );
+    }
+
+    #[test]
+    fn planar_locks_normal_and_two_rotations_keeping_in_plane_motion() {
+        let bodies = run_velocity_only(Joint::Planar(PlanarJoint::new(aligned_axis_common())));
+        assert_vec_close(
+            bodies[1].state().linear_velocity(),
+            Vec3::new(1.0, 2.0, 0.0),
+            1.0e-10,
+            "planar translation",
+        );
+        assert_vec_close(
+            bodies[1].state().angular_velocity(),
+            Vec3::new(0.0, 0.0, 6.0),
+            1.0e-10,
+            "planar rotation",
+        );
+    }
+
+    #[test]
+    fn cone_twist_without_active_limits_locks_translation_and_keeps_rotation() {
+        let joint = ConeTwistJoint::new(
+            aligned_axis_common(),
+            [std::f64::consts::PI, std::f64::consts::PI],
+            JointLimit::new(-std::f64::consts::PI, std::f64::consts::PI),
+        );
+        let bodies = run_velocity_only(Joint::ConeTwist(joint));
+        assert_vec_close(
+            bodies[1].state().linear_velocity(),
+            Vec3::ZERO,
+            1.0e-10,
+            "cone twist translation",
+        );
+        assert_vec_close(
+            bodies[1].state().angular_velocity(),
+            Vec3::new(4.0, 5.0, 6.0),
+            1.0e-10,
+            "cone twist rotation should stay free",
+        );
+    }
+
+    #[test]
+    fn d6_free_axes_are_not_constrained() {
+        let mut joint = D6Joint::new(aligned_axis_common());
+        joint.linear_motion = [JointMotion::Free; 3];
+        joint.angular_motion = [JointMotion::Free; 3];
+        let bodies = run_velocity_only(Joint::D6(joint));
+        assert_vec_close(
+            bodies[1].state().linear_velocity(),
+            Vec3::new(1.0, 2.0, 3.0),
+            1.0e-10,
+            "d6 free translation",
+        );
+        assert_vec_close(
+            bodies[1].state().angular_velocity(),
+            Vec3::new(4.0, 5.0, 6.0),
+            1.0e-10,
+            "d6 free rotation",
+        );
+    }
+
+    #[test]
+    fn d6_locks_only_declared_axes() {
+        let mut joint = D6Joint::new(aligned_axis_common());
+        joint.linear_motion = [JointMotion::Free, JointMotion::Free, JointMotion::Locked];
+        joint.angular_motion = [JointMotion::Free, JointMotion::Free, JointMotion::Locked];
+        let bodies = run_velocity_only(Joint::D6(joint));
+        assert_vec_close(
+            bodies[1].state().linear_velocity(),
+            Vec3::new(1.0, 2.0, 0.0),
+            1.0e-10,
+            "d6 mixed translation",
+        );
+        assert_vec_close(
+            bodies[1].state().angular_velocity(),
+            Vec3::new(4.0, 5.0, 0.0),
+            1.0e-10,
+            "d6 mixed rotation",
+        );
+    }
+
+    #[test]
+    fn spring_without_force_or_limits_keeps_all_degrees_of_freedom() {
+        let bodies = run_velocity_only(Joint::Spring(SpringJoint::new(
+            aligned_axis_common(),
+            1.0,
+            0.0,
+            0.0,
+        )));
+        assert_vec_close(
+            bodies[1].state().linear_velocity(),
+            Vec3::new(1.0, 2.0, 3.0),
+            1.0e-10,
+            "spring free translation",
+        );
+        assert_vec_close(
+            bodies[1].state().angular_velocity(),
+            Vec3::new(4.0, 5.0, 6.0),
+            1.0e-10,
+            "spring free rotation",
+        );
+    }
+
+    #[test]
+    fn non_fixed_joints_remove_forbidden_velocity_with_offset_anchors() {
+        // Nonzero local anchors and rotated connector frames must not change
+        // which degrees of freedom are locked. Body B is positioned so the
+        // world anchors coincide; only the forbidden relative motion remains.
+        let frame_a = JointFrame::new(
+            Vec3::new(0.1, -0.2, 0.3),
+            Quat::from_axis_angle(Vec3::Z, 0.2).expect("frame a"),
+        );
+        let frame_b = JointFrame::new(
+            Vec3::new(-0.4, 0.15, 0.2),
+            Quat::from_axis_angle(Vec3::X, -0.3).expect("frame b"),
+        );
+        let common = JointCommon::new(frame_a, frame_b);
+        // Body B keeps an identity world rotation, so the coincident-anchor
+        // position is simply the difference of the two local anchors.
+        let anchor_a = frame_a.local_anchor;
+        let anchor_b_local = frame_b.local_anchor;
+        let position_b = anchor_a - anchor_b_local;
+        let mut bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                position_b,
+                Quat::IDENTITY,
+                Vec3::new(1.0, 2.0, 3.0),
+                Vec3::new(4.0, 5.0, 6.0),
+            ),
+        ];
+        solve_joint_velocity_only_with_dt(
+            Joint::Ball(BallJoint::new(common)),
+            &mut bodies,
+            1.0 / 60.0,
+        );
+        // The ball locks the anchor point: the relative velocity of the two
+        // anchor points, including the rotational contribution, must vanish.
+        let anchor_a_world = bodies[0].state().transform().translation()
+            + bodies[0]
+                .state()
+                .transform()
+                .rotation()
+                .rotate_vector(anchor_a)
+                .expect("anchor");
+        let anchor_b_world = bodies[1].state().transform().translation()
+            + bodies[1]
+                .state()
+                .transform()
+                .rotation()
+                .rotate_vector(anchor_b_local)
+                .expect("anchor");
+        let velocity_a = bodies[0].state().linear_velocity()
+            + bodies[0]
+                .state()
+                .angular_velocity()
+                .checked_cross(anchor_a_world - bodies[0].state().transform().translation())
+                .expect("cross");
+        let velocity_b = bodies[1].state().linear_velocity()
+            + bodies[1]
+                .state()
+                .angular_velocity()
+                .checked_cross(anchor_b_world - bodies[1].state().transform().translation())
+                .expect("cross");
+        let relative_anchor_velocity =
+            velocity_b.checked_sub(velocity_a).expect("finite velocity");
+        assert!(
+            relative_anchor_velocity.length() <= 1.0e-8,
+            "ball anchor velocity with offset anchors {relative_anchor_velocity:?}"
+        );
+    }
+
+    #[test]
+    fn non_fixed_joint_solve_is_equivalent_under_body_swap() {
+        let run = |swap: bool| -> Vec<Vec3> {
+            let (mut bodies, joint): ([SolverBody; 2], Joint) = if swap {
+                (
+                    [
+                        solver_body_with_velocities(
+                            Vec3::ZERO,
+                            Quat::IDENTITY,
+                            Vec3::new(1.0, 2.0, 3.0),
+                            Vec3::new(4.0, 5.0, 6.0),
+                        ),
+                        static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                    ],
+                    Joint::Cylindrical(CylindricalJoint::new(aligned_axis_common())),
+                )
+            } else {
+                (
+                    velocity_only_bodies(),
+                    Joint::Cylindrical(CylindricalJoint::new(aligned_axis_common())),
+                )
+            };
+            solve_joint_velocity_only_with_dt(joint, &mut bodies, 1.0 / 60.0);
+            let dynamic = if swap { 0 } else { 1 };
+            vec![
+                bodies[dynamic].state().linear_velocity(),
+                bodies[dynamic].state().angular_velocity(),
+            ]
+        };
+        let forward = run(false);
+        let swapped = run(true);
+        assert_vec_close(forward[0], swapped[0], 1.0e-10, "swap linear");
+        assert_vec_close(forward[1], swapped[1], 1.0e-10, "swap angular");
     }
 
     #[test]
