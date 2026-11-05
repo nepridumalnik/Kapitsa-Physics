@@ -2421,6 +2421,16 @@ fn free_floating_ball_tree_conserves_momentum() {
         elapsed,
     );
 
+    println!(
+        "inconsistent n=31: E0={:.9e} E={:.9e} P0={:?} P={:?} L0={:?} L={:?} dL={:.9e}",
+        initial.kinetic_energy,
+        final_metrics.kinetic_energy,
+        initial.linear_momentum,
+        final_metrics.linear_momentum,
+        initial.angular_momentum,
+        final_metrics.angular_momentum,
+        (final_metrics.angular_momentum - initial.angular_momentum).length()
+    );
     let momentum_drift = (final_metrics.linear_momentum - initial.linear_momentum).length();
     assert!(
         momentum_drift <= 1.0e-9,
@@ -2438,43 +2448,76 @@ fn free_floating_ball_tree_conserves_momentum() {
     // energy is reported by the graph metrics but is not an invariant here.
 }
 
+fn assert_large_graph(name: &str, world: PhysicsWorld, force: Vec3) {
+    let (initial, final_metrics, peak_energy, elapsed) =
+        run_articulated_graph(world, 60, 240, DT, |world| apply_root_force(world, force));
+    assert_articulated_regression(name, initial, final_metrics, peak_energy, elapsed);
+}
+
 #[test]
-fn articulated_graph_large_diagnostic() {
-    for count in [100usize, 1000] {
-        let cases: [(&str, PhysicsWorld, Vec3); 5] = [
-            ("hinge_chain", hinge_chain(count), Vec3::Y * 40.0),
-            (
-                "slider_chain",
-                slider_chain(count),
-                Vec3::new(0.0, 5.0, 20.0),
-            ),
-            ("ball_tree", ball_tree(count), Vec3::Y * 60.0),
-            (
-                "mixed_graph",
-                mixed_graph(count),
-                Vec3::new(10.0, 30.0, 0.0),
-            ),
-            ("closed_loop", closed_loop(count), Vec3::Y * 50.0),
-        ];
-        for (name, world, force) in cases {
-            let (initial, final_metrics, peak_energy, elapsed) =
-                run_articulated_graph(world, 60, 240, DT, |world| {
-                    apply_root_force(world, force);
-                });
-            println!(
-                "diagnostic {name}_{count}: pos_max={:.3e}m ang_max={:.3e}rad \
-                 lin_res_max={:.3e}m/s ang_res_max={:.3e}rad/s peak_energy={:.3e}J \
-                 step_time={:?}",
-                final_metrics.position_error_max,
-                final_metrics.angular_error_max,
-                final_metrics.linear_velocity_residual_max,
-                final_metrics.angular_velocity_residual_max,
-                peak_energy,
-                elapsed,
-            );
-            assert_articulated_regression(name, initial, final_metrics, peak_energy, elapsed);
-        }
-    }
+fn articulated_graph_hinge_chain_100() {
+    assert_large_graph("hinge_chain_100", hinge_chain(100), Vec3::Y * 40.0);
+}
+
+#[test]
+fn articulated_graph_slider_chain_100() {
+    assert_large_graph(
+        "slider_chain_100",
+        slider_chain(100),
+        Vec3::new(0.0, 5.0, 20.0),
+    );
+}
+
+#[test]
+fn articulated_graph_ball_tree_100() {
+    assert_large_graph("ball_tree_100", ball_tree(100), Vec3::Y * 60.0);
+}
+
+#[test]
+fn articulated_graph_mixed_graph_100() {
+    assert_large_graph(
+        "mixed_graph_100",
+        mixed_graph(100),
+        Vec3::new(10.0, 30.0, 0.0),
+    );
+}
+
+#[test]
+fn articulated_graph_closed_loop_100() {
+    assert_large_graph("closed_loop_100", closed_loop(100), Vec3::Y * 50.0);
+}
+
+#[test]
+fn articulated_graph_hinge_chain_1000() {
+    assert_large_graph("hinge_chain_1000", hinge_chain(1000), Vec3::Y * 40.0);
+}
+
+#[test]
+fn articulated_graph_slider_chain_1000() {
+    assert_large_graph(
+        "slider_chain_1000",
+        slider_chain(1000),
+        Vec3::new(0.0, 5.0, 20.0),
+    );
+}
+
+#[test]
+fn articulated_graph_ball_tree_1000() {
+    assert_large_graph("ball_tree_1000", ball_tree(1000), Vec3::Y * 60.0);
+}
+
+#[test]
+fn articulated_graph_mixed_graph_1000() {
+    assert_large_graph(
+        "mixed_graph_1000",
+        mixed_graph(1000),
+        Vec3::new(10.0, 30.0, 0.0),
+    );
+}
+
+#[test]
+fn articulated_graph_closed_loop_1000() {
+    assert_large_graph("closed_loop_1000", closed_loop(1000), Vec3::Y * 50.0);
 }
 
 /// Exact anchor geometry and a rigid velocity field, including offset COMs.
@@ -2521,15 +2564,17 @@ fn consistent_ball_tree(count: usize) -> PhysicsWorld {
 #[test]
 fn consistent_free_system_conservation() {
     for count in [1, 2, 10, 31] {
-        for dt in [1.0 / 60.0, 1.0 / 120.0, 1.0 / 240.0] {
+        let mut previous_energy_error = f64::INFINITY;
+        for (subdivision, dt) in [(1, 1.0 / 60.0), (2, 1.0 / 120.0), (4, 1.0 / 240.0)] {
             let mut world = consistent_ball_tree(count);
             let initial = graph_metrics(&world);
             assert!(initial.position_error_max < 1.0e-14);
             assert!(initial.linear_velocity_residual_max < 1.0e-14);
-            for step in 1..=300 {
+            let steps = 300 * subdivision;
+            for step in 1..=steps {
                 world.step(dt).unwrap();
                 assert_finite_body_states(&world);
-                if step == 1 || step == 300 {
+                if step == 1 || step == 300 || step == steps {
                     let current = graph_metrics(&world);
                     let energy_change =
                         (current.kinetic_energy - initial.kinetic_energy) / initial.kinetic_energy;
@@ -2548,9 +2593,17 @@ fn consistent_free_system_conservation() {
                         current.linear_velocity_residual_max
                     );
                     assert!(p_drift < 1.0e-9);
-                    assert!(energy_change.abs() < 0.01);
+                    // Bound five-second energy error to 0.1%; the fixed-duration
+                    // comparison below additionally requires convergence with dt.
+                    assert!(energy_change.abs() < 1.0e-3);
                 }
             }
+            // Compare the same five-second physical interval, not just equal
+            // step counts (which would shorten the finer-step trajectories).
+            let final_energy = graph_metrics(&world).kinetic_energy;
+            let energy_error = (final_energy - initial.kinetic_energy).abs();
+            assert!(energy_error < 0.6 * previous_energy_error);
+            previous_energy_error = energy_error;
         }
     }
 }
