@@ -3521,6 +3521,7 @@ fn fixed_anchor_rows_with_centers(
             settings,
             anchors,
             Vec3::X,
+            anchors[0],
             geometry
                 .position_error
                 .checked_dot(Vec3::X)
@@ -3533,6 +3534,7 @@ fn fixed_anchor_rows_with_centers(
             settings,
             anchors,
             Vec3::Y,
+            anchors[0],
             geometry
                 .position_error
                 .checked_dot(Vec3::Y)
@@ -3545,6 +3547,7 @@ fn fixed_anchor_rows_with_centers(
             settings,
             anchors,
             Vec3::Z,
+            anchors[0],
             geometry
                 .position_error
                 .checked_dot(Vec3::Z)
@@ -3685,6 +3688,7 @@ fn append_ball_rows<B: SolverBodyAccess + ?Sized>(
             lock,
             [anchor_a, anchor_b],
             axis,
+            anchor_a, // World axes do not rotate with either body.
             error,
             axis_index as u8,
             bilateral_bounds(),
@@ -3781,6 +3785,7 @@ fn append_distance_rows<B: SolverBodyAccess + ?Sized>(
         settings,
         [anchor_a, anchor_b],
         axis,
+        anchor_a, // The axis follows the current delta, not a body frame.
         distance,
         joint.distance_limit,
         0,
@@ -3863,6 +3868,7 @@ fn append_slider_rows<B: SolverBodyAccess + ?Sized>(
             drive,
             [anchor_a, anchor_b],
             axis,
+            anchor_b,
             coordinate - joint.drive.target_position,
             5,
             bilateral_bounds(),
@@ -3875,6 +3881,7 @@ fn append_slider_rows<B: SolverBodyAccess + ?Sized>(
             settings,
             [anchor_a, anchor_b],
             axis,
+            anchor_b,
             coordinate,
             limit,
             6,
@@ -3919,6 +3926,7 @@ fn append_cylindrical_rows<B: SolverBodyAccess + ?Sized>(
             drive,
             [anchor_a, anchor_b],
             axis,
+            anchor_b,
             coordinate - joint.translation_drive.target_position,
             4,
             bilateral_bounds(),
@@ -3931,6 +3939,7 @@ fn append_cylindrical_rows<B: SolverBodyAccess + ?Sized>(
             settings,
             [anchor_a, anchor_b],
             axis,
+            anchor_b,
             coordinate,
             limit,
             5,
@@ -3981,6 +3990,7 @@ fn append_planar_rows<B: SolverBodyAccess + ?Sized>(
         settings,
         [anchor_a, anchor_b],
         axes[2],
+        anchor_b,
         delta
             .checked_dot(axes[2])
             .ok_or(CollisionError::ArithmeticOverflow)?,
@@ -4000,6 +4010,7 @@ fn append_planar_rows<B: SolverBodyAccess + ?Sized>(
                 drive,
                 [anchor_a, anchor_b],
                 axis,
+                anchor_b,
                 coordinate - joint.translation_drives[axis_index].target_position,
                 3 + axis_index as u8,
                 bilateral_bounds(),
@@ -4012,6 +4023,7 @@ fn append_planar_rows<B: SolverBodyAccess + ?Sized>(
                 settings,
                 [anchor_a, anchor_b],
                 axis,
+                anchor_b,
                 coordinate,
                 limit,
                 5 + axis_index as u8,
@@ -4076,6 +4088,7 @@ fn append_spring_rows<B: SolverBodyAccess + ?Sized>(
             spring_settings,
             [anchor_a, anchor_b],
             axis,
+            anchor_a, // The axis follows the current delta, not a body frame.
             distance - joint.rest_length,
             0,
             bilateral_bounds(),
@@ -4088,6 +4101,7 @@ fn append_spring_rows<B: SolverBodyAccess + ?Sized>(
             settings,
             [anchor_a, anchor_b],
             axis,
+            anchor_a,
             distance,
             limit,
             1,
@@ -4253,6 +4267,7 @@ fn append_d6_rows<B: SolverBodyAccess + ?Sized>(
                 lock,
                 [anchor_a, anchor_b],
                 axis,
+                anchor_b,
                 coordinate,
                 axis_index as u8,
                 bilateral_bounds(),
@@ -4263,6 +4278,7 @@ fn append_d6_rows<B: SolverBodyAccess + ?Sized>(
                 settings,
                 [anchor_a, anchor_b],
                 axis,
+                anchor_b,
                 coordinate,
                 limit,
                 3 + axis_index as u8,
@@ -4279,6 +4295,7 @@ fn append_d6_rows<B: SolverBodyAccess + ?Sized>(
                 drive,
                 [anchor_a, anchor_b],
                 axis,
+                anchor_b,
                 coordinate - joint.linear_drives[axis_index].target_position,
                 6 + axis_index as u8,
                 bilateral_bounds(),
@@ -4369,6 +4386,9 @@ fn append_linear_axes<B: SolverBodyAccess + ?Sized>(
             settings,
             [anchor_a, anchor_b],
             axis,
+            // Frame-derived axes rotate with body A: attach the axis to body
+            // B's anchor so the Jacobian carries the exact rotating-axis term.
+            anchor_b,
             error,
             first_key + axis_index as u8,
             bilateral_bounds(),
@@ -4518,6 +4538,7 @@ fn append_linear_limit<B: SolverBodyAccess + ?Sized>(
     settings: RowSettings,
     anchors: [Vec3; 2],
     axis: Vec3,
+    axis_anchor: Vec3,
     coordinate: f64,
     limit: super::JointLimit,
     key: u8,
@@ -4533,6 +4554,7 @@ fn append_linear_limit<B: SolverBodyAccess + ?Sized>(
             lock_settings(settings),
             anchors,
             axis,
+            axis_anchor,
             coordinate - value,
             key,
             bilateral_bounds(),
@@ -4579,6 +4601,7 @@ fn append_linear_limit<B: SolverBodyAccess + ?Sized>(
             row_settings,
             anchors,
             axis,
+            axis_anchor,
             error,
             key,
             bounds,
@@ -4865,6 +4888,7 @@ fn push_linear_row<B: SolverBodyAccess + ?Sized>(
     settings: RowSettings,
     anchors: [Vec3; 2],
     axis: Vec3,
+    axis_anchor: Vec3,
     error: f64,
     key: u8,
     bounds: (f64, f64),
@@ -4882,30 +4906,53 @@ fn push_linear_row<B: SolverBodyAccess + ?Sized>(
         )?,
     ];
     workspace.push(make_linear_row(
-        settings, anchors, axis, error, key, bounds, centers,
+        settings, anchors, axis, axis_anchor, error, key, bounds, centers,
     )?);
     Ok(())
 }
 
+/// Builds one linear constraint row.
+///
+/// `axis_anchor` is the world point the axis is rigidly attached to. For axes
+/// that co-rotate with body A (frame-derived axes) that is body B's anchor:
+/// the axis motion then contributes the exact `delta * (omega_a x axis)`
+/// derivative term, and the impulse pair acts on both bodies at that one
+/// point, which conserves angular momentum exactly. For world-aligned axes
+/// (ball locks, distance/spring directions) it is body A's anchor and the row
+/// reduces to the classic anchor-pair Jacobian.
+#[allow(clippy::too_many_arguments)] // Row construction stays explicit at call sites.
 fn make_linear_row(
     settings: RowSettings,
     anchors: [Vec3; 2],
     axis: Vec3,
+    axis_anchor: Vec3,
     error: f64,
     key: u8,
     bounds: (f64, f64),
     centers: [Vec3; 2],
 ) -> Result<ConstraintRow, CollisionError> {
-    if !axis.is_finite() || !error.is_finite() || !settings.dt.is_finite() || settings.dt <= 0.0 {
+    if !axis.is_finite()
+        || !axis_anchor.is_finite()
+        || !error.is_finite()
+        || !settings.dt.is_finite()
+        || settings.dt <= 0.0
+    {
         return Err(CollisionError::ArithmeticOverflow);
     }
-    let offset_a = anchors[0]
+    let offset_a = axis_anchor
+        .checked_sub(centers[0])
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let position_offset_a = anchors[0]
         .checked_sub(centers[0])
         .ok_or(CollisionError::ArithmeticOverflow)?;
     let offset_b = anchors[1]
         .checked_sub(centers[1])
         .ok_or(CollisionError::ArithmeticOverflow)?;
     let angular_a = offset_a
+        .checked_cross(axis)
+        .and_then(|value| value.checked_mul_scalar(-1.0))
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    let position_angular_a = position_offset_a
         .checked_cross(axis)
         .and_then(|value| value.checked_mul_scalar(-1.0))
         .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -4919,6 +4966,7 @@ fn make_linear_row(
         body_b: settings.body_b,
         linear_a: -axis,
         angular_a,
+        position_angular_a,
         linear_b: axis,
         angular_b,
         error,
@@ -4970,6 +5018,7 @@ fn make_angular_row(
         body_b: settings.body_b,
         linear_a: Vec3::ZERO,
         angular_a: -axis,
+        position_angular_a: -axis,
         linear_b: Vec3::ZERO,
         angular_b: axis,
         error,
@@ -5050,9 +5099,13 @@ fn solve_position_row<B: SolverBodyAccess + ?Sized>(
     if !row.position_enabled {
         return Ok(false);
     }
+    // The position projection follows the frozen-axis arm: see
+    // `ConstraintRow::position_angular_a`.
+    let mut position_row = *row;
+    position_row.angular_a = row.position_angular_a;
     let (effective_mass, masses) =
-        effective_mass_for_row(bodies, slots, *row, options, cache_stats)?;
-    let alpha = row.compliance * alpha_scale;
+        effective_mass_for_row(bodies, slots, position_row, options, cache_stats)?;
+    let alpha = position_row.compliance * alpha_scale;
     if !alpha.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
@@ -5060,14 +5113,15 @@ fn solve_position_row<B: SolverBodyAccess + ?Sized>(
     if denominator <= f64::MIN_POSITIVE {
         return Ok(false);
     }
-    let delta = -(row.error + alpha * row.accumulated_multiplier) / denominator;
-    let next = (row.accumulated_multiplier + delta).clamp(row.min_multiplier, row.max_multiplier);
-    let applied = next - row.accumulated_multiplier;
+    let delta = -(position_row.error + alpha * position_row.accumulated_multiplier) / denominator;
+    let next =
+        (position_row.accumulated_multiplier + delta).clamp(position_row.min_multiplier, position_row.max_multiplier);
+    let applied = next - position_row.accumulated_multiplier;
     if !next.is_finite() || !applied.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
     }
     if applied != 0.0 {
-        apply_position_row(bodies, *row, applied, masses)?;
+        apply_position_row(bodies, position_row, applied, masses)?;
         if options.mass_cache() {
             invalidate_solver_mass_pair(slots, row.body_a, row.body_b)?;
         }
@@ -5929,7 +5983,7 @@ mod tests {
     use crate::joint::workspace::JointSolverCall;
     use crate::{
         joint::{
-            BallJoint, ConeTwistJoint, CylindricalJoint, D6Joint, DistanceJoint, HingeJoint, Joint,
+            BallJoint, ConeTwistJoint, CylindricalJoint, D6Joint, HingeJoint, Joint,
             JointCommon, JointDrive, JointFrame, JointLimit, JointMotion, PlanarJoint, SliderJoint,
             SpringJoint,
         },
@@ -5949,6 +6003,7 @@ mod tests {
             body_b: 1,
             linear_a: Vec3::ZERO,
             angular_a: Vec3::ZERO,
+            position_angular_a: Vec3::ZERO,
             linear_b: Vec3::ZERO,
             angular_b: Vec3::ZERO,
             error,
@@ -6046,7 +6101,7 @@ mod tests {
         let prepare = |bodies: &[SolverBody], workspace: &mut JointWorkspace| {
             prepare_joint_rows(bodies, workspace, &constraints, 0.01)
         };
-        JointSolver::solve(&mut workspace, bodies, 0.01, 12, 8, prepare).expect("joint row solve");
+        JointSolver::solve(&mut workspace, bodies, 0.01, 200, 8, prepare).expect("joint row solve");
     }
 
     fn test_joint_id() -> crate::world::JointId {
@@ -6418,6 +6473,7 @@ mod tests {
             body_b: 1,
             linear_a: -Vec3::X,
             angular_a: Vec3::ZERO,
+            position_angular_a: Vec3::ZERO,
             linear_b: Vec3::X,
             angular_b: Vec3::ZERO,
             error,
@@ -8575,6 +8631,7 @@ mod tests {
             body_b: 1,
             linear_a,
             angular_a: Vec3::ZERO,
+            position_angular_a: Vec3::ZERO,
             linear_b: -linear_a,
             angular_b: Vec3::ZERO,
             error,
@@ -9925,6 +9982,148 @@ mod tests {
             1.0e-10,
             "slider rotation",
         );
+    }
+
+    /// Frame-derived constraint axes rotate with body A, so the velocity
+    /// Jacobian must carry the exact `delta * (omega_a x axis)` term. A
+    /// rigidly rotating pair that slides along its own axis satisfies every
+    /// locked coordinate exactly; after a velocity-only solve, a central
+    /// finite difference of those coordinates must therefore stay at zero.
+    /// A frozen-axis Jacobian injects impulses proportional to the free-axis
+    /// separation and fails this check.
+    #[test]
+    fn rotating_axis_jacobian_matches_finite_difference() {
+        let dt = 1.0 / 60.0;
+        let frame_rotation =
+            Quat::from_axis_angle(Vec3::new(0.3, -0.4, 0.5), 0.7).expect("unit axis");
+        let separation = 2.0_f64;
+        let omega = Vec3::new(0.4, 0.8, -0.3);
+        let slide = 1.5;
+        let axis = frame_rotation
+            .rotate_vector(Vec3::Z)
+            .expect("normalized rotation");
+        let in_plane = frame_rotation
+            .rotate_vector(Vec3::X)
+            .expect("normalized rotation");
+
+        // Each case keeps the pair in a consistent rigid rotation plus a slide
+        // along a genuinely free translation, so every locked coordinate has a
+        // true derivative of zero. `locked` selects the measured coordinates.
+        let cases: [(&str, Joint, Vec3, Vec3, [bool; 3]); 5] = [
+            (
+                "slider",
+                Joint::Slider(SliderJoint::new(JointCommon::new(
+                    JointFrame::IDENTITY,
+                    JointFrame::IDENTITY,
+                ))),
+                axis * separation,
+                axis * slide,
+                [true, true, false],
+            ),
+            (
+                "cylindrical",
+                Joint::Cylindrical(CylindricalJoint::new(JointCommon::new(
+                    JointFrame::IDENTITY,
+                    JointFrame::IDENTITY,
+                ))),
+                axis * separation,
+                axis * slide,
+                [true, true, false],
+            ),
+            (
+                "planar",
+                Joint::Planar(PlanarJoint::new(JointCommon::new(
+                    JointFrame::IDENTITY,
+                    JointFrame::IDENTITY,
+                ))),
+                in_plane * separation,
+                in_plane * slide,
+                [false, false, true],
+            ),
+            (
+                "hinge",
+                Joint::Hinge(HingeJoint::new(JointCommon::new(
+                    JointFrame::new(Vec3::Z * separation, Quat::IDENTITY),
+                    JointFrame::new(Vec3::Z * separation, Quat::IDENTITY),
+                ))),
+                Vec3::ZERO,
+                Vec3::ZERO,
+                [true, true, true],
+            ),
+            (
+                "d6-locked",
+                {
+                    let mut joint = D6Joint::new(JointCommon::new(
+                        JointFrame::IDENTITY,
+                        JointFrame::IDENTITY,
+                    ));
+                    joint.linear_motion = [JointMotion::Locked, JointMotion::Locked, JointMotion::Free];
+                    joint.angular_motion = [JointMotion::Free, JointMotion::Free, JointMotion::Locked];
+                    Joint::D6(joint)
+                },
+                axis * separation,
+                axis * slide,
+                [true, true, false],
+            ),
+        ];
+
+        for (name, joint, position_b, slide_velocity, locked) in cases {
+            let mut bodies = [
+                solver_body_with_velocities(Vec3::ZERO, frame_rotation, Vec3::ZERO, omega),
+                solver_body_with_velocities(
+                    position_b,
+                    frame_rotation,
+                    omega.cross(position_b) + slide_velocity,
+                    omega,
+                ),
+            ];
+            solve_joint_velocity_only_with_dt(joint, &mut bodies, dt);
+
+            // Central difference of every locked linear coordinate under the
+            // solved velocity field. The coordinates are recomputed at the
+            // advanced poses, so their rotating frames are included.
+            let h = 1.0e-6;
+            let advance = |bodies: &[SolverBody; 2], sign: f64| {
+                let mut advanced = bodies.clone();
+                for index in 0..advanced.len() {
+                    let state = advanced[index].state().clone();
+                    let transform = state.transform();
+                    let translation =
+                        transform.translation() + state.linear_velocity() * (h * sign);
+                    let rotation = transform
+                        .rotation()
+                        .integrate_world_angular_velocity(state.angular_velocity(), h * sign)
+                        .expect("finite rotation step");
+                    advanced[index] = solver_body_with_velocities(
+                        translation,
+                        rotation,
+                        state.linear_velocity(),
+                        state.angular_velocity(),
+                    );
+                }
+                advanced
+            };
+            let coordinate = |bodies: &[SolverBody; 2]| -> Vec3 {
+                let rotation_a = bodies[0].state().transform().rotation();
+                let delta = bodies[1].state().transform().translation()
+                    - bodies[0].state().transform().translation();
+                let axis_a = rotation_a.rotate_vector(Vec3::Z).expect("normalized rotation");
+                let basis = perpendicular_basis(axis_a).expect("axis is normalized");
+                Vec3::new(delta.dot(basis[0]), delta.dot(basis[1]), delta.dot(axis_a))
+            };
+            let forward = coordinate(&advance(&bodies, 1.0));
+            let backward = coordinate(&advance(&bodies, -1.0));
+            let derivative = (forward - backward) / (2.0 * h);
+            let residual = Vec3::new(
+                if locked[0] { derivative.x } else { 0.0 },
+                if locked[1] { derivative.y } else { 0.0 },
+                if locked[2] { derivative.z } else { 0.0 },
+            );
+            assert!(
+                residual.length() <= 1.0e-9,
+                "{name}: locked coordinate derivative {residual:?} exceeds 1e-9"
+            );
+        }
     }
 
     #[test]

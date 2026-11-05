@@ -16,6 +16,18 @@ pub(crate) struct ConstraintRow {
     pub(crate) body_b: usize,
     pub(crate) linear_a: Vec3,
     pub(crate) angular_a: Vec3,
+    /// Angular row arm for body A used by the position projection.
+    ///
+    /// The velocity Jacobian must be the exact time derivative of the
+    /// constraint coordinate, which for frame-derived (co-rotating) axes adds
+    /// the `delta * (omega_a x axis)` term to body A's angular arm. Solving
+    /// positions along that same arm lets large separations rotate the whole
+    /// frame instead of moving the anchors, which is a near-null direction of
+    /// the joint system and destroys Gauss-Seidel convergence. The position
+    /// projection therefore follows the frozen-axis arm, a valid descent
+    /// direction that keeps the anchors themselves responsible for closing
+    /// positional gaps.
+    pub(crate) position_angular_a: Vec3,
     pub(crate) linear_b: Vec3,
     pub(crate) angular_b: Vec3,
     pub(crate) error: f64,
@@ -43,6 +55,7 @@ impl ConstraintRow {
             && self.body_b < body_count
             && self.linear_a.is_finite()
             && self.angular_a.is_finite()
+            && self.position_angular_a.is_finite()
             && self.linear_b.is_finite()
             && self.angular_b.is_finite()
             && self.error.is_finite()

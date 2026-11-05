@@ -227,6 +227,7 @@ mod tests {
             body_b: 1,
             linear_a,
             angular_a,
+            position_angular_a: angular_a,
             linear_b,
             angular_b,
             error,

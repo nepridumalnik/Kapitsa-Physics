@@ -292,6 +292,7 @@ mod tests {
             body_b: 1,
             linear_a: -Vec3::X,
             angular_a: Vec3::ZERO,
+            position_angular_a: Vec3::ZERO,
             linear_b: Vec3::X,
             angular_b: Vec3::ZERO,
             error: 0.0,
