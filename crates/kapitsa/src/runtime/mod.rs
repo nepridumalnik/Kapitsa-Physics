@@ -69,3 +69,6 @@ pub use config::{
 };
 pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
 pub use planner::{WorkerConfig, WorkerConfigError};
+
+#[cfg(test)]
+mod modular_rocket_stability_tests;

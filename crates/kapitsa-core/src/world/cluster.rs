@@ -295,7 +295,7 @@ impl PhysicsWorld {
         } else {
             return Err(ClusterError::NotClustered);
         }
-        if desc.colliders.len() > 0 {
+        if !desc.colliders.is_empty() {
             self.colliders
                 .try_reserve_insertions(desc.colliders.len())
                 .map_err(|_| ClusterError::StorageCapacityExceeded)?;
@@ -1209,22 +1209,22 @@ impl PhysicsWorld {
             })
             .collect::<HashMap<_, _>>();
         for entry in self.joints.iter_mut().map(|(_, entry)| entry) {
-            if let JointTarget::Part(part) = entry.target_a {
-                if let Some(&target_body) = part_body.get(&part) {
-                    entry.body_a = target_body;
-                }
+            if let JointTarget::Part(part) = entry.target_a
+                && let Some(&target_body) = part_body.get(&part)
+            {
+                entry.body_a = target_body;
             }
-            if let JointTarget::Part(part) = entry.target_b {
-                if let Some(&target_body) = part_body.get(&part) {
-                    entry.body_b = target_body;
-                }
+            if let JointTarget::Part(part) = entry.target_b
+                && let Some(&target_body) = part_body.get(&part)
+            {
+                entry.body_b = target_body;
             }
         }
         for (_, source) in self.force_sources.iter_mut() {
-            if let ForceTarget::Part(part) = source.target {
-                if let Some(&target_body) = part_body.get(&part) {
-                    source.body = target_body;
-                }
+            if let ForceTarget::Part(part) = source.target
+                && let Some(&target_body) = part_body.get(&part)
+            {
+                source.body = target_body;
             }
         }
         let mut affected_bodies = Vec::with_capacity(new_bodies.len() + 1);

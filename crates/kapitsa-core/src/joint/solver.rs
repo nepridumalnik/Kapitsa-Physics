@@ -1022,8 +1022,7 @@ impl JointSolver {
             dt,
             options,
             [0, 1, 2],
-            start,
-            start + 3,
+            start..start + 3,
             masses,
         )?;
         // The previous iteration's frame rows predate the last angular solve, so
@@ -1045,8 +1044,7 @@ impl JointSolver {
             dt,
             options,
             [3, 4, 5],
-            start + 3,
-            start + 6,
+            start + 3..start + 6,
             masses,
         )?;
         if angular.pose_changed {
@@ -1068,8 +1066,7 @@ impl JointSolver {
                 dt,
                 options,
                 [0, 1, 2],
-                start,
-                start + 3,
+                start..start + 3,
                 masses,
             )?;
         }
@@ -1155,22 +1152,20 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
         keys: [u8; 3],
-        start: usize,
-        end: usize,
+        range: std::ops::Range<usize>,
         masses: [SolverMass; 2],
     ) -> Result<ProjectionGroupResult, CollisionError> {
         let mut cache_stats = SolverMassCacheStats::default();
         let result = {
-            let (rows, slots) = workspace.row_range_and_slots_mut(start, end)?;
+            let (rows, slots) = workspace.row_range_and_slots_mut(range.start, range.end)?;
             solve_position_projection_group(
                 rows,
                 slots,
                 bodies,
                 dt,
                 options,
-                keys,
+                (keys, Some(masses)),
                 &mut cache_stats,
-                Some(masses),
             )?
         };
         record_solver_mass_cache_stats(workspace, cache_stats);
@@ -1413,9 +1408,8 @@ impl JointSolver {
                 bodies,
                 dt,
                 options,
-                keys,
+                (keys, None),
                 &mut cache_stats,
-                None,
             )?
         };
         record_solver_mass_cache_stats(workspace, cache_stats);
@@ -3393,14 +3387,13 @@ fn fixed_joint_geometry<B: SolverBodyAccess + ?Sized>(
         .state()
         .transform();
     let joint_index = workspace.active_joint_index();
-    if let Some(cached) = workspace.fixed_geometry(joint_index) {
-        if cached.frame_a == frame_a
-            && cached.frame_b == frame_b
-            && cached.transform_a == transform_a
-            && cached.transform_b == transform_b
-        {
-            return Ok(cached.geometry);
-        }
+    if let Some(cached) = workspace.fixed_geometry(joint_index)
+        && cached.frame_a == frame_a
+        && cached.frame_b == frame_b
+        && cached.transform_a == transform_a
+        && cached.transform_b == transform_b
+    {
+        return Ok(cached.geometry);
     }
 
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, frame_a)?;
@@ -4906,7 +4899,14 @@ fn push_linear_row<B: SolverBodyAccess + ?Sized>(
         )?,
     ];
     workspace.push(make_linear_row(
-        settings, anchors, axis, axis_anchor, error, key, bounds, centers,
+        settings,
+        anchors,
+        axis,
+        axis_anchor,
+        error,
+        key,
+        bounds,
+        centers,
     )?);
     Ok(())
 }
@@ -5114,8 +5114,8 @@ fn solve_position_row<B: SolverBodyAccess + ?Sized>(
         return Ok(false);
     }
     let delta = -(position_row.error + alpha * position_row.accumulated_multiplier) / denominator;
-    let next =
-        (position_row.accumulated_multiplier + delta).clamp(position_row.min_multiplier, position_row.max_multiplier);
+    let next = (position_row.accumulated_multiplier + delta)
+        .clamp(position_row.min_multiplier, position_row.max_multiplier);
     let applied = next - position_row.accumulated_multiplier;
     if !next.is_finite() || !applied.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
@@ -5280,10 +5280,10 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
     bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
-    keys: [u8; 3],
+    selection: ([u8; 3], Option<[SolverMass; 2]>),
     cache_stats: &mut SolverMassCacheStats,
-    resolved_masses: Option<[SolverMass; 2]>,
 ) -> Result<ProjectionGroupResult, CollisionError> {
+    let (keys, resolved_masses) = selection;
     validate_projection_rows(rows, bodies.len())?;
     // Resolved masses are passed only by the in-place FixedJoint path, whose
     // six-row layout and ownership were checked before selecting this slice.
@@ -5983,9 +5983,8 @@ mod tests {
     use crate::joint::workspace::JointSolverCall;
     use crate::{
         joint::{
-            BallJoint, ConeTwistJoint, CylindricalJoint, D6Joint, HingeJoint, Joint,
-            JointCommon, JointDrive, JointFrame, JointLimit, JointMotion, PlanarJoint, SliderJoint,
-            SpringJoint,
+            BallJoint, ConeTwistJoint, CylindricalJoint, D6Joint, HingeJoint, Joint, JointCommon,
+            JointDrive, JointFrame, JointLimit, JointMotion, PlanarJoint, SliderJoint, SpringJoint,
         },
         mass::MassProperties,
         rigid_body::RigidBody,
@@ -6224,7 +6223,7 @@ mod tests {
             let step = JointSolverStep::new(0.01, options);
 
             // Reuse: prepare once, then run only prepared velocity sweeps.
-            let mut reused = bodies.clone();
+            let mut reused = bodies;
             let mut reuse_workspace = JointWorkspace::new();
             JointSolver::prepare(&mut reuse_workspace, &reused, &constraints, 0.01)
                 .expect("prepare once");
@@ -6286,7 +6285,7 @@ mod tests {
         let mut workspace = JointWorkspace::new();
 
         JointSolver::prepare(&mut workspace, &bodies, &constraints, 0.01).expect("prepare");
-        let mut solved = bodies.clone();
+        let mut solved = bodies;
         JointSolver::solve_velocity_prepared_iteration(
             &mut workspace,
             &mut solved,
@@ -8497,11 +8496,11 @@ mod tests {
                             Quat::from_axis_angle(Vec3::Z, 0.31).expect("rotation"),
                         );
                     }
-                    if let Joint::Fixed(ref mut joint) = constraint.joint {
-                        if !compliant {
-                            joint.common.compliance = 0.0;
-                            joint.common.damping = 0.0;
-                        }
+                    if let Joint::Fixed(ref mut joint) = constraint.joint
+                        && !compliant
+                    {
+                        joint.common.compliance = 0.0;
+                        joint.common.damping = 0.0;
                     }
                     let options = JointSolverOptions::legacy()
                         .with_mass_cache(mass_cache)
@@ -10053,12 +10052,12 @@ mod tests {
             (
                 "d6-locked",
                 {
-                    let mut joint = D6Joint::new(JointCommon::new(
-                        JointFrame::IDENTITY,
-                        JointFrame::IDENTITY,
-                    ));
-                    joint.linear_motion = [JointMotion::Locked, JointMotion::Locked, JointMotion::Free];
-                    joint.angular_motion = [JointMotion::Free, JointMotion::Free, JointMotion::Locked];
+                    let mut joint =
+                        D6Joint::new(JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY));
+                    joint.linear_motion =
+                        [JointMotion::Locked, JointMotion::Locked, JointMotion::Free];
+                    joint.angular_motion =
+                        [JointMotion::Free, JointMotion::Free, JointMotion::Locked];
                     Joint::D6(joint)
                 },
                 axis * separation,
@@ -10084,9 +10083,9 @@ mod tests {
             // advanced poses, so their rotating frames are included.
             let h = 1.0e-6;
             let advance = |bodies: &[SolverBody; 2], sign: f64| {
-                let mut advanced = bodies.clone();
-                for index in 0..advanced.len() {
-                    let state = advanced[index].state().clone();
+                let mut advanced = *bodies;
+                for body in &mut advanced {
+                    let state = body.state();
                     let transform = state.transform();
                     let translation =
                         transform.translation() + state.linear_velocity() * (h * sign);
@@ -10094,7 +10093,7 @@ mod tests {
                         .rotation()
                         .integrate_world_angular_velocity(state.angular_velocity(), h * sign)
                         .expect("finite rotation step");
-                    advanced[index] = solver_body_with_velocities(
+                    *body = solver_body_with_velocities(
                         translation,
                         rotation,
                         state.linear_velocity(),
@@ -10107,7 +10106,9 @@ mod tests {
                 let rotation_a = bodies[0].state().transform().rotation();
                 let delta = bodies[1].state().transform().translation()
                     - bodies[0].state().transform().translation();
-                let axis_a = rotation_a.rotate_vector(Vec3::Z).expect("normalized rotation");
+                let axis_a = rotation_a
+                    .rotate_vector(Vec3::Z)
+                    .expect("normalized rotation");
                 let basis = perpendicular_basis(axis_a).expect("axis is normalized");
                 Vec3::new(delta.dot(basis[0]), delta.dot(basis[1]), delta.dot(axis_a))
             };

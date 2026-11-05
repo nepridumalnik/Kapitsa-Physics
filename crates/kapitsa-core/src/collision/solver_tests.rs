@@ -432,8 +432,8 @@ fn prepare_colored_workspace(
 }
 
 fn solve_colored(
-    bodies: &mut Vec<SolverBody>,
-    manifolds: &mut Vec<SolverManifold>,
+    bodies: &mut [SolverBody],
+    manifolds: &mut [SolverManifold],
     joints: &[JointConstraint],
     config: super::CollisionConfig,
 ) -> Result<(), crate::collision::CollisionError> {
