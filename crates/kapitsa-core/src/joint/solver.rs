@@ -7544,6 +7544,189 @@ mod tests {
         }
     }
 
+    /// A/B on repeated, purely translational steps; no contacts or CCD.
+    #[test]
+    #[ignore = "compare loaded graph integration order over 180 steps"]
+    fn diagnose_loaded_graph_integration_order_trajectory() {
+        let dt = 1.0 / 120.0;
+        for count in [2_usize, 10, 50, 100, 1000] {
+            for topology in ["chain", "tree"] {
+                let mut x = vec![0.0; count];
+                for index in 1..count {
+                    let parent = if topology == "tree" {
+                        (index - 1) / 2
+                    } else {
+                        index - 1
+                    };
+                    x[index] = x[parent] + 1.0;
+                }
+                let common = JointCommon::new(
+                    JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+                    JointFrame::new(-Vec3::X * 0.5, Quat::IDENTITY),
+                );
+                let joint = Joint::Fixed(super::super::FixedJoint::new(common));
+                let mut world = crate::world::PhysicsWorld::new();
+                let ids = x
+                    .iter()
+                    .map(|position| {
+                        world
+                            .add_body(*solver_body(Vec3::X * *position).body())
+                            .expect("body")
+                    })
+                    .collect::<Vec<_>>();
+                let joints = (1..count)
+                    .map(|index| {
+                        let parent = if topology == "tree" {
+                            (index - 1) / 2
+                        } else {
+                            index - 1
+                        };
+                        let id = world
+                            .add_joint(ids[parent], ids[index], joint)
+                            .expect("joint");
+                        JointConstraint {
+                            id,
+                            body_a: parent,
+                            body_b: index,
+                            joint,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                for projection in [
+                    super::super::JointProjection::ScalarGaussSeidel,
+                    super::super::JointProjection::FixedBlock3,
+                ] {
+                    for early_pose in [true, false] {
+                        let started = std::time::Instant::now();
+                        let options = JointSolverOptions::legacy().with_projection(projection);
+                        let mut bodies = x
+                            .iter()
+                            .map(|position| solver_body(Vec3::X * *position))
+                            .collect::<Vec<_>>();
+                        let mut workspace = JointWorkspace::new();
+                        let mut max_anchor = 0.0_f64;
+                        let mut anchor_square_sum = 0.0;
+                        let mut max_velocity = 0.0_f64;
+                        let mut first_limit = None;
+                        for tick in 0..180 {
+                            let velocity = bodies[0].state().linear_velocity() + Vec3::X * 10.0;
+                            bodies[0]
+                                .body_mut()
+                                .set_linear_velocity(velocity)
+                                .expect("impulse");
+                            let integrate = |bodies: &mut [SolverBody]| {
+                                for body in bodies {
+                                    let state = body.state();
+                                    let transform = state.transform();
+                                    body.body_mut()
+                                        .set_transform(
+                                            Transform::new(
+                                                transform.translation()
+                                                    + state.linear_velocity() * dt,
+                                                transform.rotation(),
+                                            )
+                                            .expect("transform"),
+                                        )
+                                        .expect("pose");
+                                }
+                            };
+                            if early_pose {
+                                integrate(&mut bodies);
+                            }
+                            JointSolver::begin_step(&mut workspace);
+                            JointSolver::prepare(&mut workspace, &bodies, &joints, dt)
+                                .expect("rows");
+                            for _ in 0..8 {
+                                JointSolver::solve_velocity_prepared_iteration(
+                                    &mut workspace,
+                                    &mut bodies[..],
+                                    &joints,
+                                    dt,
+                                    options,
+                                )
+                                .expect("velocity");
+                            }
+                            if !early_pose {
+                                integrate(&mut bodies);
+                            }
+                            for _ in 0..3 {
+                                for (index, joint) in joints.iter().copied().enumerate() {
+                                    JointSolver::solve_position_joint(
+                                        &mut workspace,
+                                        &mut bodies[..],
+                                        joint,
+                                        index,
+                                        dt,
+                                        options,
+                                    )
+                                    .expect("position");
+                                }
+                            }
+                            let mut tick_max = 0.0_f64;
+                            for joint in &joints {
+                                let a = bodies[joint.body_a].state();
+                                let b = bodies[joint.body_b].state();
+                                let error = (b.transform().translation()
+                                    - a.transform().translation()
+                                    - Vec3::X)
+                                    .length();
+                                tick_max = tick_max.max(error);
+                                anchor_square_sum += error * error;
+                                max_velocity = max_velocity
+                                    .max((b.linear_velocity() - a.linear_velocity()).length());
+                            }
+                            max_anchor = max_anchor.max(tick_max);
+                            if first_limit.is_none() && tick_max >= 0.03 {
+                                first_limit = Some(tick);
+                            }
+                        }
+                        let momentum = bodies
+                            .iter()
+                            .map(|body| body.state().linear_velocity().x)
+                            .sum::<f64>();
+                        let kinetic = bodies
+                            .iter()
+                            .map(|body| 0.5 * body.state().linear_velocity().length_squared())
+                            .sum::<f64>();
+                        let rms = (anchor_square_sum / ((count - 1) * 180) as f64).sqrt();
+                        println!(
+                            "topology={topology} count={count} projection={projection:?} early_pose={early_pose} anchor_max/rms={max_anchor:.9e}/{rms:.9e} frame=0 velocity_residual_max={max_velocity:.9e} momentum={momentum:.9e} kinetic={kinetic:.9e} com_accel={:.9e} first_limit={first_limit:?} elapsed_ms={}",
+                            momentum / count as f64 / (180.0 * dt),
+                            started.elapsed().as_millis()
+                        );
+                        assert!((momentum - 1800.0).abs() < 1.0e-7);
+                        if early_pose
+                            && projection == super::super::JointProjection::ScalarGaussSeidel
+                        {
+                            for _ in 0..180 {
+                                world
+                                    .body_mut(ids[0])
+                                    .expect("root")
+                                    .apply_force_at_point(Vec3::X * 1200.0, Vec3::ZERO)
+                                    .expect("force");
+                                world.step(dt).expect("world step");
+                            }
+                            for (id, body) in ids.iter().zip(&bodies) {
+                                let state = world.body(*id).expect("body").state();
+                                assert!(
+                                    (state.transform().translation()
+                                        - body.state().transform().translation())
+                                    .length()
+                                        < 1.0e-8
+                                );
+                                assert!(
+                                    (state.linear_velocity() - body.state().linear_velocity())
+                                        .length()
+                                        < 1.0e-8
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     #[ignore = "known loaded-chain drift before pose integration is corrected"]
     fn loaded_fixed_joint_chain_stays_close_after_root_force() {
