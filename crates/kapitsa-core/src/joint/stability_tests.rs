@@ -3099,8 +3099,7 @@ fn slider_velocity_residual_localizes_to_joint_coupling() {
     );
 }
 
-#[test]
-fn coupled_constraint_solve_corrects_a_real_hinge_chain_snapshot() {
+fn coupled_hard_constraint_snapshot(world: &PhysicsWorld, position: bool) -> (GraphMetrics, f64) {
     use crate::{
         constraint::SolverBody,
         joint::{
@@ -3110,14 +3109,6 @@ fn coupled_constraint_solve_corrects_a_real_hinge_chain_snapshot() {
         rigid_body::solver_mass::SolverMass,
     };
     use std::collections::BTreeMap;
-    let mut world = hinge_chain(100);
-    for step in 0..300 {
-        if step < 60 {
-            apply_root_force(&mut world, Vec3::Y * 40.0);
-        }
-        world.step(DT).unwrap();
-    }
-    let original = graph_metrics(&world);
     let indexed: Vec<_> = world.bodies().map(|(id, body)| (id, *body)).collect();
     let mut bodies: Vec<_> = indexed
         .iter()
@@ -3142,13 +3133,33 @@ fn coupled_constraint_solve_corrects_a_real_hinge_chain_snapshot() {
     let mut terms = vec![Vec::new(); bodies.len()];
     for (index, row) in rows.iter().enumerate() {
         assert!(row.position_enabled && row.compliance == 0.0 && row.damping == 0.0);
-        terms[row.body_a].push((index, row.linear_a, row.position_angular_a));
+        let angular_a = if position {
+            row.position_angular_a
+        } else {
+            row.angular_a
+        };
+        terms[row.body_a].push((index, row.linear_a, angular_a));
         terms[row.body_b].push((index, row.linear_b, row.angular_b));
     }
     // Sparse exact LDL elimination of J M^-1 J^T. This test-only reference
     // retains fill; unlike finite GS sweeps it solves the coupled linearization.
     let mut matrix = vec![BTreeMap::<usize, f64>::new(); rows.len()];
-    let mut rhs: Vec<_> = rows.iter().map(|row| -row.error).collect();
+    let mut rhs: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            if position {
+                -row.error
+            } else {
+                let a = bodies[row.body_a].state();
+                let b = bodies[row.body_b].state();
+                row.target_velocity
+                    - row.linear_a.dot(a.linear_velocity())
+                    - row.angular_a.dot(a.angular_velocity())
+                    - row.linear_b.dot(b.linear_velocity())
+                    - row.angular_b.dot(b.angular_velocity())
+            }
+        })
+        .collect();
     for (mass, body_terms) in masses.iter().zip(&terms) {
         for (i, &(row, linear, angular)) in body_terms.iter().enumerate() {
             for &(column, other_linear, other_angular) in &body_terms[i..] {
@@ -3190,7 +3201,11 @@ fn coupled_constraint_solve_corrects_a_real_hinge_chain_snapshot() {
     let mut generalized = vec![(Vec3::ZERO, Vec3::ZERO); bodies.len()];
     for (row, &value) in rows.iter().zip(&solution) {
         generalized[row.body_a].0 += row.linear_a * value;
-        generalized[row.body_a].1 += row.position_angular_a * value;
+        generalized[row.body_a].1 += if position {
+            row.position_angular_a
+        } else {
+            row.angular_a
+        } * value;
         generalized[row.body_b].0 += row.linear_b * value;
         generalized[row.body_b].1 += row.angular_b * value;
     }
@@ -3199,7 +3214,11 @@ fn coupled_constraint_solve_corrects_a_real_hinge_chain_snapshot() {
         let response_a = masses[row.body_a]
             .cross(
                 row.linear_a,
-                row.position_angular_a,
+                if position {
+                    row.position_angular_a
+                } else {
+                    row.angular_a
+                },
                 generalized[row.body_a].0,
                 generalized[row.body_a].1,
             )
@@ -3212,13 +3231,30 @@ fn coupled_constraint_solve_corrects_a_real_hinge_chain_snapshot() {
                 generalized[row.body_b].1,
             )
             .unwrap();
-        residual = residual.max((row.error + response_a + response_b).abs());
+        let a = bodies[row.body_a].state();
+        let b = bodies[row.body_b].state();
+        let before = if position {
+            row.error
+        } else {
+            row.linear_a.dot(a.linear_velocity())
+                + row.angular_a.dot(a.angular_velocity())
+                + row.linear_b.dot(b.linear_velocity())
+                + row.angular_b.dot(b.angular_velocity())
+                - row.target_velocity
+        };
+        residual = residual.max((before + response_a + response_b).abs());
     }
     assert!(residual < 1.0e-9, "coupled linear residual {residual}");
     for ((body, impulse), mass) in bodies.iter_mut().zip(generalized).zip(masses) {
-        body.body_mut()
-            .apply_constraint_position_impulse_cached(impulse.0, impulse.1, mass)
-            .unwrap();
+        if position {
+            body.body_mut()
+                .apply_constraint_position_impulse_cached(impulse.0, impulse.1, mass)
+                .unwrap();
+        } else {
+            body.body_mut()
+                .apply_constraint_impulse_cached(impulse.0, impulse.1, mass)
+                .unwrap();
+        }
     }
     let mut corrected = PhysicsWorld::new();
     let ids: Vec<_> = bodies
@@ -3231,26 +3267,68 @@ fn coupled_constraint_solve_corrects_a_real_hinge_chain_snapshot() {
             .unwrap();
     }
     let result = graph_metrics(&corrected);
-    let orbital_change =
-        bodies
-            .iter()
-            .zip(&indexed)
-            .fold(Vec3::ZERO, |sum, (after, (_, before))| {
-                let displacement = after.body().world_center_of_mass().unwrap().unwrap()
-                    - before.world_center_of_mass().unwrap().unwrap();
-                sum + displacement.cross(
-                    before.state().linear_velocity() * before.physics().mass().unwrap().mass(),
-                )
-            });
-    assert!(
-        (result.angular_momentum - original.angular_momentum - orbital_change).length() < 1.0e-10
-    );
+    if position {
+        let initial = graph_metrics(world);
+        let orbital_change =
+            bodies
+                .iter()
+                .zip(&indexed)
+                .fold(Vec3::ZERO, |sum, (after, (_, before))| {
+                    let displacement = after.body().world_center_of_mass().unwrap().unwrap()
+                        - before.world_center_of_mass().unwrap().unwrap();
+                    sum + displacement.cross(
+                        before.state().linear_velocity() * before.physics().mass().unwrap().mass(),
+                    )
+                });
+        assert!(
+            (result.angular_momentum - initial.angular_momentum - orbital_change).length()
+                < 1.0e-10
+        );
+    }
+    (result, residual)
+}
+
+#[test]
+fn coupled_constraint_solve_corrects_a_real_hinge_chain_snapshot() {
+    let mut world = hinge_chain(100);
+    for step in 0..300 {
+        if step < 60 {
+            apply_root_force(&mut world, Vec3::Y * 40.0);
+        }
+        world.step(DT).unwrap();
+    }
+    let original = graph_metrics(&world);
+    let (result, residual) = coupled_hard_constraint_snapshot(&world, true);
     assert!((result.linear_momentum - original.linear_momentum).length() < 1.0e-12);
     assert!(result.position_error_max < original.position_error_max);
     println!(
         "hinge n=100 coupled position: linear_res={residual:.6e} before={:.6e} after={:.6e} dL={:.6e} dE={:.6e}",
         original.position_error_max,
         result.position_error_max,
+        (result.angular_momentum - original.angular_momentum).length(),
+        result.kinetic_energy - original.kinetic_energy
+    );
+}
+
+#[test]
+fn coupled_velocity_solve_reduces_slider_residual_without_external_impulse() {
+    let mut world = slider_chain(100);
+    for step in 0..300 {
+        if step < 60 {
+            apply_root_force(&mut world, Vec3::new(0.0, 5.0, 20.0));
+        }
+        world.step(DT).unwrap();
+    }
+    let original = graph_metrics(&world);
+    let (result, residual) = coupled_hard_constraint_snapshot(&world, false);
+    assert!(result.linear_velocity_residual_max < 1.0e-8);
+    assert!((result.linear_momentum - original.linear_momentum).length() < 1.0e-10);
+    assert!((result.angular_momentum - original.angular_momentum).length() < 1.0e-9);
+    assert!(result.kinetic_energy <= original.kinetic_energy + 1.0e-10);
+    println!(
+        "slider n=100 coupled velocity: linear_res={residual:.6e} before={:.6e} after={:.6e} dL={:.6e} dE={:.6e}",
+        original.linear_velocity_residual_max,
+        result.linear_velocity_residual_max,
         (result.angular_momentum - original.angular_momentum).length(),
         result.kinetic_energy - original.kinetic_energy
     );
