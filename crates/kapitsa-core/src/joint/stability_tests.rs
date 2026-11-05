@@ -2654,6 +2654,16 @@ fn ball_pair_stage_momentum() {
                 *body = SolverBody::from_prediction(*body.body(), state);
             }
             let integrated = metrics(&bodies);
+            let centers_before: Vec<_> = bodies
+                .iter()
+                .map(|body| {
+                    let mass = body.body().physics().mass().unwrap();
+                    (
+                        body.body().world_center_of_mass().unwrap().unwrap(),
+                        body.state().linear_velocity() * mass.mass(),
+                    )
+                })
+                .collect();
             JointSolver::begin_step(&mut workspace);
             for _ in 0..3 {
                 JointSolver::prepare(&mut workspace, &bodies, &constraints, DT).unwrap();
@@ -2666,6 +2676,22 @@ fn ball_pair_stage_momentum() {
                 .unwrap();
             }
             let projected = metrics(&bodies);
+            let orbital_change = bodies.iter().zip(centers_before).fold(
+                Vec3::ZERO,
+                |total, (body, (center, momentum))| {
+                    total
+                        + (body.body().world_center_of_mass().unwrap().unwrap() - center)
+                            .cross(momentum)
+                },
+            );
+            // Once spin momentum is transported with orientation, the remaining
+            // projection drift must be exactly the change of COM moment arms.
+            let unexplained =
+                projected.angular_momentum - integrated.angular_momentum - orbital_change;
+            assert!(
+                unexplained.length() < 1.0e-12,
+                "projection drift beyond orbital transport: {unexplained:?}"
+            );
             for _ in 0..8 {
                 JointSolver::prepare(&mut workspace, &bodies, &constraints, DT).unwrap();
                 JointSolver::solve_velocity_iteration(

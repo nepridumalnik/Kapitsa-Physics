@@ -1,3 +1,55 @@
+# Follow-up: position-projection invariants (2026-11-06)
+
+Both follow-up tasks remain open and separate. Large-graph convergence has not
+been changed during this invariant investigation. The previous checkpoint report
+below is historical; its tables are not measurements of the new spin fix.
+
+Commit `bb8b80b` fixes a reproduced orientation-projection defect: the code changed
+world inertia while retaining angular velocity. Projection now carries the body's
+world spin momentum into the new inertia. Reference and cached paths share the
+update; the cached path rotates its existing inverse inertia without another
+factorization. COM translation, linear velocity, constraint tolerances, iteration
+counts, damping, compliance, and the public `set_transform` behavior are unchanged.
+No world-level momentum or energy correction was added.
+
+The new anisotropic-body regression failed before the fix with spin drift
+`9.401422370e-3 kg m^2/s`; it now requires drift below `1e-13`. Another regression
+isolates pure-translation orbital drift without inventing spin to compensate it.
+The pair stage test now verifies that all remaining position-projection drift is
+explained by `sum(delta_COM cross linear_momentum)` to `1e-12`.
+
+| Measurement | Before spin fix | After spin fix |
+|---|---:|---:|
+| Consistent pair, projection dL on first step | 4.8198e-9 | 3.7927e-9 |
+| Consistent pair, total dL after 300 steps | 1.3680e-6 | 1.0807e-6 |
+| Inconsistent pair, projection dL on first step | 8.7704e-5 | 7.5822e-5 |
+| Consistent tree 31, total dL after 300 steps at dt=1/60 | 3.6467e-3 | 3.6172e-3 |
+| Same tree, relative energy change | -3.5231e-4 | -3.5036e-4 |
+
+The orbital source remains unresolved. A trial coupling position multipliers to
+velocity impulses conserved pair angular momentum to integrator accuracy but
+regressed the existing Hinge energy test (`6.1091 -> 8.6907 J`), FixedJoint
+trajectory, and timestep-convergence check. That experiment was removed; no test
+threshold was relaxed to accept it. A joint configuration correction cannot simply
+be treated as an additional velocity impulse in the present solver schedule.
+
+Verification of the retained code:
+
+- PASS: 69 rigid-body tests, including unchanged CCD final velocity `1.3 m/s`.
+- PASS: 80 joint solver tests; 2 existing ignored.
+- PASS: consistent free-system energy bounds and fixed-duration dt convergence.
+- PASS: pair stage regression, including the new orbital-source assertion.
+- PASS: strict workspace/all-targets/all-features Clippy and formatting.
+- Core all-feature `--no-fail-fast`: 767 passed, 7 existing stress failures,
+  12 existing ignored; all 28 collision integration/query/geometry tests and
+  2 doctests passed. This run includes both new body-level regressions.
+- Full workspace tests were not repeated for this partial invariant stage.
+
+**Acceptance is not reached.** The orientation component is fixed, the orbital
+component still drifts, and the independent large-graph task has not started.
+
+---
+
 # Non-fixed joint validation ? incomplete
 
 Date: 2026-11-06. Source checkpoint: `67053dc` on `feat/collisions`.
