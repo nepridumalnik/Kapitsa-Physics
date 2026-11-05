@@ -2522,7 +2522,10 @@ mod stability_tests {
             let errors = joint_errors(&rocket);
             #[cfg(feature = "bench-internals")]
             if trace_joint
-                && ([0, 10, 11, 12, 13, 19, 20, 40, 41, 53, 54, 55, 89, 90, 179].contains(&tick)
+                && ([
+                    0, 1, 2, 3, 10, 11, 12, 13, 19, 20, 40, 41, 53, 54, 55, 89, 90, 179,
+                ]
+                .contains(&tick)
                     || (first_anchor_limit_tick.is_none()
                         && errors.iter().any(|row| row.1 >= 0.03))
                     || (first_frame_limit_tick.is_none() && errors.iter().any(|row| row.2 >= 0.1)))
