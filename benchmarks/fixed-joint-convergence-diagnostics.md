@@ -40,3 +40,6 @@ Additional experiments on the full 1000-part, 180-tick rocket:
 - FixedBlock3 with existing experimental warm starting enabled by `KAPITSA_ROCKET_WARM_START=1` gave max/RMS anchor 2.3549/0.1368 m and frame 3.1416/0.4083 rad, with the same first anchor/frame threshold ticks 12/19. This did not establish an acceptable fix.
 
 Both options are diagnostic-only. Neither changes the production default, and neither satisfies the full-rocket strict criteria in these experiments. The PCG sample above used the existing `diagnose_rocket_global_constraint_pcg` test with `KAPITSA_ROCKET_DIAGNOSTIC_PARTS=1000`, `KAPITSA_ROCKET_VELOCITY_PCG_CAP=5` and `KAPITSA_ROCKET_POSITION_PCG_CAP=5`.
+
+
+After the diagnostic-only changes, the strict 300-step sequential FixedBlock3 scenario was rerun: it completed 300 ticks with no step error, 998 joints after separation and zero break events, but FAILED the 0.03 m maximum / 0.01 m RMS anchor criteria. Measured anchor max/RMS was 2.6480/0.1686 m, frame max/RMS 3.1415/0.4397 rad, velocity residual max 10.92 m/s / 17.44 rad/s, and stage separation linear-momentum delta 5.68e-14. The test's two runs had identical body states before reaching its strict assertion.
