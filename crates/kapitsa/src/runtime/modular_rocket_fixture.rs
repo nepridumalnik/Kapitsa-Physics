@@ -2224,15 +2224,7 @@ mod stability_tests {
             }
         }
         if matches!(mode, ScenarioMode::CenteredThrustWithoutGravityOrContact) {
-            let thrust = rocket
-                .world
-                .force_source(rocket.lower_engine)
-                .expect("lower engine")
-                .local_force();
-            rocket
-                .world
-                .set_force_source(rocket.lower_engine, Vec3::ZERO, thrust)
-                .expect("centered diagnostic engine");
+            center_diagnostic_thrust(&mut rocket);
         }
         if matches!(mode, ScenarioMode::RocketFreeAssemblyWithoutLoads) {
             set_rigid_assembly_velocity(&mut rocket);
@@ -2881,6 +2873,45 @@ mod stability_tests {
             .map(|(_, body_a, body_b, _)| (body_a, body_b))
             .collect::<Vec<_>>();
         assert_eq!(reversed_pairs, expected_pairs);
+    }
+
+    fn center_diagnostic_thrust(rocket: &mut ModularRocket) {
+        let thrust = rocket
+            .world
+            .force_source(rocket.lower_engine)
+            .expect("lower engine")
+            .local_force();
+        let center = rocket
+            .world
+            .body(rocket.lower_root)
+            .expect("lower root")
+            .physics()
+            .mass()
+            .expect("root mass")
+            .center_of_mass();
+        rocket
+            .world
+            .set_force_source(rocket.lower_engine, center, thrust)
+            .expect("centered diagnostic engine");
+    }
+
+    #[test]
+    fn centered_diagnostic_thrust_uses_root_center_of_mass() {
+        let mut rocket = ModularRocket::new(100);
+        center_diagnostic_thrust(&mut rocket);
+        let mass = rocket
+            .world
+            .body(rocket.lower_root)
+            .unwrap()
+            .physics()
+            .mass()
+            .unwrap();
+        let point = rocket
+            .world
+            .force_source(rocket.lower_engine)
+            .unwrap()
+            .local_point();
+        assert_eq!(point, mass.center_of_mass());
     }
 
     fn burn_tanks(rocket: &mut ModularRocket, lower: bool) {
