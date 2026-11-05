@@ -277,3 +277,5 @@ mod tests {
         );
     }
 }
+#[cfg(test)]
+mod discrete_reference_tests;
