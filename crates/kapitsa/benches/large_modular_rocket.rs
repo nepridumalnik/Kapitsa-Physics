@@ -1,6 +1,7 @@
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     error::Error,
+    hash::{Hash, Hasher},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
@@ -17,7 +18,7 @@ mod rayon_executor;
 use modular_rocket_fixture::ModularRocket;
 use rayon_executor::RayonExecutor;
 
-const SIZES: [usize; 4] = [100, 200, 500, 1000];
+const SIZES: [usize; 5] = [100, 200, 500, 1000, 2000];
 const WORKERS: [usize; 4] = [1, 2, 4, 8];
 const WARMUPS: usize = 5;
 const SAMPLES: usize = 60;
@@ -238,6 +239,21 @@ fn report_steady(
     }
     validate_world(&rocket.world)?;
     report_samples("steady", parts, workers, executor.name(), &samples);
+    let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+    for (_, body) in rocket.world.bodies() {
+        let state = body.state();
+        let transform = state.transform();
+        let p = transform.translation();
+        let q = transform.rotation();
+        let v = state.linear_velocity();
+        let w = state.angular_velocity();
+        for value in [
+            p.x, p.y, p.z, q.x, q.y, q.z, q.w, v.x, v.y, v.z, w.x, w.y, w.z,
+        ] {
+            value.to_bits().hash(&mut fingerprint);
+        }
+    }
+    println!("state_fingerprint={:016x}", fingerprint.finish());
     Ok(())
 }
 
@@ -436,6 +452,33 @@ fn report_samples(
     let metrics = p50.metrics.collision;
     let joint_metrics = p50.metrics.joints;
     let schedule = metrics.colored_schedule;
+    let velocity_p50 = sample_duration_quantile(samples, 0.50, |s| {
+        s.metrics.collision.colored_schedule.velocity_sweeps
+    });
+    let velocity_p95 = sample_duration_quantile(samples, 0.95, |s| {
+        s.metrics.collision.colored_schedule.velocity_sweeps
+    });
+    let position_p50 = sample_duration_quantile(samples, 0.50, |s| {
+        s.metrics.collision.colored_schedule.position_sweeps
+    });
+    let position_p95 = sample_duration_quantile(samples, 0.95, |s| {
+        s.metrics.collision.colored_schedule.position_sweeps
+    });
+    let anchor_max = samples
+        .iter()
+        .map(|s| s.metrics.joints.post_joint_anchor_error_m)
+        .fold(0.0_f64, f64::max);
+    let frame_max = samples
+        .iter()
+        .map(|s| s.metrics.joints.post_joint_frame_error_rad)
+        .fold(0.0_f64, f64::max);
+    println!(
+        "phase_ms_velocity_p50/p95={:.6}/{:.6} phase_ms_position_p50/p95={:.6}/{:.6} post_joint_anchor_max_m={anchor_max:.9e} post_joint_frame_max_rad={frame_max:.9e}",
+        milliseconds(velocity_p50),
+        milliseconds(velocity_p95),
+        milliseconds(position_p50),
+        milliseconds(position_p95)
+    );
     println!(
         "actual_solver={}",
         if schedule.rejection == "reduced-fixed-tree" {
