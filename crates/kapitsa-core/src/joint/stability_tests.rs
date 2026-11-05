@@ -2608,34 +2608,82 @@ fn consistent_free_system_conservation() {
     }
 }
 
-#[test]
-fn ball_pair_stage_momentum() {
+fn reproduce_ball_projection_orbital_drift(options: super::JointSolverOptions, label: &str) {
     use crate::{
         constraint::SolverBody,
         joint::{
-            JointSolverOptions,
+            JointSolverStep,
             solver::{JointConstraint, JointSolver},
             workspace::JointWorkspace,
         },
         rigid_body::integrator,
     };
-    fn metrics(bodies: &[SolverBody]) -> GraphMetrics {
+    fn metrics(bodies: &[SolverBody], constraints: &[JointConstraint]) -> GraphMetrics {
         let mut world = PhysicsWorld::new();
-        for body in bodies {
-            world.add_body(*body.body()).unwrap();
+        let ids: Vec<_> = bodies
+            .iter()
+            .map(|body| world.add_body(*body.body()).unwrap())
+            .collect();
+        for constraint in constraints {
+            world
+                .add_joint(
+                    ids[constraint.body_a],
+                    ids[constraint.body_b],
+                    constraint.joint,
+                )
+                .unwrap();
         }
         graph_metrics(&world)
     }
+    fn report(label: &str, stage: &str, initial: GraphMetrics, current: GraphMetrics) {
+        println!(
+            "{label} {stage}: P={:?} L={:?} E={:.12e} dP={:.9e} dL={:.9e} dE={:.9e} anchor={:.9e} velocity={:.9e}",
+            current.linear_momentum,
+            current.angular_momentum,
+            current.kinetic_energy,
+            (current.linear_momentum - initial.linear_momentum).length(),
+            (current.angular_momentum - initial.angular_momentum).length(),
+            current.kinetic_energy - initial.kinetic_energy,
+            current.position_error_max,
+            current.linear_velocity_residual_max
+        );
+    }
     for consistent in [true, false] {
-        let world = if consistent {
-            consistent_ball_tree(2)
+        // Both cases start with exact anchors. Only the initial velocities differ.
+        // This fixture has unequal masses, offset COMs, rotated anisotropic inertia.
+        let mut world = consistent_ball_tree(2);
+        let ids: Vec<_> = world.bodies().map(|(id, _)| id).collect();
+        let mass_a = world.body(ids[0]).unwrap().physics().mass().unwrap();
+        let mass_b = world.body(ids[1]).unwrap().physics().mass().unwrap();
+        assert_ne!(mass_a.mass(), mass_b.mass());
+        assert_ne!(mass_b.center_of_mass(), Vec3::ZERO);
+        assert_ne!(mass_b.inertia(), Mat3::IDENTITY);
+        if !consistent {
+            for (id, linear, angular) in [
+                (
+                    ids[0],
+                    Vec3::new(-0.4, -0.15, -0.3),
+                    Vec3::new(-0.075, -0.125, -0.025),
+                ),
+                (
+                    ids[1],
+                    Vec3::new(-0.2, 0.0, -0.2),
+                    Vec3::new(-0.025, -0.075, 0.025),
+                ),
+            ] {
+                let body = world.body_mut(id).unwrap();
+                body.set_linear_velocity(linear).unwrap();
+                body.set_angular_velocity(angular).unwrap();
+            }
+        }
+        let case = format!("{label} consistent={consistent}");
+        let initial = graph_metrics(&world);
+        assert!(initial.position_error_max < 1.0e-14);
+        if consistent {
+            assert!(initial.linear_velocity_residual_max < 1.0e-14);
         } else {
-            free_floating_graph(2)
-        };
-        let mut bodies: Vec<_> = world
-            .bodies()
-            .map(|(_, b)| SolverBody::from_prediction(*b, *b.state()))
-            .collect();
+            assert!(initial.linear_velocity_residual_max > 0.1);
+        }
         let constraints: Vec<_> = world
             .joints()
             .map(|(id, _, _, joint)| JointConstraint {
@@ -2645,75 +2693,188 @@ fn ball_pair_stage_momentum() {
                 joint: *joint,
             })
             .collect();
+        let mut bodies: Vec<_> = world
+            .bodies()
+            .map(|(_, body)| {
+                SolverBody::from_prediction(*body, integrator::predict(body, DT).unwrap())
+            })
+            .collect();
+        let integrated = metrics(&bodies, &constraints);
+        let config = world.collision_config();
         let mut workspace = JointWorkspace::new();
-        let initial = metrics(&bodies);
-        for step in 1..=300 {
-            let before = metrics(&bodies);
-            for body in &mut bodies {
-                let state = integrator::predict(body.body(), DT).unwrap();
-                *body = SolverBody::from_prediction(*body.body(), state);
-            }
-            let integrated = metrics(&bodies);
-            let centers_before: Vec<_> = bodies
-                .iter()
-                .map(|body| {
-                    let mass = body.body().physics().mass().unwrap();
-                    (
-                        body.body().world_center_of_mass().unwrap().unwrap(),
-                        body.state().linear_velocity() * mass.mass(),
-                    )
-                })
-                .collect();
-            JointSolver::begin_step(&mut workspace);
-            for _ in 0..3 {
-                JointSolver::prepare(&mut workspace, &bodies, &constraints, DT).unwrap();
-                JointSolver::solve_position_iteration(
-                    &mut workspace,
-                    &mut bodies,
-                    DT,
-                    JointSolverOptions::legacy(),
-                )
-                .unwrap();
-            }
-            let projected = metrics(&bodies);
-            let orbital_change = bodies.iter().zip(centers_before).fold(
-                Vec3::ZERO,
-                |total, (body, (center, momentum))| {
-                    total
-                        + (body.body().world_center_of_mass().unwrap().unwrap() - center)
-                            .cross(momentum)
-                },
-            );
-            // Once spin momentum is transported with orientation, the remaining
-            // projection drift must be exactly the change of COM moment arms.
-            let unexplained =
-                projected.angular_momentum - integrated.angular_momentum - orbital_change;
-            assert!(
-                unexplained.length() < 1.0e-12,
-                "projection drift beyond orbital transport: {unexplained:?}"
-            );
-            for _ in 0..8 {
-                JointSolver::prepare(&mut workspace, &bodies, &constraints, DT).unwrap();
-                JointSolver::solve_velocity_iteration(
-                    &mut workspace,
-                    &mut bodies,
-                    DT,
-                    JointSolverOptions::legacy(),
-                )
-                .unwrap();
-            }
-            let solved = metrics(&bodies);
-            assert!((solved.angular_momentum - projected.angular_momentum).length() < 1.0e-12);
-            if step == 1 || step == 300 {
-                println!(
-                    "stages consistent={consistent} step={step}: integration dL={:.9e}, projection dL={:.9e}, velocity dL={:.9e}, total dL={:.9e}",
-                    (integrated.angular_momentum - before.angular_momentum).length(),
-                    (projected.angular_momentum - integrated.angular_momentum).length(),
-                    (solved.angular_momentum - projected.angular_momentum).length(),
-                    (solved.angular_momentum - initial.angular_momentum).length()
-                );
-            }
-            assert!((solved.linear_momentum - initial.linear_momentum).length() < 1.0e-10);
+        JointSolver::begin_step(&mut workspace);
+        for iteration in 0..config.velocity_iterations {
+            JointSolver::solve_velocity_joint(
+                &mut workspace,
+                &mut bodies[..],
+                constraints[0],
+                0,
+                JointSolverStep::new(DT, options),
+                iteration == 0,
+            )
+            .unwrap();
         }
+        let velocity_solved = metrics(&bodies, &constraints);
+        let before_projection = bodies.clone();
+        for _ in 0..config.position_iterations {
+            JointSolver::solve_position_joint(
+                &mut workspace,
+                &mut bodies[..],
+                constraints[0],
+                0,
+                DT,
+                options,
+            )
+            .unwrap();
+        }
+        let projected = metrics(&bodies, &constraints);
+        let orbital_change =
+            bodies
+                .iter()
+                .zip(&before_projection)
+                .fold(Vec3::ZERO, |total, (after, before)| {
+                    let mass = before.body().physics().mass().unwrap();
+                    assert_eq!(
+                        after.state().linear_velocity(),
+                        before.state().linear_velocity()
+                    );
+                    total
+                        + (after.body().world_center_of_mass().unwrap().unwrap()
+                            - before.body().world_center_of_mass().unwrap().unwrap())
+                        .cross(before.state().linear_velocity() * mass.mass())
+                });
+        let projection_drift = projected.angular_momentum - velocity_solved.angular_momentum;
+        // This is a reproduced defect, not a conservation acceptance threshold.
+        assert!(
+            projection_drift.length() > 1.0e-12,
+            "{case}: orbital defect not reproduced"
+        );
+        assert!((projection_drift - orbital_change).length() < 1.0e-13);
+        assert!((projected.linear_momentum - initial.linear_momentum).length() < 1.0e-13);
+        assert!(
+            (velocity_solved.angular_momentum - integrated.angular_momentum).length() < 1.0e-13
+        );
+        assert!(projected.position_error_max < integrated.position_error_max);
+        assert!(velocity_solved.kinetic_energy <= integrated.kinetic_energy + 1.0e-13);
+        if !consistent {
+            assert!(
+                velocity_solved.linear_velocity_residual_max
+                    < integrated.linear_velocity_residual_max
+            );
+            assert!(velocity_solved.kinetic_energy < integrated.kinetic_energy);
+        }
+        for (stage, current) in [
+            ("initial", initial),
+            ("integration", integrated),
+            ("velocity", velocity_solved),
+            ("position", projected),
+        ] {
+            report(&case, stage, initial, current);
+        }
+        // Ordinary production stepping must reproduce the explicitly staged path.
+        // Reference options use a different mass response implementation, so compare
+        // physical quantities with roundoff allowance rather than bitwise identity.
+        world.step(DT).unwrap();
+        let committed = graph_metrics(&world);
+        assert!((committed.angular_momentum - projected.angular_momentum).length() < 1.0e-13);
+        assert!((committed.kinetic_energy - projected.kinetic_energy).abs() < 1.0e-13);
+        assert!((committed.position_error_max - projected.position_error_max).abs() < 1.0e-13);
+        assert!(
+            (committed.linear_velocity_residual_max - projected.linear_velocity_residual_max).abs()
+                < 1.0e-13
+        );
+        assert_finite_body_states(&world);
     }
+}
+
+#[test]
+fn ball_projection_orbital_drift_matches_production_order() {
+    reproduce_ball_projection_orbital_drift(super::JointSolverOptions::legacy(), "cached");
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn ball_projection_orbital_drift_matches_reference_mass_response() {
+    reproduce_ball_projection_orbital_drift(
+        super::JointSolverOptions::legacy().with_mass_cache(false),
+        "reference",
+    );
+}
+
+#[test]
+fn com_only_ball_projection_cannot_preserve_orbital_momentum_at_fixed_velocities() {
+    use crate::{
+        constraint::SolverBody,
+        joint::{
+            JointSolverOptions,
+            solver::{JointConstraint, JointSolver},
+            workspace::JointWorkspace,
+        },
+    };
+    // Deliberately inconsistent coordinates: this is an algebraic counterexample
+    // for the geometric projection map, not a conservative initial-value problem.
+    // At the target manifold both COMs coincide. With P=0 and zero spin, L must
+    // then be zero, whereas the input orbital momentum is -Z.
+    let mut world = PhysicsWorld::new();
+    let mut a = dynamic_body(-Vec3::X * 0.5, Quat::IDENTITY);
+    let mut b = dynamic_body(Vec3::X * 0.5, Quat::IDENTITY);
+    a.set_linear_velocity(Vec3::Y).unwrap();
+    b.set_linear_velocity(-Vec3::Y).unwrap();
+    let id_a = world.add_body(a).unwrap();
+    let id_b = world.add_body(b).unwrap();
+    let joint = Joint::Ball(BallJoint::new(JointCommon::new(
+        JointFrame::IDENTITY,
+        JointFrame::IDENTITY,
+    )));
+    let id = world.add_joint(id_a, id_b, joint).unwrap();
+    let initial = graph_metrics(&world);
+    assert!((initial.angular_momentum + Vec3::Z).length() < 1.0e-14);
+    let mut bodies = [
+        SolverBody::from_prediction(a, *a.state()),
+        SolverBody::from_prediction(b, *b.state()),
+    ];
+    let constraint = JointConstraint {
+        id,
+        body_a: 0,
+        body_b: 1,
+        joint,
+    };
+    let mut workspace = JointWorkspace::new();
+    JointSolver::begin_step(&mut workspace);
+    JointSolver::solve_position_joint(
+        &mut workspace,
+        &mut bodies,
+        constraint,
+        0,
+        DT,
+        JointSolverOptions::legacy(),
+    )
+    .unwrap();
+    let mut result = PhysicsWorld::new();
+    let ids: Vec<_> = bodies
+        .iter()
+        .map(|body| result.add_body(*body.body()).unwrap())
+        .collect();
+    result.add_joint(ids[0], ids[1], joint).unwrap();
+    let projected = graph_metrics(&result);
+    assert!(projected.position_error_max < 1.0e-14);
+    assert!(projected.linear_momentum.length() < 1.0e-14);
+    assert!(projected.angular_momentum.length() < 1.0e-14);
+    assert!((projected.kinetic_energy - initial.kinetic_energy).abs() < 1.0e-14);
+    for (body, before) in bodies.iter().zip([a, b]) {
+        assert_eq!(
+            body.state().linear_velocity(),
+            before.state().linear_velocity()
+        );
+        assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
+    }
+    let drift = (projected.angular_momentum - initial.angular_momentum).length();
+    assert!((drift - 1.0).abs() < 1.0e-14);
+    println!(
+        "COM-only geometric counterexample: dP={:.3e} dL={drift:.3e} dE={:.3e} anchor={:.3e} velocity={:.3e}",
+        (projected.linear_momentum - initial.linear_momentum).length(),
+        projected.kinetic_energy - initial.kinetic_energy,
+        projected.position_error_max,
+        projected.linear_velocity_residual_max
+    );
 }
