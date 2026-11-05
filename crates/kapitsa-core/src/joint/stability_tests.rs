@@ -785,6 +785,54 @@ fn conflict_free_colored_solver_is_deterministic_and_reuses_batches() {
 
 #[cfg(feature = "bench-internals")]
 #[test]
+fn dominant_and_small_islands_remain_deterministic_across_topology_change() {
+    fn fixture() -> PhysicsWorld {
+        let mut world = loaded_fixed_joint_graph(200, false, 8, false, false);
+        for i in 0..4 {
+            let a = world
+                .add_body(dynamic_body(
+                    Vec3::new(1000.0 + i as f64 * 4.0, 0.0, 0.0),
+                    Quat::IDENTITY,
+                ))
+                .unwrap();
+            let b = world
+                .add_body(dynamic_body(
+                    Vec3::new(1001.0 + i as f64 * 4.0, 0.0, 0.0),
+                    Quat::IDENTITY,
+                ))
+                .unwrap();
+            let common = JointCommon::new(
+                JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+                JointFrame::new(-Vec3::X * 0.5, Quat::IDENTITY),
+            );
+            world
+                .add_joint(a, b, Joint::Fixed(FixedJoint::new(common)))
+                .unwrap();
+        }
+        world
+    }
+    let mut a = fixture();
+    let mut b = fixture();
+    for step in 0..3 {
+        if step == 1 {
+            let ja = a.joints().last().unwrap().0;
+            let jb = b.joints().last().unwrap().0;
+            a.remove_joint(ja).unwrap();
+            b.remove_joint(jb).unwrap();
+        }
+        a.step_with_executor(DT, &ScopedPcgTestExecutor, 4).unwrap();
+        b.step_with_executor(DT, &ScopedPcgTestExecutor, 4).unwrap();
+        assert_eq!(a.joint_count(), b.joint_count());
+        assert!(a.physics_step_metrics().collision.island_count >= 4);
+        for ((_, a), (_, b)) in a.bodies().zip(b.bodies()) {
+            assert_eq!(a.state(), b.state());
+        }
+        assert_finite_body_states(&a);
+    }
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 fn colored_solver_failure_rolls_back_direct_body_updates() {
     let mut world = loaded_fixed_joint_graph(200, false, 8, false, false);
     let root = world.bodies().next().unwrap().0;

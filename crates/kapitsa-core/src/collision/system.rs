@@ -1235,7 +1235,49 @@ impl CollisionSystem {
                     .0);
         #[cfg(not(feature = "bench-internals"))]
         let enter_executor = false;
-        if worker_count <= 1 || (island_count <= 1 && !enter_executor) {
+        #[cfg(feature = "bench-internals")]
+        let dominant = if worker_count > 1 && island_count > 1 {
+            dominant_island_index(
+                self.solver_islands[..island_count]
+                    .iter()
+                    .map(|island| island.joints.len().saturating_add(island.manifolds.len())),
+            )
+        } else {
+            None
+        };
+        #[cfg(not(feature = "bench-internals"))]
+        let dominant: Option<usize> = None;
+        if let Some(index) = dominant {
+            let (left, right) = self.solver_islands[..island_count].split_at_mut(index);
+            let (large, right) = right.split_at_mut(1);
+            solve_island_group(
+                large,
+                config,
+                joint_solver_step,
+                gravity,
+                executor,
+                1,
+                worker_count,
+            )?;
+            solve_island_group(
+                left,
+                config,
+                joint_solver_step,
+                gravity,
+                executor,
+                worker_count,
+                1,
+            )?;
+            solve_island_group(
+                right,
+                config,
+                joint_solver_step,
+                gravity,
+                executor,
+                worker_count,
+                1,
+            )?;
+        } else if worker_count <= 1 || (island_count <= 1 && !enter_executor) {
             for island in self.solver_islands.iter_mut().take(island_count) {
                 island.workspace.solve_with_joints(
                     &mut island.bodies,
@@ -1510,5 +1552,83 @@ impl CollisionSystem {
             self.step_metrics_committed = true;
         }
         self.context.clear();
+    }
+}
+
+// Only the experimental colored solver may parallelize inside one island.
+#[cfg(feature = "bench-internals")]
+fn dominant_island_index(costs: impl Iterator<Item = usize>) -> Option<usize> {
+    let mut total = 0_usize;
+    let mut largest = (0, 0);
+    for (index, cost) in costs.enumerate() {
+        total = total.saturating_add(cost);
+        if cost > largest.1 {
+            largest = (index, cost);
+        }
+    }
+    (largest.1 >= 128 && largest.1 >= total.saturating_sub(largest.1).saturating_mul(2))
+        .then_some(largest.0)
+}
+
+fn solve_island_group(
+    islands: &mut [SolverIsland],
+    config: CollisionConfig,
+    step: crate::joint::JointSolverStep<'_>,
+    gravity: Option<crate::gravity::CentralGravity>,
+    executor: &impl StepExecutor,
+    workers: usize,
+    inner_workers: usize,
+) -> Result<(), CollisionError> {
+    let solve = |island: &mut SolverIsland| {
+        island.workspace.solve_with_joints(
+            &mut island.bodies,
+            &mut island.manifolds,
+            &mut island.joint_workspace,
+            &island.joints,
+            config,
+            step,
+            gravity,
+            executor,
+            inner_workers,
+        )
+    };
+    if workers <= 1 || islands.len() <= 1 {
+        for island in islands {
+            solve(island)?;
+        }
+    } else {
+        let chunk_size = islands.len().div_ceil(workers.min(islands.len()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            executor.for_each_chunk_mut(islands, chunk_size, |_, chunk| {
+                for island in chunk {
+                    if let Err(error) = solve(island) {
+                        island.worker_error = Some(error);
+                        break;
+                    }
+                }
+            })
+        }));
+        if !matches!(result, Ok(Ok(()))) {
+            return Err(CollisionError::WorkerFailed);
+        }
+        if let Some(error) = islands.iter().find_map(|island| island.worker_error) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "bench-internals"))]
+mod island_schedule_tests {
+    use super::dominant_island_index;
+
+    #[test]
+    fn identifies_dominant_islands_without_starving_other_workloads() {
+        assert_eq!(dominant_island_index([1000].into_iter()), Some(0));
+        assert_eq!(dominant_island_index([10, 10, 10, 10].into_iter()), None);
+        assert_eq!(dominant_island_index([5, 1000, 10].into_iter()), Some(1));
+        assert_eq!(dominant_island_index([1000, 1000].into_iter()), None);
+        assert_eq!(dominant_island_index([128, 64].into_iter()), Some(0));
+        assert_eq!(dominant_island_index([128, 65].into_iter()), None);
     }
 }
