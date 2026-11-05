@@ -2878,3 +2878,149 @@ fn com_only_ball_projection_cannot_preserve_orbital_momentum_at_fixed_velocities
         projected.linear_velocity_residual_max
     );
 }
+
+#[test]
+fn articulated_residual_profile_tracks_actual_joints() {
+    for count in [100usize, 1000] {
+        for (name, mut world, force) in [
+            ("hinge", hinge_chain(count), Vec3::Y * 40.0),
+            ("slider", slider_chain(count), Vec3::new(0.0, 5.0, 20.0)),
+            ("mixed", mixed_graph(count), Vec3::new(10.0, 30.0, 0.0)),
+            ("loop", closed_loop(count), Vec3::Y * 50.0),
+        ] {
+            for step in 1..=300 {
+                if step <= 60 {
+                    apply_root_force(&mut world, force);
+                }
+                world.step(DT).unwrap();
+                if step == 60 || step == 300 {
+                    let mut joint_metrics: Vec<_> = world
+                        .joints()
+                        .enumerate()
+                        .map(|(index, (_, a, b, joint))| {
+                            let violation = joint_violation(
+                                world.body(a).unwrap(),
+                                world.body(b).unwrap(),
+                                joint,
+                            );
+                            (index, violation.position, violation.linear_velocity)
+                        })
+                        .collect();
+                    joint_metrics.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    let metrics = graph_metrics(&world);
+                    assert!((joint_metrics[0].1 - metrics.position_error_max).abs() < 1.0e-14);
+                    assert_finite_body_states(&world);
+                    if step == 300 {
+                        use crate::{
+                            constraint::SolverBody,
+                            joint::{
+                                JointSolverOptions,
+                                solver::{JointConstraint, JointSolver},
+                                workspace::JointWorkspace,
+                            },
+                        };
+                        let (id, a, b, joint) = world.joints().nth(joint_metrics[0].0).unwrap();
+                        let a = *world.body(a).unwrap();
+                        let b = *world.body(b).unwrap();
+                        let mut pair = [
+                            SolverBody::from_prediction(a, *a.state()),
+                            SolverBody::from_prediction(b, *b.state()),
+                        ];
+                        let constraint = JointConstraint {
+                            id,
+                            body_a: 0,
+                            body_b: 1,
+                            joint: *joint,
+                        };
+                        let mut workspace = JointWorkspace::new();
+                        JointSolver::begin_step(&mut workspace);
+                        let mut errors = [0.0; 3];
+                        errors[0] = joint_violation(pair[0].body(), pair[1].body(), joint).position;
+                        for value in errors.iter_mut().skip(1) {
+                            JointSolver::solve_position_joint(
+                                &mut workspace,
+                                &mut pair,
+                                constraint,
+                                0,
+                                DT,
+                                JointSolverOptions::legacy(),
+                            )
+                            .unwrap();
+                            *value =
+                                joint_violation(pair[0].body(), pair[1].body(), joint).position;
+                        }
+                        assert!(errors.iter().all(|error| error.is_finite()));
+                        assert!(
+                            errors[1] < errors[0],
+                            "isolated joint failed to reduce error: {errors:?}"
+                        );
+                        println!(
+                            "{name} n={count} isolated joint {} correction={errors:?}",
+                            joint_metrics[0].0
+                        );
+                        let indexed: Vec<_> = world
+                            .bodies()
+                            .map(|(id, body)| {
+                                (id, SolverBody::from_prediction(*body, *body.state()))
+                            })
+                            .collect();
+                        let mut all_bodies: Vec<_> =
+                            indexed.iter().map(|(_, body)| *body).collect();
+                        let constraints: Vec<_> = world
+                            .joints()
+                            .map(|(id, a, b, joint)| JointConstraint {
+                                id,
+                                body_a: indexed.iter().position(|(id, _)| *id == a).unwrap(),
+                                body_b: indexed.iter().position(|(id, _)| *id == b).unwrap(),
+                                joint: *joint,
+                            })
+                            .collect();
+                        let mut all_workspace = JointWorkspace::new();
+                        JointSolver::begin_step(&mut all_workspace);
+                        let mut max_immediate: f64 = 0.0;
+                        for (index, constraint) in constraints.iter().copied().enumerate() {
+                            JointSolver::solve_position_joint(
+                                &mut all_workspace,
+                                &mut all_bodies[..],
+                                constraint,
+                                index,
+                                DT,
+                                JointSolverOptions::legacy(),
+                            )
+                            .unwrap();
+                            max_immediate = max_immediate.max(
+                                joint_violation(
+                                    all_bodies[constraint.body_a].body(),
+                                    all_bodies[constraint.body_b].body(),
+                                    &constraint.joint,
+                                )
+                                .position,
+                            );
+                        }
+                        let max_final = constraints
+                            .iter()
+                            .map(|constraint| {
+                                joint_violation(
+                                    all_bodies[constraint.body_a].body(),
+                                    all_bodies[constraint.body_b].body(),
+                                    &constraint.joint,
+                                )
+                                .position
+                            })
+                            .fold(0.0_f64, f64::max);
+                        assert!(max_immediate.is_finite() && max_final.is_finite());
+                        println!(
+                            "{name} n={count} extra ordered sweep: max immediately={max_immediate:.6e} max after neighbors={max_final:.6e}"
+                        );
+                    }
+                    println!(
+                        "{name} n={count} step={step} worst={:?} position_rms={:.6e} velocity_max={:.6e}",
+                        &joint_metrics[..joint_metrics.len().min(5)],
+                        metrics.position_error_rms,
+                        metrics.linear_velocity_residual_max
+                    );
+                }
+            }
+        }
+    }
+}
