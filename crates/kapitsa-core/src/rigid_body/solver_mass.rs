@@ -289,7 +289,7 @@ impl RigidBody {
             .ok_or(BodyError::ArithmeticOverflow)?;
         let next_transform = Transform::new(next_translation, next_rotation)
             .map_err(|_| BodyError::ArithmeticOverflow)?;
-        self.set_transform(next_transform)
+        self.set_position_projected_transform(next_transform, Some(cached.inverse_inertia))
     }
 
     pub(crate) fn apply_constraint_impulse_cached(
@@ -937,5 +937,96 @@ mod tests {
             reference.state().is_sleeping()
         );
         assert_eq!(optimized.ccd_mode(), reference.ccd_mode());
+    }
+
+    fn spin_momentum(body: &RigidBody) -> Vec3 {
+        let state = body.state();
+        let rotation = state.transform().rotation();
+        let omega = rotation
+            .conjugate()
+            .rotate_vector(state.angular_velocity())
+            .unwrap();
+        rotation
+            .rotate_vector(body.physics().mass().unwrap().inertia() * omega)
+            .unwrap()
+    }
+
+    #[test]
+    fn orientation_projection_preserves_spin_momentum() {
+        for cached in [false, true] {
+            let mut body = dynamic_body(
+                Transform::new(
+                    Vec3::new(3.0, -2.0, 1.0),
+                    Quat::from_axis_angle(Vec3::Y, 0.7).unwrap(),
+                )
+                .unwrap(),
+                mass(
+                    Mat3::from_diagonal(Vec3::new(1.0, 2.0, 2.5)),
+                    Vec3::new(0.2, -0.3, 0.4),
+                ),
+            );
+            body.set_linear_velocity(Vec3::new(0.3, -0.7, 0.4)).unwrap();
+            body.set_angular_velocity(Vec3::new(0.7, -0.4, 0.9))
+                .unwrap();
+            let initial = body;
+            let momentum = spin_momentum(&body);
+            if cached {
+                let response = SolverMass::from_body(&body).unwrap();
+                body.apply_constraint_position_impulse_cached(
+                    Vec3::ZERO,
+                    Vec3::new(0.03, -0.02, 0.04),
+                    response,
+                )
+                .unwrap();
+            } else {
+                body.apply_constraint_position_impulse(Vec3::ZERO, Vec3::new(0.03, -0.02, 0.04))
+                    .unwrap();
+            }
+            assert!(
+                (body.world_center_of_mass().unwrap().unwrap()
+                    - initial.world_center_of_mass().unwrap().unwrap())
+                .length()
+                    < 1.0e-14
+            );
+            assert_eq!(
+                body.state().linear_velocity(),
+                initial.state().linear_velocity()
+            );
+            let drift = (spin_momentum(&body) - momentum).length();
+            assert!(drift < 1.0e-13, "cached={cached}: spin drift={drift}");
+        }
+    }
+
+    #[test]
+    fn translation_projection_changes_only_orbital_momentum() {
+        let mut body = dynamic_body(
+            Transform::identity(),
+            mass(
+                Mat3::from_diagonal(Vec3::new(1.0, 2.0, 2.5)),
+                Vec3::new(0.2, -0.3, 0.4),
+            ),
+        );
+        body.set_linear_velocity(Vec3::new(0.3, -0.7, 0.4)).unwrap();
+        body.set_angular_velocity(Vec3::new(0.7, -0.4, 0.9))
+            .unwrap();
+        let initial = body;
+        let impulse = Vec3::new(0.03, -0.02, 0.04);
+        body.apply_constraint_position_impulse(impulse, Vec3::ZERO)
+            .unwrap();
+        assert_eq!(
+            body.state().angular_velocity(),
+            initial.state().angular_velocity()
+        );
+        assert_eq!(
+            body.state().linear_velocity(),
+            initial.state().linear_velocity()
+        );
+        let center_delta = body.world_center_of_mass().unwrap().unwrap()
+            - initial.world_center_of_mass().unwrap().unwrap();
+        let expected = impulse.cross(initial.state().linear_velocity());
+        let orbital_change = center_delta
+            .cross(initial.state().linear_velocity() * initial.physics().mass().unwrap().mass());
+        assert!((orbital_change - expected).length() < 1.0e-15);
+        assert!(orbital_change.length() > 1.0e-3);
     }
 }

@@ -423,7 +423,54 @@ impl RigidBody {
             .ok_or(BodyError::ArithmeticOverflow)?;
         let next_transform = Transform::new(next_translation, next_rotation)
             .map_err(|_| BodyError::ArithmeticOverflow)?;
-        self.set_transform(next_transform)
+        self.set_position_projected_transform(next_transform, None)
+    }
+
+    /// A geometric orientation correction carries no physical angular impulse.
+    /// Keep spin momentum fixed while resolving angular velocity in the new inertia.
+    fn set_position_projected_transform(
+        &mut self,
+        transform: Transform,
+        inverse_inertia: Option<kapitsa_math::Mat3>,
+    ) -> Result<(), BodyError> {
+        let rotation = self.state.transform.rotation();
+        let next_rotation = transform.rotation();
+        let omega = self.state.angular_velocity;
+        if rotation == next_rotation || omega == Vec3::ZERO {
+            return self.set_transform(transform);
+        }
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
+        let local_omega = rotation
+            .conjugate()
+            .rotate_vector(omega)
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let momentum = mass
+            .inertia()
+            .checked_mul_vector(local_omega)
+            .and_then(|value| rotation.rotate_vector(value))
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_omega = if let Some(inverse_inertia) = inverse_inertia {
+            // Rotate the cached response with the pose instead of factoring
+            // the same local inertia again: I_new^-1 = Q I_old^-1 Q^T.
+            let delta = next_rotation * rotation.conjugate();
+            delta
+                .conjugate()
+                .rotate_vector(momentum)
+                .and_then(|value| inverse_inertia.checked_mul_vector(value))
+                .and_then(|value| delta.rotate_vector(value))
+                .ok_or(BodyError::ArithmeticOverflow)?
+        } else {
+            let next_local_momentum = next_rotation
+                .conjugate()
+                .rotate_vector(momentum)
+                .ok_or(BodyError::ArithmeticOverflow)?;
+            next_rotation
+                .rotate_vector(solve_inertia(mass.inertia(), next_local_momentum)?)
+                .ok_or(BodyError::ArithmeticOverflow)?
+        };
+        self.set_transform(transform)?;
+        self.state.angular_velocity = next_omega;
+        Ok(())
     }
 }
 
