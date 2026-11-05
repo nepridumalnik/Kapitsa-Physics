@@ -3732,32 +3732,16 @@ fn append_ball_angular_limits<B: SolverBodyAccess + ?Sized>(
         }
     }
     if let (Some(limit), Some(twist)) = (joint.twist_limit, twist_angle(relative)?) {
+        // The twist coordinate is undefined at the swing singularity; a
+        // well-defined `twist` avoids the ±π wrap ambiguity because the limit is
+        // expressed in the same `(-π, π]` domain returned by `twist_angle`.
+        // Route through the shared angular limit so the row both reacts to an
+        // existing violation and brakes a predicted crossing within the step,
+        // while the collapsed interval still collapses to a bilateral lock.
         let axis = rotation_a
             .rotate_vector(Vec3::Z)
             .ok_or(CollisionError::ArithmeticOverflow)?;
-        // A collapsed twist limit is a bilateral equality; lock it every step
-        // rather than relying on a predicted crossing.
-        if let Some(value) = collapsed_limit_value(limit) {
-            push_angular_row(
-                workspace,
-                lock_settings(settings),
-                axis,
-                twist - value,
-                4,
-                bilateral_bounds(),
-            )?;
-            return Ok(());
-        }
-        let (error, bounds) = if twist < limit.lower {
-            (twist - limit.lower, (0.0, f64::INFINITY))
-        } else if twist > limit.upper {
-            (twist - limit.upper, (f64::NEG_INFINITY, 0.0))
-        } else {
-            return Ok(());
-        };
-        // A violated twist limit is corrected by position projection; adding a
-        // Baumgarte velocity target would correct it a second time.
-        push_angular_row(workspace, lock_settings(settings), axis, error, 4, bounds)?;
+        append_angular_axis_limit(bodies, workspace, settings, axis, twist, limit, 4)?;
     }
     Ok(())
 }
@@ -9594,6 +9578,180 @@ mod tests {
         assert_eq!(row.min_multiplier, f64::NEG_INFINITY);
         assert_eq!(row.max_multiplier, f64::INFINITY);
         assert_eq!(row.target_velocity, 0.0);
+    }
+
+    fn ball_twist_joint(lower: f64, upper: f64) -> super::super::Joint {
+        let mut ball = super::super::BallJoint::new(aligned_axis_common());
+        ball.twist_limit = Some(super::super::JointLimit::new(lower, upper));
+        super::super::Joint::Ball(ball)
+    }
+
+    /// Recomputes the twist coordinate of a solved pair the same way the solver
+    /// does, without relying on internal state.
+    fn twist_between(bodies: &[SolverBody; 2]) -> f64 {
+        let rotation_a = bodies[0].state().transform().rotation();
+        let rotation_b = bodies[1].state().transform().rotation();
+        let mut relative = (rotation_a.conjugate() * rotation_b)
+            .try_normalize()
+            .expect("normalized relative rotation");
+        if relative.w < 0.0 {
+            relative = Quat::new(-relative.x, -relative.y, -relative.z, -relative.w);
+        }
+        let length = relative.z.hypot(relative.w);
+        let angle = 2.0 * (relative.z / length).atan2(relative.w / length);
+        (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+    }
+
+    #[test]
+    fn ball_twist_limit_predicts_outward_boundary_crossing_for_all_timesteps() {
+        for dt in [1.0 / 60.0, 1.0 / 120.0, 1.0 / 240.0] {
+            // The twist coordinate sits inside the interval but the relative
+            // angular velocity would carry it past the upper bound within one
+            // step. The velocity solve must brake it before the crossing.
+            let rotation = Quat::from_axis_angle(Vec3::Z, 0.9).expect("twist rotation");
+            let mut bodies = [
+                static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                solver_body_with_velocities(
+                    Vec3::ZERO,
+                    rotation,
+                    Vec3::ZERO,
+                    Vec3::new(0.0, 0.0, 100.0),
+                ),
+            ];
+            solve_joint_velocity_only_with_dt(ball_twist_joint(-1.0, 1.0), &mut bodies, dt);
+            let relative_speed =
+                bodies[1].state().angular_velocity().z - bodies[0].state().angular_velocity().z;
+            let predicted = twist_between(&bodies) + relative_speed * dt;
+            assert!(
+                predicted <= 1.0 + 1.0e-9,
+                "dt={dt} predicted twist {predicted} crossed the upper bound"
+            );
+
+            // The symmetric lower-bound crossing must also be predicted.
+            let rotation = Quat::from_axis_angle(Vec3::Z, -0.9).expect("twist rotation");
+            let mut bodies = [
+                static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                solver_body_with_velocities(
+                    Vec3::ZERO,
+                    rotation,
+                    Vec3::ZERO,
+                    Vec3::new(0.0, 0.0, -100.0),
+                ),
+            ];
+            solve_joint_velocity_only_with_dt(ball_twist_joint(-1.0, 1.0), &mut bodies, dt);
+            let relative_speed =
+                bodies[1].state().angular_velocity().z - bodies[0].state().angular_velocity().z;
+            let predicted = twist_between(&bodies) + relative_speed * dt;
+            assert!(
+                predicted >= -1.0 - 1.0e-9,
+                "dt={dt} predicted twist {predicted} crossed the lower bound"
+            );
+        }
+    }
+
+    #[test]
+    fn ball_twist_limit_at_exact_boundary_brakes_outward_velocity() {
+        let rotation = Quat::from_axis_angle(Vec3::Z, 1.0).expect("twist rotation");
+        let mut bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(Vec3::ZERO, rotation, Vec3::ZERO, Vec3::new(0.0, 0.0, 5.0)),
+        ];
+        solve_joint_velocity_only_with_dt(ball_twist_joint(-1.0, 1.0), &mut bodies, 1.0 / 60.0);
+        let relative_speed =
+            bodies[1].state().angular_velocity().z - bodies[0].state().angular_velocity().z;
+        assert!(
+            relative_speed <= 1.0e-9,
+            "outward velocity at the exact twist boundary must be removed, got {relative_speed}"
+        );
+    }
+
+    #[test]
+    fn ball_twist_limit_ignores_inward_motion_inside_the_interval() {
+        let rotation = Quat::from_axis_angle(Vec3::Z, 0.5).expect("twist rotation");
+        let mut bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                Vec3::ZERO,
+                rotation,
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.0, -3.0),
+            ),
+        ];
+        solve_joint_velocity_only_with_dt(ball_twist_joint(-1.0, 1.0), &mut bodies, 1.0 / 60.0);
+        assert!(
+            (bodies[1].state().angular_velocity().z + 3.0).abs() <= 1.0e-10,
+            "inward motion inside the interval must be untouched, got {}",
+            bodies[1].state().angular_velocity().z
+        );
+    }
+
+    #[test]
+    fn ball_twist_limit_solve_is_equivalent_under_body_swap() {
+        let run = |swap: bool| -> f64 {
+            let dt = 1.0 / 120.0;
+            let rotation = Quat::from_axis_angle(Vec3::Z, 0.9).expect("twist rotation");
+            let dynamic = solver_body_with_velocities(
+                Vec3::ZERO,
+                rotation,
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.0, 100.0),
+            );
+            let fixed = static_solver_body(Vec3::ZERO, Quat::IDENTITY);
+            let mut bodies = if swap {
+                [dynamic, fixed]
+            } else {
+                [fixed, dynamic]
+            };
+            solve_joint_velocity_only_with_dt(ball_twist_joint(-1.0, 1.0), &mut bodies, dt);
+            let axis = bodies[0]
+                .state()
+                .transform()
+                .rotation()
+                .rotate_vector(Vec3::Z)
+                .expect("finite twist axis");
+            let relative_speed = bodies[1]
+                .state()
+                .angular_velocity()
+                .checked_sub(bodies[0].state().angular_velocity())
+                .expect("finite relative velocity")
+                .checked_dot(axis)
+                .expect("finite dot");
+            twist_between(&bodies) + relative_speed * dt
+        };
+        for predicted in [run(false), run(true)] {
+            assert!(
+                (-1.0 - 1.0e-9..=1.0 + 1.0e-9).contains(&predicted),
+                "swapped twist predicted {predicted} left the interval"
+            );
+        }
+    }
+
+    #[test]
+    fn ball_twist_limit_stays_finite_near_pi() {
+        for dt in [1.0 / 60.0, 1.0 / 120.0, 1.0 / 240.0] {
+            let rotation =
+                Quat::from_axis_angle(Vec3::Z, std::f64::consts::PI - 1.0e-6).expect("twist");
+            let mut bodies = [
+                static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+                solver_body_with_velocities(
+                    Vec3::ZERO,
+                    rotation,
+                    Vec3::ZERO,
+                    Vec3::new(0.0, 0.0, 200.0),
+                ),
+            ];
+            solve_joint_velocity_only_with_dt(
+                ball_twist_joint(-std::f64::consts::PI, std::f64::consts::PI),
+                &mut bodies,
+                dt,
+            );
+            let angular_velocity = bodies[1].state().angular_velocity();
+            assert!(
+                angular_velocity.is_finite(),
+                "dt={dt} near-pi twist produced {angular_velocity:?}"
+            );
+            assert!(twist_between(&bodies).is_finite());
+        }
     }
 
     #[test]
