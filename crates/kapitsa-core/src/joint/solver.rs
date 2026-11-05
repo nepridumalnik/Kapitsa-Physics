@@ -3672,6 +3672,9 @@ fn append_ball_rows<B: SolverBodyAccess + ?Sized>(
     let position_error = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
+    // The ball anchor is a hard bilateral lock; its swing/twist limits are
+    // unilateral and handled separately below.
+    let lock = lock_settings(settings);
     for (axis_index, axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
         let error = position_error
             .checked_dot(axis)
@@ -3679,7 +3682,7 @@ fn append_ball_rows<B: SolverBodyAccess + ?Sized>(
         push_linear_row(
             bodies,
             workspace,
-            settings,
+            lock,
             [anchor_a, anchor_b],
             axis,
             error,
@@ -3739,7 +3742,9 @@ fn append_ball_angular_limits<B: SolverBodyAccess + ?Sized>(
         let axis = rotation_a
             .rotate_vector(Vec3::Z)
             .ok_or(CollisionError::ArithmeticOverflow)?;
-        push_angular_row(workspace, settings, axis, error, 4, bounds)?;
+        // A violated twist limit is corrected by position projection; adding a
+        // Baumgarte velocity target would correct it a second time.
+        push_angular_row(workspace, lock_settings(settings), axis, error, 4, bounds)?;
     }
     Ok(())
 }
@@ -4231,6 +4236,7 @@ fn append_d6_rows<B: SolverBodyAccess + ?Sized>(
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
+    let lock = lock_settings(settings);
     let delta = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -4247,7 +4253,7 @@ fn append_d6_rows<B: SolverBodyAccess + ?Sized>(
             super::JointMotion::Locked => push_linear_row(
                 bodies,
                 workspace,
-                settings,
+                lock,
                 [anchor_a, anchor_b],
                 axis,
                 coordinate,
@@ -4289,7 +4295,7 @@ fn append_d6_rows<B: SolverBodyAccess + ?Sized>(
         match joint.angular_motion[axis_index] {
             super::JointMotion::Locked => push_angular_row(
                 workspace,
-                settings,
+                lock,
                 angular_axis,
                 angular_coordinate,
                 9 + axis_index as u8,
@@ -4352,6 +4358,7 @@ fn append_linear_axes<B: SolverBodyAccess + ?Sized>(
     axes: &[Vec3],
     first_key: u8,
 ) -> Result<(), CollisionError> {
+    let settings = lock_settings(settings);
     let delta = anchor_b
         .checked_sub(anchor_a)
         .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -4380,6 +4387,7 @@ fn append_rotation_lock(
     rotation_b: Quat,
     first_key: u8,
 ) -> Result<(), CollisionError> {
+    let settings = lock_settings(settings);
     let error = relative_rotation_error(rotation_a, rotation_b)?;
     for (axis_index, local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
         let axis = rotation_a
@@ -4421,8 +4429,7 @@ fn ball_swing_axis<B: SolverBodyAccess + ?Sized>(
     if cosine < 0.0 {
         // Antiparallel swing: the rotation axis is undefined, so pick a
         // deterministic perpendicular to keep the limit well posed.
-        let (first, _) =
-            constraint::tangent_basis(axis_a).ok_or(CollisionError::InvalidContact)?;
+        let (first, _) = constraint::tangent_basis(axis_a).ok_or(CollisionError::InvalidContact)?;
         return Ok(Some(first));
     }
     let relative_velocity = bodies
@@ -4439,9 +4446,12 @@ fn ball_swing_axis<B: SolverBodyAccess + ?Sized>(
         )
         .ok_or(CollisionError::ArithmeticOverflow)?;
     let perpendicular = relative_velocity
-        .checked_sub(axis_a * relative_velocity.checked_dot(axis_a).ok_or(
-            CollisionError::ArithmeticOverflow,
-        )?)
+        .checked_sub(
+            axis_a
+                * relative_velocity
+                    .checked_dot(axis_a)
+                    .ok_or(CollisionError::ArithmeticOverflow)?,
+        )
         .ok_or(CollisionError::ArithmeticOverflow)?;
     if let Some(axis) = perpendicular.try_normalize() {
         return Ok(Some(axis));
@@ -4457,6 +4467,7 @@ fn append_axis_alignment(
     rotation_b: Quat,
     first_key: u8,
 ) -> Result<(), CollisionError> {
+    let settings = lock_settings(settings);
     let axis_a = rotation_a
         .rotate_vector(Vec3::Z)
         .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -4516,6 +4527,9 @@ fn append_linear_limit<B: SolverBodyAccess + ?Sized>(
 ) -> Result<(), CollisionError> {
     let mut row_settings = settings;
     let active = if let Some(violation) = limit_error(coordinate, limit) {
+        // Position projection removes an existing violation. Disable the
+        // Baumgarte velocity bias so the same error is not corrected twice.
+        row_settings.velocity_bias = false;
         Some(violation)
     } else {
         let body_a = bodies
@@ -4586,6 +4600,9 @@ fn append_angular_axis_limit<B: SolverBodyAccess + ?Sized>(
 ) -> Result<(), CollisionError> {
     let mut row_settings = settings;
     let active = if let Some(violation) = limit_error(angle, limit) {
+        // Position projection removes an existing violation. Disable the
+        // Baumgarte velocity bias so the same error is not corrected twice.
+        row_settings.velocity_bias = false;
         Some(violation)
     } else {
         let body_a = bodies
@@ -4645,6 +4662,15 @@ fn row_settings(body_a: usize, body_b: usize, common: super::JointCommon, dt: f6
         multiplier_bounds: None,
         impulse_bounds: None,
     }
+}
+
+/// Row settings for a hard bilateral lock. Position projection (XPBD) already
+/// removes the positional error, so these rows must not also carry a Baumgarte
+/// velocity target: applying both corrects the same error twice and injects
+/// energy into the relative motion. This mirrors the FixedJoint row builder.
+fn lock_settings(mut settings: RowSettings) -> RowSettings {
+    settings.velocity_bias = false;
+    settings
 }
 
 fn perpendicular_basis(axis: Vec3) -> Result<[Vec3; 2], CollisionError> {
@@ -9245,7 +9271,9 @@ mod tests {
                         ),
                         static_solver_body(Vec3::ZERO, Quat::IDENTITY),
                     ],
-                    super::super::Joint::Hinge(super::super::HingeJoint::new(aligned_axis_common())),
+                    super::super::Joint::Hinge(
+                        super::super::HingeJoint::new(aligned_axis_common()),
+                    ),
                 )
             } else {
                 (
@@ -9258,7 +9286,9 @@ mod tests {
                             Vec3::new(5.0, -3.0, 2.0),
                         ),
                     ],
-                    super::super::Joint::Hinge(super::super::HingeJoint::new(aligned_axis_common())),
+                    super::super::Joint::Hinge(
+                        super::super::HingeJoint::new(aligned_axis_common()),
+                    ),
                 )
             };
             solve_joint_velocity_only(joint, &mut bodies);
@@ -9329,8 +9359,7 @@ mod tests {
                 ),
             ];
             solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, dt);
-            let predicted = distance_between(&bodies)
-                + bodies[1].state().linear_velocity().z * dt;
+            let predicted = distance_between(&bodies) + bodies[1].state().linear_velocity().z * dt;
             assert!(
                 predicted <= 2.0 + 1.0e-9,
                 "dt={dt} predicted upper {predicted}"
@@ -9347,8 +9376,7 @@ mod tests {
                 ),
             ];
             solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, dt);
-            let predicted = distance_between(&bodies)
-                + bodies[1].state().linear_velocity().z * dt;
+            let predicted = distance_between(&bodies) + bodies[1].state().linear_velocity().z * dt;
             assert!(
                 predicted >= 1.0 - 1.0e-9,
                 "dt={dt} predicted lower {predicted}"
@@ -9367,7 +9395,11 @@ mod tests {
                 Vec3::ZERO,
             ),
         ];
-        solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, 1.0 / 60.0);
+        solve_joint_velocity_only_with_dt(
+            distance_joint_with_limit(1.0, 2.0),
+            &mut bodies,
+            1.0 / 60.0,
+        );
         assert!(
             bodies[1].state().linear_velocity().z <= 1.0e-9,
             "outward velocity at the upper boundary {}",
@@ -9386,7 +9418,11 @@ mod tests {
                 Vec3::ZERO,
             ),
         ];
-        solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, 1.0 / 60.0);
+        solve_joint_velocity_only_with_dt(
+            distance_joint_with_limit(1.0, 2.0),
+            &mut bodies,
+            1.0 / 60.0,
+        );
         assert!(
             (bodies[1].state().linear_velocity().z + 1.0).abs() <= 1.0e-10,
             "interior motion should not be constrained, got {}",
@@ -9395,7 +9431,31 @@ mod tests {
     }
 
     #[test]
-    fn distance_limit_corrects_existing_violation() {
+    fn distance_limit_violation_is_removed_by_position_projection() {
+        // A violated limit is corrected by XPBD position projection, not by a
+        // Baumgarte velocity bias. A velocity-only sweep must therefore leave a
+        // resting body at rest (no artificial energy injection)...
+        let mut resting = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_velocities(
+                Vec3::new(0.0, 0.0, 2.5),
+                Quat::IDENTITY,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ),
+        ];
+        solve_joint_velocity_only_with_dt(
+            distance_joint_with_limit(1.0, 2.0),
+            &mut resting,
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            resting[1].state().linear_velocity(),
+            Vec3::ZERO,
+            "a resting body must not gain velocity from a position-only violation"
+        );
+
+        // ...while the full solve, which runs position projection, removes it.
         let mut bodies = [
             static_solver_body(Vec3::ZERO, Quat::IDENTITY),
             solver_body_with_velocities(
@@ -9405,11 +9465,11 @@ mod tests {
                 Vec3::ZERO,
             ),
         ];
-        solve_joint_velocity_only_with_dt(distance_joint_with_limit(1.0, 2.0), &mut bodies, 1.0 / 60.0);
+        solve_joint(distance_joint_with_limit(1.0, 2.0), &mut bodies);
+        let distance = distance_between(&bodies);
         assert!(
-            bodies[1].state().linear_velocity().z < 0.0,
-            "violation should drive an inward correction, got {}",
-            bodies[1].state().linear_velocity().z
+            distance <= 2.0 + 1.0e-9,
+            "position projection should remove the violation, got {distance}"
         );
     }
 
@@ -9437,7 +9497,10 @@ mod tests {
             .checked_sub(bodies[0].state().linear_velocity())
             .expect("finite velocity");
         let predicted = distance_between(&bodies) + relative.z * dt;
-        assert!(predicted <= 2.0 + 1.0e-9, "dynamic pair predicted {predicted}");
+        assert!(
+            predicted <= 2.0 + 1.0e-9,
+            "dynamic pair predicted {predicted}"
+        );
         // Linear momentum is preserved: the pair has no external forces.
         let momentum = bodies[0].state().linear_velocity() + bodies[1].state().linear_velocity();
         assert!(momentum.length() <= 1.0e-10, "momentum {momentum:?}");
@@ -9460,7 +9523,10 @@ mod tests {
             joint.swing_limit = Some(0.1);
             solve_joint_velocity_only_with_dt(super::super::Joint::Ball(joint), &mut bodies, dt);
             let angular_velocity = bodies[1].state().angular_velocity();
-            assert!(angular_velocity.is_finite(), "angular velocity {angular_velocity:?}");
+            assert!(
+                angular_velocity.is_finite(),
+                "angular velocity {angular_velocity:?}"
+            );
 
             // Near-pi swing must not fail on the degenerate cross product.
             let swing = Quat::from_axis_angle(Vec3::X, std::f64::consts::PI - 1.0e-9)
@@ -9473,11 +9539,7 @@ mod tests {
             joint.swing_limit = Some(0.1);
             solve_joint_velocity_only_with_dt(super::super::Joint::Ball(joint), &mut bodies, dt);
             assert!(bodies[1].state().angular_velocity().is_finite());
-            assert!(bodies[1]
-                .state()
-                .transform()
-                .translation()
-                .is_finite());
+            assert!(bodies[1].state().transform().translation().is_finite());
         }
     }
 
@@ -9560,8 +9622,9 @@ mod tests {
 
     #[test]
     fn cylindrical_locks_two_translations_and_two_rotations_keeping_axis() {
-        let bodies =
-            run_velocity_only(Joint::Cylindrical(CylindricalJoint::new(aligned_axis_common())));
+        let bodies = run_velocity_only(Joint::Cylindrical(CylindricalJoint::new(
+            aligned_axis_common(),
+        )));
         assert_vec_close(
             bodies[1].state().linear_velocity(),
             Vec3::new(0.0, 0.0, 3.0),
@@ -9738,8 +9801,7 @@ mod tests {
                 .angular_velocity()
                 .checked_cross(anchor_b_world - bodies[1].state().transform().translation())
                 .expect("cross");
-        let relative_anchor_velocity =
-            velocity_b.checked_sub(velocity_a).expect("finite velocity");
+        let relative_anchor_velocity = velocity_b.checked_sub(velocity_a).expect("finite velocity");
         assert!(
             relative_anchor_velocity.length() <= 1.0e-8,
             "ball anchor velocity with offset anchors {relative_anchor_velocity:?}"
@@ -10166,6 +10228,265 @@ mod tests {
         let separation = bodies[1].state().transform().translation().x
             - bodies[0].state().transform().translation().x;
         assert!(separation > 0.99, "driven separation={separation}");
+    }
+
+    fn hard_lock_row_targets_zero_velocity(joint: Joint) {
+        let constraints = [JointConstraint {
+            id: test_joint_id(),
+            body_a: 0,
+            body_b: 1,
+            joint,
+        }];
+        let bodies = [
+            static_solver_body(Vec3::ZERO, Quat::IDENTITY),
+            solver_body_with_rotation(
+                Vec3::new(0.3, -0.4, 0.5),
+                Quat::from_axis_angle(Vec3::new(1.0, 2.0, -1.0), 0.7).expect("rotation"),
+            ),
+        ];
+        let mut workspace = JointWorkspace::new();
+        JointSolver::prepare(&mut workspace, &bodies, &constraints, 0.01).expect("prepare rows");
+        // Every hard bilateral lock row must target zero relative velocity: a
+        // Baumgarte bias would instead target a nonzero value proportional to
+        // the position error and inject energy on top of position projection.
+        for row in workspace.rows() {
+            assert!(
+                row.target_velocity.abs() <= 1.0e-12,
+                "lock row key {} has bias target {} for error {}",
+                row.key,
+                row.target_velocity,
+                row.error
+            );
+        }
+    }
+
+    #[test]
+    fn hard_bilateral_lock_rows_do_not_apply_baumgarte_bias() {
+        hard_lock_row_targets_zero_velocity(Joint::Hinge(HingeJoint::new(aligned_axis_common())));
+        hard_lock_row_targets_zero_velocity(Joint::Slider(SliderJoint::new(aligned_axis_common())));
+        hard_lock_row_targets_zero_velocity(Joint::Ball(BallJoint::new(aligned_axis_common())));
+        hard_lock_row_targets_zero_velocity(Joint::Cylindrical(CylindricalJoint::new(
+            aligned_axis_common(),
+        )));
+        hard_lock_row_targets_zero_velocity(Joint::D6(D6Joint::new(aligned_axis_common())));
+    }
+
+    #[test]
+    fn resting_violated_lock_does_not_gain_velocity() {
+        // Two dynamic bodies joined by a hinge whose anchors start apart and at
+        // rest. Position projection removes the gap; the velocity solve must not
+        // create motion from the position error.
+        let frame_a = JointFrame::new(
+            Vec3::new(0.1, -0.2, 0.3),
+            Quat::from_axis_angle(Vec3::Z, 0.2).expect("frame a"),
+        );
+        let frame_b = JointFrame::new(
+            Vec3::new(-0.4, 0.15, 0.2),
+            Quat::from_axis_angle(Vec3::X, -0.3).expect("frame b"),
+        );
+        let inertia = kapitsa_math::Mat3::from_diagonal(Vec3::new(0.4, 1.1, 1.4));
+        let joint = Joint::Hinge(HingeJoint::new(JointCommon::new(frame_a, frame_b)));
+        let initial_b = frame_a.local_anchor - frame_b.local_anchor + Vec3::new(0.35, -0.2, 0.4);
+        let mut bodies = [
+            solver_body_with_properties(
+                Vec3::new(0.2, 0.1, -0.3),
+                Quat::from_axis_angle(Vec3::Y, 0.5).expect("rotation a"),
+                1.0,
+                Vec3::new(0.05, -0.02, 0.01),
+                inertia,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ),
+            solver_body_with_properties(
+                initial_b,
+                Quat::from_axis_angle(Vec3::X, 0.4).expect("rotation b"),
+                2.0,
+                Vec3::new(-0.03, 0.04, 0.02),
+                inertia,
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ),
+        ];
+
+        solve_joint_velocity_only_with_dt(joint, &mut bodies, 1.0 / 60.0);
+        assert_eq!(
+            bodies[0].state().linear_velocity(),
+            Vec3::ZERO,
+            "body A gained velocity from a resting violation"
+        );
+        assert_eq!(
+            bodies[1].state().linear_velocity(),
+            Vec3::ZERO,
+            "body B gained velocity from a resting violation"
+        );
+
+        solve_joint(joint, &mut bodies);
+        let anchor_error = joint_anchor_error(&bodies, frame_a, frame_b);
+        assert!(
+            anchor_error <= 1.0e-3,
+            "position projection should close the anchor gap, got {anchor_error}"
+        );
+    }
+
+    fn joint_anchor_error(
+        bodies: &[SolverBody; 2],
+        frame_a: JointFrame,
+        frame_b: JointFrame,
+    ) -> f64 {
+        let anchor = |body: &SolverBody, local: Vec3| {
+            let transform = body.state().transform();
+            transform.translation()
+                + transform
+                    .rotation()
+                    .rotate_vector(local)
+                    .expect("anchor rotation")
+        };
+        (anchor(&bodies[1], frame_b.local_anchor) - anchor(&bodies[0], frame_a.local_anchor))
+            .length()
+    }
+
+    fn body_momentum(body: &SolverBody) -> (Vec3, Vec3) {
+        let mass = body.body().physics().mass().expect("dynamic mass");
+        let state = body.state();
+        let center = body
+            .body()
+            .world_center_of_mass()
+            .expect("center of mass")
+            .unwrap_or(state.transform().translation());
+        let linear = state.linear_velocity() * mass.mass();
+        let rotation = state.transform().rotation().to_mat3().expect("rotation");
+        let inertia_world = rotation * mass.inertia() * rotation.transpose();
+        let angular = center.checked_cross(linear).expect("angular momentum")
+            + inertia_world * state.angular_velocity();
+        (linear, angular)
+    }
+
+    fn kinetic_energy(body: &SolverBody) -> f64 {
+        let mass = body.body().physics().mass().expect("dynamic mass");
+        let state = body.state();
+        let rotation = state.transform().rotation().to_mat3().expect("rotation");
+        let inertia_world = rotation * mass.inertia() * rotation.transpose();
+        0.5 * mass.mass() * state.linear_velocity().length_squared()
+            + 0.5
+                * state
+                    .angular_velocity()
+                    .dot(inertia_world * state.angular_velocity())
+    }
+
+    fn two_body_hinge_fixture() -> ([SolverBody; 2], Joint) {
+        let frame_a = JointFrame::new(
+            Vec3::new(0.1, -0.2, 0.3),
+            Quat::from_axis_angle(Vec3::Z, 0.2).expect("frame a"),
+        );
+        let frame_b = JointFrame::new(
+            Vec3::new(-0.4, 0.15, 0.2),
+            Quat::from_axis_angle(Vec3::X, -0.3).expect("frame b"),
+        );
+        let inertia = kapitsa_math::Mat3::from_diagonal(Vec3::new(0.4, 1.1, 1.4));
+        let joint = Joint::Hinge(HingeJoint::new(JointCommon::new(frame_a, frame_b)));
+        let bodies = [
+            solver_body_with_properties(
+                Vec3::new(0.2, 0.1, -0.3),
+                Quat::from_axis_angle(Vec3::Y, 0.5).expect("rotation a"),
+                1.0,
+                Vec3::new(0.05, -0.02, 0.01),
+                inertia,
+                Vec3::new(1.5, -0.7, 0.9),
+                Vec3::new(-0.6, 1.2, 0.4),
+            ),
+            solver_body_with_properties(
+                Vec3::new(0.3, -0.25, 0.6),
+                Quat::from_axis_angle(Vec3::X, 0.4).expect("rotation b"),
+                2.0,
+                Vec3::new(-0.03, 0.04, 0.02),
+                inertia,
+                Vec3::new(-0.8, 0.5, -1.1),
+                Vec3::new(0.7, -0.3, 1.3),
+            ),
+        ];
+        (bodies, joint)
+    }
+
+    #[test]
+    fn joint_solve_conserves_linear_and_angular_momentum() {
+        // Coincident anchors: the equal-and-opposite constraint forces act at
+        // the same world point, so a velocity-only solve must leave total linear
+        // and angular momentum untouched. Positions stay fixed, so the momentum
+        // arms do not move.
+        let frame_a = JointFrame::new(
+            Vec3::new(0.1, -0.2, 0.3),
+            Quat::from_axis_angle(Vec3::Z, 0.2).expect("frame a"),
+        );
+        let frame_b = JointFrame::new(
+            Vec3::new(-0.4, 0.15, 0.2),
+            Quat::from_axis_angle(Vec3::X, -0.3).expect("frame b"),
+        );
+        let inertia = kapitsa_math::Mat3::from_diagonal(Vec3::new(0.4, 1.1, 1.4));
+        let pose_a = Transform::new(
+            Vec3::new(0.2, 0.1, -0.3),
+            Quat::from_axis_angle(Vec3::Y, 0.5).expect("rotation a"),
+        )
+        .expect("pose a");
+        let rotation_b = Quat::from_axis_angle(Vec3::X, 0.4).expect("rotation b");
+        let world_anchor_a = pose_a.translation()
+            + pose_a
+                .rotation()
+                .rotate_vector(frame_a.local_anchor)
+                .expect("anchor a");
+        let pose_b = Transform::new(
+            world_anchor_a
+                - rotation_b
+                    .rotate_vector(frame_b.local_anchor)
+                    .expect("anchor b"),
+            rotation_b,
+        )
+        .expect("pose b");
+        let joint = Joint::Hinge(HingeJoint::new(JointCommon::new(frame_a, frame_b)));
+        let mut bodies = [
+            solver_body_with_properties(
+                pose_a.translation(),
+                pose_a.rotation(),
+                1.0,
+                Vec3::ZERO,
+                inertia,
+                Vec3::new(1.5, -0.7, 0.9),
+                Vec3::new(-0.6, 1.2, 0.4),
+            ),
+            solver_body_with_properties(
+                pose_b.translation(),
+                pose_b.rotation(),
+                2.0,
+                Vec3::ZERO,
+                inertia,
+                Vec3::new(-0.8, 0.5, -1.1),
+                Vec3::new(0.7, -0.3, 1.3),
+            ),
+        ];
+        let before = [body_momentum(&bodies[0]), body_momentum(&bodies[1])];
+        solve_joint_velocity_only_with_dt(joint, &mut bodies, 1.0 / 60.0);
+        let after = [body_momentum(&bodies[0]), body_momentum(&bodies[1])];
+        let linear_drift = (after[0].0 + after[1].0 - before[0].0 - before[1].0).length();
+        let angular_drift = (after[0].1 + after[1].1 - before[0].1 - before[1].1).length();
+        assert!(
+            linear_drift <= 1.0e-10,
+            "linear momentum drift {linear_drift}"
+        );
+        assert!(
+            angular_drift <= 1.0e-10,
+            "angular momentum drift {angular_drift}"
+        );
+    }
+
+    #[test]
+    fn joint_solve_does_not_grow_kinetic_energy() {
+        let (mut bodies, joint) = two_body_hinge_fixture();
+        let energy_before = kinetic_energy(&bodies[0]) + kinetic_energy(&bodies[1]);
+        solve_joint(joint, &mut bodies);
+        let energy_after = kinetic_energy(&bodies[0]) + kinetic_energy(&bodies[1]);
+        assert!(
+            energy_after <= energy_before + 1.0e-9,
+            "kinetic energy grew from {energy_before} to {energy_after}"
+        );
     }
 }
 
