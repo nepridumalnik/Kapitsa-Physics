@@ -3024,3 +3024,77 @@ fn articulated_residual_profile_tracks_actual_joints() {
         }
     }
 }
+
+#[test]
+fn slider_velocity_residual_localizes_to_joint_coupling() {
+    use crate::{
+        constraint::SolverBody,
+        joint::{
+            JointSolverOptions, JointSolverStep,
+            solver::{JointConstraint, JointSolver},
+            workspace::JointWorkspace,
+        },
+    };
+    let mut world = slider_chain(100);
+    for step in 0..300 {
+        if step < 60 {
+            apply_root_force(&mut world, Vec3::new(0.0, 5.0, 20.0));
+        }
+        world.step(DT).unwrap();
+    }
+    let (index, (id, a, b, joint)) = world
+        .joints()
+        .enumerate()
+        .max_by(|(_, (_, a1, b1, j1)), (_, (_, a2, b2, j2))| {
+            let first = joint_violation(world.body(*a1).unwrap(), world.body(*b1).unwrap(), j1);
+            let second = joint_violation(world.body(*a2).unwrap(), world.body(*b2).unwrap(), j2);
+            first.linear_velocity.total_cmp(&second.linear_velocity)
+        })
+        .unwrap();
+    let a = *world.body(a).unwrap();
+    let b = *world.body(b).unwrap();
+    let mut pair = [
+        SolverBody::from_prediction(a, *a.state()),
+        SolverBody::from_prediction(b, *b.state()),
+    ];
+    let constraint = JointConstraint {
+        id,
+        body_a: 0,
+        body_b: 1,
+        joint: *joint,
+    };
+    let mut workspace = JointWorkspace::new();
+    JointSolver::begin_step(&mut workspace);
+    let before = joint_violation(pair[0].body(), pair[1].body(), joint);
+    for iteration in 0..8 {
+        JointSolver::solve_velocity_joint(
+            &mut workspace,
+            &mut pair,
+            constraint,
+            0,
+            JointSolverStep::new(DT, JointSolverOptions::legacy()),
+            iteration == 0,
+        )
+        .unwrap();
+    }
+    let velocity = joint_violation(pair[0].body(), pair[1].body(), joint);
+    JointSolver::solve_position_joint(
+        &mut workspace,
+        &mut pair,
+        constraint,
+        0,
+        DT,
+        JointSolverOptions::legacy(),
+    )
+    .unwrap();
+    let position = joint_violation(pair[0].body(), pair[1].body(), joint);
+    assert!(
+        (before.linear_velocity - graph_metrics(&world).linear_velocity_residual_max).abs()
+            < 1.0e-14
+    );
+    assert!(velocity.linear_velocity < before.linear_velocity);
+    assert!(position.linear_velocity.is_finite() && position.position.is_finite());
+    println!(
+        "slider worst velocity joint={index}: before={before:?} after_velocity={velocity:?} after_position={position:?}"
+    );
+}
