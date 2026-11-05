@@ -2306,6 +2306,10 @@ mod stability_tests {
             rocket.world.set_reduced_fixed_tree_for_bench(true);
         }
         #[cfg(feature = "bench-internals")]
+        if std::env::var_os("KAPITSA_ROCKET_WARM_START").is_some() {
+            rocket.world.set_joint_warm_start_for_bench(true);
+        }
+        #[cfg(feature = "bench-internals")]
         if std::env::var_os("KAPITSA_ROCKET_NO_MASS_CACHE").is_some() {
             rocket.world.set_joint_mass_cache_for_bench(false);
         }

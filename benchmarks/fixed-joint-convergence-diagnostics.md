@@ -32,3 +32,11 @@ The full FixedBlock3 1000-body sweep matrix (`diagnose_fixed_block_rocket_sweep_
 All nine runs cross the 3 cm anchor limit by tick 12 or 13; none meets the strict threshold. At 32/12, maximum frame error is 1.418 rad and RMS anchor error is 0.0190 m. This does not justify changing the default sweeps.
 
 A diagnostic error was found in the pre-existing `CenteredThrustWithoutGravityOrContact` mode: it used local point `(0,0,0)` even though the root COM is `(-0.05,0,0)`. `centered_diagnostic_thrust_uses_root_center_of_mass` failed before the fix and passes after it. Earlier centered-thrust measurements are invalid. With the corrected diagnostic and FixedBlock3 on 1000 bodies, centered thrust without gravity/contact gives first 3 cm crossing at tick 13, maximum/RMS anchor 2.3949/0.1557 m, maximum/RMS frame 3.1409/0.4373 rad, normalized coast drift 0.4787. Original offset thrust gives tick 13, 2.4033/0.1568 m, 3.1415/0.4059 rad and normalized coast drift 0.4694. Initial state and force magnitude are the same, but these are distinct physical load locations.
+
+
+Additional experiments on the full 1000-part, 180-tick rocket:
+
+- Diagnostic velocity+position PCG, IC(0) velocity preconditioner, at the original 8/3 outer sweeps and inner caps 5/5, produced max/RMS anchor 0.033844/0.002273 m, max/RMS frame 0.010363/0.001348 rad and first 3 cm crossing at tick 30. The velocity PCG reported 1094 converged and 1354 iteration-limit calls, with peak residual 1.587 m/s and 0.566 rad/s. The diagnostic test completing is not a strict stability pass: max anchor is above 0.03 m, and the fixture's maximum altitude 1.451 m is below its 1.6 m scenario criterion.
+- FixedBlock3 with existing experimental warm starting enabled by `KAPITSA_ROCKET_WARM_START=1` gave max/RMS anchor 2.3549/0.1368 m and frame 3.1416/0.4083 rad, with the same first anchor/frame threshold ticks 12/19. This did not establish an acceptable fix.
+
+Both options are diagnostic-only. Neither changes the production default, and neither satisfies the full-rocket strict criteria in these experiments. The PCG sample above used the existing `diagnose_rocket_global_constraint_pcg` test with `KAPITSA_ROCKET_DIAGNOSTIC_PARTS=1000`, `KAPITSA_ROCKET_VELOCITY_PCG_CAP=5` and `KAPITSA_ROCKET_POSITION_PCG_CAP=5`.
