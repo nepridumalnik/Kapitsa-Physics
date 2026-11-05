@@ -479,6 +479,29 @@ fn report_samples(
         milliseconds(position_p50),
         milliseconds(position_p95)
     );
+    let linear_residual = samples
+        .iter()
+        .map(|s| s.metrics.joints.post_velocity_linear_residual_mps)
+        .fold(0.0_f64, f64::max);
+    let angular_residual = samples
+        .iter()
+        .map(|s| s.metrics.joints.post_velocity_angular_residual_radps)
+        .fold(0.0_f64, f64::max);
+    println!(
+        "coloring_us_p50/p95={:.3}/{:.3} coloring_rebuilds={} coloring_hits={} dispatch_groups={} dispatch_batches={} velocity_residual_max_mps/radps={linear_residual:.9e}/{angular_residual:.9e}",
+        micros(sample_duration_quantile(samples, 0.50, |s| s
+            .metrics
+            .joints
+            .constraint_coloring_prepare_time)),
+        micros(sample_duration_quantile(samples, 0.95, |s| s
+            .metrics
+            .joints
+            .constraint_coloring_prepare_time)),
+        joint_metrics.constraint_coloring_rebuilds,
+        joint_metrics.constraint_coloring_cache_hits,
+        metrics.colored_groups_dispatched,
+        metrics.colored_parallel_batches
+    );
     println!(
         "actual_solver={}",
         if schedule.rejection == "reduced-fixed-tree" {
