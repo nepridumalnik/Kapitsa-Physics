@@ -257,6 +257,37 @@ fn production_metrics(
 }
 
 #[test]
+fn free_ball_kernel_matches_independent_reference() {
+    for consistent in [true, false] {
+        for dt in [1.0 / 60.0, 1.0 / 120.0, 1.0 / 240.0] {
+            let mut reference = fixture(consistent);
+            let world = production_world(reference);
+            let mut source = world.bodies().map(|(_, body)| *body);
+            let mut bodies = [source.next().unwrap(), source.next().unwrap()];
+            let anchors = reference.map(|body| body.anchor);
+            for _ in 0..30 {
+                reference = constrained_step(reference, dt);
+                let predicted =
+                    super::free_ball::predict([&bodies[0], &bodies[1]], anchors, dt).unwrap();
+                for ((body, state), expected) in bodies.iter_mut().zip(predicted).zip(reference) {
+                    body.set_state_preserving_forces(state);
+                    assert!(
+                        (body.world_center_of_mass().unwrap().unwrap() - expected.center).length()
+                            < 1.0e-10
+                    );
+                    assert!(
+                        (state.linear_velocity() - expected.momentum / expected.mass.mass())
+                            .length()
+                            < 1.0e-10
+                    );
+                    assert!((state.angular_velocity() - expected.omega()).length() < 1.0e-10);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn two_body_constrained_reference_conserves_momentum_and_converges_in_time() {
     for consistent in [true, false] {
         let mut previous_error = f64::INFINITY;

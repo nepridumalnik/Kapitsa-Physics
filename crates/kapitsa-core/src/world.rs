@@ -1305,6 +1305,12 @@ impl PhysicsWorld {
         }
 
         self.with_force_source_updates(|world| {
+            if shards.is_empty() {
+                return Err(StepError::InvalidStepResults);
+            }
+            if world.try_step_free_ball(dt)? {
+                return Ok(());
+            }
             world.fill_step_shards(shards)?;
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunk| {
@@ -1327,6 +1333,9 @@ impl PhysicsWorld {
         executor: &E,
         worker_count: usize,
     ) -> Result<(), StepError> {
+        if self.try_step_free_ball(dt)? {
+            return Ok(());
+        }
         self.collision_system.begin_step();
         #[cfg(feature = "bench-internals")]
         self.collision_system
@@ -1386,6 +1395,85 @@ impl PhysicsWorld {
         self.collision_system
             .record_commit(commit_started.elapsed());
         Ok(())
+    }
+
+    /// A deliberately narrow whole-world path: no contacts or external work can
+    /// intervene between the start kick, constrained drift and endpoint kick.
+    fn try_step_free_ball(&mut self, dt: f64) -> Result<bool, StepError> {
+        if self.bodies.len() != 2
+            || self.joints.len() != 1
+            || !self.colliders.is_empty()
+            || self.central_gravity.is_some()
+            || !self.force_sources.is_empty()
+        {
+            return Ok(false);
+        }
+        let Some((dense_joint, entry)) = self.joints.iter().next() else {
+            return Ok(false);
+        };
+        let Joint::Ball(ball) = entry.joint else {
+            return Ok(false);
+        };
+        let common = ball.common;
+        if !common.enabled
+            || common.compliance != 0.0
+            || common.damping != 0.0
+            || common.break_force.is_some()
+            || common.break_torque.is_some()
+            || ball.swing_limit.is_some()
+            || ball.twist_limit.is_some()
+        {
+            return Ok(false);
+        }
+        let ids = [entry.body_a, entry.body_b];
+        let pair = [self.body(ids[0]), self.body(ids[1])];
+        let [Some(a), Some(b)] = pair else {
+            return Err(StepError::InvalidStepResults);
+        };
+        if [a, b].iter().any(|body| {
+            body.physics().body_type() != BodyType::Dynamic
+                || body.state().is_sleeping()
+                || body.forces().force() != Vec3::ZERO
+                || body.forces().torque() != Vec3::ZERO
+        }) || self.bodies.iter().any(|(_, entry)| entry.cluster.is_some())
+        {
+            return Ok(false);
+        }
+        // No world state, event or cache is written until both outputs pass all
+        // nonlinear and endpoint residual checks. A numerical failure is an
+        // explicit error, never a fallback to position projection.
+        let predicted = crate::joint::free_ball::predict(
+            [a, b],
+            [common.frame_a.local_anchor, common.frame_b.local_anchor],
+            dt,
+        )
+        .map_err(StepError::Collision)?;
+        let joint_id = JointId {
+            world: self.world_id,
+            dense: dense_joint,
+        };
+        #[cfg(feature = "bench-internals")]
+        let energy_before = self.energy_components();
+        self.collision_system.invalidate_joint_warm_start(joint_id);
+        self.collision_system.begin_step();
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_energy_before_integration(energy_before);
+        for (dense, _) in self.bodies.iter() {
+            let id = BodyId {
+                world: self.world_id,
+                dense,
+            };
+            let state = predicted[usize::from(id != ids[0])];
+            self.collision_system.stage_prediction(id, state);
+        }
+        self.commit_predicted_states();
+        self.joint_events.clear();
+        #[cfg(feature = "bench-internals")]
+        self.collision_system
+            .record_energy_after_integration(self.energy_components());
+        self.collision_system.commit_step();
+        Ok(true)
     }
 
     fn prepare_joint_break_commit(&mut self) -> Result<(), CollisionError> {
@@ -5173,6 +5261,17 @@ impl PhysicsWorld {
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
         self.prepare_gravity_updates()?;
+        match self.try_step_free_ball(dt) {
+            Ok(true) => {
+                self.clear_gravity_updates();
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.rollback_gravity_updates();
+                return Err(error);
+            }
+        }
         self.collision_system.begin_step();
         if let Err(error) = self.prepare_joint_collision_pairs() {
             self.collision_system.abort_step();

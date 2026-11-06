@@ -211,7 +211,7 @@ impl SolverMassSlot {
     }
 }
 
-fn inverse_spd(matrix: Mat3) -> Result<Mat3, CollisionError> {
+pub(crate) fn inverse_spd(matrix: Mat3) -> Result<Mat3, CollisionError> {
     let x = matrix.solve_spd(Vec3::X).map_err(map_cholesky_error)?;
     let y = matrix.solve_spd(Vec3::Y).map_err(map_cholesky_error)?;
     let z = matrix.solve_spd(Vec3::Z).map_err(map_cholesky_error)?;

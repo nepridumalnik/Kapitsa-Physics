@@ -12,6 +12,7 @@ mod distance;
 mod error;
 mod event;
 mod fixed;
+pub(crate) mod free_ball;
 mod hinge;
 mod planar;
 mod reaction;
