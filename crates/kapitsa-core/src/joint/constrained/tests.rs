@@ -10,9 +10,13 @@ use crate::{
 use kapitsa_math::{Mat3, Quat, Vec3};
 
 fn fixture(count: usize) -> (Vec<SolverBody>, Vec<JointConstraint>) {
+    fixture_graph(count, false)
+}
+fn fixture_graph(count: usize, branching: bool) -> (Vec<SolverBody>, Vec<JointConstraint>) {
     let mut world = PhysicsWorld::new();
     let omega = Vec3::new(0.05, 0.1, 0.02);
     let mut ids = Vec::new();
+    let mut positions = Vec::new();
     for i in 0..count {
         let mass = MassProperties::new(
             0.8 + (i % 3) as f64 * 0.3,
@@ -21,7 +25,12 @@ fn fixture(count: usize) -> (Vec<SolverBody>, Vec<JointConstraint>) {
         )
         .unwrap();
         let rotation = Quat::from_axis_angle(Vec3::Y, (i % 4) as f64 * 0.1).unwrap();
-        let origin = Vec3::X * i as f64;
+        let origin = if branching && i > 0 {
+            positions[(i - 1) / 2] + Vec3::new(1.0, if i % 2 == 0 { -0.5 } else { 0.5 }, 0.1)
+        } else {
+            Vec3::X * i as f64
+        };
+        positions.push(origin);
         let mut body =
             RigidBody::new_dynamic(Transform::new(origin, rotation).unwrap(), mass).unwrap();
         let center = body.world_center_of_mass().unwrap().unwrap();
@@ -31,8 +40,9 @@ fn fixture(count: usize) -> (Vec<SolverBody>, Vec<JointConstraint>) {
         ids.push(world.add_body(body).unwrap());
     }
     for i in 1..count {
-        let point = Vec3::X * (i as f64 - 0.5);
-        let frames = [i - 1, i].map(|j| {
+        let parent = if branching { (i - 1) / 2 } else { i - 1 };
+        let point = (positions[parent] + positions[i]) * 0.5;
+        let frames = [parent, i].map(|j| {
             let transform = world.body(ids[j]).unwrap().state().transform();
             JointFrame::new(
                 transform
@@ -45,7 +55,7 @@ fn fixture(count: usize) -> (Vec<SolverBody>, Vec<JointConstraint>) {
         });
         world
             .add_joint(
-                ids[i - 1],
+                ids[parent],
                 ids[i],
                 Joint::Ball(BallJoint::new(JointCommon::new(frames[0], frames[1]))),
             )
@@ -60,7 +70,7 @@ fn fixture(count: usize) -> (Vec<SolverBody>, Vec<JointConstraint>) {
         .enumerate()
         .map(|(i, (id, _, _, joint))| JointConstraint {
             id,
-            body_a: i,
+            body_a: if branching { i / 2 } else { i },
             body_b: i + 1,
             joint: *joint,
         })
@@ -164,6 +174,30 @@ fn joint_variants(common: JointCommon) -> Vec<(Joint, usize)> {
                 JointLimit::new(-std::f64::consts::PI, std::f64::consts::PI),
             )),
             3,
+        ),
+        (
+            Joint::ConeTwist(ConeTwistJoint::new(
+                common,
+                [0.0, std::f64::consts::PI],
+                JointLimit::new(-std::f64::consts::PI, std::f64::consts::PI),
+            )),
+            4,
+        ),
+        (
+            Joint::ConeTwist(ConeTwistJoint::new(
+                common,
+                [std::f64::consts::PI, 0.0],
+                JointLimit::new(0.3, 0.3),
+            )),
+            5,
+        ),
+        (
+            Joint::ConeTwist(ConeTwistJoint::new(
+                common,
+                [std::f64::consts::PI; 2],
+                JointLimit::new(0.3, 0.3),
+            )),
+            4,
         ),
     ]
 }
@@ -485,6 +519,270 @@ fn constrained_parallel_scaling_and_single_island_cost() {
                 "islands={islands} bodies_per_island={count} workers={workers} p50_us={:.3} p95_us={:.3}",
                 samples[16] as f64 / 1000.0,
                 samples[30] as f64 / 1000.0
+            );
+        }
+    }
+}
+
+fn mixed_joints(bodies: &[SolverBody], joints: &mut [JointConstraint]) {
+    for (i, joint) in joints.iter_mut().enumerate() {
+        joint.joint = joint_variants(*joint.joint.common())[i % 12].0;
+        if let Joint::Distance(ref mut distance) = joint.joint {
+            distance.common.frame_a.local_anchor = Vec3::ZERO;
+            distance.common.frame_b.local_anchor = Vec3::ZERO;
+            let length = (bodies[joint.body_b].state().transform().translation()
+                - bodies[joint.body_a].state().transform().translation())
+            .length();
+            distance.distance_limit.lower = length;
+            distance.distance_limit.upper = length;
+        }
+        if let Joint::ConeTwist(ref mut cone) = joint.joint
+            && cone.twist_limit.lower == cone.twist_limit.upper
+        {
+            cone.common.frame_b.local_rotation = cone.common.frame_b.local_rotation
+                * Quat::from_axis_angle(Vec3::Z, cone.twist_limit.lower).unwrap();
+        }
+    }
+}
+
+fn measure_graph(count: usize, branching: bool, mixed: bool, seconds: usize) {
+    let mut previous = f64::INFINITY;
+    for frequency in [60, 120, 240] {
+        let (mut bodies, mut joints) = fixture_graph(count, branching);
+        if mixed {
+            mixed_joints(&bodies, &mut joints);
+        }
+        let initial = invariants(&bodies);
+        let mut scratch = ConstrainedWorkspace::default();
+        assert!(ConstrainedIntegrator::eligible(
+            &bodies,
+            &joints,
+            IslandEligibility::default()
+        ));
+        for step in 0..seconds * frequency {
+            ConstrainedIntegrator::solve(&mut bodies,&joints,1.0/frequency as f64,&mut scratch).unwrap_or_else(|error|panic!("n={count} branching={branching} mixed={mixed} Hz={frequency} step={step}: {error}"));
+        }
+        let end = invariants(&bodies);
+        let energy = ((end.2 - initial.2) / initial.2).abs();
+        let p = (end.0 - initial.0).length();
+        let l = (end.1 - initial.1).length();
+        let momentum: Vec<_> = bodies
+            .iter()
+            .map(|body| MomentumBody::new(body.body()).unwrap())
+            .collect();
+        let mut rows = [EqualityRow::ZERO; MAX_EQUALITY_ROWS];
+        let mut error: f64 = 0.0;
+        for joint in &joints {
+            let n = write_equality_rows(*joint, &momentum, &mut rows).unwrap();
+            for row in &rows[..n] {
+                error = error.max(row.value.abs());
+            }
+        }
+        println!(
+            "graph n={count} branching={branching} mixed={mixed} Hz={frequency} dP={p:.6e} dL={l:.6e} dE/E={energy:.6e} max_constraint={error:.6e}"
+        );
+        assert!(p < 1.0e-10 * (1.0 + initial.0.length()));
+        assert!(l < 1.0e-10 * (1.0 + initial.1.length()));
+        assert!(error < 1.0e-7 && energy < 1.0e-7);
+        assert!(energy < 0.35 * previous || energy < 128.0 * f64::EPSILON);
+        previous = energy;
+    }
+}
+
+#[test]
+fn mixed_and_ball_trees_have_five_second_convergence() {
+    for count in [2, 10, 31] {
+        for mixed in [false, true] {
+            measure_graph(count, true, mixed, 5);
+        }
+    }
+}
+
+#[test]
+#[ignore = "Release five-second 60/120/240 Hz validation of large trees and mixed trees"]
+fn constrained_large_graphs_five_second_convergence() {
+    for count in [100, 500, 1000] {
+        for branching in [false, true] {
+            for mixed in [false, true] {
+                measure_graph(count, branching, mixed, 5);
+            }
+        }
+    }
+}
+
+fn world_from_graph(bodies: Vec<SolverBody>, joints: Vec<JointConstraint>) -> PhysicsWorld {
+    let mut world = PhysicsWorld::new();
+    let ids: Vec<_> = bodies
+        .into_iter()
+        .map(|body| world.add_body(body.body).unwrap())
+        .collect();
+    for joint in joints {
+        world
+            .add_joint(ids[joint.body_a], ids[joint.body_b], joint.joint)
+            .unwrap();
+    }
+    world
+}
+
+#[test]
+fn constrained_mixed_world_routes_match_at_all_frequencies() {
+    use crate::execution::SequentialExecutor;
+    for frequency in [60, 120, 240] {
+        let mut worlds: Vec<_> = (0..4)
+            .map(|_| {
+                let (bodies, mut joints) = fixture_graph(10, true);
+                mixed_joints(&bodies, &mut joints);
+                world_from_graph(bodies, joints)
+            })
+            .collect();
+        let mut shards = vec![Vec::new(); 4];
+        for _ in 0..5 * frequency {
+            let dt = 1.0 / f64::from(frequency);
+            worlds[0].step(dt).unwrap();
+            worlds[1]
+                .step_with_executor(dt, &SequentialExecutor, 4)
+                .unwrap();
+            worlds[2]
+                .step_with_shards(dt, &mut shards, &SequentialExecutor, 4)
+                .unwrap();
+            worlds[3].fill_step_shards(&mut shards).unwrap();
+            for step in shards.iter_mut().flatten() {
+                step.integrate(dt).unwrap();
+            }
+            worlds[3]
+                .commit_step_shards_with_executor(&shards, &SequentialExecutor, 4)
+                .unwrap();
+            let reference: Vec<_> = worlds[0].bodies().map(|(_, body)| *body.state()).collect();
+            for world in &worlds[1..] {
+                assert_eq!(
+                    world
+                        .bodies()
+                        .map(|(_, body)| *body.state())
+                        .collect::<Vec<_>>(),
+                    reference
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn constrained_failure_rolls_back_other_eligible_and_legacy_islands() {
+    let (mut world, ids) = production_fixture(10);
+    let (bodies, joints) = fixture(2);
+    let bad_ids: Vec<_> = bodies
+        .into_iter()
+        .map(|body| {
+            let mut body = body.body;
+            body.set_angular_velocity(Vec3::new(10.0, 15.0, 20.0))
+                .unwrap();
+            world.add_body(body).unwrap()
+        })
+        .collect();
+    for joint in joints {
+        world
+            .add_joint(bad_ids[joint.body_a], bad_ids[joint.body_b], joint.joint)
+            .unwrap();
+    }
+    let mut forced = *world.body(ids[0]).unwrap();
+    forced.set_angular_velocity(Vec3::ZERO).unwrap();
+    let forced = world.add_body(forced).unwrap();
+    world.add_force_source(forced, Vec3::ZERO, Vec3::Y).unwrap();
+    let original: Vec<_> = world.bodies().map(|(_, body)| *body).collect();
+    assert_eq!(
+        world.step(1.0),
+        Err(crate::world::StepError::Collision(
+            crate::collision::CollisionError::NonConvergent
+        ))
+    );
+    assert_eq!(
+        world.bodies().map(|(_, body)| *body).collect::<Vec<_>>(),
+        original
+    );
+    assert!(world.collision_events().is_empty());
+    assert!(world.joint_events().is_empty());
+}
+
+#[test]
+fn constrained_geometric_degeneracy_is_an_explicit_atomic_error() {
+    let (mut bodies, mut joints) = fixture(2);
+    bodies[1] = bodies[0];
+    let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+    joints[0].joint = Joint::Distance(crate::joint::DistanceJoint::fixed_length(common, 1.0));
+    let mut world = world_from_graph(bodies, joints);
+    let original: Vec<_> = world.bodies().map(|(_, body)| *body).collect();
+    assert_eq!(
+        world.step(1.0 / 120.0),
+        Err(crate::world::StepError::Collision(
+            crate::collision::CollisionError::NonConvergent
+        ))
+    );
+    assert_eq!(
+        world.bodies().map(|(_, body)| *body).collect::<Vec<_>>(),
+        original
+    );
+}
+
+#[test]
+fn nonredundant_ball_triangle_has_five_second_convergence() {
+    let mut previous = f64::INFINITY;
+    for frequency in [60, 120, 240] {
+        let (mut bodies, mut joints) = fixture_graph(3, true);
+        let point = (bodies[1].state().transform().translation()
+            + bodies[2].state().transform().translation())
+            * 0.5;
+        let frames = [1, 2].map(|i| {
+            let transform = bodies[i].state().transform();
+            JointFrame::new(
+                transform
+                    .rotation()
+                    .conjugate()
+                    .rotate_vector(point - transform.translation())
+                    .unwrap(),
+                transform.rotation().conjugate(),
+            )
+        });
+        joints.push(JointConstraint {
+            body_a: 1,
+            body_b: 2,
+            joint: Joint::Ball(BallJoint::new(JointCommon::new(frames[0], frames[1]))),
+            ..joints[0]
+        });
+        let initial = invariants(&bodies);
+        let mut scratch = ConstrainedWorkspace::default();
+        for _ in 0..5 * frequency {
+            ConstrainedIntegrator::solve(
+                &mut bodies,
+                &joints,
+                1.0 / frequency as f64,
+                &mut scratch,
+            )
+            .unwrap();
+        }
+        let end = invariants(&bodies);
+        let error = ((end.2 - initial.2) / initial.2).abs();
+        assert!((end.0 - initial.0).length() < 1.0e-10 && (end.1 - initial.1).length() < 1.0e-10);
+        assert!(error < 1.0e-7 && (error < 0.35 * previous || error < 128.0 * f64::EPSILON));
+        previous = error;
+    }
+}
+
+#[test]
+fn constrained_branch_sizes_report_matrix_free_cost() {
+    for count in [100, 500, 1000] {
+        for mixed in [false, true] {
+            let (mut bodies, mut joints) = fixture_graph(count, true);
+            if mixed {
+                mixed_joints(&bodies, &mut joints);
+            }
+            let mut scratch = ConstrainedWorkspace::default();
+            let start = std::time::Instant::now();
+            ConstrainedIntegrator::solve(&mut bodies, &joints, 1.0 / 120.0, &mut scratch).unwrap();
+            println!(
+                "branch n={count} mixed={mixed} us={} linear_iterations={} nonlinear_iterations={}",
+                start.elapsed().as_micros(),
+                scratch.linear_iterations,
+                scratch.nonlinear_iterations
             );
         }
     }

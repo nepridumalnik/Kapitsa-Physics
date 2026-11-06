@@ -114,9 +114,11 @@ impl Joint {
             Self::ConeTwist(joint) => {
                 let free_twist = joint.twist_limit.lower <= -std::f64::consts::PI
                     && joint.twist_limit.upper >= std::f64::consts::PI;
-                (joint.swing_limit == [0.0, 0.0]
-                    && (free_twist || joint.twist_limit.lower == joint.twist_limit.upper))
-                    || (joint.swing_limit == [std::f64::consts::PI; 2] && free_twist)
+                joint
+                    .swing_limit
+                    .iter()
+                    .all(|angle| *angle == 0.0 || *angle == std::f64::consts::PI)
+                    && (free_twist || joint.twist_limit.lower == joint.twist_limit.upper)
             }
             Self::Spring(_) => false,
         }
