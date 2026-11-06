@@ -16,6 +16,7 @@ pub(crate) struct EqualityRow {
     pub(crate) linear_b: Vec3,
     pub(crate) angular_b: Vec3,
     pub(crate) value: f64,
+    pub(crate) tolerance: f64,
 }
 impl EqualityRow {
     pub(crate) const ZERO: Self = Self {
@@ -26,6 +27,7 @@ impl EqualityRow {
         linear_b: Vec3::ZERO,
         angular_b: Vec3::ZERO,
         value: 0.0,
+        tolerance: 1.0e-13,
     };
 }
 
@@ -125,6 +127,8 @@ pub(crate) fn write_equality_rows(
             angular_a: finite(axis.cross(delta) - (pa - a.center).cross(axis))?,
             angular_b: finite((pb - b.center).cross(axis))?,
             value: delta.dot(axis),
+            tolerance: (32.0 * f64::EPSILON * (super::length(pa)? + super::length(pb)?))
+                .max(1.0e-13),
         };
         count += 1;
     }

@@ -3,7 +3,6 @@ mod block;
 mod common;
 mod cone_twist;
 mod config;
-#[allow(dead_code, unused_imports)] // Connected to island execution after the kernel stages.
 pub(crate) mod constrained;
 mod cylindrical;
 mod d6;
@@ -14,7 +13,6 @@ mod distance;
 mod error;
 mod event;
 mod fixed;
-pub(crate) mod free_ball;
 mod hinge;
 mod planar;
 mod reaction;

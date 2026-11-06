@@ -259,11 +259,11 @@ fn every_bilateral_kind_has_five_second_momentum_and_energy_convergence() {
                 distance.distance_limit.lower = 1.0;
                 distance.distance_limit.upper = 1.0;
             }
-            if let Joint::ConeTwist(ref mut cone) = constraint.joint {
-                if cone.twist_limit.lower == cone.twist_limit.upper {
-                    cone.common.frame_b.local_rotation = cone.common.frame_b.local_rotation
-                        * Quat::from_axis_angle(Vec3::Z, cone.twist_limit.lower).unwrap();
-                }
+            if let Joint::ConeTwist(ref mut cone) = constraint.joint
+                && cone.twist_limit.lower == cone.twist_limit.upper
+            {
+                cone.common.frame_b.local_rotation = cone.common.frame_b.local_rotation
+                    * Quat::from_axis_angle(Vec3::Z, cone.twist_limit.lower).unwrap();
             }
             let initial = invariants(&bodies);
             let mut scratch = ConstrainedWorkspace::default();
@@ -325,4 +325,92 @@ fn redundant_closed_fixed_loop_preserves_invariants() {
     let end = invariants(&bodies);
     assert!((end.0 - initial.0).length() < 1.0e-10);
     assert!((end.1 - initial.1).length() < 1.0e-10);
+}
+
+fn production_fixture(count: usize) -> (PhysicsWorld, Vec<crate::world::BodyId>) {
+    let (bodies, joints) = fixture(count);
+    let mut world = PhysicsWorld::new();
+    let ids: Vec<_> = bodies
+        .iter()
+        .map(|body| world.add_body(*body.body()).unwrap())
+        .collect();
+    for joint in joints {
+        world
+            .add_joint(ids[joint.body_a], ids[joint.body_b], joint.joint)
+            .unwrap();
+    }
+    (world, ids)
+}
+
+#[test]
+fn eligible_island_is_independent_of_legacy_contacts_and_external_work() {
+    use crate::{
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    let (mut reference, reference_ids) = production_fixture(10);
+    let (mut mixed, ids) = production_fixture(10);
+    let mass = *mixed
+        .body(ids[0])
+        .unwrap()
+        .physics()
+        .mass()
+        .as_ref()
+        .unwrap();
+    let static_id = mixed
+        .add_body(RigidBody::new_static(
+            Transform::new(Vec3::X * 100.0, Quat::IDENTITY).unwrap(),
+        ))
+        .unwrap();
+    let moving = mixed
+        .add_body(
+            RigidBody::new_dynamic(
+                Transform::new(Vec3::X * 100.9, Quat::IDENTITY).unwrap(),
+                mass,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    for id in [static_id, moving] {
+        mixed
+            .add_collider(
+                id,
+                Collider::new(
+                    Shape::Sphere(Sphere::new(0.5).unwrap()),
+                    Transform::identity(),
+                ),
+            )
+            .unwrap();
+    }
+    mixed
+        .add_force_source(moving, Vec3::ZERO, Vec3::Y * 0.01)
+        .unwrap();
+    for _ in 0..600 {
+        reference.step(1.0 / 120.0).unwrap();
+        mixed.step(1.0 / 120.0).unwrap();
+        for (&a, &b) in ids.iter().zip(&reference_ids) {
+            assert_eq!(mixed.body(a), reference.body(b));
+        }
+    }
+}
+
+#[test]
+fn constrained_chain_sizes_retain_invariants_and_report_cost() {
+    for count in [2, 10, 31, 100, 500, 1000] {
+        let (mut bodies, joints) = fixture(count);
+        let initial = invariants(&bodies);
+        let mut scratch = ConstrainedWorkspace::default();
+        let start = std::time::Instant::now();
+        let result = ConstrainedIntegrator::solve(&mut bodies, &joints, 1.0 / 120.0, &mut scratch);
+        println!(
+            "chain n={count} result={result:?} us={} linear_iterations={} nonlinear_iterations={}",
+            start.elapsed().as_micros(),
+            scratch.linear_iterations,
+            scratch.nonlinear_iterations
+        );
+        result.unwrap();
+        let end = invariants(&bodies);
+        assert!((end.0 - initial.0).length() < 1.0e-10 * (1.0 + initial.0.length()));
+        assert!((end.1 - initial.1).length() < 1.0e-10 * (1.0 + initial.1.length()));
+    }
 }

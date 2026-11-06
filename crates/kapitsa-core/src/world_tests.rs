@@ -214,6 +214,11 @@ fn add_fixed_pair(world: &mut PhysicsWorld, offset: f64) -> (BodyId, BodyId) {
     let body_b = world
         .add_body(body_at(Vec3::new(offset + 1.0, 0.0, 0.0), 1.0))
         .expect("second fixed-joint body");
+    // These fixtures exercise legacy solver counters and caches. A collider
+    // explicitly excludes the new free, collider-less island integrator.
+    world
+        .add_collider(body_a, collider(0.1))
+        .expect("legacy-path collider");
     world
         .add_joint(
             body_a,
@@ -360,6 +365,9 @@ fn joint_warm_start_uses_committed_impulses_once_and_clears_disabled_joints() {
             ))),
         )
         .expect("fixed joint");
+    world
+        .add_collider(body_a, collider(0.1))
+        .expect("legacy-path collider");
     world.set_joint_warm_start_for_bench(true);
 
     world.step(1.0 / 60.0).expect("seed joint impulses");
@@ -451,6 +459,9 @@ fn joint_mass_cache_matches_legacy_for_anisotropic_fixed_joint() {
                 ))),
             )
             .expect("fixed joint");
+        world
+            .add_collider(body_a, collider(0.1))
+            .expect("legacy mass-cache fixture");
         world
     }
 

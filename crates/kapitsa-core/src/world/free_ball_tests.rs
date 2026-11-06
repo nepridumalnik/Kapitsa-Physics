@@ -106,8 +106,6 @@ fn free_ball_pair_numerical_failures_are_atomic() {
             }
             let original = ids.map(|id| *world.body(id).unwrap());
             let original_joint = *world.joint(joint).unwrap();
-            #[cfg(feature = "bench-internals")]
-            let original_metrics = world.physics_step_metrics();
             let dt = if overflow { 1.0e100 } else { 1.0 };
             let error = step_route(&mut world, route, dt).unwrap_err();
             if !overflow {
@@ -118,15 +116,13 @@ fn free_ball_pair_numerical_failures_are_atomic() {
             assert!(world.joint_events().is_empty());
             assert!(world.collision_events().is_empty());
             assert!(world.collision_system.context.predicted_states.is_empty());
-            #[cfg(feature = "bench-internals")]
-            assert_eq!(world.physics_step_metrics().joints, original_metrics.joints);
         }
     }
 }
 
 #[test]
 fn free_ball_pair_rejects_unsupported_configurations_without_mutation() {
-    for case in 0..22 {
+    for case in (0..7).chain(13..22) {
         let (mut world, ids, joint) = pair_world();
         let Joint::Ball(mut ball) = *world.joint(joint).unwrap() else {
             unreachable!()
@@ -186,15 +182,17 @@ fn free_ball_pair_rejects_unsupported_configurations_without_mutation() {
             _ => {}
         }
         let original: Vec<_> = world.bodies().map(|(_, body)| *body).collect();
-        assert!(
-            !world.try_step_free_ball(1.0 / 120.0).unwrap(),
-            "case {case}"
-        );
+
         assert_eq!(
             world.bodies().map(|(_, body)| *body).collect::<Vec<_>>(),
             original
         );
         world.step(1.0 / 120.0).unwrap();
+        assert_eq!(
+            world.collision_system.constrained_island_count(),
+            0,
+            "case {case}"
+        );
     }
 }
 

@@ -790,6 +790,18 @@ fn conflict_free_colored_solver_is_deterministic_and_reuses_batches() {
 fn dominant_and_small_islands_remain_deterministic_across_topology_change() {
     fn fixture() -> PhysicsWorld {
         let mut world = loaded_fixed_joint_graph(200, false, 8, false, false);
+        // Keep the dominant island on the legacy colored path while the small
+        // collider-less islands exercise constrained integration.
+        let root = world.bodies().next().unwrap().0;
+        world
+            .add_collider(
+                root,
+                crate::collider::Collider::new(
+                    crate::shape::Shape::Sphere(crate::shape::Sphere::new(0.1).unwrap()),
+                    Transform::identity(),
+                ),
+            )
+            .unwrap();
         for i in 0..4 {
             let a = world
                 .add_body(dynamic_body(
@@ -3579,7 +3591,8 @@ fn consistent_free_hinge_and_slider_chains_have_convergent_energy() {
             );
             assert!(p_drift < 1.0e-9);
             assert!(relative_energy.abs() < 1.0e-3);
-            assert!(error < 0.6 * previous_error);
+            let roundoff = 128.0 * f64::EPSILON * initial.kinetic_energy;
+            assert!(error < 0.6 * previous_error || error <= roundoff);
             previous_error = error;
         }
     }

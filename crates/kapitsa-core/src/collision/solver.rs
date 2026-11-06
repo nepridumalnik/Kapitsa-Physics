@@ -510,10 +510,13 @@ pub(crate) struct SolverIsland {
     pub(crate) workspace: SolverWorkspace,
     pub(crate) joint_workspace: JointWorkspace,
     pub(crate) worker_error: Option<CollisionError>,
+    pub(crate) constrained_starts: Vec<SolverBody>,
+    pub(crate) constrained_eligible: bool,
+    pub(crate) constrained_workspace: crate::joint::constrained::ConstrainedWorkspace,
 }
 
 impl SolverIsland {
-    pub(crate) const fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             body_indices: Vec::new(),
             manifold_indices: Vec::new(),
@@ -524,6 +527,9 @@ impl SolverIsland {
             workspace: SolverWorkspace::new(),
             joint_workspace: JointWorkspace::new(),
             worker_error: None,
+            constrained_starts: Vec::new(),
+            constrained_eligible: false,
+            constrained_workspace: crate::joint::constrained::ConstrainedWorkspace::default(),
         }
     }
 
@@ -536,6 +542,39 @@ impl SolverIsland {
         self.joints.clear();
         self.joint_workspace.clear();
         self.worker_error = None;
+        self.constrained_starts.clear();
+        self.constrained_eligible = true;
+    }
+
+    pub(crate) fn solve(
+        &mut self,
+        config: CollisionConfig,
+        step: JointSolverStep<'_>,
+        gravity: Option<CentralGravity>,
+        executor: &impl crate::execution::StepExecutor,
+        workers: usize,
+    ) -> Result<(), CollisionError> {
+        if self.constrained_eligible {
+            crate::joint::constrained::ConstrainedIntegrator::solve(
+                &mut self.constrained_starts,
+                &self.joints,
+                step.dt(),
+                &mut self.constrained_workspace,
+            )?;
+            self.bodies.copy_from_slice(&self.constrained_starts);
+            return Ok(());
+        }
+        self.workspace.solve_with_joints(
+            &mut self.bodies,
+            &mut self.manifolds,
+            &mut self.joint_workspace,
+            &self.joints,
+            config,
+            step,
+            gravity,
+            executor,
+            workers,
+        )
     }
 
     #[cfg(feature = "bench-internals")]
@@ -550,6 +589,8 @@ impl SolverIsland {
             + self.joints.capacity() * size_of::<JointConstraint>()
             + self.workspace.retained_capacity_bytes()
             + self.joint_workspace.retained_capacity_bytes()
+            + self.constrained_starts.capacity() * size_of::<SolverBody>()
+            + self.constrained_workspace.retained_capacity_bytes()
     }
 }
 

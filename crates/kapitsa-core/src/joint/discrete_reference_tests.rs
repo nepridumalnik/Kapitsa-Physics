@@ -264,11 +264,25 @@ fn free_ball_kernel_matches_independent_reference() {
             let world = production_world(reference);
             let mut source = world.bodies().map(|(_, body)| *body);
             let mut bodies = [source.next().unwrap(), source.next().unwrap()];
-            let anchors = reference.map(|body| body.anchor);
+            let mut scratch = super::constrained::ConstrainedWorkspace::default();
             for _ in 0..30 {
                 reference = constrained_step(reference, dt);
-                let predicted =
-                    super::free_ball::predict([&bodies[0], &bodies[1]], anchors, dt).unwrap();
+                let mut staged = bodies.map(|body| crate::constraint::SolverBody { body });
+                let id = world.joints().next().unwrap().0;
+                let joint = super::JointConstraint {
+                    id,
+                    body_a: 0,
+                    body_b: 1,
+                    joint: *world.joint(id).unwrap(),
+                };
+                super::constrained::ConstrainedIntegrator::solve(
+                    &mut staged,
+                    &[joint],
+                    dt,
+                    &mut scratch,
+                )
+                .unwrap();
+                let predicted = staged.map(|body| body.state());
                 for ((body, state), expected) in bodies.iter_mut().zip(predicted).zip(reference) {
                     body.set_state_preserving_forces(state);
                     assert!(

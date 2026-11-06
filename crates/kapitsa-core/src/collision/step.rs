@@ -92,6 +92,7 @@ pub(crate) struct StepContext {
     pub(crate) spatial_proxies: Vec<(ColliderId, Aabb)>,
     pub(crate) manifolds: Vec<ContactManifold>,
     pub(crate) solver_bodies: Vec<SolverBody>,
+    pub(crate) constrained_starts: Vec<Option<SolverBody>>,
     pub(crate) solver_body_predictions: Vec<usize>,
     pub(crate) ccd_states: Vec<BodyState>,
     pub(crate) ccd_elapsed: Vec<f64>,
@@ -140,6 +141,7 @@ impl StepContext {
             spatial_proxies: Vec::new(),
             manifolds: Vec::new(),
             solver_bodies: Vec::new(),
+            constrained_starts: Vec::new(),
             solver_body_predictions: Vec::new(),
             ccd_states: Vec::new(),
             ccd_elapsed: Vec::new(),
@@ -186,6 +188,7 @@ impl StepContext {
         self.spatial_proxies.clear();
         self.manifolds.clear();
         self.solver_bodies.clear();
+        self.constrained_starts.clear();
         self.solver_body_predictions.clear();
         self.ccd_states.clear();
         self.ccd_elapsed.clear();
@@ -255,6 +258,7 @@ impl StepContext {
             self.spatial_proxies.capacity() * size_of::<(ColliderId, Aabb)>(),
             self.manifolds.capacity() * size_of::<ContactManifold>(),
             self.solver_bodies.capacity() * size_of::<SolverBody>(),
+            self.constrained_starts.capacity() * size_of::<Option<SolverBody>>(),
             self.solver_body_predictions.capacity() * size_of::<usize>(),
             self.ccd_states.capacity() * size_of::<BodyState>(),
             self.ccd_elapsed.capacity() * size_of::<f64>(),

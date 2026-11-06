@@ -237,6 +237,15 @@ impl CollisionSystem {
         &self.context.joint_break_events
     }
 
+    #[cfg(test)]
+    pub(crate) fn constrained_island_count(&self) -> usize {
+        self.solver_islands
+            .iter()
+            .take(self.islands.island_count())
+            .filter(|island| island.constrained_eligible)
+            .count()
+    }
+
     pub(crate) fn begin_step(&mut self) {
         self.context.clear();
         self.lifecycle_staged = false;
@@ -1130,7 +1139,16 @@ impl CollisionSystem {
                 .bodies
                 .try_reserve(island.body_indices.len())
                 .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            island
+                .constrained_starts
+                .try_reserve(island.body_indices.len())
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
             for body_index in island.body_indices.iter().copied() {
+                if let Some(Some(start)) = self.context.constrained_starts.get(body_index) {
+                    island.constrained_starts.push(*start);
+                } else {
+                    island.constrained_eligible = false;
+                }
                 let body = self
                     .context
                     .solver_bodies
@@ -1191,6 +1209,18 @@ impl CollisionSystem {
                     .map_err(|_| CollisionError::InvalidContact)?;
                 island.joints.push(joint);
             }
+            island.constrained_eligible &=
+                crate::joint::constrained::ConstrainedIntegrator::eligible(
+                    &island.constrained_starts,
+                    &island.joints,
+                    crate::joint::constrained::IslandEligibility {
+                        has_contacts: !island.manifolds.is_empty(),
+                        external_work: gravity.is_some(),
+                        legacy_requested: self.joint_solver_options
+                            != crate::joint::JointSolverOptions::legacy(),
+                        ..Default::default()
+                    },
+                );
         }
         #[cfg(feature = "bench-internals")]
         {
@@ -1268,11 +1298,7 @@ impl CollisionSystem {
             )?;
         } else if worker_count <= 1 || (island_count <= 1 && !enter_executor) {
             for island in self.solver_islands.iter_mut().take(island_count) {
-                island.workspace.solve_with_joints(
-                    &mut island.bodies,
-                    &mut island.manifolds,
-                    &mut island.joint_workspace,
-                    &island.joints,
+                island.solve(
                     config,
                     joint_solver_step,
                     gravity,
@@ -1289,11 +1315,7 @@ impl CollisionSystem {
                     chunk_size,
                     |_, chunk| {
                         for island in chunk {
-                            if let Err(error) = island.workspace.solve_with_joints(
-                                &mut island.bodies,
-                                &mut island.manifolds,
-                                &mut island.joint_workspace,
-                                &island.joints,
+                            if let Err(error) = island.solve(
                                 config,
                                 joint_solver_step,
                                 gravity,
@@ -1569,19 +1591,8 @@ fn solve_island_group(
     skip: Option<usize>,
 ) -> Result<(), CollisionError> {
     let [workers, inner_workers] = workers;
-    let solve = |island: &mut SolverIsland| {
-        island.workspace.solve_with_joints(
-            &mut island.bodies,
-            &mut island.manifolds,
-            &mut island.joint_workspace,
-            &island.joints,
-            config,
-            step,
-            gravity,
-            executor,
-            inner_workers,
-        )
-    };
+    let solve =
+        |island: &mut SolverIsland| island.solve(config, step, gravity, executor, inner_workers);
     if workers <= 1 || islands.len() <= 1 {
         for (index, island) in islands.iter_mut().enumerate() {
             if Some(index) != skip {
