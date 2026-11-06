@@ -121,7 +121,17 @@ impl Mat3 {
     /// machine epsilons, and positive definite. Matrix scaling keeps the
     /// factorization stable for very large and very small finite coefficients.
     pub fn solve_spd(self, rhs: Vec3) -> Result<Vec3, CholeskyError> {
-        if !self.is_finite() || !rhs.is_finite() {
+        self.factor_spd()?.solve(rhs)
+    }
+
+    /// Factors `self` once so that several right-hand sides can be solved with
+    /// forward and back substitution only.
+    ///
+    /// The matrix must be finite, symmetric to a relative tolerance of 32
+    /// machine epsilons, and positive definite. Factorization is stack-only and
+    /// normalized by the largest coefficient to stay stable at extreme scales.
+    pub fn factor_spd(self) -> Result<Cholesky3, CholeskyError> {
+        if !self.is_finite() {
             return Err(CholeskyError::NonFiniteInput);
         }
 
@@ -172,11 +182,40 @@ impl Mat3 {
             }
         }
 
-        let normalized_rhs = [rhs.x / scale, rhs.y / scale, rhs.z / scale];
+        Ok(Cholesky3 { lower, scale })
+    }
+
+    fn to_rows(self) -> [[f64; 3]; 3] {
+        [
+            [self.columns[0].x, self.columns[1].x, self.columns[2].x],
+            [self.columns[0].y, self.columns[1].y, self.columns[2].y],
+            [self.columns[0].z, self.columns[1].z, self.columns[2].z],
+        ]
+    }
+}
+
+/// Stack-allocated Cholesky factorization produced by [`Mat3::factor_spd`].
+///
+/// Reusing one factorization for several right-hand sides avoids repeating the
+/// decomposition while keeping Cholesky's numerical stability.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cholesky3 {
+    lower: [[f64; 3]; 3],
+    scale: f64,
+}
+
+impl Cholesky3 {
+    /// Solves the factorized system for `rhs` with forward and back substitution.
+    pub fn solve(self, rhs: Vec3) -> Result<Vec3, CholeskyError> {
+        if !rhs.is_finite() {
+            return Err(CholeskyError::NonFiniteInput);
+        }
+        let normalized_rhs = [rhs.x / self.scale, rhs.y / self.scale, rhs.z / self.scale];
         if normalized_rhs.iter().any(|value| !value.is_finite()) {
             return Err(CholeskyError::ResultOutOfRange);
         }
 
+        let lower = self.lower;
         let mut intermediate = [0.0; 3];
         for row in 0..3 {
             let mut value = normalized_rhs[row];
@@ -200,14 +239,6 @@ impl Mat3 {
             return Err(CholeskyError::ResultOutOfRange);
         }
         Ok(solution)
-    }
-
-    fn to_rows(self) -> [[f64; 3]; 3] {
-        [
-            [self.columns[0].x, self.columns[1].x, self.columns[2].x],
-            [self.columns[0].y, self.columns[1].y, self.columns[2].y],
-            [self.columns[0].z, self.columns[1].z, self.columns[2].z],
-        ]
     }
 }
 
@@ -394,6 +425,62 @@ mod tests {
                 .solve_spd(Vec3::ONE),
             Err(CholeskyError::NotPositiveDefinite)
         );
+    }
+
+    #[test]
+    fn factor_spd_solve_matches_solve_spd_across_right_hand_sides_and_scales() {
+        for scale in [1.0, 1.0e-200, 1.0e200] {
+            let matrix = Mat3::from_rows([
+                [4.0 * scale, 1.0 * scale, 1.0 * scale],
+                [1.0 * scale, 3.0 * scale, 0.5 * scale],
+                [1.0 * scale, 0.5 * scale, 2.0 * scale],
+            ]);
+            let factor = matrix.factor_spd().expect("SPD factorization");
+            for expected in [
+                Vec3::new(1.5, -2.0, 0.25),
+                Vec3::new(-3.0, 0.5, 2.0),
+                Vec3::ZERO,
+            ] {
+                let rhs = matrix * expected;
+                let direct = matrix.solve_spd(rhs).expect("direct SPD solve");
+                let reused = factor.solve(rhs).expect("factorized SPD solve");
+                assert_vec3_close(reused, direct, 1e-13);
+                assert_vec3_close(reused, expected, 1e-13);
+            }
+        }
+    }
+
+    #[test]
+    fn factor_spd_reports_the_same_failures_as_solve_spd() {
+        let cases = [
+            Mat3::from_rows([[f64::INFINITY, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+            Mat3::from_rows([[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+            Mat3::from_rows([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]),
+            Mat3::from_rows([[0.0; 3]; 3]),
+        ];
+        for matrix in cases {
+            assert_eq!(matrix.factor_spd().err(), matrix.solve_spd(Vec3::ONE).err());
+        }
+        let factor = Mat3::IDENTITY.factor_spd().expect("identity factor");
+        assert_eq!(
+            factor.solve(Vec3::new(f64::NAN, 0.0, 0.0)),
+            Err(CholeskyError::NonFiniteInput)
+        );
+    }
+
+    #[test]
+    fn reused_factorization_stays_finite_for_ill_conditioned_spd_matrices() {
+        let matrix = Mat3::from_rows([
+            [1.0, 0.999_999, 0.0],
+            [0.999_999, 1.0, 0.0],
+            [0.0, 0.0, 1.0e-9],
+        ]);
+        let factor = matrix
+            .factor_spd()
+            .expect("ill-conditioned SPD factorization");
+        let expected = Vec3::new(1.0, -1.0, 2.0);
+        let solution = factor.solve(matrix * expected).expect("factorized solve");
+        assert_vec3_close(solution, expected, 1e-6);
     }
 
     #[test]

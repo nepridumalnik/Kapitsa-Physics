@@ -1,0 +1,832 @@
+use std::{
+    error::Error,
+    hint::black_box,
+    time::{Duration, Instant},
+};
+
+use kapitsa_core::{
+    collider::Collider,
+    collision::{CollisionStepMetrics, QueryFilter, Ray},
+    joint::{FixedJoint, Joint, JointCommon, JointFrame},
+    mass::MassProperties,
+    material::PhysicsMaterial,
+    rigid_body::{CcdMode, RigidBody},
+    shape::{Cuboid, HeightField, LevelSet, Plane, Shape, Sphere, TriangleMesh},
+    transform::Transform,
+    world::PhysicsWorld,
+};
+use kapitsa_math::{Mat3, Quat, Vec2, Vec3};
+
+#[path = "support/scoped_executor.rs"]
+mod scoped_executor;
+use scoped_executor::ScopedThreadExecutor;
+
+const SAMPLES: usize = 5;
+const WARMUP_RUNS: usize = 1;
+const DT: f64 = 1.0 / 60.0;
+
+struct Sample {
+    elapsed: Duration,
+    metrics: CollisionStepMetrics,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    println!(
+        "Kapitsa collision benchmark: warmups={WARMUP_RUNS}, samples={SAMPLES}, statistics=min/median/max"
+    );
+    for (name, build) in [
+        ("256 Dynamic Sphere", separated_spheres as fn() -> _),
+        ("4096 Dynamic Sphere", || separated_spheres_of(4_096)),
+        ("20,000 Dynamic Sphere, no contacts", || {
+            separated_spheres_of(20_000)
+        }),
+        ("20,000 bodies, localized contacts", || {
+            contact_pairs(20_000)
+        }),
+        ("1,000 bodies, one contact island", dense_contact_group),
+        ("20,000 Static + 100 Dynamic", mixed_static_dynamic),
+        ("Large TriangleMesh + movers", triangle_mesh_scene),
+        ("HeightField + colliders", height_field_scene),
+        ("LevelSet + colliders", level_set_scene),
+        ("CCD fast bodies", ccd_scene),
+        ("CCD 1k statics + 64 mixed", || {
+            ccd_static_load_scene(1_000, 64)
+        }),
+        ("CCD 20k statics + 64 mixed", || {
+            ccd_static_load_scene(20_000, 64)
+        }),
+        ("CCD 20k statics + 128 mixed", || {
+            ccd_static_load_scene(20_000, 128)
+        }),
+        ("CCD 20k statics + 256 mixed", || {
+            ccd_static_load_scene(20_000, 256)
+        }),
+        ("CCD fast no-contact candidates", ccd_no_contact_scene),
+        ("CCD one large island", ccd_large_island_scene),
+        ("CCD sequential wall bounces", ccd_sequence_scene),
+        ("CCD rebound creates pair", ccd_rebound_scene),
+    ] {
+        report_world(name, build)?;
+    }
+    report_ccd_worker_scaling()?;
+    report_ccd_gjk_worker_scaling()?;
+    report_joint_worker_scaling()?;
+    report_queries()?;
+    Ok(())
+}
+
+fn separated_spheres() -> Result<PhysicsWorld, Box<dyn Error>> {
+    separated_spheres_of(256)
+}
+
+fn separated_spheres_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = mass()?;
+    for index in 0..count {
+        let x = (index % 100) as f64 * 2.0;
+        let y = (index / 100) as f64 * 2.0;
+        add_sphere(&mut world, Vec3::new(x, y, 0.0), Vec3::ZERO, mass, false)?;
+    }
+    Ok(world)
+}
+
+fn contact_pairs(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = mass()?;
+    let pair_count = (count / 2).min(128);
+    for pair in 0..pair_count {
+        let x = (pair % 32) as f64 * 3.0;
+        let z = (pair / 32) as f64 * 3.0;
+        add_sphere(&mut world, Vec3::new(x, 0.0, z), Vec3::ZERO, mass, false)?;
+        add_sphere(
+            &mut world,
+            Vec3::new(x + 0.9, 0.0, z),
+            Vec3::ZERO,
+            mass,
+            false,
+        )?;
+    }
+    for index in pair_count * 2..count {
+        let index = index - pair_count * 2;
+        let x = (index % 200) as f64 * 2.0;
+        let z = (index / 200) as f64 * 2.0;
+        add_sphere(&mut world, Vec3::new(x, 10.0, z), Vec3::ZERO, mass, false)?;
+    }
+    Ok(world)
+}
+
+fn dense_contact_group() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = mass()?;
+    for index in 0..1_000 {
+        let body = world.add_body(RigidBody::new_dynamic(
+            Transform::new(Vec3::new(index as f64 * 0.99, 0.0, 0.0), Quat::IDENTITY)?,
+            mass,
+        )?)?;
+        world.add_collider(
+            body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            ),
+        )?;
+    }
+    Ok(world)
+}
+
+fn mixed_static_dynamic() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    for index in 0..20_000 {
+        let x = (index % 200) as f64 * 4.0;
+        let z = (index / 200) as f64 * 4.0;
+        add_static_sphere(&mut world, Vec3::new(x, 0.0, z))?;
+    }
+    let mass = mass()?;
+    for index in 0..100 {
+        let x = (index % 20) as f64 * 40.0 + 0.9;
+        let z = (index / 20) as f64 * 40.0;
+        add_sphere(&mut world, Vec3::new(x, 100.0, z), Vec3::ZERO, mass, false)?;
+    }
+    Ok(world)
+}
+
+fn triangle_mesh_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mut vertices = Vec::with_capacity(101 * 101);
+    for z in 0..=100 {
+        for x in 0..=100 {
+            vertices.push(Vec3::new(x as f64 - 50.0, 0.0, z as f64 - 50.0));
+        }
+    }
+    let mut triangles = Vec::with_capacity(100 * 100 * 2);
+    for z in 0..100 {
+        for x in 0..100 {
+            let a = z * 101 + x;
+            let b = a + 1;
+            let c = a + 101;
+            let d = c + 1;
+            triangles.push([a, b, d]);
+            triangles.push([a, d, c]);
+        }
+    }
+    let mesh = TriangleMesh::new(vertices, triangles)?;
+    let mesh_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    world.add_collider(
+        mesh_body,
+        Collider::new(Shape::TriangleMesh(mesh), Transform::identity()),
+    )?;
+    let mass = mass()?;
+    add_surface_movers(&mut world, 100, mass)?;
+    Ok(world)
+}
+
+fn height_field_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let field = HeightField::from_vec(65, 65, Vec2::splat(2.0), vec![0.0; 65 * 65])?;
+    let field_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let rotation = Quat::from_axis_angle(Vec3::X, std::f64::consts::FRAC_PI_2)
+        .ok_or("invalid field rotation")?;
+    world.add_collider(
+        field_body,
+        Collider::new(
+            Shape::HeightField(field),
+            Transform::new(Vec3::new(-64.0, 0.0, -64.0), rotation)?,
+        ),
+    )?;
+    let mass = mass()?;
+    add_surface_movers(&mut world, 512, mass)?;
+    Ok(world)
+}
+
+fn level_set_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let dimensions = [65, 4, 65];
+    let mut distances = Vec::with_capacity(dimensions.iter().product());
+    for _z in 0..dimensions[2] {
+        for y in 0..dimensions[1] {
+            for _x in 0..dimensions[0] {
+                distances.push(y as f64 - 2.0);
+            }
+        }
+    }
+    let field = LevelSet::from_vec(
+        Vec3::new(-32.0, -2.0, -32.0),
+        dimensions,
+        Vec3::ONE,
+        distances,
+    )?;
+    let field_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    world.add_collider(
+        field_body,
+        Collider::new(Shape::LevelSet(field), Transform::identity()),
+    )?;
+    let mass = mass()?;
+    add_surface_movers(&mut world, 256, mass)?;
+    Ok(world)
+}
+
+fn ccd_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    ccd_scene_of(64)
+}
+
+fn ccd_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let columns = (count as f64).sqrt().ceil() as usize;
+    let side = columns as f64 * 8.0 + 4.0;
+    world.add_collider(
+        wall,
+        Collider::new(
+            Shape::Cuboid(kapitsa_core::shape::Cuboid::new(0.1, side, side)?),
+            Transform::identity(),
+        ),
+    )?;
+    let mass = mass()?;
+    for index in 0..count {
+        let y = (index % columns) as f64 * 4.0;
+        let z = (index / columns) as f64 * 4.0;
+        add_sphere_with_velocity(
+            &mut world,
+            Vec3::new(-5.0, y, z),
+            Vec3::new(1000.0, 0.0, 0.0),
+            mass,
+            true,
+        )?;
+    }
+    Ok(world)
+}
+
+fn ccd_static_load_scene(
+    static_count: usize,
+    dynamic_count: usize,
+) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let static_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let impact_count = dynamic_count / 4;
+
+    for index in 0..static_count.saturating_sub(impact_count) {
+        let x = 10_000.0 + (index % 200) as f64 * 2.0;
+        let y = (index / 200) as f64 * 2.0;
+        world.add_collider(
+            static_body,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5)?),
+                Transform::new(Vec3::new(x, y, 0.0), Quat::IDENTITY)?,
+            ),
+        )?;
+    }
+    for index in 0..impact_count {
+        let y = index as f64 * 4.0;
+        world.add_collider(
+            static_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 1.0, 1.0)?),
+                Transform::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY)?,
+            ),
+        )?;
+    }
+
+    let mass = mass()?;
+    for index in 0..dynamic_count {
+        add_sphere_with_velocity(
+            &mut world,
+            Vec3::new(-5.0, index as f64 * 4.0, 0.0),
+            Vec3::new(1000.0, 0.0, 0.0),
+            mass,
+            true,
+        )?;
+    }
+    Ok(world)
+}
+
+fn ccd_no_contact_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = mass()?;
+    for index in 0..64 {
+        let x = -5.0 - index as f64 * 2.0;
+        add_sphere_with_velocity(
+            &mut world,
+            Vec3::new(x, 0.0, 0.0),
+            Vec3::new(1000.0, 0.0, 0.0),
+            mass,
+            true,
+        )?;
+    }
+    Ok(world)
+}
+
+fn ccd_large_island_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 0.5, 1.0)?)?;
+    let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let wall = world.add_collider(
+        wall,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 2.0, 2.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    world.set_collider_material(wall, Some(material))?;
+
+    let mass = mass()?;
+    for index in 0..64 {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(
+                Vec3::new(-5.0 - index as f64 * 17.0, 0.0, 0.0),
+                Quat::IDENTITY,
+            )?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::new(1000.0, 0.0, 0.0))?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body)?;
+        let collider = world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?;
+        world.set_collider_material(collider, Some(material))?;
+    }
+    Ok(world)
+}
+
+fn ccd_sequence_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    add_bench_plane(&mut world, Vec3::X, -1.0, material)?;
+    add_bench_plane(&mut world, -Vec3::X, -1.0, material)?;
+
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass()?)?;
+    body.set_linear_velocity(Vec3::new(600.0, 0.0, 0.0))?;
+    body.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(body)?;
+    let collider = world.add_collider(
+        body,
+        Collider::new(Shape::Sphere(Sphere::new(0.2)?), Transform::identity()),
+    )?;
+    world.set_collider_material(collider, Some(material))?;
+    Ok(world)
+}
+
+fn ccd_rebound_scene() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let wall = world.add_collider(
+        wall_body,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    world.set_collider_material(wall, Some(material))?;
+
+    let target_body = world.add_body(RigidBody::new_static(Transform::new(
+        Vec3::new(15.0, 0.0, 0.0),
+        Quat::IDENTITY,
+    )?))?;
+    let target = world.add_collider(
+        target_body,
+        Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+    )?;
+    world.set_collider_material(target, Some(material))?;
+
+    let mut body = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY)?,
+        mass()?,
+    )?;
+    body.set_linear_velocity(Vec3::new(-2000.0, 0.0, 0.0))?;
+    body.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(body)?;
+    let collider = world.add_collider(
+        body,
+        Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+    )?;
+    world.set_collider_material(collider, Some(material))?;
+    Ok(world)
+}
+
+fn add_bench_plane(
+    world: &mut PhysicsWorld,
+    normal: Vec3,
+    distance: f64,
+    material: kapitsa_core::material::MaterialId,
+) -> Result<(), Box<dyn Error>> {
+    let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let collider = world.add_collider(
+        body,
+        Collider::new(
+            Shape::Plane(Plane::from_vec(normal, distance)?),
+            Transform::identity(),
+        ),
+    )?;
+    world.set_collider_material(collider, Some(material))?;
+    Ok(())
+}
+
+fn ccd_box_scene_of(count: usize) -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let columns = (count as f64).sqrt().ceil() as usize;
+    let side = columns as f64 * 8.0 + 4.0;
+    world.add_collider(
+        wall,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, side, side)?),
+            Transform::identity(),
+        ),
+    )?;
+    let mass = mass()?;
+    for index in 0..count {
+        let y = (index % columns) as f64 * 4.0;
+        let z = (index / columns) as f64 * 4.0;
+        let mut moving_body =
+            RigidBody::new_dynamic(Transform::new(Vec3::new(-5.0, y, z), Quat::IDENTITY)?, mass)?;
+        moving_body.set_linear_velocity(Vec3::new(1000.0, 0.0, 0.0))?;
+        moving_body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(moving_body)?;
+        world.add_collider(
+            body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            ),
+        )?;
+    }
+    Ok(world)
+}
+
+fn report_ccd_worker_scaling() -> Result<(), Box<dyn Error>> {
+    println!("\nIndependent CCD islands by worker count");
+    report_ccd_worker_scaling_for(&[1, 2, 4, 8, 16, 64, 128, 256, 512, 1_024], ccd_scene_of)
+}
+
+fn report_ccd_gjk_worker_scaling() -> Result<(), Box<dyn Error>> {
+    println!("\nIndependent GJK-heavy CCD islands by worker count");
+    report_ccd_worker_scaling_for(&[8, 16, 64, 128, 256, 512, 1_024], ccd_box_scene_of)
+}
+
+fn report_joint_worker_scaling() -> Result<(), Box<dyn Error>> {
+    println!("\nJoint solver scaling by worker count; one step/sample");
+    for (name, build) in [
+        (
+            "2,048 independent fixed-joint islands",
+            independent_joint_islands as fn() -> _,
+        ),
+        ("512 bodies, one fixed-joint chain", fixed_joint_chain),
+    ] {
+        let mut results = Vec::with_capacity(4);
+        for worker_count in [1, 2, 4, 8] {
+            for _ in 0..WARMUP_RUNS {
+                run_joint_step(build, worker_count)?;
+            }
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for _ in 0..SAMPLES {
+                samples.push(run_joint_step(build, worker_count)?);
+            }
+            samples.sort_unstable_by_key(|sample| sample.0);
+            results.push((worker_count, samples));
+        }
+
+        let baseline = results
+            .first()
+            .and_then(|(_, samples)| samples.get(SAMPLES / 2))
+            .ok_or("missing joint benchmark sample")?
+            .0;
+        println!("{name}");
+        for (worker_count, samples) in results {
+            let min = samples.first().ok_or("missing joint benchmark sample")?;
+            let median = samples
+                .get(SAMPLES / 2)
+                .ok_or("missing joint benchmark sample")?;
+            let max = samples.last().ok_or("missing joint benchmark sample")?;
+            println!(
+                "  x{worker_count}: step={:.3}/{:.3}/{:.3} ms solver={:.3} ms prepare/iterations/writeback={:.3}/{:.3}/{:.3} ms islands={} speedup={:.2}x scratch={} KiB",
+                millis(min.0),
+                millis(median.0),
+                millis(max.0),
+                millis(median.1.solver),
+                millis(median.1.solver_prepare),
+                millis(median.1.solver_iterations),
+                millis(median.1.solver_writeback),
+                median.1.island_count,
+                baseline.as_secs_f64() / median.0.as_secs_f64(),
+                median.1.retained_scratch_bytes / 1024,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_joint_step(
+    build: fn() -> Result<PhysicsWorld, Box<dyn Error>>,
+    worker_count: usize,
+) -> Result<(Duration, CollisionStepMetrics), Box<dyn Error>> {
+    let mut world = build()?;
+    let started = Instant::now();
+    world.step_with_executor(DT, &ScopedThreadExecutor, worker_count)?;
+    Ok((started.elapsed(), world.collision_step_metrics()))
+}
+
+fn independent_joint_islands() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = mass()?;
+    let common = JointCommon::new(
+        JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+        JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+    );
+    for pair in 0..2_048 {
+        let position = Vec3::X * (pair as f64 * 3.0);
+        let body_a = world.add_body(RigidBody::new_dynamic(
+            Transform::new(position, Quat::IDENTITY)?,
+            mass,
+        )?)?;
+        let mut body_b =
+            RigidBody::new_dynamic(Transform::new(position + Vec3::X, Quat::IDENTITY)?, mass)?;
+        body_b.set_linear_velocity(Vec3::Y * 0.1)?;
+        let body_b = world.add_body(body_b)?;
+        world.add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))?;
+    }
+    Ok(world)
+}
+
+fn fixed_joint_chain() -> Result<PhysicsWorld, Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = mass()?;
+    let mut bodies = Vec::with_capacity(512);
+    for index in 0..512 {
+        let velocity = if index == 511 {
+            Vec3::Y * 0.1
+        } else {
+            Vec3::ZERO
+        };
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::X * index as f64, Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(velocity)?;
+        bodies.push(world.add_body(body)?);
+    }
+    let common = JointCommon::new(
+        JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+        JointFrame::new(Vec3::X * -0.5, Quat::IDENTITY),
+    );
+    for pair in bodies.windows(2) {
+        world.add_joint(pair[0], pair[1], Joint::Fixed(FixedJoint::new(common)))?;
+    }
+    Ok(world)
+}
+
+fn report_ccd_worker_scaling_for(
+    body_counts: &[usize],
+    scene: fn(usize) -> Result<PhysicsWorld, Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    for body_count in body_counts.iter().copied() {
+        for worker_count in [1, 2, 4] {
+            for _ in 0..WARMUP_RUNS {
+                run_ccd_shards_with(body_count, worker_count, scene)?;
+            }
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for _ in 0..SAMPLES {
+                samples.push(run_ccd_shards_with(body_count, worker_count, scene)?);
+            }
+            samples.sort_unstable_by_key(|sample| sample.0);
+            let mut ccd_samples = samples
+                .iter()
+                .map(|sample| sample.1.ccd)
+                .collect::<Vec<_>>();
+            ccd_samples.sort_unstable();
+            let median = samples[SAMPLES / 2];
+            println!(
+                "{body_count:4} bodies x{worker_count}: step={:.3}/{:.3}/{:.3} ms | ccd={:.3}/{:.3}/{:.3} ms | islands={} parallel={} tasks={} candidates={} toi={} resweeps={} fallback={} scratch={} KiB",
+                millis(samples[0].0),
+                millis(median.0),
+                millis(samples[SAMPLES - 1].0),
+                millis(ccd_samples[0]),
+                millis(ccd_samples[SAMPLES / 2]),
+                millis(ccd_samples[SAMPLES - 1]),
+                median.1.ccd_island_count,
+                median.1.ccd_parallel_island_count,
+                median.1.worker_tasks_started,
+                median.1.ccd_initial_candidate_count,
+                median.1.ccd_toi_call_count,
+                median.1.ccd_resweep_count,
+                median.1.ccd_global_fallback_count,
+                median.1.retained_scratch_bytes / 1024,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_ccd_shards_with(
+    body_count: usize,
+    worker_count: usize,
+    scene: fn(usize) -> Result<PhysicsWorld, Box<dyn Error>>,
+) -> Result<(Duration, CollisionStepMetrics), Box<dyn Error>> {
+    let mut world = scene(body_count)?;
+    let mut shards = (0..worker_count).map(|_| Vec::new()).collect::<Vec<_>>();
+    world.fill_step_shards(&mut shards)?;
+    let started = Instant::now();
+    for shard in &mut shards {
+        for body in shard {
+            body.integrate(DT)?;
+        }
+    }
+    world.commit_step_shards_with_executor(&shards, &ScopedThreadExecutor, worker_count)?;
+    Ok((started.elapsed(), world.collision_step_metrics()))
+}
+
+fn add_surface_movers(
+    world: &mut PhysicsWorld,
+    count: usize,
+    mass: MassProperties,
+) -> Result<(), Box<dyn Error>> {
+    for index in 0..count {
+        let x = (index % 32) as f64 * 2.0 - 31.0;
+        let z = (index / 32) as f64 * 2.0 - 15.0;
+        add_sphere_with_velocity(
+            world,
+            Vec3::new(x, 0.6, z),
+            Vec3::new(0.0, -10.0, 0.0),
+            mass,
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+fn add_static_sphere(world: &mut PhysicsWorld, position: Vec3) -> Result<(), Box<dyn Error>> {
+    let body = world.add_body(RigidBody::new_static(Transform::new(
+        position,
+        Quat::IDENTITY,
+    )?))?;
+    world.add_collider(
+        body,
+        Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+    )?;
+    Ok(())
+}
+
+fn add_sphere(
+    world: &mut PhysicsWorld,
+    position: Vec3,
+    velocity: Vec3,
+    mass: MassProperties,
+    continuous: bool,
+) -> Result<(), Box<dyn Error>> {
+    add_sphere_with_velocity(world, position, velocity, mass, continuous)
+}
+
+fn add_sphere_with_velocity(
+    world: &mut PhysicsWorld,
+    position: Vec3,
+    velocity: Vec3,
+    mass: MassProperties,
+    continuous: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut body = RigidBody::new_dynamic(Transform::new(position, Quat::IDENTITY)?, mass)?;
+    body.set_linear_velocity(velocity)?;
+    if continuous {
+        body.set_ccd_mode(CcdMode::Continuous);
+    }
+    let id = world.add_body(body)?;
+    world.add_collider(
+        id,
+        Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+    )?;
+    Ok(())
+}
+
+fn mass() -> Result<MassProperties, Box<dyn Error>> {
+    Ok(MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?)
+}
+
+fn report_world(
+    name: &str,
+    build: impl Fn() -> Result<PhysicsWorld, Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
+    for _ in 0..WARMUP_RUNS {
+        let mut world = build()?;
+        black_box(world.step(DT)?);
+    }
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let mut world = build()?;
+        let started = Instant::now();
+        world.step(DT)?;
+        samples.push(Sample {
+            elapsed: started.elapsed(),
+            metrics: world.collision_step_metrics(),
+        });
+    }
+    samples.sort_unstable_by_key(|sample| sample.elapsed);
+    let median = &samples[SAMPLES / 2];
+    let min = samples.first().ok_or("missing benchmark sample")?;
+    let max = samples.last().ok_or("missing benchmark sample")?;
+    let mut ccd_samples = samples
+        .iter()
+        .map(|sample| sample.metrics.ccd)
+        .collect::<Vec<_>>();
+    ccd_samples.sort_unstable();
+    let high_water = samples
+        .iter()
+        .map(|sample| sample.metrics.retained_scratch_bytes)
+        .max()
+        .unwrap_or(0);
+    println!(
+        "{name:38} step={:.3}/{:8.3}/{:8.3} ms min/median/max | candidates={} contacts={} solver_islands={} ccd_islands={} ccd_impacts={} ccd_clipped={} clipped_bodies={} | CCD initial={} final={} toi_calls={} repeated={} broad_builds={} refreshes={} resweeps={} local/inter={} / {} visited={} proxy_updates={} new_pairs={} fallback={} recalc(local/global)={}/{} replay(local/islands)={}/{} tasks={} invalidated={} | ccd={:.3}/{:.3}/{:.3} ms min/median/max phases(prep/exec/commit)={:.3}/{:.3}/{:.3} search={:.3} refresh={:.3} resolve={:.3} ms | index={:.3} broad={:.3} narrow={:.3} islands={:.3} solver={:.3} (prepare={:.3}, iterations={:.3}, writeback={:.3}) events={:.3} commit={:.3} ms | body_copies={} manifold_copies={} growth={} B retained_scratch~{} KiB query_index~{} KiB peak_sampled~{} KiB",
+        millis(min.elapsed),
+        millis(median.elapsed),
+        millis(max.elapsed),
+        median.metrics.candidate_count,
+        median.metrics.contact_count,
+        median.metrics.island_count,
+        median.metrics.ccd_island_count,
+        median.metrics.ccd_impact_count,
+        median.metrics.ccd_clipped_island_count,
+        median.metrics.ccd_clipped_body_count,
+        median.metrics.ccd_initial_candidate_count,
+        median.metrics.ccd_final_candidate_count,
+        median.metrics.ccd_toi_call_count,
+        median.metrics.ccd_repeated_toi_call_count,
+        median.metrics.ccd_broad_phase_build_count,
+        median.metrics.ccd_candidate_refresh_count,
+        median.metrics.ccd_resweep_count,
+        median.metrics.ccd_local_resweep_count,
+        median.metrics.ccd_interisland_resweep_count,
+        median.metrics.ccd_resweep_colliders_visited,
+        median.metrics.ccd_resweep_proxies_updated,
+        median.metrics.ccd_new_candidate_count,
+        median.metrics.ccd_global_fallback_count,
+        median.metrics.ccd_local_toi_recalculation_count,
+        median.metrics.ccd_global_toi_recalculation_count,
+        median.metrics.ccd_local_replay_count,
+        median.metrics.ccd_replayed_island_count,
+        median.metrics.worker_tasks_started,
+        median.metrics.ccd_invalidated_toi_count,
+        millis(ccd_samples[0]),
+        millis(ccd_samples[SAMPLES / 2]),
+        millis(ccd_samples[SAMPLES - 1]),
+        millis(median.metrics.ccd_island_prepare),
+        millis(median.metrics.ccd_island_execute),
+        millis(median.metrics.ccd_island_commit),
+        millis(median.metrics.ccd_toi_search),
+        millis(median.metrics.ccd_candidate_refresh),
+        millis(median.metrics.ccd_contact_resolution),
+        millis(median.metrics.spatial_index),
+        millis(median.metrics.broad_phase),
+        millis(median.metrics.narrow_phase),
+        millis(median.metrics.island_build),
+        millis(median.metrics.solver),
+        millis(median.metrics.solver_prepare),
+        millis(median.metrics.solver_iterations),
+        millis(median.metrics.solver_writeback),
+        millis(median.metrics.events),
+        millis(median.metrics.commit),
+        median.metrics.solver_body_copies,
+        median.metrics.solver_manifold_copies,
+        median.metrics.logical_capacity_growth_bytes,
+        median.metrics.retained_scratch_bytes / 1024,
+        median.metrics.committed_query_index_bytes / 1024,
+        median.metrics.peak_scratch_bytes.max(high_water) / 1024,
+    );
+    Ok(())
+}
+
+fn report_queries() -> Result<(), Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    for index in 0..20_000 {
+        let x = (index % 200) as f64 * 2.0;
+        let y = (index / 200) as f64 * 2.0;
+        add_static_sphere(&mut world, Vec3::new(x, y, 0.0))?;
+    }
+    let ray = Ray::new(Vec3::new(-1.0, 0.0, 0.0), Vec3::X, 500.0)?;
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for _ in 0..WARMUP_RUNS {
+        for _ in 0..1_000 {
+            black_box(world.raycast(ray, QueryFilter::default())?);
+        }
+    }
+    for _ in 0..SAMPLES {
+        let started = Instant::now();
+        for _ in 0..1_000 {
+            black_box(world.raycast(ray, QueryFilter::default())?);
+        }
+        samples.push(started.elapsed());
+    }
+    samples.sort_unstable();
+    println!(
+        "{:38} 1,000 rays={:.3}/{:.3}/{:.3} ms min/median/max | colliders={} | median={:.3} us/query",
+        "Spatial queries under load",
+        millis(*samples.first().ok_or("missing benchmark sample")?),
+        millis(samples[SAMPLES / 2]),
+        millis(*samples.last().ok_or("missing benchmark sample")?),
+        world.colliders().count(),
+        samples[SAMPLES / 2].as_secs_f64() * 1.0e6 / 1_000.0,
+    );
+    Ok(())
+}
+
+fn millis(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}

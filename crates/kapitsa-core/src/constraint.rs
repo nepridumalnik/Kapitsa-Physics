@@ -1,0 +1,358 @@
+use kapitsa_math::{CholeskyError, Vec3};
+
+use crate::{
+    mass::MassProperties,
+    rigid_body::{BodyType, RigidBody, solver_mass::SolverMass},
+};
+
+/// A staged body shared by the contact and joint solvers.
+#[derive(Clone, Copy)]
+pub(crate) struct SolverBody {
+    pub(crate) body: RigidBody,
+}
+
+impl SolverBody {
+    pub(crate) fn state(&self) -> crate::rigid_body::BodyState {
+        *self.body.state()
+    }
+
+    pub(crate) fn from_prediction(
+        mut body: RigidBody,
+        state: crate::rigid_body::BodyState,
+    ) -> Self {
+        body.commit_integrated_state(state);
+        Self { body }
+    }
+
+    pub(crate) fn body(&self) -> &RigidBody {
+        &self.body
+    }
+
+    pub(crate) fn body_mut(&mut self) -> &mut RigidBody {
+        &mut self.body
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn set_rigid_state(
+        &mut self,
+        transform: crate::transform::Transform,
+        linear_velocity: Vec3,
+        angular_velocity: Vec3,
+    ) -> Result<(), ConstraintError> {
+        self.body
+            .set_transform(transform)
+            .map_err(|_| ConstraintError::ArithmeticOverflow)?;
+        self.body
+            .set_linear_velocity(linear_velocity)
+            .map_err(|_| ConstraintError::ArithmeticOverflow)?;
+        self.body
+            .set_angular_velocity(angular_velocity)
+            .map_err(|_| ConstraintError::ArithmeticOverflow)?;
+        Ok(())
+    }
+}
+
+/// Read access to solver bodies with mutation limited to dynamic bodies.
+///
+/// The collision color scheduler also implements this for a checked local pair
+/// so independent constraints can update their island bodies in place.
+pub(crate) trait SolverBodyAccess {
+    fn len(&self) -> usize;
+    fn get(&self, index: usize) -> Option<&SolverBody>;
+    fn get_dynamic_mut(&mut self, index: usize) -> Option<&mut SolverBody>;
+}
+
+impl SolverBodyAccess for [SolverBody] {
+    fn len(&self) -> usize {
+        <[SolverBody]>::len(self)
+    }
+
+    fn get(&self, index: usize) -> Option<&SolverBody> {
+        <[SolverBody]>::get(self, index)
+    }
+
+    fn get_dynamic_mut(&mut self, index: usize) -> Option<&mut SolverBody> {
+        let body = <[SolverBody]>::get_mut(self, index)?;
+        (body.body().physics().body_type() == BodyType::Dynamic).then_some(body)
+    }
+}
+
+impl<const N: usize> SolverBodyAccess for [SolverBody; N] {
+    fn len(&self) -> usize {
+        N
+    }
+
+    fn get(&self, index: usize) -> Option<&SolverBody> {
+        <[SolverBody]>::get(self, index)
+    }
+
+    fn get_dynamic_mut(&mut self, index: usize) -> Option<&mut SolverBody> {
+        let body = <[SolverBody]>::get_mut(self, index)?;
+        (body.body().physics().body_type() == BodyType::Dynamic).then_some(body)
+    }
+}
+
+/// Builds an orthonormal tangent basis for a nonzero normal.
+pub(crate) fn tangent_basis(normal: Vec3) -> Option<(Vec3, Vec3)> {
+    let axis = if normal.x.abs() <= normal.y.abs() && normal.x.abs() <= normal.z.abs() {
+        Vec3::X
+    } else if normal.y.abs() <= normal.z.abs() {
+        Vec3::Y
+    } else {
+        Vec3::Z
+    };
+    let tangent_a = normal.checked_cross(axis).and_then(Vec3::try_normalize)?;
+    let tangent_b = normal
+        .checked_cross(tangent_a)
+        .and_then(Vec3::try_normalize)?;
+    Some((tangent_a, tangent_b))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConstraintError {
+    InvalidMass,
+    ArithmeticOverflow,
+    NonConvergent,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Jacobian {
+    pub(crate) linear: Vec3,
+    pub(crate) angular: Vec3,
+}
+
+fn inverse_inertia_world_with_mass(
+    body: &RigidBody,
+    mass: MassProperties,
+    impulse: Vec3,
+) -> Result<Vec3, ConstraintError> {
+    let rotation = body.state().transform().rotation();
+    let local = rotation
+        .conjugate()
+        .rotate_vector(impulse)
+        .ok_or(ConstraintError::ArithmeticOverflow)?;
+    let local_response = mass
+        .inertia()
+        .solve_spd(local)
+        .map_err(map_cholesky_error)?;
+    rotation
+        .rotate_vector(local_response)
+        .ok_or(ConstraintError::ArithmeticOverflow)
+}
+
+pub(crate) fn effective_cross_mass_at(
+    body_a: &RigidBody,
+    body_b: &RigidBody,
+    position_a: Vec3,
+    position_b: Vec3,
+    measurement: Vec3,
+    impulse: Vec3,
+) -> Result<f64, ConstraintError> {
+    let mut result = 0.0;
+    for (body, position) in [(body_a, position_a), (body_b, position_b)] {
+        if body.physics().body_type() != BodyType::Dynamic {
+            continue;
+        }
+        let mass = body.physics().mass().ok_or(ConstraintError::InvalidMass)?;
+        let linear_term = mass.mass().recip()
+            * measurement
+                .checked_dot(impulse)
+                .ok_or(ConstraintError::ArithmeticOverflow)?;
+        let center = body
+            .world_center_of_mass()
+            .map_err(map_body_error)?
+            .unwrap_or(body.state().transform().translation());
+        let offset = position
+            .checked_sub(center)
+            .ok_or(ConstraintError::ArithmeticOverflow)?;
+        let torque = offset
+            .checked_cross(impulse)
+            .ok_or(ConstraintError::ArithmeticOverflow)?;
+        let response = inverse_inertia_world_with_mass(body, mass, torque)?;
+        let angular_velocity = response
+            .checked_cross(offset)
+            .ok_or(ConstraintError::ArithmeticOverflow)?;
+        let angular_term = measurement
+            .checked_dot(angular_velocity)
+            .ok_or(ConstraintError::ArithmeticOverflow)?;
+        result += linear_term + angular_term;
+        if !result.is_finite() {
+            return Err(ConstraintError::ArithmeticOverflow);
+        }
+    }
+    Ok(result)
+}
+
+/// Generalized inverse-mass matrix entry for two scalar Jacobian rows.
+pub(crate) fn effective_cross_mass(
+    body_a: &RigidBody,
+    body_b: &RigidBody,
+    measurement: [Jacobian; 2],
+    impulse: [Jacobian; 2],
+) -> Result<f64, ConstraintError> {
+    let mut result = 0.0;
+    for (body, measurement, impulse) in [
+        (body_a, measurement[0], impulse[0]),
+        (body_b, measurement[1], impulse[1]),
+    ] {
+        if body.physics().body_type() != BodyType::Dynamic {
+            continue;
+        }
+        let mass = body.physics().mass().ok_or(ConstraintError::InvalidMass)?;
+        result += mass.mass().recip()
+            * measurement
+                .linear
+                .checked_dot(impulse.linear)
+                .ok_or(ConstraintError::ArithmeticOverflow)?;
+        result += measurement
+            .angular
+            .checked_dot(inverse_inertia_world_with_mass(
+                body,
+                mass,
+                impulse.angular,
+            )?)
+            .ok_or(ConstraintError::ArithmeticOverflow)?;
+        if !result.is_finite() {
+            return Err(ConstraintError::ArithmeticOverflow);
+        }
+    }
+    Ok(result)
+}
+
+/// Generalized inverse-mass matrix entry using per-body derived solver mass.
+pub(crate) fn effective_cross_mass_cached(
+    masses: [SolverMass; 2],
+    measurement: [Jacobian; 2],
+    impulse: [Jacobian; 2],
+) -> Result<f64, ConstraintError> {
+    let mut result = 0.0;
+    for index in 0..2 {
+        let contribution = if measurement[index].linear == impulse[index].linear
+            && measurement[index].angular == impulse[index].angular
+        {
+            masses[index].diagonal(measurement[index].linear, measurement[index].angular)
+        } else {
+            masses[index].cross(
+                measurement[index].linear,
+                measurement[index].angular,
+                impulse[index].linear,
+                impulse[index].angular,
+            )
+        }
+        .map_err(map_solver_mass_error)?;
+        result += contribution;
+        if !result.is_finite() {
+            return Err(ConstraintError::ArithmeticOverflow);
+        }
+    }
+    Ok(result)
+}
+
+pub(crate) fn point_velocity(body: &RigidBody, position: Vec3) -> Result<Vec3, ConstraintError> {
+    let center = body
+        .world_center_of_mass()
+        .map_err(map_body_error)?
+        .unwrap_or(body.state().transform().translation());
+    let offset = position
+        .checked_sub(center)
+        .ok_or(ConstraintError::ArithmeticOverflow)?;
+    body.state()
+        .angular_velocity()
+        .checked_cross(offset)
+        .and_then(|angular| angular.checked_add(body.state().linear_velocity()))
+        .ok_or(ConstraintError::ArithmeticOverflow)
+}
+
+pub(crate) fn relative_velocity_at(
+    body_a: &RigidBody,
+    body_b: &RigidBody,
+    position_a: Vec3,
+    position_b: Vec3,
+) -> Result<Vec3, ConstraintError> {
+    point_velocity(body_b, position_b)?
+        .checked_sub(point_velocity(body_a, position_a)?)
+        .ok_or(ConstraintError::ArithmeticOverflow)
+}
+
+pub(crate) fn apply_point_impulse(
+    body: &mut RigidBody,
+    point: Vec3,
+    impulse: Vec3,
+) -> Result<(), ConstraintError> {
+    body.apply_impulse_at_point(impulse, point)
+        .map_err(map_body_error)
+}
+
+pub(crate) fn apply_point_position_impulse(
+    body: &mut RigidBody,
+    point: Vec3,
+    impulse: Vec3,
+) -> Result<(), ConstraintError> {
+    body.apply_position_impulse(impulse, point)
+        .map_err(map_body_error)
+}
+
+pub(crate) fn apply_generalized_impulse_cached(
+    body: &mut RigidBody,
+    mass: SolverMass,
+    impulse: Jacobian,
+) -> Result<(), ConstraintError> {
+    body.apply_constraint_impulse_cached(impulse.linear, impulse.angular, mass)
+        .map_err(map_body_error)
+}
+
+pub(crate) fn apply_generalized_impulse(
+    body: &mut RigidBody,
+    impulse: Jacobian,
+) -> Result<(), ConstraintError> {
+    body.apply_constraint_impulse(impulse.linear, impulse.angular)
+        .map_err(map_body_error)
+}
+
+pub(crate) fn apply_generalized_position_impulse(
+    body: &mut RigidBody,
+    impulse: Jacobian,
+) -> Result<(), ConstraintError> {
+    body.apply_constraint_position_impulse(impulse.linear, impulse.angular)
+        .map_err(map_body_error)
+}
+
+pub(crate) fn apply_generalized_position_impulse_cached(
+    body: &mut RigidBody,
+    mass: SolverMass,
+    impulse: Jacobian,
+) -> Result<(), ConstraintError> {
+    body.apply_constraint_position_impulse_cached(impulse.linear, impulse.angular, mass)
+        .map_err(map_body_error)
+}
+
+fn map_body_error(error: crate::rigid_body::BodyError) -> ConstraintError {
+    match error {
+        crate::rigid_body::BodyError::ArithmeticOverflow
+        | crate::rigid_body::BodyError::NonFiniteValue => ConstraintError::ArithmeticOverflow,
+        crate::rigid_body::BodyError::InvalidInertiaTensor => ConstraintError::NonConvergent,
+        crate::rigid_body::BodyError::BodyMustBeDynamic
+        | crate::rigid_body::BodyError::StaticBodyCannotHaveVelocity => {
+            ConstraintError::InvalidMass
+        }
+    }
+}
+
+fn map_cholesky_error(error: CholeskyError) -> ConstraintError {
+    match error {
+        CholeskyError::NonFiniteInput | CholeskyError::ResultOutOfRange => {
+            ConstraintError::ArithmeticOverflow
+        }
+        CholeskyError::NotSymmetric | CholeskyError::NotPositiveDefinite => {
+            ConstraintError::NonConvergent
+        }
+    }
+}
+
+fn map_solver_mass_error(error: crate::collision::CollisionError) -> ConstraintError {
+    match error {
+        crate::collision::CollisionError::InvalidContact => ConstraintError::InvalidMass,
+        crate::collision::CollisionError::ArithmeticOverflow => ConstraintError::ArithmeticOverflow,
+        _ => ConstraintError::NonConvergent,
+    }
+}

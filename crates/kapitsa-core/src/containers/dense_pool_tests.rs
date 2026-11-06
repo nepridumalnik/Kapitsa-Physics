@@ -255,3 +255,153 @@ fn values_length_stays_synchronized_with_pool_length() -> Result<(), DensePoolEr
     assert!(pool.values().is_empty());
     Ok(())
 }
+
+#[test]
+fn try_insert_many_commits_as_a_batch_and_reuses_free_slots() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let first = pool.insert(1)?;
+    let second = pool.insert(2)?;
+    let third = pool.insert(3)?;
+    assert_eq!(pool.remove(second), Some(2));
+    assert_eq!(pool.remove(first), Some(1));
+
+    let ids = pool.try_insert_many(vec![10, 11, 12, 13])?;
+
+    assert_eq!(ids.len(), 4);
+    assert_eq!(ids[0].index(), first.index());
+    assert_eq!(ids[1].index(), second.index());
+    assert_eq!(ids[2].index(), 3);
+    assert_eq!(ids[3].index(), 4);
+    for (id, expected) in ids.iter().copied().zip([10, 11, 12, 13]) {
+        assert_eq!(pool.get(id), Some(&expected));
+    }
+    assert_eq!(pool.get(third), Some(&3));
+    assert!(!pool.contains(first));
+    assert!(!pool.contains(second));
+    Ok(())
+}
+
+#[test]
+fn try_insert_many_with_no_values_is_a_no_op() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let id = pool.insert(1)?;
+
+    assert!(pool.try_insert_many(Vec::new())?.is_empty());
+    assert_eq!(pool.get(id), Some(&1));
+    Ok(())
+}
+
+#[test]
+fn try_insert_many_rolls_back_values_slots_and_generations() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let first = pool.insert(1)?;
+    let second = pool.insert(2)?;
+    let third = pool.insert(3)?;
+    assert_eq!(pool.remove(first), Some(1));
+    assert_eq!(pool.remove(second), Some(2));
+
+    let values_before = pool.values().to_vec();
+    let free_head_before = pool.free_head;
+    let slots_before = pool
+        .slots
+        .iter()
+        .map(|slot| (slot.generation, slot.state))
+        .collect::<Vec<_>>();
+    let first_generation = pool.slots[first.index() as usize].generation;
+    let second_generation = pool.slots[second.index() as usize].generation;
+
+    let result = pool.try_insert_many_failing_after(vec![10, 11, 12], 2);
+
+    assert_eq!(result, Err(DensePoolError::CapacityExceeded));
+    assert_eq!(pool.values(), values_before);
+    assert_eq!(pool.free_head, free_head_before);
+    assert_eq!(
+        pool.slots
+            .iter()
+            .map(|slot| (slot.generation, slot.state))
+            .collect::<Vec<_>>(),
+        slots_before
+    );
+    assert!(!pool.values().contains(&10));
+    assert!(!pool.values().contains(&11));
+    assert_eq!(pool.get(third), Some(&3));
+
+    let ids = pool.try_insert_many(vec![20, 21])?;
+    assert_eq!(ids[0].index(), second.index());
+    assert_eq!(ids[0].generation(), second_generation);
+    assert_eq!(ids[1].index(), first.index());
+    assert_eq!(ids[1].generation(), first_generation);
+    Ok(())
+}
+
+#[test]
+fn reserves_insertions_for_reused_and_new_slots() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let first = pool.insert(1)?;
+    let second = pool.insert(2)?;
+    let third = pool.insert(3)?;
+    assert_eq!(pool.remove(second), Some(2));
+    assert_eq!(pool.remove(first), Some(1));
+
+    pool.try_reserve_insertions(4)?;
+    let ids = [
+        pool.insert(10)?,
+        pool.insert(11)?,
+        pool.insert(12)?,
+        pool.insert(13)?,
+    ];
+
+    assert_eq!(ids[0].index(), first.index());
+    assert_eq!(ids[1].index(), second.index());
+    assert_eq!(ids[2].index(), 3);
+    assert_eq!(ids[3].index(), 4);
+    assert_eq!(pool.get(third), Some(&3));
+    Ok(())
+}
+
+#[test]
+fn reserve_overflow_does_not_change_pool() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let id = pool.insert(7)?;
+    let values = pool.values().to_vec();
+    let dense_to_slot = pool.dense_to_slot.clone();
+    let slots = pool
+        .slots
+        .iter()
+        .map(|slot| (slot.generation, slot.state))
+        .collect::<Vec<_>>();
+    let free_head = pool.free_head;
+
+    assert_eq!(
+        pool.try_reserve_insertions(usize::MAX),
+        Err(DensePoolError::IndexOverflow)
+    );
+    assert_eq!(pool.values(), values.as_slice());
+    assert_eq!(pool.dense_to_slot, dense_to_slot);
+    assert_eq!(
+        pool.slots
+            .iter()
+            .map(|slot| (slot.generation, slot.state))
+            .collect::<Vec<_>>(),
+        slots
+    );
+    assert_eq!(pool.free_head, free_head);
+    assert_eq!(pool.get(id), Some(&7));
+    Ok(())
+}
+
+#[test]
+fn reserve_rejects_a_cycle_before_insertion() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let id = pool.insert(7)?;
+    assert_eq!(pool.remove(id), Some(7));
+    pool.slots[id.index() as usize].state = SlotState::Free {
+        next: Some(id.index()),
+    };
+    assert_eq!(
+        pool.try_reserve_insertions(2),
+        Err(DensePoolError::InvalidFreeList)
+    );
+    assert_eq!(pool.len(), 0);
+    Ok(())
+}

@@ -2,6 +2,7 @@ pub mod error;
 mod forces;
 pub(crate) mod integrator;
 mod physics;
+pub(crate) mod solver_mass;
 mod state;
 
 pub use error::BodyError;
@@ -10,9 +11,16 @@ pub use integrator::IntegrationError;
 pub use physics::{BodyPhysics, BodyType};
 pub use state::BodyState;
 
-pub(crate) use integrator::predict;
+/// Continuous collision detection policy for a rigid body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CcdMode {
+    Discrete,
+    Continuous,
+}
 
-use kapitsa_math::{CholeskyError, Vec3};
+pub(crate) use integrator::{predict, predict_from_state, trajectory_bounds};
+
+use kapitsa_math::{CholeskyError, Quat, Vec3};
 
 use crate::{mass::MassProperties, transform::Transform};
 
@@ -25,6 +33,7 @@ pub struct RigidBody {
     state: BodyState,
     physics: BodyPhysics,
     forces: BodyForces,
+    ccd_mode: CcdMode,
 }
 
 impl RigidBody {
@@ -58,6 +67,7 @@ impl RigidBody {
                 force: Vec3::ZERO,
                 torque: Vec3::ZERO,
             },
+            ccd_mode: CcdMode::Discrete,
         }
     }
 
@@ -71,6 +81,14 @@ impl RigidBody {
 
     pub fn forces(&self) -> &BodyForces {
         &self.forces
+    }
+
+    pub fn ccd_mode(&self) -> CcdMode {
+        self.ccd_mode
+    }
+
+    pub fn set_ccd_mode(&mut self, mode: CcdMode) {
+        self.ccd_mode = mode;
     }
 
     /// Replaces the world transform while preserving velocities.
@@ -119,8 +137,15 @@ impl RigidBody {
 
     /// Replaces dynamic mass properties without changing position or velocity.
     ///
+    /// This is a state edit, not a model of fuel ejection, mass transfer, or
+    /// attachment: it does not conserve linear or angular momentum. When the
+    /// local center of mass changes, the stored linear velocity is retained
+    /// as the velocity of the new center of mass. Callers must account for
+    /// any physical impulse or momentum exchange required by their model.
+    ///
     /// Changed mass properties wake the body and clear accumulated forces and
-    /// torques, whose torque reference may otherwise be stale.
+    /// torques, whose torque reference may otherwise be stale. Separately
+    /// registered force sources are not removed by this operation.
     pub fn set_mass(&mut self, mass: MassProperties) -> Result<(), BodyError> {
         if self.physics.body_type != BodyType::Dynamic {
             return Err(BodyError::BodyMustBeDynamic);
@@ -236,6 +261,10 @@ impl RigidBody {
         self.clear_forces();
     }
 
+    pub(crate) fn set_state_preserving_forces(&mut self, state: BodyState) {
+        self.state = state;
+    }
+
     fn ensure_dynamic(&self) -> Result<(), BodyError> {
         if self.physics.body_type == BodyType::Dynamic {
             Ok(())
@@ -280,6 +309,23 @@ impl RigidBody {
             .checked_sub(center)
             .and_then(|offset| offset.checked_cross(impulse))
             .ok_or(BodyError::ArithmeticOverflow)?;
+        self.apply_constraint_impulse(impulse, angular_impulse)
+    }
+
+    pub(crate) fn apply_constraint_impulse(
+        &mut self,
+        linear_impulse: Vec3,
+        angular_impulse: Vec3,
+    ) -> Result<(), BodyError> {
+        self.ensure_dynamic()?;
+        if !linear_impulse.is_finite() || !angular_impulse.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+        if linear_impulse == Vec3::ZERO && angular_impulse == Vec3::ZERO {
+            return Ok(());
+        }
+
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
         let rotation = self.state.transform.rotation();
         let local_angular_impulse = rotation
             .conjugate()
@@ -289,7 +335,7 @@ impl RigidBody {
         let delta_angular_velocity = rotation
             .rotate_vector(local_delta_angular_velocity)
             .ok_or(BodyError::ArithmeticOverflow)?;
-        let delta_linear_velocity = impulse / mass.mass();
+        let delta_linear_velocity = linear_impulse / mass.mass();
         let next_linear_velocity = add_checked(self.state.linear_velocity, delta_linear_velocity)?;
         let next_angular_velocity =
             add_checked(self.state.angular_velocity, delta_angular_velocity)?;
@@ -297,6 +343,133 @@ impl RigidBody {
         self.state.linear_velocity = next_linear_velocity;
         self.state.angular_velocity = next_angular_velocity;
         self.state.sleeping = false;
+        Ok(())
+    }
+
+    pub(crate) fn apply_position_impulse(
+        &mut self,
+        impulse: Vec3,
+        point: Vec3,
+    ) -> Result<(), BodyError> {
+        if self.physics.body_type != BodyType::Dynamic {
+            return Ok(());
+        }
+        if !impulse.is_finite() || !point.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+        if impulse == Vec3::ZERO {
+            return Ok(());
+        }
+
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
+        let center = world_center_of_mass_for(self.state.transform, Some(mass))?
+            .ok_or(BodyError::BodyMustBeDynamic)?;
+        let angular_impulse = point
+            .checked_sub(center)
+            .and_then(|offset| offset.checked_cross(impulse))
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        self.apply_constraint_position_impulse(impulse, angular_impulse)
+    }
+
+    pub(crate) fn apply_constraint_position_impulse(
+        &mut self,
+        linear_impulse: Vec3,
+        angular_impulse: Vec3,
+    ) -> Result<(), BodyError> {
+        if self.physics.body_type != BodyType::Dynamic {
+            return Ok(());
+        }
+        if !linear_impulse.is_finite() || !angular_impulse.is_finite() {
+            return Err(BodyError::NonFiniteValue);
+        }
+        if linear_impulse == Vec3::ZERO && angular_impulse == Vec3::ZERO {
+            return Ok(());
+        }
+
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
+        let center = world_center_of_mass_for(self.state.transform, Some(mass))?
+            .ok_or(BodyError::BodyMustBeDynamic)?;
+        let rotation = self.state.transform.rotation();
+        let local_angular_impulse = rotation
+            .conjugate()
+            .rotate_vector(angular_impulse)
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let local_rotation_delta = solve_inertia(mass.inertia(), local_angular_impulse)?;
+        let rotation_delta = rotation
+            .rotate_vector(local_rotation_delta)
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let angle = rotation_delta
+            .checked_length()
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let rotation_delta = if angle > 0.0 {
+            Quat::from_axis_angle(rotation_delta / angle, angle)
+                .ok_or(BodyError::ArithmeticOverflow)?
+        } else {
+            Quat::IDENTITY
+        };
+        let next_rotation = (rotation_delta * rotation)
+            .try_normalize()
+            .filter(|rotation| rotation.is_normalized())
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_center = center
+            .checked_add(linear_impulse / mass.mass())
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_translation = next_center
+            .checked_sub(
+                next_rotation
+                    .rotate_vector(mass.center_of_mass())
+                    .ok_or(BodyError::ArithmeticOverflow)?,
+            )
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_transform = Transform::new(next_translation, next_rotation)
+            .map_err(|_| BodyError::ArithmeticOverflow)?;
+        self.set_position_projected_transform(next_transform, None)
+    }
+
+    /// A geometric orientation correction carries no physical angular impulse.
+    /// Keep spin momentum fixed while resolving angular velocity in the new inertia.
+    fn set_position_projected_transform(
+        &mut self,
+        transform: Transform,
+        inverse_inertia: Option<kapitsa_math::Mat3>,
+    ) -> Result<(), BodyError> {
+        let rotation = self.state.transform.rotation();
+        let next_rotation = transform.rotation();
+        let omega = self.state.angular_velocity;
+        if rotation == next_rotation || omega == Vec3::ZERO {
+            return self.set_transform(transform);
+        }
+        let mass = self.physics.mass.ok_or(BodyError::BodyMustBeDynamic)?;
+        let local_omega = rotation
+            .conjugate()
+            .rotate_vector(omega)
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let momentum = mass
+            .inertia()
+            .checked_mul_vector(local_omega)
+            .and_then(|value| rotation.rotate_vector(value))
+            .ok_or(BodyError::ArithmeticOverflow)?;
+        let next_omega = if let Some(inverse_inertia) = inverse_inertia {
+            // Rotate the cached response with the pose instead of factoring
+            // the same local inertia again: I_new^-1 = Q I_old^-1 Q^T.
+            let delta = next_rotation * rotation.conjugate();
+            delta
+                .conjugate()
+                .rotate_vector(momentum)
+                .and_then(|value| inverse_inertia.checked_mul_vector(value))
+                .and_then(|value| delta.rotate_vector(value))
+                .ok_or(BodyError::ArithmeticOverflow)?
+        } else {
+            let next_local_momentum = next_rotation
+                .conjugate()
+                .rotate_vector(momentum)
+                .ok_or(BodyError::ArithmeticOverflow)?;
+            next_rotation
+                .rotate_vector(solve_inertia(mass.inertia(), next_local_momentum)?)
+                .ok_or(BodyError::ArithmeticOverflow)?
+        };
+        self.set_transform(transform)?;
+        self.state.angular_velocity = next_omega;
         Ok(())
     }
 }

@@ -1,0 +1,247 @@
+use kapitsa_math::Vec3;
+
+use super::CollisionError;
+use super::CollisionPair;
+
+/// Change in the interaction state for a collider pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CollisionEventKind {
+    Begin,
+    Persist,
+    End,
+    Impact,
+}
+
+/// Representative contact data associated with a collider pair.
+///
+/// These values are not necessarily a single simultaneous measurement:
+/// discrete contacts use the deepest generated point's normal and penetration,
+/// while `point` is reconstructed from its anchors after solving. Continuous
+/// collision contacts may instead describe an earlier impact in the step.
+/// When multiple interactions for a pair are staged, later contact data can
+/// replace earlier data; `Impact` therefore does not imply this geometry is
+/// the geometry of the first impact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactInfo {
+    /// Representative world-space midpoint of the two contact anchors.
+    pub point: Vec3,
+    /// Normal of the representative generated contact.
+    pub normal: Vec3,
+    /// Penetration reported when the representative contact was generated.
+    pub penetration: f64,
+    /// Sum of normal impulses in the selected manifold, not the impulse at
+    /// `point` alone or necessarily the total across all impacts in the step.
+    pub normal_impulse: f64,
+}
+
+/// A collision lifecycle notification for one canonical collider pair.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CollisionEvent {
+    pub kind: CollisionEventKind,
+    pub pair: CollisionPair,
+    pub sensor: bool,
+    pub contact: Option<ContactInfo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CollisionInteraction {
+    pub(crate) pair: CollisionPair,
+    pub(crate) sensor: bool,
+    pub(crate) transient: bool,
+    pub(crate) contact: Option<ContactInfo>,
+    pub(crate) impact: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ActivePair {
+    pair: CollisionPair,
+    sensor: bool,
+}
+
+/// Transactional lifecycle state, committed alongside the world step.
+pub(crate) struct CollisionLifecycle {
+    active: Vec<ActivePair>,
+    next: Vec<ActivePair>,
+}
+
+impl CollisionLifecycle {
+    pub(crate) const fn new() -> Self {
+        Self {
+            active: Vec::new(),
+            next: Vec::new(),
+        }
+    }
+
+    pub(crate) fn stage(
+        &mut self,
+        interactions: &mut [CollisionInteraction],
+        events: &mut Vec<CollisionEvent>,
+    ) -> Result<(), CollisionError> {
+        interactions.sort_by_key(|interaction| interaction.pair);
+        self.next.clear();
+        events.clear();
+        if interactions
+            .windows(2)
+            .any(|pair| pair[0].pair == pair[1].pair)
+        {
+            return Err(CollisionError::InvalidContact);
+        }
+        for interaction in interactions.iter().copied() {
+            if interaction.transient && (!interaction.sensor || interaction.impact) {
+                return Err(CollisionError::InvalidContact);
+            }
+            if interaction.impact
+                && (interaction.sensor
+                    || interaction
+                        .contact
+                        .is_none_or(|contact| contact.normal_impulse <= 0.0))
+            {
+                return Err(CollisionError::InvalidContact);
+            }
+            if let Some(contact) = interaction.contact
+                && (!contact.point.is_finite()
+                    || !contact.normal.is_finite()
+                    || !contact.penetration.is_finite()
+                    || contact.penetration < 0.0
+                    || !contact.normal_impulse.is_finite()
+                    || contact.normal_impulse < 0.0
+                    || contact.normal.try_normalize().is_none())
+            {
+                return Err(CollisionError::InvalidContact);
+            }
+        }
+        self.next
+            .try_reserve(interactions.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        let event_capacity = self
+            .active
+            .len()
+            .checked_add(
+                interactions
+                    .len()
+                    .checked_mul(2)
+                    .ok_or(CollisionError::SpatialIndexCapacityExceeded)?,
+            )
+            .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+        events
+            .try_reserve(event_capacity)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+
+        let mut old_index = 0;
+        let mut new_index = 0;
+        while old_index < self.active.len() || new_index < interactions.len() {
+            let old = self.active.get(old_index).copied();
+            let current = interactions.get(new_index).copied();
+            match (old, current) {
+                (Some(old), Some(current)) if old.pair == current.pair => {
+                    if old.sensor != current.sensor {
+                        Self::push_end(old, events);
+                        if current.transient {
+                            Self::push_transient(current, events);
+                        } else {
+                            self.push_current(current, CollisionEventKind::Begin, events);
+                        }
+                    } else if current.transient {
+                        Self::push_end(old, events);
+                    } else {
+                        self.push_current(current, CollisionEventKind::Persist, events);
+                    }
+                    old_index += 1;
+                    new_index += 1;
+                }
+                (Some(old), Some(current)) if old.pair < current.pair => {
+                    Self::push_end(old, events);
+                    old_index += 1;
+                }
+                (Some(_), Some(current)) => {
+                    if current.transient {
+                        Self::push_transient(current, events);
+                    } else {
+                        self.push_current(current, CollisionEventKind::Begin, events);
+                    }
+                    new_index += 1;
+                }
+                (Some(old), None) => {
+                    Self::push_end(old, events);
+                    old_index += 1;
+                }
+                (None, Some(current)) => {
+                    if current.transient {
+                        Self::push_transient(current, events);
+                    } else {
+                        self.push_current(current, CollisionEventKind::Begin, events);
+                    }
+                    new_index += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        // The merge emits events in pair order. Events for one pair retain their
+        // lifecycle order, including End before Begin on mode transitions.
+        Ok(())
+    }
+
+    fn push_end(old: ActivePair, events: &mut Vec<CollisionEvent>) {
+        events.push(CollisionEvent {
+            kind: CollisionEventKind::End,
+            pair: old.pair,
+            sensor: old.sensor,
+            contact: None,
+        });
+    }
+
+    fn push_transient(current: CollisionInteraction, events: &mut Vec<CollisionEvent>) {
+        events.push(CollisionEvent {
+            kind: CollisionEventKind::Begin,
+            pair: current.pair,
+            sensor: true,
+            contact: None,
+        });
+        Self::push_end(
+            ActivePair {
+                pair: current.pair,
+                sensor: true,
+            },
+            events,
+        );
+    }
+
+    fn push_current(
+        &mut self,
+        current: CollisionInteraction,
+        kind: CollisionEventKind,
+        events: &mut Vec<CollisionEvent>,
+    ) {
+        self.next.push(ActivePair {
+            pair: current.pair,
+            sensor: current.sensor,
+        });
+        events.push(CollisionEvent {
+            kind,
+            pair: current.pair,
+            sensor: current.sensor,
+            contact: current.contact,
+        });
+        if current.impact {
+            events.push(CollisionEvent {
+                kind: CollisionEventKind::Impact,
+                pair: current.pair,
+                sensor: current.sensor,
+                contact: current.contact,
+            });
+        }
+    }
+
+    pub(crate) fn commit(&mut self) {
+        std::mem::swap(&mut self.active, &mut self.next);
+        self.next.clear();
+    }
+
+    pub(crate) fn abort(&mut self) {
+        self.next.clear();
+    }
+}
+
+#[cfg(test)]
+#[path = "event_tests.rs"]
+mod tests;

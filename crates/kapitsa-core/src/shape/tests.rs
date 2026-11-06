@@ -885,7 +885,7 @@ fn shape_local_bounds_returns_none_for_plane() {
 }
 
 #[rstest]
-fn shape_local_bounds_reports_unimplemented_skinned_mesh_bounds(
+fn shape_local_bounds_use_skinned_reference_mesh_bounds(
     triangle_mesh: TriangleMesh,
     vertex_influences: Vec<Vec<BoneInfluence>>,
 ) {
@@ -900,7 +900,7 @@ fn shape_local_bounds_reports_unimplemented_skinned_mesh_bounds(
 
     assert_eq!(
         Shape::SkinnedTriangleMesh(skinned_mesh).local_bounds(),
-        Err(BoundsError::NotImplemented)
+        Ok(Some(expected_aabb(Vec3::ZERO, Vec3::new(1.0, 1.0, 0.0))))
     );
 }
 

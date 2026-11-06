@@ -1,0 +1,271 @@
+# Collision system
+
+`kapitsa-core` owns collision state as part of `PhysicsWorld`. Add bodies and
+colliders to the world, then advance the complete simulation with
+`PhysicsWorld::step(dt)`. The step predicts motion, updates the spatial index,
+generates filtered candidate pairs, builds contacts, resolves CCD and discrete
+contacts, stages lifecycle events, validates results, and commits once. A
+collision error leaves body states, accumulated forces, cached contacts, and
+published events at their previous committed values.
+
+There is no implicit gravity. Apply forces or set initial velocities when
+building a falling or moving scene. Positions, sizes, mass properties, forces,
+and velocities use consistent application-defined units; calculations use
+`f64`.
+
+## Quick start
+
+This example adds a solid plane, a continuous dynamic sphere, a material, then
+steps and queries the world. Errors are returned to the caller.
+
+```rust,no_run
+use std::error::Error;
+
+use kapitsa_core::{
+    collider::{Collider, CollisionMode},
+    collision::{CollisionEventKind, QueryFilter, Ray},
+    mass::MassProperties,
+    material::PhysicsMaterial,
+    rigid_body::{CcdMode, RigidBody},
+    shape::{Plane, Shape, Sphere},
+    transform::Transform,
+    world::PhysicsWorld,
+};
+use kapitsa_math::{Mat3, Quat, Vec3};
+
+fn simulate() -> Result<(), Box<dyn Error>> {
+    let mut world = PhysicsWorld::new();
+    let floor = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let mut floor_collider = Collider::new(
+        Shape::Plane(Plane::new(0.0, 1.0, 0.0, 0.0)?),
+        Transform::identity(),
+    );
+    floor_collider.set_mode(CollisionMode::Solid);
+    world.add_collider(floor, floor_collider)?;
+
+    let material = world.add_material(PhysicsMaterial::new(0.6, 0.8, 0.2, 1.0)?)?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut ball = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(0.0, 2.0, 0.0), Quat::IDENTITY)?,
+        mass,
+    )?;
+    ball.set_linear_velocity(Vec3::new(0.0, -20.0, 0.0))?;
+    ball.set_ccd_mode(CcdMode::Continuous);
+    let ball_id = world.add_body(ball)?;
+    let ball_collider = world.add_collider(
+        ball_id,
+        Collider::new(
+            Shape::Sphere(Sphere::new(0.5)?),
+            Transform::identity(),
+        ),
+    )?;
+    world.set_collider_material(ball_collider, Some(material))?;
+
+    world.step(1.0 / 60.0)?;
+    for event in world.collision_events() {
+        if event.kind == CollisionEventKind::Impact {
+            println!("impact: {:?}", event.contact);
+        }
+    }
+
+    let ray = Ray::new(Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, 10.0)?;
+    if let Some(hit) = world.raycast(ray, QueryFilter::default())? {
+        println!("hit {:?} at {:?}", hit.collider, hit.position);
+    }
+    Ok(())
+}
+```
+
+`PhysicsWorld::collision_events()` contains the events from the latest
+successful step. `Raycast` returns the nearest hit that passes its query filter.
+
+## Shape support
+
+Dynamic bodies can use convex geometry only. The supported pair set is the
+convex-convex and convex-surface cross product below; reversing A and B is also
+supported, with contact orientation reversed. This covers 28 unordered convex
+pair types (including same-type pairs) and 42 convex-to-surface pair types.
+
+| Category | `Shape` variants |
+|---|---|
+| Convex | `Sphere`, `Cuboid`, `Capsule`, `Cylinder`, `TaperedCapsule`, `TaperedCylinder`, `Convex` |
+| Surface | `Plane`, `Triangle`, `TriangleMesh`, `HeightField`, `LevelSet`, `SkinnedTriangleMesh` |
+
+Convex shapes collide with every convex shape and every surface shape in the
+table. Surface-to-surface pairs are unsupported. A non-convex collider on a
+dynamic body is rejected when it is added. Static and kinematic bodies may own
+surface colliders.
+
+The narrow phase uses support mapping with GJK distance/intersection and EPA
+penetration for convex pairs. EPA is bounded to 64 expansions and returns its
+closest face if it reaches that limit or expansion stalls; that estimate can
+overstate minimum translation depth for oblique contacts. If GJK confirms
+overlap with a lower-dimensional simplex, support points along the center-to-
+center direction provide a contact estimate. Convex pairs are processed in a
+stable geometry order so reversing A and B reverses the contact normal. Other
+contacts use plane contact generation, triangle contacts, mesh BVH traversal,
+heightfield cell traversal, and interpolated level-set sampling. Skinned meshes
+use the current deformed pose and a refitted BVH. Pose updates prepare new
+vertices and BVH bounds in staging buffers; on error, the last committed pose
+and bounds remain active. Contacts are reduced into persistent manifolds with
+feature IDs; contact impulses are cached for warm starting. Dynamic bodies
+connected by contacts are grouped into deterministically ordered islands.
+Each manifold stores up to four active contacts in a fixed array and exposes
+only the counted slice. Its cached world-space contact positions support
+contact reduction and mesh/heightfield manifold merging.
+Surface/convex contacts route through one normalized surface dispatch; a shared
+builder restores canonical A-to-B point order and feature IDs while keeping
+anchors in each body's local coordinates. Sphere/sphere remains analytic.
+CCD and discrete candidate processing share the per-step prediction index;
+the separate solver-body index is prepared only when candidates need solving.
+
+Triangles are finite, zero-thickness, two-sided surfaces. Sphere contacts use
+the closest point on the finite triangle; other convex contacts use GJK distance
+and EPA for a full-dimensional overlap. A lower-dimensional GJK contact has zero
+reported penetration because it does not establish a penetration depth. The
+configured contact offset permits proximity contacts but does not give a triangle
+physical thickness.
+
+## Bodies, colliders, and materials
+
+`RigidBody` can be Static, Kinematic, or Dynamic. A collider has a local
+transform, a solid or sensor mode, a symmetric layer/mask filter, and an
+optional material ID. Multiple colliders can belong to one body. A sensor
+reports overlap lifecycle events but does not generate solver contacts or
+impact impulses.
+
+Use `PhysicsWorld::add_material` and `set_collider_material` to assign a
+world-owned material. The default material is friction `0.5`, static friction
+`0.0`, restitution `0.1`, and density `1.0`. Pair friction coefficients are
+combined by geometric mean; pair restitution is the larger value. Density is
+stored on the material but does not create mass properties automatically;
+dynamic bodies receive explicit `MassProperties`. Removing a material that is
+still assigned to a collider returns `WorldError::MaterialInUse`.
+
+`CollisionFilter::new(layers, mask)` requires mutual permission:
+
+```text
+left.layers & right.mask != 0 && right.layers & left.mask != 0
+```
+
+Query filters have their own `layers` and `mask` with the same interaction
+rule. `QueryFilter::default()` queries layer 0, accepts all collider masks,
+excludes no body, and omits sensors.
+
+## Solver and configuration
+
+`PhysicsWorld::collision_config()` returns the current `CollisionConfig`;
+`set_collision_config` validates a replacement. Defaults are 8 velocity
+iterations, 3 position iterations, `0.01` contact offset, `0.001` penetration
+slop, `1.0` restitution threshold, and 8 CCD impacts per continuous body.
+Iteration counts and the impact limit must be positive; distances and threshold
+must be finite and nonnegative; penetration slop cannot exceed contact offset.
+When a body reaches its impact limit, the default `CcdLimitPolicy::ClipIsland`
+stops only the dynamic bodies involved in that unresolved contact at the
+contact time for the rest of the step. Other bodies in the CCD island continue
+their motion and collision processing. The clipped contact is reported as a
+normal contact with zero impulse; it does not emit an `Impact` event. The
+`ClipIsland` variant name remains for source compatibility. Set
+`ccd_limit_policy` to
+`CcdLimitPolicy::AbortStep` to preserve the previous transactional error behavior.
+
+The solver applies normal impulses, friction, restitution, warm starting, and
+bounded positional correction. Finite iterations and slop permit small
+residual penetration; exact zero penetration is not guaranteed. Bodies sleep
+only when explicitly put to sleep; the engine does not automatically put idle
+bodies to sleep. Relevant state changes and contacts wake sleeping bodies.
+
+## Joint constraints
+
+Joints share contact solver islands and the same iterative velocity and
+position passes. Fixed, hinge, slider, and other rigid joint rows use positional
+correction; `SpringJoint` applies its Hooke stiffness and viscous damping as
+forces in the velocity solver, so an undamped spring can oscillate and damping
+removes energy. Spring `stiffness` is in N/m and `spring_damping` in N·s/m.
+Break thresholds are measured from accumulated solver impulses divided by the
+step duration. `PhysicsWorld::joint_events()` exposes break events from the
+latest successful step; a failed step publishes neither body updates nor joint
+events.
+
+Set `RigidBody::set_ccd_mode(CcdMode::Continuous)` on bodies that need
+continuous collision detection. Swept broadphase bounds feed time-of-impact
+queries for the supported convex-convex and convex-surface pairings. The
+continuous path handles moving and rotating transforms over the step and
+resolves impacts in chronological order. The impact budget is per continuous
+body and applies to solver-resolved impacts; clipped bodies remain fixed at
+their contact poses for the rest of the current step. `AbortStep` returns
+`CollisionError::CcdLimitExceeded` without committing the step.
+
+When a resweep discovers a dynamic pair between CCD islands, the bridge and
+its connected components are replayed from their committed start states. Only
+TOI caches and staged interactions incident to those bodies are invalidated;
+completed independent islands keep their staged states and events. A bridge
+that is not an initial-trajectory hit remains scheduled so contacts created by
+an earlier rebound in the replay are still found. Static and kinematic bodies
+remain shared read-only surfaces and do not join dynamic islands. The engine
+retains a full-scene replay as a bounded safe fallback if local expansion does
+not converge.
+
+## Queries
+
+- `PhysicsWorld::raycast` returns the closest `RayHit` or `None`.
+- `PhysicsWorld::sweep` moves a convex query shape by a displacement and
+  returns its earliest `ShapeHit` or `None`.
+- `PhysicsWorld::overlaps` writes sorted `OverlapHit` values into a caller
+  buffer; it replaces the buffer only after a successful query.
+
+All queries read the current committed transforms, honor collision filters,
+and return `QueryError` for invalid input, unsupported shapes, arithmetic
+failures, or non-convergent geometry. Sweep and overlap query shapes must be
+convex. `raycast`, `sweep`, and `overlaps` use a separate committed-geometry
+AABB tree to select finite-shape candidates; infinite planes are checked
+separately. The index does not reuse predicted step broadphase data. Its
+fat bounds conservatively cover small body movement and are refreshed when
+committed geometry leaves a proxy. Exact shape queries decide every result.
+Mutable body or collider access invalidates the tree, so read-only queries use
+a full scan until the next successful step rebuilds it. Equal-distance hits
+are ordered by `ColliderId`; overlap results remain sorted. See the measured
+query workload and step-maintenance cost in `benchmarks/collisions.md`.
+Each query reuses its temporary mesh and surface-cell buffers across candidate
+colliders. The existing `PhysicsWorld` methods remain the complete query API.
+
+## Events and errors
+
+Events are ordered deterministically by canonical collider pair, with each
+pair's lifecycle events kept in order. A newly active pair emits `Begin`; an
+ongoing pair emits `Persist`; a separated pair emits `End`. If an overlapping
+collider pair changes between solid and sensor mode, the step emits `End` for
+the old mode followed by `Begin` for the new mode. A solid contact with a
+positive new impulse can also emit `Impact`. Sensors carry no contact data and
+do not emit `Impact`. A continuous sensor crossing that has already exited by
+the end of the step emits `Begin` and `End` in the same step and is not kept
+active. Event changes are staged with contacts and become visible only after a
+successful commit.
+
+Step failures are returned as `StepError`, including `StepError::Collision`
+with a `CollisionError` such as `InvalidMaterial`, `UnsupportedGeometryPair`,
+`NonConvergent`, or `CcdLimitExceeded`. Query failures use the separate
+`QueryError` type. Errors are not converted to empty hits or ignored contacts.
+
+## Runtime integration
+
+The public `kapitsa::Simulation` owns the physics world and advances it on a
+fixed clock. Use its `PhysicsClient` for body, collider, and joint changes,
+snapshots, collision and joint-break events, and spatial queries. Command
+buffers apply ordered changes at a step boundary without waiting in the game tick. See
+[Simulation runtime](runtime.md) for lifecycle and command examples. The
+measured collision pipeline and worker comparisons are in
+`benchmarks/collisions.md`.
+
+## Scope
+
+Joint constraints and contacts share one constraint graph and solver island.
+Connected dynamic bodies are solved together, while a shared static or
+kinematic support does not merge otherwise independent islands. Joint breaking
+is committed with the successful step and exposed through
+`PhysicsWorld::joint_events()`.
+
+This collision system does not add gravity or game-object destruction. Those
+remain separate physics systems. Numerical algorithms can return
+`NonConvergent` for geometry they cannot resolve within their iteration
+bounds; such errors abort the entire step.

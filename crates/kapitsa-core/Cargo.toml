@@ -1,11 +1,40 @@
 [package]
 name = "kapitsa-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license.workspace = true
+
+[features]
+bench-internals = []
 
 [dependencies]
 kapitsa-math = { path = "../kapitsa-math" }
 
 [dev-dependencies]
+rayon = "1.12.0"
 rstest = "0.28"
+
+[[bench]]
+name = "collisions"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "collision_storage"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "collision_interactions"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "joint_stress"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "joint_parallel_scaling"
+harness = false
+required-features = ["bench-internals"]

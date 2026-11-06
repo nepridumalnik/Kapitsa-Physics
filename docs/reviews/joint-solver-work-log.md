@@ -1,0 +1,253 @@
+# Joint solver work log
+
+## 2026-11-02 — baseline and projection comparison
+
+- `6294fdf` records the local scalar-solver baseline at the original remote HEAD. Workspace fmt/check/Clippy passed; workspace tests passed (775 passed, 4 ignored). The strict Release rocket test failed the original error limits for all sizes.
+- The strict fixture completed all 180 steps at 100, 200, 500, and 1,000 parts. It exercised gravity, pad contact, offset thrust, fuel mass changes, and stage separation. Separation momentum error stayed at or below `2.629e-13`; no step failed and no joint broke.
+- A Release comparison with identical fixture, 3 position sweeps, and 8 velocity sweeps changed only scalar vs `FixedBlock3`. Both completed at all sizes, but neither met strict limits. Block3 lowered maximum and RMS frame error for 200/500/1,000 parts; both frame errors increased at 100 parts. It did not improve maximum anchor error at any size and increased coast energy drift at 500 parts. Keep Block3 experimental until geometry and pipeline correctness are addressed.
+
+| Parts | Projection | Anchor max / RMS, m | Frame max / RMS, rad | Coast energy drift |
+|---:|---|---:|---:|---:|
+| 100 | Scalar | 0.1538798 / 0.01302640 | 1.333782 / 0.08493318 | 4.1225% |
+| 100 | FixedBlock3 | 0.2213087 / 0.01416238 | 1.442233 / 0.08996116 | 3.2120% |
+| 200 | Scalar | 0.2846846 / 0.02980872 | 1.565341 / 0.1226705 | 69.9332% |
+| 200 | FixedBlock3 | 0.2883405 / 0.02782598 | 1.201834 / 0.09864404 | 60.8098% |
+| 500 | Scalar | 0.6644705 / 0.06259963 | 3.141284 / 0.3265347 | 59.3510% |
+| 500 | FixedBlock3 | 0.7414070 / 0.06269059 | 3.140986 / 0.3017271 | 62.0578% |
+| 1,000 | Scalar | 2.814815 / 0.1660589 | 3.141479 / 0.6627714 | 44.4683% |
+| 1,000 | FixedBlock3 | 2.866444 / 0.1481344 | 3.141102 / 0.4548406 | 44.1231% |
+
+The near-π relative-frame errors and the known small-angle angular Jacobian are the next concrete mathematical check. Add a finite-difference test for the FixedJoint rotation-log derivative, correct the Jacobian if confirmed, then repeat this exact rocket test before changing production defaults.
+
+## 2026-11-02 — angular Jacobian and singular twist regression
+
+- Added the finite-angle transpose inverse SO(3) left-Jacobian to FixedJoint angular rows. Central finite differences pass for all three error coordinates and world axes at `1e-5`, `0.7`, `2.8`, and `π - 1e-5` radians. A separate finite-difference test covers fixed connector-point Jacobians with nonzero local centers of mass and nontrivial local frames.
+- `twist_angle` now represents the undefined 180-degree swing coordinate as `None`; constraints that specifically require that twist coordinate are skipped until it is defined. It does not substitute an arbitrary angle or abort the step. Preparation tests cover Ball, Hinge, Cylindrical, Planar, and ConeTwist; a world integration test confirms a BallJoint step remains finite.
+- Validation: `fmt --check`, `check -p kapitsa-core`, warning-free `clippy -p kapitsa-core`, all 581 core unit tests, 28 integration/query/geometry tests, 2 doctests, and `git diff --check` passed.
+- The strict Release rocket test still fails at every size. The finite-angle Jacobian did not fix the drift; this change is not evidence for the rocket root cause. The report-only and strict runs completed all 180 ticks, repeated deterministically, retained fuel and separation invariants, and had no step failure or joint break.
+
+| Parts | Anchor max / RMS, m | Frame max / RMS, rad | Coast energy drift | Elapsed |
+|---:|---:|---:|---:|---:|
+| 100 | 0.1559734 / 0.01254084 | 1.358748 / 0.08467397 | 4.1414% | 852 ms |
+| 200 | 0.2910659 / 0.02982499 | 1.713914 / 0.1226009 | 70.8814% | 1,724 ms |
+| 500 | 0.7676298 / 0.06260248 | 3.139344 / 0.2949535 | 58.3762% | 4,408 ms |
+| 1,000 | 3.023810 / 0.1625110 | 3.141562 / 0.6276528 | 45.5216% | 8,836 ms |
+
+These values remain far above the unchanged strict geometry limits. Contacts occurred at every size; the stage-separation momentum error remained at or below `1.990e-13`; fuel masses reached the expected values; and every run recorded zero joint breaks. The math slice is verified, but the cause of the instability remains unproven.
+
+## 2026-11-02 — correction-order and load-source isolation
+
+- Added controlled FixedJoint order measurements at 5°, 15°, 45°, and 90° with two dynamic bodies, unequal masses/inertias, offset centers of mass, and nonzero connector arms. No contacts or external forces are present. Linear-first (A) can increase the frame residual before the stale angular rows run; angular-first (B) can recreate a large frame residual when the refreshed linear rows run. The extra refreshed linear pass (C) gives the smallest one-sweep anchor error, but at 90° it leaves a larger frame residual than A/B. This is a coupled nonlinear constraint; no fixed one-sweep ordering dominates every residual.
+- The actual force-free `PhysicsWorld` solver, with its configured repeated position sweeps, reduced all four initial cases below `7.61e-4 m / 6.58e-3 rad` after one step and below `1.56e-5 m / 5.33e-6 rad` after two. The one-joint ordering issue alone does not explain the rocket failure.
+- Added chain/branch measurements with varied mass, inertia, and local COM. At step 10, chains of 2, 10, 50, and 100 bodies reached max anchor/frame errors of `(0, 2.39e-20)`, `(1.00e-5 m, 2.74e-5 rad)`, `(9.56e-6 m, 1.72e-5 rad)`, and `(8.48e-6 m, 1.97e-5 rad)`. A 100-body binary branch initially increased anchor error from `5.39e-3` to `5.87e-3 m`; after 10 steps it was `2.79e-3 m`, with frame error `3.94e-5 rad`. This confirms slower, non-monotone anchor convergence for the branch.
+- Source isolation on the 100-part fixture: no loads stayed at roundoff; gravity without contact stayed below `3.93e-8 m / 5.97e-8 rad`; gravity plus pad contact reached `0.293 m / 2.187 rad`; thrust without gravity/contact reached `0.103 m / 0.907 rad`. Centering the same thrust barely changed the errors (`0.103 m / 0.984 rad`), so its offset moment is not the main trigger. Both contact and thrust load cases are sufficient to expose the weakness.
+- The existing adaptive test path (1–8 position and velocity iterations) reduced geometry errors for contact (`0.293/2.187` to `0.134/1.259`) and thrust (`0.103/0.907` to `0.0604/0.567`) but roughly doubled elapsed time and increased coast energy drift (`46.7%` to `69.0%`, `68.1%` to `71.4%`). It remains experimental and is not a production fix.
+- These experiments establish load sensitivity and slow branched-graph convergence, but do not prove whether contact/joint ordering, per-sweep Jacobian refresh, or velocity/position coupling is the first rocket failure. Continue with residual tracing before changing production order or iteration defaults.
+
+## 2026-11-02 — position projection order A/B/C
+
+Variant A is the existing scalar Linear → Angular sweep. Variant B solves Angular, refreshes connector geometry and rows, then solves Linear. Variant C solves Linear, refreshes and solves Angular, refreshes again, then solves Linear. All variants retain multipliers by row key and apply only the newly computed multiplier delta.
+
+| Parts | Order | Anchor max, m | Frame max / RMS, rad | Coast energy drift | Elapsed, ms |
+|---:|---|---:|---:|---:|---:|
+| 100 | A | 0.1559734 | 1.358748 / 0.08467397 | 4.1414% | 852 |
+| 100 | B | 0.1387972 | 1.389727 / 0.08279818 | 4.0002% | 911 |
+| 100 | C | 0.1323372 | 1.581435 / 0.09111354 | 3.6841% | 1,098 |
+| 200 | A | 0.2910659 | 1.713914 / 0.1226009 | 70.8814% | 1,724 |
+| 200 | B | 0.2852765 | 1.649234 / 0.1132870 | 69.1131% | 1,828 |
+| 200 | C | 0.2896826 | 1.491072 / 0.1129851 | 68.7790% | 2,259 |
+| 500 | A | 0.7676298 | 3.139344 / 0.2949535 | 58.3762% | 4,408 |
+| 500 | B | 0.8195813 | 2.614975 / 0.2813381 | 63.2394% | 4,638 |
+| 500 | C | 0.7424552 | 3.094329 / 0.2548137 | 66.1312% | 5,700 |
+| 1,000 | A | 3.023810 | 3.141562 / 0.6276528 | 45.5216% | 8,836 |
+| 1,000 | B | 2.626698 | 3.141119 / 0.5419593 | 42.0811% | 9,293 |
+| 1,000 | C | 2.576289 | 3.141282 / 0.4688818 | 46.5546% | 11,576 |
+
+All three configurations fail the original strict limits. B is about 5–7% slower than A and trades anchor error against frame error. C improves maximum anchor error at all sizes and frame RMS at 200–1,000 parts, but costs about 26% more elapsed time, worsens the 100-part frame maximum, and raises 500/1,000-part coast energy drift relative to A. The actual strict C run failed at all sizes. Its first anchor/frame limit crossing ticks were `15/47`, `14/32`, `12/22`, and `12/19` for 100, 200, 500, and 1,000 parts. The larger cases cross the anchor limit on the first booster-thrust step (tick 12). The test does not identify a sequence as a complete fix.
+
+The production path currently uses C because it refreshes the offset-anchor geometry after angular correction and reduces the measured anchor maximum in all four rocket runs. The strict Release run on this exact implementation failed at all four sizes; it completed every tick with no step failure and reproduced the report-only metrics. The full workspace suite passed (781 passed, 4 ignored), as did workspace check, strict Clippy, formatting, and diff checks. This is a partial mathematical correction only; the stability defect remains, the extra pass has a measurable cost, and no overall win is claimed. Continue isolating the first loaded-step residual before considering solver optimization or Block3 promotion.
+
+## 2026-11-02 — loaded-step stage residuals and sweep response
+
+- Added `bench-internals` snapshots of raw geometric residuals before and after velocity solving, after contact position correction, and after joint position projection. FixedJoint's three world-axis anchor rows and three rotation-log rows are combined as Euclidean norms. The trace also records the maximum velocity-row residual after velocity and position phases. This instrumentation is absent from the normal build and does not change solver behavior.
+- In the 100-part full fixture, booster ignition at tick 12 raises anchor error from `0.01608835 m` on tick 11 to `0.03038108 m` before velocity constraints. It remains exactly `0.03038108 m` after velocity solving, falls to `0.01998944 m` after contact correction, and to `0.01944706 m` after joint projection. The strict anchor threshold is crossed at tick 15, but the pose error first jumps at force integration, before the velocity solver.
+- On tick 12, the maximum linear velocity-row residual is `0.5146800 m/s` after velocity solving and `0.5146831 m/s` after position projection; angular residual is `0.2467740 rad/s` at both points. Through ticks 12–16, position projection changes the maximum velocity residual by only a few `1e-5 m/s` or less. This rejects velocity changes caused by position projection as the source of the observed growth.
+- Load isolation remains consistent: no-load and gravity-only runs stay near machine precision; thrust without contact crosses the anchor limit at tick 20; gravity with contact crosses at tick 19. Centering the engine force changes the maxima only slightly, so thrust moment is not the main trigger. The first strict crossing also precedes tank mass updates at tick 24 and stage separation at tick 54.
+
+The sweep-count comparison below is diagnostic only. It uses the same 100-part, 180-tick fixture and scalar solver:
+
+| Load mode | Sweeps (velocity / position) | Anchor max, m | First limit tick | Velocity row residual at crossing, m/s | Elapsed, ms | Coast energy drift |
+|---|---:|---:|---:|---:|---:|---:|
+| Thrust, no gravity/contact | 8 / 3 | 0.09826316 | 20 | 0.6828425 | 1,323 | 68.8932% |
+| Thrust, no gravity/contact | 16 / 3 | 0.05796826 | 25 | 0.3014304 | 1,954 | 73.0034% |
+| Thrust, no gravity/contact | 8 / 6 | 0.07638819 | 28 | 0.7535137 | 2,043 | 70.7027% |
+| Thrust, no gravity/contact | 16 / 6 | 0.03661618 | 77 | 0.2904382 | 2,688 | 73.6789% |
+| Gravity with contact | 8 / 3 | 0.2081661 | 19 | 0.5208623 | 1,389 | 42.9573% |
+| Gravity with contact | 16 / 3 | 0.1065852 | 24 | 0.3264612 | 2,031 | 20.0153% |
+| Gravity with contact | 8 / 6 | 0.1462785 | 21 | 0.5407806 | 2,097 | 21.5286% |
+| Gravity with contact | 16 / 6 | 0.1147427 | 28 | 0.3319039 | 2,775 | 12.9566% |
+
+More velocity sweeps lower the velocity residual and delay geometry failure. More position sweeps also help, though less consistently. The 16 / 6 thrust run still exceeds the anchor, frame (`0.407537 rad`), and coast-energy (`73.6789%`) limits at roughly twice the default runtime. The data supports load-dependent under-convergence in the connected solver, but does not yet establish whether row ordering, island topology, or another velocity-stage defect is the underlying cause. Do not promote higher fixed iteration counts as a fix; continue tracing convergence by sweep and retain the strict failure.
+
+- Validation for this diagnostic checkpoint: `cargo +1.98.0 fmt --all -- --check`, `cargo +1.98.0 check --workspace --all-features --locked`, and strict workspace Clippy passed. `cargo +1.98.0 test --workspace --locked` passed with 781 tests and 4 ignored; the focused geometric residual test and both ignored Release diagnostics also passed.
+- The strict Release rocket fixture was rerun with `KAPITSA_ROCKET_REPORT_ONLY` unset and failed as required by its real thresholds. All scenarios completed without step failure or joint breaks, but numerical stability failed at 100/200/500/1,000 parts. Current C metrics were respectively anchor max/RMS `0.1323372/0.01108183`, `0.2896826/0.02798799`, `0.7424552/0.06016442`, and `2.576289/0.1463842` m; max frame error `1.581435`, `1.491072`, `3.094329`, and `3.141282` rad; coast drift `3.6841%`, `68.7790%`, `66.1312%`, and `46.5546%`. The failure is preserved; the diagnostic work is not a correctness pass.
+
+## 2026-11-02 — per-sweep residual response and reverse-order check
+
+- Extended the benchmark trace to retain the first and final velocity-sweep residuals, first and final joint-position anchor residuals, and the velocity residual after contact solving but before joint velocity solving. This distinguishes whether the contact phase reintroduces error before the joint solver sees it.
+- At the first anchor-limit tick with thrust and no contact, default 8/3 sweeps reduce the linear velocity row residual from `0.9840819 m/s` after the first joint velocity sweep to `0.6828425 m/s` after all eight. The first position sweep leaves `0.03509969 m` anchor error; all three leave `0.03196534 m`. At 16/3 these fall from `0.9354011` to `0.3014304 m/s`, and from `0.03251405` to `0.03026537 m` respectively, but the complete run still fails.
+- With gravity and contact at 8/3, the residual is `0.5133333 m/s` after the first complete velocity iteration, `0.5322764 m/s` after contact velocity solving in the last iteration, and `0.5208623 m/s` after the final joint velocity solve. The first/final position anchor residuals are `0.03351901/0.03245108 m`. At 16/3, velocity residual decreases from `0.3422268` to `0.3264612 m/s`; the contact phase ends at `0.3305984 m/s`. This is evidence of contact/joint interaction in the contact case, while thrust alone still fails without contacts.
+
+Reversing the rocket's dense joint storage order provides a controlled solver ordering comparison without changing physics or solver code. It also updates the diagnostic stage-joint ID and verifies the stored body-pair order really is reversed:
+
+| Mode | Order | Anchor max / RMS, m | Frame max, rad | First anchor limit tick | Coast energy drift |
+|---|---|---:|---:|---:|---:|
+| Full | Forward | 0.1323372 / 0.01108183 | 1.581435 | 15 | 3.6841% |
+| Full | Reverse | 0.2783684 / 0.04333044 | 1.446800 | 16 | 5.7104% |
+| Thrust, no gravity/contact | Forward | 0.09826316 / 0.01210467 | 1.026284 | 20 | 68.8932% |
+| Thrust, no gravity/contact | Reverse | 0.1334365 / 0.02090281 | 0.993433 | 21 | 65.6509% |
+| Gravity with contact | Forward | 0.2081661 / 0.02127407 | 2.206484 | 19 | 42.9573% |
+| Gravity with contact | Reverse | 0.3175803 / 0.03548104 | 1.624990 | 20 | 48.2826% |
+
+Reverse order slightly improves frame maxima but materially worsens anchor error in all three modes. A global reverse sweep is rejected as a fix; topology-aware ordering or symmetric sweeps still require separate measurement. This supports that graph/order sensitivity exists, but does not yet identify a single defective Jacobian or mass/COM calculation. Keep the remaining cause open.
+
+## 2026-11-02 — loaded graph velocity convergence
+
+Added an ignored Release diagnostic with no colliders or gravity. It applies a one-step thrust-like force at an offset point on the root of fixed-joint chains of 2, 10, 50, and 100 bodies, plus a 100-body binary branch. Bodies use varied mass, inertia, and local COM. The following rows show final velocity residual after the configured sweeps and the next step's predicted anchor error before position projection:
+
+| Graph | Velocity sweeps | Linear residual, m/s | Angular residual, rad/s | Next-step predicted anchor error, m |
+|---|---:|---:|---:|---:|
+| Chain 10 | 8 | 0.033454 | 0.046610 | 0.000837 |
+| Chain 50 | 8 | 0.179980 | 0.250763 | 0.004505 |
+| Chain 100 | 8 | 0.360431 | 0.502182 | 0.009046 |
+| Branch 100 | 8 | 0.287878 | 0.231644 | 0.009498 |
+| Chain 10 | 16 | 0.018329 | 0.037358 | 0.000695 |
+| Chain 50 | 16 | 0.098784 | 0.202327 | 0.003743 |
+| Chain 100 | 16 | 0.197826 | 0.405184 | 0.007510 |
+| Branch 100 | 16 | 0.070497 | 0.070647 | 0.007543 |
+
+The 100-body chain's first post-thrust velocity sweep leaves `2.319957 m/s` linear and `1.420510 rad/s` angular residual; 8 sweeps reduce these to `0.360431/0.502182`, and 16 to `0.197826/0.405184`. A second load-free step still produces a predicted anchor error before projection, so the residual is carried into the next integration. Small graphs converge rapidly (the 2-body chain reaches roundoff by 8 sweeps), while residual grows with graph size. This is direct evidence of loaded Gauss–Seidel under-convergence in long connected graphs; it is not caused by contact because the diagnostic has no colliders, and unequal masses/inertias and nonzero COM are part of the setup.
+
+Joint-storage order remains topology-dependent. At 100 bodies and 8 sweeps, reversing the chain increases linear/angular residual from `0.360431/0.502182` to `0.437700/0.613877`; reversing the branch improves linear but worsens angular (`0.287878/0.231644` to `0.138199/0.384722`). At 16 sweeps, reverse order worsens both residuals for both graphs. A global reverse traversal is not a general fix. The remaining production work should target bounded residual-based convergence and a measured graph-aware sweep policy; do not promote larger fixed iteration counts alone.
+
+A bench-only alternating forward/reverse velocity sweep was measured against forward order. For the 100-body chain, 8 sweeps lower linear residual and next-step predicted anchor error (`0.360431` to `0.192529 m/s`, `0.009046` to `0.006347 m`) but increase angular residual (`0.502182` to `0.639143 rad/s`). At 16 sweeps the chain again trades a small linear improvement for worse angular residual (`0.197826/0.405184` to `0.167667/0.475874`). The 100-body branch worsens in both residuals at 16 sweeps (`0.070497/0.070647` to `0.084973/0.166048`). Alternating direction is therefore not promoted as a general convergence fix; it remains a measured diagnostic option only.
+
+- Validation of the load/order diagnostic: Release ignored diagnostic passed, full workspace tests passed on rerun, format and strict workspace Clippy passed. The strict Release rocket test was rerun with report-only unset and reproduced the same failure metrics at all four sizes; the benchmark hook is disabled by default and the production trajectory is unchanged.
+
+## 2026-11-02 — bounded residual iteration limit
+
+The existing benchmark-only adaptive path was extended to test velocity iteration caps of 8, 16, 32, 64, and 128 at a fixed residual tolerance of `1e-4 m/s / 1e-4 rad/s`. It hit every configured cap on both a loaded 100-body chain and branch; none converged to the requested residual. At 128 sweeps, the chain remained at `0.05636 m/s / 0.10425 rad/s` and the branch at `0.008379 m/s / 0.02968 rad/s`. The one-step measurements took about `70 ms` for each 100-body graph, versus `14–15 ms` at the 8-sweep adaptive cap. Position projection reduced the end-of-step geometry to `0.00286 m / 0.00424 rad` (chain) and `0.00230 m / 0.00191 rad` (branch), but did not make the velocity residual converge.
+
+This rejects simply raising the adaptive cap as a production solution: the existing loop silently exhausts its maximum without exposing that fact, and reaching even a loose local velocity residual is expensive. The next solver experiment needs to improve the linear solve or propagation per sweep, then retain a bounded cap with an explicit non-convergence result.
+
+## 2026-11-03 — energy balance and velocity projection audit
+
+- Replaced the explicit angular-velocity Euler update in `predict_dynamic()` with a midpoint update that evaluates gyroscopic acceleration at the midpoint orientation and angular velocity. A free asymmetric body with inertia `(2, 3, 4)`, initial `omega=(1,2,3)`, and ten simulated seconds previously drifted `+7.348426%` at `dt=1/120` and `+3.427050%` at `dt=1/240`. The midpoint update now measures `−4.313487e−4%` and `−1.077910e−4%`, with relative world angular-momentum errors `3.497e−5` and `8.365e−6`. The active Release regression passes at both steps.
+- Corrected the rocket coast-energy potential reference from the arbitrary surface zero to physical `U=−mu*m/r` with zero at infinity. The metric normalizes signed drift by the initial energy scale `|T|+|R|+|U|`, so it is independent of a near-zero total and no longer uses an arbitrary potential offset. For the 500-part gravity-only, contact-free, thrust-free run, the former surface-relative metric reported `1.351126%`; the corrected metric reports `4.758411e−7%`. Across the strict scalar rocket's sizes it reports `1.50e−6%`, `1.56e−5%`, `8.52e−6%`, and `6.67e−5%`. This corrects the measurement; it does not fix the separate geometric Joint failure.
+- In the no-load 100-part rigid rocket assembly over 180 steps, summed integration energy change was `−4.02e−10 J`, scalar velocity-solver change `−1.51153e−2 J`, and position-solver change `−5.91e−5 J`; total kinetic drift was `0.075847%`. With 64-iteration global velocity/position PCG, drift was `0.004841%`, summed velocity PCG change `−1.07777e−3 J`, and position PCG change `−1.87300e−5 J`. The scalar assembly does not pass the provisional `0.01%` diagnostic limit; the PCG diagnostic does.
+- Added signed work accounting for the complete velocity correction. In an isolated two-body FixedJoint, measured `Delta K` matched `v·Delta p + 0.5 Delta v·Delta p + omega·Delta L + 0.5 Delta omega·Delta L` within `1.5e−16 J`. Halving `dt` halved the initial linear `|Jv|` and the integrated projection loss over equal simulated time. That projection loss is consistent with removing velocity that violates the updated constraint; it is not itself treated as an error.
+- On an isolated 100-body chain at `dt=1/120`, initial post-integration max residual was `4.77e−4 m/s`. Scalar GS ended at `7.36e−2 m/s` and removed `120.23 J`; PCG ended at `3.37e−15 m/s` and removed `1.977 J`. At half step, PCG loss fell to `0.989 J`, while scalar ended at `4.77e−2 m/s` and removed `122.15 J`. This supports large-island scalar under-convergence as excess numerical dissipation; the PCG change matches its applied correction work. On one joint both methods converged to the same residual and loss, so the excess is graph-scale dependent.
+- Position projection altered kinetic energy much less than the velocity phase in these fixtures. Gravity-only rocket integration showed signed accumulated changes `Delta T=+47,121.57 J`, `Delta U=−47,383.35 J`, `Delta E=−261.79 J` over 180 steps; velocity solving changed energy by `−1.50e−9 J` and position solving by `−5.72e−5 J`. The collision-free full-scene coast metric stops before the first upper-stage surface contact and records that contact separately.
+- The strict Release scalar rocket test still fails geometry at 100/200/500/1,000 parts, with anchor maxima `0.1334/0.2907/0.7411/2.5072 m` and frame maxima `1.5689/1.5450/2.7995/3.1412 rad`; no step failed, all 180 ticks completed, and separation momentum error stayed below `6.4e−14`. A preliminary cap-64 PCG report completed all sizes with geometry below strict limits, but the filter accidentally selected four similarly named diagnostics that ran concurrently; timings are invalid and this was not the strict test. The controlled sequential cap-1 sweep is in progress and already fails anchor limits at 100/200/500 parts. Minimum-cap selection, a sequential strict PCG run, and fair performance comparison remain open.
+- PCG position iteration count remained zero in cap-64 rocket measurements. Velocity PCG is the mechanism improving loaded graph convergence; no position-PCG benefit is established. Do not promote either path to production based on these diagnostics alone.
+- Validation so far: focused Release free-spin test passed; Release free-assembly PCG check passed; isolated no-contact energy diagnostic passed; isolated two-vs-100-body projection-work diagnostic passed; `cargo fmt` and `cargo check -p kapitsa --features bench-internals` passed. The strict scalar Release fixture failed as expected on geometry. Workspace tests and Clippy have not yet been rerun for this checkpoint.
+
+## 2026-11-03 — velocity PCG reuse and strict rocket follow-up
+
+- The velocity PCG previously rebuilt the same joint rows, masses, diagonal, and IC(0) factorization on each velocity pass. The Jacobian and effective-mass matrix are fixed during the velocity phase; only the velocity residual changes. The solver now prepares those rows and matrix once per step and reuses PCG vectors and nested IC(0) storage across steps. Position PCG continues to rebuild its system after each position correction because those Jacobians can change with pose.
+- A 100-body no-contact chain allocation diagnostic compared 32 warmed world steps for scalar and PCG. Each measured `1 allocation / 19.2 KB per step`; the PCG path added no allocation over the same scalar world path. The shared world-step allocation remains, so this is an incremental comparison rather than a claim of zero total allocations.
+- After reuse, the loaded chain/branch Release diagnostic passed, and the 100-body energy-stage fixture still closed the velocity-projection work identity within `4.8e−15 J` with cap-64 PCG.
+- The strict Release rocket test with PCG caps `64/64` passed numerical geometry and coast-energy checks at 100, 200, and 500 parts. At 1,000 parts geometry was also within strict limits (max anchor `1.012952e−4 m`, max frame `3.014574e−5 rad`) and signed coast drift was `−4.12e−7%`, but the fixture's existing launch-completion condition failed: upper-root max altitude was `1.524 m` versus the required `>1.6 m`. All 180 ticks completed and there was no step failure. A single-run 16/16 diagnostic had the same 1,000-part altitude and similarly small geometry residuals, indicating this flight-height condition is insensitive to PCG cap once the joints are well solved. Do not lower the flight criterion or deliberately under-converge constraints to fit it.
+- Full-rocket elapsed time on the same Release fixture was `1.479 / 3.057 / 7.720 / 15.672 s` for scalar and `1.934 / 5.417 / 23.742 / 75.521 s` for PCG 64/64 at 100/200/500/1,000 parts. This is a 1.31x / 1.77x / 3.07x / 4.82x slowdown. These are scenario timings, not steady-state solver microbenchmarks; PCG currently improves constraint residuals but is not a performance win.
+- The 64/64 strict run is not an overall PASS because the 1,000-part scenario remains incomplete by its existing altitude criterion. A physical investigation of the pad-contact/thrust interaction remains open; changing the metric or selecting a knowingly under-converged cap is not justified by these results.
+
+## 2026-11-03 — projection-work recheck and block-Jacobi evaluation
+
+- Re-ran the ignored Release projection-work diagnostic after the PCG workspace changes. For a free two-body FixedJoint, post-integration `max |Jv|` was `4.55511e-4 m/s` at `dt=1/120` and `2.27797e-4 m/s` at `dt=1/240`. Over the same 1.5 seconds the measured Velocity Solver energy changes were `−8.25308e-6 J` and `−4.12681e-6 J`. In each case `Delta T = v·Delta p + 0.5 Delta v·Delta p + omega·Delta L + 0.5 Delta omega·Delta L` closed within `1.5e-16 J`. Scalar, IC(0) PCG, and block-Jacobi PCG agree to roundoff on this one-joint projection.
+- On a free 100-body fixed chain at `dt=1/120`, post-integration `max |Jv|` was `4.76902e-4 m/s`. Scalar GS left `7.36476e-2 m/s` linear and `1.97594e-3 rad/s` angular residual and removed `120.2335 J`; IC(0) PCG reduced the residual to `3.37e-15 m/s / 1.53e-16 rad/s` and removed `1.97677 J`; block-Jacobi PCG at cap 64 removed the same predicted `1.97682 J` but left `7.46e-5 m/s / 6.11e-5 rad/s`. Work-identity closure stayed below `2.9e-12 J`. At half dt, the IC(0) correction was `−0.98889 J`, consistent with first-order reduction of the incompatible post-integration velocity over equal simulation time. These results distinguish valid projection dissipation from excess loss caused by an under-converged large-graph sweep.
+- Compared preconditioners on the loaded 100-body chain/branch Release diagnostic. IC(0) reached the `1e-4` velocity tolerance in 1 iteration on the chain and 61 on the branch. Block Jacobi needed 512/443 cumulative iterations at cap 64 and left chain residual `7.63e-2 / 6.42e-2`; even cap 256 accumulated 2,048 iterations and left `4.41e-3 / 6.45e-3`. Block Jacobi is retained as a benchmark-only candidate and is not selected for production; IC(0) is materially stronger on these graph fixtures.
+- Traced the 1,000-part staged-thrust, gravity-on, no-contact rocket with block-Jacobi PCG 64/64. It completed 180 ticks without contacts or step failure. The upper root fell from `y=1.25 m` through `y=1.04 m` before the stage ignition, reached only `1.272 m`, then ended at `y=-0.738 m`, `vy=-6.217 m/s`; this isolated mode is underpowered for the strict fixture's `max altitude > 1.6 m` criterion even without contacts. It does not establish that the full contact-and-fuel trajectory has the same cause: that full strict run still needs an isolated thrust/contact comparison before any fixture change.
+- Validation: Release ignored projection-work and loaded graph diagnostics passed; `cargo fmt --all` and `cargo clippy -p kapitsa-core --features bench-internals --tests -- -D warnings` passed. The separate 1,000-part isolated rocket source diagnostic passed its no-contact/tick-count assertions; its reported low altitude is retained as evidence, not treated as a completed strict rocket pass.
+
+## 2026-11-03 — matrix-free velocity PCG parallel path
+
+- Added a benchmark-only parallel PCG operator through the caller-provided `StepExecutor`. `J^T p` now gathers per-body row contributions in stable row order, inverse mass/inertia is applied per body, `Jx` is evaluated per row, and dot products use fixed contiguous partitions followed by a fixed-order reduction. PCG vector updates and diagonal preconditioning use the same executor. IC(0) triangular factor construction/solve remains sequential. Internal chunk work uses no `unsafe`; nested island execution is avoided by enabling inner workers only when the solver has one island.
+- Added stage timings for matrix-free operators, preconditioning, and deterministic reductions. Added explicit per-call convergence and iteration-limit counters plus final linear/angular PCG residuals. A cap-1 diagonal-PCG test confirms residual above `1e-4` increments the limit counter rather than being reported as converged.
+- Compared a 600-body loaded chain solved with 1 and 4 workers. Final transforms and velocities matched within `1e-9`, both residuals stayed below `1e-4`, and IC(0) reports convergence. The test validates the worker path numerically; it does not establish a general cross-worker bitwise guarantee.
+- Ran seven measured Release steps after one warm-up on loaded fixed-joint chains. The `StepExecutor` test implementation launches scoped threads per chunk, so these measurements include thread creation and dispatch overhead rather than a persistent production thread pool:
+
+| Bodies | 1 worker | 2 workers | 4 workers | 8 workers |
+|---:|---:|---:|---:|---:|
+| 100 | 5.956 ms | 8.050 ms | 8.218 ms | 7.875 ms |
+| 200 | 12.049 ms | 13.989 ms | 15.643 ms | 15.229 ms |
+| 500 | 30.151 ms | 32.315 ms | 33.556 ms | 37.977 ms |
+| 1,000 | 60.332 ms | 63.561 ms | 66.379 ms | 76.903 ms |
+
+  A telemetry audit found that the first version repeatedly reported cumulative per-step PCG stage timers on every PCG call. Those earlier stage breakdowns are invalid; the overall step timings remain valid. Timers are now consumed after each call, and system preparation (masses, diagonal, and preconditioner construction) is measured separately. The corrected 1,000-body p50 stage times, in preparation / matrix-vector / preconditioner / reduction order, are `3.036 / 0.104 / 0.226 / 0.007 ms` at one worker, `3.219 / 0.351 / 0.288 / 0.180 ms` at two, `3.244 / 0.410 / 0.278 / 0.311 ms` at four, and `3.683 / 0.587 / 0.305 / 0.615 ms` at eight. The scoped-thread executor still has no performance win and stays experimental. A persistent worker-pool implementation is not present in this repository, so pool-backed scaling remains unverified; no default switch is justified.
+- Validation: `cargo fmt --all`, `cargo check -p kapitsa --features bench-internals`, core test Clippy with `-D warnings`, Release projection-work diagnostic, Release one-vs-four worker state comparison, and the PCG iteration-limit regression all passed. Full workspace validation and strict rocket acceptance remain outstanding.
+- Re-ran the 1,000-part full rocket once with IC(0) caps `64/64` after adding convergence reporting. It completed 180 ticks with no step failure and passed the strict geometric limits (`anchor max 1.012952e-4 m`, `frame max 3.014574e-5 rad`). PCG reported `2,355` converged calls and `93` iteration-limit calls, with peak residual `4.529379e-4 m/s / 8.994853e-4 rad/s`; the result makes the remaining under-convergence visible. The existing scenario-completion gate still fails because max altitude was `1.524 m` versus `>1.6 m`. No iteration cap currently passes the complete strict test, and the altitude threshold remains unchanged.
+
+## 2026-11-03 — conflict-free constraint coloring
+
+- Added a reusable greedy color plan per large solver island. It reuses the existing `IslandLayout` connected components and colors the combined ordered manifold-contact and Joint list. Dynamic bodies alone create conflicts, so distinct contacts against the same static support can share a color. Compact `color_offsets + colored_constraint_indices` storage preserves input order within each color.
+- The plan is rebuilt only when the exact dynamic-body mask or ordered endpoint pairs change. This covers body-type changes, contact/Joints addition or removal, and enabled-state changes reflected in the active island list. Unchanged topology uses retained scratch and does not allocate. A linear debug ownership check and tests verify no dynamic body appears twice in a color. Anchor-relative levels are deferred because no measurement yet shows they improve the existing sweep order; the deterministic greedy color plan is the baseline for the next stage.
+- The 600-body deterministic worker test now runs a second step and verifies unchanged topology hits the cache, reports the expected two colors, and preserves the one-worker result within `1e-9`. The graph builder's mixed contact/Joint fixture verifies shared dynamic endpoints conflict while static endpoints do not.
+- Release diagnostic at `dt=1/120`, seven measured steps after one cold step, found two colors for chain islands of 200, 500, and 1,000 bodies. Cold graph build was `6–38 us`; steady cache validation was `1–3 us`. The solver does not yet execute constraints by these groups; this stage records graph preparation cost and correctness only. The next large-island stage will use the group layout for execution and compare total solve time and residuals before enabling it.
+- Validation: Release conflict-coloring and 600-body worker tests passed; Release 100/200/500/1,000 PCG scaling diagnostic passed with color-cache telemetry; production and `bench-internals` checks and strict Clippy passed. No velocity/position solve order changed in this stage.
+
+## 2026-11-03 — level-ordered large-island execution
+
+- Executed the conflict-free groups in stable dependency levels. Static/kinematic endpoints seed level zero; unanchored components use the lowest-index dynamic body as the root. A constraint is assigned to its farthest dynamic endpoint's level, then greedily colored within that level. Levels execute sequentially, preserving the chain's outward correction propagation; independent constraints in a wide level run in bounded batches.
+- Large graphs whose widest level has fewer than 32 constraints use the scalar solver. This keeps long chains on the existing sequential path; the coloring cache's warm check costs 0–4 us in the measured 200–1,000-body chain cases. The 200-body branch regression verifies repeated multiworker steps are bitwise deterministic and have the same joint errors as the scalar solver.
+- Release benchmark used six loaded steps (one warm-up), with a force applied each step, and a scoped-thread test executor. The geometry errors matched scalar within each topology at all worker counts. Times below are per-step p50 in milliseconds:
+
+| Topology | Bodies | 1 worker (scalar) | 2 workers | 4 workers | 8 workers |
+|---|---:|---:|---:|---:|---:|
+| Chain | 200 | 15.418 | 15.485 | 15.629 | 15.482 |
+| Chain | 500 | 38.987 | 39.386 | 39.261 | 39.809 |
+| Chain | 1,000 | 90.771 | 90.798 | 90.967 | 91.975 |
+| Binary branch | 200 | 17.954 | 18.404 | 17.890 | 17.852 |
+| Binary branch | 500 | 41.948 | 35.366 | 38.363 | 37.897 |
+| Binary branch | 1,000 | 83.624 | 64.587 | 64.187 | 71.063 |
+
+  At 1,000 bodies the branch path is 23% faster with four workers; at 500 bodies two workers are 16% faster. The 200-body branch is within measurement noise. Eight scoped workers do not improve on four. These timings include per-chunk OS-thread creation and are not evidence for a persistent worker-pool speedup. The chain fallback has no material regression.
+- A 200-body forced-load iteration sweep shows the 8/3 branch result matches scalar (`0.2685 m / 0.2228 rad` max anchor/frame errors); higher iteration counts reduce residuals but are not enough to make this deliberately heavy fixture an acceptance test. Chain topology remains scalar at every worker count and has the same measured result as the baseline.
+- Validation: level-order and unanchored-root unit tests, Release deterministic/cache-reuse test, Release chain/branch performance matrix, and Release iteration sweep passed. The PCG path remains gated from colored execution. Full workspace validation, strict rocket acceptance, and report/PR updates remain open.
+
+## 2026-11-03 — strict rocket PCG cap and outer contact/joint coupling
+
+- Corrected a diagnostics aggregation omission: `JointSolverMetrics::accumulate` summed velocity-PCG iterations but dropped position-PCG iterations. Added saturating position-iteration aggregation and a regression assertion; re-measurements now report 3,369 position-PCG iterations for the 1,000-part cap-8/8 run instead of a misleading zero.
+- Velocity PCG alone did not stabilize the large rocket: with no position-PCG cap, velocity caps 8–48 left roughly `0.185 m` maximum anchor error at 1,000 parts. Enabling position PCG substantially reduced geometry. This separates the two solver paths and explains why a velocity-only cap sweep could not select the strict configuration.
+- The existing strict fixture also couples plane contacts and Joint rows through outer velocity sweeps. At cap 8/8 on 1,000 parts, the standard eight outer sweeps reached only `1.504 m` max altitude. Raising the outer count to 12 reached `1.578 m`; 16 reached `1.637 m` with anchor/frame maxima `0.00618 m / 0.00462 rad`. These runs keep the altitude gate at `>1.6 m` and use the existing three position sweeps.
+- With 16 outer velocity sweeps, the 1,000-part cap screen found cap 4/4 fails the altitude gate (`1.573 m`), cap 5/5 passes (`1.613 m`, anchors `0.02659 m / 0.001923 m RMS`, frames `0.01028 rad / 0.001075 rad RMS`), and cap 6/6 also passes (`1.618 m`, anchor max `0.01446 m`). Caps 1–3 fail; cap 1 also reaches `Collision(InvalidContact)` at tick 125. Thus cap 5/5 is the smallest passing value in the tested range, with a narrow but positive margin at the largest size.
+- Re-ran the complete strict Release fixture without report-only at velocity/position PCG caps `5/5` and 16 outer velocity sweeps. All sizes completed 180 ticks, reproduced identical states, separated stages, preserved momentum, and passed the unchanged geometry, coast-energy, altitude, and completion gates:
+
+| Parts | Run ms | Anchor max / RMS, m | Frame max / RMS, rad | Coast drift | Max altitude, m | Contacts begin / end / impact |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 2,267 | 0.000347 / 0.000034 | 0.000691 / 0.000035 | `−4.78e−7%` | 2.310 | 2 / 1 / 105 |
+| 200 | 5,981 | 0.001417 / 0.000150 | 0.001380 / 0.000178 | `−4.76e−7%` | 2.192 | 2 / 1 / 109 |
+| 500 | 29,356 | 0.009504 / 0.001406 | 0.007923 / 0.001031 | `−1.77e−5%` | 1.834 | 3 / 3 / 125 |
+| 1,000 | 84,788 | 0.026590 / 0.001923 | 0.010279 / 0.001075 | `−4.28e−7%` | 1.613 | 3 / 2 / 64 |
+
+- Compared with the original `1e083a5` strict-run medians (`843 / 1,729 / 4,533 / 9,061 ms`), this accurate configuration is `2.69x / 3.46x / 6.48x / 9.36x` slower. The original configuration fails the unchanged Joint and energy limits, so it is a timing baseline rather than an accuracy-valid winner. The larger cost comes from the 16 outer passes plus per-pass PCG; performance reduction is still open.
+- The strict-test helper accepts `KAPITSA_ROCKET_OUTER_VELOCITY_SWEEPS` for this controlled comparison. Its default remains unchanged. This is a benchmark-internals PCG result, not a production-default change. Full workspace validation, the Release large-rocket p50/p95 comparison, production policy, final report, and PR update remain open.
+
+## 2026-11-03 — midpoint integrator and rotational CCD regressions
+
+- Updated the constant-torque expectation to use the midpoint angular velocity for orientation. For isotropic inertia, zero initial angular velocity, torque `2 N·m`, and `dt=0.5 s`, the final angular speed is `1 rad/s` while the integrated angle is `0.25 rad`.
+- Reworked the full-inertia test to verify convergence of measured angular acceleration toward `I⁻¹τ` under timestep halving. A finite-step constant-inertia expectation was invalid once the body rotates during the midpoint evaluation.
+- Aligned the rotating CCD fixture's initial angular speed with its requested total midpoint rotation and changed the trajectory comparison to a roundoff-scaled pose check because composing an identity collider transform introduces a few ulps.
+- The rotational plane CCD test exhausted its 64-step conservative-advancement limit on the midpoint path. Raising the bound to 80 makes the unchanged TOI tolerance converge for quarter-turn through two-turn cases; the test still compares against a 20,000-sample trajectory reference.
+- The full serial workspace suite passed after these updates. This CCD follow-up does not change the solver acceptance tolerances or rocket fixture thresholds.
+
+## 2026-11-03 — projection residual after position correction and final evidence
+
+- Repeated the isolated projection diagnostic on the final CCD revision and recorded `Jv` both after velocity solving and again after position correction. For the two-body FixedJoint, the post-position residual is `1.70e−8 m/s` at `dt=1/120` and `4.26e−9 m/s` at `dt=1/240`. For the 100-body PCG chain it is `1.57e−7 m/s / 1.67e−16 rad/s`; Scalar's `7.36e−2 m/s / 1.98e−3 rad/s` residual is effectively unchanged by position correction. In the free rocket assembly, post-position `Jv` is likewise nearly unchanged from post-velocity. Position correction is not the source of the large velocity-stage loss in these tests.
+- The work identity still closes within `1.5e−16 J` on one joint and `2.9e−12 J` on the 100-body graph. Halving `dt` halves the one-joint post-integration residual and the cumulative projection loss for equal simulated time. This confirms that Velocity Solver removes an existing integration mismatch; the loss is admissible projection dissipation, not an energy-accounting bug in PCG.
+- Repeated the minimum-cap screen on the final CCD code. At 1,000 parts, caps 1/1, 2/2, and 3/3 fail strict limits (cap 1 also returns `Collision(InvalidContact)`); cap 4/4 meets the geometry limits but reaches only `1.573 m`, below the unchanged `>1.6 m` launch gate. Cap 5/5 is the smallest tested pass. Its full strict Release run passes all 100/200/500/1,000-part cases with 16 outer velocity sweeps; individual PCG calls still frequently hit their iteration cap.
+- Added a free 100-part assembly reference test against one body with combined mass properties. After 180 unforced ticks with PCG 64/64, relative energy difference is `9.7898e−5`, relative angular-momentum difference is `8.3736e−5`, and COM difference is `1.17e−14 m`. This checks the aggregate model without introducing rigid-cluster behavior.
+- Added [`joint-solver-energy-parallel-results.md`](joint-solver-energy-parallel-results.md) with signed stage deltas, projection-work closure, strict cap screen, performance comparison, parallel preparation cost, and remaining failure status. Current production scalar still fails strict rocket geometry; benchmark-only PCG is not promoted because the connected rocket is slower and local solves remain capped.
+- Diagnostic velocity snapshots now reuse compact `bench-internals` workspace scratch; snapshots retain only linear/angular velocity because poses and mass properties do not change during the velocity phase. The release benchmark reports no steady-state diagnostic allocations after warm-up. This instrumentation-only change does not alter production solver behavior.
+- Focused Release checks passed for the free asymmetric rotor, two-body/100-body projection-work diagnostic, free rocket assembly stage ledger, no-contact/no-thrust gravity rocket energy ledger, and equivalent single-body assembly reference. Workspace format/check/Clippy and full serial tests passed for this code/documentation checkpoint.
+- Re-ran the 500-part full-flight IC(0) PCG 64/64 trace and evaluated both coast definitions on the same states. The physical zero-at-infinity metric is `4.598934067e−7%` through tick 176, before the first upper-stage impact at tick 177. The old surface-relative formula with its old `|E_initial|` normalization reports `88.94944039%` on that exact trajectory. The arbitrary offset nearly cancels the large gravitational term in its denominator, so its percent value is not a reliable physical drift measure. This shows why the old full-flight value cannot be compared with kinetic-only drift from the no-gravity assembly.
+- The earlier approximately 6% experimental-PCG result is not reproducible with the current saved fixtures: the final 100-part free-assembly test reports `0.004841%` with IC(0), `0.004958%` with diagonal PCG, and `0.004907%` with block Jacobi. The exact previous configuration/output is absent from the repository, so its precise historical cause remains unverified; the two metrics and scenarios are explicitly kept separate in the report.

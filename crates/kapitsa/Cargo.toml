@@ -1,8 +1,39 @@
 [package]
 name = "kapitsa"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license.workspace = true
 
+[features]
+bench-internals = ["kapitsa-core/bench-internals"]
+
 [dependencies]
 kapitsa-core = { path = "../kapitsa-core" }
+kapitsa-math = { path = "../kapitsa-math" }
+rayon = { version = "1.12.0" }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
+
+[[test]]
+name = "async_marshalling"
+
+[[test]]
+name = "collision_runtime"
+
+[[test]]
+name = "rayon_tokio_spawn"
+
+[[bench]]
+name = "collisions"
+harness = false
+
+[[bench]]
+name = "parallel_step"
+harness = false
+
+[[bench]]
+name = "large_modular_rocket"
+harness = false
+required-features = ["bench-internals"]
