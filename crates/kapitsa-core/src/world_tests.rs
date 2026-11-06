@@ -35,6 +35,9 @@ use std::time::Duration;
 
 use crate::execution::{ExecutionError, StepExecutor};
 
+#[path = "world/free_ball_tests.rs"]
+mod free_ball_tests;
+
 #[cfg(feature = "bench-internals")]
 fn clear_joint_metric_timings(mut metrics: JointSolverMetrics) -> JointSolverMetrics {
     metrics.joint_row_preparation_time = Duration::ZERO;

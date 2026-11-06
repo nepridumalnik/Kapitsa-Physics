@@ -291,6 +291,7 @@ fn free_ball_kernel_matches_independent_reference() {
 fn two_body_constrained_reference_conserves_momentum_and_converges_in_time() {
     for consistent in [true, false] {
         let mut previous_error = f64::INFINITY;
+        let mut previous_production_error = f64::INFINITY;
         for (subdivision, dt) in [(1, 1.0 / 60.0), (2, 1.0 / 120.0), (4, 1.0 / 240.0)] {
             let mut bodies = fixture(consistent);
             let fixture = bodies;
@@ -331,6 +332,19 @@ fn two_body_constrained_reference_conserves_momentum_and_converges_in_time() {
                 (production.0 - initial.0).length()
             );
             assert!(production_l_drift.is_finite() && production_energy.is_finite());
+            assert!((production.0 - initial.0).length() <= 1.0e-10);
+            assert!(production_l_drift <= 1.0e-10);
+            assert!(max_anchor <= 1.0e-7 && max_velocity <= 1.0e-7);
+            let production_energy_error = if consistent {
+                production_energy.abs()
+            } else {
+                assert!(first_production.2 < initial.2);
+                assert!((first_production.2 - after_first.2).abs() < 1.0e-12);
+                (production.2 - first_production.2).abs() / first_production.2
+            };
+            assert!(production_energy_error <= 1.0e-7);
+            assert!(production_energy_error < 0.35 * previous_production_error);
+            previous_production_error = production_energy_error;
             println!(
                 "reference consistent={consistent} dt={dt:.6} dP={p_drift:.6e} dL={l_drift:.6e} dE/E={energy_change:.6e} first_E={:.9e} anchor={:.3e} vel={:.3e}",
                 after_first.2, final_metrics.3, final_metrics.4
@@ -345,6 +359,39 @@ fn two_body_constrained_reference_conserves_momentum_and_converges_in_time() {
             assert!(energy_error < previous_error);
             previous_error = energy_error;
         }
+    }
+}
+
+#[test]
+fn free_ball_pair_conserves_invariants_with_full_inertia_tensors() {
+    let mut initial_bodies = fixture(true);
+    for body in &mut initial_bodies {
+        let local_omega = body
+            .rotation
+            .conjugate()
+            .rotate_vector(body.omega())
+            .unwrap();
+        let inertia = body.mass.inertia()
+            + Mat3::from_rows([[0.0, 0.08, -0.03], [0.08, 0.0, 0.04], [-0.03, 0.04, 0.0]]);
+        body.mass =
+            MassProperties::new(body.mass.mass(), body.mass.center_of_mass(), inertia).unwrap();
+        body.spin = body.rotation.rotate_vector(inertia * local_omega).unwrap();
+    }
+    let initial = metrics(initial_bodies);
+    let mut previous_error = f64::INFINITY;
+    for frequency in [60, 120, 240] {
+        let mut world = production_world(initial_bodies);
+        for _ in 0..5 * frequency {
+            world.step(1.0 / f64::from(frequency)).unwrap();
+            let current = production_metrics(&world, initial_bodies);
+            assert!((current.0 - initial.0).length() <= 1.0e-10);
+            assert!((current.1 - initial.1).length() <= 1.0e-10);
+            assert!(current.3 <= 1.0e-7 && current.4 <= 1.0e-7);
+        }
+        let end = production_metrics(&world, initial_bodies);
+        let error = ((end.2 - initial.2) / initial.2).abs();
+        assert!(error <= 1.0e-7 && error < 0.35 * previous_error);
+        previous_error = error;
     }
 }
 
