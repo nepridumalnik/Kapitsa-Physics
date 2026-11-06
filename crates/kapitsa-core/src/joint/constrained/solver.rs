@@ -38,6 +38,8 @@ pub(crate) struct ConstrainedWorkspace {
     product: Vec<f64>,
     diagonal: Vec<f64>,
     states: Vec<BodyState>,
+    normal: Vec<f64>,
+    cyclic: bool,
     pub(crate) linear_iterations: usize,
     pub(crate) nonlinear_iterations: usize,
 }
@@ -77,6 +79,7 @@ impl ConstrainedIntegrator {
         if !dt.is_finite() || dt <= 0.0 {
             return Err(CollisionError::InvalidConfig);
         }
+        scratch.cyclic = joints.len() >= bodies.len();
         scratch.linear_iterations = 0;
         scratch.nonlinear_iterations = 0;
         scratch.start.clear();
@@ -181,6 +184,62 @@ impl ConstrainedWorkspace {
         Ok(())
     }
 
+    // Cyclic graphs can have a singular Schur operator and an off-manifold
+    // residual outside its range. CGLS finds a minimum-residual reaction without
+    // regularizing the physical constraints. The nonlinear solve still checks
+    // every original geometric equality before accepting a step.
+    fn least_squares(&mut self, start: bool) -> Result<(), CollisionError> {
+        let rows = if start { &self.start_rows } else { &self.rows };
+        let n = rows.len();
+        resize(&mut self.normal, n, 0.0)?;
+        operator(
+            rows,
+            &self.masses,
+            &self.residual,
+            &mut self.normal,
+            &mut self.generalized,
+        )?;
+        self.direction.copy_from_slice(&self.normal);
+        let mut norm = dot(&self.normal, &self.normal)?;
+        let tolerance = 1.0e-14 * (1.0 + dot(&self.rhs, &self.rhs)?.sqrt());
+        for _ in 0..n.saturating_mul(4).saturating_add(64) {
+            if norm.sqrt() <= tolerance {
+                return Ok(());
+            }
+            operator(
+                rows,
+                &self.masses,
+                &self.direction,
+                &mut self.product,
+                &mut self.generalized,
+            )?;
+            let denominator = dot(&self.product, &self.product)?;
+            if denominator <= 0.0 {
+                return Err(CollisionError::NonConvergent);
+            }
+            let alpha = norm / denominator;
+            for i in 0..n {
+                self.solution[i] += alpha * self.direction[i];
+                self.residual[i] -= alpha * self.product[i];
+            }
+            operator(
+                rows,
+                &self.masses,
+                &self.residual,
+                &mut self.normal,
+                &mut self.generalized,
+            )?;
+            let next = dot(&self.normal, &self.normal)?;
+            let beta = next / norm;
+            for i in 0..n {
+                self.direction[i] = self.normal[i] + beta * self.direction[i];
+            }
+            norm = next;
+            self.linear_iterations += 1;
+        }
+        Err(CollisionError::NonConvergent)
+    }
+
     fn linear_solve(&mut self, start: bool) -> Result<(), CollisionError> {
         let rows = if start { &self.start_rows } else { &self.rows };
         let n = rows.len();
@@ -191,6 +250,9 @@ impl ConstrainedWorkspace {
         resize(&mut self.direction, n, 0.0)?;
         resize(&mut self.product, n, 0.0)?;
         resize(&mut self.diagonal, n, 0.0)?;
+        if self.cyclic {
+            return self.least_squares(start);
+        }
         let mut rho = 0.0;
         for (i, row) in rows.iter().enumerate() {
             let ma = self

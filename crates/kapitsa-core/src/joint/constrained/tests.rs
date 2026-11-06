@@ -241,3 +241,88 @@ fn all_equality_jacobians_match_finite_differences_and_rigid_invariance() {
         }
     }
 }
+
+#[test]
+fn every_bilateral_kind_has_five_second_momentum_and_energy_convergence() {
+    let (template, links) = fixture(2);
+    for (kind, _) in joint_variants(*links[0].joint.common()) {
+        let mut previous = f64::INFINITY;
+        for frequency in [60, 120, 240] {
+            let mut bodies = template.clone();
+            let mut constraint = JointConstraint {
+                joint: kind,
+                ..links[0]
+            };
+            if let Joint::Distance(ref mut distance) = constraint.joint {
+                distance.common.frame_a.local_anchor = Vec3::ZERO;
+                distance.common.frame_b.local_anchor = Vec3::ZERO;
+                distance.distance_limit.lower = 1.0;
+                distance.distance_limit.upper = 1.0;
+            }
+            if let Joint::ConeTwist(ref mut cone) = constraint.joint {
+                if cone.twist_limit.lower == cone.twist_limit.upper {
+                    cone.common.frame_b.local_rotation = cone.common.frame_b.local_rotation
+                        * Quat::from_axis_angle(Vec3::Z, cone.twist_limit.lower).unwrap();
+                }
+            }
+            let initial = invariants(&bodies);
+            let mut scratch = ConstrainedWorkspace::default();
+            for _ in 0..5 * frequency {
+                ConstrainedIntegrator::solve(
+                    &mut bodies,
+                    &[constraint],
+                    1.0 / f64::from(frequency),
+                    &mut scratch,
+                )
+                .unwrap_or_else(|error| panic!("kind={kind:?} Hz={frequency}: {error}"));
+            }
+            let end = invariants(&bodies);
+            let energy = ((end.2 - initial.2) / initial.2).abs();
+            println!(
+                "kind={:?} Hz={frequency} dP={:.6e} dL={:.6e} dE/E={energy:.6e}",
+                std::mem::discriminant(&kind),
+                (end.0 - initial.0).length(),
+                (end.1 - initial.1).length()
+            );
+            assert!((end.0 - initial.0).length() < 1.0e-10);
+            assert!((end.1 - initial.1).length() < 1.0e-10);
+            assert!(energy < 1.0e-7 && (energy < 0.35 * previous || energy < 1.0e-12));
+            previous = energy;
+        }
+    }
+}
+
+#[test]
+fn redundant_closed_fixed_loop_preserves_invariants() {
+    let (mut bodies, mut links) = fixture(3);
+    for link in &mut links {
+        link.joint = Joint::Fixed(crate::joint::FixedJoint::new(*link.joint.common()));
+    }
+    let frames = [0, 2].map(|i| {
+        let transform = bodies[i].state().transform();
+        JointFrame::new(
+            transform
+                .rotation()
+                .conjugate()
+                .rotate_vector(Vec3::X - transform.translation())
+                .unwrap(),
+            transform.rotation().conjugate(),
+        )
+    });
+    links.push(JointConstraint {
+        body_a: 0,
+        body_b: 2,
+        joint: Joint::Fixed(crate::joint::FixedJoint::new(JointCommon::new(
+            frames[0], frames[1],
+        ))),
+        ..links[0]
+    });
+    let initial = invariants(&bodies);
+    let mut scratch = ConstrainedWorkspace::default();
+    for _ in 0..600 {
+        ConstrainedIntegrator::solve(&mut bodies, &links, 1.0 / 120.0, &mut scratch).unwrap();
+    }
+    let end = invariants(&bodies);
+    assert!((end.0 - initial.0).length() < 1.0e-10);
+    assert!((end.1 - initial.1).length() < 1.0e-10);
+}
