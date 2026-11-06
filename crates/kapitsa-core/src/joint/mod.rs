@@ -75,12 +75,53 @@ pub enum Joint {
 impl Joint {
     pub(crate) fn supports_free_bilateral(&self) -> bool {
         let common = self.common();
-        common.enabled
-            && common.compliance == 0.0
-            && common.damping == 0.0
-            && common.break_force.is_none()
-            && common.break_torque.is_none()
-            && matches!(self, Self::Ball(ball) if ball.swing_limit.is_none() && ball.twist_limit.is_none())
+        if !common.enabled
+            || common.compliance != 0.0
+            || common.damping != 0.0
+            || common.break_force.is_some()
+            || common.break_torque.is_some()
+        {
+            return false;
+        }
+        match self {
+            Self::Ball(joint) => joint.swing_limit.is_none() && joint.twist_limit.is_none(),
+            Self::Fixed(_) => true,
+            Self::Hinge(joint) => joint.angle_limit.is_none() && !joint.drive.enabled,
+            Self::Slider(joint) => joint.translation_limit.is_none() && !joint.drive.enabled,
+            Self::Cylindrical(joint) => {
+                joint.translation_limit.is_none()
+                    && joint.angle_limit.is_none()
+                    && !joint.translation_drive.enabled
+                    && !joint.angular_drive.enabled
+            }
+            Self::Planar(joint) => {
+                joint.translation_limits.iter().all(Option::is_none)
+                    && joint.rotation_limit.is_none()
+                    && joint.translation_drives.iter().all(|drive| !drive.enabled)
+                    && !joint.rotation_drive.enabled
+            }
+            Self::Distance(joint) => joint.distance_limit.lower == joint.distance_limit.upper,
+            Self::D6(joint) => {
+                joint
+                    .linear_motion
+                    .iter()
+                    .chain(&joint.angular_motion)
+                    .all(|motion| matches!(motion, JointMotion::Locked | JointMotion::Free))
+                    && joint
+                        .linear_drives
+                        .iter()
+                        .chain(&joint.angular_drives)
+                        .all(|drive| !drive.enabled)
+            }
+            Self::ConeTwist(joint) => {
+                let free_twist = joint.twist_limit.lower <= -std::f64::consts::PI
+                    && joint.twist_limit.upper >= std::f64::consts::PI;
+                (joint.swing_limit == [0.0, 0.0]
+                    && (free_twist || joint.twist_limit.lower == joint.twist_limit.upper))
+                    || (joint.swing_limit == [std::f64::consts::PI; 2] && free_twist)
+            }
+            Self::Spring(_) => false,
+        }
     }
 
     pub fn common(&self) -> &JointCommon {

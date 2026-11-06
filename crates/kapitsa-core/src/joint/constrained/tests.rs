@@ -122,3 +122,122 @@ fn ball_rows_are_invariant_under_translation_and_rotation() {
         );
     }
 }
+
+fn joint_variants(common: JointCommon) -> Vec<(Joint, usize)> {
+    use crate::joint::*;
+    let mut partial = D6Joint::new(common);
+    partial.linear_motion[1] = JointMotion::Free;
+    partial.angular_motion[2] = JointMotion::Free;
+    let mut free = D6Joint::new(common);
+    free.linear_motion = [JointMotion::Free; 3];
+    free.angular_motion = [JointMotion::Free; 3];
+    vec![
+        (Joint::Ball(BallJoint::new(common)), 3),
+        (Joint::Fixed(FixedJoint::new(common)), 6),
+        (Joint::Hinge(HingeJoint::new(common)), 5),
+        (Joint::Slider(SliderJoint::new(common)), 5),
+        (Joint::Cylindrical(CylindricalJoint::new(common)), 4),
+        (Joint::Planar(PlanarJoint::new(common)), 3),
+        (Joint::Distance(DistanceJoint::fixed_length(common, 0.7)), 1),
+        (Joint::D6(partial), 4),
+        (Joint::D6(free), 0),
+        (
+            Joint::ConeTwist(ConeTwistJoint::new(
+                common,
+                [0.0; 2],
+                JointLimit::new(0.3, 0.3),
+            )),
+            6,
+        ),
+        (
+            Joint::ConeTwist(ConeTwistJoint::new(
+                common,
+                [0.0; 2],
+                JointLimit::new(-std::f64::consts::PI, std::f64::consts::PI),
+            )),
+            5,
+        ),
+        (
+            Joint::ConeTwist(ConeTwistJoint::new(
+                common,
+                [std::f64::consts::PI; 2],
+                JointLimit::new(-std::f64::consts::PI, std::f64::consts::PI),
+            )),
+            3,
+        ),
+    ]
+}
+
+#[test]
+fn all_equality_jacobians_match_finite_differences_and_rigid_invariance() {
+    let (bodies, joints) = fixture(2);
+    let mut bodies: Vec<_> = bodies
+        .iter()
+        .map(|body| MomentumBody::new(body.body()).unwrap())
+        .collect();
+    bodies[1].center += Vec3::new(0.1, -0.2, 0.3);
+    bodies[1].rotation = bodies[1]
+        .rotation
+        .integrate_world_angular_velocity(Vec3::new(0.2, -0.1, 0.3), 1.0)
+        .unwrap();
+    let mut common = *joints[0].joint.common();
+    let rotation = Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0), 0.4).unwrap();
+    common.frame_a.local_rotation = common.frame_a.local_rotation * rotation;
+    common.frame_b.local_rotation = common.frame_b.local_rotation * rotation;
+    for (joint, expected_count) in joint_variants(common) {
+        assert!(joint.supports_free_bilateral());
+        let constraint = JointConstraint { joint, ..joints[0] };
+        let mut rows = [EqualityRow::ZERO; MAX_EQUALITY_ROWS];
+        let count = write_equality_rows(constraint, &bodies, &mut rows).unwrap();
+        assert_eq!(count, expected_count);
+        for row in &rows[..count] {
+            assert!((row.linear_a + row.linear_b).length() < 1.0e-13);
+            assert!(
+                (bodies[row.a].center.cross(row.linear_a)
+                    + row.angular_a
+                    + bodies[row.b].center.cross(row.linear_b)
+                    + row.angular_b)
+                    .length()
+                    < 1.0e-13,
+                "{joint:?}"
+            );
+        }
+        for body in 0..2 {
+            for angular in [false, true] {
+                for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                    let epsilon = 1.0e-6;
+                    let mut perturbed = [bodies.clone(), bodies.clone()];
+                    for (state, sign) in perturbed.iter_mut().zip([1.0, -1.0]) {
+                        if angular {
+                            state[body].rotation = state[body]
+                                .rotation
+                                .integrate_world_angular_velocity(axis, sign * epsilon)
+                                .unwrap();
+                        } else {
+                            state[body].center += axis * (sign * epsilon);
+                        }
+                    }
+                    let mut plus = [EqualityRow::ZERO; MAX_EQUALITY_ROWS];
+                    let mut minus = plus;
+                    write_equality_rows(constraint, &perturbed[0], &mut plus).unwrap();
+                    write_equality_rows(constraint, &perturbed[1], &mut minus).unwrap();
+                    for i in 0..count {
+                        let row = rows[i];
+                        let gradient = match (body, angular) {
+                            (0, false) => row.linear_a,
+                            (0, true) => row.angular_a,
+                            (1, false) => row.linear_b,
+                            _ => row.angular_b,
+                        };
+                        let numerical = (plus[i].value - minus[i].value) / (2.0 * epsilon);
+                        assert!(
+                            (numerical - gradient.dot(axis)).abs() < 2.0e-8,
+                            "{joint:?} row={i} body={body} angular={angular} numerical={numerical} analytic={}",
+                            gradient.dot(axis)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

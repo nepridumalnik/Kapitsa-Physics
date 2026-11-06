@@ -4795,7 +4795,10 @@ fn world_frame<B: SolverBodyAccess + ?Sized>(
     Ok((transform.translation(), transform.rotation()))
 }
 
-fn relative_rotation_error(rotation_a: Quat, rotation_b: Quat) -> Result<Vec3, CollisionError> {
+pub(super) fn relative_rotation_error(
+    rotation_a: Quat,
+    rotation_b: Quat,
+) -> Result<Vec3, CollisionError> {
     let relative = canonical_relative_rotation(rotation_a, rotation_b)?;
     let vector = Vec3::new(relative.x, relative.y, relative.z);
     let sine = vector
@@ -4820,7 +4823,7 @@ fn canonical_relative_rotation(rotation_a: Quat, rotation_b: Quat) -> Result<Qua
     Ok(relative)
 }
 
-fn fixed_rotation_coefficient(rotation_error: Vec3) -> Result<f64, CollisionError> {
+pub(super) fn fixed_rotation_coefficient(rotation_error: Vec3) -> Result<f64, CollisionError> {
     let angle_squared = rotation_error
         .checked_dot(rotation_error)
         .ok_or(CollisionError::ArithmeticOverflow)?;
@@ -4843,7 +4846,7 @@ fn fixed_rotation_coefficient(rotation_error: Vec3) -> Result<f64, CollisionErro
     Ok(coefficient)
 }
 
-fn fixed_rotation_row_axis(
+pub(super) fn fixed_rotation_row_axis(
     rotation_a: Quat,
     rotation_error: Vec3,
     local_axis: Vec3,
