@@ -3,6 +3,19 @@ mod runtime;
 #[cfg(test)]
 extern crate self as kapitsa;
 
+pub mod execution {
+    pub use crate::runtime::{RayonExecutor, RayonPool, RayonPoolError};
+    pub use kapitsa_core::execution::{ExecutionError, SequentialExecutor, StepExecutor};
+}
+
+pub mod aerodynamics {
+    pub use kapitsa_core::aerodynamics::AerodynamicsTask;
+}
+
+pub mod hydrodynamics {
+    pub use kapitsa_core::hydrodynamics::HydrodynamicsTask;
+}
+
 pub mod aabb {
     pub use kapitsa_core::aabb::{Aabb, AabbError};
 }

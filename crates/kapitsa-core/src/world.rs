@@ -124,6 +124,7 @@ pub enum JointTarget {
 
 struct GravityBodyUpdate {
     id: BodyId,
+    error: Option<StepError>,
     original: RigidBody,
     prepared: RigidBody,
 }
@@ -1238,7 +1239,7 @@ impl PhysicsWorld {
             return Err(StepError::InvalidDeltaTime);
         }
         self.with_force_source_updates(|world| {
-            world.prepare_gravity_updates()?;
+            world.prepare_gravity_updates(executor, worker_count)?;
             world.step_prepared(dt, executor, worker_count)
         })
     }
@@ -1308,7 +1309,7 @@ impl PhysicsWorld {
             if shards.is_empty() {
                 return Err(StepError::InvalidStepResults);
             }
-            world.fill_step_shards(shards)?;
+            world.fill_step_shards_with_executor(shards, executor)?;
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunk| {
                     for shard in chunk {
@@ -1576,8 +1577,12 @@ impl PhysicsWorld {
         }
     }
 
-    fn gravity_force_for_body(&self, body_id: BodyId, body: &RigidBody) -> Result<Vec3, StepError> {
-        let Some(gravity) = self.central_gravity else {
+    fn gravity_force_for_body(
+        gravity: Option<CentralGravity>,
+        body_id: BodyId,
+        body: &RigidBody,
+    ) -> Result<Vec3, StepError> {
+        let Some(gravity) = gravity else {
             return Ok(Vec3::ZERO);
         };
         if body.physics().body_type() != BodyType::Dynamic {
@@ -1608,7 +1613,26 @@ impl PhysicsWorld {
             })
     }
 
-    fn prepare_gravity_updates(&mut self) -> Result<(), StepError> {
+    fn apply_gravity(
+        gravity: Option<CentralGravity>,
+        body_id: BodyId,
+        body: &mut RigidBody,
+    ) -> Result<(), StepError> {
+        let force = Self::gravity_force_for_body(gravity, body_id, body)?;
+        if force != Vec3::ZERO {
+            body.apply_force(force).map_err(|_| StepError::Gravity {
+                body_id,
+                cause: GravityError::ArithmeticOverflow,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn prepare_gravity_updates<E: StepExecutor>(
+        &mut self,
+        executor: &E,
+        workers: usize,
+    ) -> Result<(), StepError> {
         self.gravity_body_updates.clear();
         if self.central_gravity.is_none() {
             return Ok(());
@@ -1619,14 +1643,7 @@ impl PhysicsWorld {
                 world: self.world_id,
                 dense: dense_id,
             };
-            let force = match self.gravity_force_for_body(body_id, &entry.body) {
-                Ok(force) => force,
-                Err(error) => {
-                    self.gravity_body_updates.clear();
-                    return Err(error);
-                }
-            };
-            if force == Vec3::ZERO {
+            if entry.body.physics().body_type() != BodyType::Dynamic {
                 continue;
             }
             if self.gravity_body_updates.try_reserve(1).is_err() {
@@ -1636,19 +1653,35 @@ impl PhysicsWorld {
                     cause: GravityError::StorageCapacityExceeded,
                 });
             }
-            let mut prepared = entry.body;
-            if prepared.apply_force(force).is_err() {
-                self.gravity_body_updates.clear();
-                return Err(StepError::Gravity {
-                    body_id,
-                    cause: GravityError::ArithmeticOverflow,
-                });
-            }
             self.gravity_body_updates.push(GravityBodyUpdate {
                 id: body_id,
+                error: None,
                 original: entry.body,
-                prepared,
+                prepared: entry.body,
             });
+        }
+
+        let gravity = self.central_gravity;
+        let chunk_size = self
+            .gravity_body_updates
+            .len()
+            .div_ceil(workers.max(1))
+            .max(1);
+        executor
+            .for_each_chunk_mut(&mut self.gravity_body_updates, chunk_size, |_, updates| {
+                for update in updates {
+                    update.error =
+                        Self::apply_gravity(gravity, update.id, &mut update.prepared).err();
+                }
+            })
+            .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
+        if let Some(error) = self
+            .gravity_body_updates
+            .iter()
+            .find_map(|update| update.error)
+        {
+            self.gravity_body_updates.clear();
+            return Err(error);
         }
 
         for update in &self.gravity_body_updates {
@@ -5074,6 +5107,14 @@ impl PhysicsWorld {
     /// [`Self::step_with_shards`] to execute a complete step.
     #[doc(hidden)]
     pub fn fill_step_shards(&self, shards: &mut [Vec<BodyStep>]) -> Result<(), StepError> {
+        self.fill_step_shards_with_executor(shards, &SequentialExecutor)
+    }
+
+    fn fill_step_shards_with_executor<E: StepExecutor>(
+        &self,
+        shards: &mut [Vec<BodyStep>],
+        executor: &E,
+    ) -> Result<(), StepError> {
         if shards.is_empty() {
             return Err(StepError::InvalidStepResults);
         }
@@ -5101,25 +5142,32 @@ impl PhysicsWorld {
                 world: self.world_id,
                 dense: dense_id,
             };
-            let mut prepared = entry.body;
-            let gravity_force = self.gravity_force_for_body(body_id, &prepared)?;
-            if gravity_force != Vec3::ZERO {
-                prepared
-                    .apply_force(gravity_force)
-                    .map_err(|_| StepError::Gravity {
-                        body_id,
-                        cause: GravityError::ArithmeticOverflow,
-                    })?;
-            }
             shards[shard_index].push(BodyStep {
                 body_id,
                 source: entry.body,
                 predicted: None,
                 dt: None,
                 error: None,
-                prepared,
+                prepared: entry.body,
             });
             shard_remaining -= 1;
+        }
+        if self.central_gravity.is_some() {
+            executor
+                .for_each_chunk_mut(shards, 1, |_, chunks| {
+                    for step in chunks.iter_mut().flatten() {
+                        step.error = Self::apply_gravity(
+                            self.central_gravity,
+                            step.body_id,
+                            &mut step.prepared,
+                        )
+                        .err();
+                    }
+                })
+                .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
+            if let Some(error) = shards.iter().flatten().find_map(|step| step.error) {
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -5185,7 +5233,7 @@ impl PhysicsWorld {
 
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
-        self.prepare_gravity_updates()?;
+        self.prepare_gravity_updates(executor, worker_count)?;
         self.collision_system.begin_step();
         if let Err(error) = self.prepare_joint_collision_pairs() {
             self.collision_system.abort_step();

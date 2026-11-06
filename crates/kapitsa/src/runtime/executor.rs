@@ -1,6 +1,9 @@
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use kapitsa_core::execution::{ExecutionError, StepExecutor};
@@ -19,9 +22,15 @@ pub struct RayonPool {
 }
 
 /// Cloneable, statically dispatched access to a `RayonPool`.
+///
+/// One root computation and its nested `join`/chunk calls share the active
+/// worker budget. Clones share that budget too. Change it only between completed
+/// root computations; independent simulations should obtain separate executors.
+/// `spawn` submits a root task and does not itself reserve a compute permit.
 #[derive(Clone)]
 pub struct RayonExecutor {
     pool: Arc<ThreadPool>,
+    spare_workers: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +112,7 @@ impl RayonPool {
             .as_ref()
             .map(|pool| RayonExecutor {
                 pool: Arc::clone(pool),
+                spare_workers: Arc::new(AtomicUsize::new(pool.current_num_threads() - 1)),
             })
             .ok_or(RayonPoolError::PoolAlreadyShutDown)
     }
@@ -143,6 +153,33 @@ impl RayonPool {
 }
 
 impl StepExecutor for RayonExecutor {
+    fn set_parallelism(&mut self, workers: usize) {
+        self.spare_workers
+            .store(workers.clamp(1, self.worker_count()) - 1, Ordering::Relaxed);
+    }
+
+    fn join<A, B, RA, RB>(&self, left: A, right: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send,
+    {
+        if self
+            .spare_workers
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
+                available.checked_sub(1)
+            })
+            .is_err()
+        {
+            return (left(), right());
+        }
+        // Never wait for a permit: nested work runs locally when the budget is
+        // exhausted. Keep this permit until BOTH branches finish, also on panic.
+        let _permit = WorkerPermit(&self.spare_workers);
+        self.pool.install(|| rayon::join(left, right))
+    }
+
     fn for_each_chunk_mut<T, F>(
         &self,
         values: &mut [T],
@@ -156,12 +193,7 @@ impl StepExecutor for RayonExecutor {
         if chunk_size == 0 {
             return Err(ExecutionError::InvalidChunkLayout);
         }
-        self.pool.scope(|scope| {
-            for (index, chunk) in values.chunks_mut(chunk_size).enumerate() {
-                let operation = &operation;
-                scope.spawn(move |_| operation(index, chunk));
-            }
-        });
+        self.for_chunks(values, chunk_size, 0, &operation);
         Ok(())
     }
 
@@ -176,22 +208,59 @@ impl StepExecutor for RayonExecutor {
         F: Fn(usize, &mut [T]) + Send + Sync,
     {
         validate_chunk_layout(values.len(), chunk_sizes)?;
-        self.pool.scope(|scope| {
-            let mut remaining = values;
-            let mut start = 0;
-            for &chunk_size in chunk_sizes {
-                let (chunk, tail) = remaining.split_at_mut(chunk_size);
-                let operation = &operation;
-                scope.spawn(move |_| operation(start, chunk));
-                start += chunk_size;
-                remaining = tail;
-            }
-        });
+        self.for_layout(values, chunk_sizes, 0, &operation);
         Ok(())
     }
 }
 
 impl RayonExecutor {
+    fn for_chunks<T: Send, F: Fn(usize, &mut [T]) + Send + Sync>(
+        &self,
+        values: &mut [T],
+        size: usize,
+        start: usize,
+        operation: &F,
+    ) {
+        let count = values.len().div_ceil(size);
+        if count <= 1 || self.spare_workers.load(Ordering::Relaxed) == 0 {
+            for (index, chunk) in values.chunks_mut(size).enumerate() {
+                operation(start + index, chunk);
+            }
+            return;
+        }
+        let middle = count / 2;
+        let (left, right) = values.split_at_mut(middle * size);
+        self.join(
+            || self.for_chunks(left, size, start, operation),
+            || self.for_chunks(right, size, start + middle, operation),
+        );
+    }
+
+    fn for_layout<T: Send, F: Fn(usize, &mut [T]) + Send + Sync>(
+        &self,
+        mut values: &mut [T],
+        sizes: &[usize],
+        mut start: usize,
+        operation: &F,
+    ) {
+        if sizes.len() <= 1 || self.spare_workers.load(Ordering::Relaxed) == 0 {
+            for &size in sizes {
+                let (chunk, tail) = values.split_at_mut(size);
+                operation(start, chunk);
+                start += size;
+                values = tail;
+            }
+            return;
+        }
+        let middle = sizes.len() / 2;
+        let offset = sizes[..middle].iter().sum();
+        let (left, right) = values.split_at_mut(offset);
+        self.join(
+            || self.for_layout(left, &sizes[..middle], start, operation),
+            || self.for_layout(right, &sizes[middle..], start + offset, operation),
+        );
+    }
+
     /// Schedules a top-level task on the shared pool.
     pub fn spawn<F>(&self, operation: F) -> Result<(), RayonPoolError>
     where
@@ -204,6 +273,14 @@ impl RayonExecutor {
     /// Returns the fixed number of worker threads in this pool.
     pub fn worker_count(&self) -> usize {
         self.pool.current_num_threads()
+    }
+}
+
+struct WorkerPermit<'a>(&'a AtomicUsize);
+
+impl Drop for WorkerPermit<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -248,6 +325,92 @@ mod tests {
 
     use super::RayonPool;
     use kapitsa_core::execution::StepExecutor;
+
+    #[test]
+    fn nested_tasks_share_worker_limit_and_return_borrowed_results() {
+        fn tree(
+            executor: &super::RayonExecutor,
+            depth: usize,
+            active: &AtomicUsize,
+            peak: &AtomicUsize,
+        ) -> usize {
+            if depth == 0 {
+                let running = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(running, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(1));
+                active.fetch_sub(1, Ordering::SeqCst);
+                return 1;
+            }
+            let (left, right) = executor.join(
+                || tree(executor, depth - 1, active, peak),
+                || tree(executor, depth - 1, active, peak),
+            );
+            left + right
+        }
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let mut pool = RayonPool::new(runtime.handle(), 4).unwrap();
+        let mut executor = pool.executor().unwrap();
+        for workers in [1, 2, 3, 4] {
+            executor.set_parallelism(workers);
+            let active = AtomicUsize::new(0);
+            let peak = AtomicUsize::new(0);
+            assert_eq!(tree(&executor, 6, &active, &peak), 64);
+            assert!(peak.load(Ordering::SeqCst) <= workers);
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+            assert_eq!(executor.spare_workers.load(Ordering::Relaxed), workers - 1);
+            let mut values = [0; 23];
+            executor
+                .for_each_chunk_layout_mut(&mut values, &[2, 5, 1, 15], |start, chunk| {
+                    executor
+                        .for_each_chunk_mut(chunk, 1, |index, value| value[0] = start + index)
+                        .unwrap();
+                })
+                .unwrap();
+            assert_eq!(values, std::array::from_fn::<_, 23, _>(|i| i));
+        }
+        drop(executor);
+        runtime.block_on(pool.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn independent_branches_overlap_and_panics_release_permits() {
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let mut pool = RayonPool::new(runtime.handle(), 2).unwrap();
+        let executor = pool.executor().unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let values = [3, 7];
+        let result = executor.join(
+            || {
+                barrier.wait();
+                &values[0]
+            },
+            || {
+                barrier.wait();
+                &values[1]
+            },
+        );
+        assert_eq!(result, (&3, &7));
+        let completed = AtomicUsize::new(0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            executor.join(
+                || panic!("task failed"),
+                || {
+                    completed.fetch_add(1, Ordering::Relaxed);
+                },
+            );
+        }));
+        assert!(result.is_err());
+        assert_eq!(completed.load(Ordering::Relaxed), 1);
+        assert_eq!(executor.spare_workers.load(Ordering::Relaxed), 1);
+        drop(executor);
+        runtime.block_on(pool.shutdown()).unwrap();
+    }
 
     #[test]
     fn rayon_pool_reuses_scoped_workers_and_shuts_down_on_host_runtime() {

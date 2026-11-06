@@ -4,9 +4,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use kapitsa::execution::RayonPool;
 use kapitsa_core::{
     collider::Collider,
-    execution::{ExecutionError, StepExecutor},
+    execution::StepExecutor,
     mass::MassProperties,
     rigid_body::RigidBody,
     shape::{Shape, Sphere},
@@ -14,82 +15,17 @@ use kapitsa_core::{
     world::PhysicsWorld,
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
-use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 
 const DT: f64 = 1.0 / 60.0;
 const STEPS: usize = 12;
 const SAMPLES: usize = 5;
 const BODY_COUNTS: [usize; 3] = [256, 4_096, 20_000];
 
-struct RayonStepExecutor {
-    pool: ThreadPool,
-}
-
-impl StepExecutor for RayonStepExecutor {
-    fn for_each_chunk_mut<T, F>(
-        &self,
-        values: &mut [T],
-        chunk_size: usize,
-        operation: F,
-    ) -> Result<(), ExecutionError>
-    where
-        T: Send,
-        F: Fn(usize, &mut [T]) + Send + Sync,
-    {
-        if chunk_size == 0 {
-            return Err(ExecutionError::InvalidChunkLayout);
-        }
-        self.pool.install(|| {
-            values
-                .par_chunks_mut(chunk_size)
-                .enumerate()
-                .for_each(|(index, chunk)| operation(index, chunk));
-        });
-        Ok(())
-    }
-
-    fn for_each_chunk_layout_mut<T, F>(
-        &self,
-        values: &mut [T],
-        chunk_sizes: &[usize],
-        operation: F,
-    ) -> Result<(), ExecutionError>
-    where
-        T: Send,
-        F: Fn(usize, &mut [T]) + Send + Sync,
-    {
-        validate_layout(values.len(), chunk_sizes)?;
-        self.pool.scope(|scope| {
-            let mut remaining = values;
-            let mut start = 0;
-            for &chunk_size in chunk_sizes {
-                let (chunk, tail) = remaining.split_at_mut(chunk_size);
-                let operation = &operation;
-                scope.spawn(move |_| operation(start, chunk));
-                start += chunk_size;
-                remaining = tail;
-            }
-        });
-        Ok(())
-    }
-}
-
-fn validate_layout(length: usize, chunk_sizes: &[usize]) -> Result<(), ExecutionError> {
-    let total = chunk_sizes.iter().try_fold(0_usize, |total, &size| {
-        if size == 0 {
-            None
-        } else {
-            total.checked_add(size)
-        }
-    });
-    if total == Some(length) {
-        Ok(())
-    } else {
-        Err(ExecutionError::InvalidChunkLayout)
-    }
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()?;
+    let pool = RayonPool::new(runtime.handle(), 8)?;
     println!(
         "Kapitsa core parallel-step benchmark; steps={STEPS}, warmups=1, samples={SAMPLES}, statistics=min/median/max"
     );
@@ -98,7 +34,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         for workers in [1, 2, 4, 8] {
             let elapsed = sample(|| {
                 let mut world = make_world(body_count, false)?;
-                let executor = executor(workers)?;
+                let mut executor = pool.executor()?;
+                executor.set_parallelism(workers);
                 let started = Instant::now();
                 for _ in 0..STEPS {
                     black_box(world.step_with_executor(DT, &executor, workers)?);
@@ -127,7 +64,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     for workers in [1, 2, 4, 8] {
         let elapsed = sample(|| {
             let mut world = collision_world()?;
-            let executor = executor(workers)?;
+            let mut executor = pool.executor()?;
+            executor.set_parallelism(workers);
             let started = Instant::now();
             for _ in 0..STEPS {
                 black_box(world.step_with_executor(DT, &executor, workers)?);
@@ -150,13 +88,33 @@ fn main() -> Result<(), Box<dyn Error>> {
             baseline.as_secs_f64() / median.as_secs_f64(),
         );
     }
+    println!(
+        "\n20,000 dynamic bodies / central gravity / sharded prediction / production executor"
+    );
+    for workers in [1, 2, 4, 8] {
+        let (min, median, max) = sample(|| {
+            let mut world = make_world(20_000, false)?;
+            world.set_central_gravity(Some(kapitsa_core::CentralGravity::new(
+                Vec3::new(-100.0, 0.0, 0.0),
+                10_000.0,
+            )?));
+            let mut executor = pool.executor()?;
+            executor.set_parallelism(workers);
+            let mut shards = vec![Vec::new(); workers * 4];
+            let started = Instant::now();
+            for _ in 0..STEPS {
+                black_box(world.step_with_shards(DT, &mut shards, &executor, workers)?);
+            }
+            Ok(started.elapsed().div_f64(STEPS as f64))
+        })?;
+        println!(
+            "workers={workers} step={:.3}/{:.3}/{:.3} ms min/median/max",
+            millis(min),
+            millis(median),
+            millis(max)
+        );
+    }
     Ok(())
-}
-
-fn executor(workers: usize) -> Result<RayonStepExecutor, Box<dyn Error>> {
-    Ok(RayonStepExecutor {
-        pool: ThreadPoolBuilder::new().num_threads(workers).build()?,
-    })
 }
 
 fn make_world(body_count: usize, sleeping_heavy: bool) -> Result<PhysicsWorld, Box<dyn Error>> {

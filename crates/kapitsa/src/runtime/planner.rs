@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-const EARLY_WARNING_AT: f64 = 0.75;
+pub(crate) const EARLY_WARNING_AT: f64 = 0.70;
 const MIN_SCALE_UP_STEPS: u32 = 3;
 const MIN_SCALE_DOWN_STEPS: u32 = 24;
 const STABILIZATION_STEPS: u32 = 12;
@@ -16,9 +16,9 @@ const SCALE_DOWN_HYSTERESIS: f64 = 1.15;
 pub struct WorkerConfig {
     /// Fixed Rayon pool size; `None` uses the host's available parallelism.
     pub max_workers: Option<NonZeroUsize>,
-    /// Smoothed step-time ratio that starts a scale-up probe. Defaults to `0.85`.
+    /// Smoothed step-time ratio that starts a scale-up probe. Defaults to `0.70`.
     pub scale_up_at: f64,
-    /// Per-worker load ratio that permits scaling down. Defaults to `0.30`.
+    /// Smoothed step-time ratio that permits scaling down. Defaults to `0.30`.
     pub scale_down_at: f64,
     /// EWMA weight for the latest completed step, in `(0, 1]`.
     pub smoothing: f64,
@@ -28,7 +28,7 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             max_workers: None,
-            scale_up_at: 0.85,
+            scale_up_at: 0.70,
             scale_down_at: 0.30,
             smoothing: 0.20,
         }
@@ -37,15 +37,11 @@ impl Default for WorkerConfig {
 
 impl WorkerConfig {
     pub fn validate(&self) -> Result<(), WorkerConfigError> {
-        if !self.scale_up_at.is_finite()
-            || self.scale_up_at <= EARLY_WARNING_AT
-            || self.scale_up_at > 1.0
-        {
+        if !self.scale_up_at.is_finite() || self.scale_up_at <= 0.0 || self.scale_up_at > 1.0 {
             return Err(WorkerConfigError::InvalidScaleUpThreshold);
         }
         if !self.scale_down_at.is_finite()
             || self.scale_down_at <= 0.0
-            || self.scale_down_at >= EARLY_WARNING_AT
             || self.scale_down_at >= self.scale_up_at
         {
             return Err(WorkerConfigError::InvalidScaleDownThreshold);
@@ -77,8 +73,10 @@ pub enum WorkerConfigError {
 impl std::fmt::Display for WorkerConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
-            Self::InvalidScaleUpThreshold => "scale_up_at must be in (0.75, 1]",
-            Self::InvalidScaleDownThreshold => "scale_down_at must be in (0, 0.75)",
+            Self::InvalidScaleUpThreshold => "scale_up_at must be in (0, 1]",
+            Self::InvalidScaleDownThreshold => {
+                "scale_down_at must be positive and below scale_up_at"
+            }
             Self::InvalidSmoothing => "smoothing must be finite and in (0, 1]",
             Self::ActiveWorkersOutOfRange => "active workers must be in 1..=max_workers",
         };
@@ -176,10 +174,9 @@ impl AdaptiveScheduler {
             self.scale_up_streak = 0;
         }
 
-        let average_worker_seconds = smoothed_seconds / self.active_workers as f64;
-        if average_worker_seconds < budget_seconds * self.config.scale_down_at {
+        if smoothed_seconds <= budget_seconds * self.config.scale_down_at {
             self.scale_down_streak = self.scale_down_streak.saturating_add(1);
-        } else if average_worker_seconds
+        } else if smoothed_seconds
             > budget_seconds * self.config.scale_down_at * SCALE_DOWN_HYSTERESIS
         {
             self.scale_down_streak = 0;
@@ -249,7 +246,7 @@ impl AdaptiveScheduler {
         if self.active_workers >= self.max_workers {
             return false;
         }
-        let candidate_workers = self.active_workers + 1;
+        let candidate_workers = self.active_workers.saturating_mul(2).min(self.max_workers);
         let baseline_seconds = self.smoothed_seconds.unwrap_or(0.0);
         if self.rejected_increase.as_ref().is_some_and(|rejected| {
             rejected.candidate_workers == candidate_workers
@@ -278,14 +275,15 @@ impl AdaptiveScheduler {
             return false;
         }
         let smoothed_seconds = self.smoothed_seconds.unwrap_or(0.0);
+        let candidate_workers = (self.active_workers / 2).max(1);
         let estimated_seconds =
-            smoothed_seconds * self.active_workers as f64 / (self.active_workers - 1) as f64;
+            smoothed_seconds * self.active_workers as f64 / candidate_workers as f64;
         if estimated_seconds >= budget_seconds {
             self.scale_down_streak = 0;
             return false;
         }
 
-        self.active_workers -= 1;
+        self.active_workers = candidate_workers;
         self.finish_adjustment();
         true
     }
@@ -333,10 +331,35 @@ mod tests {
     }
 
     #[test]
-    fn thresholds_warn_at_seventy_five_percent_and_scale_up_after_sustained_load() {
+    fn scale_up_doubles_and_caps_at_non_power_of_two_limit() {
+        let mut scheduler = scheduler(6);
+        scheduler.set_active_workers(2).unwrap();
+        observe_many(&mut scheduler, Duration::from_millis(15), 13);
+        assert_eq!(scheduler.active_workers(), 4);
+        observe_many(
+            &mut scheduler,
+            Duration::from_millis(12),
+            WORKER_PROBE_STEPS,
+        );
+        observe_many(&mut scheduler, Duration::from_millis(12), 13);
+        assert_eq!(scheduler.active_workers(), 6);
+    }
+
+    #[test]
+    fn moderate_step_time_is_not_divided_by_worker_count() {
+        let mut scheduler = scheduler(8);
+        scheduler.set_active_workers(8).unwrap();
+        observe_many(&mut scheduler, Duration::from_millis(8), 120);
+        assert_eq!(scheduler.active_workers(), 8);
+        observe_many(&mut scheduler, Duration::from_millis(1), 200);
+        assert_eq!(scheduler.active_workers(), 1);
+    }
+
+    #[test]
+    fn thresholds_warn_at_seventy_percent_and_scale_up_after_sustained_load() {
         let budget = Duration::from_millis(20);
         let mut warning_scheduler = scheduler(4);
-        let warning = warning_scheduler.observe(Duration::from_millis(15), budget);
+        let warning = warning_scheduler.observe(Duration::from_millis(14), budget);
         assert!(warning.budget_warning);
         assert_eq!(warning.active_workers, 1);
 
@@ -359,8 +382,8 @@ mod tests {
     fn alternating_load_near_scale_up_threshold_does_not_trigger_a_probe() {
         let mut scheduler = scheduler(4);
         let budget = Duration::from_nanos(16_666_667);
-        let lower = budget.mul_f64(0.84);
-        let upper = budget.mul_f64(0.86);
+        let lower = budget.mul_f64(0.69);
+        let upper = budget.mul_f64(0.71);
 
         for index in 0..120 {
             scheduler.observe(if index % 2 == 0 { lower } else { upper }, budget);
@@ -370,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn useful_worker_probe_is_retained_and_does_not_double_worker_count() {
+    fn useful_worker_probe_is_retained() {
         let mut scheduler = scheduler(4);
         observe_many(&mut scheduler, Duration::from_millis(15), 3);
         assert_eq!(scheduler.active_workers(), 2);
@@ -395,13 +418,13 @@ mod tests {
     }
 
     #[test]
-    fn sustained_low_load_reduces_one_worker_without_changing_pool_size() {
+    fn sustained_low_load_halves_workers_without_changing_pool_size() {
         let mut scheduler = scheduler(4);
         scheduler
             .set_active_workers(4)
             .expect("valid active workers");
         let status = observe_many(&mut scheduler, Duration::from_millis(2), 40);
-        assert_eq!(status.active_workers, 3);
+        assert_eq!(status.active_workers, 2);
         assert_eq!(status.max_workers, 4);
     }
 
@@ -420,7 +443,7 @@ mod tests {
         assert_eq!(
             WorkerConfig {
                 max_workers: None,
-                scale_up_at: 0.75,
+                scale_up_at: 0.0,
                 scale_down_at: 0.30,
                 smoothing: 0.20,
             }
@@ -430,7 +453,7 @@ mod tests {
         assert_eq!(
             WorkerConfig {
                 max_workers: None,
-                scale_up_at: 0.85,
+                scale_up_at: 0.70,
                 scale_down_at: 0.75,
                 smoothing: 0.20,
             }
@@ -440,7 +463,7 @@ mod tests {
         assert_eq!(
             WorkerConfig {
                 max_workers: None,
-                scale_up_at: 0.85,
+                scale_up_at: 0.70,
                 scale_down_at: 0.30,
                 smoothing: f64::NAN,
             }
@@ -451,6 +474,6 @@ mod tests {
 
     #[test]
     fn early_warning_threshold_is_the_shared_budget_policy() {
-        assert_eq!(EARLY_WARNING_AT, 0.75);
+        assert_eq!(EARLY_WARNING_AT, 0.70);
     }
 }
