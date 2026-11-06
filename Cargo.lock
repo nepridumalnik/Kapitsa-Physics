@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "kapitsa"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kapitsa-core",
  "kapitsa-math",
@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "kapitsa-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kapitsa-math",
  "rayon",
@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "kapitsa-math"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "khronos_api"
@@ -1324,7 +1324,7 @@ checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 
 [[package]]
 name = "rocket-flight-viewer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gif",
  "glium",
