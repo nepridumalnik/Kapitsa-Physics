@@ -2771,24 +2771,26 @@ fn reproduce_ball_projection_orbital_drift(options: super::JointSolverOptions, l
         ] {
             report(&case, stage, initial, current);
         }
-        // Ordinary production stepping must reproduce the explicitly staged path.
-        // Reference options use a different mass response implementation, so compare
-        // physical quantities with roundoff allowance rather than bitwise identity.
+        // The staged legacy projection above must still reproduce its orbital
+        // defect. The public free-pair step instead uses constrained integration.
         world.step(DT).unwrap();
         let committed = graph_metrics(&world);
-        assert!((committed.angular_momentum - projected.angular_momentum).length() < 1.0e-13);
-        assert!((committed.kinetic_energy - projected.kinetic_energy).abs() < 1.0e-13);
-        assert!((committed.position_error_max - projected.position_error_max).abs() < 1.0e-13);
-        assert!(
-            (committed.linear_velocity_residual_max - projected.linear_velocity_residual_max).abs()
-                < 1.0e-13
-        );
+        report(&case, "constrained production", initial, committed);
+        assert!((committed.linear_momentum - initial.linear_momentum).length() < 1.0e-13);
+        assert!((committed.angular_momentum - initial.angular_momentum).length() < 1.0e-13);
+        assert!(committed.position_error_max < 1.0e-12);
+        assert!(committed.linear_velocity_residual_max < 1.0e-12);
+        if consistent {
+            assert!((committed.kinetic_energy - initial.kinetic_energy).abs() < 1.0e-12);
+        } else {
+            assert!(committed.kinetic_energy < initial.kinetic_energy);
+        }
         assert_finite_body_states(&world);
     }
 }
 
 #[test]
-fn ball_projection_orbital_drift_matches_production_order() {
+fn ball_projection_orbital_drift_is_avoided_by_free_pair_step() {
     reproduce_ball_projection_orbital_drift(super::JointSolverOptions::legacy(), "cached");
 }
 
