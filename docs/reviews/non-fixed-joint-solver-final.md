@@ -47,18 +47,18 @@ Both errors decrease approximately linearly with dt. This is a remaining product
 
 A separate test-only RATTLE-like reference solves a start kick, constrained drift and independent endpoint kick, including world spin momentum and anisotropic rotational inertia. The compatible two-body Ball case over five seconds shows production ΔL of 2.076090e-5, 1.038104e-5 and 5.190666e-6 at dt 1/60, 1/120 and 1/240; reference ΔL is respectively 4.221e-16, 8.092e-17 and 3.047e-16. Production relative ΔE is -3.522211e-5, -1.761236e-5 and -8.806508e-6, versus reference -3.800e-10, -9.501e-11 and -2.375e-11. An incompatible initial velocity loses 8.391871% energy in its initial reference projection while conserving momentum to about 1e-15.
 
-For compatible Ball trees over one second, absolute ΔL and relative ΔE are:
+For compatible Ball trees over five seconds, the baseline test reports:
 
-| Bodies | dt | Production ΔL | Production relative ΔE | Reference ΔL | Reference relative ΔE |
-|---:|---|---:|---:|---:|---:|
-| 10 | 1/60 | 1.131206e-4 | -3.678295e-5 | 7.692e-16 | 2.179054e-10 |
-| 10 | 1/120 | 5.721829e-5 | -1.844976e-5 | 1.088e-15 | 5.447276e-11 |
-| 10 | 1/240 | 2.877390e-5 | -9.239455e-6 | 2.220e-16 | 1.361912e-11 |
-| 31 | 1/60 | 6.812114e-4 | -6.827866e-5 | 1.986e-15 | 1.103793e-10 |
-| 31 | 1/120 | 3.512151e-4 | -3.449776e-5 | 2.665e-15 | 2.758875e-11 |
-| 31 | 1/240 | 1.782694e-4 | -1.733853e-5 | 3.997e-15 | 6.898827e-12 |
+| Bodies | dt | Production ?P | Production ?L | Production relative ?E | Maximum anchor error | Maximum anchor velocity | Reference ?L | Reference relative ?E |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 1/60 | 2.987305e-15 | 5.751367e-4 | -1.839728e-4 | 5.240113e-6 | 8.136579e-5 | 9.930137e-16 | 1.510479e-9 |
+| 10 | 1/120 | 5.885491e-15 | 2.885557e-4 | -9.209237e-5 | 1.312857e-6 | 4.075483e-5 | 2.106500e-15 | 3.776172e-10 |
+| 10 | 1/240 | 5.503168e-15 | 1.445253e-4 | -4.607269e-5 | 3.285698e-7 | 2.039579e-5 | 8.393756e-15 | 9.440489e-11 |
+| 31 | 1/60 | 5.604152e-15 | 3.617215e-3 | -3.503563e-4 | 2.940516e-5 | 2.509129e-4 | 3.552714e-15 | 4.208043e-10 |
+| 31 | 1/120 | 5.777428e-15 | 1.824162e-3 | -1.757225e-4 | 7.403942e-6 | 1.256053e-4 | 6.541843e-15 | 1.051946e-10 |
+| 31 | 1/240 | 9.900301e-15 | 9.159976e-4 | -8.799740e-5 | 1.857595e-6 | 6.284487e-5 | 1.005840e-14 | 2.630020e-11 |
 
-Across those tree runs production ΔP is at most 3.820e-15 and reference ΔP at most 3.608e-15. Reference energy error decreases approximately fourfold per halving of dt. The reference uses dense finite-difference Newton solves and covers free bilateral Ball systems only; it does not validate production forces, contacts, CCD, motors, compliance or limits.
+Reference energy error decreases approximately fourfold per halving of dt. The reference uses dense finite-difference Newton solves and covers free bilateral Ball systems only; it does not validate production forces, contacts, CCD, motors, compliance or limits.
 
 A safe production integration requires a common segment-level treatment of start state, constrained trajectories, candidate bounds and TOI, remaining-segment forces, rollback and constraint reactions. Solver modes, compliance and unilateral/contact constraints must share consistent residuals. The existing position-multiplier-to-velocity conversion was not repeated. No general production integration change is claimed.
 
