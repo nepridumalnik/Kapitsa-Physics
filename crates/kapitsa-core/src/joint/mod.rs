@@ -3,6 +3,8 @@ mod block;
 mod common;
 mod cone_twist;
 mod config;
+#[allow(dead_code, unused_imports)] // Connected to island execution after the kernel stages.
+pub(crate) mod constrained;
 mod cylindrical;
 mod d6;
 #[cfg(feature = "bench-internals")]
@@ -71,6 +73,16 @@ pub enum Joint {
 }
 
 impl Joint {
+    pub(crate) fn supports_free_bilateral(&self) -> bool {
+        let common = self.common();
+        common.enabled
+            && common.compliance == 0.0
+            && common.damping == 0.0
+            && common.break_force.is_none()
+            && common.break_torque.is_none()
+            && matches!(self, Self::Ball(ball) if ball.swing_limit.is_none() && ball.twist_limit.is_none())
+    }
+
     pub fn common(&self) -> &JointCommon {
         match self {
             Self::Fixed(joint) => &joint.common,
