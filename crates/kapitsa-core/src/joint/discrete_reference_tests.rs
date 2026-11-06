@@ -273,6 +273,9 @@ fn two_body_constrained_reference_conserves_momentum_and_converges_in_time() {
             }
             bodies = constrained_step(bodies, dt);
             world.step(dt).unwrap();
+            let first_production = production_metrics(&world, fixture);
+            let mut max_anchor = first_production.3;
+            let mut max_velocity = first_production.4;
             let after_first = metrics(bodies);
             assert!(after_first.3 < 1.0e-12 && after_first.4 < 1.0e-12);
             if !consistent {
@@ -281,6 +284,9 @@ fn two_body_constrained_reference_conserves_momentum_and_converges_in_time() {
             for _ in 1..300 * subdivision {
                 bodies = constrained_step(bodies, dt);
                 world.step(dt).unwrap();
+                let current = production_metrics(&world, fixture);
+                max_anchor = max_anchor.max(current.3);
+                max_velocity = max_velocity.max(current.4);
             }
             let final_metrics = metrics(bodies);
             let production = production_metrics(&world, fixture);
@@ -290,7 +296,8 @@ fn two_body_constrained_reference_conserves_momentum_and_converges_in_time() {
             let production_l_drift = (production.1 - initial.1).length();
             let production_energy = (production.2 - initial.2) / initial.2;
             println!(
-                "production consistent={consistent} dt={dt:.6} dL={production_l_drift:.6e} dE/E={production_energy:.6e}"
+                "production consistent={consistent} dt={dt:.6} dP={:.6e} dL={production_l_drift:.6e} dE/E={production_energy:.6e} max_anchor={max_anchor:.6e} max_velocity={max_velocity:.6e}",
+                (production.0 - initial.0).length()
             );
             assert!(production_l_drift.is_finite() && production_energy.is_finite());
             println!(
@@ -623,20 +630,23 @@ fn ball_trees_constrained_reference_preserves_momentum_and_converges() {
             let mut world = tree_production_world(&bodies, &links);
             let initial = tree_invariants(&bodies, &links);
             assert!(initial.3 < 1.0e-14 && initial.4 < 1.0e-14);
-            // One fixed physical second, independent of dt.
-            for _ in 0..60 * subdivision {
+            let mut max_anchor: f64 = 0.0;
+            let mut max_velocity: f64 = 0.0;
+            // Five fixed physical seconds, independent of dt.
+            for _ in 0..300 * subdivision {
                 bodies = tree_constrained_step(&bodies, &links, dt);
                 world.step(dt).unwrap();
+                let current = tree_invariants(&tree_production_state(&world, &template), &links);
+                max_anchor = max_anchor.max(current.3);
+                max_velocity = max_velocity.max(current.4);
             }
             let end = tree_invariants(&bodies, &links);
             let production = tree_invariants(&tree_production_state(&world, &template), &links);
             println!(
-                "production tree n={count} dt={dt:.6}: dP={:.6e} dL={:.6e} dE/E={:.6e} anchor={:.3e} velocity={:.3e}",
+                "production tree n={count} dt={dt:.6}: dP={:.6e} dL={:.6e} dE/E={:.6e} max_anchor={max_anchor:.6e} max_velocity={max_velocity:.6e}",
                 (production.0 - initial.0).length(),
                 (production.1 - initial.1).length(),
-                (production.2 - initial.2) / initial.2,
-                production.3,
-                production.4
+                (production.2 - initial.2) / initial.2
             );
             assert!(
                 production.0.is_finite() && production.1.is_finite() && production.2.is_finite()
