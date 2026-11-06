@@ -1454,7 +1454,6 @@ impl PhysicsWorld {
         };
         #[cfg(feature = "bench-internals")]
         let energy_before = self.energy_components();
-        self.collision_system.invalidate_joint_warm_start(joint_id);
         self.collision_system.begin_step();
         #[cfg(feature = "bench-internals")]
         self.collision_system
@@ -1467,6 +1466,14 @@ impl PhysicsWorld {
             let state = predicted[usize::from(id != ids[0])];
             self.collision_system.stage_prediction(id, state);
         }
+        // Removing the last colliders can leave committed lifecycle pairs.
+        // Stage their End events before any body is committed, just as on the
+        // general path, even though this step has no collision candidates.
+        if let Err(error) = self.collision_system.stage_lifecycle_events() {
+            self.collision_system.abort_step();
+            return Err(StepError::Collision(error));
+        }
+        self.collision_system.invalidate_joint_warm_start(joint_id);
         self.commit_predicted_states();
         self.joint_events.clear();
         #[cfg(feature = "bench-internals")]

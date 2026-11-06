@@ -219,6 +219,53 @@ fn free_ball_pair_rejects_stale_shards_before_any_commit() {
     assert_eq!(ids.map(|id| *world.body(id).unwrap()), original);
 }
 
+#[test]
+fn free_ball_pair_preserves_pending_collision_events_across_failure_and_commit() {
+    use crate::{collider::CollisionMode, collision::CollisionEventKind};
+
+    for route in 0..4 {
+        let (mut world, ids, joint) = pair_world();
+        let Joint::Ball(mut ball) = *world.joint(joint).unwrap() else {
+            unreachable!()
+        };
+        ball.common.collide_connected = true;
+        world.update_joint(joint, Joint::Ball(ball)).unwrap();
+        let colliders = ids.map(|id| {
+            let mut sensor = super::collider(1.0);
+            sensor.set_mode(CollisionMode::Sensor);
+            world.add_collider(id, sensor).unwrap()
+        });
+        world.step(1.0 / 120.0).unwrap();
+        assert_eq!(world.collision_events().len(), 1);
+        assert_eq!(world.collision_events()[0].kind, CollisionEventKind::Begin);
+        let events = world.collision_events().to_vec();
+        for id in colliders {
+            world.remove_collider(id).unwrap();
+        }
+        let original = ids.map(|id| *world.body(id).unwrap());
+        for id in ids {
+            world
+                .body_mut(id)
+                .unwrap()
+                .set_angular_velocity(Vec3::new(10.0, 15.0, 20.0))
+                .unwrap();
+        }
+        assert_eq!(
+            step_route(&mut world, route, 1.0),
+            Err(StepError::Collision(CollisionError::NonConvergent))
+        );
+        assert_eq!(world.collision_events(), events);
+        for (id, body) in ids.into_iter().zip(original) {
+            *world.body_mut(id).unwrap() = body;
+        }
+        step_route(&mut world, route, 1.0 / 120.0).unwrap();
+        assert_eq!(world.collision_events().len(), 1);
+        assert_eq!(world.collision_events()[0].kind, CollisionEventKind::End);
+        step_route(&mut world, route, 1.0 / 120.0).unwrap();
+        assert!(world.collision_events().is_empty());
+    }
+}
+
 #[cfg(feature = "bench-internals")]
 #[test]
 #[ignore = "Run alone to count process-wide allocations after warming the Ball pair"]
