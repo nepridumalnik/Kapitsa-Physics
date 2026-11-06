@@ -67,6 +67,7 @@ pub use asynchronous::{
 pub use config::{
     AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, TimeStepPolicy,
 };
+pub use executor::{RayonExecutor, RayonPool, RayonPoolError};
 pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
 pub use planner::{WorkerConfig, WorkerConfigError};
 

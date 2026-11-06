@@ -3,6 +3,23 @@
 /// Implementations must wait until every callback has completed before returning.
 /// Callbacks may borrow shared step input and write only to their assigned chunk.
 pub trait StepExecutor: Sync {
+    /// Executes independent branches and waits for both results. Branches may
+    /// borrow step data and recursively use this executor for child work.
+    /// The default keeps existing executors source-compatible and sequential.
+    fn join<A, B, RA, RB>(&self, left: A, right: B) -> (RA, RB)
+    where
+        A: FnOnce() -> RA + Send,
+        B: FnOnce() -> RB + Send,
+        RA: Send,
+        RB: Send,
+    {
+        (left(), right())
+    }
+
+    /// Changes the step's concurrency limit between completed steps.
+    /// Executors without adaptive concurrency may keep their fixed policy.
+    fn set_parallelism(&mut self, _workers: usize) {}
+
     fn for_each_chunk_mut<T, F>(
         &self,
         values: &mut [T],

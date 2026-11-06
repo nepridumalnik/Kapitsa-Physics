@@ -42,8 +42,9 @@ impl<E: StepExecutor> StepEngine<E> {
     pub(crate) fn new_validated(
         mut world: PhysicsWorld,
         config: SimulationConfig,
-        executor: E,
+        mut executor: E,
     ) -> Self {
+        executor.set_parallelism(1);
         if let Some(gravity) = config.central_gravity {
             world.set_central_gravity(Some(gravity));
         }
@@ -80,6 +81,7 @@ impl<E: StepExecutor> StepEngine<E> {
 
     pub(crate) fn set_parallelism(&mut self, active_workers: usize, pool_size: Option<usize>) {
         self.active_workers = active_workers.max(1);
+        self.executor.set_parallelism(self.active_workers);
         self.rayon_pool_size = pool_size;
         self.metrics.active_workers = self.active_workers;
         self.metrics.rayon_pool_size = pool_size;
@@ -142,8 +144,8 @@ impl<E: StepExecutor> StepEngine<E> {
             .unwrap_or(Duration::ZERO);
         let step_budget = self.config.step_budget();
         let budget_usage = step_duration.as_secs_f64() / step_budget.as_secs_f64();
-        let budget_warning = step_duration >= step_budget.mul_f64(0.75);
-        let overloaded = step_duration >= step_budget.mul_f64(0.85);
+        let budget_warning = step_duration >= step_budget.mul_f64(super::planner::EARLY_WARNING_AT);
+        let overloaded = step_duration >= step_budget.mul_f64(self.config.workers.scale_up_at);
         let deadline_missed = step_duration > step_budget;
 
         self.metrics.state = SimulationState::Stopped;
@@ -180,6 +182,10 @@ impl<E: StepExecutor> StepEngine<E> {
     }
 
     fn run_step(&mut self, physics_dt: f64) -> Result<(), StepError> {
+        self.executor.join(
+            || kapitsa_core::aerodynamics::AerodynamicsTask.execute(&self.world),
+            || kapitsa_core::hydrodynamics::HydrodynamicsTask.execute(&self.world),
+        );
         let body_count = self.world.body_count();
         let worker_count = self.active_workers.min(body_count).max(1);
         if worker_count <= 1 {
@@ -395,6 +401,61 @@ mod tests {
                 expected.state().angular_velocity(),
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn gravity_task_failure_rolls_back_sources_and_allows_retry() {
+        let mut pool = RayonPool::new(&Handle::current(), 4).unwrap();
+        for workers in [1, 4] {
+            let (mut reference, reference_ids) = world_with_force_sources();
+            let (world, ids) = world_with_force_sources();
+            let original: Vec<_> = ids.iter().map(|id| *world.body(*id).unwrap()).collect();
+            let config = SimulationConfig {
+                tick_rate: 120,
+                central_gravity: Some(CentralGravity::new(Vec3::new(8.0, 0.0, 0.0), 1.0).unwrap()),
+                ..SimulationConfig::default()
+            };
+            let mut engine = StepEngine::new(world, config, pool.executor().unwrap()).unwrap();
+            engine.set_parallelism(workers, Some(4));
+            assert_eq!(
+                engine.step(Duration::ZERO),
+                Err(kapitsa_core::world::StepError::Gravity {
+                    body_id: ids[2],
+                    cause: kapitsa_core::gravity::GravityError::AtFieldCenter,
+                })
+            );
+            for (id, before) in ids.iter().zip(&original) {
+                assert_eq!(engine.world().body(*id).unwrap(), before);
+            }
+            engine.world_mut().set_central_gravity(None);
+            reference.step(1.0 / 120.0).unwrap();
+            engine.step(Duration::ZERO).unwrap();
+            assert_states_match(engine.world(), &ids, &reference, &reference_ids);
+        }
+        pool.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn changing_worker_count_preserves_bits_over_many_gravity_steps() {
+        let (mut reference, reference_ids) = world_with_force_sources();
+        let (world, ids) = world_with_force_sources();
+        let gravity = CentralGravity::new(Vec3::new(-100.0, 0.0, 0.0), 10_000.0).unwrap();
+        reference.set_central_gravity(Some(gravity));
+        let config = SimulationConfig {
+            tick_rate: 120,
+            central_gravity: Some(gravity),
+            ..SimulationConfig::default()
+        };
+        let mut pool = RayonPool::new(&Handle::current(), 4).unwrap();
+        let mut engine = StepEngine::new(world, config, pool.executor().unwrap()).unwrap();
+        for tick in 0..120 {
+            engine.set_parallelism([1, 2, 4, 2][tick % 4], Some(4));
+            reference.step(1.0 / 120.0).unwrap();
+            engine.step(Duration::ZERO).unwrap();
+            assert_states_match(engine.world(), &ids, &reference, &reference_ids);
+        }
+        drop(engine);
+        pool.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
