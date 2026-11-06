@@ -1,5 +1,7 @@
 ﻿# Numerical correctness: convergence and orbital momentum
 
+Superseded for constrained integration by [the universal island report](constrained-island-integrator.md). The pair-only implementation described here is historical and has been removed.
+
 Date: 2026-11-06. Branch: `feat/collisions`. Starting HEAD: `253b161`.
 
 **Status: production drift fixed for the free two-body hard Ball pair described below.** Other systems retain the existing solver and its known orbital drift. All changes are local; no push was performed.
