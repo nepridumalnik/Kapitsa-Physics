@@ -280,3 +280,56 @@ fn free_ball_pair_warm_steps_do_not_allocate() {
     println!("free Ball pair: 600 warmed steps, {allocations} allocations, {bytes} bytes");
     assert_eq!((allocations, bytes), (0, 0));
 }
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Run alone for process-wide allocation counts on warmed large constrained islands"]
+fn constrained_large_warm_steps_do_not_allocate() {
+    for count in [100, 500, 1000] {
+        let mut world = PhysicsWorld::new();
+        let mut ids = Vec::new();
+        let omega = Vec3::new(0.05, 0.1, 0.02);
+        for i in 0..count {
+            let mass = MassProperties::new(
+                0.8 + (i % 3) as f64 * 0.3,
+                Vec3::new(0.01, -0.02, 0.03),
+                Mat3::from_rows([[0.6, 0.08, -0.03], [0.08, 0.8, 0.04], [-0.03, 0.04, 1.0]]),
+            )
+            .unwrap();
+            let mut body = RigidBody::new_dynamic(
+                Transform::new(Vec3::X * i as f64, Quat::IDENTITY).unwrap(),
+                mass,
+            )
+            .unwrap();
+            body.set_angular_velocity(omega).unwrap();
+            body.set_linear_velocity(
+                Vec3::new(0.2, -0.1, 0.05)
+                    + omega.cross(body.world_center_of_mass().unwrap().unwrap()),
+            )
+            .unwrap();
+            ids.push(world.add_body(body).unwrap());
+        }
+        for pair in ids.windows(2) {
+            world
+                .add_joint(
+                    pair[0],
+                    pair[1],
+                    Joint::Ball(BallJoint::new(JointCommon::new(
+                        JointFrame::new(Vec3::X * 0.5, Quat::IDENTITY),
+                        JointFrame::new(-Vec3::X * 0.5, Quat::IDENTITY),
+                    ))),
+                )
+                .unwrap();
+        }
+        for _ in 0..8 {
+            world.step(1.0 / 120.0).unwrap();
+        }
+        let (allocations, bytes) = super::tracked_world_allocations(|| {
+            for _ in 0..16 {
+                world.step(1.0 / 120.0).unwrap();
+            }
+        });
+        println!("constrained n={count} warmed_steps=16 allocations={allocations} bytes={bytes}");
+        assert_eq!((allocations, bytes), (0, 0));
+    }
+}

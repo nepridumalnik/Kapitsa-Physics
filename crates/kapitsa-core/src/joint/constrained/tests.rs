@@ -414,3 +414,78 @@ fn constrained_chain_sizes_retain_invariants_and_report_cost() {
         assert!((end.1 - initial.1).length() < 1.0e-10 * (1.0 + initial.1.length()));
     }
 }
+
+#[cfg(feature = "bench-internals")]
+mod rayon_executor {
+    use crate as kapitsa_core;
+    include!("../../../benches/support/rayon_executor.rs");
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+#[ignore = "Release timing comparison with persistent Rayon pools"]
+fn constrained_parallel_scaling_and_single_island_cost() {
+    use crate::execution::SequentialExecutor;
+    for (islands, count) in [(1, 100), (1, 500), (1, 1000), (8, 100)] {
+        let mut reference = None;
+        for workers in [1, 2, 4, 8] {
+            let mut world = PhysicsWorld::new();
+            for island in 0..islands {
+                let (bodies, joints) = fixture(count);
+                let ids: Vec<_> = bodies
+                    .into_iter()
+                    .map(|body| {
+                        let mut body = body.body;
+                        let transform = body.state().transform();
+                        body.set_transform(
+                            Transform::new(
+                                transform.translation() + Vec3::Y * (island as f64 * 30.0),
+                                transform.rotation(),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                        world.add_body(body).unwrap()
+                    })
+                    .collect();
+                for joint in joints {
+                    world
+                        .add_joint(ids[joint.body_a], ids[joint.body_b], joint.joint)
+                        .unwrap();
+                }
+            }
+            let pool = rayon_executor::RayonExecutor::new(workers).unwrap();
+            for _ in 0..8 {
+                world
+                    .step_with_executor(1.0 / 120.0, &pool, workers)
+                    .unwrap();
+            }
+            let mut samples = Vec::with_capacity(32);
+            for _ in 0..32 {
+                let start = std::time::Instant::now();
+                if workers == 1 {
+                    world
+                        .step_with_executor(1.0 / 120.0, &SequentialExecutor, 1)
+                        .unwrap();
+                } else {
+                    world
+                        .step_with_executor(1.0 / 120.0, &pool, workers)
+                        .unwrap();
+                }
+                samples.push(start.elapsed().as_nanos());
+            }
+            samples.sort_unstable();
+            let states: Vec<_> = world.bodies().map(|(_, body)| *body.state()).collect();
+            if let Some(reference) = &reference {
+                assert_eq!(&states, reference);
+            } else {
+                reference = Some(states);
+            }
+            println!(
+                "islands={islands} bodies_per_island={count} workers={workers} p50_us={:.3} p95_us={:.3}",
+                samples[16] as f64 / 1000.0,
+                samples[30] as f64 / 1000.0
+            );
+        }
+    }
+}
