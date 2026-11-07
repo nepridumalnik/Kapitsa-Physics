@@ -162,6 +162,7 @@ pub enum WorldError {
     InvalidBodyId,
     InvalidColliderId,
     InvalidJointId,
+    InvalidGravityId,
     InvalidJointBodies,
     InvalidJointTarget,
     InvalidMaterialId,
@@ -184,6 +185,7 @@ impl fmt::Display for WorldError {
             Self::InvalidBodyId => formatter.write_str("body ID is invalid for this world"),
             Self::InvalidColliderId => formatter.write_str("collider ID is invalid for this world"),
             Self::InvalidJointId => formatter.write_str("joint ID is invalid for this world"),
+            Self::InvalidGravityId => formatter.write_str("gravity ID is invalid for this world"),
             Self::InvalidJointBodies => {
                 formatter.write_str("joint body IDs must identify two bodies in this world")
             }
@@ -212,6 +214,7 @@ impl std::error::Error for WorldError {
             | Self::InvalidBodyId
             | Self::InvalidColliderId
             | Self::InvalidJointId
+            | Self::InvalidGravityId
             | Self::InvalidJointBodies
             | Self::InvalidJointTarget
             | Self::InvalidMaterialId

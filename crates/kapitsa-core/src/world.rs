@@ -10,12 +10,14 @@ use std::time::Instant;
 
 mod cluster;
 mod error;
+#[cfg(test)]
+mod gravity_fields_tests;
 mod id;
 #[cfg(feature = "bench-internals")]
 mod metrics;
 
 pub use error::{ClusterError, ForceSourceError, StepError, WorldError};
-pub use id::{BodyId, ColliderId, ForceSourceId, JointId, PartId, WeldId};
+pub use id::{BodyId, ColliderId, ForceSourceId, GravityId, JointId, PartId, WeldId};
 #[cfg(feature = "bench-internals")]
 pub use metrics::PhysicsStepMetrics;
 
@@ -44,7 +46,7 @@ use crate::{
     },
     containers::DensePool,
     execution::{SequentialExecutor, StepExecutor},
-    gravity::{CentralGravity, GravityError},
+    gravity::{CentralGravity, Gravity, GravityError},
     joint::{Joint, JointBreakEvent, JointFrame},
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
     rigid_body::{BodyState, BodyType, CcdMode, RigidBody, predict, predict_from_state},
@@ -188,6 +190,7 @@ pub struct PhysicsWorld {
     force_source_body_updates: Vec<ForceSourceBodyUpdate>,
     force_source_body_indices: Option<HashMap<BodyId, usize>>,
     central_gravity: Option<CentralGravity>,
+    gravity_fields: DensePool<Gravity>,
     gravity_body_updates: Vec<GravityBodyUpdate>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
@@ -249,6 +252,7 @@ impl PhysicsWorld {
             force_source_body_updates: Vec::new(),
             force_source_body_indices: None,
             central_gravity: None,
+            gravity_fields: DensePool::new(),
             gravity_body_updates: Vec::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
@@ -270,6 +274,58 @@ impl PhysicsWorld {
 
     pub fn set_central_gravity(&mut self, gravity: Option<CentralGravity>) {
         self.central_gravity = gravity;
+    }
+
+    /// Adds an independently managed gravity field.
+    pub fn add_gravity(&mut self, gravity: impl Into<Gravity>) -> Result<GravityId, WorldError> {
+        if self.world_id == 0 {
+            self.world_id = allocate_world_id(&NEXT_WORLD_ID)?;
+        }
+        let dense = self.gravity_fields.insert(gravity.into())?;
+        Ok(GravityId {
+            world: self.world_id,
+            dense,
+        })
+    }
+
+    pub fn gravity(&self, id: GravityId) -> Option<Gravity> {
+        (id.world == self.world_id)
+            .then(|| self.gravity_fields.get(id.dense).copied())
+            .flatten()
+    }
+
+    pub fn gravity_fields(&self) -> impl Iterator<Item = (GravityId, Gravity)> + '_ {
+        self.gravity_fields.iter().map(|(dense, field)| {
+            (
+                GravityId {
+                    world: self.world_id,
+                    dense,
+                },
+                *field,
+            )
+        })
+    }
+
+    pub fn update_gravity(
+        &mut self,
+        id: GravityId,
+        gravity: impl Into<Gravity>,
+    ) -> Result<(), WorldError> {
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidGravityId);
+        }
+        *self
+            .gravity_fields
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidGravityId)? = gravity.into();
+        Ok(())
+    }
+
+    pub fn remove_gravity(&mut self, id: GravityId) -> Option<Gravity> {
+        if id.world != self.world_id {
+            return None;
+        }
+        self.gravity_fields.remove(id.dense)
     }
 
     pub fn set_collision_config(&mut self, config: CollisionConfig) -> Result<(), CollisionError> {
@@ -1579,12 +1635,13 @@ impl PhysicsWorld {
 
     fn gravity_force_for_body(
         gravity: Option<CentralGravity>,
+        fields: &DensePool<Gravity>,
         body_id: BodyId,
         body: &RigidBody,
     ) -> Result<Vec3, StepError> {
-        let Some(gravity) = gravity else {
+        if gravity.is_none() && fields.is_empty() {
             return Ok(Vec3::ZERO);
-        };
+        }
         if body.physics().body_type() != BodyType::Dynamic {
             return Ok(Vec3::ZERO);
         }
@@ -1598,9 +1655,21 @@ impl PhysicsWorld {
                 body_id,
                 cause: GravityError::ArithmeticOverflow,
             })?;
-        let acceleration = gravity
-            .acceleration_at(center)
-            .map_err(|cause| StepError::Gravity { body_id, cause })?;
+        let mut acceleration = match gravity {
+            Some(gravity) => gravity
+                .acceleration_at(center)
+                .map_err(|cause| StepError::Gravity { body_id, cause })?,
+            None => Vec3::ZERO,
+        };
+        for (_, field) in fields.iter() {
+            let next = field
+                .acceleration_at(center)
+                .map_err(|cause| StepError::Gravity { body_id, cause })?;
+            acceleration = acceleration.checked_add(next).ok_or(StepError::Gravity {
+                body_id,
+                cause: GravityError::ArithmeticOverflow,
+            })?;
+        }
         let mass = body.physics().mass().ok_or(StepError::Gravity {
             body_id,
             cause: GravityError::ArithmeticOverflow,
@@ -1615,10 +1684,11 @@ impl PhysicsWorld {
 
     fn apply_gravity(
         gravity: Option<CentralGravity>,
+        fields: &DensePool<Gravity>,
         body_id: BodyId,
         body: &mut RigidBody,
     ) -> Result<(), StepError> {
-        let force = Self::gravity_force_for_body(gravity, body_id, body)?;
+        let force = Self::gravity_force_for_body(gravity, fields, body_id, body)?;
         if force != Vec3::ZERO {
             body.apply_force(force).map_err(|_| StepError::Gravity {
                 body_id,
@@ -1634,7 +1704,7 @@ impl PhysicsWorld {
         workers: usize,
     ) -> Result<(), StepError> {
         self.gravity_body_updates.clear();
-        if self.central_gravity.is_none() {
+        if self.central_gravity.is_none() && self.gravity_fields.is_empty() {
             return Ok(());
         }
 
@@ -1662,6 +1732,7 @@ impl PhysicsWorld {
         }
 
         let gravity = self.central_gravity;
+        let fields = &self.gravity_fields;
         let chunk_size = self
             .gravity_body_updates
             .len()
@@ -1671,7 +1742,7 @@ impl PhysicsWorld {
             .for_each_chunk_mut(&mut self.gravity_body_updates, chunk_size, |_, updates| {
                 for update in updates {
                     update.error =
-                        Self::apply_gravity(gravity, update.id, &mut update.prepared).err();
+                        Self::apply_gravity(gravity, fields, update.id, &mut update.prepared).err();
                 }
             })
             .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
@@ -5152,12 +5223,13 @@ impl PhysicsWorld {
             });
             shard_remaining -= 1;
         }
-        if self.central_gravity.is_some() {
+        if self.central_gravity.is_some() || !self.gravity_fields.is_empty() {
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunks| {
                     for step in chunks.iter_mut().flatten() {
                         step.error = Self::apply_gravity(
                             self.central_gravity,
+                            &self.gravity_fields,
                             step.body_id,
                             &mut step.prepared,
                         )
