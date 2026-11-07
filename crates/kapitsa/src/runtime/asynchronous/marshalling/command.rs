@@ -2,18 +2,21 @@ use crate::runtime::constants::{MAX_COMMANDS_PER_BATCH, SMALL_STAGING_LINEAR_SEA
 use std::collections::HashMap;
 
 use kapitsa_core::{
+    cluster::{
+        ClusterPart, ClusterPartDesc, MassChangeMode, MassTransfer, RigidCluster, Weld, WeldDesc,
+    },
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{CollisionConfig, OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
     gravity::Gravity,
     joint::Joint,
     mass::MassProperties,
-    material::MaterialId,
+    material::{MaterialId, PhysicsMaterial},
     rigid_body::{BodyError, CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
     world::{
         BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, GravityId,
-        JointId, PhysicsWorld, WorldError,
+        JointId, JointTarget, PartId, PhysicsWorld, WeldId, WorldError,
     },
 };
 use kapitsa_math::{Affine3, Vec3};
@@ -38,6 +41,106 @@ impl BatchId {
 
 /// An operation applied to the simulation world at a physics-step boundary.
 pub enum PhysicsCommand {
+    /// Adds a material and returns its ID.
+    AddMaterial {
+        material: PhysicsMaterial,
+    },
+    /// Replaces a material, invalidating affected cached contacts.
+    UpdateMaterial {
+        id: MaterialId,
+        material: PhysicsMaterial,
+    },
+    /// Removes an unassigned material.
+    RemoveMaterial {
+        id: MaterialId,
+    },
+    /// Reads a material at this request's position in the queue.
+    GetMaterial {
+        id: MaterialId,
+    },
+    /// Converts a dynamic body into a cluster and returns its root part.
+    EnableCluster {
+        body: BodyId,
+    },
+    /// Converts a body into a cluster with explicit root mass.
+    EnableClusterWithMass {
+        body: BodyId,
+        mass: MassProperties,
+    },
+    /// Adds a welded part to a cluster.
+    AddClusterPart {
+        parent: PartId,
+        desc: ClusterPartDesc,
+        weld: WeldDesc,
+    },
+    /// Adds a collider in part-local coordinates.
+    AddPartCollider {
+        part: PartId,
+        collider: Collider,
+    },
+    /// Removes a part-owned collider.
+    RemovePartCollider {
+        id: ColliderId,
+    },
+    /// Destroys a part when topology allows it.
+    DestroyClusterPart {
+        part: PartId,
+    },
+    /// Breaks a weld and returns the component body IDs.
+    BreakWeld {
+        weld: WeldId,
+    },
+    /// Detaches a part and returns the component body IDs.
+    DetachPart {
+        part: PartId,
+    },
+    /// Merges the second cluster into the first.
+    MergeClusters {
+        first: BodyId,
+        second: BodyId,
+        weld: WeldDesc,
+    },
+    /// Changes a part's mass using a mass-change policy.
+    SetPartMass {
+        part: PartId,
+        mass: MassProperties,
+        mode: MassChangeMode,
+    },
+    /// Changes a part's mass with explicit momentum transfer.
+    SetPartMassWithTransfer {
+        part: PartId,
+        mass: MassProperties,
+        transfer: MassTransfer,
+    },
+    /// Reads the cluster at this request's position in the queue.
+    GetCluster {
+        body: BodyId,
+    },
+    /// Reads the part at this request's position in the queue.
+    GetClusterPart {
+        part: PartId,
+    },
+    /// Reads the weld at this request's position in the queue.
+    GetWeld {
+        weld: WeldId,
+    },
+    /// Adds a joint between body or cluster-part targets.
+    AddJointTargets {
+        target_a: JointTarget,
+        target_b: JointTarget,
+        joint: Joint,
+    },
+    /// Updates a joint using its target-local frames.
+    UpdateJointTargets {
+        id: JointId,
+        joint: Joint,
+    },
+    /// Adds a persistent force expressed in part-local coordinates.
+    AddPartForceSource {
+        part: PartId,
+        local_point: Vec3,
+        local_force: Vec3,
+    },
     AddGravity {
         gravity: Gravity,
     },
@@ -407,6 +510,20 @@ pub enum PhysicsCommandResult {
     /// A persistent force source was inserted.
     ForceSource(ForceSourceId),
     Gravity(GravityId),
+    /// A newly created material ID.
+    MaterialId(MaterialId),
+    /// Material found by a read-only query.
+    Material(Option<PhysicsMaterial>),
+    /// A newly created cluster part ID.
+    Part(PartId),
+    /// Component body IDs after a split.
+    Bodies(Vec<BodyId>),
+    /// Cluster found by a read-only query.
+    Cluster(Option<RigidCluster>),
+    /// Cluster part found by a read-only query.
+    ClusterPart(Option<ClusterPart>),
+    /// Weld found by a read-only query.
+    Weld(Option<Weld>),
     /// A joint was inserted.
     Joint(JointId),
     /// The result of a ray query.
@@ -763,7 +880,28 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::ApplyImpulse { id, .. }
         | PhysicsCommand::ApplyImpulseAtPoint { id, .. }
         | PhysicsCommand::ClearForces { id } => Some(*id),
-        PhysicsCommand::AddGravity { .. }
+        PhysicsCommand::AddJointTargets { .. }
+        | PhysicsCommand::UpdateJointTargets { .. }
+        | PhysicsCommand::AddPartForceSource { .. }
+        | PhysicsCommand::AddMaterial { .. }
+        | PhysicsCommand::UpdateMaterial { .. }
+        | PhysicsCommand::RemoveMaterial { .. }
+        | PhysicsCommand::GetMaterial { .. }
+        | PhysicsCommand::EnableCluster { .. }
+        | PhysicsCommand::EnableClusterWithMass { .. }
+        | PhysicsCommand::AddClusterPart { .. }
+        | PhysicsCommand::AddPartCollider { .. }
+        | PhysicsCommand::RemovePartCollider { .. }
+        | PhysicsCommand::DestroyClusterPart { .. }
+        | PhysicsCommand::BreakWeld { .. }
+        | PhysicsCommand::DetachPart { .. }
+        | PhysicsCommand::MergeClusters { .. }
+        | PhysicsCommand::SetPartMass { .. }
+        | PhysicsCommand::SetPartMassWithTransfer { .. }
+        | PhysicsCommand::GetCluster { .. }
+        | PhysicsCommand::GetClusterPart { .. }
+        | PhysicsCommand::GetWeld { .. }
+        | PhysicsCommand::AddGravity { .. }
         | PhysicsCommand::UpdateGravity { .. }
         | PhysicsCommand::RemoveGravity { .. }
         | PhysicsCommand::AddBody { .. }
@@ -812,7 +950,28 @@ fn apply_body_command(body: &mut RigidBody, command: &PhysicsCommand) -> Result<
             body.apply_impulse_at_point(*impulse, *point)?;
         }
         PhysicsCommand::ClearForces { .. } => body.clear_forces(),
-        PhysicsCommand::AddGravity { .. }
+        PhysicsCommand::AddJointTargets { .. }
+        | PhysicsCommand::UpdateJointTargets { .. }
+        | PhysicsCommand::AddPartForceSource { .. }
+        | PhysicsCommand::AddMaterial { .. }
+        | PhysicsCommand::UpdateMaterial { .. }
+        | PhysicsCommand::RemoveMaterial { .. }
+        | PhysicsCommand::GetMaterial { .. }
+        | PhysicsCommand::EnableCluster { .. }
+        | PhysicsCommand::EnableClusterWithMass { .. }
+        | PhysicsCommand::AddClusterPart { .. }
+        | PhysicsCommand::AddPartCollider { .. }
+        | PhysicsCommand::RemovePartCollider { .. }
+        | PhysicsCommand::DestroyClusterPart { .. }
+        | PhysicsCommand::BreakWeld { .. }
+        | PhysicsCommand::DetachPart { .. }
+        | PhysicsCommand::MergeClusters { .. }
+        | PhysicsCommand::SetPartMass { .. }
+        | PhysicsCommand::SetPartMassWithTransfer { .. }
+        | PhysicsCommand::GetCluster { .. }
+        | PhysicsCommand::GetClusterPart { .. }
+        | PhysicsCommand::GetWeld { .. }
+        | PhysicsCommand::AddGravity { .. }
         | PhysicsCommand::UpdateGravity { .. }
         | PhysicsCommand::RemoveGravity { .. }
         | PhysicsCommand::AddBody { .. }
@@ -846,6 +1005,89 @@ pub(crate) fn apply_command(
     command: PhysicsCommand,
 ) -> Result<PhysicsCommandResult, PhysicsClientError> {
     let result = match command {
+        PhysicsCommand::AddJointTargets {
+            target_a,
+            target_b,
+            joint,
+        } => PhysicsCommandResult::Joint(world.add_joint_targets(target_a, target_b, joint)?),
+        PhysicsCommand::UpdateJointTargets { id, joint } => {
+            world.update_joint_targets(id, joint)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::AddPartForceSource {
+            part,
+            local_point,
+            local_force,
+        } => PhysicsCommandResult::ForceSource(world.add_force_source_for_part(
+            part,
+            local_point,
+            local_force,
+        )?),
+        PhysicsCommand::AddMaterial { material } => {
+            PhysicsCommandResult::MaterialId(world.add_material(material)?)
+        }
+        PhysicsCommand::UpdateMaterial { id, material } => {
+            world.update_material(id, material)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::RemoveMaterial { id } => {
+            world.remove_material(id)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::GetMaterial { id } => {
+            PhysicsCommandResult::Material(world.material(id).copied())
+        }
+        PhysicsCommand::EnableCluster { body } => {
+            PhysicsCommandResult::Part(world.enable_cluster(body)?)
+        }
+        PhysicsCommand::EnableClusterWithMass { body, mass } => {
+            PhysicsCommandResult::Part(world.enable_cluster_with_mass(body, mass)?)
+        }
+        PhysicsCommand::AddClusterPart { parent, desc, weld } => {
+            PhysicsCommandResult::Part(world.add_cluster_part(parent, desc, weld)?)
+        }
+        PhysicsCommand::AddPartCollider { part, collider } => {
+            PhysicsCommandResult::Collider(world.add_part_collider(part, collider)?)
+        }
+        PhysicsCommand::RemovePartCollider { id } => {
+            world.remove_part_collider(id)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::DestroyClusterPart { part } => {
+            world.destroy_cluster_part(part)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::BreakWeld { weld } => PhysicsCommandResult::Bodies(world.break_weld(weld)?),
+        PhysicsCommand::DetachPart { part } => {
+            PhysicsCommandResult::Bodies(world.detach_part(part)?)
+        }
+        PhysicsCommand::MergeClusters {
+            first,
+            second,
+            weld,
+        } => {
+            world.merge_clusters(first, second, weld)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartMass { part, mass, mode } => {
+            world.set_part_mass(part, mass, mode)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartMassWithTransfer {
+            part,
+            mass,
+            transfer,
+        } => {
+            world.set_part_mass_with_transfer(part, mass, transfer)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::GetCluster { body } => {
+            PhysicsCommandResult::Cluster(world.cluster(body).cloned())
+        }
+        PhysicsCommand::GetClusterPart { part } => {
+            PhysicsCommandResult::ClusterPart(world.cluster_part(part).cloned())
+        }
+        PhysicsCommand::GetWeld { weld } => PhysicsCommandResult::Weld(world.weld(weld).copied()),
         PhysicsCommand::AddGravity { gravity } => {
             PhysicsCommandResult::Gravity(world.add_gravity(gravity)?)
         }

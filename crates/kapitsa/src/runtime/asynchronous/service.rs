@@ -62,7 +62,7 @@ enum DeferredCommandResult {
     Single {
         reply: tokio::sync::oneshot::Sender<Result<PhysicsCommandResult, PhysicsClientError>>,
         result: Result<PhysicsCommandResult, PhysicsClientError>,
-        is_spatial_query: bool,
+        is_read_only_query: bool,
     },
     Batch(PhysicsBatchResult),
 }
@@ -914,11 +914,15 @@ fn apply_queued_commands(
         }
         match request {
             CommandRequest::Single { command, reply } => {
-                let is_spatial_query = matches!(
+                let is_read_only_query = matches!(
                     &command,
                     PhysicsCommand::Raycast { .. }
                         | PhysicsCommand::Sweep { .. }
                         | PhysicsCommand::Overlaps { .. }
+                        | PhysicsCommand::GetMaterial { .. }
+                        | PhysicsCommand::GetCluster { .. }
+                        | PhysicsCommand::GetClusterPart { .. }
+                        | PhysicsCommand::GetWeld { .. }
                 );
                 let result = apply_command(world, command);
                 commands
@@ -926,7 +930,7 @@ fn apply_queued_commands(
                     .push(DeferredCommandResult::Single {
                         reply,
                         result,
-                        is_spatial_query,
+                        is_read_only_query,
                     });
             }
             CommandRequest::Batch { id, buffer } => {
@@ -971,9 +975,9 @@ fn publish_failed_command_results(
             DeferredCommandResult::Single {
                 reply,
                 mut result,
-                is_spatial_query,
+                is_read_only_query,
             } => {
-                if result.is_ok() && !is_spatial_query {
+                if result.is_ok() && !is_read_only_query {
                     result = Err(PhysicsClientError::StepFailedAfterApply {
                         step: attempted_step,
                         cause,

@@ -79,7 +79,7 @@ pub mod transform {
 pub mod world {
     pub use kapitsa_core::world::{
         BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, GravityId,
-        JointId, PartId, StepError, WeldId, WorldError,
+        JointId, JointTarget, PartId, StepError, WeldId, WorldError,
     };
 }
 
@@ -97,8 +97,8 @@ pub use kapitsa_core::{
     shape::Shape,
     transform::Transform,
     world::{
-        BodyId, ClusterError, ColliderId, ForceSourceId, GravityId, JointId, PartId, StepError,
-        WeldId, WorldError,
+        BodyId, ClusterError, ColliderId, ForceSourceId, GravityId, JointId, JointTarget, PartId,
+        StepError, WeldId, WorldError,
     },
 };
 

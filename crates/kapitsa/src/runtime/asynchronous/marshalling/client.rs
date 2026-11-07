@@ -1,3 +1,6 @@
+mod cluster;
+mod material;
+
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -149,7 +152,7 @@ impl PhysicsClient {
     /// Cancelling before the bounded send completes prevents enqueueing. Once
     /// enqueued, the command remains active even if this future is cancelled.
     /// Successful world changes are acknowledged only after their step has
-    /// completed and its snapshot has been published. Spatial queries return
+    /// completed and its snapshot has been published. Read-only queries return
     /// the value computed at their FIFO position before that step's integration;
     /// a query result is still valid if that later integration fails.
     pub async fn submit(
@@ -181,6 +184,13 @@ impl PhysicsClient {
             | PhysicsCommandResult::Joint(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::MaterialId(_)
+            | PhysicsCommandResult::Material(_)
+            | PhysicsCommandResult::Part(_)
+            | PhysicsCommandResult::Bodies(_)
+            | PhysicsCommandResult::Cluster(_)
+            | PhysicsCommandResult::ClusterPart(_)
+            | PhysicsCommandResult::Weld(_)
             | PhysicsCommandResult::Gravity(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
         }
@@ -208,6 +218,13 @@ impl PhysicsClient {
             | PhysicsCommandResult::Joint(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::MaterialId(_)
+            | PhysicsCommandResult::Material(_)
+            | PhysicsCommandResult::Part(_)
+            | PhysicsCommandResult::Bodies(_)
+            | PhysicsCommandResult::Cluster(_)
+            | PhysicsCommandResult::ClusterPart(_)
+            | PhysicsCommandResult::Weld(_)
             | PhysicsCommandResult::Gravity(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
         }
@@ -240,6 +257,13 @@ impl PhysicsClient {
             | PhysicsCommandResult::ForceSource(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::MaterialId(_)
+            | PhysicsCommandResult::Material(_)
+            | PhysicsCommandResult::Part(_)
+            | PhysicsCommandResult::Bodies(_)
+            | PhysicsCommandResult::Cluster(_)
+            | PhysicsCommandResult::ClusterPart(_)
+            | PhysicsCommandResult::Weld(_)
             | PhysicsCommandResult::Gravity(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
         }
@@ -295,6 +319,13 @@ impl PhysicsClient {
             | PhysicsCommandResult::Joint(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::MaterialId(_)
+            | PhysicsCommandResult::Material(_)
+            | PhysicsCommandResult::Part(_)
+            | PhysicsCommandResult::Bodies(_)
+            | PhysicsCommandResult::Cluster(_)
+            | PhysicsCommandResult::ClusterPart(_)
+            | PhysicsCommandResult::Weld(_)
             | PhysicsCommandResult::Gravity(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
         }
@@ -602,6 +633,13 @@ fn expect_done(result: PhysicsCommandResult) -> Result<(), PhysicsClientError> {
         | PhysicsCommandResult::Joint(_)
         | PhysicsCommandResult::Raycast(_)
         | PhysicsCommandResult::Sweep(_)
+        | PhysicsCommandResult::MaterialId(_)
+        | PhysicsCommandResult::Material(_)
+        | PhysicsCommandResult::Part(_)
+        | PhysicsCommandResult::Bodies(_)
+        | PhysicsCommandResult::Cluster(_)
+        | PhysicsCommandResult::ClusterPart(_)
+        | PhysicsCommandResult::Weld(_)
         | PhysicsCommandResult::Gravity(_)
         | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
     }
