@@ -1,17 +1,22 @@
+use crate::runtime::constants::{MAX_COMMANDS_PER_BATCH, SMALL_STAGING_LINEAR_SEARCH_LIMIT};
 use std::collections::HashMap;
 
 use kapitsa_core::{
+    cluster::{
+        ClusterPart, ClusterPartDesc, MassChangeMode, MassTransfer, RigidCluster, Weld, WeldDesc,
+    },
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{CollisionConfig, OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
+    gravity::Gravity,
     joint::Joint,
     mass::MassProperties,
-    material::MaterialId,
+    material::{MaterialId, PhysicsMaterial},
     rigid_body::{BodyError, CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
     world::{
-        BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, JointId,
-        PhysicsWorld, WorldError,
+        BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, GravityId,
+        JointId, JointTarget, PartId, PhysicsWorld, WeldId, WorldError,
     },
 };
 use kapitsa_math::{Affine3, Vec3};
@@ -36,12 +41,129 @@ impl BatchId {
 
 /// An operation applied to the simulation world at a physics-step boundary.
 pub enum PhysicsCommand {
+    /// Adds a material and returns its ID.
+    AddMaterial {
+        material: PhysicsMaterial,
+    },
+    /// Replaces a material, invalidating affected cached contacts.
+    UpdateMaterial {
+        id: MaterialId,
+        material: PhysicsMaterial,
+    },
+    /// Removes an unassigned material.
+    RemoveMaterial {
+        id: MaterialId,
+    },
+    /// Reads a material at this request's position in the queue.
+    GetMaterial {
+        id: MaterialId,
+    },
+    /// Converts a dynamic body into a cluster and returns its root part.
+    EnableCluster {
+        body: BodyId,
+    },
+    /// Converts a body into a cluster with explicit root mass.
+    EnableClusterWithMass {
+        body: BodyId,
+        mass: MassProperties,
+    },
+    /// Adds a welded part to a cluster.
+    AddClusterPart {
+        parent: PartId,
+        desc: ClusterPartDesc,
+        weld: WeldDesc,
+    },
+    /// Adds a collider in part-local coordinates.
+    AddPartCollider {
+        part: PartId,
+        collider: Collider,
+    },
+    /// Removes a part-owned collider.
+    RemovePartCollider {
+        id: ColliderId,
+    },
+    /// Destroys a part when topology allows it.
+    DestroyClusterPart {
+        part: PartId,
+    },
+    /// Breaks a weld and returns the component body IDs.
+    BreakWeld {
+        weld: WeldId,
+    },
+    /// Detaches a part and returns the component body IDs.
+    DetachPart {
+        part: PartId,
+    },
+    /// Merges the second cluster into the first.
+    MergeClusters {
+        first: BodyId,
+        second: BodyId,
+        weld: WeldDesc,
+    },
+    /// Changes a part's mass using a mass-change policy.
+    SetPartMass {
+        part: PartId,
+        mass: MassProperties,
+        mode: MassChangeMode,
+    },
+    /// Changes a part's mass with explicit momentum transfer.
+    SetPartMassWithTransfer {
+        part: PartId,
+        mass: MassProperties,
+        transfer: MassTransfer,
+    },
+    /// Reads the cluster at this request's position in the queue.
+    GetCluster {
+        body: BodyId,
+    },
+    /// Reads the part at this request's position in the queue.
+    GetClusterPart {
+        part: PartId,
+    },
+    /// Reads the weld at this request's position in the queue.
+    GetWeld {
+        weld: WeldId,
+    },
+    /// Adds a joint between body or cluster-part targets.
+    AddJointTargets {
+        target_a: JointTarget,
+        target_b: JointTarget,
+        joint: Joint,
+    },
+    /// Updates a joint using its target-local frames.
+    UpdateJointTargets {
+        id: JointId,
+        joint: Joint,
+    },
+    /// Adds a persistent force expressed in part-local coordinates.
+    AddPartForceSource {
+        part: PartId,
+        local_point: Vec3,
+        local_force: Vec3,
+    },
+    AddGravity {
+        gravity: Gravity,
+    },
+    UpdateGravity {
+        id: GravityId,
+        gravity: Gravity,
+    },
+    RemoveGravity {
+        id: GravityId,
+    },
     /// Inserts a rigid body and returns its new [`BodyId`].
-    AddBody { body: RigidBody },
+    AddBody {
+        body: RigidBody,
+    },
     /// Removes a body and its attached colliders.
-    RemoveBody { id: BodyId },
+    RemoveBody {
+        id: BodyId,
+    },
     /// Attaches a collider to a body and returns its new [`ColliderId`].
-    AddCollider { body: BodyId, collider: Collider },
+    AddCollider {
+        body: BodyId,
+        collider: Collider,
+    },
     /// Creates a joint between two bodies and returns its new [`JointId`].
     AddJoint {
         body_a: BodyId,
@@ -49,13 +171,23 @@ pub enum PhysicsCommand {
         joint: Joint,
     },
     /// Removes a joint.
-    RemoveJoint { id: JointId },
+    RemoveJoint {
+        id: JointId,
+    },
     /// Replaces a joint's settings while retaining its ID and attached bodies.
-    UpdateJoint { id: JointId, joint: Joint },
+    UpdateJoint {
+        id: JointId,
+        joint: Joint,
+    },
     /// Enables or disables a joint without changing its settings.
-    SetJointEnabled { id: JointId, enabled: bool },
+    SetJointEnabled {
+        id: JointId,
+        enabled: bool,
+    },
     /// Removes a collider.
-    RemoveCollider { id: ColliderId },
+    RemoveCollider {
+        id: ColliderId,
+    },
     /// Creates a persistent local-space force source and returns its ID.
     AddForceSource {
         body: BodyId,
@@ -63,7 +195,9 @@ pub enum PhysicsCommand {
         local_force: Vec3,
     },
     /// Removes a persistent force source.
-    RemoveForceSource { id: ForceSourceId },
+    RemoveForceSource {
+        id: ForceSourceId,
+    },
     /// Updates the local point and force of an existing persistent source.
     SetForceSource {
         id: ForceSourceId,
@@ -71,25 +205,52 @@ pub enum PhysicsCommand {
         local_force: Vec3,
     },
     /// Enables or disables a persistent force source.
-    SetForceSourceEnabled { id: ForceSourceId, enabled: bool },
+    SetForceSourceEnabled {
+        id: ForceSourceId,
+        enabled: bool,
+    },
     /// Replaces a body's transform while preserving its velocities.
-    SetTransform { id: BodyId, transform: Transform },
+    SetTransform {
+        id: BodyId,
+        transform: Transform,
+    },
     /// Sets the world-space linear velocity.
-    SetLinearVelocity { id: BodyId, velocity: Vec3 },
+    SetLinearVelocity {
+        id: BodyId,
+        velocity: Vec3,
+    },
     /// Sets the world-space angular velocity.
-    SetAngularVelocity { id: BodyId, velocity: Vec3 },
+    SetAngularVelocity {
+        id: BodyId,
+        velocity: Vec3,
+    },
     /// Replaces the body's dynamic mass properties.
-    SetMass { id: BodyId, mass: MassProperties },
+    SetMass {
+        id: BodyId,
+        mass: MassProperties,
+    },
     /// Replaces the world's validated collision configuration.
-    SetCollisionConfig { config: CollisionConfig },
+    SetCollisionConfig {
+        config: CollisionConfig,
+    },
     /// Sets continuous collision detection for a body.
-    SetCcdMode { id: BodyId, mode: CcdMode },
+    SetCcdMode {
+        id: BodyId,
+        mode: CcdMode,
+    },
     /// Sleeps a dynamic body and clears its motion and forces.
-    Sleep { id: BodyId },
+    Sleep {
+        id: BodyId,
+    },
     /// Wakes a dynamic body.
-    WakeUp { id: BodyId },
+    WakeUp {
+        id: BodyId,
+    },
     /// Accumulates a world-space force.
-    ApplyForce { id: BodyId, force: Vec3 },
+    ApplyForce {
+        id: BodyId,
+        force: Vec3,
+    },
     /// Accumulates a world-space force at a world-space point.
     ApplyForceAtPoint {
         id: BodyId,
@@ -97,9 +258,15 @@ pub enum PhysicsCommand {
         point: Vec3,
     },
     /// Accumulates a world-space torque.
-    ApplyTorque { id: BodyId, torque: Vec3 },
+    ApplyTorque {
+        id: BodyId,
+        torque: Vec3,
+    },
     /// Applies a world-space impulse immediately.
-    ApplyImpulse { id: BodyId, impulse: Vec3 },
+    ApplyImpulse {
+        id: BodyId,
+        impulse: Vec3,
+    },
     /// Applies a world-space impulse at a world-space point immediately.
     ApplyImpulseAtPoint {
         id: BodyId,
@@ -107,14 +274,19 @@ pub enum PhysicsCommand {
         point: Vec3,
     },
     /// Clears accumulated force and torque.
-    ClearForces { id: BodyId },
+    ClearForces {
+        id: BodyId,
+    },
     /// Replaces a collider's collision filter.
     SetColliderFilter {
         id: ColliderId,
         filter: CollisionFilter,
     },
     /// Sets whether an attached collider responds physically or only reports intersections.
-    SetColliderMode { id: ColliderId, mode: CollisionMode },
+    SetColliderMode {
+        id: ColliderId,
+        mode: CollisionMode,
+    },
     /// Updates a skinned mesh collider's bone pose.
     SetSkinPose {
         id: ColliderId,
@@ -126,7 +298,10 @@ pub enum PhysicsCommand {
         material: Option<MaterialId>,
     },
     /// Casts a ray against the current world at this command's FIFO position.
-    Raycast { ray: Ray, filter: QueryFilter },
+    Raycast {
+        ray: Ray,
+        filter: QueryFilter,
+    },
     /// Sweeps a convex shape against the current world at this command's FIFO position.
     Sweep {
         shape: Shape,
@@ -159,7 +334,7 @@ impl std::fmt::Debug for PhysicsCommandBuffer {
 
 impl PhysicsCommandBuffer {
     /// Maximum number of commands accepted in one atomic batch.
-    pub const MAX_COMMANDS: usize = 128;
+    pub const MAX_COMMANDS: usize = MAX_COMMANDS_PER_BATCH;
 
     pub fn new() -> Self {
         Self::default()
@@ -334,6 +509,21 @@ pub enum PhysicsCommandResult {
     Collider(ColliderId),
     /// A persistent force source was inserted.
     ForceSource(ForceSourceId),
+    Gravity(GravityId),
+    /// A newly created material ID.
+    MaterialId(MaterialId),
+    /// Material found by a read-only query.
+    Material(Option<PhysicsMaterial>),
+    /// A newly created cluster part ID.
+    Part(PartId),
+    /// Component body IDs after a split.
+    Bodies(Vec<BodyId>),
+    /// Cluster found by a read-only query.
+    Cluster(Option<RigidCluster>),
+    /// Cluster part found by a read-only query.
+    ClusterPart(Option<ClusterPart>),
+    /// Weld found by a read-only query.
+    Weld(Option<Weld>),
     /// A joint was inserted.
     Joint(JointId),
     /// The result of a ray query.
@@ -382,7 +572,6 @@ struct StagedJoint {
 }
 
 // Bound small-set scans to avoid hashing overhead on repeated-target batches.
-const SMALL_STAGING_LINEAR_SEARCH_LIMIT: usize = 64;
 
 #[derive(Default)]
 pub(crate) struct BatchScratch {
@@ -691,7 +880,31 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::ApplyImpulse { id, .. }
         | PhysicsCommand::ApplyImpulseAtPoint { id, .. }
         | PhysicsCommand::ClearForces { id } => Some(*id),
-        PhysicsCommand::AddBody { .. }
+        PhysicsCommand::AddJointTargets { .. }
+        | PhysicsCommand::UpdateJointTargets { .. }
+        | PhysicsCommand::AddPartForceSource { .. }
+        | PhysicsCommand::AddMaterial { .. }
+        | PhysicsCommand::UpdateMaterial { .. }
+        | PhysicsCommand::RemoveMaterial { .. }
+        | PhysicsCommand::GetMaterial { .. }
+        | PhysicsCommand::EnableCluster { .. }
+        | PhysicsCommand::EnableClusterWithMass { .. }
+        | PhysicsCommand::AddClusterPart { .. }
+        | PhysicsCommand::AddPartCollider { .. }
+        | PhysicsCommand::RemovePartCollider { .. }
+        | PhysicsCommand::DestroyClusterPart { .. }
+        | PhysicsCommand::BreakWeld { .. }
+        | PhysicsCommand::DetachPart { .. }
+        | PhysicsCommand::MergeClusters { .. }
+        | PhysicsCommand::SetPartMass { .. }
+        | PhysicsCommand::SetPartMassWithTransfer { .. }
+        | PhysicsCommand::GetCluster { .. }
+        | PhysicsCommand::GetClusterPart { .. }
+        | PhysicsCommand::GetWeld { .. }
+        | PhysicsCommand::AddGravity { .. }
+        | PhysicsCommand::UpdateGravity { .. }
+        | PhysicsCommand::RemoveGravity { .. }
+        | PhysicsCommand::AddBody { .. }
         | PhysicsCommand::RemoveBody { .. }
         | PhysicsCommand::AddCollider { .. }
         | PhysicsCommand::RemoveCollider { .. }
@@ -737,7 +950,31 @@ fn apply_body_command(body: &mut RigidBody, command: &PhysicsCommand) -> Result<
             body.apply_impulse_at_point(*impulse, *point)?;
         }
         PhysicsCommand::ClearForces { .. } => body.clear_forces(),
-        PhysicsCommand::AddBody { .. }
+        PhysicsCommand::AddJointTargets { .. }
+        | PhysicsCommand::UpdateJointTargets { .. }
+        | PhysicsCommand::AddPartForceSource { .. }
+        | PhysicsCommand::AddMaterial { .. }
+        | PhysicsCommand::UpdateMaterial { .. }
+        | PhysicsCommand::RemoveMaterial { .. }
+        | PhysicsCommand::GetMaterial { .. }
+        | PhysicsCommand::EnableCluster { .. }
+        | PhysicsCommand::EnableClusterWithMass { .. }
+        | PhysicsCommand::AddClusterPart { .. }
+        | PhysicsCommand::AddPartCollider { .. }
+        | PhysicsCommand::RemovePartCollider { .. }
+        | PhysicsCommand::DestroyClusterPart { .. }
+        | PhysicsCommand::BreakWeld { .. }
+        | PhysicsCommand::DetachPart { .. }
+        | PhysicsCommand::MergeClusters { .. }
+        | PhysicsCommand::SetPartMass { .. }
+        | PhysicsCommand::SetPartMassWithTransfer { .. }
+        | PhysicsCommand::GetCluster { .. }
+        | PhysicsCommand::GetClusterPart { .. }
+        | PhysicsCommand::GetWeld { .. }
+        | PhysicsCommand::AddGravity { .. }
+        | PhysicsCommand::UpdateGravity { .. }
+        | PhysicsCommand::RemoveGravity { .. }
+        | PhysicsCommand::AddBody { .. }
         | PhysicsCommand::RemoveBody { .. }
         | PhysicsCommand::AddCollider { .. }
         | PhysicsCommand::RemoveCollider { .. }
@@ -768,6 +1005,102 @@ pub(crate) fn apply_command(
     command: PhysicsCommand,
 ) -> Result<PhysicsCommandResult, PhysicsClientError> {
     let result = match command {
+        PhysicsCommand::AddJointTargets {
+            target_a,
+            target_b,
+            joint,
+        } => PhysicsCommandResult::Joint(world.add_joint_targets(target_a, target_b, joint)?),
+        PhysicsCommand::UpdateJointTargets { id, joint } => {
+            world.update_joint_targets(id, joint)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::AddPartForceSource {
+            part,
+            local_point,
+            local_force,
+        } => PhysicsCommandResult::ForceSource(world.add_force_source_for_part(
+            part,
+            local_point,
+            local_force,
+        )?),
+        PhysicsCommand::AddMaterial { material } => {
+            PhysicsCommandResult::MaterialId(world.add_material(material)?)
+        }
+        PhysicsCommand::UpdateMaterial { id, material } => {
+            world.update_material(id, material)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::RemoveMaterial { id } => {
+            world.remove_material(id)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::GetMaterial { id } => {
+            PhysicsCommandResult::Material(world.material(id).copied())
+        }
+        PhysicsCommand::EnableCluster { body } => {
+            PhysicsCommandResult::Part(world.enable_cluster(body)?)
+        }
+        PhysicsCommand::EnableClusterWithMass { body, mass } => {
+            PhysicsCommandResult::Part(world.enable_cluster_with_mass(body, mass)?)
+        }
+        PhysicsCommand::AddClusterPart { parent, desc, weld } => {
+            PhysicsCommandResult::Part(world.add_cluster_part(parent, desc, weld)?)
+        }
+        PhysicsCommand::AddPartCollider { part, collider } => {
+            PhysicsCommandResult::Collider(world.add_part_collider(part, collider)?)
+        }
+        PhysicsCommand::RemovePartCollider { id } => {
+            world.remove_part_collider(id)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::DestroyClusterPart { part } => {
+            world.destroy_cluster_part(part)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::BreakWeld { weld } => PhysicsCommandResult::Bodies(world.break_weld(weld)?),
+        PhysicsCommand::DetachPart { part } => {
+            PhysicsCommandResult::Bodies(world.detach_part(part)?)
+        }
+        PhysicsCommand::MergeClusters {
+            first,
+            second,
+            weld,
+        } => {
+            world.merge_clusters(first, second, weld)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartMass { part, mass, mode } => {
+            world.set_part_mass(part, mass, mode)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartMassWithTransfer {
+            part,
+            mass,
+            transfer,
+        } => {
+            world.set_part_mass_with_transfer(part, mass, transfer)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::GetCluster { body } => {
+            PhysicsCommandResult::Cluster(world.cluster(body).cloned())
+        }
+        PhysicsCommand::GetClusterPart { part } => {
+            PhysicsCommandResult::ClusterPart(world.cluster_part(part).cloned())
+        }
+        PhysicsCommand::GetWeld { weld } => PhysicsCommandResult::Weld(world.weld(weld).copied()),
+        PhysicsCommand::AddGravity { gravity } => {
+            PhysicsCommandResult::Gravity(world.add_gravity(gravity)?)
+        }
+        PhysicsCommand::UpdateGravity { id, gravity } => {
+            world.update_gravity(id, gravity)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::RemoveGravity { id } => {
+            world
+                .remove_gravity(id)
+                .ok_or(WorldError::InvalidGravityId)?;
+            PhysicsCommandResult::Done
+        }
         PhysicsCommand::AddBody { body } => PhysicsCommandResult::Body(world.add_body(body)?),
         PhysicsCommand::RemoveBody { id } => {
             world.remove_body(id).ok_or(WorldError::InvalidBodyId)?;

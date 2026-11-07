@@ -1,9 +1,7 @@
+use crate::runtime::constants::{MAX_POOL_MEMORY_BYTES, MAX_POOLED_BUFFERS};
 use std::sync::Mutex;
 
 use super::command::{PhysicsCommand, PhysicsCommandBuffer};
-
-const MAX_POOLED_BUFFERS: usize = 16;
-const MAX_POOL_MEMORY_BYTES: usize = 256 * 1024;
 
 struct PoolState {
     buffers: Vec<Vec<PhysicsCommand>>,

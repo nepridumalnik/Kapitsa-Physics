@@ -3,6 +3,7 @@
 mod adaptive_step;
 mod asynchronous;
 mod config;
+mod constants;
 mod engine;
 mod executor;
 pub mod metrics;
@@ -62,7 +63,7 @@ pub use asynchronous::{
     JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError, PhysicsBatchResult,
     PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient, PhysicsClientError,
     PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSnapshot,
-    PhysicsSubmitError, Simulation, SimulationError,
+    PhysicsSubmitError, Simulation, SimulationBuilder, SimulationError,
 };
 pub use config::{
     AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, TimeStepPolicy,

@@ -1,10 +1,12 @@
+use crate::runtime::constants::{
+    DEFAULT_MAX_BATCHES_PER_WORKER, DEFAULT_MAX_CATCH_UP_STEPS, DEFAULT_MIN_BATCH_SIZE,
+    DEFAULT_TICK_RATE, MAX_TICK_RATE,
+};
 use std::time::Duration;
 
 use kapitsa_core::gravity::CentralGravity;
 
 use super::planner::{WorkerConfig, WorkerConfigError};
-
-const MAX_TICK_RATE: u32 = 1_000_000_000;
 
 /// Shared timestep and batching settings.
 #[derive(Clone, Debug, PartialEq)]
@@ -21,8 +23,8 @@ pub struct SimulationConfig {
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
-            tick_rate: 60,
-            max_catch_up_steps: 4,
+            tick_rate: DEFAULT_TICK_RATE,
+            max_catch_up_steps: DEFAULT_MAX_CATCH_UP_STEPS,
             time_step_policy: TimeStepPolicy::Fixed,
             scheduler: SchedulerConfig::default(),
             workers: WorkerConfig::default(),
@@ -110,8 +112,8 @@ pub struct SchedulerConfig {
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            min_batch_size: 128,
-            max_batches_per_worker: 4,
+            min_batch_size: DEFAULT_MIN_BATCH_SIZE,
+            max_batches_per_worker: DEFAULT_MAX_BATCHES_PER_WORKER,
         }
     }
 }

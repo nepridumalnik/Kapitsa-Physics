@@ -2,6 +2,45 @@ use std::fmt;
 
 use kapitsa_math::Vec3;
 
+mod spherical;
+mod uniform;
+pub use spherical::SphericalGravity;
+pub use uniform::UniformGravity;
+
+/// A statically dispatched gravitational field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Gravity {
+    Uniform(UniformGravity),
+    Central(CentralGravity),
+    Spherical(SphericalGravity),
+}
+
+impl Gravity {
+    pub fn acceleration_at(self, position: Vec3) -> Result<Vec3, GravityError> {
+        match self {
+            Self::Uniform(field) => field.acceleration_at(position),
+            Self::Central(field) => field.acceleration_at(position),
+            Self::Spherical(field) => field.acceleration_at(position),
+        }
+    }
+}
+
+impl From<UniformGravity> for Gravity {
+    fn from(value: UniformGravity) -> Self {
+        Self::Uniform(value)
+    }
+}
+impl From<CentralGravity> for Gravity {
+    fn from(value: CentralGravity) -> Self {
+        Self::Central(value)
+    }
+}
+impl From<SphericalGravity> for Gravity {
+    fn from(value: SphericalGravity) -> Self {
+        Self::Spherical(value)
+    }
+}
+
 /// A point-mass gravitational field with gravitational parameter `μ = GM`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CentralGravity {
@@ -65,6 +104,8 @@ impl CentralGravity {
 /// Invalid field parameters or an unrepresentable gravity calculation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GravityError {
+    InvalidAcceleration,
+    InvalidRadius,
     InvalidGravitationalParameter,
     NonFiniteCenter,
     NonFinitePosition,
@@ -76,6 +117,8 @@ pub enum GravityError {
 impl fmt::Display for GravityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::InvalidAcceleration => "gravity acceleration must be finite",
+            Self::InvalidRadius => "gravity radius must be finite and positive",
             Self::InvalidGravitationalParameter => {
                 "gravitational parameter must be finite and non-negative"
             }

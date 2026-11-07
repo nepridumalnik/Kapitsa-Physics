@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod affine;
 mod matrix;
 pub mod numeric;
