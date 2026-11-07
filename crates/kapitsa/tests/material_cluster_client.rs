@@ -96,6 +96,17 @@ async fn materials_are_managed_through_client_on_pause() {
     assert_eq!(client.material(id).await.unwrap(), None);
     assert!(client.update_material(id, initial).await.is_err());
     assert_eq!(client.snapshot().step(), step);
+    let running_id = client.add_material(initial).await.unwrap();
+    simulation.resume().unwrap();
+    let running_material = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.material(running_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(running_material, Some(initial));
+    client.remove_material(running_id).await.unwrap();
     simulation.stop().await.unwrap();
 }
 
