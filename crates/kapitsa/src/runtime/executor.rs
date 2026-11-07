@@ -214,6 +214,14 @@ impl StepExecutor for RayonExecutor {
 }
 
 impl RayonExecutor {
+    /// Creates an independent worker budget over an existing Rayon pool.
+    pub fn from_pool(pool: Arc<ThreadPool>) -> Self {
+        let spare = pool.current_num_threads().saturating_sub(1);
+        Self {
+            pool,
+            spare_workers: Arc::new(AtomicUsize::new(spare)),
+        }
+    }
     fn for_chunks<T: Send, F: Fn(usize, &mut [T]) + Send + Sync>(
         &self,
         values: &mut [T],

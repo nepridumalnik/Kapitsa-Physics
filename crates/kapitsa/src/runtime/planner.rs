@@ -1,15 +1,10 @@
+use crate::runtime::constants::{
+    DEFAULT_SCALE_DOWN_AT, DEFAULT_SCALE_UP_AT, DEFAULT_SMOOTHING, EARLY_WARNING_AT,
+    MIN_SCALE_DOWN_STEPS, MIN_SCALE_UP_STEPS, REQUIRED_SPEEDUP, SCALE_DOWN_HYSTERESIS,
+    SCALE_UP_HYSTERESIS, SIGNIFICANT_LOAD_INCREASE, STABILIZATION_STEPS, WORKER_PROBE_STEPS,
+};
 use std::num::NonZeroUsize;
 use std::time::Duration;
-
-pub(crate) const EARLY_WARNING_AT: f64 = 0.70;
-const MIN_SCALE_UP_STEPS: u32 = 3;
-const MIN_SCALE_DOWN_STEPS: u32 = 24;
-const STABILIZATION_STEPS: u32 = 12;
-const WORKER_PROBE_STEPS: usize = 12;
-const REQUIRED_SPEEDUP: f64 = 0.05;
-const SIGNIFICANT_LOAD_INCREASE: f64 = 1.25;
-const SCALE_UP_HYSTERESIS: f64 = 0.10;
-const SCALE_DOWN_HYSTERESIS: f64 = 1.15;
 
 /// Worker pool limits and adaptive thresholds.
 #[derive(Clone, Debug, PartialEq)]
@@ -28,9 +23,9 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             max_workers: None,
-            scale_up_at: 0.70,
-            scale_down_at: 0.30,
-            smoothing: 0.20,
+            scale_up_at: DEFAULT_SCALE_UP_AT,
+            scale_down_at: DEFAULT_SCALE_DOWN_AT,
+            smoothing: DEFAULT_SMOOTHING,
         }
     }
 }

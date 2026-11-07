@@ -1,3 +1,7 @@
+use crate::runtime::constants::{
+    COLLISION_EVENT_BATCH_CAPACITY, COMMAND_QUEUE_CAPACITY, JOINT_BREAK_EVENT_BATCH_CAPACITY,
+    MAX_COMMANDS_PER_STEP, MIN_LOAD_SPEED, PHYSICS_BATCH_RESULT_CAPACITY,
+};
 use std::{
     sync::{Arc, atomic::AtomicU64},
     time::Duration,
@@ -25,13 +29,8 @@ use super::{
 use crate::runtime::{
     ConfigError, SimulationConfig, SimulationMetrics, SimulationState, TimeStepPolicy,
     adaptive_step::{StepChoice, choose_step},
+    executor::RayonExecutor,
 };
-
-const COMMAND_QUEUE_CAPACITY: usize = 1024;
-const MAX_COMMANDS_PER_STEP: usize = 1024;
-const COLLISION_EVENT_BATCH_CAPACITY: usize = 64;
-const JOINT_BREAK_EVENT_BATCH_CAPACITY: usize = 64;
-const PHYSICS_BATCH_RESULT_CAPACITY: usize = 256;
 
 struct ServiceTaskOutput {
     simulation: StepRunner,
@@ -99,6 +98,119 @@ pub struct Simulation {
     metrics_tx: watch::Sender<SimulationMetrics>,
     metrics_rx: watch::Receiver<SimulationMetrics>,
     runtime: Handle,
+    paused_multiplier: Option<f64>,
+    owned_runtime: Option<OwnedRuntime>,
+}
+
+struct OwnedRuntime {
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for OwnedRuntime {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+}
+
+impl OwnedRuntime {
+    fn start() -> Result<(Self, Handle), SimulationError> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        std::thread::Builder::new()
+            .name("kapitsa-clock".into())
+            .spawn(move || {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(runtime) => {
+                        if sender.send(Ok(runtime.handle().clone())).is_ok() {
+                            runtime.block_on(async {
+                                let _ = stopped.await;
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error.to_string()));
+                    }
+                }
+            })
+            .map_err(|error| SimulationError::TaskFailed(error.to_string()))?;
+        let runtime = receiver
+            .recv()
+            .map_err(|error| SimulationError::TaskFailed(error.to_string()))?
+            .map_err(SimulationError::TaskFailed)?;
+        Ok((
+            Self {
+                shutdown: Some(shutdown),
+            },
+            runtime,
+        ))
+    }
+}
+
+/// Settings for starting a clock-driven simulation.
+#[derive(Default)]
+pub struct SimulationBuilder {
+    config: SimulationConfig,
+    invalid_worker_count: bool,
+}
+
+impl SimulationBuilder {
+    /// Sets the base physics frequency in hertz.
+    pub fn frequency(mut self, frequency: u32) -> Self {
+        self.config.tick_rate = frequency;
+        self
+    }
+
+    /// Selects fixed or physics-bounded adaptive stepping.
+    pub fn time_step_policy(mut self, policy: TimeStepPolicy) -> Self {
+        self.config.time_step_policy = policy;
+        self
+    }
+
+    /// Limits the number of workers used by this simulation.
+    pub fn max_workers(mut self, workers: usize) -> Self {
+        self.invalid_worker_count = workers == 0;
+        self.config.workers.max_workers = std::num::NonZeroUsize::new(workers);
+        self
+    }
+
+    /// Starts a simulation on the supplied Tokio runtime.
+    pub fn spawn_on_tokio(self, runtime: &Handle) -> Result<Simulation, SimulationError> {
+        if self.invalid_worker_count {
+            return Err(SimulationError::InvalidWorkerCount);
+        }
+        let _entered = runtime.enter();
+        let mut simulation = Simulation::new_from_config(self.config)?;
+        simulation.start()?;
+        Ok(simulation)
+    }
+
+    /// Starts a simulation using the supplied Rayon pool for computation.
+    pub fn spawn_on_rayon(
+        self,
+        pool: Arc<rayon::ThreadPool>,
+    ) -> Result<Simulation, SimulationError> {
+        if self.invalid_worker_count {
+            return Err(SimulationError::InvalidWorkerCount);
+        }
+        self.config
+            .validate()
+            .map_err(SimulationError::InvalidConfig)?;
+        let (owned_runtime, runtime) = OwnedRuntime::start()?;
+        let runner = StepRunner::new_with_executor(
+            PhysicsWorld::new(),
+            self.config,
+            RayonExecutor::from_pool(pool),
+        )?;
+        let mut simulation = Simulation::from_runner(runner, runtime)?;
+        simulation.owned_runtime = Some(owned_runtime);
+        simulation.start()?;
+        Ok(simulation)
+    }
 }
 
 /// Failure returned by a clock-driven physics service.
@@ -108,6 +220,7 @@ pub enum SimulationError {
     MissingRuntime,
     SimulationTimeOverflow,
     InvalidTimeMultiplier,
+    InvalidWorkerCount,
     AlreadyRunning,
     TaskRequiresStop,
     Physics(kapitsa_core::world::StepError),
@@ -130,6 +243,7 @@ impl std::fmt::Display for SimulationError {
             Self::InvalidTimeMultiplier => {
                 formatter.write_str("time multiplier must be finite and non-negative")
             }
+            Self::InvalidWorkerCount => formatter.write_str("worker count must be positive"),
             Self::AlreadyRunning => formatter.write_str("simulation is already running"),
             Self::TaskRequiresStop => {
                 formatter.write_str("stop the completed simulation before restarting")
@@ -171,6 +285,9 @@ impl From<StepRunnerError> for SimulationError {
 }
 
 impl Simulation {
+    pub fn builder() -> SimulationBuilder {
+        SimulationBuilder::default()
+    }
     /// Creates an empty simulation using the default fixed-step configuration.
     pub fn new() -> Result<Self, SimulationError> {
         Self::new_from_config(SimulationConfig::default())
@@ -188,6 +305,10 @@ impl Simulation {
         config.validate().map_err(SimulationError::InvalidConfig)?;
         let runtime = Handle::try_current().map_err(|_| SimulationError::MissingRuntime)?;
         let simulation = StepRunner::new_on_validated(world, config, runtime.clone())?;
+        Self::from_runner(simulation, runtime)
+    }
+
+    fn from_runner(simulation: StepRunner, runtime: Handle) -> Result<Self, SimulationError> {
         let world = simulation.world().map_err(SimulationError::from)?;
         let initial_snapshot = Arc::new(PhysicsSnapshot::from_world(
             world,
@@ -220,6 +341,8 @@ impl Simulation {
             metrics_tx,
             metrics_rx,
             runtime,
+            paused_multiplier: None,
+            owned_runtime: None,
         })
     }
 
@@ -258,6 +381,7 @@ impl Simulation {
         let mut initial_metrics = simulation.metrics().clone();
         initial_metrics.requested_time_multiplier = *self.time_multiplier_tx.borrow();
         initial_metrics.actual_time_multiplier = 0.0;
+        initial_metrics.load_speed_factor = 1.0;
         initial_metrics.adaptive_step_limited = false;
         self.metrics_tx.send_replace(initial_metrics);
 
@@ -298,10 +422,12 @@ impl Simulation {
                 let requested_multiplier = metrics.requested_time_multiplier;
                 let actual_multiplier = metrics.actual_time_multiplier;
                 let adaptive_step_limited = metrics.adaptive_step_limited;
+                let load_speed_factor = metrics.load_speed_factor;
                 *metrics = simulation.metrics().clone();
                 metrics.requested_time_multiplier = requested_multiplier;
                 metrics.actual_time_multiplier = actual_multiplier;
                 metrics.adaptive_step_limited = adaptive_step_limited;
+                metrics.load_speed_factor = load_speed_factor;
             });
             ServiceTaskOutput {
                 simulation,
@@ -364,6 +490,23 @@ impl Simulation {
             metrics.actual_time_multiplier = 0.0;
             metrics.adaptive_step_limited = false;
         });
+        Ok(())
+    }
+
+    /// Pauses simulated time, retaining the requested speed for resuming.
+    pub fn pause(&mut self) -> Result<(), SimulationError> {
+        if self.paused_multiplier.is_none() {
+            self.paused_multiplier = Some(*self.time_multiplier_tx.borrow());
+            self.set_time_multiplier(0.0)?;
+        }
+        Ok(())
+    }
+
+    /// Resumes at the speed requested before pausing.
+    pub fn resume(&mut self) -> Result<(), SimulationError> {
+        if let Some(multiplier) = self.paused_multiplier.take() {
+            self.set_time_multiplier(multiplier)?;
+        }
         Ok(())
     }
 
@@ -446,20 +589,36 @@ async fn run_simulation_loop(
     let mut multiplier_started_at = previous;
     let mut multiplier_started_simulation_time = *simulation_time;
     let mut current_multiplier = *time_multiplier.borrow_and_update();
+    let mut load_speed = 1.0;
     let mut time_updates_open = true;
     let mut accumulator = Duration::ZERO;
     let mut reusable_snapshot = None;
 
     loop {
+        if current_multiplier == 0.0 && commands.pending.is_some() {
+            apply_queued_commands(simulation, commands)?;
+            let step = simulation.metrics().total_steps;
+            for result in &mut commands.pending_results {
+                if let DeferredCommandResult::Batch(batch) = result {
+                    batch.step = step;
+                }
+            }
+            let world = simulation.world().map_err(SimulationError::from)?;
+            let snapshot = PhysicsSnapshot::from_world(world, step, *simulation_time);
+            snapshots.send_replace(Arc::new(snapshot));
+            publish_command_results(commands, events);
+            continue;
+        }
         let (mut ready_step, mut step_limited) =
             choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
-        if step_limited && has_queued_request(commands) {
+        if current_multiplier != 0.0 && step_limited && has_queued_request(commands) {
             apply_queued_commands(simulation, commands)?;
             (ready_step, step_limited) =
                 choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
         }
-        let has_ready_step =
-            ready_step.is_some() || (adaptive_policy && step_limited && commands.pending.is_some());
+        let has_ready_step = current_multiplier != 0.0
+            && (ready_step.is_some()
+                || (adaptive_policy && step_limited && commands.pending.is_some()));
         let remaining = if adaptive_policy {
             step_duration
         } else {
@@ -468,7 +627,7 @@ async fn run_simulation_loop(
         let scheduler_multiplier = if adaptive_policy {
             if current_multiplier > 0.0 { 1.0 } else { 0.0 }
         } else {
-            current_multiplier
+            current_multiplier * load_speed
         };
         let step_deadline_reached = tokio::select! {
             biased;
@@ -483,7 +642,7 @@ async fn run_simulation_loop(
                 add_scaled_elapsed(
                     &mut accumulator,
                     now.duration_since(previous),
-                    current_multiplier,
+                    current_multiplier * load_speed,
                 )?;
                 previous = now;
                 match changed {
@@ -497,13 +656,13 @@ async fn run_simulation_loop(
                 false
             }
             request = commands.receiver.recv(),
-                if adaptive_policy && step_limited && commands.pending.is_none() && !commands.receiver.is_closed() =>
+                if (current_multiplier == 0.0 || (adaptive_policy && step_limited)) && commands.pending.is_none() && !commands.receiver.is_closed() =>
             {
                 let now = Instant::now();
                 add_scaled_elapsed(
                     &mut accumulator,
                     now.duration_since(previous),
-                    current_multiplier,
+                    current_multiplier * load_speed,
                 )?;
                 previous = now;
                 commands.pending = request;
@@ -518,12 +677,15 @@ async fn run_simulation_loop(
         if stopping(&stop) {
             break;
         }
+        if current_multiplier == 0.0 {
+            continue;
+        }
 
         let now = Instant::now();
         add_scaled_elapsed(
             &mut accumulator,
             now.duration_since(previous),
-            current_multiplier,
+            current_multiplier * load_speed,
         )?;
         if step_deadline_reached && !adaptive_policy {
             accumulator = accumulator.max(step_duration);
@@ -564,6 +726,7 @@ async fn run_simulation_loop(
                             *time_multiplier.borrow(),
                             actual_multiplier,
                             true,
+                            load_speed,
                         );
                     }
                 }
@@ -642,9 +805,22 @@ async fn run_simulation_loop(
             add_scaled_elapsed(
                 &mut accumulator,
                 completed_at.duration_since(previous),
-                current_multiplier,
+                current_multiplier * load_speed,
             )?;
             previous = completed_at;
+            let measured = simulation
+                .metrics()
+                .average_step_duration
+                .saturating_add(simulation.metrics().task_wait_duration);
+            load_speed = load_speed_for_step(
+                step_duration,
+                measured,
+                if adaptive_policy {
+                    1.0
+                } else {
+                    current_multiplier
+                },
+            );
             let debt = simulation_debt(accumulator, step_duration);
             simulation.set_runtime_status(SimulationState::Running, debt);
             publish_runtime_metrics(
@@ -653,6 +829,7 @@ async fn run_simulation_loop(
                 *time_multiplier.borrow(),
                 actual_multiplier,
                 false,
+                load_speed,
             );
         }
 
@@ -662,6 +839,14 @@ async fn run_simulation_loop(
     }
 
     Ok(())
+}
+
+fn load_speed_for_step(budget: Duration, average: Duration, multiplier: f64) -> f64 {
+    if average.is_zero() {
+        1.0
+    } else {
+        (budget.as_secs_f64() / average.as_secs_f64() / multiplier).clamp(MIN_LOAD_SPEED, 1.0)
+    }
 }
 
 fn choose_runtime_step(
@@ -917,11 +1102,13 @@ fn publish_runtime_metrics(
     requested_multiplier: f64,
     actual_multiplier: f64,
     adaptive_step_limited: bool,
+    load_speed: f64,
 ) {
     let mut snapshot = simulation.metrics().clone();
     snapshot.requested_time_multiplier = requested_multiplier;
     snapshot.actual_time_multiplier = actual_multiplier;
     snapshot.adaptive_step_limited = adaptive_step_limited;
+    snapshot.load_speed_factor = load_speed;
     metrics.send_replace(snapshot);
 }
 
@@ -956,13 +1143,65 @@ mod tests {
     };
 
     use super::{
-        PhysicsBatchError, Simulation, add_elapsed, add_scaled_elapsed, measured_time_multiplier,
-        wait_for_scaled_step, wait_for_scheduler_turn,
+        PhysicsBatchError, Simulation, add_elapsed, add_scaled_elapsed, load_speed_for_step,
+        measured_time_multiplier, wait_for_scaled_step, wait_for_scheduler_turn,
     };
 
     fn dynamic_body() -> RigidBody {
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass");
         RigidBody::new_dynamic(Transform::identity(), mass).expect("dynamic body")
+    }
+
+    #[test]
+    fn overload_slowdown_keeps_fixed_step_and_accumulates_below_floor() {
+        let step = Duration::from_millis(10);
+        assert_eq!(
+            load_speed_for_step(step, Duration::from_millis(5), 1.0),
+            1.0
+        );
+        assert_eq!(
+            load_speed_for_step(step, Duration::from_millis(20), 1.0),
+            0.5
+        );
+        assert_eq!(
+            load_speed_for_step(step, Duration::from_millis(100), 1.0),
+            0.3
+        );
+        assert_eq!(
+            load_speed_for_step(step, Duration::from_millis(10), 2.0),
+            0.5
+        );
+        let mut elapsed = Duration::ZERO;
+        add_scaled_elapsed(&mut elapsed, Duration::from_millis(100), 0.3).unwrap();
+        assert_eq!(elapsed - step, Duration::from_millis(20));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overloaded_step_keeps_dt_and_reports_speed_floor() {
+        let mut simulation = Simulation::new_from_config(config(100)).unwrap();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        simulation
+            .simulation
+            .as_mut()
+            .unwrap()
+            .gate_next_step(entered_tx, release_rx);
+        simulation.start().unwrap();
+        entered_rx.await.unwrap();
+        sleep(Duration::from_millis(80)).await;
+        simulation.pause().unwrap();
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while simulation.metrics().total_steps == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let metrics = simulation.metrics();
+        assert_eq!(metrics.last_physics_step, Duration::from_millis(10));
+        assert_eq!(metrics.load_speed_factor, 0.3);
+        simulation.stop().await.unwrap();
     }
 
     fn config(tick_rate: u32) -> SimulationConfig {
@@ -979,6 +1218,163 @@ mod tests {
 
     fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
         future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn paused_commands_publish_without_advancing_time() {
+        let mut simulation = Simulation::new_from_config(config(120)).unwrap();
+        simulation.pause().unwrap();
+        simulation.start().unwrap();
+        let client = simulation.client();
+        let id = tokio::time::timeout(Duration::from_secs(2), client.add_body(dynamic_body()))
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = client.snapshot();
+        assert!(snapshot.body(id).is_some());
+        assert_eq!(snapshot.step(), 0);
+        assert_eq!(snapshot.simulation_time(), Duration::ZERO);
+        let gravity = client
+            .add_gravity(kapitsa_core::gravity::UniformGravity::new(Vec3::Y).unwrap())
+            .await
+            .unwrap();
+        client
+            .update_gravity(
+                gravity,
+                kapitsa_core::gravity::UniformGravity::new(Vec3::X).unwrap(),
+            )
+            .await
+            .unwrap();
+        client.remove_gravity(gravity).await.unwrap();
+        assert!(client.remove_gravity(gravity).await.is_err());
+        assert_eq!(client.snapshot().step(), 0);
+        simulation.resume().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while simulation.metrics().total_steps == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        simulation.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_gravity_changes_motion_after_resuming() {
+        let mut simulation = Simulation::new_from_config(config(100)).unwrap();
+        simulation.pause().unwrap();
+        simulation.start().unwrap();
+        let mut client = simulation.client();
+        let id = client.add_body(dynamic_body()).await.unwrap();
+        client
+            .add_gravity(kapitsa_core::gravity::UniformGravity::new(Vec3::Y).unwrap())
+            .await
+            .unwrap();
+        simulation.resume().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let state = client.next_snapshot().await.unwrap();
+                if state.body(id).unwrap().linear_velocity().y > 0.0 {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        simulation.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_zero_worker_limit() {
+        let result = Simulation::builder()
+            .max_workers(0)
+            .spawn_on_tokio(&tokio::runtime::Handle::current());
+        assert!(matches!(result, Err(SimulationError::InvalidWorkerCount)));
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_zero_frequency() {
+        let result = Simulation::builder()
+            .frequency(0)
+            .spawn_on_tokio(&tokio::runtime::Handle::current());
+        assert!(matches!(result, Err(SimulationError::InvalidConfig(_))));
+    }
+
+    #[tokio::test]
+    async fn resume_restores_requested_time_multiplier() {
+        let mut simulation = Simulation::new_from_config(config(120)).unwrap();
+        simulation.set_time_multiplier(2.0).unwrap();
+        simulation.pause().unwrap();
+        simulation.pause().unwrap();
+        assert_eq!(simulation.metrics().requested_time_multiplier, 0.0);
+        simulation.resume().unwrap();
+        assert_eq!(simulation.metrics().requested_time_multiplier, 2.0);
+    }
+
+    #[test]
+    fn rayon_builder_starts_without_a_tokio_runtime() {
+        let pool = std::sync::Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .unwrap(),
+        );
+        let mut simulation = Simulation::builder()
+            .frequency(120)
+            .max_workers(1)
+            .spawn_on_rayon(pool.clone())
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client = simulation.client();
+            let id = tokio::time::timeout(Duration::from_secs(2), client.add_body(dynamic_body()))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(client.snapshot().body(id).is_some());
+            simulation.stop().await.unwrap();
+        });
+        assert_eq!(pool.install(|| 2 + 2), 4);
+    }
+
+    #[test]
+    fn simulations_share_rayon_pool_without_sharing_lifecycle() {
+        let pool = std::sync::Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .unwrap(),
+        );
+        let mut first = Simulation::builder()
+            .max_workers(1)
+            .spawn_on_rayon(pool.clone())
+            .unwrap();
+        let mut second = Simulation::builder()
+            .max_workers(2)
+            .spawn_on_rayon(pool.clone())
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let id = first.client().add_body(dynamic_body()).await.unwrap();
+            assert!(first.client().snapshot().body(id).is_some());
+            first.stop().await.unwrap();
+            let id = tokio::time::timeout(
+                Duration::from_secs(2),
+                second.client().add_body(dynamic_body()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(second.client().snapshot().body(id).is_some());
+            second.stop().await.unwrap();
+        });
+        assert_eq!(pool.install(|| 7), 7);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1583,7 +1979,8 @@ mod tests {
         let result = results.next_result().await.expect("recovery result");
         assert_eq!(result.batch_id, batch_id);
         assert!(result.result.is_ok());
-        assert!(result.step > 0);
+        assert_eq!(result.step, 0);
+        assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
         assert_eq!(
             client
                 .snapshot()

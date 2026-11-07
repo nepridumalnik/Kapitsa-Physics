@@ -1,3 +1,4 @@
+use crate::runtime::constants::METRICS_WINDOW;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -14,8 +15,6 @@ use super::{
     config::SimulationConfig,
     metrics::{SimulationMetrics, SimulationState, StepStats},
 };
-
-const METRICS_WINDOW: usize = 120;
 
 pub(crate) struct StepEngine<E: StepExecutor> {
     world: PhysicsWorld,
@@ -144,7 +143,8 @@ impl<E: StepExecutor> StepEngine<E> {
             .unwrap_or(Duration::ZERO);
         let step_budget = self.config.step_budget();
         let budget_usage = step_duration.as_secs_f64() / step_budget.as_secs_f64();
-        let budget_warning = step_duration >= step_budget.mul_f64(super::planner::EARLY_WARNING_AT);
+        let budget_warning =
+            step_duration >= step_budget.mul_f64(super::constants::EARLY_WARNING_AT);
         let overloaded = step_duration >= step_budget.mul_f64(self.config.workers.scale_up_at);
         let deadline_missed = step_duration > step_budget;
 

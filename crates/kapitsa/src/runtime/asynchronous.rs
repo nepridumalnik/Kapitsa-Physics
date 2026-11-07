@@ -28,7 +28,7 @@ pub use marshalling::{
     PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSnapshot,
     PhysicsSubmitError,
 };
-pub use service::{Simulation, SimulationError};
+pub use service::{Simulation, SimulationBuilder, SimulationError};
 
 enum EngineState {
     Available(Box<StepEngine<RayonExecutor>>),
@@ -142,7 +142,6 @@ impl StepRunner {
         Self::with_executor_validated(world, config, executor, Some(pool))
     }
 
-    #[cfg(test)]
     fn new_with_executor(
         world: PhysicsWorld,
         config: SimulationConfig,

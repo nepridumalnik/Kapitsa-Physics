@@ -42,6 +42,8 @@ pub struct SimulationMetrics {
     pub requested_time_multiplier: f64,
     /// Simulated seconds per wall second measured since the latest multiplier change.
     pub actual_time_multiplier: f64,
+    /// Current load-induced speed factor, between 0.3 and 1.0 while running.
+    pub load_speed_factor: f64,
 }
 
 /// Statistics for one completed manual `Simulation::step()` call.

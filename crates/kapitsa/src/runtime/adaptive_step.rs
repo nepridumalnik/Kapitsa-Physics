@@ -149,7 +149,7 @@ fn estimate_acceleration_limit(
             continue;
         };
         let force_acceleration = vector_length(body.forces().force()) / mass.mass();
-        let gravity_acceleration = gravity
+        let mut gravity_acceleration = gravity
             .and_then(|gravity| {
                 body.world_center_of_mass()
                     .ok()
@@ -157,6 +157,36 @@ fn estimate_acceleration_limit(
                     .and_then(|position| gravity.acceleration_at(position).ok())
             })
             .map_or(0.0, vector_length);
+        if let Ok(Some(center)) = body.world_center_of_mass() {
+            for (_, field) in world.gravity_fields() {
+                gravity_acceleration += field
+                    .acceleration_at(center)
+                    .map_or(f64::INFINITY, vector_length);
+                let origin = match field {
+                    kapitsa_core::gravity::Gravity::Central(field) => Some(field.center()),
+                    kapitsa_core::gravity::Gravity::Spherical(field)
+                        if (center - field.center()).length() <= field.radius() =>
+                    {
+                        Some(field.center())
+                    }
+                    _ => None,
+                };
+                if let Some(origin) = origin {
+                    let radius = vector_length(center - origin);
+                    let acceleration = field
+                        .acceleration_at(center)
+                        .map_or(f64::INFINITY, vector_length);
+                    if radius == 0.0 && acceleration.is_infinite() {
+                        cap(limit, 0.0);
+                    } else if acceleration > 0.0 {
+                        cap(
+                            limit,
+                            adaptive.relative_error_tolerance * (radius / acceleration).sqrt(),
+                        );
+                    }
+                }
+            }
+        }
         max_acceleration = max_acceleration.max(force_acceleration + gravity_acceleration);
 
         let local_torque = body

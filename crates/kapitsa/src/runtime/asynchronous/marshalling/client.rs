@@ -6,13 +6,14 @@ use std::sync::{
 use kapitsa_core::{
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{CollisionConfig, OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
+    gravity::Gravity,
     joint::Joint,
     mass::MassProperties,
     material::MaterialId,
     rigid_body::{CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
-    world::{BodyId, ColliderId, ForceSourceId, JointId},
+    world::{BodyId, ColliderId, ForceSourceId, GravityId, JointId},
 };
 use kapitsa_math::{Affine3, Vec3};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -39,6 +40,39 @@ pub struct PhysicsClient {
 }
 
 impl PhysicsClient {
+    /// Adds a gravity field and returns its world-scoped ID.
+    pub async fn add_gravity(
+        &self,
+        gravity: impl Into<Gravity>,
+    ) -> Result<GravityId, PhysicsClientError> {
+        match self
+            .submit(PhysicsCommand::AddGravity {
+                gravity: gravity.into(),
+            })
+            .await?
+        {
+            PhysicsCommandResult::Gravity(id) => Ok(id),
+            _ => Err(PhysicsClientError::UnexpectedResult),
+        }
+    }
+
+    pub async fn update_gravity(
+        &self,
+        id: GravityId,
+        gravity: impl Into<Gravity>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::UpdateGravity {
+                id,
+                gravity: gravity.into(),
+            })
+            .await?,
+        )
+    }
+
+    pub async fn remove_gravity(&self, id: GravityId) -> Result<(), PhysicsClientError> {
+        expect_done(self.submit(PhysicsCommand::RemoveGravity { id }).await?)
+    }
     pub(crate) fn new(
         command_tx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
         snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
@@ -147,6 +181,7 @@ impl PhysicsClient {
             | PhysicsCommandResult::Joint(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::Gravity(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
         }
     }
@@ -173,6 +208,7 @@ impl PhysicsClient {
             | PhysicsCommandResult::Joint(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::Gravity(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
         }
     }
@@ -204,6 +240,7 @@ impl PhysicsClient {
             | PhysicsCommandResult::ForceSource(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::Gravity(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
         }
     }
@@ -258,6 +295,7 @@ impl PhysicsClient {
             | PhysicsCommandResult::Joint(_)
             | PhysicsCommandResult::Raycast(_)
             | PhysicsCommandResult::Sweep(_)
+            | PhysicsCommandResult::Gravity(_)
             | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
         }
     }
@@ -564,6 +602,7 @@ fn expect_done(result: PhysicsCommandResult) -> Result<(), PhysicsClientError> {
         | PhysicsCommandResult::Joint(_)
         | PhysicsCommandResult::Raycast(_)
         | PhysicsCommandResult::Sweep(_)
+        | PhysicsCommandResult::Gravity(_)
         | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
     }
 }

@@ -1,8 +1,10 @@
+use crate::runtime::constants::{MAX_COMMANDS_PER_BATCH, SMALL_STAGING_LINEAR_SEARCH_LIMIT};
 use std::collections::HashMap;
 
 use kapitsa_core::{
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{CollisionConfig, OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
+    gravity::Gravity,
     joint::Joint,
     mass::MassProperties,
     material::MaterialId,
@@ -10,8 +12,8 @@ use kapitsa_core::{
     shape::Shape,
     transform::Transform,
     world::{
-        BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, JointId,
-        PhysicsWorld, WorldError,
+        BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, GravityId,
+        JointId, PhysicsWorld, WorldError,
     },
 };
 use kapitsa_math::{Affine3, Vec3};
@@ -36,12 +38,29 @@ impl BatchId {
 
 /// An operation applied to the simulation world at a physics-step boundary.
 pub enum PhysicsCommand {
+    AddGravity {
+        gravity: Gravity,
+    },
+    UpdateGravity {
+        id: GravityId,
+        gravity: Gravity,
+    },
+    RemoveGravity {
+        id: GravityId,
+    },
     /// Inserts a rigid body and returns its new [`BodyId`].
-    AddBody { body: RigidBody },
+    AddBody {
+        body: RigidBody,
+    },
     /// Removes a body and its attached colliders.
-    RemoveBody { id: BodyId },
+    RemoveBody {
+        id: BodyId,
+    },
     /// Attaches a collider to a body and returns its new [`ColliderId`].
-    AddCollider { body: BodyId, collider: Collider },
+    AddCollider {
+        body: BodyId,
+        collider: Collider,
+    },
     /// Creates a joint between two bodies and returns its new [`JointId`].
     AddJoint {
         body_a: BodyId,
@@ -49,13 +68,23 @@ pub enum PhysicsCommand {
         joint: Joint,
     },
     /// Removes a joint.
-    RemoveJoint { id: JointId },
+    RemoveJoint {
+        id: JointId,
+    },
     /// Replaces a joint's settings while retaining its ID and attached bodies.
-    UpdateJoint { id: JointId, joint: Joint },
+    UpdateJoint {
+        id: JointId,
+        joint: Joint,
+    },
     /// Enables or disables a joint without changing its settings.
-    SetJointEnabled { id: JointId, enabled: bool },
+    SetJointEnabled {
+        id: JointId,
+        enabled: bool,
+    },
     /// Removes a collider.
-    RemoveCollider { id: ColliderId },
+    RemoveCollider {
+        id: ColliderId,
+    },
     /// Creates a persistent local-space force source and returns its ID.
     AddForceSource {
         body: BodyId,
@@ -63,7 +92,9 @@ pub enum PhysicsCommand {
         local_force: Vec3,
     },
     /// Removes a persistent force source.
-    RemoveForceSource { id: ForceSourceId },
+    RemoveForceSource {
+        id: ForceSourceId,
+    },
     /// Updates the local point and force of an existing persistent source.
     SetForceSource {
         id: ForceSourceId,
@@ -71,25 +102,52 @@ pub enum PhysicsCommand {
         local_force: Vec3,
     },
     /// Enables or disables a persistent force source.
-    SetForceSourceEnabled { id: ForceSourceId, enabled: bool },
+    SetForceSourceEnabled {
+        id: ForceSourceId,
+        enabled: bool,
+    },
     /// Replaces a body's transform while preserving its velocities.
-    SetTransform { id: BodyId, transform: Transform },
+    SetTransform {
+        id: BodyId,
+        transform: Transform,
+    },
     /// Sets the world-space linear velocity.
-    SetLinearVelocity { id: BodyId, velocity: Vec3 },
+    SetLinearVelocity {
+        id: BodyId,
+        velocity: Vec3,
+    },
     /// Sets the world-space angular velocity.
-    SetAngularVelocity { id: BodyId, velocity: Vec3 },
+    SetAngularVelocity {
+        id: BodyId,
+        velocity: Vec3,
+    },
     /// Replaces the body's dynamic mass properties.
-    SetMass { id: BodyId, mass: MassProperties },
+    SetMass {
+        id: BodyId,
+        mass: MassProperties,
+    },
     /// Replaces the world's validated collision configuration.
-    SetCollisionConfig { config: CollisionConfig },
+    SetCollisionConfig {
+        config: CollisionConfig,
+    },
     /// Sets continuous collision detection for a body.
-    SetCcdMode { id: BodyId, mode: CcdMode },
+    SetCcdMode {
+        id: BodyId,
+        mode: CcdMode,
+    },
     /// Sleeps a dynamic body and clears its motion and forces.
-    Sleep { id: BodyId },
+    Sleep {
+        id: BodyId,
+    },
     /// Wakes a dynamic body.
-    WakeUp { id: BodyId },
+    WakeUp {
+        id: BodyId,
+    },
     /// Accumulates a world-space force.
-    ApplyForce { id: BodyId, force: Vec3 },
+    ApplyForce {
+        id: BodyId,
+        force: Vec3,
+    },
     /// Accumulates a world-space force at a world-space point.
     ApplyForceAtPoint {
         id: BodyId,
@@ -97,9 +155,15 @@ pub enum PhysicsCommand {
         point: Vec3,
     },
     /// Accumulates a world-space torque.
-    ApplyTorque { id: BodyId, torque: Vec3 },
+    ApplyTorque {
+        id: BodyId,
+        torque: Vec3,
+    },
     /// Applies a world-space impulse immediately.
-    ApplyImpulse { id: BodyId, impulse: Vec3 },
+    ApplyImpulse {
+        id: BodyId,
+        impulse: Vec3,
+    },
     /// Applies a world-space impulse at a world-space point immediately.
     ApplyImpulseAtPoint {
         id: BodyId,
@@ -107,14 +171,19 @@ pub enum PhysicsCommand {
         point: Vec3,
     },
     /// Clears accumulated force and torque.
-    ClearForces { id: BodyId },
+    ClearForces {
+        id: BodyId,
+    },
     /// Replaces a collider's collision filter.
     SetColliderFilter {
         id: ColliderId,
         filter: CollisionFilter,
     },
     /// Sets whether an attached collider responds physically or only reports intersections.
-    SetColliderMode { id: ColliderId, mode: CollisionMode },
+    SetColliderMode {
+        id: ColliderId,
+        mode: CollisionMode,
+    },
     /// Updates a skinned mesh collider's bone pose.
     SetSkinPose {
         id: ColliderId,
@@ -126,7 +195,10 @@ pub enum PhysicsCommand {
         material: Option<MaterialId>,
     },
     /// Casts a ray against the current world at this command's FIFO position.
-    Raycast { ray: Ray, filter: QueryFilter },
+    Raycast {
+        ray: Ray,
+        filter: QueryFilter,
+    },
     /// Sweeps a convex shape against the current world at this command's FIFO position.
     Sweep {
         shape: Shape,
@@ -159,7 +231,7 @@ impl std::fmt::Debug for PhysicsCommandBuffer {
 
 impl PhysicsCommandBuffer {
     /// Maximum number of commands accepted in one atomic batch.
-    pub const MAX_COMMANDS: usize = 128;
+    pub const MAX_COMMANDS: usize = MAX_COMMANDS_PER_BATCH;
 
     pub fn new() -> Self {
         Self::default()
@@ -334,6 +406,7 @@ pub enum PhysicsCommandResult {
     Collider(ColliderId),
     /// A persistent force source was inserted.
     ForceSource(ForceSourceId),
+    Gravity(GravityId),
     /// A joint was inserted.
     Joint(JointId),
     /// The result of a ray query.
@@ -382,7 +455,6 @@ struct StagedJoint {
 }
 
 // Bound small-set scans to avoid hashing overhead on repeated-target batches.
-const SMALL_STAGING_LINEAR_SEARCH_LIMIT: usize = 64;
 
 #[derive(Default)]
 pub(crate) struct BatchScratch {
@@ -691,7 +763,10 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::ApplyImpulse { id, .. }
         | PhysicsCommand::ApplyImpulseAtPoint { id, .. }
         | PhysicsCommand::ClearForces { id } => Some(*id),
-        PhysicsCommand::AddBody { .. }
+        PhysicsCommand::AddGravity { .. }
+        | PhysicsCommand::UpdateGravity { .. }
+        | PhysicsCommand::RemoveGravity { .. }
+        | PhysicsCommand::AddBody { .. }
         | PhysicsCommand::RemoveBody { .. }
         | PhysicsCommand::AddCollider { .. }
         | PhysicsCommand::RemoveCollider { .. }
@@ -737,7 +812,10 @@ fn apply_body_command(body: &mut RigidBody, command: &PhysicsCommand) -> Result<
             body.apply_impulse_at_point(*impulse, *point)?;
         }
         PhysicsCommand::ClearForces { .. } => body.clear_forces(),
-        PhysicsCommand::AddBody { .. }
+        PhysicsCommand::AddGravity { .. }
+        | PhysicsCommand::UpdateGravity { .. }
+        | PhysicsCommand::RemoveGravity { .. }
+        | PhysicsCommand::AddBody { .. }
         | PhysicsCommand::RemoveBody { .. }
         | PhysicsCommand::AddCollider { .. }
         | PhysicsCommand::RemoveCollider { .. }
@@ -768,6 +846,19 @@ pub(crate) fn apply_command(
     command: PhysicsCommand,
 ) -> Result<PhysicsCommandResult, PhysicsClientError> {
     let result = match command {
+        PhysicsCommand::AddGravity { gravity } => {
+            PhysicsCommandResult::Gravity(world.add_gravity(gravity)?)
+        }
+        PhysicsCommand::UpdateGravity { id, gravity } => {
+            world.update_gravity(id, gravity)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::RemoveGravity { id } => {
+            world
+                .remove_gravity(id)
+                .ok_or(WorldError::InvalidGravityId)?;
+            PhysicsCommandResult::Done
+        }
         PhysicsCommand::AddBody { body } => PhysicsCommandResult::Body(world.add_body(body)?),
         PhysicsCommand::RemoveBody { id } => {
             world.remove_body(id).ok_or(WorldError::InvalidBodyId)?;

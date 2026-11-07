@@ -36,7 +36,9 @@ pub mod cluster {
 }
 
 pub mod gravity {
-    pub use kapitsa_core::gravity::{CentralGravity, GravityError};
+    pub use kapitsa_core::gravity::{
+        CentralGravity, Gravity, GravityError, SphericalGravity, UniformGravity,
+    };
 }
 
 pub mod joint {
@@ -76,8 +78,8 @@ pub mod transform {
 
 pub mod world {
     pub use kapitsa_core::world::{
-        BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, JointId,
-        PartId, StepError, WeldId, WorldError,
+        BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, GravityId,
+        JointId, PartId, StepError, WeldId, WorldError,
     };
 }
 
@@ -87,7 +89,7 @@ pub use kapitsa_core::{
         CcdLimitPolicy, CollisionConfig, CollisionError, CollisionEvent, CollisionEventKind,
         CollisionPair, ContactInfo,
     },
-    gravity::{CentralGravity, GravityError},
+    gravity::{CentralGravity, Gravity, GravityError, SphericalGravity, UniformGravity},
     joint::{Joint, JointBreakEvent},
     mass::MassProperties,
     material::{MaterialId, PhysicsMaterial},
@@ -95,8 +97,8 @@ pub use kapitsa_core::{
     shape::Shape,
     transform::Transform,
     world::{
-        BodyId, ClusterError, ColliderId, ForceSourceId, JointId, PartId, StepError, WeldId,
-        WorldError,
+        BodyId, ClusterError, ColliderId, ForceSourceId, GravityId, JointId, PartId, StepError,
+        WeldId, WorldError,
     },
 };
 
@@ -106,6 +108,6 @@ pub use runtime::{
     JointBreakEvents, PhysicsBatchError, PhysicsBatchResult, PhysicsBatchResultStreamError,
     PhysicsBatchResults, PhysicsClient, PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer,
     PhysicsCommandResult, PhysicsSnapshot, PhysicsSubmitError, SchedulerConfig, Simulation,
-    SimulationConfig, SimulationError, SimulationMetrics, SimulationState, StepMeasurement,
-    StepStats, TimeStepPolicy, WorkerConfig, WorkerConfigError,
+    SimulationBuilder, SimulationConfig, SimulationError, SimulationMetrics, SimulationState,
+    StepMeasurement, StepStats, TimeStepPolicy, WorkerConfig, WorkerConfigError,
 };

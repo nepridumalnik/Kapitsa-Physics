@@ -1,3 +1,6 @@
+use crate::runtime::constants::{
+    CAPACITY_SHRINK_RATIO, DENSE_ENTER_RATIO, DENSE_EXIT_RATIO, MIN_RETAINED_CAPACITY,
+};
 use std::{
     collections::HashMap,
     mem::{self, size_of},
@@ -9,11 +12,6 @@ use kapitsa_core::{
     rigid_body::BodyState,
     world::{BodyId, PhysicsWorld},
 };
-
-const DENSE_ENTER_RATIO: usize = 3;
-const DENSE_EXIT_RATIO: usize = 6;
-const CAPACITY_SHRINK_RATIO: usize = 4;
-const MIN_RETAINED_CAPACITY: usize = 256;
 
 #[derive(Clone, Copy)]
 struct SnapshotEntry {
