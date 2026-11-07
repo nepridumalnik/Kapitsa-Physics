@@ -1775,6 +1775,15 @@ mod tests {
                 ),
             )
             .expect("fixed collider");
+        let material = world
+            .add_material(kapitsa_core::material::PhysicsMaterial::default())
+            .unwrap();
+        let root = world
+            .enable_cluster_with_mass(
+                fixed,
+                MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+            )
+            .unwrap();
         let client = simulation.client();
         let (entered_tx, entered_rx) = oneshot::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -1793,6 +1802,10 @@ mod tests {
         let ray = Ray::new(Vec3::new(4.0, 0.0, -2.0), Vec3::Z, 10.0).expect("ray");
         let mut query = Box::pin(client.raycast(ray, QueryFilter::default()));
         assert!(matches!(poll_once(query.as_mut()), Poll::Pending));
+        let mut material_query = Box::pin(client.material(material));
+        assert!(matches!(poll_once(material_query.as_mut()), Poll::Pending));
+        let mut part_query = Box::pin(client.cluster_part(root));
+        assert!(matches!(poll_once(part_query.as_mut()), Poll::Pending));
         tokio::time::advance(Duration::from_millis(10)).await;
         entered_rx.await.expect("step worker entered gate");
         assert_eq!(client.snapshot().step(), 0);
@@ -1825,6 +1838,11 @@ mod tests {
                 .expect("query result remains distinct")
                 .is_some()
         );
+        assert_eq!(
+            material_query.await.unwrap(),
+            Some(kapitsa_core::material::PhysicsMaterial::default())
+        );
+        assert_eq!(part_query.await.unwrap().unwrap().body(), fixed);
         assert!(matches!(
             simulation.stop().await,
             Err(SimulationError::Physics(StepError::BodyIntegration { .. }))
