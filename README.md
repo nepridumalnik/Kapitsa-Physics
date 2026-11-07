@@ -143,11 +143,58 @@ client.apply_force(id, Vec3::new(0.0, 1000.0, 0.0)).await?;
 
 Клиент умеет добавлять, обновлять, отключать и удалять соединения. `JointLimit`, `JointDrive` и `JointMotion` задают ограничения и приводы там, где они поддерживаются. Разрушение соединения публикуется как событие.
 
-Модуль `cluster` содержит описания составных жёстких объектов: `ClusterPartDesc`, `WeldDesc`, настройки прочности и изменения массы. Их наличие в core не означает, что все операции кластеров доступны через асинхронный клиент; проверяйте методы клиента для нужного сценария.
+Кластер объединяет детали в одно жёсткое тело. Создайте динамическое тело обычным способом, затем включите кластер и добавьте к нему деталь:
+
+```rust
+use kapitsa::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
+use kapitsa::joint::JointFrame;
+use kapitsa::math::{Mat3, Vec3};
+use kapitsa::{MassProperties, RigidBody, Transform};
+
+let part_mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+let body_id = client.add_body(RigidBody::new_dynamic(Transform::identity(), part_mass)?).await?;
+let root = client.enable_cluster(body_id).await?;
+let weld = WeldDesc {
+    frame_a: JointFrame::IDENTITY,
+    frame_b: JointFrame::IDENTITY,
+    strength: WeldStrength::Unbreakable,
+    stiffness: WeldStiffness { linear: 1.0, angular: 1.0 },
+};
+let part = client.add_cluster_part(root, ClusterPartDesc {
+    local_transform: Transform::identity(),
+    mass: part_mass,
+    colliders: Vec::new(),
+    linear_velocity: Vec3::ZERO,
+    angular_velocity: Vec3::ZERO,
+}, weld).await?;
+
+let cluster = client.cluster(body_id).await?.expect("cluster exists");
+let weld_id = cluster.welds()[0];
+let bodies = client.break_weld(weld_id).await?;
+let detached_body = client.cluster_part(part).await?.expect("part exists").body();
+```
+
+В примере начальные скорости и локальные системы координат деталей совпадают; при других положениях и скоростях задайте согласованные системы и поле скоростей. `break_weld` и `detach_part` возвращают ID тел образовавшихся компонент. После разделения снимок уже содержит их состояния. `cluster`, `cluster_part` и `weld` возвращают данные на момент обработки запроса; по ним можно получить актуальные `PartId`, `WeldId`, `BodyId` и коллайдеры.
+
+`add_part_collider` и `remove_part_collider` управляют коллайдерами детали. `destroy_cluster_part` удаляет деталь при допустимой топологии; последнюю деталь кластера удалить этим методом нельзя. `merge_clusters` присоединяет второй кластер к первому. Массу детали меняют через `set_part_mass` с `MassChangeMode::KeepVelocityField` либо через `set_part_mass_with_transfer` с явным `MassTransfer`. Для силы в локальных координатах детали используйте `add_part_force_source`. Соединить тело или деталь с другой целью можно через `add_joint_targets` и `JointTarget`; для обновления такого соединения используйте `update_joint_targets`.
 
 ## Материалы и гравитация
 
-`PhysicsMaterial` описывает трение, упругость и плотность; коллайдер ссылается на материал через `MaterialId`. Создание и удаление материалов через асинхронный клиент пока не доступны. `CollisionConfig` задаёт параметры обработки контактов и CCD и обновляется через клиент.
+`PhysicsMaterial` описывает динамическое и статическое трение, упругость и плотность; коллайдер ссылается на материал через `MaterialId`. В примере используется `collider_id` созданного выше коллайдера:
+
+```rust
+use kapitsa::PhysicsMaterial;
+
+let material = PhysicsMaterial::new(0.4, 0.5, 0.1, 1000.0)?;
+let material_id = client.add_material(material).await?;
+client.set_collider_material(collider_id, Some(material_id)).await?;
+let current = client.material(material_id).await?;
+client.update_material(material_id, PhysicsMaterial::new(0.2, 0.3, 0.0, 1000.0)?).await?;
+client.set_collider_material(collider_id, None).await?;
+client.remove_material(material_id).await?;
+```
+
+Материал, назначенный коллайдеру, удалить нельзя: сначала снимите все назначения. Изменение материала сбрасывает кешированные контакты использующих его коллайдеров. `CollisionConfig` задаёт параметры обработки контактов и CCD и обновляется через клиент.
 
 Источники гравитации добавляются через клиент и идентифицируются `GravityId`. Несколько источников действуют одновременно, их ускорения суммируются:
 
@@ -163,11 +210,11 @@ client.remove_gravity(gravity).await?;
 
 ## Запросы, события и пакеты
 
-`client.raycast`, `sweep` и `overlaps` выполняют пространственные запросы. Фильтр `QueryFilter` ограничивает кандидатов. Запрос обрабатывается в своей позиции очереди команд до интегрирования соответствующего шага.
+`client.raycast`, `sweep` и `overlaps` выполняют пространственные запросы. Фильтр `QueryFilter` ограничивает кандидатов. Запросы состояния и пространственные запросы обрабатываются в своей позиции очереди до интегрирования соответствующего шага. Создание и изменение материалов и кластеров также работает на паузе.
 
 `subscribe_collision_events()` и `subscribe_joint_break_events()` создают подписки. Потоки ограничены: медленный получатель получает ошибку `Lagged` с числом пропущенных пакетов.
 
-`client.commands()` создаёт буфер изменений; `try_submit` ставит его в очередь без ожидания и возвращает ID пакета. Очередь ограничена, поэтому при её заполнении пакет возвращается с ошибкой и может быть отправлен повторно. Результаты доступны через `subscribe_batch_results`. Обычные методы клиента ожидают подтверждения применения и публикации состояния.
+`client.commands()` создаёт буфер изменений; `try_submit` ставит его в очередь без ожидания и возвращает ID пакета. Очередь ограничена, поэтому при её заполнении пакет возвращается с ошибкой и может быть отправлен повторно. Результаты доступны через `subscribe_batch_results`. Буфер поддерживает перечисленные в `PhysicsCommandBuffer` операции над телами, силами и соединениями; новые операции материалов и кластеров выполняются отдельными командами. Обычные методы клиента ожидают подтверждения применения и публикации состояния.
 
 ## Аэродинамика и гидродинамика
 
