@@ -100,7 +100,7 @@ async fn materials_are_managed_through_client_on_pause() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn clients_reject_foreign_and_stale_material_ids() {
+async fn clients_reject_foreign_and_stale_ids() {
     let mut first = Simulation::builder()
         .max_workers(1)
         .spawn_on_tokio(&tokio::runtime::Handle::current())
@@ -121,6 +121,14 @@ async fn clients_reject_foreign_and_stale_material_ids() {
     let replacement = a.add_material(material).await.unwrap();
     assert_ne!(id, replacement);
     assert!(a.update_material(id, material).await.is_err());
+    let body = a
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass(1.0)).unwrap())
+        .await
+        .unwrap();
+    let part = a.enable_cluster(body).await.unwrap();
+    assert!(b.cluster_part(part).await.unwrap().is_none());
+    assert!(b.detach_part(part).await.is_err());
+    assert!(a.cluster_part(part).await.unwrap().is_some());
     first.stop().await.unwrap();
     second.stop().await.unwrap();
 }
