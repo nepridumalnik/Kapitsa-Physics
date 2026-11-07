@@ -764,6 +764,32 @@ impl PhysicsWorld {
         self.materials.get_mut(id)
     }
 
+    /// Replaces a material and invalidates cached contacts that used it.
+    pub fn update_material(
+        &mut self,
+        id: MaterialId,
+        material: PhysicsMaterial,
+    ) -> Result<(), WorldError> {
+        let current = self
+            .materials
+            .get_mut(id)
+            .ok_or(WorldError::InvalidMaterialId)?;
+        if *current == material {
+            return Ok(());
+        }
+        *current = material;
+        for (dense, entry) in self.colliders.iter() {
+            if entry.collider.material() == Some(id) {
+                self.collision_system
+                    .invalidate_collider_contacts(ColliderId {
+                        world: self.world_id,
+                        dense,
+                    });
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove_material(&mut self, id: MaterialId) -> Result<PhysicsMaterial, WorldError> {
         if !self.materials.contains(id) {
             return Err(WorldError::InvalidMaterialId);

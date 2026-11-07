@@ -216,6 +216,39 @@ fn material_restitution_and_friction_affect_world_contacts() {
 }
 
 #[test]
+fn replacing_material_changes_subsequent_contact_response() {
+    let mut world = PhysicsWorld::new();
+    let material = material(&mut world, 1.0, 0.8);
+    let plane = add_plane(&mut world, CollisionMode::Solid);
+    let body = world
+        .add_body(dynamic(
+            Vec3::new(0.0, 0.49, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+        ))
+        .unwrap();
+    let sphere = add_sphere(&mut world, body);
+    world.set_collider_material(sphere, Some(material)).unwrap();
+    world.set_collider_material(plane, Some(material)).unwrap();
+    world.step(0.01).unwrap();
+    assert!(world.body(body).unwrap().state().linear_velocity().y > 0.0);
+    world
+        .update_material(material, PhysicsMaterial::new(0.0, 0.0, 0.0, 1.0).unwrap())
+        .unwrap();
+    let body_mut = world.body_mut(body).unwrap();
+    body_mut
+        .set_transform(transform(Vec3::new(0.0, 0.49, 0.0)))
+        .unwrap();
+    body_mut
+        .set_linear_velocity(Vec3::new(1.0, -1.0, 0.0))
+        .unwrap();
+    body_mut.set_angular_velocity(Vec3::ZERO).unwrap();
+    world.step(0.01).unwrap();
+    let velocity = world.body(body).unwrap().state().linear_velocity();
+    assert!(velocity.y.abs() < 1.0e-9, "{velocity:?}");
+    assert!((velocity.x - 1.0).abs() < 1.0e-9, "{velocity:?}");
+}
+
+#[test]
 fn moving_kinematic_body_keeps_its_trajectory_and_wakes_sleeping_dynamic_body() {
     let mut world = PhysicsWorld::new();
     let sleeping = world
