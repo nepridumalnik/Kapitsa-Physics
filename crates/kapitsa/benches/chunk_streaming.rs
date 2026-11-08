@@ -72,10 +72,15 @@ fn main() -> BenchResult<()> {
                                         cache == "warm",
                                         &pool,
                                     );
-                                    failed |= stats.error.is_some()
-                                        || stats.reuse_errors > 0
-                                        || stats.contact_errors > 0
-                                        || stats.stale_ids > 0;
+                                    println!(
+                                        "  {}: coverage_misses={}, contact_errors={}, reuse_errors={}, stale_ids={}",
+                                        stats.status(),
+                                        stats.misses,
+                                        stats.contact_errors,
+                                        stats.reuse_errors,
+                                        stats.stale_ids
+                                    );
+                                    failed |= stats.failed();
                                     support::report_run(&mut report, &label, &stats)?;
                                 }
                             }
@@ -99,10 +104,15 @@ fn main() -> BenchResult<()> {
                                         &pool,
                                         &executor,
                                     );
-                                    failed |= stats.error.is_some()
-                                        || stats.reuse_errors > 0
-                                        || stats.contact_errors > 0
-                                        || stats.stale_ids > 0;
+                                    println!(
+                                        "  {}: coverage_misses={}, contact_errors={}, reuse_errors={}, stale_ids={}",
+                                        stats.status(),
+                                        stats.misses,
+                                        stats.contact_errors,
+                                        stats.reuse_errors,
+                                        stats.stale_ids
+                                    );
+                                    failed |= stats.failed();
                                     support::report_run(&mut report, &label, &stats)?;
                                 }
                             }

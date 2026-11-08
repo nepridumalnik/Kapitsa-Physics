@@ -20,6 +20,9 @@ cargo bench -p kapitsa --bench chunk_streaming --features bench-internals -- --o
 ```
 
 After writing the Markdown report, the tool prints its absolute canonical path.
+Each workload also prints its status and correctness counters to the console.
+With `cargo bench`, relative output paths resolve from `crates/kapitsa`; use an
+absolute `--output` path to choose a location independently of Cargo's directory.
 The default matrix uses 1/2/4/8 preparation workers crossed independently with
 1/2/4/8 physics workers, 4/64/1024 active chunks, cold/warm caches, 60 seconds at
 20 ms dt and three independent repetitions. It is a substantial measurement run.
@@ -44,13 +47,15 @@ preparation. The benchmark does not silently reduce requested workloads.
 | overflight | Straight surface traversal, 200 m/s, prescribed kinematic probe |
 | shuttle | Repeated 256 m route, 8 second period, kinematic probe |
 | boundary | Oscillation around an X chunk boundary while moving along Z |
-| landing | Real dynamic sphere, initial velocity (3,-1,0) m/s and gravity |
+| landing | Real continuous dynamic sphere, initial velocity (3,-1,0) m/s and gravity |
 | ccd | Real continuous dynamic sphere, initial velocity (500,-200,0) m/s and gravity |
 | bulk | Equal total geometry through individual collider, individual chunk and batch APIs |
 
 Landing/CCD positions evolve through the actual solver, with no pose correction
 or replacement by prescribed trajectories. Gravity is a per-step physical force.
 Other scenarios are deterministic streaming load traces, not flight dynamics.
+Landing uses CCD so a discrete 20 ms impact overshoot is not mistaken for a
+streaming error. The 0.01 m diagnostic budget and solver settings are unchanged.
 
 Each flight frame requests a fixed-size working set around the probe and one
 step of lookahead. Cold evicts old data; warm prewarms the nominal route and

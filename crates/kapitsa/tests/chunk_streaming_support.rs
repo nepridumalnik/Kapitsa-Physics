@@ -110,5 +110,107 @@ fn report_percentiles_use_nearest_rank_and_show_failures() -> BenchResult<()> {
     support::report_run(&mut text, "fixture", &stats)?;
     assert!(text.contains("Status: test failure"));
     assert!(text.contains("50.000000 | 95.000000 | 99.000000"));
+    stats.error = None;
+    stats.contact_errors = 1;
+    assert!(stats.failed());
+    assert_eq!(stats.status(), "completed with correctness errors");
+    stats.contact_errors = 0;
+    stats.misses = 1;
+    assert!(!stats.failed());
+    assert_eq!(stats.status(), "completed with coverage misses");
     Ok(())
+}
+
+#[test]
+fn physical_mesh_landing_regression() -> BenchResult<()> {
+    let mesh = physical_mesh_fixture("landing", 100, false, false)?;
+    let plane = physical_mesh_fixture("landing", 100, true, false)?;
+    assert!(
+        mesh <= plane,
+        "mesh penetration={mesh}, reference plane penetration={plane}"
+    );
+    Ok(())
+}
+
+#[test]
+fn physical_mesh_ccd_regression() -> BenchResult<()> {
+    let penetration = physical_mesh_fixture("ccd", 5, false, true)?;
+    assert!(penetration <= 0.01);
+    Ok(())
+}
+
+#[test]
+fn physical_mesh_continuous_landing_regression() -> BenchResult<()> {
+    let penetration = physical_mesh_fixture("landing", 500, false, true)?;
+    assert!(penetration <= 0.01, "penetration={penetration}");
+    Ok(())
+}
+
+fn physical_mesh_fixture(
+    scenario: &str,
+    frames: usize,
+    plane: bool,
+    continuous: bool,
+) -> BenchResult<f64> {
+    use kapitsa_core::{
+        collider::Collider,
+        mass::MassProperties,
+        rigid_body::{CcdMode, RigidBody},
+        shape::{Shape, Sphere},
+        transform::Transform,
+        world::PhysicsWorld,
+    };
+    let mut world = PhysicsWorld::new();
+    let terrain = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    if plane {
+        world.add_collider(
+            terrain,
+            Collider::new(
+                Shape::Plane(kapitsa_core::shape::Plane::new(0.0, 1.0, 0.0, 0.0)?),
+                Transform::identity(),
+            ),
+        )?;
+    } else {
+        let mut chunks = Vec::new();
+        for key in support::working_set(support::position(scenario, 0, 0.02), 4) {
+            chunks.push(support::prepare(key, 8, 1)?.chunk);
+        }
+        world.add_chunk_batch(terrain, chunks)?;
+    }
+    let shape = Shape::Sphere(Sphere::new(0.5)?);
+    let mass = MassProperties::from_shape(&shape, 1000.0)?;
+    let mut rocket = RigidBody::new_dynamic(
+        support::transform(support::position(scenario, 0, 0.02))?,
+        mass,
+    )?;
+    rocket.set_linear_velocity(Vec3::new(
+        if scenario == "ccd" { 500.0 } else { 3.0 },
+        if scenario == "ccd" { -200.0 } else { -1.0 },
+        0.0,
+    ))?;
+    if continuous {
+        rocket.set_ccd_mode(CcdMode::Continuous);
+    }
+    let rocket = world.add_body(rocket)?;
+    world.add_collider(rocket, Collider::new(shape, Transform::identity()))?;
+    let mut penetration = 0.0f64;
+    for frame in 0..frames {
+        let body = world.body_mut(rocket).ok_or("missing rocket")?;
+        body.apply_force(-Vec3::Y * (mass.mass() * 9.81))?;
+        let previous = *body.state();
+        if let Err(error) = world.step(0.02) {
+            return Err(format!("{scenario} frame={frame} previous={previous:?}: {error}").into());
+        }
+        penetration = penetration.max(
+            (0.5 - world
+                .body(rocket)
+                .ok_or("missing rocket")?
+                .state()
+                .transform()
+                .translation()
+                .y)
+                .max(0.0),
+        );
+    }
+    Ok(penetration)
 }

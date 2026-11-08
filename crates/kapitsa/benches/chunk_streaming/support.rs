@@ -313,6 +313,23 @@ pub struct Stats {
 }
 
 impl Stats {
+    pub fn failed(&self) -> bool {
+        self.error.is_some()
+            || self.reuse_errors > 0
+            || self.contact_errors > 0
+            || self.stale_ids > 0
+    }
+
+    pub fn status(&self) -> &str {
+        self.error.as_deref().unwrap_or(if self.failed() {
+            "completed with correctness errors"
+        } else if self.misses > 0 {
+            "completed with coverage misses"
+        } else {
+            "completed"
+        })
+    }
+
     pub fn record(&mut self, phase: &'static str, elapsed: Duration) {
         self.samples.entry(phase).or_default().push(elapsed);
     }
@@ -338,18 +355,7 @@ pub fn quantile(samples: &[Duration], percentile: usize) -> Option<Duration> {
 }
 
 pub fn report_run(out: &mut String, label: &str, stats: &Stats) -> std::fmt::Result {
-    let status = if stats.reuse_errors > 0 || stats.contact_errors > 0 || stats.stale_ids > 0 {
-        "completed with correctness errors"
-    } else if stats.misses > 0 {
-        "completed with coverage misses"
-    } else {
-        "completed"
-    };
-    writeln!(
-        out,
-        "\n## {label}\n\nStatus: {}\n",
-        stats.error.as_deref().unwrap_or(status)
-    )?;
+    writeln!(out, "\n## {label}\n\nStatus: {}\n", stats.status())?;
     writeln!(
         out,
         "| Phase | Samples | p50 ms | p95 ms | p99 ms |\n|---|---:|---:|---:|---:|"
@@ -528,7 +534,7 @@ pub fn flight(
                 0.0,
             ))?;
         }
-        if scenario == "ccd" {
+        if physical {
             rocket.set_ccd_mode(CcdMode::Continuous);
         }
         let rocket = world.add_body(rocket)?;
