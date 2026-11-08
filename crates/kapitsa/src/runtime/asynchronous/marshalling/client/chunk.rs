@@ -214,4 +214,63 @@ mod tests {
         }
         Ok(())
     }
+
+    #[tokio::test]
+    async fn closed_queue_returns_the_original_prepared_chunk() -> Result<(), Box<dyn Error>> {
+        use crate::runtime::asynchronous::marshalling::{CommandBufferPool, PhysicsSnapshot};
+        use kapitsa_core::{rigid_body::RigidBody, world::PhysicsWorld};
+        use std::sync::{Arc, atomic::AtomicU64};
+        use tokio::sync::{broadcast, mpsc, watch};
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        let (_state_tx, state_rx) = watch::channel(Some(sender));
+        let (_snapshot_tx, snapshot_rx) = watch::channel(Arc::new(PhysicsSnapshot::from_world(
+            &world,
+            0,
+            std::time::Duration::ZERO,
+        )));
+        let (collisions, _) = broadcast::channel(1);
+        let (joints, _) = broadcast::channel(1);
+        let (batches, _) = broadcast::channel(1);
+        let client = PhysicsClient::new(
+            state_rx,
+            snapshot_rx,
+            collisions,
+            joints,
+            batches,
+            Arc::new(AtomicU64::new(1)),
+            Arc::new(CommandBufferPool::default()),
+        );
+        let mut builder = ChunkBuilder::new();
+        builder.add_mesh(TriangleMesh::new(
+            vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+            vec![[0, 1, 2]],
+        )?)?;
+        let chunk = builder.build(Transform::identity())?;
+        #[cfg(feature = "bench-internals")]
+        let before = chunk
+            .colliders()
+            .first()
+            .and_then(|collider| collider.mesh_bvh_serial());
+        match client.add_chunk(body, chunk).await {
+            Err(ChunkClientError::NotSubmitted {
+                cause: PhysicsClientError::ChannelClosed,
+                input,
+            }) => {
+                assert_eq!(input.colliders().len(), 1);
+                #[cfg(feature = "bench-internals")]
+                assert_eq!(
+                    before,
+                    input
+                        .colliders()
+                        .first()
+                        .and_then(|collider| collider.mesh_bvh_serial())
+                );
+            }
+            _ => return Err("closed queue failed to return the chunk".into()),
+        }
+        Ok(())
+    }
 }
