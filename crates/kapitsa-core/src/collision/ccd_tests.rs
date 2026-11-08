@@ -19,6 +19,54 @@ fn transform(position: Vec3, rotation: Quat) -> Transform {
 }
 
 #[test]
+fn sphere_triangle_toi_handles_tangential_motion_and_both_sides()
+-> Result<(), Box<dyn std::error::Error>> {
+    let sphere = Shape::Sphere(Sphere::new(0.5)?);
+    let triangle = Shape::Triangle(crate::shape::Triangle::from_vertices([
+        Vec3::new(4.0, 0.0, 0.0),
+        Vec3::new(4.0, 0.0, 4.0),
+        Vec3::new(8.0, 0.0, 0.0),
+    ])?);
+    let at = |point| Transform::new(point, Quat::IDENTITY);
+    for side in [-1.0, 1.0] {
+        let hit = convex_toi(
+            &sphere,
+            at(Vec3::new(0.0, side * 3.0, 0.0))?,
+            at(Vec3::new(10.0, -side, 0.0))?,
+            &triangle,
+            Transform::identity(),
+            Transform::identity(),
+        )?
+        .ok_or("missing hit")?;
+        assert!((hit.toi - 0.625).abs() < 1.0e-10);
+        assert!((hit.normal + Vec3::Y * side).length() < 1.0e-10);
+    }
+    assert!(
+        convex_toi(
+            &sphere,
+            at(Vec3::new(0.0, 0.5001, 0.0))?,
+            at(Vec3::new(10.0, 0.5001, 0.0))?,
+            &triangle,
+            Transform::identity(),
+            Transform::identity()
+        )?
+        .is_none()
+    );
+    assert!(
+        convex_toi(
+            &sphere,
+            at(Vec3::new(6.0, 0.4, 5.0))?,
+            at(Vec3::new(10.0, 0.4, 5.0))?,
+            &triangle,
+            Transform::identity(),
+            Transform::identity()
+        )?
+        .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn convex_toi_finds_fast_translation_impact() {
     let sphere = Shape::Sphere(Sphere::new(1.0).expect("sphere"));
     let start = transform(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY);

@@ -59,11 +59,11 @@ mod bench_counter_tests {
 }
 
 pub use asynchronous::{
-    BatchId, CollisionEventBatch, CollisionEventStreamError, CollisionEvents, JointBreakEventBatch,
-    JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError, PhysicsBatchResult,
-    PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient, PhysicsClientError,
-    PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSnapshot,
-    PhysicsSubmitError, Simulation, SimulationBuilder, SimulationError,
+    BatchId, ChunkClientError, CollisionEventBatch, CollisionEventStreamError, CollisionEvents,
+    JointBreakEventBatch, JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError,
+    PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
+    PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
+    PhysicsSnapshot, PhysicsSubmitError, Simulation, SimulationBuilder, SimulationError,
 };
 pub use config::{
     AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, TimeStepPolicy,

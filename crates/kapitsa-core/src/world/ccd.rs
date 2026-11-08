@@ -18,6 +18,24 @@ use kapitsa_math::Vec3;
 #[cfg(feature = "bench-internals")]
 use std::time::Instant;
 
+fn contact_speed_roundoff(
+    velocity_a: Vec3,
+    velocity_b: Vec3,
+    state_a: BodyState,
+    state_b: BodyState,
+) -> Result<f64, CollisionError> {
+    // A zero-time resting contact can have a tiny negative projected velocity
+    // after solver/cross-product cancellation. Bound roundoff, not penetration.
+    let scale = velocity_a
+        .abs()
+        .max_element()
+        .max(velocity_b.abs().max_element())
+        .max(state_a.linear_velocity().abs().max_element())
+        .max(state_b.linear_velocity().abs().max_element())
+        .max(1.0);
+    kapitsa_math::numeric::roundoff_bound(scale, 32).ok_or(CollisionError::ArithmeticOverflow)
+}
+
 impl PhysicsWorld {
     pub(super) fn process_continuous_collisions(
         &mut self,
@@ -385,7 +403,11 @@ impl PhysicsWorld {
                                 .checked_sub(velocity_a)
                                 .and_then(|velocity| velocity.checked_dot(hit.normal))
                                 .ok_or(CollisionError::ArithmeticOverflow)?;
-                            if normal_speed >= 0.0 {
+                            if normal_speed
+                                >= -contact_speed_roundoff(
+                                    velocity_a, velocity_b, state_a, state_b,
+                                )?
+                            {
                                 continue;
                             }
                         }
@@ -2147,7 +2169,7 @@ impl PhysicsWorld {
                 .checked_sub(velocity_a)
                 .and_then(|velocity| velocity.checked_dot(hit.normal))
                 .ok_or(CollisionError::ArithmeticOverflow)?;
-            if normal_speed >= 0.0 {
+            if normal_speed >= -contact_speed_roundoff(velocity_a, velocity_b, state_a, state_b)? {
                 return Ok((cache, None));
             }
         }

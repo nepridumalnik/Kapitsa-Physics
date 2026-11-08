@@ -1,5 +1,22 @@
 use crate::containers::DenseId;
 
+/// Identifies a registered chunk in the world that created it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ChunkId {
+    pub(super) world: u64,
+    pub(super) dense: DenseId,
+}
+
+impl ChunkId {
+    pub fn index(self) -> u32 {
+        self.dense.index()
+    }
+
+    pub fn generation(self) -> u32 {
+        self.dense.generation()
+    }
+}
+
 /// Identifies a gravitational field in its owning world.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GravityId {

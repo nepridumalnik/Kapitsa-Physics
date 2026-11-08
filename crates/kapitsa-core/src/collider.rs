@@ -42,6 +42,42 @@ struct SkinPose {
 }
 
 impl Collider {
+    /// Process-wide successful mesh BVH builds (benchmark instrumentation).
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn mesh_bvh_build_count() -> u64 {
+        TriangleBvh::build_count()
+    }
+
+    /// Stable preparation identity, preserved through removal and reinsertion.
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn mesh_bvh_serial(&self) -> Option<u64> {
+        self.mesh_bvh.as_ref().map(|bvh| bvh.serial())
+    }
+
+    /// Retained TriangleMesh and BVH buffers; excludes world indices and allocator overhead.
+    #[cfg(feature = "bench-internals")]
+    #[doc(hidden)]
+    pub fn mesh_retained_capacity_bytes(&self) -> usize {
+        let mesh = match self.shape() {
+            Shape::TriangleMesh(mesh) => mesh.retained_capacity_bytes(),
+            _ => 0,
+        };
+        mesh + self.mesh_bvh.as_ref().map_or(0, |bvh| {
+            std::mem::size_of::<TriangleBvh>() + bvh.retained_capacity_bytes()
+        })
+    }
+
+    /// Prepares collision query geometry without accessing a physics world.
+    ///
+    /// This synchronous operation is idempotent and can be run on a worker
+    /// thread before the collider is inserted into a world. Prepared mesh
+    /// geometry remains available when the collider is removed from the world.
+    pub fn prepare(&mut self) -> Result<(), CollisionError> {
+        self.prepare_query_geometry()
+    }
+
     pub fn new(shape: Shape, local_transform: Transform) -> Self {
         Self {
             shape,

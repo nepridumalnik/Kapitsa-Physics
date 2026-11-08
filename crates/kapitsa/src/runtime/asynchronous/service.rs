@@ -21,9 +21,10 @@ use tokio::{
 use super::{
     StepRunner, StepRunnerError,
     marshalling::{
-        BatchScratch, CollisionEventBatch, CommandBufferPool, CommandRequest, JointBreakEventBatch,
-        PhysicsBatchError, PhysicsBatchResult, PhysicsClient, PhysicsClientError, PhysicsCommand,
-        PhysicsCommandResult, PhysicsSnapshot, apply_command, apply_command_batch,
+        BatchScratch, ChunkOutcome, ChunkReply, CollisionEventBatch, CommandBufferPool,
+        CommandRequest, JointBreakEventBatch, PhysicsBatchError, PhysicsBatchResult, PhysicsClient,
+        PhysicsClientError, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot, apply_chunk,
+        apply_command, apply_command_batch,
     },
 };
 use crate::runtime::{
@@ -65,6 +66,10 @@ enum DeferredCommandResult {
         is_read_only_query: bool,
     },
     Batch(PhysicsBatchResult),
+    Chunk {
+        reply: tokio::sync::oneshot::Sender<ChunkReply>,
+        outcome: ChunkOutcome,
+    },
 }
 
 impl CommandQueue {
@@ -913,6 +918,12 @@ fn apply_queued_commands(
             break;
         }
         match request {
+            CommandRequest::Chunk { command, reply } => {
+                let outcome = apply_chunk(world, command);
+                commands
+                    .pending_results
+                    .push(DeferredCommandResult::Chunk { reply, outcome });
+            }
             CommandRequest::Single { command, reply } => {
                 let is_read_only_query = matches!(
                     &command,
@@ -954,6 +965,12 @@ fn apply_queued_commands(
 fn publish_command_results(commands: &mut CommandQueue, events: &SimulationEvents) {
     for pending in commands.pending_results.drain(..) {
         match pending {
+            DeferredCommandResult::Chunk { reply, outcome } => {
+                let _ = reply.send(ChunkReply::Completed {
+                    outcome,
+                    step_failure: None,
+                });
+            }
             DeferredCommandResult::Single { reply, result, .. } => {
                 let _ = reply.send(result);
             }
@@ -972,6 +989,13 @@ fn publish_failed_command_results(
 ) {
     for pending in commands.pending_results.drain(..) {
         match pending {
+            DeferredCommandResult::Chunk { reply, outcome } => {
+                let step_failure = outcome.applied().then_some((attempted_step, cause));
+                let _ = reply.send(ChunkReply::Completed {
+                    outcome,
+                    step_failure,
+                });
+            }
             DeferredCommandResult::Single {
                 reply,
                 mut result,
@@ -1020,6 +1044,12 @@ fn reject_request(
     buffer_pool: &CommandBufferPool,
 ) {
     match request {
+        CommandRequest::Chunk { command, reply } => {
+            let _ = reply.send(ChunkReply::NotSubmitted {
+                command,
+                cause: PhysicsClientError::NotRunning,
+            });
+        }
         CommandRequest::Single { reply, .. } => {
             let _ = reply.send(Err(PhysicsClientError::NotRunning));
         }
@@ -1115,6 +1145,10 @@ fn publish_runtime_metrics(
     snapshot.load_speed_factor = load_speed;
     metrics.send_replace(snapshot);
 }
+
+#[cfg(test)]
+#[path = "service/chunk_tests.rs"]
+mod chunk_tests;
 
 #[cfg(test)]
 mod tests {

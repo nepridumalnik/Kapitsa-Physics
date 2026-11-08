@@ -11,6 +11,7 @@ use crate::collision::ContactManifold;
 use std::time::Instant;
 
 mod ccd;
+mod chunk;
 mod cluster;
 mod error;
 #[cfg(test)]
@@ -20,8 +21,9 @@ mod id;
 mod metrics;
 mod query;
 
+pub use chunk::{AddChunkBatchError, AddChunkError, ChunkOperationError, RemoveChunkBatchError};
 pub use error::{ClusterError, ForceSourceError, StepError, WorldError};
-pub use id::{BodyId, ColliderId, ForceSourceId, GravityId, JointId, PartId, WeldId};
+pub use id::{BodyId, ChunkId, ColliderId, ForceSourceId, GravityId, JointId, PartId, WeldId};
 #[cfg(feature = "bench-internals")]
 pub use metrics::PhysicsStepMetrics;
 
@@ -137,6 +139,7 @@ struct ColliderEntry {
     body: BodyId,
     prev: Option<ColliderId>,
     next: Option<ColliderId>,
+    chunk: Option<ChunkId>,
 }
 
 #[derive(Clone, Copy)]
@@ -184,6 +187,7 @@ pub struct PhysicsWorld {
     parts: DensePool<ClusterPart>,
     welds: DensePool<Weld>,
     colliders: DensePool<ColliderEntry>,
+    chunks: DensePool<chunk::ChunkEntry>,
     force_sources: DensePool<ForceSource>,
     joints: DensePool<JointEntry>,
     force_source_body_updates: Vec<ForceSourceBodyUpdate>,
@@ -246,6 +250,7 @@ impl PhysicsWorld {
             parts: DensePool::new(),
             welds: DensePool::new(),
             colliders: DensePool::new(),
+            chunks: DensePool::new(),
             force_sources: DensePool::new(),
             joints: DensePool::new(),
             force_source_body_updates: Vec::new(),
@@ -2143,6 +2148,9 @@ impl PhysicsWorld {
                     deepest = Some(point);
                 }
             }
+            // Solver updates can add and then completely cancel an impulse.
+            // Such a manifold has no resultant impact to publish.
+            impact &= total_impulse > 0.0;
             let deepest = deepest.ok_or(CollisionError::InvalidContact)?;
             let point_a = body_a.transform_point(deepest.local_a);
             let point_b = body_b.transform_point(deepest.local_b);
@@ -2545,6 +2553,7 @@ impl PhysicsWorld {
                 body,
                 prev: None,
                 next: first,
+                chunk: None,
             })
             .map_err(WorldError::from)?;
         let id = ColliderId {
@@ -2603,7 +2612,11 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return None;
         }
-        let body = self.colliders.get(id.dense)?.body;
+        let collider = self.colliders.get(id.dense)?;
+        if collider.chunk.is_some() {
+            return None;
+        }
+        let body = collider.body;
         if self
             .bodies
             .get(body.dense)
@@ -2632,7 +2645,11 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return None;
         }
-        let body = self.colliders.get(id.dense)?.body;
+        let collider = self.colliders.get(id.dense)?;
+        if collider.chunk.is_some() {
+            return None;
+        }
+        let body = collider.body;
         if self
             .bodies
             .get(body.dense)
@@ -2711,6 +2728,7 @@ impl PhysicsWorld {
             next = self.colliders.get(collider.dense)?.next;
             self.remove_collider_internal(collider)?;
         }
+        self.remove_body_chunks(id);
         loop {
             let joint = self.joints.iter().find_map(|(dense, entry)| {
                 (entry.body_a == id || entry.body_b == id).then_some(JointId {
@@ -3003,8 +3021,12 @@ fn merge_interaction(
         return Err(CollisionError::InvalidContact);
     }
     existing.transient &= incoming.transient;
-    if incoming.contact.is_some() {
-        existing.contact = incoming.contact;
+    if let Some(contact) = incoming.contact
+        && (!existing.impact || contact.normal_impulse > 0.0)
+    {
+        // A later resting manifold must not erase the contact that proves an
+        // earlier CCD impact. Impact events require a positive actual impulse.
+        existing.contact = Some(contact);
     }
     existing.impact |= incoming.impact;
     Ok(())

@@ -1,10 +1,15 @@
 mod buffer_pool;
+mod chunk;
 mod client;
 mod command;
 mod events;
 mod snapshot;
 
 pub(crate) use buffer_pool::CommandBufferPool;
+pub use chunk::ChunkClientError;
+#[cfg(test)]
+pub(crate) use chunk::ChunkCommand;
+pub(crate) use chunk::{ChunkOutcome, ChunkReply, apply_chunk};
 pub use client::PhysicsClient;
 #[cfg(all(test, feature = "bench-internals"))]
 pub(crate) use command::tests::allocation_tracking;

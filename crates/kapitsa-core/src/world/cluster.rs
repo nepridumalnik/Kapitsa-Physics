@@ -100,6 +100,9 @@ impl PhysicsWorld {
         body: BodyId,
         mass: MassProperties,
     ) -> Result<PartId, ClusterError> {
+        if self.has_body_chunks(body) {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
         let body_entry = self
             .bodies
             .get(body.dense)

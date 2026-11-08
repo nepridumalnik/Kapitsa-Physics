@@ -1,5 +1,21 @@
 use std::error::Error;
 
+#[test]
+fn mesh_preparation_on_worker_is_idempotent() -> Result<(), Box<dyn Error>> {
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]])?;
+    let worker = std::thread::spawn(move || {
+        let mut collider = Collider::new(Shape::TriangleMesh(mesh), Transform::identity());
+        collider.prepare()?;
+        Ok::<_, crate::collision::CollisionError>(collider)
+    });
+    let mut collider = worker.join().map_err(|_| "preparation worker failed")??;
+    let first = collider.query_bvh().ok_or("missing BVH")? as *const _;
+    collider.prepare()?;
+    let second = collider.query_bvh().ok_or("missing BVH")? as *const _;
+    assert_eq!(first, second);
+    Ok(())
+}
+
 use kapitsa_math::{Affine3, Quat, Vec3};
 
 use crate::{

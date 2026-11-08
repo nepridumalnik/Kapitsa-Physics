@@ -37,3 +37,8 @@ harness = false
 name = "large_modular_rocket"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "chunk_streaming"
+harness = false
+required-features = ["bench-internals"]
