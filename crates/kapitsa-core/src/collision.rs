@@ -21,6 +21,7 @@ pub(crate) mod spatial_index;
 mod step;
 mod support;
 mod system;
+mod triangle;
 
 #[cfg(feature = "bench-internals")]
 use std::time::Duration;

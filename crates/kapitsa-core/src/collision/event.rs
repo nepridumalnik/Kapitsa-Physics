@@ -21,6 +21,8 @@ pub enum CollisionEventKind {
 /// When multiple interactions for a pair are staged, later contact data can
 /// replace earlier data; `Impact` therefore does not imply this geometry is
 /// the geometry of the first impact.
+/// A later zero-impulse resting contact retains the previous impact contact so
+/// its positive impulse remains available to consumers of the impact event.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContactInfo {
     /// Representative world-space midpoint of the two contact anchors.

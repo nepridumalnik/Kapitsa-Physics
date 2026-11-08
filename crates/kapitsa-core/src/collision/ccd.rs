@@ -211,6 +211,66 @@ impl CcdMotion {
     fn is_linear(&self) -> bool {
         self.trajectory.is_none()
     }
+
+    /// Bounds collider-origin travel projected on a fixed separating axis.
+    fn projected_translation_bound(&self, normal: Vec3) -> Result<f64, CollisionError> {
+        let Some((linear, quadratic)) = self.translation_polynomial()? else {
+            return Ok(self.translation_bound);
+        };
+        let bound = linear
+            .checked_dot(normal)
+            .ok_or(CollisionError::ArithmeticOverflow)?
+            .abs()
+            + 2.0
+                * quadratic
+                    .checked_dot(normal)
+                    .ok_or(CollisionError::ArithmeticOverflow)?
+                    .abs();
+        bound
+            .is_finite()
+            .then_some(bound)
+            .ok_or(CollisionError::ArithmeticOverflow)
+    }
+
+    /// Exact origin polynomial for centered, non-offset collider trajectories.
+    fn translation_polynomial(&self) -> Result<Option<(Vec3, Vec3)>, CollisionError> {
+        if self.linear_translation {
+            return Ok(Some((translation_delta(self.start, self.end)?, Vec3::ZERO)));
+        }
+        let Some(path) = self.trajectory else {
+            return Ok(None);
+        };
+        if path.local_transform.translation() != Vec3::ZERO
+            || path
+                .body
+                .physics()
+                .mass()
+                .is_some_and(|mass| mass.center_of_mass() != Vec3::ZERO)
+        {
+            return Ok(None);
+        }
+        let acceleration = if path.body.physics().body_type() == BodyType::Dynamic {
+            path.body.forces().force()
+                / path
+                    .body
+                    .physics()
+                    .mass()
+                    .ok_or(CollisionError::InvalidContact)?
+                    .mass()
+        } else {
+            Vec3::ZERO
+        };
+        let duration = path.end_time - path.sample_start_time;
+        let linear = acceleration
+            .checked_mul_scalar(2.0 * (path.sample_start_time - path.base_time))
+            .and_then(|delta| path.base_state.linear_velocity().checked_add(delta))
+            .and_then(|velocity| velocity.checked_mul_scalar(duration))
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let quadratic = acceleration
+            .checked_mul_scalar(duration * duration)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        Ok(Some((linear, quadratic)))
+    }
 }
 
 /// Finds the first contact between two shapes following their start-to-end poses.
@@ -250,6 +310,9 @@ pub(crate) fn convex_toi_motion(
         );
     }
     match (shape_a, shape_b) {
+        (Shape::Sphere(sphere), Shape::Triangle(triangle)) => {
+            return sphere_triangle_toi_motion(sphere.radius(), motion_a, triangle, motion_b);
+        }
         (Shape::Sphere(sphere), Shape::Cuboid(cuboid))
             if motion_b.rotation_bound == 0.0
                 && motion_a.linear_translation
@@ -1167,6 +1230,174 @@ fn point_aabb_distance(point: Vec3, bounds: Aabb) -> Result<f64, CollisionError>
     offset
         .checked_length()
         .ok_or(CollisionError::ArithmeticOverflow)
+}
+
+fn sphere_triangle_toi_motion(
+    radius: f64,
+    sphere_motion: &CcdMotion,
+    triangle: &Triangle,
+    triangle_motion: &CcdMotion,
+) -> Result<Option<CcdHit>, CollisionError> {
+    // The sphere is invariant under rotation. Its collider-origin path bound
+    // already includes any rotation around an offset body center of mass.
+    let triangle_radius = bounds_radius(
+        triangle
+            .local_bounds()
+            .map_err(|_| CollisionError::GeometryBounds)?,
+    )?;
+    let polynomial = if triangle_motion.rotation_bound == 0.0 {
+        match (
+            sphere_motion.translation_polynomial()?,
+            triangle_motion.translation_polynomial()?,
+        ) {
+            (Some((va, aa)), Some((vb, ab))) => Some((
+                va.checked_sub(vb)
+                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                aa.checked_sub(ab)
+                    .ok_or(CollisionError::ArithmeticOverflow)?,
+            )),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let mut toi = 0.0;
+    for _ in 0..MAX_CCD_ITERATIONS {
+        let center = sphere_motion.at(toi)?.translation();
+        let transform = triangle_motion.at(toi)?;
+        let vertices = triangle
+            .vertices()
+            .map(|point| transform.transform_point(point));
+        if !vertices.iter().all(|point| point.is_finite()) {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        let point = super::triangle::closest_point_on_triangle(center, vertices)?;
+        let radial = center
+            .checked_sub(point)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let distance = radial
+            .checked_length()
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        let gap = distance - radius;
+        if gap <= tolerance(distance) {
+            let outward = match radial.try_normalize() {
+                Some(normal) => normal,
+                None => vertices[1]
+                    .checked_sub(vertices[0])
+                    .and_then(|ab| {
+                        vertices[2]
+                            .checked_sub(vertices[0])
+                            .and_then(|ac| ab.checked_cross(ac))
+                    })
+                    .and_then(Vec3::try_normalize)
+                    .ok_or(CollisionError::GeometryBounds)?,
+            };
+            let point_a = center
+                .checked_sub(
+                    outward
+                        .checked_mul_scalar(radius)
+                        .ok_or(CollisionError::ArithmeticOverflow)?,
+                )
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            return Ok(Some(CcdHit {
+                toi,
+                normal: -outward,
+                point_a,
+                point_b: point,
+            }));
+        }
+        let normal = radial
+            .try_normalize()
+            .ok_or(CollisionError::GeometryBounds)?;
+        if let Some((linear, quadratic)) = polynomial {
+            let acceleration = quadratic
+                .checked_dot(normal)
+                .ok_or(CollisionError::ArithmeticOverflow)?;
+            let speed = linear
+                .checked_dot(normal)
+                .ok_or(CollisionError::ArithmeticOverflow)?
+                + 2.0 * acceleration * toi;
+            // The closest-point normal defines a separating support plane of
+            // the rounded triangle. Advance to its exact first crossing; large
+            // tangential speeds must not slow progress toward a resting face.
+            let Some(advance) = first_plane_crossing(gap, speed, acceleration, 1.0 - toi)? else {
+                return Ok(None);
+            };
+            let next = toi + advance;
+            if next <= toi {
+                return Err(CollisionError::NonConvergent);
+            }
+            toi = next.min(1.0);
+            continue;
+        }
+        let translation_bound =
+            if sphere_motion.linear_translation && triangle_motion.linear_translation {
+                translation_delta(sphere_motion.start, sphere_motion.end)?
+                    .checked_sub(translation_delta(
+                        triangle_motion.start,
+                        triangle_motion.end,
+                    )?)
+                    .and_then(|delta| delta.checked_dot(normal))
+                    .ok_or(CollisionError::ArithmeticOverflow)?
+                    .abs()
+            } else {
+                sphere_motion.projected_translation_bound(normal)?
+                    + triangle_motion.projected_translation_bound(normal)?
+            };
+        let motion_bound = translation_bound + triangle_motion.rotation_bound * triangle_radius;
+        if !motion_bound.is_finite() {
+            return Err(CollisionError::ArithmeticOverflow);
+        }
+        if motion_bound == 0.0 {
+            return Ok(None);
+        }
+        let advance = gap / motion_bound;
+        if advance > 1.0 - toi {
+            return Ok(None);
+        }
+        let next = toi + advance;
+        if next <= toi {
+            return Err(CollisionError::NonConvergent);
+        }
+        toi = next.min(1.0);
+    }
+    Err(CollisionError::NonConvergent)
+}
+
+fn first_plane_crossing(
+    gap: f64,
+    speed: f64,
+    acceleration: f64,
+    remaining: f64,
+) -> Result<Option<f64>, CollisionError> {
+    if !gap.is_finite() || !speed.is_finite() || !acceleration.is_finite() {
+        return Err(CollisionError::ArithmeticOverflow);
+    }
+    if acceleration == 0.0 {
+        if speed >= 0.0 {
+            return Ok(None);
+        }
+        let root = -gap / speed;
+        return Ok((root <= remaining).then_some(root));
+    }
+    let scale = gap.abs().max(speed.abs()).max(acceleration.abs());
+    let a = acceleration / scale;
+    let b = speed / scale;
+    let c = gap / scale;
+    let discriminant = b.mul_add(b, -4.0 * a * c);
+    let roundoff = (b * b).max((4.0 * a * c).abs()).max(1.0) * f64::EPSILON * 128.0;
+    if discriminant < -roundoff {
+        return Ok(None);
+    }
+    let q = -0.5 * (b + b.signum() * discriminant.max(0.0).sqrt());
+    let mut best = None;
+    for root in [q / a, c / q] {
+        if root.is_finite() && root >= 0.0 && root <= remaining && best.is_none_or(|old| root < old)
+        {
+            best = Some(root);
+        }
+    }
+    Ok(best)
 }
 
 fn consider_triangle_toi(

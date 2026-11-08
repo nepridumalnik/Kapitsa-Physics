@@ -38,6 +38,61 @@ use crate::execution::{ExecutionError, StepExecutor};
 #[path = "world/free_ball_tests.rs"]
 mod free_ball_tests;
 
+#[test]
+fn resting_contact_keeps_the_previous_ccd_impact_witness() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut world = PhysicsWorld::new();
+    let a = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let b = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let a = world.add_collider(
+        a,
+        Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+    )?;
+    let b = world.add_collider(
+        b,
+        Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+    )?;
+    let pair = CollisionPair::new(a, b).ok_or("identical colliders")?;
+    let impact = ContactInfo {
+        point: Vec3::ZERO,
+        normal: Vec3::Y,
+        penetration: 0.0,
+        normal_impulse: 1.0,
+    };
+    let mut interactions = Vec::new();
+    let mut indices = None;
+    upsert_interaction(
+        &mut interactions,
+        &mut indices,
+        CollisionInteraction {
+            pair,
+            sensor: false,
+            transient: false,
+            contact: Some(impact),
+            impact: true,
+        },
+    )?;
+    upsert_interaction(
+        &mut interactions,
+        &mut indices,
+        CollisionInteraction {
+            pair,
+            sensor: false,
+            transient: false,
+            contact: Some(ContactInfo {
+                point: Vec3::X,
+                normal_impulse: 0.0,
+                ..impact
+            }),
+            impact: false,
+        },
+    )?;
+    let interaction = interactions.first().ok_or("missing interaction")?;
+    assert!(interaction.impact);
+    assert_eq!(interaction.contact, Some(impact));
+    Ok(())
+}
+
 #[cfg(feature = "bench-internals")]
 fn clear_joint_metric_timings(mut metrics: JointSolverMetrics) -> JointSolverMetrics {
     metrics.joint_row_preparation_time = Duration::ZERO;

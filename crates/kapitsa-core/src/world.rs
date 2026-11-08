@@ -2148,6 +2148,9 @@ impl PhysicsWorld {
                     deepest = Some(point);
                 }
             }
+            // Solver updates can add and then completely cancel an impulse.
+            // Such a manifold has no resultant impact to publish.
+            impact &= total_impulse > 0.0;
             let deepest = deepest.ok_or(CollisionError::InvalidContact)?;
             let point_a = body_a.transform_point(deepest.local_a);
             let point_b = body_b.transform_point(deepest.local_b);
@@ -3018,8 +3021,12 @@ fn merge_interaction(
         return Err(CollisionError::InvalidContact);
     }
     existing.transient &= incoming.transient;
-    if incoming.contact.is_some() {
-        existing.contact = incoming.contact;
+    if let Some(contact) = incoming.contact
+        && (!existing.impact || contact.normal_impulse > 0.0)
+    {
+        // A later resting manifold must not erase the contact that proves an
+        // earlier CCD impact. Impact events require a positive actual impulse.
+        existing.contact = Some(contact);
     }
     existing.impact |= incoming.impact;
     Ok(())
