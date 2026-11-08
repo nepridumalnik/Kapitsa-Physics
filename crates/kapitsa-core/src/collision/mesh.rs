@@ -5,6 +5,9 @@ use super::CollisionError;
 
 const LEAF_TRIANGLES: usize = 4;
 
+#[cfg(feature = "bench-internals")]
+static BVH_BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Clone, Copy)]
 struct Primitive {
     triangle: usize,
@@ -26,6 +29,8 @@ struct Node {
 
 /// Immutable local-space BVH for one triangle mesh.
 pub(crate) struct TriangleBvh {
+    #[cfg(feature = "bench-internals")]
+    serial: u64,
     nodes: Vec<Node>,
     triangles: Vec<usize>,
     triangle_bounds: Vec<Aabb>,
@@ -64,6 +69,15 @@ impl BvhRefitScratch {
 }
 
 impl TriangleBvh {
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn build_count() -> u64 {
+        BVH_BUILDS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn serial(&self) -> u64 {
+        self.serial
+    }
     #[cfg(feature = "bench-internals")]
     pub(crate) fn retained_capacity_bytes(&self) -> usize {
         self.nodes.capacity() * std::mem::size_of::<Node>()
@@ -115,6 +129,8 @@ impl TriangleBvh {
             &mut triangles,
         )?;
         Ok(Self {
+            #[cfg(feature = "bench-internals")]
+            serial: BVH_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             nodes,
             triangles,
             triangle_bounds: bounds_by_triangle,

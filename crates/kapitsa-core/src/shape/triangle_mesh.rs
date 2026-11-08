@@ -10,6 +10,12 @@ pub struct TriangleMesh {
 }
 
 impl TriangleMesh {
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn retained_capacity_bytes(&self) -> usize {
+        self.vertices.capacity() * std::mem::size_of::<Vec3>()
+            + self.triangles.capacity() * std::mem::size_of::<[usize; 3]>()
+    }
+
     pub fn new(vertices: Vec<Vec3>, triangles: Vec<[usize; 3]>) -> Result<Self, ShapeError> {
         if vertices.len() < 3 || triangles.is_empty() {
             return Err(ShapeError::InvalidTopology);
