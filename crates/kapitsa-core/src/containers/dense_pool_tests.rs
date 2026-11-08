@@ -405,3 +405,22 @@ fn reserve_rejects_a_cycle_before_insertion() -> Result<(), DensePoolError> {
     assert_eq!(pool.len(), 0);
     Ok(())
 }
+
+#[test]
+fn failed_insertion_returns_owned_value() -> Result<(), DensePoolError> {
+    let mut pool = DensePool::new();
+    let id = pool.insert(String::from("previous"))?;
+    assert!(pool.remove(id).is_some());
+    let slot = pool
+        .slots
+        .get_mut(id.index() as usize)
+        .ok_or(DensePoolError::InvalidFreeList)?;
+    slot.state = SlotState::Retired;
+    let result = pool.insert_recover(String::from("retained"));
+    assert_eq!(
+        result,
+        Err((DensePoolError::InvalidFreeList, String::from("retained")))
+    );
+    assert_eq!(pool.len(), 0);
+    Ok(())
+}

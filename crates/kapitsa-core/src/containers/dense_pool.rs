@@ -140,48 +140,66 @@ impl<T> DensePool<T> {
     }
 
     pub fn insert(&mut self, value: T) -> Result<DenseId, DensePoolError> {
-        let dense_index =
-            u32::try_from(self.values.len()).map_err(|_| DensePoolError::IndexOverflow)?;
-        let (slot_index, slot_position, generation, next_free) = match self.free_head {
-            Some(slot_index) => {
-                let slot_position =
-                    usize::try_from(slot_index).map_err(|_| DensePoolError::InvalidFreeList)?;
-                let slot = self
-                    .slots
-                    .get(slot_position)
-                    .ok_or(DensePoolError::InvalidFreeList)?;
-                let next_free = match slot.state {
-                    SlotState::Free { next } => next,
-                    SlotState::Occupied { .. } | SlotState::Retired => {
-                        return Err(DensePoolError::InvalidFreeList);
-                    }
-                };
-                (slot_index, slot_position, slot.generation, next_free)
-            }
-            None => {
-                let slot_index =
-                    u32::try_from(self.slots.len()).map_err(|_| DensePoolError::IndexOverflow)?;
-                (slot_index, self.slots.len(), 0, None)
-            }
-        };
+        self.insert_recover(value).map_err(|(error, _)| error)
+    }
 
-        self.values
-            .try_reserve(1)
-            .map_err(|_| DensePoolError::CapacityExceeded)?;
-        self.dense_to_slot
-            .try_reserve(1)
-            .map_err(|_| DensePoolError::CapacityExceeded)?;
-        if self.free_head.is_none() {
-            self.slots
+    /// Inserts a value, returning it unchanged if insertion fails.
+    pub(crate) fn insert_recover(&mut self, value: T) -> Result<DenseId, (DensePoolError, T)> {
+        let prepared = (|| -> Result<_, DensePoolError> {
+            let dense_index =
+                u32::try_from(self.values.len()).map_err(|_| DensePoolError::IndexOverflow)?;
+            let (slot_index, slot_position, generation, next_free) = match self.free_head {
+                Some(slot_index) => {
+                    let slot_position =
+                        usize::try_from(slot_index).map_err(|_| DensePoolError::InvalidFreeList)?;
+                    let slot = self
+                        .slots
+                        .get(slot_position)
+                        .ok_or(DensePoolError::InvalidFreeList)?;
+                    let next_free = match slot.state {
+                        SlotState::Free { next } => next,
+                        SlotState::Occupied { .. } | SlotState::Retired => {
+                            return Err(DensePoolError::InvalidFreeList);
+                        }
+                    };
+                    (slot_index, slot_position, slot.generation, next_free)
+                }
+                None => {
+                    let slot_index = u32::try_from(self.slots.len())
+                        .map_err(|_| DensePoolError::IndexOverflow)?;
+                    (slot_index, self.slots.len(), 0, None)
+                }
+            };
+
+            self.values
                 .try_reserve(1)
                 .map_err(|_| DensePoolError::CapacityExceeded)?;
-        }
+            self.dense_to_slot
+                .try_reserve(1)
+                .map_err(|_| DensePoolError::CapacityExceeded)?;
+            if self.free_head.is_none() {
+                self.slots
+                    .try_reserve(1)
+                    .map_err(|_| DensePoolError::CapacityExceeded)?;
+            }
+
+            Ok((
+                dense_index,
+                slot_index,
+                slot_position,
+                generation,
+                next_free,
+            ))
+        })();
+        let (dense_index, slot_index, slot_position, generation, next_free) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return Err((error, value)),
+        };
 
         if self.free_head.is_some() {
-            let slot = self
-                .slots
-                .get_mut(slot_position)
-                .ok_or(DensePoolError::InvalidFreeList)?;
+            let Some(slot) = self.slots.get_mut(slot_position) else {
+                return Err((DensePoolError::InvalidFreeList, value));
+            };
             slot.state = SlotState::Occupied { dense_index };
             self.free_head = next_free;
         } else {
