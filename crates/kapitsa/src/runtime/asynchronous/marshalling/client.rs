@@ -1,3 +1,4 @@
+mod chunk;
 mod cluster;
 mod material;
 
@@ -141,7 +142,9 @@ impl PhysicsClient {
                 Err(PhysicsSubmitError::ChannelClosed(buffer))
             }
             Err(mpsc::error::TrySendError::Full(CommandRequest::Single { .. }))
-            | Err(mpsc::error::TrySendError::Closed(CommandRequest::Single { .. })) => Err(
+            | Err(mpsc::error::TrySendError::Closed(CommandRequest::Single { .. }))
+            | Err(mpsc::error::TrySendError::Full(CommandRequest::Chunk { .. }))
+            | Err(mpsc::error::TrySendError::Closed(CommandRequest::Chunk { .. })) => Err(
                 PhysicsSubmitError::ChannelClosed(PhysicsCommandBuffer::new()),
             ),
         }

@@ -545,6 +545,10 @@ pub(crate) enum CommandRequest {
         id: BatchId,
         buffer: PhysicsCommandBuffer,
     },
+    Chunk {
+        command: super::chunk::ChunkCommand,
+        reply: oneshot::Sender<super::chunk::ChunkReply>,
+    },
 }
 
 impl CommandRequest {
@@ -552,6 +556,7 @@ impl CommandRequest {
         match self {
             Self::Single { .. } => 1,
             Self::Batch { buffer, .. } => buffer.len(),
+            Self::Chunk { .. } => 1,
         }
     }
 }
