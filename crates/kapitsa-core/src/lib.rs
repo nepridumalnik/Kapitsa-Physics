@@ -2,6 +2,7 @@
 
 pub mod aabb;
 pub mod aerodynamics;
+pub mod chunk;
 pub mod cluster;
 pub mod collider;
 pub mod collision;
