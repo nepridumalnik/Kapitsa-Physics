@@ -4,6 +4,9 @@ This tool measures Kapitsa's prepared mesh/chunk APIs. It contains no planetary
 LOD, quadtree or Delta-V scheduler. Meshes tile a flat local tangent surface;
 the rocket is a sphere of radius 0.5 m. Geometry and nominal routes are fixed.
 Async job readiness deliberately depends on real scheduling and CPU load.
+The harness directly drives the low-level `PhysicsWorld` to isolate core step
+and registration costs; its timings exclude `PhysicsClient` queue latency and
+snapshot publication. Application simulation commands use `PhysicsClient`.
 
 The benchmark is never part of ordinary `cargo test --workspace --all-features`.
 Compile without running workloads:

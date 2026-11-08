@@ -124,6 +124,34 @@ Available `Shape` variants:
 
 Support for specific shape and operation combinations depends on the collision module's implementation; handle query errors and unsupported geometry. See [docs/collisions.md](docs/collisions.md) for more details.
 
+## Streaming Mesh Chunks
+
+Use `ChunkBuilder` to prepare a nonempty group of triangle meshes, then register it through the simulation's client. Mesh vertices are chunk-local; the transform passed to `build` is relative to the body. Building BVHs is synchronous and can run on a worker thread without accessing the simulation.
+
+```rust
+use kapitsa::{ChunkBuilder, RigidBody, Transform};
+use kapitsa::math::Vec3;
+use kapitsa::shape::TriangleMesh;
+
+let terrain = client.add_body(RigidBody::new_static(Transform::identity())).await?;
+let mut builder = ChunkBuilder::new();
+builder.add_mesh(TriangleMesh::new(
+    vec![Vec3::ZERO, Vec3::X, Vec3::Z],
+    vec![[0, 1, 2]],
+)?)?;
+let chunk = builder.build(Transform::identity())?;
+let id = client.add_chunk(terrain, chunk).await?;
+
+// The returned chunk keeps its prepared meshes and BVHs for later reuse.
+let chunk = client.remove_chunk(id).await?.ok_or("chunk no longer exists")?;
+let ids = client.add_chunk_batch(terrain, vec![chunk]).await?;
+let cached = client.remove_chunk_batch(ids).await?;
+```
+
+Each batch is atomic and preserves input order. `chunk_count`, `chunk_body` and `chunk_colliders` read the registered state through the same FIFO queue; these queries also work while paused. `ChunkId` is specific to a simulation and becomes invalid after removal. Chunk meshes require a static or kinematic non-cluster body. Individual chunk-owned colliders cannot be removed through `remove_collider`.
+
+`ChunkClientError::NotSubmitted` and `Rejected` return the input in `input`. `StepFailedAfterApply` returns the actual operation output in `output`: the mutation was applied even though the following step failed. `ResponseLost` means the outcome cannot be determined from the response. After a future is cancelled, an already queued operation can still execute, so retain and await the future when its ID or returned geometry is needed. See [docs/chunks.md](docs/chunks.md) for ownership, cancellation and batch semantics.
+
 ## Joints and Composite Objects
 
 A `Joint` connects two bodies. Shared settings are stored in `JointCommon`, and local frames in `JointFrame`. Available variants:
