@@ -217,6 +217,78 @@ impl<T> DensePool<T> {
         })
     }
 
+    /// Inserts all values, retaining their order and ownership on failure.
+    #[allow(dead_code)]
+    pub(crate) fn try_insert_many_recover(
+        &mut self,
+        values: &mut Vec<T>,
+    ) -> Result<Vec<DenseId>, DensePoolError> {
+        self.try_insert_many_recover_inner(values, None)
+    }
+
+    fn try_insert_many_recover_inner(
+        &mut self,
+        values: &mut Vec<T>,
+        fail_after: Option<usize>,
+    ) -> Result<Vec<DenseId>, DensePoolError> {
+        let count = values.len();
+        self.try_reserve_insertions(count)?;
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(count)
+            .map_err(|_| DensePoolError::CapacityExceeded)?;
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(count.min(self.slots.len()))
+            .map_err(|_| DensePoolError::CapacityExceeded)?;
+        let start_values = self.values.len();
+        let start_slots = self.slots.len();
+        let start_free_head = self.free_head;
+
+        for index in 0..count {
+            let error = if fail_after == Some(index) {
+                Some(DensePoolError::CapacityExceeded)
+            } else if let Some(value) = values.pop() {
+                if let Some(slot_index) = self.free_head
+                    && let Ok(position) = usize::try_from(slot_index)
+                    && let Some(slot) = self.slots.get(position)
+                {
+                    slots.push((position, slot.generation, slot.state));
+                }
+                match self.insert_recover(value) {
+                    Ok(id) => {
+                        ids.push(id);
+                        None
+                    }
+                    Err((error, value)) => {
+                        values.push(value);
+                        Some(error)
+                    }
+                }
+            } else {
+                Some(DensePoolError::InvalidFreeList)
+            };
+            if let Some(error) = error {
+                while self.values.len() > start_values {
+                    if let Some(value) = self.values.pop() {
+                        values.push(value);
+                    }
+                }
+                self.dense_to_slot.truncate(start_values);
+                self.slots.truncate(start_slots);
+                for (position, generation, state) in slots {
+                    if let Some(slot) = self.slots.get_mut(position) {
+                        slot.generation = generation;
+                        slot.state = state;
+                    }
+                }
+                self.free_head = start_free_head;
+                return Err(error);
+            }
+        }
+        ids.reverse();
+        Ok(ids)
+    }
+
     /// Inserts every value or leaves the pool unchanged.
     ///
     /// On failure, values inserted by this call are removed and the consumed

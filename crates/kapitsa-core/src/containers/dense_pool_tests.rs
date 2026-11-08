@@ -424,3 +424,36 @@ fn failed_insertion_returns_owned_value() -> Result<(), DensePoolError> {
     assert_eq!(pool.len(), 0);
     Ok(())
 }
+
+#[test]
+fn recoverable_batch_restores_values_and_free_slots_after_failure() -> Result<(), DensePoolError> {
+    for fail_after in 0..3 {
+        let mut pool = DensePool::new();
+        let survivor = pool.insert(String::from("survivor"))?;
+        let freed = pool.insert(String::from("freed"))?;
+        assert!(pool.remove(freed).is_some());
+        let free_head = pool.free_head;
+        let mut values = vec![String::from("a"), String::from("b"), String::from("c")];
+        assert_eq!(
+            pool.try_insert_many_recover_inner(&mut values, Some(fail_after)),
+            Err(DensePoolError::CapacityExceeded)
+        );
+        assert_eq!(values, ["a", "b", "c"]);
+        assert_eq!(pool.get(survivor).map(String::as_str), Some("survivor"));
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.free_head, free_head);
+        let ids = pool.try_insert_many_recover(&mut values)?;
+        assert!(values.is_empty());
+        let stored: Vec<_> = ids
+            .iter()
+            .map(|&id| pool.get(id).map(String::as_str))
+            .collect();
+        assert_eq!(stored, [Some("a"), Some("b"), Some("c")]);
+        assert_eq!(ids.last().map(|id| id.index()), Some(freed.index()));
+        assert_eq!(
+            ids.last().map(|id| id.generation()),
+            Some(freed.generation() + 1)
+        );
+    }
+    Ok(())
+}
