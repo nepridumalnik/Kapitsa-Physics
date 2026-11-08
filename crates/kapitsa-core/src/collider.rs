@@ -42,6 +42,15 @@ struct SkinPose {
 }
 
 impl Collider {
+    /// Prepares collision query geometry without accessing a physics world.
+    ///
+    /// This synchronous operation is idempotent and can be run on a worker
+    /// thread before the collider is inserted into a world. Prepared mesh
+    /// geometry remains available when the collider is removed from the world.
+    pub fn prepare(&mut self) -> Result<(), CollisionError> {
+        self.prepare_query_geometry()
+    }
+
     pub fn new(shape: Shape, local_transform: Transform) -> Self {
         Self {
             shape,
