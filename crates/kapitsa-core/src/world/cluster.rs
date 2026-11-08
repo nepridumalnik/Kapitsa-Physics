@@ -1123,6 +1123,7 @@ impl PhysicsWorld {
             .copied()
             .map(|body| BodyEntry {
                 body,
+                aerodynamics: Vec::new(),
                 first_collider: None,
                 cluster: None,
             })

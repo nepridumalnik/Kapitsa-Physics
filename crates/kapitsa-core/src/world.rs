@@ -10,6 +10,8 @@ use crate::collision::ContactManifold;
 #[cfg(feature = "bench-internals")]
 use std::time::Instant;
 
+#[cfg(test)]
+mod aerodynamics_tests;
 mod ccd;
 mod chunk;
 mod cluster;
@@ -39,6 +41,7 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 
 use crate::{
     aabb::Aabb,
+    aerodynamics::{AerodynamicProperties, AtmosphericState},
     cluster::{ClusterPart, RigidCluster, Weld},
     collider::Collider,
     collision::{
@@ -56,6 +59,7 @@ use crate::{
 
 struct BodyEntry {
     body: RigidBody,
+    aerodynamics: Vec<AerodynamicProperties>,
     first_collider: Option<ColliderId>,
     cluster: Option<RigidCluster>,
 }
@@ -132,6 +136,13 @@ struct GravityBodyUpdate {
     prepared: RigidBody,
 }
 
+struct AerodynamicsBodyUpdate {
+    id: BodyId,
+    error: Option<StepError>,
+    original: RigidBody,
+    prepared: RigidBody,
+}
+
 const FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT: usize = 128;
 
 struct ColliderEntry {
@@ -195,6 +206,8 @@ pub struct PhysicsWorld {
     central_gravity: Option<CentralGravity>,
     gravity_fields: DensePool<Gravity>,
     gravity_body_updates: Vec<GravityBodyUpdate>,
+    atmosphere: Option<AtmosphericState>,
+    aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
     joint_events: Vec<JointBreakEvent>,
@@ -258,6 +271,8 @@ impl PhysicsWorld {
             central_gravity: None,
             gravity_fields: DensePool::new(),
             gravity_body_updates: Vec::new(),
+            atmosphere: None,
+            aerodynamics_body_updates: Vec::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
             joint_events: Vec::new(),
@@ -278,6 +293,86 @@ impl PhysicsWorld {
 
     pub fn set_central_gravity(&mut self, gravity: Option<CentralGravity>) {
         self.central_gravity = gravity;
+    }
+
+    pub fn atmosphere(&self) -> Option<AtmosphericState> {
+        self.atmosphere
+    }
+
+    pub fn set_atmosphere(&mut self, atmosphere: Option<AtmosphericState>) {
+        self.atmosphere = atmosphere;
+    }
+
+    pub fn aerodynamics(&self, id: BodyId) -> Option<AerodynamicProperties> {
+        if id.world != self.world_id {
+            return None;
+        }
+        self.bodies
+            .get(id.dense)
+            .and_then(|entry| entry.aerodynamics.first().copied())
+    }
+
+    pub fn set_aerodynamics(
+        &mut self,
+        id: BodyId,
+        properties: Option<AerodynamicProperties>,
+    ) -> Result<(), WorldError> {
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidBodyId);
+        }
+        self.bodies
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidBodyId)?
+            .aerodynamics = properties.into_iter().collect();
+        Ok(())
+    }
+
+    pub fn aerodynamic_surfaces(&self, id: BodyId) -> Option<&[AerodynamicProperties]> {
+        if id.world != self.world_id {
+            return None;
+        }
+        self.bodies
+            .get(id.dense)
+            .map(|entry| entry.aerodynamics.as_slice())
+    }
+
+    pub fn add_aerodynamic_surface(
+        &mut self,
+        id: BodyId,
+        properties: AerodynamicProperties,
+    ) -> Result<usize, WorldError> {
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidBodyId);
+        }
+        let surfaces = &mut self
+            .bodies
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidBodyId)?
+            .aerodynamics;
+        surfaces
+            .try_reserve(1)
+            .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
+        surfaces.push(properties);
+        Ok(surfaces.len() - 1)
+    }
+
+    pub fn remove_aerodynamic_surface(
+        &mut self,
+        id: BodyId,
+        index: usize,
+    ) -> Result<AerodynamicProperties, WorldError> {
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidBodyId);
+        }
+        let surfaces = &mut self
+            .bodies
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidBodyId)?
+            .aerodynamics;
+        if index >= surfaces.len() {
+            return Err(WorldError::InvalidAerodynamicSurface);
+        }
+        Ok(surfaces.remove(index))
     }
 
     /// Adds an independently managed gravity field.
@@ -448,6 +543,7 @@ impl PhysicsWorld {
             .bodies
             .insert(BodyEntry {
                 body,
+                aerodynamics: Vec::new(),
                 first_collider: None,
                 cluster: None,
             })
@@ -897,6 +993,7 @@ impl PhysicsWorld {
             Ok(result) => result,
             Err(_) => {
                 self.collision_system.abort_step();
+                self.rollback_aerodynamics_updates();
                 self.rollback_gravity_updates();
                 self.rollback_force_source_updates();
                 Err(StepError::Collision(CollisionError::WorkerFailed))
@@ -914,6 +1011,7 @@ impl PhysicsWorld {
             return Err(StepError::InvalidDeltaTime);
         }
         self.with_force_source_updates(|world| {
+            world.prepare_aerodynamics_updates(executor, worker_count)?;
             world.prepare_gravity_updates(executor, worker_count)?;
             world.step_prepared(dt, executor, worker_count)
         })
@@ -931,9 +1029,11 @@ impl PhysicsWorld {
 
         let result = operation(self);
         if result.is_err() {
+            self.rollback_aerodynamics_updates();
             self.rollback_gravity_updates();
             self.rollback_force_source_updates();
         } else {
+            self.aerodynamics_body_updates.clear();
             self.clear_gravity_updates();
             self.clear_force_source_updates();
         }
@@ -962,6 +1062,7 @@ impl PhysicsWorld {
             Ok(result) => result,
             Err(_) => {
                 self.collision_system.abort_step();
+                self.rollback_aerodynamics_updates();
                 self.rollback_gravity_updates();
                 self.rollback_force_source_updates();
                 Err(StepError::Collision(CollisionError::WorkerFailed))
@@ -1250,6 +1351,148 @@ impl PhysicsWorld {
         if let Some(indices) = &mut self.force_source_body_indices {
             indices.clear();
         }
+    }
+
+    fn apply_aerodynamics(
+        atmosphere: AtmosphericState,
+        properties: &[AerodynamicProperties],
+        body_id: BodyId,
+        body: &mut RigidBody,
+    ) -> Result<(), StepError> {
+        for &properties in properties {
+            let force = properties
+                .drag_force(
+                    atmosphere,
+                    body.state().transform(),
+                    body.state().linear_velocity(),
+                    body.state().angular_velocity(),
+                )
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            if force.force() == Vec3::ZERO {
+                continue;
+            }
+            let center = body
+                .world_center_of_mass()
+                .map_err(|_| StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                })?
+                .ok_or(StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                })?;
+            let offset = body
+                .state()
+                .transform()
+                .transform_vector(force.local_application_offset());
+            let point = center.checked_add(offset).ok_or(StepError::Aerodynamics {
+                body_id,
+                cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+            })?;
+            body.apply_force_at_point(force.force(), point)
+                .map_err(|_| StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                })?;
+        }
+        Ok(())
+    }
+
+    fn prepare_aerodynamics_updates<E: StepExecutor>(
+        &mut self,
+        executor: &E,
+        workers: usize,
+    ) -> Result<(), StepError> {
+        self.aerodynamics_body_updates.clear();
+        let Some(atmosphere) = self.atmosphere else {
+            return Ok(());
+        };
+
+        for (dense_id, entry) in self.bodies.iter() {
+            if entry.aerodynamics.is_empty()
+                || entry.body.physics().body_type() != BodyType::Dynamic
+            {
+                continue;
+            }
+            let body_id = BodyId {
+                world: self.world_id,
+                dense: dense_id,
+            };
+            if self.aerodynamics_body_updates.try_reserve(1).is_err() {
+                self.aerodynamics_body_updates.clear();
+                return Err(StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                });
+            }
+            self.aerodynamics_body_updates.push(AerodynamicsBodyUpdate {
+                id: body_id,
+                error: None,
+                original: entry.body,
+                prepared: entry.body,
+            });
+        }
+
+        let bodies = &self.bodies;
+        let chunk_size = self
+            .aerodynamics_body_updates
+            .len()
+            .div_ceil(workers.max(1))
+            .max(1);
+        executor
+            .for_each_chunk_mut(
+                &mut self.aerodynamics_body_updates,
+                chunk_size,
+                |_, updates| {
+                    for update in updates {
+                        update.error = bodies
+                            .get(update.id.dense)
+                            .map(|entry| {
+                                Self::apply_aerodynamics(
+                                    atmosphere,
+                                    &entry.aerodynamics,
+                                    update.id,
+                                    &mut update.prepared,
+                                )
+                            })
+                            .unwrap_or(Ok(()))
+                            .err();
+                    }
+                },
+            )
+            .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
+        if let Some(error) = self
+            .aerodynamics_body_updates
+            .iter()
+            .find_map(|update| update.error)
+        {
+            self.aerodynamics_body_updates.clear();
+            return Err(error);
+        }
+
+        for update in &self.aerodynamics_body_updates {
+            if let Some(entry) = self
+                .bodies
+                .get_mut(update.id.dense)
+                .filter(|_| update.id.world == self.world_id)
+            {
+                entry.body = update.prepared;
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_aerodynamics_updates(&mut self) {
+        for update in &self.aerodynamics_body_updates {
+            if let Some(entry) = self
+                .bodies
+                .get_mut(update.id.dense)
+                .filter(|_| update.id.world == self.world_id)
+            {
+                entry.body = update.original;
+            }
+        }
+        self.aerodynamics_body_updates.clear();
     }
 
     fn gravity_force_for_body(
@@ -2370,17 +2613,37 @@ impl PhysicsWorld {
             });
             shard_remaining -= 1;
         }
-        if self.central_gravity.is_some() || !self.gravity_fields.is_empty() {
+        if self.atmosphere.is_some()
+            || self.central_gravity.is_some()
+            || !self.gravity_fields.is_empty()
+        {
+            let atmosphere = self.atmosphere;
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunks| {
                     for step in chunks.iter_mut().flatten() {
-                        step.error = Self::apply_gravity(
-                            self.central_gravity,
-                            &self.gravity_fields,
-                            step.body_id,
-                            &mut step.prepared,
-                        )
-                        .err();
+                        if let Some(atmosphere) = atmosphere
+                            && let Some(properties) = self
+                                .bodies
+                                .get(step.body_id.dense)
+                                .map(|entry| entry.aerodynamics.as_slice())
+                        {
+                            step.error = Self::apply_aerodynamics(
+                                atmosphere,
+                                properties,
+                                step.body_id,
+                                &mut step.prepared,
+                            )
+                            .err();
+                        }
+                        if step.error.is_none() {
+                            step.error = Self::apply_gravity(
+                                self.central_gravity,
+                                &self.gravity_fields,
+                                step.body_id,
+                                &mut step.prepared,
+                            )
+                            .err();
+                        }
                     }
                 })
                 .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
@@ -2452,10 +2715,12 @@ impl PhysicsWorld {
 
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
+        self.prepare_aerodynamics_updates(executor, worker_count)?;
         self.prepare_gravity_updates(executor, worker_count)?;
         self.collision_system.begin_step();
         if let Err(error) = self.prepare_joint_collision_pairs() {
             self.collision_system.abort_step();
+            self.rollback_aerodynamics_updates();
             self.rollback_gravity_updates();
             return Err(StepError::Collision(error));
         }
@@ -2467,16 +2732,19 @@ impl PhysicsWorld {
         let worker_count = worker_count.max(1);
         if let Err(error) = self.prepare_collision_candidates(dt, worker_count, executor) {
             self.collision_system.abort_step();
+            self.rollback_aerodynamics_updates();
             self.rollback_gravity_updates();
             return Err(StepError::Collision(error));
         }
         if let Err(error) = self.process_collision_candidates(worker_count, executor, dt) {
             self.collision_system.abort_step();
+            self.rollback_aerodynamics_updates();
             self.rollback_gravity_updates();
             return Err(StepError::Collision(error));
         }
         if let Err(error) = self.prepare_joint_break_commit() {
             self.collision_system.abort_step();
+            self.rollback_aerodynamics_updates();
             self.rollback_gravity_updates();
             return Err(StepError::Collision(error));
         }
