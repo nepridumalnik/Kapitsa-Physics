@@ -218,12 +218,20 @@ impl<T> DensePool<T> {
     }
 
     /// Inserts all values, retaining their order and ownership on failure.
-    #[allow(dead_code)]
     pub(crate) fn try_insert_many_recover(
         &mut self,
         values: &mut Vec<T>,
     ) -> Result<Vec<DenseId>, DensePoolError> {
         self.try_insert_many_recover_inner(values, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_insert_many_recover_failing_after(
+        &mut self,
+        values: &mut Vec<T>,
+        fail_after: usize,
+    ) -> Result<Vec<DenseId>, DensePoolError> {
+        self.try_insert_many_recover_inner(values, Some(fail_after))
     }
 
     fn try_insert_many_recover_inner(

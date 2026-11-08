@@ -12,12 +12,17 @@ use crate::{
 
 /// A prepared, nonempty group of colliders sharing a body-local transform.
 pub struct Chunk {
-    transform: Transform,
-    bounds: Aabb,
-    colliders: Vec<Collider>,
+    pub(crate) transform: Transform,
+    pub(crate) bounds: Aabb,
+    pub(crate) colliders: Vec<Collider>,
 }
 
 impl Chunk {
+    /// Returns the prepared meshes without exposing mutable geometry.
+    pub fn colliders(&self) -> &[Collider] {
+        &self.colliders
+    }
+
     /// Returns the bounds in chunk-local coordinates, before its transform.
     pub fn local_bounds(&self) -> Aabb {
         self.bounds

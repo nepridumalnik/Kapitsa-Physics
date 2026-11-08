@@ -24,6 +24,10 @@ pub mod collider {
     pub use kapitsa_core::collider::{Collider, ColliderError, CollisionFilter, CollisionMode};
 }
 
+pub mod chunk {
+    pub use kapitsa_core::chunk::{Chunk, ChunkBuildError, ChunkBuilder};
+}
+
 pub mod collision {
     pub use kapitsa_core::collision::{
         CcdLimitPolicy, CollisionConfig, CollisionError, CollisionEvent, CollisionEventKind,
@@ -78,12 +82,16 @@ pub mod transform {
 
 pub mod world {
     pub use kapitsa_core::world::{
+        AddChunkBatchError, AddChunkError, ChunkId, ChunkOperationError, RemoveChunkBatchError,
+    };
+    pub use kapitsa_core::world::{
         BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, GravityId,
         JointId, JointTarget, PartId, StepError, WeldId, WorldError,
     };
 }
 
 pub use kapitsa_core::{
+    chunk::{Chunk, ChunkBuildError, ChunkBuilder},
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{
         CcdLimitPolicy, CollisionConfig, CollisionError, CollisionEvent, CollisionEventKind,
@@ -97,7 +105,8 @@ pub use kapitsa_core::{
     shape::Shape,
     transform::Transform,
     world::{
-        BodyId, ClusterError, ColliderId, ForceSourceId, GravityId, JointId, JointTarget, PartId,
+        AddChunkBatchError, AddChunkError, BodyId, ChunkId, ChunkOperationError, ClusterError,
+        ColliderId, ForceSourceId, GravityId, JointId, JointTarget, PartId, RemoveChunkBatchError,
         StepError, WeldId, WorldError,
     },
 };
