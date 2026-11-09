@@ -21,6 +21,32 @@ use crate::{
 use kapitsa_math::{Mat3, Vec3};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[test]
+fn safe_binding_preserves_shared_static_and_consumes_dynamic_ownership() {
+    use super::colored_bodies::BodyBinding;
+    let mut bodies: Vec<_> = (0..5)
+        .map(|_| {
+            let body = dynamic_body(Vec3::ZERO);
+            let state = *body.state();
+            SolverBody::from_prediction(body, state)
+        })
+        .collect();
+    let indices = [0, 2, 4];
+    let mut binding = BodyBinding::bind(&mut bodies, &indices).unwrap();
+    let first = binding.pair([4, 0], &indices).unwrap();
+    assert!(binding.pair([2, 4], &indices).is_err());
+    drop(first);
+}
+
+#[test]
+fn safe_binding_rejects_invalid_index_plans() {
+    use super::colored_bodies::BodyBinding;
+    let mut bodies = [];
+    assert!(BodyBinding::bind(&mut bodies, &[0]).is_err());
+    assert!(BodyBinding::bind(&mut bodies, &[1, 1]).is_err());
+    assert!(BodyBinding::bind(&mut bodies, &[2, 1]).is_err());
+}
+
 #[derive(Default)]
 struct CountingExecutor {
     calls: AtomicUsize,
