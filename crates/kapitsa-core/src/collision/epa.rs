@@ -85,7 +85,14 @@ impl EpaWorkspace {
                 .checked_dot(face.normal)
                 .ok_or(CollisionError::ArithmeticOverflow)?;
             let tolerance = scale_tolerance(support.difference);
-            if projection - face.distance <= tolerance {
+            // A support point already in the polytope cannot expand it. Reusing
+            // it would create zero-area horizon faces when dot-product rounding
+            // leaves a positive advance at an otherwise converged face.
+            let duplicate = self
+                .vertices
+                .iter()
+                .any(|point| point.difference == support.difference);
+            if projection - face.distance <= tolerance || duplicate {
                 return self.contact(face);
             }
 

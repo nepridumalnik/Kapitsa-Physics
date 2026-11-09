@@ -19,6 +19,111 @@ struct Geometry {
 }
 
 #[test]
+fn translated_terrain_triangle_distance_converges() -> Result<(), Box<dyn std::error::Error>> {
+    let vertices = [
+        Vec3::new(4.516131799668074, 3.0703475098125637, 3.0703475098125637),
+        Vec3::new(4.554803368635476, 2.4917392446659505, 3.5973936300724745),
+        Vec3::new(4.739887624979019, 2.9211768084205687, 3.4740039790049195),
+    ];
+    let triangle = Geometry {
+        name: "translated terrain",
+        shape: Shape::Triangle(Triangle::from_vertices(vertices)?),
+        transform: Transform::new(
+            Vec3::new(19.633437521755695, -16.037372938357294, -16.037372938357294),
+            Quat::IDENTITY,
+        )?,
+        bvh: None,
+    };
+    let rotation = Quat::new(
+        -0.28468756375233273,
+        -0.18006563064963527,
+        -0.47611939483953325,
+        -0.8123051652926672,
+    );
+    for size in [Vec3::splat(2.0), Vec3::new(1.2, 1.2, 4.0)] {
+        let cuboid = Geometry {
+            name: "rocket",
+            shape: Shape::Cuboid(Cuboid::from_vec(size)?),
+            transform: Transform::new(
+                Vec3::new(23.534257644305242, -11.502131641484667, -12.893779090128566),
+                rotation,
+            )?,
+            bvh: None,
+        };
+        let expected = triangle_cuboid_sat(&triangle, vertices, &cuboid, size * 0.5);
+        let actual = detect_with_offset(&mut NarrowPhase::new(), pair(), &triangle, &cuboid, 0.0)?;
+        assert_eq!(actual.is_some(), expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn terrain_triangle_contact_does_not_duplicate_an_epa_support_vertex()
+-> Result<(), Box<dyn std::error::Error>> {
+    let vertices = [
+        Vec3::new(3.691569077782333, 5.831359362229705, -0.24974326184019446),
+        Vec3::new(3.910318565554917, 5.685526119079441, 0.15725020924583077),
+        Vec3::new(3.878662615083158, 6.259456971194595, -0.37447261344641447),
+    ];
+    let triangle = Geometry {
+        name: "terrain regression",
+        shape: Shape::Triangle(Triangle::from_vertices(vertices)?),
+        transform: Transform::new(
+            Vec3::new(23.194621048867702, -18.41149302572012, -9.566256045829505),
+            Quat::IDENTITY,
+        )?,
+        bvh: None,
+    };
+    let rotation = Quat::new(
+        -0.266355337121638,
+        -0.22010789995334865,
+        -0.32062844689697484,
+        -0.8819323929901763,
+    );
+    let translation = Vec3::new(25.30292533018086, -12.034650402025179, -10.488863020735103);
+    let mut contacts = 0;
+    for size in [Vec3::splat(2.0), Vec3::new(1.2, 1.2, 4.0)] {
+        let mut cuboid = Geometry {
+            name: "rocket part",
+            shape: Shape::Cuboid(Cuboid::from_vec(size)?),
+            transform: Transform::new(translation, rotation)?,
+            bvh: None,
+        };
+        let expected = triangle_cuboid_sat(&triangle, vertices, &cuboid, size * 0.5);
+        let mut narrow_phase = NarrowPhase::new();
+        let actual = detect(&mut narrow_phase, pair(), &triangle, &cuboid)?;
+        assert_eq!(actual.is_some(), expected);
+        if let Some(manifold) = actual {
+            contacts += 1;
+            let contact = manifold.points().first().ok_or("missing contact")?;
+            assert!(contact.penetration > 0.0);
+            cuboid.transform = Transform::new(
+                translation + contact.normal * (contact.penetration * 0.5),
+                rotation,
+            )?;
+            assert!(triangle_cuboid_sat(
+                &triangle,
+                vertices,
+                &cuboid,
+                size * 0.5
+            ));
+            cuboid.transform = Transform::new(
+                translation + contact.normal * (contact.penetration + 1.0e-8),
+                rotation,
+            )?;
+            assert!(!triangle_cuboid_sat(
+                &triangle,
+                vertices,
+                &cuboid,
+                size * 0.5
+            ));
+        }
+    }
+    assert!(contacts > 0);
+    Ok(())
+}
+
+#[test]
 fn all_28_convex_shape_pairs_generate_symmetric_contacts() {
     let pair = pair();
     let shapes = convex_shapes();
@@ -660,6 +765,16 @@ fn detect(
     left: &Geometry,
     right: &Geometry,
 ) -> Result<Option<crate::collision::manifold::ContactManifold>, crate::collision::CollisionError> {
+    detect_with_offset(narrow_phase, pair, left, right, 0.01)
+}
+
+fn detect_with_offset(
+    narrow_phase: &mut NarrowPhase,
+    pair: CollisionPair,
+    left: &Geometry,
+    right: &Geometry,
+    contact_offset: f64,
+) -> Result<Option<crate::collision::manifold::ContactManifold>, crate::collision::CollisionError> {
     narrow_phase.detect_with_geometry(
         pair,
         &left.shape,
@@ -674,7 +789,7 @@ fn detect(
         CollisionMode::Solid,
         right.bvh.as_ref(),
         None,
-        0.01,
+        contact_offset,
     )
 }
 

@@ -48,18 +48,33 @@ pub(crate) fn support_pair(
     transform_b: &Transform,
     direction: Vec3,
 ) -> Result<SupportPoint, CollisionError> {
-    let (point_a, feature_a) = support_world(shape_a, transform_a, direction)?;
-    let (point_b, feature_b) = support_world(shape_b, transform_b, -direction)?;
-    let difference = point_a
-        .checked_sub(point_b)
+    if !matches!(shape_a, Shape::Triangle(_)) && !matches!(shape_b, Shape::Triangle(_)) {
+        let (point_a, feature_a) = support_world(shape_a, transform_a, direction)?;
+        let (point_b, feature_b) = support_world(shape_b, transform_b, -direction)?;
+        let difference = point_a
+            .checked_sub(point_b)
+            .ok_or(CollisionError::ArithmeticOverflow)?;
+        return Ok(SupportPoint {
+            difference,
+            point_a,
+            point_b,
+            feature_a,
+            feature_b,
+        });
+    }
+    let mut support =
+        support_pair_relative(shape_a, transform_a, shape_b, transform_b, direction, true)?;
+    // Form the Minkowski difference before adding the shared world translation.
+    // Witnesses remain world-space, while nearby supports keep their low bits.
+    support.point_a = support
+        .point_a
+        .checked_add(transform_a.translation())
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    Ok(SupportPoint {
-        difference,
-        point_a,
-        point_b,
-        feature_a,
-        feature_b,
-    })
+    support.point_b = support
+        .point_b
+        .checked_add(transform_a.translation())
+        .ok_or(CollisionError::ArithmeticOverflow)?;
+    Ok(support)
 }
 
 pub(crate) fn support_pair_core(
@@ -68,6 +83,17 @@ pub(crate) fn support_pair_core(
     shape_b: &Shape,
     transform_b: &Transform,
     direction: Vec3,
+) -> Result<SupportPoint, CollisionError> {
+    support_pair_relative(shape_a, transform_a, shape_b, transform_b, direction, false)
+}
+
+fn support_pair_relative(
+    shape_a: &Shape,
+    transform_a: &Transform,
+    shape_b: &Shape,
+    transform_b: &Transform,
+    direction: Vec3,
+    include_radius: bool,
 ) -> Result<SupportPoint, CollisionError> {
     if !direction.is_finite() {
         return Err(CollisionError::ArithmeticOverflow);
@@ -83,8 +109,8 @@ pub(crate) fn support_pair_core(
         .conjugate()
         .rotate_vector(-direction)
         .ok_or(CollisionError::ArithmeticOverflow)?;
-    let local_a = support_local(shape_a, local_direction_a, false)?;
-    let local_b = support_local(shape_b, local_direction_b, false)?;
+    let local_a = support_local(shape_a, local_direction_a, include_radius)?;
+    let local_b = support_local(shape_b, local_direction_b, include_radius)?;
     let relative_translation = transform_b
         .translation()
         .checked_sub(transform_a.translation())
