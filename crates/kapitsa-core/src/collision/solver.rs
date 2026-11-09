@@ -142,6 +142,7 @@ impl ColoredConstraintPhase {
 struct ColoredConstraintTask {
     constraint_index: usize,
     body_indices: [usize; 2],
+    binding_positions: [usize; 2],
     points: [SolverPoint; 4],
     point_count: usize,
     kind: ColoredConstraintKind,
@@ -174,6 +175,7 @@ impl ColoredConstraintTask {
         Ok(Self {
             constraint_index,
             body_indices,
+            binding_positions: [usize::MAX; 2],
             points: [SolverPoint::default(); 4],
             point_count: 0,
             kind,
@@ -201,6 +203,10 @@ impl ColoredConstraintTask {
         };
         self.point_count = 0;
         Ok(())
+    }
+
+    fn set_binding_positions(&mut self, positions: [usize; 2]) {
+        self.binding_positions = positions;
     }
 }
 
@@ -241,7 +247,7 @@ fn bind_colored_batches<'a>(
         } = batch;
         let mut bound_tasks = Vec::with_capacity(tasks.len());
         for task in tasks.iter_mut() {
-            let bodies = binding.pair(task.body_indices, indices)?;
+            let bodies = binding.pair_at(task.binding_positions)?;
             bound_tasks.push(BoundConstraint { task, bodies });
         }
         result.push(BoundColoredBatch {
@@ -1177,6 +1183,16 @@ impl SolverWorkspace {
                             manifolds,
                             joints,
                         )?);
+                        let task = batch
+                            .tasks
+                            .last_mut()
+                            .ok_or(CollisionError::InvalidContact)?;
+                        let global_constraint = task.constraint_index;
+                        let positions = self
+                            .constraint_coloring
+                            .body_positions_for_constraint(global_constraint)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        task.set_binding_positions(positions);
                         if constraint_index < manifolds.len() {
                             batch.contact_task_count += 1;
                         } else {

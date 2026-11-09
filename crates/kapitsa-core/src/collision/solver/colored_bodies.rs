@@ -74,18 +74,11 @@ impl<'a> BodyBinding<'a> {
         Ok(Self { slots })
     }
 
-    pub(super) fn pair(
+    pub(super) fn pair_at(
         &mut self,
-        indices: [usize; 2],
-        all_indices: &[usize],
+        [a, b]: [usize; 2],
     ) -> Result<[BoundBodyRef<'a>; 2], CollisionError> {
-        let a = all_indices
-            .binary_search(&indices[0])
-            .map_err(|_| CollisionError::InvalidContact)?;
-        let b = all_indices
-            .binary_search(&indices[1])
-            .map_err(|_| CollisionError::InvalidContact)?;
-        if a == b {
+        if a == b || a >= self.slots.len() || b >= self.slots.len() {
             return Err(CollisionError::InvalidContact);
         }
         let (lo, hi, reversed) = if a < b { (a, b, false) } else { (b, a, true) };

@@ -18,6 +18,7 @@ pub(crate) struct ConstraintColoring {
     colored_constraints: Vec<usize>,
     color_body_offsets: Vec<usize>,
     color_bodies: Vec<usize>,
+    constraint_body_positions: Vec<[usize; 2]>,
     color_count: usize,
     max_color_constraint_count: usize,
 }
@@ -37,6 +38,7 @@ impl ConstraintColoring {
             colored_constraints: Vec::new(),
             color_body_offsets: Vec::new(),
             color_bodies: Vec::new(),
+            constraint_body_positions: Vec::new(),
             color_count: 0,
             max_color_constraint_count: 0,
         }
@@ -218,6 +220,23 @@ impl ConstraintColoring {
             .unwrap_or(0);
         self.color_count = color_count;
         self.rebuild_color_body_plan(body_count)?;
+        reserve(&mut self.constraint_body_positions, constraint_count)?;
+        self.constraint_body_positions
+            .resize(constraint_count, [0; 2]);
+        for constraint in 0..constraint_count {
+            let color = self.constraint_colors[constraint];
+            let bodies = &self.color_bodies
+                [self.color_body_offsets[color]..self.color_body_offsets[color + 1]];
+            let [a, b] = self.endpoints[constraint];
+            self.constraint_body_positions[constraint] = [
+                bodies
+                    .binary_search(&a)
+                    .map_err(|_| CollisionError::InvalidContact)?,
+                bodies
+                    .binary_search(&b)
+                    .map_err(|_| CollisionError::InvalidContact)?,
+            ];
+        }
 
         // This check is unconditional because the solver's concurrent body access
         // relies on each dynamic body having exactly one owner per color.
@@ -263,6 +282,10 @@ impl ConstraintColoring {
             self.color_body_offsets[color + 1] = self.color_bodies.len();
         }
         Ok(())
+    }
+
+    pub(crate) fn body_positions_for_constraint(&self, constraint: usize) -> Option<[usize; 2]> {
+        self.constraint_body_positions.get(constraint).copied()
     }
 
     pub(crate) fn bodies_in_schedule_group(&self, group: usize) -> Option<&[usize]> {
