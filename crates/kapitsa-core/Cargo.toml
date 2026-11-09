@@ -38,3 +38,8 @@ required-features = ["bench-internals"]
 name = "joint_parallel_scaling"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "colored_solver_scaling"
+harness = false
+required-features = ["bench-internals"]
