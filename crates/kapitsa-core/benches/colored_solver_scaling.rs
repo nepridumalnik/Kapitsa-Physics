@@ -43,6 +43,8 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         world.step_with_executor(DT, &executor, workers)?;
     }
     let mut times = Vec::with_capacity(SAMPLES);
+    let mut rebuild_steps = 0;
+    let mut cache_hit_steps = 0;
     for sample in 0..SAMPLES {
         if sample % 5 == 0 {
             // Exercise the steady-state cache without rebuilding the world.
@@ -64,12 +66,15 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
                 metrics.colored_schedule.rejection,
             ).into());
         }
+        let joint_metrics = world.physics_step_metrics().joints;
+        rebuild_steps += usize::from(joint_metrics.constraint_coloring_rebuilds > 0);
+        cache_hit_steps += usize::from(joint_metrics.constraint_coloring_cache_hits > 0);
         let joints = world.joints().count();
-        let contacts = metrics.contact_count;
+        let contact_points = metrics.contact_count;
+        let graph_constraints = joint_metrics.constraint_coloring_constraints;
         if sample == 0 {
             println!(
-                "fixture mode={mode} requested={count} active_contacts={contacts} active_joints={joints} total_constraints={} topology=fixed",
-                contacts.saturating_add(joints)
+                "fixture mode={mode} requested={count} contact_points={contact_points} world_joints={joints} colored_graph_constraints={graph_constraints} topology=unverified",
             );
         }
         if sample == 0 {
@@ -94,7 +99,7 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
     }
     times.sort_unstable();
     println!(
-        "result mode={mode} requested={count} workers={workers} topology=fixed p50_ms={:.3} p95_ms={:.3}",
+        "result mode={mode} requested={count} workers={workers} topology=unverified rebuild_steps={rebuild_steps} cache_hit_steps={cache_hit_steps} p50_ms={:.3} p95_ms={:.3}",
         nanos_to_ms(times[SAMPLES / 2]),
         nanos_to_ms(times[p95_index(SAMPLES)]),
     );
