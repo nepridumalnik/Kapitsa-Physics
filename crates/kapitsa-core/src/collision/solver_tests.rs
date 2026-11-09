@@ -486,6 +486,57 @@ fn colored_batch_layout_rebuilds_when_contact_joint_boundary_changes() {
     assert_eq!(task.binding_positions, [2, 3]);
     assert!(matches!(task.kind, super::ColoredConstraintKind::Joint(_)));
 
+    // Compare the reused layout with a freshly built layout on identical input.
+    let check_solution = |workspace: &mut SolverWorkspace,
+                          contacts: &[SolverManifold],
+                          joints: &[JointConstraint]| {
+        let mut actual_bodies = bodies.clone();
+        let mut expected_bodies = bodies.clone();
+        let mut actual_contacts = contacts.to_vec();
+        let mut expected_contacts = contacts.to_vec();
+        let mut joint_workspace = JointWorkspace::new();
+        joint_workspace.begin_step();
+        workspace
+            .solve_colored_constraints(
+                &mut actual_bodies,
+                &mut actual_contacts,
+                &mut joint_workspace,
+                joints,
+                super::CollisionConfig::default(),
+                JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy()),
+                None,
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+            .unwrap();
+        solve_colored(
+            &mut expected_bodies,
+            &mut expected_contacts,
+            joints,
+            super::CollisionConfig::default(),
+        )
+        .unwrap();
+        for (actual, expected) in actual_bodies.iter().zip(&expected_bodies) {
+            assert_eq!(
+                actual.body().state().transform(),
+                expected.body().state().transform()
+            );
+            assert_eq!(
+                actual.body().state().linear_velocity(),
+                expected.body().state().linear_velocity()
+            );
+            assert_eq!(
+                actual.body().state().angular_velocity(),
+                expected.body().state().angular_velocity()
+            );
+        }
+        assert_eq!(
+            manifold_impulses(&actual_contacts),
+            manifold_impulses(&expected_contacts)
+        );
+    };
+    check_solution(&mut workspace, &contacts_and_joint, &[joint]);
+
     let restored_contacts = contacts.clone();
     prepare_colored_workspace(&mut workspace, &bodies, &restored_contacts, &[]);
     assert!(workspace.joint_task_locations.is_empty());
@@ -503,26 +554,9 @@ fn colored_batch_layout_rebuilds_when_contact_joint_boundary_changes() {
         super::ColoredConstraintKind::Contact(_)
     ));
 
-    // Running the real contact phase after both transitions verifies that the
-    // stale task kind and binding metadata are not used.
-    let mut solver_bodies = bodies.clone();
-    let mut manifolds = restored_contacts;
-    let mut joint_workspace = JointWorkspace::new();
-    joint_workspace.begin_step();
-    workspace
-        .solve_colored_constraints(
-            &mut solver_bodies,
-            &mut manifolds,
-            &mut joint_workspace,
-            &[],
-            super::CollisionConfig::default(),
-            JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy()),
-            None,
-            &crate::execution::SequentialExecutor,
-            1,
-        )
-        .unwrap();
-    assert_eq!(manifolds.len(), 2);
+    check_solution(&mut workspace, &restored_contacts, &[]);
+    prepare_colored_workspace(&mut workspace, &bodies, &contacts_and_joint, &[joint]);
+    check_solution(&mut workspace, &contacts_and_joint, &[joint]);
 }
 
 fn solve_colored(
