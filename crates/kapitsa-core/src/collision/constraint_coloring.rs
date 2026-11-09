@@ -252,7 +252,7 @@ impl ConstraintColoring {
             let end = self.color_offsets[color + 1];
             for &constraint in &self.colored_constraints[start..end] {
                 for body in self.endpoints[constraint] {
-                    if self.dynamic_bodies[body] && self.body_stamps[body] != stamp {
+                    if self.body_stamps[body] != stamp {
                         self.body_stamps[body] = stamp;
                         self.color_bodies.push(body);
                     }
@@ -265,7 +265,7 @@ impl ConstraintColoring {
         Ok(())
     }
 
-    pub(crate) fn dynamic_bodies_in_schedule_group(&self, group: usize) -> Option<&[usize]> {
+    pub(crate) fn bodies_in_schedule_group(&self, group: usize) -> Option<&[usize]> {
         let start = *self.color_body_offsets.get(group)?;
         let end = *self.color_body_offsets.get(group + 1)?;
         self.color_bodies.get(start..end)
@@ -324,18 +324,9 @@ mod tests {
         assert_eq!(coloring.constraints_in_schedule_group(0), Some(&[0, 1][..]));
         assert_eq!(coloring.constraints_in_schedule_group(1), Some(&[2][..]));
         assert_eq!(coloring.constraints_in_schedule_group(2), Some(&[3][..]));
-        assert_eq!(
-            coloring.dynamic_bodies_in_schedule_group(0),
-            Some(&[0, 1][..])
-        );
-        assert_eq!(
-            coloring.dynamic_bodies_in_schedule_group(1),
-            Some(&[0, 1][..])
-        );
-        assert_eq!(
-            coloring.dynamic_bodies_in_schedule_group(2),
-            Some(&[1, 2][..])
-        );
+        assert_eq!(coloring.bodies_in_schedule_group(0), Some(&[0, 1, 3][..]));
+        assert_eq!(coloring.bodies_in_schedule_group(1), Some(&[0, 1][..]));
+        assert_eq!(coloring.bodies_in_schedule_group(2), Some(&[1, 2][..]));
         assert!(
             coloring
                 .has_unique_dynamic_body_ownership(dynamic_bodies.len())
@@ -358,11 +349,11 @@ mod tests {
         assert_eq!(coloring.constraints_in_schedule_group(0), Some(&[0, 2][..]));
         assert_eq!(coloring.constraints_in_schedule_group(1), Some(&[1, 3][..]));
         assert_eq!(
-            coloring.dynamic_bodies_in_schedule_group(0),
+            coloring.bodies_in_schedule_group(0),
             Some(&[0, 1, 2, 3][..])
         );
         assert_eq!(
-            coloring.dynamic_bodies_in_schedule_group(1),
+            coloring.bodies_in_schedule_group(1),
             Some(&[1, 2, 3, 4][..])
         );
         assert!(coloring.has_unique_dynamic_body_ownership(5).unwrap());

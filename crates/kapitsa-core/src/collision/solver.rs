@@ -14,6 +14,8 @@ use crate::{mass::MassProperties, rigid_body::BodyType, transform::Transform};
 use kapitsa_math::Mat3;
 use kapitsa_math::Vec3;
 mod colored_bodies;
+#[cfg(test)]
+mod safe_binding_prototype;
 use colored_bodies::SharedSolverBodies;
 
 use super::{
