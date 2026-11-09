@@ -18,8 +18,8 @@ use rayon_executor::RayonExecutor;
 
 const COUNTS: [usize; 5] = [128, 512, 1_000, 5_000, 10_000];
 const WORKERS: [usize; 3] = [2, 4, 8];
-const WARMUPS: usize = 3;
-const SAMPLES: usize = 15;
+const WARMUPS: usize = 8;
+const SAMPLES: usize = 40;
 const DT: f64 = 1.0 / 120.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -64,6 +64,14 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
                 metrics.colored_schedule.rejection,
             ).into());
         }
+        let joints = world.joints().count();
+        let contacts = metrics.contact_count;
+        if sample == 0 {
+            println!(
+                "fixture mode={mode} requested={count} active_contacts={contacts} active_joints={joints} total_constraints={} topology=fixed",
+                contacts.saturating_add(joints)
+            );
+        }
         if sample == 0 {
             println!(
                 "colored mode={mode} constraints={count} workers={workers} colors={} batches={} groups={} parallel_batches={} retained={} rebuilds={} cache_hits={} step_ms={:.3}",
@@ -86,9 +94,9 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
     }
     times.sort_unstable();
     println!(
-        "result mode={mode} constraints={count} workers={workers} p50_ms={:.3} p95_ms={:.3}",
+        "result mode={mode} requested={count} workers={workers} topology=fixed p50_ms={:.3} p95_ms={:.3}",
         nanos_to_ms(times[SAMPLES / 2]),
-        nanos_to_ms(times[(SAMPLES * 95 / 100).saturating_sub(1)]),
+        nanos_to_ms(times[p95_index(SAMPLES)]),
     );
     Ok(())
 }
@@ -169,4 +177,8 @@ fn fixture(count: usize, mode: &str) -> Result<PhysicsWorld, Box<dyn Error>> {
 
 fn nanos_to_ms(ns: u128) -> f64 {
     ns as f64 / 1_000_000.0
+}
+
+fn p95_index(sample_count: usize) -> usize {
+    ((sample_count * 95).div_ceil(100)).saturating_sub(1)
 }
