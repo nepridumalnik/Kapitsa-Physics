@@ -1288,6 +1288,21 @@ impl SolverWorkspace {
         workload.can_use_parallel_schedule(worker_count)
     }
 
+    #[cfg(feature = "bench-internals")]
+    fn colored_options_are_eligible(
+        options: JointSolverOptions,
+        worker_count: usize,
+        constraint_count: usize,
+    ) -> bool {
+        cfg!(feature = "bench-internals")
+            && worker_count > 1
+            && constraint_count >= LARGE_ISLAND_COLORING_THRESHOLD
+            && matches!(options.iterations(), JointIterations::Fixed)
+            && options.global_velocity_pcg_max_iterations() == 0
+            && options.global_position_pcg_max_iterations() == 0
+            && !options.alternates_velocity_sweeps()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn solve_colored_constraints(
         &mut self,
@@ -1847,10 +1862,15 @@ impl SolverWorkspace {
             self.colored_schedule.constraints = coloring_constraint_count;
             self.colored_schedule.rejection = "small-or-single-worker";
         }
-        if cfg!(feature = "bench-internals")
-            && worker_count > 1
-            && coloring_constraint_count >= LARGE_ISLAND_COLORING_THRESHOLD
-        {
+        #[cfg(feature = "bench-internals")]
+        let coloring_eligible = Self::colored_options_are_eligible(
+            joint_solver_options,
+            worker_count,
+            coloring_constraint_count,
+        );
+        #[cfg(not(feature = "bench-internals"))]
+        let coloring_eligible = false;
+        if coloring_eligible {
             #[cfg(feature = "bench-internals")]
             let coloring_started = std::time::Instant::now();
             let graph_rebuilt = self.prepare_constraint_coloring(bodies, manifolds, joints)?;
