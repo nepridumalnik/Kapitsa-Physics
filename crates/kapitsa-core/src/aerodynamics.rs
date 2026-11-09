@@ -176,6 +176,7 @@ impl AerodynamicProperties {
                 let projection = world_axis
                     .checked_dot(flow_direction)
                     .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+                let lift_factor = (1.0 - projection * projection).max(0.0).sqrt();
                 let lift_direction = world_axis
                     .checked_sub(
                         flow_direction
@@ -189,7 +190,8 @@ impl AerodynamicProperties {
                         local_application_offset: self.local_application_offset,
                     });
                 };
-                let lift_magnitude = dynamic_pressure * self.reference_area * self.lift_coefficient;
+                let lift_magnitude =
+                    dynamic_pressure * self.reference_area * self.lift_coefficient * lift_factor;
                 if !lift_magnitude.is_finite() {
                     return Err(AerodynamicsError::ArithmeticOverflow);
                 }
@@ -340,6 +342,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(force.force(), Vec3::new(0.0, 50.0, 0.0));
+    }
+
+    #[test]
+    fn lift_vanishes_continuously_when_axis_aligns_with_flow() {
+        let atmosphere = AtmosphericState::new(1.0, Vec3::ZERO).unwrap();
+        let properties = AerodynamicProperties::new(1.0, 0.0, Vec3::ZERO)
+            .unwrap()
+            .with_lift(1.0, Vec3::new(1.0, 1.0e-6, 0.0))
+            .unwrap();
+        let force = properties
+            .drag_force(
+                atmosphere,
+                Transform::identity(),
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::ZERO,
+            )
+            .unwrap();
+
+        assert!(force.force().length() < 1.0e-4);
     }
 
     #[test]
