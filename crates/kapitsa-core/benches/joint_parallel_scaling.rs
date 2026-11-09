@@ -71,6 +71,11 @@ struct Sample {
     measured_jv_angular: f64,
     colors: u32,
     color_batches: u64,
+    colored_selected: bool,
+    colored_groups: usize,
+    colored_parallel_batches: usize,
+    colored_rejection: &'static str,
+    retained_scratch_bytes: usize,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -120,6 +125,7 @@ fn run_case(
         let elapsed_ns = started.elapsed().as_nanos();
         let metrics = world.physics_step_metrics();
         let joints = metrics.joints;
+        let colored = metrics.collision.colored_solver_selected;
         let (measured_jv_linear, measured_jv_angular) = joint_velocity_residuals(&world)?;
         samples.push(Sample {
             elapsed_ns,
@@ -139,6 +145,11 @@ fn run_case(
             measured_jv_angular,
             colors: joints.max_colors_per_island,
             color_batches: joints.color_batches_processed,
+            colored_selected: colored,
+            colored_groups: metrics.collision.colored_groups_dispatched,
+            colored_parallel_batches: metrics.collision.colored_parallel_batches,
+            colored_rejection: metrics.collision.colored_schedule.rejection,
+            retained_scratch_bytes: metrics.collision.retained_scratch_bytes,
         });
     }
 
@@ -161,7 +172,7 @@ fn run_case(
     });
 
     println!(
-        "fixed_chain bodies={body_count:>4} joints={:>4} solver={} executor={} workers={workers}: step_p50/p95_ms={:.3}/{:.3} prepare_p50_ms={:.3} row_prepare_p50_ms={:.3} sweeps_v/p={}/{} pcg_iters_v/p={}/{} pcg_caps_v/p={}/{} pcg_residual_max_v_mps/radps={:.3e}/{:.3e} pcg_residual_max_p_m/rad={:.3e}/{:.3e} measured_Jv_max_mps/radps={:.3e}/{:.3e} colors={} color_batches={} final_geometry_anchor_m/frame_rad={:.3e}/{:.3e}",
+        "fixed_chain bodies={body_count:>4} joints={:>4} solver={} executor={} workers={workers}: step_p50/p95_ms={:.3}/{:.3} prepare_p50_ms={:.3} row_prepare_p50_ms={:.3} sweeps_v/p={}/{} pcg_iters_v/p={}/{} pcg_caps_v/p={}/{} pcg_residual_max_v_mps/radps={:.3e}/{:.3e} pcg_residual_max_p_m/rad={:.3e}/{:.3e} measured_Jv_max_mps/radps={:.3e}/{:.3e} colors={} color_batches={} colored_selected={} colored_groups={} colored_parallel_batches={} rejection={} retained_scratch_bytes={} final_geometry_anchor_m/frame_rad={:.3e}/{:.3e}",
         body_count.saturating_sub(1),
         mode.name(),
         executor_name,
@@ -187,6 +198,11 @@ fn run_case(
             .fold(0.0_f64, |max, sample| max.max(sample.measured_jv_angular)),
         median.colors,
         median.color_batches,
+        median.colored_selected,
+        median.colored_groups,
+        median.colored_parallel_batches,
+        median.colored_rejection,
+        median.retained_scratch_bytes,
         final_geometry.0,
         final_geometry.1,
     );
