@@ -459,30 +459,70 @@ fn prepare_colored_workspace(
 
 #[test]
 fn colored_batch_layout_rebuilds_when_contact_joint_boundary_changes() {
-    let (bodies, mut contacts) = static_contact_fixture(2);
+    let (_, contacts) = static_contact_fixture(2);
+    let bodies: Vec<_> = (0..4)
+        .map(|_| {
+            let body = dynamic_body(Vec3::ZERO);
+            let state = *body.state();
+            SolverBody::from_prediction(body, state)
+        })
+        .collect();
     let mut workspace = SolverWorkspace::new();
-    let joint = fixed_joint_constraint(0, 1);
+    let joint = fixed_joint_constraint(2, 3);
 
-    prepare_colored_workspace(&mut workspace, &bodies, &contacts, &[]);
-    let first = workspace.joint_task_locations.len();
-    assert_eq!(first, 0);
+    // The global endpoint sequence is [0,1], [2,3] in every configuration.
+    // Only the contact/joint boundary changes.
+    let mut contacts_and_joint = contacts.clone();
+    prepare_colored_workspace(&mut workspace, &bodies, &contacts_and_joint, &[]);
+    assert!(workspace.joint_task_locations.is_empty());
 
-    prepare_colored_workspace(&mut workspace, &bodies, &contacts, &[joint]);
+    contacts_and_joint.pop();
+    prepare_colored_workspace(&mut workspace, &bodies, &contacts_and_joint, &[joint]);
     assert_eq!(workspace.joint_task_locations.len(), 1);
     let location = workspace.joint_task_locations[0];
-    assert!(
-        workspace.colored_batches[location[0]].tasks[location[1]].constraint_index
-            >= contacts.len()
-    );
+    let task = &workspace.colored_batches[location[0]].tasks[location[1]];
+    assert_eq!(task.constraint_index, 1);
+    assert_eq!(task.body_indices, [2, 3]);
+    assert_eq!(task.binding_positions, [2, 3]);
+    assert!(matches!(task.kind, super::ColoredConstraintKind::Joint(_)));
 
-    let moved_contact = contacts.pop().unwrap();
-    prepare_colored_workspace(&mut workspace, &bodies, &[moved_contact], &[joint]);
-    assert_eq!(workspace.joint_task_locations.len(), 1);
-    let location = workspace.joint_task_locations[0];
-    assert_eq!(
-        workspace.colored_batches[location[0]].tasks[location[1]].constraint_index,
-        1
-    );
+    let restored_contacts = contacts.clone();
+    prepare_colored_workspace(&mut workspace, &bodies, &restored_contacts, &[]);
+    assert!(workspace.joint_task_locations.is_empty());
+    let task = workspace
+        .colored_batches
+        .iter()
+        .flat_map(|batch| batch.tasks.iter())
+        .find(|task| task.constraint_index == 1)
+        .expect("contact task after boundary transition");
+    assert_eq!(task.constraint_index, 1);
+    assert_eq!(task.body_indices, [2, 3]);
+    assert_eq!(task.binding_positions, [2, 3]);
+    assert!(matches!(
+        task.kind,
+        super::ColoredConstraintKind::Contact(_)
+    ));
+
+    // Running the real contact phase after both transitions verifies that the
+    // stale task kind and binding metadata are not used.
+    let mut solver_bodies = bodies.clone();
+    let mut manifolds = restored_contacts;
+    let mut joint_workspace = JointWorkspace::new();
+    joint_workspace.begin_step();
+    workspace
+        .solve_colored_constraints(
+            &mut solver_bodies,
+            &mut manifolds,
+            &mut joint_workspace,
+            &[],
+            super::CollisionConfig::default(),
+            JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy()),
+            None,
+            &crate::execution::SequentialExecutor,
+            1,
+        )
+        .unwrap();
+    assert_eq!(manifolds.len(), 2);
 }
 
 fn solve_colored(
