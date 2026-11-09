@@ -4,7 +4,10 @@ use std::fmt;
 
 use kapitsa_math::Vec3;
 
-use crate::{transform::Transform, world::PhysicsWorld};
+use crate::{
+    transform::Transform,
+    world::{PartId, PhysicsWorld},
+};
 
 /// Local atmospheric conditions used by an aerodynamic force model.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,6 +85,21 @@ impl AerodynamicProperties {
 
     pub fn local_application_offset(self) -> Vec3 {
         self.local_application_offset
+    }
+
+    pub(crate) fn with_local_application_offset(
+        self,
+        local_application_offset: Vec3,
+    ) -> Result<Self, AerodynamicsError> {
+        let mut properties = Self::new(
+            self.reference_area,
+            self.drag_coefficient,
+            local_application_offset,
+        )?;
+        if let Some(axis) = self.local_lift_axis {
+            properties = properties.with_lift(self.lift_coefficient, axis)?;
+        }
+        Ok(properties)
     }
 
     pub fn lift_coefficient(self) -> f64 {
@@ -212,6 +230,48 @@ impl AerodynamicProperties {
             force,
             local_application_offset: self.local_application_offset,
         })
+    }
+}
+
+/// Identifies the rigid object that owns an aerodynamic surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AerodynamicTarget {
+    Body,
+    Part(PartId),
+}
+
+/// Aerodynamic properties attached to a body or one of its cluster parts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AerodynamicSurface {
+    properties: AerodynamicProperties,
+    target: AerodynamicTarget,
+}
+
+impl AerodynamicSurface {
+    pub fn new(properties: AerodynamicProperties) -> Self {
+        Self {
+            properties,
+            target: AerodynamicTarget::Body,
+        }
+    }
+
+    pub fn for_part(part: PartId, properties: AerodynamicProperties) -> Self {
+        Self {
+            properties,
+            target: AerodynamicTarget::Part(part),
+        }
+    }
+
+    pub fn properties(self) -> AerodynamicProperties {
+        self.properties
+    }
+
+    pub fn target(self) -> AerodynamicTarget {
+        self.target
+    }
+
+    pub(crate) fn with_properties(self, properties: AerodynamicProperties) -> Self {
+        Self { properties, ..self }
     }
 }
 

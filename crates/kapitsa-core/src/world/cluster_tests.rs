@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    aerodynamics::{AerodynamicProperties, AerodynamicTarget},
     cluster::{
         ClusterPart, ClusterPartDesc, RigidCluster, Weld, WeldDesc, WeldStiffness, WeldStrength,
     },
@@ -775,6 +776,12 @@ fn merge_then_split_preserves_first_cluster_root() {
         .expect("first body");
     let first_root = world.enable_cluster(first).expect("first root");
     let second_root = world.enable_cluster(second).expect("second root");
+    world
+        .add_aerodynamic_surface_for_part(
+            second_root,
+            AerodynamicProperties::new(1.0, 0.2, Vec3::Z).expect("surface"),
+        )
+        .expect("aerodynamic surface");
     let weld = WeldDesc {
         frame_a: JointFrame::IDENTITY,
         frame_b: JointFrame::IDENTITY,
@@ -786,6 +793,13 @@ fn merge_then_split_preserves_first_cluster_root() {
     };
 
     world.merge_clusters(first, second, weld).expect("merge");
+    assert!(
+        world
+            .aerodynamic_surfaces(first)
+            .unwrap()
+            .iter()
+            .any(|surface| surface.target() == AerodynamicTarget::Part(second_root))
+    );
     let bridge = world.cluster(first).expect("merged cluster").welds()[0];
     let bodies = world.break_weld(bridge).expect("split");
 
@@ -1178,6 +1192,10 @@ fn breaking_weld_splits_chain_and_rebinds_part_targets() {
     let source = world
         .add_force_source_for_part(tail, Vec3::ZERO, Vec3::X)
         .expect("force source");
+    let surface = AerodynamicProperties::new(1.0, 0.2, Vec3::new(0.0, 0.0, 1.0)).expect("surface");
+    world
+        .add_aerodynamic_surface_for_part(tail, surface)
+        .expect("aerodynamic surface");
     let external = world
         .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
         .expect("external body");
@@ -1218,6 +1236,13 @@ fn breaking_weld_splits_chain_and_rebinds_part_targets() {
             .cluster(world.part_body(tail).expect("tail body"))
             .map(RigidCluster::part_count),
         Some(1)
+    );
+    assert!(
+        world
+            .aerodynamic_surfaces(world.part_body(tail).expect("tail body"))
+            .unwrap()
+            .iter()
+            .any(|surface| surface.target() == AerodynamicTarget::Part(tail))
     );
     assert_eq!(world.validate_clusters(), Ok(()));
 }

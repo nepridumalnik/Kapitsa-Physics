@@ -6,6 +6,7 @@ use super::{
     PhysicsWorld, WeldId,
 };
 use crate::{
+    aerodynamics::AerodynamicTarget,
     cluster::{
         ClusterPart, MassChangeMode, MassTransfer, RigidCluster, Weld,
         mass::aggregate_mass,
@@ -551,6 +552,11 @@ impl PhysicsWorld {
                 .remove(weld.dense)
                 .ok_or(ClusterError::InvalidTopology)?;
         }
+        self.bodies
+            .get_mut(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .aerodynamics
+            .retain(|surface| surface.target() != AerodynamicTarget::Part(part));
         self.parts
             .remove(part.dense)
             .ok_or(ClusterError::InvalidTopology)?;
@@ -641,6 +647,8 @@ impl PhysicsWorld {
         let second_welds = second_cluster.welds().to_vec();
         let first_body = *self.body(first).ok_or(ClusterError::InvalidBodyId)?;
         let second_body = *self.body(second).ok_or(ClusterError::InvalidBodyId)?;
+        let first_aerodynamics = self.bodies.get(first.dense).unwrap().aerodynamics.clone();
+        let second_aerodynamics = self.bodies.get(second.dense).unwrap().aerodynamics.clone();
         let first_type = first_body.physics().body_type();
         if first_type != second_body.physics().body_type() {
             return Err(ClusterError::IncompatibleMotion);
@@ -957,10 +965,24 @@ impl PhysicsWorld {
         cluster.parts.extend(second_parts);
         cluster.welds.extend(second_welds);
         cluster.welds.push(bridge);
+        let mut merged_aerodynamics = Vec::new();
+        for surface in first_aerodynamics {
+            merged_aerodynamics.push(
+                PhysicsWorld::rebase_aerodynamic_surface(surface, &first_body, &prepared)
+                    .map_err(|_| ClusterError::ArithmeticOverflow)?,
+            );
+        }
+        for surface in second_aerodynamics {
+            merged_aerodynamics.push(
+                PhysicsWorld::rebase_aerodynamic_surface(surface, &second_body, &prepared)
+                    .map_err(|_| ClusterError::ArithmeticOverflow)?,
+            );
+        }
         self.bodies
             .get_mut(first.dense)
             .expect("first body must exist during merge commit")
             .body = prepared;
+        self.bodies.get_mut(first.dense).unwrap().aerodynamics = merged_aerodynamics;
         self.bodies
             .remove(second.dense)
             .expect("second body must exist during merge commit");
@@ -1037,6 +1059,7 @@ impl PhysicsWorld {
         components.swap(0, root_index);
 
         let original = *self.body(body).ok_or(ClusterError::InvalidBodyId)?;
+        let original_aerodynamics = self.bodies.get(body.dense).unwrap().aerodynamics.clone();
         let mut prepared_bodies = Vec::new();
         prepared_bodies
             .try_reserve(components.len())
@@ -1138,6 +1161,32 @@ impl PhysicsWorld {
                 dense,
             })
             .collect::<Vec<_>>();
+
+        let mut component_aerodynamics = vec![Vec::new(); components.len()];
+        for surface in original_aerodynamics {
+            match surface.target() {
+                AerodynamicTarget::Body => component_aerodynamics[0].push(
+                    PhysicsWorld::rebase_aerodynamic_surface(
+                        surface,
+                        &original,
+                        &prepared_bodies[0],
+                    )
+                    .map_err(|_| ClusterError::ArithmeticOverflow)?,
+                ),
+                AerodynamicTarget::Part(part) => {
+                    let index = components
+                        .iter()
+                        .position(|component| component.contains(&part))
+                        .ok_or(ClusterError::InvalidTopology)?;
+                    component_aerodynamics[index].push(surface);
+                }
+            }
+        }
+        self.bodies.get_mut(body.dense).unwrap().aerodynamics = component_aerodynamics[0].clone();
+        for (index, target_body) in new_bodies.iter().copied().enumerate() {
+            self.bodies.get_mut(target_body.dense).unwrap().aerodynamics =
+                component_aerodynamics[index + 1].clone();
+        }
 
         for &weld in removed_welds {
             self.welds

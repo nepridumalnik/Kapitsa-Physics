@@ -41,7 +41,9 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 
 use crate::{
     aabb::Aabb,
-    aerodynamics::{AerodynamicProperties, AtmosphericState},
+    aerodynamics::{
+        AerodynamicProperties, AerodynamicSurface, AerodynamicTarget, AtmosphericState,
+    },
     cluster::{ClusterPart, RigidCluster, Weld},
     collider::Collider,
     collision::{
@@ -59,7 +61,7 @@ use crate::{
 
 struct BodyEntry {
     body: RigidBody,
-    aerodynamics: Vec<AerodynamicProperties>,
+    aerodynamics: Vec<AerodynamicSurface>,
     first_collider: Option<ColliderId>,
     cluster: Option<RigidCluster>,
 }
@@ -307,9 +309,12 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return None;
         }
-        self.bodies
-            .get(id.dense)
-            .and_then(|entry| entry.aerodynamics.first().copied())
+        self.bodies.get(id.dense).and_then(|entry| {
+            entry
+                .aerodynamics
+                .first()
+                .map(|surface| surface.properties())
+        })
     }
 
     pub fn set_aerodynamics(
@@ -323,11 +328,14 @@ impl PhysicsWorld {
         self.bodies
             .get_mut(id.dense)
             .ok_or(WorldError::InvalidBodyId)?
-            .aerodynamics = properties.into_iter().collect();
+            .aerodynamics = properties
+            .into_iter()
+            .map(AerodynamicSurface::new)
+            .collect();
         Ok(())
     }
 
-    pub fn aerodynamic_surfaces(&self, id: BodyId) -> Option<&[AerodynamicProperties]> {
+    pub fn aerodynamic_surfaces(&self, id: BodyId) -> Option<&[AerodynamicSurface]> {
         if id.world != self.world_id {
             return None;
         }
@@ -352,7 +360,7 @@ impl PhysicsWorld {
         surfaces
             .try_reserve(1)
             .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
-        surfaces.push(properties);
+        surfaces.push(AerodynamicSurface::new(properties));
         Ok(surfaces.len() - 1)
     }
 
@@ -372,7 +380,68 @@ impl PhysicsWorld {
         if index >= surfaces.len() {
             return Err(WorldError::InvalidAerodynamicSurface);
         }
-        Ok(surfaces.remove(index))
+        Ok(surfaces.remove(index).properties())
+    }
+
+    pub fn add_aerodynamic_surface_for_part(
+        &mut self,
+        part: PartId,
+        properties: AerodynamicProperties,
+    ) -> Result<usize, WorldError> {
+        let part_entry = self.cluster_part(part).ok_or(WorldError::InvalidBodyId)?;
+        let body = part_entry.body();
+        let surfaces = &mut self
+            .bodies
+            .get_mut(body.dense)
+            .ok_or(WorldError::InvalidBodyId)?
+            .aerodynamics;
+        surfaces
+            .try_reserve(1)
+            .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
+        surfaces.push(AerodynamicSurface::for_part(part, properties));
+        Ok(surfaces.len() - 1)
+    }
+
+    pub(crate) fn rebase_aerodynamic_surface(
+        surface: AerodynamicSurface,
+        old_body: &RigidBody,
+        new_body: &RigidBody,
+    ) -> Result<AerodynamicSurface, crate::aerodynamics::AerodynamicsError> {
+        if !matches!(surface.target(), AerodynamicTarget::Body) {
+            return Ok(surface);
+        }
+        let old_center = old_body
+            .world_center_of_mass()
+            .map_err(|_| crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?
+            .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+        let new_center = new_body
+            .world_center_of_mass()
+            .map_err(|_| crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?
+            .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+        let world_point = old_center
+            .checked_add(
+                old_body
+                    .state()
+                    .transform()
+                    .transform_vector(surface.properties().local_application_offset()),
+            )
+            .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+        let inverse_rotation = new_body
+            .state()
+            .transform()
+            .rotation()
+            .conjugate()
+            .rotate_vector(
+                world_point
+                    .checked_sub(new_center)
+                    .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?,
+            )
+            .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+        Ok(surface.with_properties(
+            surface
+                .properties()
+                .with_local_application_offset(inverse_rotation)?,
+        ))
     }
 
     /// Adds an independently managed gravity field.
@@ -1355,16 +1424,30 @@ impl PhysicsWorld {
 
     fn apply_aerodynamics(
         atmosphere: AtmosphericState,
-        properties: &[AerodynamicProperties],
+        surfaces: &[AerodynamicSurface],
         body_id: BodyId,
         body: &mut RigidBody,
+        parts: &DensePool<ClusterPart>,
         dt: Option<f64>,
     ) -> Result<(), StepError> {
-        for &properties in properties {
+        for surface in surfaces {
+            let properties = surface.properties();
+            let target_transform = match surface.target() {
+                AerodynamicTarget::Body => body.state().transform(),
+                AerodynamicTarget::Part(part) => parts
+                    .get(part.dense)
+                    .and_then(|entry| {
+                        body.state()
+                            .transform()
+                            .compose(&entry.local_transform())
+                            .ok()
+                    })
+                    .unwrap_or(body.state().transform()),
+            };
             let force = properties
                 .drag_force(
                     atmosphere,
-                    body.state().transform(),
+                    target_transform,
                     body.state().linear_velocity(),
                     body.state().angular_velocity(),
                 )
@@ -1382,11 +1465,23 @@ impl PhysicsWorld {
                     body_id,
                     cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
                 })?;
-            let offset = body
-                .state()
-                .transform()
-                .transform_vector(force.local_application_offset());
-            let point = center.checked_add(offset).ok_or(StepError::Aerodynamics {
+            let point = match surface.target() {
+                AerodynamicTarget::Body => center.checked_add(
+                    body.state()
+                        .transform()
+                        .transform_vector(force.local_application_offset()),
+                ),
+                AerodynamicTarget::Part(part) => parts.get(part.dense).and_then(|entry| {
+                    entry
+                        .local_transform()
+                        .compose(&body.state().transform())
+                        .ok()
+                        .map(|transform| {
+                            transform.transform_point(force.local_application_offset())
+                        })
+                }),
+            }
+            .ok_or(StepError::Aerodynamics {
                 body_id,
                 cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
             })?;
@@ -1473,6 +1568,7 @@ impl PhysicsWorld {
                                     &entry.aerodynamics,
                                     update.id,
                                     &mut update.prepared,
+                                    &self.parts,
                                     Some(dt),
                                 )
                             })
@@ -2662,6 +2758,7 @@ impl PhysicsWorld {
                                 properties,
                                 step.body_id,
                                 &mut step.prepared,
+                                &self.parts,
                                 dt,
                             )
                             .err();
