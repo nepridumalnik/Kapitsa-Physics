@@ -288,6 +288,8 @@ pub(crate) struct SolverWorkspace {
     color_batch_offsets: Vec<usize>,
     joint_task_locations: Vec<[usize; 2]>,
     active_colored_batches: usize,
+    colored_batch_manifold_count: usize,
+    colored_batch_joint_count: usize,
     #[cfg(feature = "bench-internals")]
     colored_schedule: super::ColoredScheduleMetrics,
     #[cfg(feature = "bench-internals")]
@@ -564,6 +566,8 @@ impl SolverWorkspace {
             color_batch_offsets: Vec::new(),
             joint_task_locations: Vec::new(),
             active_colored_batches: 0,
+            colored_batch_manifold_count: 0,
+            colored_batch_joint_count: 0,
             #[cfg(feature = "bench-internals")]
             colored_schedule: super::ColoredScheduleMetrics {
                 rejection: "not-evaluated",
@@ -1122,8 +1126,13 @@ impl SolverWorkspace {
         joints: &[JointConstraint],
         graph_rebuilt: bool,
     ) -> Result<(), CollisionError> {
-        let rebuild_batches = graph_rebuilt || self.active_colored_batches == 0;
+        let rebuild_batches = graph_rebuilt
+            || self.active_colored_batches == 0
+            || self.colored_batch_manifold_count != manifolds.len()
+            || self.colored_batch_joint_count != joints.len();
         if rebuild_batches {
+            self.colored_batch_manifold_count = manifolds.len();
+            self.colored_batch_joint_count = joints.len();
             let group_count = self.constraint_coloring.schedule_group_count();
             if self.color_batch_offsets.capacity() < group_count + 1 {
                 self.color_batch_offsets

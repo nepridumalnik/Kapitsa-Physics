@@ -457,6 +457,34 @@ fn prepare_colored_workspace(
         .unwrap();
 }
 
+#[test]
+fn colored_batch_layout_rebuilds_when_contact_joint_boundary_changes() {
+    let (bodies, mut contacts) = static_contact_fixture(2);
+    let mut workspace = SolverWorkspace::new();
+    let joint = fixed_joint_constraint(0, 1);
+
+    prepare_colored_workspace(&mut workspace, &bodies, &contacts, &[]);
+    let first = workspace.joint_task_locations.len();
+    assert_eq!(first, 0);
+
+    prepare_colored_workspace(&mut workspace, &bodies, &contacts, &[joint]);
+    assert_eq!(workspace.joint_task_locations.len(), 1);
+    let location = workspace.joint_task_locations[0];
+    assert!(
+        workspace.colored_batches[location[0]].tasks[location[1]].constraint_index
+            >= contacts.len()
+    );
+
+    let moved_contact = contacts.pop().unwrap();
+    prepare_colored_workspace(&mut workspace, &bodies, &[moved_contact], &[joint]);
+    assert_eq!(workspace.joint_task_locations.len(), 1);
+    let location = workspace.joint_task_locations[0];
+    assert_eq!(
+        workspace.colored_batches[location[0]].tasks[location[1]].constraint_index,
+        1
+    );
+}
+
 fn solve_colored(
     bodies: &mut [SolverBody],
     manifolds: &mut [SolverManifold],

@@ -117,6 +117,7 @@ impl ConstraintColoring {
             + self.colored_constraints.capacity() * size_of::<usize>()
             + self.color_body_offsets.capacity() * size_of::<usize>()
             + self.color_bodies.capacity() * size_of::<usize>()
+            + self.constraint_body_positions.capacity() * size_of::<[usize; 2]>()
     }
 
     fn rebuild(&mut self) -> Result<(), CollisionError> {
