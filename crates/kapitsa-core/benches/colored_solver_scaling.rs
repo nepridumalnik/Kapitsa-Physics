@@ -43,6 +43,10 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         world.step_with_executor(DT, &executor, workers)?;
     }
     let mut times = Vec::with_capacity(SAMPLES);
+    let mut binding_times = Vec::with_capacity(SAMPLES);
+    let mut executor_times = Vec::with_capacity(SAMPLES);
+    let mut processing_times = Vec::with_capacity(SAMPLES);
+    let mut outside_times = Vec::with_capacity(SAMPLES);
     let mut rebuild_steps = 0;
     let mut cache_hit_steps = 0;
     for sample in 0..SAMPLES {
@@ -54,6 +58,10 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         world.step_with_executor(DT, &executor, workers)?;
         times.push(started.elapsed().as_nanos());
         let metrics = world.collision_step_metrics();
+        binding_times.push(metrics.colored_binding.as_nanos());
+        executor_times.push(metrics.colored_executor_wall.as_nanos());
+        processing_times.push(metrics.colored_processing_sum.as_nanos());
+        outside_times.push(metrics.colored_outside_callbacks.as_nanos());
         if !metrics.colored_solver_selected
             || metrics.colored_groups_dispatched == 0
             || metrics.colored_parallel_batches == 0
@@ -104,10 +112,25 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         }
     }
     times.sort_unstable();
+    binding_times.sort_unstable();
+    executor_times.sort_unstable();
+    processing_times.sort_unstable();
+    outside_times.sort_unstable();
     println!(
         "result mode={mode} requested={count} workers={workers} topology=unverified rebuild_steps={rebuild_steps} cache_hit_steps={cache_hit_steps} p50_ms={:.3} p95_ms={:.3}",
         nanos_to_ms(times[SAMPLES / 2]),
         nanos_to_ms(times[p95_index(SAMPLES)]),
+    );
+    println!(
+        "timing_result mode={mode} workers={workers} binding_p50_p95_ms={:.3}/{:.3} executor_wall_p50_p95_ms={:.3}/{:.3} processing_sum_p50_p95_ms={:.3}/{:.3} outside_callbacks_p50_p95_ms={:.3}/{:.3}",
+        nanos_to_ms(binding_times[SAMPLES / 2]),
+        nanos_to_ms(binding_times[p95_index(SAMPLES)]),
+        nanos_to_ms(executor_times[SAMPLES / 2]),
+        nanos_to_ms(executor_times[p95_index(SAMPLES)]),
+        nanos_to_ms(processing_times[SAMPLES / 2]),
+        nanos_to_ms(processing_times[p95_index(SAMPLES)]),
+        nanos_to_ms(outside_times[SAMPLES / 2]),
+        nanos_to_ms(outside_times[p95_index(SAMPLES)]),
     );
     Ok(())
 }
