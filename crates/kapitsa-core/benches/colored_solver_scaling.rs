@@ -270,11 +270,20 @@ fn run_sequential(count: usize, mode: &str) -> Result<(), Box<dyn Error>> {
     for _ in 0..WARMUPS {
         world.step_with_executor(DT, &SequentialExecutor, 1)?;
     }
-    let started = Instant::now();
-    world.step_with_executor(DT, &SequentialExecutor, 1)?;
+    let mut times = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES {
+        if sample % 5 == 0 {
+            world.step_with_executor(DT, &SequentialExecutor, 1)?;
+        }
+        let started = Instant::now();
+        world.step_with_executor(DT, &SequentialExecutor, 1)?;
+        times.push(started.elapsed().as_nanos());
+    }
+    times.sort_unstable();
     println!(
-        "sequential mode={mode} constraints={count} step_ms={:.3}",
-        nanos_to_ms(started.elapsed().as_nanos())
+        "sequential mode={mode} requested={count} p50_ms={:.3} p95_ms={:.3}",
+        nanos_to_ms(times[SAMPLES / 2]),
+        nanos_to_ms(times[p95_index(SAMPLES)])
     );
     Ok(())
 }
