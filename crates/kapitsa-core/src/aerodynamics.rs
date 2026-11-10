@@ -102,6 +102,12 @@ impl AerodynamicProperties {
         Ok(properties)
     }
 
+    pub(crate) fn without_lift(mut self) -> Self {
+        self.lift_coefficient = 0.0;
+        self.local_lift_axis = None;
+        self
+    }
+
     pub fn lift_coefficient(self) -> f64 {
         self.lift_coefficient
     }

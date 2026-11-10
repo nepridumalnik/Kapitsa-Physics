@@ -12,7 +12,7 @@ use crate::{
     transform::Transform,
     world::{ForceSource, ForceTarget, JointTarget},
 };
-use kapitsa_math::{Mat3, Vec3};
+use kapitsa_math::{Mat3, Quat, Vec3};
 
 fn part(world: &mut PhysicsWorld, body: BodyId) -> PartId {
     let mass = match MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY) {
@@ -56,6 +56,142 @@ fn weld(world: &mut PhysicsWorld, a: PartId, b: PartId) -> WeldId {
         world: world.world_id,
         dense,
     }
+}
+
+#[test]
+fn rotated_cluster_surface_uses_part_position_for_velocity_and_torque() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let rotation = Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_2).unwrap();
+    let pose = Transform::new(Vec3::X * 5.0, rotation).unwrap();
+    let mut rigid_body = RigidBody::new_dynamic(pose, mass).unwrap();
+    rigid_body.set_angular_velocity(Vec3::Z).unwrap();
+    let body = world.add_body(rigid_body).unwrap();
+    let root = world.enable_cluster(body).unwrap();
+    world.parts.get_mut(root.dense).unwrap().local_transform =
+        Transform::new(Vec3::X * 2.0, Quat::IDENTITY).unwrap();
+    world
+        .add_aerodynamic_surface_for_part(
+            root,
+            AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO).unwrap(),
+        )
+        .unwrap();
+    world.set_atmosphere(Some(
+        crate::aerodynamics::AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+    ));
+    world.step(0.01).unwrap();
+    let state = world.body(body).unwrap().state();
+    assert!(state.linear_velocity().x > 0.0);
+    assert!(state.angular_velocity().z < 1.0);
+}
+
+#[test]
+fn rebasing_preserves_world_lift_axis() {
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let rotation = Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_2).unwrap();
+    let old = RigidBody::new_dynamic(Transform::new(Vec3::ZERO, rotation).unwrap(), mass).unwrap();
+    let new = RigidBody::new_dynamic(Transform::identity(), mass).unwrap();
+    let properties = AerodynamicProperties::new(1.0, 0.1, Vec3::ZERO)
+        .unwrap()
+        .with_lift(0.7, Vec3::Y)
+        .unwrap();
+    let surface = crate::aerodynamics::AerodynamicSurface::new(properties);
+    let rebased = PhysicsWorld::rebase_aerodynamic_surface(surface, &old, &new).unwrap();
+    let expected = old.state().transform().transform_vector(Vec3::Y);
+    let actual = new
+        .state()
+        .transform()
+        .transform_vector(rebased.properties().local_lift_axis().unwrap());
+    assert!((expected - actual).length() < 1e-12);
+}
+
+#[test]
+fn merge_rebase_overflow_preserves_topology() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let pose = Transform::new(Vec3::X * (f64::MAX * 0.5), Quat::IDENTITY).unwrap();
+    let first = world
+        .add_body(RigidBody::new_dynamic(pose, mass).unwrap())
+        .unwrap();
+    let second = world
+        .add_body(RigidBody::new_dynamic(pose, mass).unwrap())
+        .unwrap();
+    let first_root = world.enable_cluster(first).unwrap();
+    let second_root = world.enable_cluster(second).unwrap();
+    let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::X * f64::MAX).unwrap();
+    world.set_aerodynamics(first, Some(properties)).unwrap();
+    let first_before = *world.body(first).unwrap();
+    let second_before = *world.body(second).unwrap();
+    let desc = WeldDesc {
+        frame_a: JointFrame::IDENTITY,
+        frame_b: JointFrame::IDENTITY,
+        strength: WeldStrength::Unbreakable,
+        stiffness: WeldStiffness {
+            linear: 1.0,
+            angular: 1.0,
+        },
+    };
+    assert_eq!(
+        world.merge_clusters(first, second, desc),
+        Err(ClusterError::ArithmeticOverflow)
+    );
+    assert_eq!(world.body_count(), 2);
+    assert_eq!(*world.body(first).unwrap(), first_before);
+    assert_eq!(*world.body(second).unwrap(), second_before);
+    assert_eq!(world.part_body(first_root), Some(first));
+    assert_eq!(world.part_body(second_root), Some(second));
+    assert!(world.cluster(first).unwrap().welds().is_empty());
+    assert!(world.cluster(second).unwrap().welds().is_empty());
+    assert_eq!(world.aerodynamics(first), Some(properties));
+    assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
+fn split_rebase_overflow_preserves_topology() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let pose = Transform::new(Vec3::X * (f64::MAX * 0.5), Quat::IDENTITY).unwrap();
+    let body = world
+        .add_body(RigidBody::new_dynamic(pose, mass).unwrap())
+        .unwrap();
+    let root = world.enable_cluster(body).unwrap();
+    let desc = WeldDesc {
+        frame_a: JointFrame::IDENTITY,
+        frame_b: JointFrame::IDENTITY,
+        strength: WeldStrength::Unbreakable,
+        stiffness: WeldStiffness {
+            linear: 1.0,
+            angular: 1.0,
+        },
+    };
+    let child = world
+        .add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            desc,
+        )
+        .unwrap();
+    let bridge = world.cluster(body).unwrap().welds()[0];
+    let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::X * f64::MAX).unwrap();
+    world.set_aerodynamics(body, Some(properties)).unwrap();
+    let before = *world.body(body).unwrap();
+    assert_eq!(
+        world.break_weld(bridge),
+        Err(ClusterError::ArithmeticOverflow)
+    );
+    assert_eq!(world.body_count(), 1);
+    assert_eq!(*world.body(body).unwrap(), before);
+    assert_eq!(world.part_body(root), Some(body));
+    assert_eq!(world.part_body(child), Some(body));
+    assert_eq!(world.cluster(body).unwrap().welds(), &[bridge]);
+    assert_eq!(world.aerodynamics(body), Some(properties));
+    assert_eq!(world.validate_clusters(), Ok(()));
 }
 
 #[test]

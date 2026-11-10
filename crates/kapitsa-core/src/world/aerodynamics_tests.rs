@@ -159,3 +159,84 @@ fn failed_step_restores_body_after_aerodynamics_and_gravity_preparation() {
     assert!(world.step(0.1).is_err());
     assert_eq!(*world.body(body_id).unwrap(), before);
 }
+
+#[test]
+fn wind_accelerates_a_stationary_body() {
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let mut world = PhysicsWorld::new();
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).unwrap())
+        .unwrap();
+    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::X * 10.0).unwrap()));
+    world
+        .set_aerodynamics(
+            body,
+            Some(AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO).unwrap()),
+        )
+        .unwrap();
+    world.step(0.5).unwrap();
+    let velocity = world.body(body).unwrap().state().linear_velocity().x;
+    assert!(velocity > 0.0 && velocity <= 10.0);
+}
+
+#[test]
+fn rotating_body_experiences_drag_at_an_offset() {
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let mut rigid_body = RigidBody::new_dynamic(Transform::identity(), mass).unwrap();
+    rigid_body.set_angular_velocity(Vec3::Z).unwrap();
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(rigid_body).unwrap();
+    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    world
+        .set_aerodynamics(
+            body,
+            Some(AerodynamicProperties::new(1.0, 1.0, Vec3::X).unwrap()),
+        )
+        .unwrap();
+    world.step(0.1).unwrap();
+    assert!(world.body(body).unwrap().state().angular_velocity().z < 1.0);
+}
+
+#[test]
+fn many_surfaces_cannot_reverse_motion_under_large_drag() {
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let mut rigid_body = RigidBody::new_dynamic(Transform::identity(), mass).unwrap();
+    rigid_body.set_linear_velocity(Vec3::X * 10.0).unwrap();
+    let mut world = PhysicsWorld::new();
+    let body = world.add_body(rigid_body).unwrap();
+    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    for _ in 0..3 {
+        world
+            .add_aerodynamic_surface(
+                body,
+                AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO).unwrap(),
+            )
+            .unwrap();
+    }
+    world.step(0.5).unwrap();
+    let velocity = world.body(body).unwrap().state().linear_velocity().x;
+    assert!((-1e-12..=10.0).contains(&velocity));
+}
+
+#[test]
+fn changing_body_aerodynamics_preserves_part_surfaces() {
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let mut world = PhysicsWorld::new();
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).unwrap())
+        .unwrap();
+    let part = world.enable_cluster(body).unwrap();
+    let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO).unwrap();
+    world
+        .add_aerodynamic_surface_for_part(part, properties)
+        .unwrap();
+    world.set_aerodynamics(body, Some(properties)).unwrap();
+    assert_eq!(world.aerodynamic_surfaces(body).unwrap().len(), 2);
+    world.set_aerodynamics(body, None).unwrap();
+    let surfaces = world.aerodynamic_surfaces(body).unwrap();
+    assert_eq!(surfaces.len(), 1);
+    assert_eq!(
+        surfaces[0].target(),
+        crate::aerodynamics::AerodynamicTarget::Part(part)
+    );
+}

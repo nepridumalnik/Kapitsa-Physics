@@ -312,7 +312,8 @@ impl PhysicsWorld {
         self.bodies.get(id.dense).and_then(|entry| {
             entry
                 .aerodynamics
-                .first()
+                .iter()
+                .find(|surface| surface.target() == AerodynamicTarget::Body)
                 .map(|surface| surface.properties())
         })
     }
@@ -325,13 +326,24 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return Err(WorldError::InvalidBodyId);
         }
-        self.bodies
+        let surfaces = &mut self
+            .bodies
             .get_mut(id.dense)
             .ok_or(WorldError::InvalidBodyId)?
-            .aerodynamics = properties
-            .into_iter()
-            .map(AerodynamicSurface::new)
-            .collect();
+            .aerodynamics;
+        if properties.is_some()
+            && !surfaces
+                .iter()
+                .any(|surface| surface.target() == AerodynamicTarget::Body)
+        {
+            surfaces
+                .try_reserve(1)
+                .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
+        }
+        surfaces.retain(|surface| surface.target() != AerodynamicTarget::Body);
+        if let Some(properties) = properties {
+            surfaces.push(AerodynamicSurface::new(properties));
+        }
         Ok(())
     }
 
@@ -437,11 +449,27 @@ impl PhysicsWorld {
                     .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?,
             )
             .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
-        Ok(surface.with_properties(
-            surface
-                .properties()
-                .with_local_application_offset(inverse_rotation)?,
-        ))
+        let mut properties = surface
+            .properties()
+            .with_local_application_offset(inverse_rotation)?;
+        if let Some(axis) = surface.properties().local_lift_axis() {
+            let world_axis = old_body
+                .state()
+                .transform()
+                .rotation()
+                .rotate_vector(axis)
+                .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+            let local_axis = new_body
+                .state()
+                .transform()
+                .rotation()
+                .conjugate()
+                .rotate_vector(world_axis)
+                .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+            properties =
+                properties.with_lift(surface.properties().lift_coefficient(), local_axis)?;
+        }
+        Ok(surface.with_properties(properties))
     }
 
     /// Adds an independently managed gravity field.
@@ -1430,85 +1458,119 @@ impl PhysicsWorld {
         parts: &DensePool<ClusterPart>,
         dt: Option<f64>,
     ) -> Result<(), StepError> {
+        if body.physics().body_type() != BodyType::Dynamic {
+            return Ok(());
+        }
+        let error = || StepError::Aerodynamics {
+            body_id,
+            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+        };
+        let center = body
+            .world_center_of_mass()
+            .map_err(|_| error())?
+            .ok_or_else(error)?;
+        let mut drag = Vec3::ZERO;
+        let mut drag_torque = Vec3::ZERO;
         for surface in surfaces {
             let properties = surface.properties();
             let target_transform = match surface.target() {
                 AerodynamicTarget::Body => body.state().transform(),
                 AerodynamicTarget::Part(part) => parts
                     .get(part.dense)
+                    .filter(|entry| part.world == body_id.world && entry.body() == body_id)
                     .and_then(|entry| {
                         body.state()
                             .transform()
                             .compose(&entry.local_transform())
                             .ok()
                     })
-                    .unwrap_or(body.state().transform()),
+                    .ok_or_else(error)?,
             };
-            let force = properties
-                .drag_force(
-                    atmosphere,
-                    target_transform,
-                    body.state().linear_velocity(),
-                    body.state().angular_velocity(),
-                )
-                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
-            if force.force() == Vec3::ZERO {
-                continue;
-            }
-            let center = body
-                .world_center_of_mass()
-                .map_err(|_| StepError::Aerodynamics {
-                    body_id,
-                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                })?
-                .ok_or(StepError::Aerodynamics {
-                    body_id,
-                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                })?;
             let point = match surface.target() {
                 AerodynamicTarget::Body => center.checked_add(
-                    body.state()
-                        .transform()
-                        .transform_vector(force.local_application_offset()),
+                    target_transform.transform_vector(properties.local_application_offset()),
                 ),
-                AerodynamicTarget::Part(part) => parts.get(part.dense).and_then(|entry| {
-                    entry
-                        .local_transform()
-                        .compose(&body.state().transform())
-                        .ok()
-                        .map(|transform| {
-                            transform.transform_point(force.local_application_offset())
-                        })
-                }),
-            }
-            .ok_or(StepError::Aerodynamics {
-                body_id,
-                cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-            })?;
-            let mut applied_force = force.force();
-            if let Some(dt) = dt {
-                let mass = body.physics().mass().ok_or(StepError::Aerodynamics {
-                    body_id,
-                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                })?;
-                let speed = body.state().linear_velocity().length();
-                let maximum_force = mass.mass() * speed / dt;
-                if maximum_force.is_finite() && applied_force.length() > maximum_force {
-                    applied_force = applied_force
-                        .try_normalize()
-                        .and_then(|direction| direction.checked_mul_scalar(maximum_force))
-                        .ok_or(StepError::Aerodynamics {
-                            body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                        })?;
+                AerodynamicTarget::Part(_) => {
+                    Some(target_transform.transform_point(properties.local_application_offset()))
                 }
             }
-            body.apply_force_at_point(applied_force, point)
-                .map_err(|_| StepError::Aerodynamics {
-                    body_id,
-                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                })?;
+            .filter(|point| point.is_finite())
+            .ok_or_else(error)?;
+            let offset = point.checked_sub(center).ok_or_else(error)?;
+            let point_velocity = body
+                .state()
+                .angular_velocity()
+                .checked_cross(offset)
+                .and_then(|velocity| velocity.checked_add(body.state().linear_velocity()))
+                .ok_or_else(error)?;
+            let point_properties = properties
+                .with_local_application_offset(Vec3::ZERO)
+                .map_err(|_| error())?;
+            let force = point_properties
+                .drag_force(atmosphere, target_transform, point_velocity, Vec3::ZERO)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            let surface_drag = point_properties
+                .without_lift()
+                .drag_force(atmosphere, target_transform, point_velocity, Vec3::ZERO)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?
+                .force();
+            let lift = force.force().checked_sub(surface_drag).ok_or_else(error)?;
+            drag = drag.checked_add(surface_drag).ok_or_else(error)?;
+            drag_torque = offset
+                .checked_cross(surface_drag)
+                .and_then(|torque| drag_torque.checked_add(torque))
+                .ok_or_else(error)?;
+            body.apply_force_at_point(lift, point)
+                .map_err(|_| error())?;
         }
+        let mut scale = 1.0_f64;
+        if let Some(dt) = dt {
+            let mass = body.physics().mass().ok_or_else(error)?;
+            let rotation = body.state().transform().rotation();
+            let local_torque = rotation
+                .conjugate()
+                .rotate_vector(drag_torque)
+                .ok_or_else(error)?;
+            let local_angular_acceleration = mass
+                .inertia()
+                .solve_spd(local_torque)
+                .map_err(|_| error())?;
+            let angular_acceleration = rotation
+                .rotate_vector(local_angular_acceleration)
+                .ok_or_else(error)?;
+            let relative_velocity = body
+                .state()
+                .linear_velocity()
+                .checked_sub(atmosphere.wind_velocity())
+                .ok_or_else(error)?;
+            let power = relative_velocity
+                .checked_dot(drag)
+                .and_then(|linear| {
+                    body.state()
+                        .angular_velocity()
+                        .checked_dot(drag_torque)
+                        .map(|angular| linear + angular)
+                })
+                .ok_or_else(error)?;
+            let curvature = drag
+                .checked_dot(drag)
+                .and_then(|linear| {
+                    drag_torque
+                        .checked_dot(angular_acceleration)
+                        .map(|angular| linear / mass.mass() + angular)
+                })
+                .ok_or_else(error)?;
+            if !power.is_finite() || !curvature.is_finite() {
+                return Err(error());
+            }
+            if curvature > 0.0 {
+                scale = (-power / dt / curvature).clamp(0.0, 1.0);
+            }
+        }
+        body.apply_force(drag.checked_mul_scalar(scale).ok_or_else(error)?)
+            .map_err(|_| error())?;
+        body.apply_torque(drag_torque.checked_mul_scalar(scale).ok_or_else(error)?)
+            .map_err(|_| error())?;
         Ok(())
     }
 

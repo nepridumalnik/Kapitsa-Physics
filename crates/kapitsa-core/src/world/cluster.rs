@@ -647,8 +647,6 @@ impl PhysicsWorld {
         let second_welds = second_cluster.welds().to_vec();
         let first_body = *self.body(first).ok_or(ClusterError::InvalidBodyId)?;
         let second_body = *self.body(second).ok_or(ClusterError::InvalidBodyId)?;
-        let first_aerodynamics = self.bodies.get(first.dense).unwrap().aerodynamics.clone();
-        let second_aerodynamics = self.bodies.get(second.dense).unwrap().aerodynamics.clone();
         let first_type = first_body.physics().body_type();
         if first_type != second_body.physics().body_type() {
             return Err(ClusterError::IncompatibleMotion);
@@ -885,6 +883,29 @@ impl PhysicsWorld {
             joint_updates.push((dense, target_a_moves, target_b_moves, frame_a, frame_b));
         }
 
+        let first_aerodynamics = &self.bodies.get(first.dense).unwrap().aerodynamics;
+        let second_aerodynamics = &self.bodies.get(second.dense).unwrap().aerodynamics;
+        let mut merged_aerodynamics = Vec::new();
+        merged_aerodynamics
+            .try_reserve(
+                first_aerodynamics
+                    .len()
+                    .saturating_add(second_aerodynamics.len()),
+            )
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for &surface in first_aerodynamics {
+            merged_aerodynamics.push(
+                PhysicsWorld::rebase_aerodynamic_surface(surface, &first_body, &prepared)
+                    .map_err(|_| ClusterError::ArithmeticOverflow)?,
+            );
+        }
+        for &surface in second_aerodynamics {
+            merged_aerodynamics.push(
+                PhysicsWorld::rebase_aerodynamic_surface(surface, &second_body, &prepared)
+                    .map_err(|_| ClusterError::ArithmeticOverflow)?,
+            );
+        }
+
         self.welds
             .try_reserve_insertions(1)
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
@@ -965,19 +986,6 @@ impl PhysicsWorld {
         cluster.parts.extend(second_parts);
         cluster.welds.extend(second_welds);
         cluster.welds.push(bridge);
-        let mut merged_aerodynamics = Vec::new();
-        for surface in first_aerodynamics {
-            merged_aerodynamics.push(
-                PhysicsWorld::rebase_aerodynamic_surface(surface, &first_body, &prepared)
-                    .map_err(|_| ClusterError::ArithmeticOverflow)?,
-            );
-        }
-        for surface in second_aerodynamics {
-            merged_aerodynamics.push(
-                PhysicsWorld::rebase_aerodynamic_surface(surface, &second_body, &prepared)
-                    .map_err(|_| ClusterError::ArithmeticOverflow)?,
-            );
-        }
         self.bodies
             .get_mut(first.dense)
             .expect("first body must exist during merge commit")
@@ -1059,7 +1067,6 @@ impl PhysicsWorld {
         components.swap(0, root_index);
 
         let original = *self.body(body).ok_or(ClusterError::InvalidBodyId)?;
-        let original_aerodynamics = self.bodies.get(body.dense).unwrap().aerodynamics.clone();
         let mut prepared_bodies = Vec::new();
         prepared_bodies
             .try_reserve(components.len())
@@ -1140,13 +1147,50 @@ impl PhysicsWorld {
             }
         }
 
+        let mut part_components = HashMap::new();
+        part_components
+            .try_reserve(cluster.parts().len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for (index, component) in components.iter().enumerate() {
+            for &part in component {
+                part_components.insert(part, index);
+            }
+        }
+        let original_aerodynamics = &self.bodies.get(body.dense).unwrap().aerodynamics;
+        let mut component_aerodynamics = vec![Vec::new(); components.len()];
+        for &surface in original_aerodynamics {
+            let (index, surface) = match surface.target() {
+                AerodynamicTarget::Body => (
+                    0,
+                    PhysicsWorld::rebase_aerodynamic_surface(
+                        surface,
+                        &original,
+                        &prepared_bodies[0],
+                    )
+                    .map_err(|_| ClusterError::ArithmeticOverflow)?,
+                ),
+                AerodynamicTarget::Part(part) => (
+                    *part_components
+                        .get(&part)
+                        .ok_or(ClusterError::InvalidTopology)?,
+                    surface,
+                ),
+            };
+            component_aerodynamics[index]
+                .try_reserve(1)
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+            component_aerodynamics[index].push(surface);
+        }
+        let mut component_aerodynamics = component_aerodynamics.into_iter();
+        let root_aerodynamics = component_aerodynamics.next().unwrap();
         let entries = prepared_bodies
             .iter()
             .skip(1)
             .copied()
-            .map(|body| BodyEntry {
+            .zip(component_aerodynamics)
+            .map(|(body, aerodynamics)| BodyEntry {
                 body,
-                aerodynamics: Vec::new(),
+                aerodynamics,
                 first_collider: None,
                 cluster: None,
             })
@@ -1161,32 +1205,7 @@ impl PhysicsWorld {
                 dense,
             })
             .collect::<Vec<_>>();
-
-        let mut component_aerodynamics = vec![Vec::new(); components.len()];
-        for surface in original_aerodynamics {
-            match surface.target() {
-                AerodynamicTarget::Body => component_aerodynamics[0].push(
-                    PhysicsWorld::rebase_aerodynamic_surface(
-                        surface,
-                        &original,
-                        &prepared_bodies[0],
-                    )
-                    .map_err(|_| ClusterError::ArithmeticOverflow)?,
-                ),
-                AerodynamicTarget::Part(part) => {
-                    let index = components
-                        .iter()
-                        .position(|component| component.contains(&part))
-                        .ok_or(ClusterError::InvalidTopology)?;
-                    component_aerodynamics[index].push(surface);
-                }
-            }
-        }
-        self.bodies.get_mut(body.dense).unwrap().aerodynamics = component_aerodynamics[0].clone();
-        for (index, target_body) in new_bodies.iter().copied().enumerate() {
-            self.bodies.get_mut(target_body.dense).unwrap().aerodynamics =
-                component_aerodynamics[index + 1].clone();
-        }
+        self.bodies.get_mut(body.dense).unwrap().aerodynamics = root_aerodynamics;
 
         for &weld in removed_welds {
             self.welds
