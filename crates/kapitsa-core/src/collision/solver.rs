@@ -298,19 +298,19 @@ pub(crate) struct SolverWorkspace {
     colored_groups_dispatched: usize,
     #[cfg(feature = "bench-internals")]
     colored_parallel_batches: usize,
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "bench-detailed-timing")]
     colored_binding: std::time::Duration,
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "bench-detailed-timing")]
     colored_constraint_processing: std::time::Duration,
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "bench-detailed-timing")]
     colored_dispatch_overhead: std::time::Duration,
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "bench-detailed-timing")]
     colored_executor_wall: std::time::Duration,
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "bench-detailed-timing")]
     colored_processing_sum: std::time::Duration,
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "bench-detailed-timing")]
     colored_callback_span: std::time::Duration,
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "bench-detailed-timing")]
     colored_outside_callbacks: std::time::Duration,
     #[cfg(feature = "bench-internals")]
     reduced_fixed_tree_offsets: Vec<Transform>,
@@ -602,12 +602,19 @@ impl SolverWorkspace {
             colored_groups_dispatched: 0,
             #[cfg(feature = "bench-internals")]
             colored_parallel_batches: 0,
+            #[cfg(feature = "bench-detailed-timing")]
             colored_binding: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
             colored_constraint_processing: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
             colored_dispatch_overhead: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
             colored_executor_wall: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
             colored_processing_sum: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
             colored_callback_span: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
             colored_outside_callbacks: std::time::Duration::ZERO,
             #[cfg(feature = "bench-internals")]
             reduced_fixed_tree_offsets: Vec::new(),
@@ -646,7 +653,7 @@ impl SolverWorkspace {
         self.colored_schedule
     }
 
-    #[cfg(feature = "bench-internals")]
+    #[cfg(feature = "bench-detailed-timing")]
     pub(crate) fn colored_phase_timings(
         &self,
     ) -> (
@@ -678,13 +685,16 @@ impl SolverWorkspace {
         self.colored_solver_selected = false;
         self.colored_groups_dispatched = 0;
         self.colored_parallel_batches = 0;
-        self.colored_binding = std::time::Duration::ZERO;
-        self.colored_constraint_processing = std::time::Duration::ZERO;
-        self.colored_dispatch_overhead = std::time::Duration::ZERO;
-        self.colored_executor_wall = std::time::Duration::ZERO;
-        self.colored_processing_sum = std::time::Duration::ZERO;
-        self.colored_callback_span = std::time::Duration::ZERO;
-        self.colored_outside_callbacks = std::time::Duration::ZERO;
+        #[cfg(feature = "bench-detailed-timing")]
+        {
+            self.colored_binding = std::time::Duration::ZERO;
+            self.colored_constraint_processing = std::time::Duration::ZERO;
+            self.colored_dispatch_overhead = std::time::Duration::ZERO;
+            self.colored_executor_wall = std::time::Duration::ZERO;
+            self.colored_processing_sum = std::time::Duration::ZERO;
+            self.colored_callback_span = std::time::Duration::ZERO;
+            self.colored_outside_callbacks = std::time::Duration::ZERO;
+        }
     }
 
     pub(crate) fn clear(&mut self) {
@@ -1598,24 +1608,24 @@ impl SolverWorkspace {
                 .constraint_coloring
                 .bodies_in_schedule_group(group)
                 .ok_or(CollisionError::InvalidContact)?;
-            #[cfg(feature = "bench-internals")]
+            #[cfg(feature = "bench-detailed-timing")]
             let binding_started = std::time::Instant::now();
             let mut bound_batches = bind_colored_batches(
                 &mut self.colored_batches[start..process_end],
                 bodies,
                 indices,
             )?;
-            #[cfg(feature = "bench-internals")]
+            #[cfg(feature = "bench-detailed-timing")]
             {
                 self.colored_binding += binding_started.elapsed();
             }
             if !use_parallel {
-                #[cfg(feature = "bench-internals")]
+                #[cfg(feature = "bench-detailed-timing")]
                 let processing_started = std::time::Instant::now();
                 for batch in &mut bound_batches {
                     Self::process_colored_batch(batch, config, joint_solver_step, phase)?;
                 }
-                #[cfg(feature = "bench-internals")]
+                #[cfg(feature = "bench-detailed-timing")]
                 {
                     self.colored_constraint_processing += processing_started.elapsed();
                 }
@@ -1637,23 +1647,24 @@ impl SolverWorkspace {
                 let chunk_size = batch_count.div_ceil(task_count);
                 #[cfg(feature = "bench-internals")]
                 let started = std::sync::atomic::AtomicUsize::new(0);
-                #[cfg(feature = "bench-internals")]
+                #[cfg(feature = "bench-detailed-timing")]
                 let dispatch_started = std::time::Instant::now();
-                #[cfg(feature = "bench-internals")]
+                #[cfg(feature = "bench-detailed-timing")]
                 let processing_nanos = std::sync::atomic::AtomicU64::new(0);
-                #[cfg(feature = "bench-internals")]
+                #[cfg(feature = "bench-detailed-timing")]
                 let callback_first = std::sync::atomic::AtomicU64::new(u64::MAX);
-                #[cfg(feature = "bench-internals")]
+                #[cfg(feature = "bench-detailed-timing")]
                 let callback_last = std::sync::atomic::AtomicU64::new(0);
                 let batch_result =
                     executor.for_each_chunk_mut(&mut bound_batches, chunk_size, |_, batches| {
                         #[cfg(feature = "bench-internals")]
                         started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        #[cfg(feature = "bench-internals")]
+                        #[cfg(feature = "bench-detailed-timing")]
                         let callback_started = dispatch_started.elapsed().as_nanos() as u64;
+                        #[cfg(feature = "bench-detailed-timing")]
                         let _ = callback_first
                             .fetch_min(callback_started, std::sync::atomic::Ordering::Relaxed);
-                        #[cfg(feature = "bench-internals")]
+                        #[cfg(feature = "bench-detailed-timing")]
                         let processing_started = std::time::Instant::now();
                         for batch in batches {
                             *batch.error = Self::process_colored_batch(
@@ -1664,7 +1675,7 @@ impl SolverWorkspace {
                             )
                             .err();
                         }
-                        #[cfg(feature = "bench-internals")]
+                        #[cfg(feature = "bench-detailed-timing")]
                         processing_nanos.fetch_add(
                             processing_started
                                 .elapsed()
@@ -1672,13 +1683,13 @@ impl SolverWorkspace {
                                 .min(u64::MAX as u128) as u64,
                             std::sync::atomic::Ordering::Relaxed,
                         );
-                        #[cfg(feature = "bench-internals")]
+                        #[cfg(feature = "bench-detailed-timing")]
                         let callback_finished = dispatch_started.elapsed().as_nanos() as u64;
-                        #[cfg(feature = "bench-internals")]
+                        #[cfg(feature = "bench-detailed-timing")]
                         let _ = callback_last
                             .fetch_max(callback_finished, std::sync::atomic::Ordering::Relaxed);
                     });
-                #[cfg(feature = "bench-internals")]
+                #[cfg(feature = "bench-detailed-timing")]
                 {
                     let dispatch_elapsed = dispatch_started.elapsed();
                     let processing_elapsed = std::time::Duration::from_nanos(

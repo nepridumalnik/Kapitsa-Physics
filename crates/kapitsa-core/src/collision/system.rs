@@ -1347,12 +1347,19 @@ impl CollisionSystem {
             let mut selected = false;
             let mut groups = 0_usize;
             let mut batches = 0_usize;
+            #[cfg(feature = "bench-detailed-timing")]
             let mut binding = std::time::Duration::ZERO;
+            #[cfg(feature = "bench-detailed-timing")]
             let mut processing = std::time::Duration::ZERO;
+            #[cfg(feature = "bench-detailed-timing")]
             let mut dispatch = std::time::Duration::ZERO;
+            #[cfg(feature = "bench-detailed-timing")]
             let mut executor_wall = std::time::Duration::ZERO;
+            #[cfg(feature = "bench-detailed-timing")]
             let mut processing_sum = std::time::Duration::ZERO;
+            #[cfg(feature = "bench-detailed-timing")]
             let mut callback_span = std::time::Duration::ZERO;
+            #[cfg(feature = "bench-detailed-timing")]
             let mut outside_callbacks = std::time::Duration::ZERO;
             for island in self.solver_islands.iter().take(island_count) {
                 let (island_selected, island_groups, island_batches) =
@@ -1364,6 +1371,7 @@ impl CollisionSystem {
                 selected |= island_selected;
                 groups = groups.saturating_add(island_groups);
                 batches = batches.saturating_add(island_batches);
+                #[cfg(feature = "bench-detailed-timing")]
                 let (
                     island_binding,
                     island_processing,
@@ -1373,24 +1381,30 @@ impl CollisionSystem {
                     island_span,
                     island_outside,
                 ) = island.workspace.colored_phase_timings();
-                binding += island_binding;
-                processing += island_processing;
-                dispatch += island_dispatch;
-                executor_wall += island_wall;
-                processing_sum += island_sum;
-                callback_span += island_span;
-                outside_callbacks += island_outside;
+                #[cfg(feature = "bench-detailed-timing")]
+                {
+                    binding += island_binding;
+                    processing += island_processing;
+                    dispatch += island_dispatch;
+                    executor_wall += island_wall;
+                    processing_sum += island_sum;
+                    callback_span += island_span;
+                    outside_callbacks += island_outside;
+                }
             }
             self.benchmark_metrics.colored_solver_selected = selected;
             self.benchmark_metrics.colored_groups_dispatched = groups;
             self.benchmark_metrics.colored_parallel_batches = batches;
-            self.benchmark_metrics.colored_binding = binding;
-            self.benchmark_metrics.colored_constraint_processing = processing;
-            self.benchmark_metrics.colored_dispatch_overhead = dispatch;
-            self.benchmark_metrics.colored_executor_wall = executor_wall;
-            self.benchmark_metrics.colored_processing_sum = processing_sum;
-            self.benchmark_metrics.colored_callback_span = callback_span;
-            self.benchmark_metrics.colored_outside_callbacks = outside_callbacks;
+            #[cfg(feature = "bench-detailed-timing")]
+            {
+                self.benchmark_metrics.colored_binding = binding;
+                self.benchmark_metrics.colored_constraint_processing = processing;
+                self.benchmark_metrics.colored_dispatch_overhead = dispatch;
+                self.benchmark_metrics.colored_executor_wall = executor_wall;
+                self.benchmark_metrics.colored_processing_sum = processing_sum;
+                self.benchmark_metrics.colored_callback_span = callback_span;
+                self.benchmark_metrics.colored_outside_callbacks = outside_callbacks;
+            }
         }
 
         for island_index in 0..island_count {

@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 bench-internals = []
+bench-detailed-timing = ["bench-internals"]
 
 [dependencies]
 kapitsa-math = { path = "../kapitsa-math" }

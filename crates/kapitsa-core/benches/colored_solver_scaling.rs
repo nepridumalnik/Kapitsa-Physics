@@ -43,9 +43,13 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         world.step_with_executor(DT, &executor, workers)?;
     }
     let mut times = Vec::with_capacity(SAMPLES);
+    #[cfg(feature = "bench-detailed-timing")]
     let mut binding_times = Vec::with_capacity(SAMPLES);
+    #[cfg(feature = "bench-detailed-timing")]
     let mut executor_times = Vec::with_capacity(SAMPLES);
+    #[cfg(feature = "bench-detailed-timing")]
     let mut processing_times = Vec::with_capacity(SAMPLES);
+    #[cfg(feature = "bench-detailed-timing")]
     let mut outside_times = Vec::with_capacity(SAMPLES);
     let mut phase_samples = Vec::with_capacity(SAMPLES);
     let mut rebuild_steps = 0;
@@ -59,10 +63,13 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         world.step_with_executor(DT, &executor, workers)?;
         times.push(started.elapsed().as_nanos());
         let metrics = world.collision_step_metrics();
-        binding_times.push(metrics.colored_binding.as_nanos());
-        executor_times.push(metrics.colored_executor_wall.as_nanos());
-        processing_times.push(metrics.colored_processing_sum.as_nanos());
-        outside_times.push(metrics.colored_outside_callbacks.as_nanos());
+        #[cfg(feature = "bench-detailed-timing")]
+        {
+            binding_times.push(metrics.colored_binding.as_nanos());
+            executor_times.push(metrics.colored_executor_wall.as_nanos());
+            processing_times.push(metrics.colored_processing_sum.as_nanos());
+            outside_times.push(metrics.colored_outside_callbacks.as_nanos());
+        }
         phase_samples.push(PhaseSample::from(metrics));
         if !metrics.colored_solver_selected
             || metrics.colored_groups_dispatched == 0
@@ -105,6 +112,7 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
                     .constraint_coloring_cache_hits,
                 nanos_to_ms(times[0]),
             );
+            #[cfg(feature = "bench-detailed-timing")]
             println!(
                 "timing mode={mode} workers={workers} binding_ms={:.3} processing_ms={:.3} dispatch_overhead_ms={:.3}",
                 metrics.colored_binding.as_secs_f64() * 1_000.0,
@@ -114,15 +122,19 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         }
     }
     times.sort_unstable();
-    binding_times.sort_unstable();
-    executor_times.sort_unstable();
-    processing_times.sort_unstable();
-    outside_times.sort_unstable();
+    #[cfg(feature = "bench-detailed-timing")]
+    {
+        binding_times.sort_unstable();
+        executor_times.sort_unstable();
+        processing_times.sort_unstable();
+        outside_times.sort_unstable();
+    }
     println!(
         "result mode={mode} requested={count} workers={workers} topology=unverified rebuild_steps={rebuild_steps} cache_hit_steps={cache_hit_steps} p50_ms={:.3} p95_ms={:.3}",
         nanos_to_ms(times[SAMPLES / 2]),
         nanos_to_ms(times[p95_index(SAMPLES)]),
     );
+    #[cfg(feature = "bench-detailed-timing")]
     println!(
         "timing_result mode={mode} workers={workers} binding_p50_p95_ms={:.3}/{:.3} executor_wall_p50_p95_ms={:.3}/{:.3} processing_sum_p50_p95_ms={:.3}/{:.3} outside_callbacks_p50_p95_ms={:.3}/{:.3}",
         nanos_to_ms(binding_times[SAMPLES / 2]),
@@ -134,6 +146,8 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         nanos_to_ms(outside_times[SAMPLES / 2]),
         nanos_to_ms(outside_times[p95_index(SAMPLES)]),
     );
+    #[cfg(not(feature = "bench-detailed-timing"))]
+    println!("timing_result mode={mode} workers={workers} detailed=N/A");
     let phase_p50 = phase_percentile(&phase_samples, SAMPLES / 2);
     let phase_p95 = phase_percentile(&phase_samples, p95_index(SAMPLES));
     println!(
@@ -203,7 +217,10 @@ impl PhaseSample {
             prepare_ns: metrics.solver_prepare.as_nanos(),
             iterations_ns: metrics.solver_iterations.as_nanos(),
             writeback_ns: metrics.solver_writeback.as_nanos(),
+            #[cfg(feature = "bench-detailed-timing")]
             constraint_ns: metrics.colored_constraint_processing.as_nanos(),
+            #[cfg(not(feature = "bench-detailed-timing"))]
+            constraint_ns: 0,
             growth: metrics.logical_capacity_growth_bytes,
             body_copies: metrics.solver_body_copies,
             manifold_copies: metrics.solver_manifold_copies,
