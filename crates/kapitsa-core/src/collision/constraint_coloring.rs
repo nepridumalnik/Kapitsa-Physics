@@ -18,6 +18,7 @@ pub(crate) struct ConstraintColoring {
     colored_constraints: Vec<usize>,
     color_body_offsets: Vec<usize>,
     color_bodies: Vec<usize>,
+    constraint_body_positions: Vec<[usize; 2]>,
     color_count: usize,
     max_color_constraint_count: usize,
 }
@@ -37,6 +38,7 @@ impl ConstraintColoring {
             colored_constraints: Vec::new(),
             color_body_offsets: Vec::new(),
             color_bodies: Vec::new(),
+            constraint_body_positions: Vec::new(),
             color_count: 0,
             max_color_constraint_count: 0,
         }
@@ -115,6 +117,7 @@ impl ConstraintColoring {
             + self.colored_constraints.capacity() * size_of::<usize>()
             + self.color_body_offsets.capacity() * size_of::<usize>()
             + self.color_bodies.capacity() * size_of::<usize>()
+            + self.constraint_body_positions.capacity() * size_of::<[usize; 2]>()
     }
 
     fn rebuild(&mut self) -> Result<(), CollisionError> {
@@ -218,6 +221,23 @@ impl ConstraintColoring {
             .unwrap_or(0);
         self.color_count = color_count;
         self.rebuild_color_body_plan(body_count)?;
+        reserve(&mut self.constraint_body_positions, constraint_count)?;
+        self.constraint_body_positions
+            .resize(constraint_count, [0; 2]);
+        for constraint in 0..constraint_count {
+            let color = self.constraint_colors[constraint];
+            let bodies = &self.color_bodies
+                [self.color_body_offsets[color]..self.color_body_offsets[color + 1]];
+            let [a, b] = self.endpoints[constraint];
+            self.constraint_body_positions[constraint] = [
+                bodies
+                    .binary_search(&a)
+                    .map_err(|_| CollisionError::InvalidContact)?,
+                bodies
+                    .binary_search(&b)
+                    .map_err(|_| CollisionError::InvalidContact)?,
+            ];
+        }
 
         // This check is unconditional because the solver's concurrent body access
         // relies on each dynamic body having exactly one owner per color.
@@ -252,7 +272,7 @@ impl ConstraintColoring {
             let end = self.color_offsets[color + 1];
             for &constraint in &self.colored_constraints[start..end] {
                 for body in self.endpoints[constraint] {
-                    if self.dynamic_bodies[body] && self.body_stamps[body] != stamp {
+                    if self.body_stamps[body] != stamp {
                         self.body_stamps[body] = stamp;
                         self.color_bodies.push(body);
                     }
@@ -265,7 +285,11 @@ impl ConstraintColoring {
         Ok(())
     }
 
-    pub(crate) fn dynamic_bodies_in_schedule_group(&self, group: usize) -> Option<&[usize]> {
+    pub(crate) fn body_positions_for_constraint(&self, constraint: usize) -> Option<[usize; 2]> {
+        self.constraint_body_positions.get(constraint).copied()
+    }
+
+    pub(crate) fn bodies_in_schedule_group(&self, group: usize) -> Option<&[usize]> {
         let start = *self.color_body_offsets.get(group)?;
         let end = *self.color_body_offsets.get(group + 1)?;
         self.color_bodies.get(start..end)
@@ -324,18 +348,9 @@ mod tests {
         assert_eq!(coloring.constraints_in_schedule_group(0), Some(&[0, 1][..]));
         assert_eq!(coloring.constraints_in_schedule_group(1), Some(&[2][..]));
         assert_eq!(coloring.constraints_in_schedule_group(2), Some(&[3][..]));
-        assert_eq!(
-            coloring.dynamic_bodies_in_schedule_group(0),
-            Some(&[0, 1][..])
-        );
-        assert_eq!(
-            coloring.dynamic_bodies_in_schedule_group(1),
-            Some(&[0, 1][..])
-        );
-        assert_eq!(
-            coloring.dynamic_bodies_in_schedule_group(2),
-            Some(&[1, 2][..])
-        );
+        assert_eq!(coloring.bodies_in_schedule_group(0), Some(&[0, 1, 3][..]));
+        assert_eq!(coloring.bodies_in_schedule_group(1), Some(&[0, 1][..]));
+        assert_eq!(coloring.bodies_in_schedule_group(2), Some(&[1, 2][..]));
         assert!(
             coloring
                 .has_unique_dynamic_body_ownership(dynamic_bodies.len())
@@ -358,11 +373,11 @@ mod tests {
         assert_eq!(coloring.constraints_in_schedule_group(0), Some(&[0, 2][..]));
         assert_eq!(coloring.constraints_in_schedule_group(1), Some(&[1, 3][..]));
         assert_eq!(
-            coloring.dynamic_bodies_in_schedule_group(0),
+            coloring.bodies_in_schedule_group(0),
             Some(&[0, 1, 2, 3][..])
         );
         assert_eq!(
-            coloring.dynamic_bodies_in_schedule_group(1),
+            coloring.bodies_in_schedule_group(1),
             Some(&[1, 2, 3, 4][..])
         );
         assert!(coloring.has_unique_dynamic_body_ownership(5).unwrap());

@@ -21,6 +21,32 @@ use crate::{
 use kapitsa_math::{Mat3, Vec3};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[test]
+fn safe_binding_preserves_shared_static_and_consumes_dynamic_ownership() {
+    use super::colored_bodies::BodyBinding;
+    let mut bodies: Vec<_> = (0..5)
+        .map(|_| {
+            let body = dynamic_body(Vec3::ZERO);
+            let state = *body.state();
+            SolverBody::from_prediction(body, state)
+        })
+        .collect();
+    let indices = [0, 2, 4];
+    let mut binding = BodyBinding::bind(&mut bodies, &indices).unwrap();
+    let first = binding.pair_at([2, 0]).unwrap();
+    assert!(binding.pair_at([1, 2]).is_err());
+    assert_eq!(first.len(), 2);
+}
+
+#[test]
+fn safe_binding_rejects_invalid_index_plans() {
+    use super::colored_bodies::BodyBinding;
+    let mut bodies = [];
+    assert!(BodyBinding::bind(&mut bodies, &[0]).is_err());
+    assert!(BodyBinding::bind(&mut bodies, &[1, 1]).is_err());
+    assert!(BodyBinding::bind(&mut bodies, &[2, 1]).is_err());
+}
+
 #[derive(Default)]
 struct CountingExecutor {
     calls: AtomicUsize,
@@ -429,6 +455,108 @@ fn prepare_colored_workspace(
     workspace
         .prepare_colored_batches(manifolds, joints, rebuilt)
         .unwrap();
+}
+
+#[test]
+fn colored_batch_layout_rebuilds_when_contact_joint_boundary_changes() {
+    let (_, contacts) = static_contact_fixture(2);
+    let bodies: Vec<_> = (0..4)
+        .map(|_| {
+            let body = dynamic_body(Vec3::ZERO);
+            let state = *body.state();
+            SolverBody::from_prediction(body, state)
+        })
+        .collect();
+    let mut workspace = SolverWorkspace::new();
+    let joint = fixed_joint_constraint(2, 3);
+
+    // The global endpoint sequence is [0,1], [2,3] in every configuration.
+    // Only the contact/joint boundary changes.
+    let mut contacts_and_joint = contacts.clone();
+    prepare_colored_workspace(&mut workspace, &bodies, &contacts_and_joint, &[]);
+    assert!(workspace.joint_task_locations.is_empty());
+
+    contacts_and_joint.pop();
+    prepare_colored_workspace(&mut workspace, &bodies, &contacts_and_joint, &[joint]);
+    assert_eq!(workspace.joint_task_locations.len(), 1);
+    let location = workspace.joint_task_locations[0];
+    let task = &workspace.colored_batches[location[0]].tasks[location[1]];
+    assert_eq!(task.constraint_index, 1);
+    assert_eq!(task.body_indices, [2, 3]);
+    assert_eq!(task.binding_positions, [2, 3]);
+    assert!(matches!(task.kind, super::ColoredConstraintKind::Joint(_)));
+
+    // Compare the reused layout with a freshly built layout on identical input.
+    let check_solution = |workspace: &mut SolverWorkspace,
+                          contacts: &[SolverManifold],
+                          joints: &[JointConstraint]| {
+        let mut actual_bodies = bodies.clone();
+        let mut expected_bodies = bodies.clone();
+        let mut actual_contacts = contacts.to_vec();
+        let mut expected_contacts = contacts.to_vec();
+        let mut joint_workspace = JointWorkspace::new();
+        joint_workspace.begin_step();
+        workspace
+            .solve_colored_constraints(
+                &mut actual_bodies,
+                &mut actual_contacts,
+                &mut joint_workspace,
+                joints,
+                super::CollisionConfig::default(),
+                JointSolverStep::new(1.0 / 60.0, JointSolverOptions::legacy()),
+                None,
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+            .unwrap();
+        solve_colored(
+            &mut expected_bodies,
+            &mut expected_contacts,
+            joints,
+            super::CollisionConfig::default(),
+        )
+        .unwrap();
+        for (actual, expected) in actual_bodies.iter().zip(&expected_bodies) {
+            assert_eq!(
+                actual.body().state().transform(),
+                expected.body().state().transform()
+            );
+            assert_eq!(
+                actual.body().state().linear_velocity(),
+                expected.body().state().linear_velocity()
+            );
+            assert_eq!(
+                actual.body().state().angular_velocity(),
+                expected.body().state().angular_velocity()
+            );
+        }
+        assert_eq!(
+            manifold_impulses(&actual_contacts),
+            manifold_impulses(&expected_contacts)
+        );
+    };
+    check_solution(&mut workspace, &contacts_and_joint, &[joint]);
+
+    let restored_contacts = contacts.clone();
+    prepare_colored_workspace(&mut workspace, &bodies, &restored_contacts, &[]);
+    assert!(workspace.joint_task_locations.is_empty());
+    let task = workspace
+        .colored_batches
+        .iter()
+        .flat_map(|batch| batch.tasks.iter())
+        .find(|task| task.constraint_index == 1)
+        .expect("contact task after boundary transition");
+    assert_eq!(task.constraint_index, 1);
+    assert_eq!(task.body_indices, [2, 3]);
+    assert_eq!(task.binding_positions, [2, 3]);
+    assert!(matches!(
+        task.kind,
+        super::ColoredConstraintKind::Contact(_)
+    ));
+
+    check_solution(&mut workspace, &restored_contacts, &[]);
+    prepare_colored_workspace(&mut workspace, &bodies, &contacts_and_joint, &[joint]);
+    check_solution(&mut workspace, &contacts_and_joint, &[joint]);
 }
 
 fn solve_colored(

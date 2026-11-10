@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 bench-internals = []
+bench-detailed-timing = ["bench-internals"]
 
 [dependencies]
 kapitsa-math = { path = "../kapitsa-math" }
@@ -36,5 +37,10 @@ required-features = ["bench-internals"]
 
 [[bench]]
 name = "joint_parallel_scaling"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "colored_solver_scaling"
 harness = false
 required-features = ["bench-internals"]

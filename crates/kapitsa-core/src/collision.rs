@@ -170,6 +170,23 @@ pub struct CollisionStepMetrics {
     pub colored_groups_dispatched: usize,
     /// Batches processed by the step executor in parallel color groups.
     pub colored_parallel_batches: usize,
+    /// Time spent materializing safe colored body references.
+    #[cfg(feature = "bench-detailed-timing")]
+    pub colored_binding: Duration,
+    /// Wall time spent executing colored constraint work.
+    #[cfg(feature = "bench-detailed-timing")]
+    pub colored_constraint_processing: Duration,
+    /// Executor interval excluding the measured constraint-processing interval.
+    #[cfg(feature = "bench-detailed-timing")]
+    pub colored_dispatch_overhead: Duration,
+    #[cfg(feature = "bench-detailed-timing")]
+    pub colored_executor_wall: Duration,
+    #[cfg(feature = "bench-detailed-timing")]
+    pub colored_processing_sum: Duration,
+    #[cfg(feature = "bench-detailed-timing")]
+    pub colored_callback_span: Duration,
+    #[cfg(feature = "bench-detailed-timing")]
+    pub colored_outside_callbacks: Duration,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -246,6 +263,20 @@ impl CollisionStepMetrics {
         colored_solver_selected: false,
         colored_groups_dispatched: 0,
         colored_parallel_batches: 0,
+        #[cfg(feature = "bench-detailed-timing")]
+        colored_binding: Duration::ZERO,
+        #[cfg(feature = "bench-detailed-timing")]
+        colored_constraint_processing: Duration::ZERO,
+        #[cfg(feature = "bench-detailed-timing")]
+        colored_dispatch_overhead: Duration::ZERO,
+        #[cfg(feature = "bench-detailed-timing")]
+        colored_executor_wall: Duration::ZERO,
+        #[cfg(feature = "bench-detailed-timing")]
+        colored_processing_sum: Duration::ZERO,
+        #[cfg(feature = "bench-detailed-timing")]
+        colored_callback_span: Duration::ZERO,
+        #[cfg(feature = "bench-detailed-timing")]
+        colored_outside_callbacks: Duration::ZERO,
     };
 }
 pub(crate) use event::{CollisionInteraction, CollisionLifecycle};

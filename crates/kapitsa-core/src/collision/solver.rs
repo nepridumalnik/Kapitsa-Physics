@@ -13,8 +13,8 @@ use crate::{mass::MassProperties, rigid_body::BodyType, transform::Transform};
 #[cfg(feature = "bench-internals")]
 use kapitsa_math::Mat3;
 use kapitsa_math::Vec3;
+#[forbid(unsafe_code)]
 mod colored_bodies;
-use colored_bodies::SharedSolverBodies;
 
 use super::{
     CollisionConfig, CollisionError,
@@ -142,6 +142,7 @@ impl ColoredConstraintPhase {
 struct ColoredConstraintTask {
     constraint_index: usize,
     body_indices: [usize; 2],
+    binding_positions: [usize; 2],
     points: [SolverPoint; 4],
     point_count: usize,
     kind: ColoredConstraintKind,
@@ -174,6 +175,7 @@ impl ColoredConstraintTask {
         Ok(Self {
             constraint_index,
             body_indices,
+            binding_positions: [usize::MAX; 2],
             points: [SolverPoint::default(); 4],
             point_count: 0,
             kind,
@@ -202,6 +204,10 @@ impl ColoredConstraintTask {
         self.point_count = 0;
         Ok(())
     }
+
+    fn set_binding_positions(&mut self, positions: [usize; 2]) {
+        self.binding_positions = positions;
+    }
 }
 
 struct ColoredConstraintBatch {
@@ -210,6 +216,48 @@ struct ColoredConstraintBatch {
     contact_points: Vec<SolverPoint>,
     contact_task_count: usize,
     error: Option<CollisionError>,
+}
+
+struct BoundConstraint<'a> {
+    task: &'a mut ColoredConstraintTask,
+    bodies: [colored_bodies::BoundBodyRef<'a>; 2],
+}
+
+struct BoundColoredBatch<'a> {
+    tasks: Vec<BoundConstraint<'a>>,
+    joint_workspace: &'a mut JointWorkspace,
+    contact_points: &'a mut Vec<SolverPoint>,
+    error: &'a mut Option<CollisionError>,
+}
+
+fn bind_colored_batches<'a>(
+    batches: &'a mut [ColoredConstraintBatch],
+    bodies: &'a mut [SolverBody],
+    indices: &[usize],
+) -> Result<Vec<BoundColoredBatch<'a>>, CollisionError> {
+    let mut binding = colored_bodies::BodyBinding::bind(bodies, indices)?;
+    let mut result = Vec::with_capacity(batches.len());
+    for batch in batches.iter_mut() {
+        let ColoredConstraintBatch {
+            tasks,
+            joint_workspace,
+            contact_points,
+            error,
+            ..
+        } = batch;
+        let mut bound_tasks = Vec::with_capacity(tasks.len());
+        for task in tasks.iter_mut() {
+            let bodies = binding.pair_at(task.binding_positions)?;
+            bound_tasks.push(BoundConstraint { task, bodies });
+        }
+        result.push(BoundColoredBatch {
+            tasks: bound_tasks,
+            joint_workspace,
+            contact_points,
+            error,
+        });
+    }
+    Ok(result)
 }
 
 impl ColoredConstraintBatch {
@@ -240,6 +288,8 @@ pub(crate) struct SolverWorkspace {
     color_batch_offsets: Vec<usize>,
     joint_task_locations: Vec<[usize; 2]>,
     active_colored_batches: usize,
+    colored_batch_manifold_count: usize,
+    colored_batch_joint_count: usize,
     #[cfg(feature = "bench-internals")]
     colored_schedule: super::ColoredScheduleMetrics,
     #[cfg(feature = "bench-internals")]
@@ -248,6 +298,20 @@ pub(crate) struct SolverWorkspace {
     colored_groups_dispatched: usize,
     #[cfg(feature = "bench-internals")]
     colored_parallel_batches: usize,
+    #[cfg(feature = "bench-detailed-timing")]
+    colored_binding: std::time::Duration,
+    #[cfg(feature = "bench-detailed-timing")]
+    colored_constraint_processing: std::time::Duration,
+    #[cfg(feature = "bench-detailed-timing")]
+    colored_dispatch_overhead: std::time::Duration,
+    #[cfg(feature = "bench-detailed-timing")]
+    colored_executor_wall: std::time::Duration,
+    #[cfg(feature = "bench-detailed-timing")]
+    colored_processing_sum: std::time::Duration,
+    #[cfg(feature = "bench-detailed-timing")]
+    colored_callback_span: std::time::Duration,
+    #[cfg(feature = "bench-detailed-timing")]
+    colored_outside_callbacks: std::time::Duration,
     #[cfg(feature = "bench-internals")]
     reduced_fixed_tree_offsets: Vec<Transform>,
     #[cfg(feature = "bench-internals")]
@@ -516,6 +580,8 @@ impl SolverWorkspace {
             color_batch_offsets: Vec::new(),
             joint_task_locations: Vec::new(),
             active_colored_batches: 0,
+            colored_batch_manifold_count: 0,
+            colored_batch_joint_count: 0,
             #[cfg(feature = "bench-internals")]
             colored_schedule: super::ColoredScheduleMetrics {
                 rejection: "not-evaluated",
@@ -536,6 +602,20 @@ impl SolverWorkspace {
             colored_groups_dispatched: 0,
             #[cfg(feature = "bench-internals")]
             colored_parallel_batches: 0,
+            #[cfg(feature = "bench-detailed-timing")]
+            colored_binding: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
+            colored_constraint_processing: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
+            colored_dispatch_overhead: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
+            colored_executor_wall: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
+            colored_processing_sum: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
+            colored_callback_span: std::time::Duration::ZERO,
+            #[cfg(feature = "bench-detailed-timing")]
+            colored_outside_callbacks: std::time::Duration::ZERO,
             #[cfg(feature = "bench-internals")]
             reduced_fixed_tree_offsets: Vec::new(),
             #[cfg(feature = "bench-internals")]
@@ -573,6 +653,29 @@ impl SolverWorkspace {
         self.colored_schedule
     }
 
+    #[cfg(feature = "bench-detailed-timing")]
+    pub(crate) fn colored_phase_timings(
+        &self,
+    ) -> (
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
+        (
+            self.colored_binding,
+            self.colored_constraint_processing,
+            self.colored_dispatch_overhead,
+            self.colored_executor_wall,
+            self.colored_processing_sum,
+            self.colored_callback_span,
+            self.colored_outside_callbacks,
+        )
+    }
+
     #[cfg(feature = "bench-internals")]
     fn reset_colored_dispatch_metrics(&mut self) {
         self.colored_schedule = super::ColoredScheduleMetrics {
@@ -582,6 +685,16 @@ impl SolverWorkspace {
         self.colored_solver_selected = false;
         self.colored_groups_dispatched = 0;
         self.colored_parallel_batches = 0;
+        #[cfg(feature = "bench-detailed-timing")]
+        {
+            self.colored_binding = std::time::Duration::ZERO;
+            self.colored_constraint_processing = std::time::Duration::ZERO;
+            self.colored_dispatch_overhead = std::time::Duration::ZERO;
+            self.colored_executor_wall = std::time::Duration::ZERO;
+            self.colored_processing_sum = std::time::Duration::ZERO;
+            self.colored_callback_span = std::time::Duration::ZERO;
+            self.colored_outside_callbacks = std::time::Duration::ZERO;
+        }
     }
 
     pub(crate) fn clear(&mut self) {
@@ -1074,8 +1187,13 @@ impl SolverWorkspace {
         joints: &[JointConstraint],
         graph_rebuilt: bool,
     ) -> Result<(), CollisionError> {
-        let rebuild_batches = graph_rebuilt || self.active_colored_batches == 0;
+        let rebuild_batches = graph_rebuilt
+            || self.active_colored_batches == 0
+            || self.colored_batch_manifold_count != manifolds.len()
+            || self.colored_batch_joint_count != joints.len();
         if rebuild_batches {
+            self.colored_batch_manifold_count = manifolds.len();
+            self.colored_batch_joint_count = joints.len();
             let group_count = self.constraint_coloring.schedule_group_count();
             if self.color_batch_offsets.capacity() < group_count + 1 {
                 self.color_batch_offsets
@@ -1135,6 +1253,16 @@ impl SolverWorkspace {
                             manifolds,
                             joints,
                         )?);
+                        let task = batch
+                            .tasks
+                            .last_mut()
+                            .ok_or(CollisionError::InvalidContact)?;
+                        let global_constraint = task.constraint_index;
+                        let positions = self
+                            .constraint_coloring
+                            .body_positions_for_constraint(global_constraint)
+                            .ok_or(CollisionError::InvalidContact)?;
+                        task.set_binding_positions(positions);
                         if constraint_index < manifolds.len() {
                             batch.contact_task_count += 1;
                         } else {
@@ -1219,6 +1347,21 @@ impl SolverWorkspace {
             return workload.can_use_partial_schedule(worker_count);
         }
         workload.can_use_parallel_schedule(worker_count)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn colored_options_are_eligible(
+        options: JointSolverOptions,
+        worker_count: usize,
+        constraint_count: usize,
+    ) -> bool {
+        cfg!(feature = "bench-internals")
+            && worker_count > 1
+            && constraint_count >= LARGE_ISLAND_COLORING_THRESHOLD
+            && matches!(options.iterations(), JointIterations::Fixed)
+            && options.global_velocity_pcg_max_iterations() == 0
+            && options.global_position_pcg_max_iterations() == 0
+            && !options.alternates_velocity_sweeps()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1417,7 +1560,6 @@ impl SolverWorkspace {
         executor: &impl crate::execution::StepExecutor,
         worker_count: usize,
     ) -> Result<(), CollisionError> {
-        let shared_bodies = SharedSolverBodies::new(bodies);
         let contact_only = phase.is_contact_only();
         let group_count = self.color_batch_offsets.len().saturating_sub(1);
         for group in 0..group_count {
@@ -1462,18 +1604,30 @@ impl SolverWorkspace {
             };
             let use_parallel = active_batch_count >= COLORED_MIN_PARALLEL_BATCHES
                 && constraint_count > SMALL_COLOR_MERGE_THRESHOLD;
+            let indices = self
+                .constraint_coloring
+                .bodies_in_schedule_group(group)
+                .ok_or(CollisionError::InvalidContact)?;
+            #[cfg(feature = "bench-detailed-timing")]
+            let binding_started = std::time::Instant::now();
+            let mut bound_batches = bind_colored_batches(
+                &mut self.colored_batches[start..process_end],
+                bodies,
+                indices,
+            )?;
+            #[cfg(feature = "bench-detailed-timing")]
+            {
+                self.colored_binding += binding_started.elapsed();
+            }
             if !use_parallel {
-                for batch in &mut self.colored_batches[start..process_end] {
-                    if contact_only && !batch.has_contacts() {
-                        continue;
-                    }
-                    Self::process_colored_batch(
-                        batch,
-                        &shared_bodies,
-                        config,
-                        joint_solver_step,
-                        phase,
-                    )?;
+                #[cfg(feature = "bench-detailed-timing")]
+                let processing_started = std::time::Instant::now();
+                for batch in &mut bound_batches {
+                    Self::process_colored_batch(batch, config, joint_solver_step, phase)?;
+                }
+                #[cfg(feature = "bench-detailed-timing")]
+                {
+                    self.colored_constraint_processing += processing_started.elapsed();
                 }
             } else {
                 #[cfg(feature = "bench-internals")]
@@ -1493,28 +1647,65 @@ impl SolverWorkspace {
                 let chunk_size = batch_count.div_ceil(task_count);
                 #[cfg(feature = "bench-internals")]
                 let started = std::sync::atomic::AtomicUsize::new(0);
-                let batch_result = executor.for_each_chunk_mut(
-                    &mut self.colored_batches[start..process_end],
-                    chunk_size,
-                    |_, batches| {
+                #[cfg(feature = "bench-detailed-timing")]
+                let dispatch_started = std::time::Instant::now();
+                #[cfg(feature = "bench-detailed-timing")]
+                let processing_nanos = std::sync::atomic::AtomicU64::new(0);
+                #[cfg(feature = "bench-detailed-timing")]
+                let callback_first = std::sync::atomic::AtomicU64::new(u64::MAX);
+                #[cfg(feature = "bench-detailed-timing")]
+                let callback_last = std::sync::atomic::AtomicU64::new(0);
+                let batch_result =
+                    executor.for_each_chunk_mut(&mut bound_batches, chunk_size, |_, batches| {
                         #[cfg(feature = "bench-internals")]
                         started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        #[cfg(feature = "bench-detailed-timing")]
+                        let callback_started = dispatch_started.elapsed().as_nanos() as u64;
+                        #[cfg(feature = "bench-detailed-timing")]
+                        let _ = callback_first
+                            .fetch_min(callback_started, std::sync::atomic::Ordering::Relaxed);
+                        #[cfg(feature = "bench-detailed-timing")]
+                        let processing_started = std::time::Instant::now();
                         for batch in batches {
-                            if contact_only && !batch.has_contacts() {
-                                batch.error = None;
-                                continue;
-                            }
-                            batch.error = Self::process_colored_batch(
+                            *batch.error = Self::process_colored_batch(
                                 batch,
-                                &shared_bodies,
                                 config,
                                 joint_solver_step,
                                 phase,
                             )
                             .err();
                         }
-                    },
-                );
+                        #[cfg(feature = "bench-detailed-timing")]
+                        processing_nanos.fetch_add(
+                            processing_started
+                                .elapsed()
+                                .as_nanos()
+                                .min(u64::MAX as u128) as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        #[cfg(feature = "bench-detailed-timing")]
+                        let callback_finished = dispatch_started.elapsed().as_nanos() as u64;
+                        #[cfg(feature = "bench-detailed-timing")]
+                        let _ = callback_last
+                            .fetch_max(callback_finished, std::sync::atomic::Ordering::Relaxed);
+                    });
+                #[cfg(feature = "bench-detailed-timing")]
+                {
+                    let dispatch_elapsed = dispatch_started.elapsed();
+                    let processing_elapsed = std::time::Duration::from_nanos(
+                        processing_nanos.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                    let executor_wall = dispatch_elapsed;
+                    let first = callback_first.load(std::sync::atomic::Ordering::Relaxed);
+                    let last = callback_last.load(std::sync::atomic::Ordering::Relaxed);
+                    let callback_span = std::time::Duration::from_nanos(last.saturating_sub(first));
+                    self.colored_executor_wall += executor_wall;
+                    self.colored_processing_sum += processing_elapsed;
+                    self.colored_callback_span += callback_span;
+                    self.colored_outside_callbacks += executor_wall.saturating_sub(callback_span);
+                    self.colored_constraint_processing += processing_elapsed;
+                    self.colored_dispatch_overhead += executor_wall.saturating_sub(callback_span);
+                }
                 #[cfg(feature = "bench-internals")]
                 {
                     self.colored_schedule.tasks_started +=
@@ -1523,13 +1714,15 @@ impl SolverWorkspace {
                 if batch_result.is_err() {
                     return Err(CollisionError::WorkerFailed);
                 }
-                if let Some(error) = self.colored_batches[start..process_end]
+                if let Some(error) = bound_batches
                     .iter_mut()
                     .find_map(|batch| batch.error.take())
                 {
                     return Err(error);
                 }
             }
+
+            drop(bound_batches);
 
             if matches!(phase, ColoredConstraintPhase::Velocity { .. }) {
                 for batch in &self.colored_batches[start..end] {
@@ -1552,8 +1745,7 @@ impl SolverWorkspace {
     }
 
     fn process_colored_batch(
-        batch: &mut ColoredConstraintBatch,
-        source_bodies: &SharedSolverBodies<'_>,
+        batch: &mut BoundColoredBatch<'_>,
         config: CollisionConfig,
         joint_solver_step: JointSolverStep<'_>,
         phase: ColoredConstraintPhase,
@@ -1561,12 +1753,13 @@ impl SolverWorkspace {
         let dt = joint_solver_step.dt();
         let options = joint_solver_step.options();
         let contact_only = phase.is_contact_only();
-        for (task_slot, task) in batch.tasks.iter_mut().enumerate() {
+        for (task_slot, bound) in batch.tasks.iter_mut().enumerate() {
+            let task = &mut *bound.task;
             if contact_only && !matches!(task.kind, ColoredConstraintKind::Contact(_)) {
                 continue;
             }
-            // SAFETY: tasks are grouped by the unconditional conflict-free color check.
-            let mut bodies = unsafe { source_bodies.pair(task.body_indices)? };
+            let [a, b] = &mut bound.bodies;
+            let mut bodies = colored_bodies::BoundPair([a.reborrow(), b.reborrow()]);
             match &mut task.kind {
                 ColoredConstraintKind::Contact(manifold) => {
                     let mut local_manifold = SolverManifold {
@@ -1578,7 +1771,7 @@ impl SolverWorkspace {
                     match phase {
                         ColoredConstraintPhase::PrepareContactPoints => {
                             Self::prepare_points_into(
-                                &mut batch.contact_points,
+                                batch.contact_points,
                                 &bodies,
                                 &local_manifolds,
                                 config,
@@ -1587,7 +1780,7 @@ impl SolverWorkspace {
                                 return Err(CollisionError::InvalidContact);
                             }
                             task.point_count = batch.contact_points.len();
-                            task.points[..task.point_count].copy_from_slice(&batch.contact_points);
+                            task.points[..task.point_count].copy_from_slice(batch.contact_points);
                         }
                         ColoredConstraintPhase::WarmStartContacts => {
                             Self::warm_start_points(
@@ -1631,7 +1824,7 @@ impl SolverWorkspace {
                             // are built once and every later iteration reuses them.
                             if first_iteration {
                                 JointSolver::prepare_velocity_joint(
-                                    &mut batch.joint_workspace,
+                                    batch.joint_workspace,
                                     &bodies,
                                     local_joint,
                                     task_slot,
@@ -1639,7 +1832,7 @@ impl SolverWorkspace {
                                 )?;
                             }
                             JointSolver::solve_velocity_joint_prepared(
-                                &mut batch.joint_workspace,
+                                batch.joint_workspace,
                                 &mut bodies,
                                 local_joint,
                                 task_slot,
@@ -1649,7 +1842,7 @@ impl SolverWorkspace {
                         }
                         ColoredConstraintPhase::Position => {
                             JointSolver::solve_position_joint(
-                                &mut batch.joint_workspace,
+                                batch.joint_workspace,
                                 &mut bodies,
                                 local_joint,
                                 task_slot,
@@ -1787,10 +1980,15 @@ impl SolverWorkspace {
             self.colored_schedule.constraints = coloring_constraint_count;
             self.colored_schedule.rejection = "small-or-single-worker";
         }
-        if cfg!(feature = "bench-internals")
-            && worker_count > 1
-            && coloring_constraint_count >= LARGE_ISLAND_COLORING_THRESHOLD
-        {
+        #[cfg(feature = "bench-internals")]
+        let coloring_eligible = Self::colored_options_are_eligible(
+            joint_solver_options,
+            worker_count,
+            coloring_constraint_count,
+        );
+        #[cfg(not(feature = "bench-internals"))]
+        let coloring_eligible = false;
+        if coloring_eligible {
             #[cfg(feature = "bench-internals")]
             let coloring_started = std::time::Instant::now();
             let graph_rebuilt = self.prepare_constraint_coloring(bodies, manifolds, joints)?;

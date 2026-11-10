@@ -685,11 +685,20 @@ fn parallel_velocity_pcg_matches_single_worker_on_a_large_joint_island() {
     assert!(metrics.velocity_pcg_matrix_vector_time > std::time::Duration::ZERO);
     assert!(metrics.velocity_pcg_preconditioner_time > std::time::Duration::ZERO);
     assert!(metrics.velocity_pcg_reduction_time > std::time::Duration::ZERO);
-    assert!(metrics.constraint_coloring_prepare_time > std::time::Duration::ZERO);
-    assert!(metrics.constraint_coloring_constraints >= 599);
-    assert!(metrics.max_colors_per_island >= 2);
+    // Global PCG is ineligible for the colored Gauss-Seidel schedule.
+    assert_eq!(
+        metrics.constraint_coloring_prepare_time,
+        std::time::Duration::ZERO
+    );
+    assert_eq!(metrics.constraint_coloring_constraints, 0);
+    assert_eq!(metrics.max_colors_per_island, 0);
     assert_eq!(metrics.constraint_coloring_rebuilds, 0);
-    assert!(metrics.constraint_coloring_cache_hits > 0);
+    assert_eq!(metrics.constraint_coloring_cache_hits, 0);
+    assert!(
+        !multiple_workers
+            .collision_step_metrics()
+            .colored_solver_selected
+    );
     assert!(metrics.post_velocity_linear_residual_mps < 1.0e-4);
     assert!(metrics.post_velocity_angular_residual_radps < 1.0e-4);
 }

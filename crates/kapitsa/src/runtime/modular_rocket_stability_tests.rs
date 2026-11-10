@@ -35,6 +35,7 @@ struct StabilityRun {
     max_frame_error: f64,
     rms_frame_error: f64,
     max_coast_energy_drift: f64,
+    #[cfg_attr(not(feature = "bench-internals"), allow(dead_code))]
     max_coast_energy_drift_tick: Option<usize>,
     final_coast_energy_signed_drift: f64,
     #[cfg(feature = "bench-internals")]
@@ -43,13 +44,16 @@ struct StabilityRun {
     coast_energy_reference_scale_j: f64,
     coast_energy_final_components: (f64, f64, f64),
     max_altitude: f64,
+    #[cfg_attr(not(feature = "bench-internals"), allow(dead_code))]
     upper_root_final_velocity: Vec3,
     max_angular_speed: f64,
     separation_momentum_error: f64,
     surface_begins: usize,
     surface_ends: usize,
     surface_impacts: usize,
+    #[cfg_attr(not(feature = "bench-internals"), allow(dead_code))]
     other_contact_events: usize,
+    #[cfg_attr(not(feature = "bench-internals"), allow(dead_code))]
     post_cutoff_surface_events: usize,
     post_cutoff_upper_surface_events: usize,
     post_cutoff_upper_surface_event_ticks: Vec<usize>,
@@ -1784,6 +1788,7 @@ fn system_center_of_mass(world: &PhysicsWorld) -> Vec3 {
     weighted_center / mass
 }
 
+#[cfg(feature = "bench-internals")]
 fn run_fixed_scenario(part_count: usize, block3: bool) -> StabilityRun {
     run_scenario(
         part_count,
