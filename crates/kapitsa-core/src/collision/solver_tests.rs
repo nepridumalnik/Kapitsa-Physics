@@ -35,7 +35,7 @@ fn safe_binding_preserves_shared_static_and_consumes_dynamic_ownership() {
     let mut binding = BodyBinding::bind(&mut bodies, &indices).unwrap();
     let first = binding.pair_at([2, 0]).unwrap();
     assert!(binding.pair_at([1, 2]).is_err());
-    drop(first);
+    assert_eq!(first.len(), 2);
 }
 
 #[test]
