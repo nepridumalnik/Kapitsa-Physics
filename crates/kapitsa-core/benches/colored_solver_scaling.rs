@@ -150,8 +150,16 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
     println!("timing_result mode={mode} workers={workers} detailed=N/A");
     let phase_p50 = phase_percentile(&phase_samples, SAMPLES / 2);
     let phase_p95 = phase_percentile(&phase_samples, p95_index(SAMPLES));
+    #[cfg(feature = "bench-detailed-timing")]
+    let constraint = format!(
+        "{:.3}/{:.3}",
+        nanos_to_ms(phase_p50.constraint_ns),
+        nanos_to_ms(phase_p95.constraint_ns)
+    );
+    #[cfg(not(feature = "bench-detailed-timing"))]
+    let constraint = "N/A";
     println!(
-        "phases mode={mode} workers={workers} spatial_p50_p95_ms={:.3}/{:.3} broad_p50_p95_ms={:.3}/{:.3} narrow_p50_p95_ms={:.3}/{:.3} ccd_p50_p95_ms={:.3}/{:.3} island_p50_p95_ms={:.3}/{:.3} solver_p50_p95_ms={:.3}/{:.3} prepare_p50_p95_ms={:.3}/{:.3} iterations_p50_p95_ms={:.3}/{:.3} writeback_p50_p95_ms={:.3}/{:.3} constraint_p50_p95_ms={:.3}/{:.3} growth_bytes_p50_p95={}/{} body_copies_p50_p95={}/{} manifold_copies_p50_p95={}/{} retained_p50_p95={}/{} peak_p50_p95={}/{}",
+        "phases mode={mode} workers={workers} spatial_p50_p95_ms={:.3}/{:.3} broad_p50_p95_ms={:.3}/{:.3} narrow_p50_p95_ms={:.3}/{:.3} ccd_p50_p95_ms={:.3}/{:.3} island_p50_p95_ms={:.3}/{:.3} solver_p50_p95_ms={:.3}/{:.3} prepare_p50_p95_ms={:.3}/{:.3} iterations_p50_p95_ms={:.3}/{:.3} writeback_p50_p95_ms={:.3}/{:.3} constraint_p50_p95_ms={constraint} growth_bytes_p50_p95={}/{} body_copies_p50_p95={}/{} manifold_copies_p50_p95={}/{} retained_p50_p95={}/{} peak_p50_p95={}/{}",
         nanos_to_ms(phase_p50.spatial_ns),
         nanos_to_ms(phase_p95.spatial_ns),
         nanos_to_ms(phase_p50.broad_ns),
@@ -170,8 +178,6 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         nanos_to_ms(phase_p95.iterations_ns),
         nanos_to_ms(phase_p50.writeback_ns),
         nanos_to_ms(phase_p95.writeback_ns),
-        nanos_to_ms(phase_p50.constraint_ns),
-        nanos_to_ms(phase_p95.constraint_ns),
         phase_p50.growth,
         phase_p95.growth,
         phase_p50.body_copies,
