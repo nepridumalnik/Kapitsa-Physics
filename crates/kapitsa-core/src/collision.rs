@@ -176,6 +176,10 @@ pub struct CollisionStepMetrics {
     pub colored_constraint_processing: Duration,
     /// Executor interval excluding the measured constraint-processing interval.
     pub colored_dispatch_overhead: Duration,
+    pub colored_executor_wall: Duration,
+    pub colored_processing_sum: Duration,
+    pub colored_callback_span: Duration,
+    pub colored_outside_callbacks: Duration,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -255,6 +259,10 @@ impl CollisionStepMetrics {
         colored_binding: Duration::ZERO,
         colored_constraint_processing: Duration::ZERO,
         colored_dispatch_overhead: Duration::ZERO,
+        colored_executor_wall: Duration::ZERO,
+        colored_processing_sum: Duration::ZERO,
+        colored_callback_span: Duration::ZERO,
+        colored_outside_callbacks: Duration::ZERO,
     };
 }
 pub(crate) use event::{CollisionInteraction, CollisionLifecycle};
