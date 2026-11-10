@@ -8,12 +8,9 @@ processing/solver iterations, not safe body binding. The largest contacts-only
 case is also limited by aggregate callback CPU time and does not scale
 linearly from four to eight workers.
 
-The audit implemented one measured structural optimization: the colored phase
-now computes active batches, constraint count, and the contact prefix in one
-pass instead of three passes. The change preserves the schedule and numerical
-algorithm. One run showed a large improvement, but it was not independently
-repeated enough to claim that the entire difference is attributable to this
-change; treat the figures below as indicative rather than a stable percentage.
+An experiment combined colored phase metadata scans into one pass. It was
+reverted because a reproducible full-step improvement was not established.
+No new solver optimization is retained from this experiment.
 
 Parity with the historical unsafe implementation is not established for all
 fixtures. The current evidence is sufficient to reject the hypothesis that
@@ -27,18 +24,20 @@ are retained from the earlier audit run and are not re-instrumented here.
 
 | Scenario | Workers | Unsafe p50/p95 | Safe baseline | Before | After | Improvement |
 |---|---:|---:|---:|---:|---:|---:|
-| Joints-only 10000 | 2 | N/A | N/A | 117.540/124.184 | 120.301/132.046 | not established |
-| Joints-only 10000 | 4 | N/A | N/A | 91.823/96.013 | 96.833/103.447 | not established |
-| Joints-only 10000 | 8 | historical safe ~3.6–5.3% over unsafe | N/A | 80.451/90.301 | 82.249/90.108 | p50 regressed in this run |
-| Contacts-only 10000 | 2 | N/A | N/A | 525.435/575.206 | 409.666/423.123 | indicative, not isolated |
-| Contacts-only 10000 | 4 | N/A | N/A | 465.245/537.318 | 372.858/420.760 | indicative, not isolated |
-| Contacts-only 10000 | 8 | N/A | N/A | 463.767/522.324 | 371.223/400.129 | indicative, not isolated |
-| Mixed 10000 | 2 | N/A | N/A | 419.171/454.126 | 322.960/345.849 | indicative, not isolated |
-| Mixed 10000 | 4 | N/A | N/A | 359.544/445.859 | 254.588/272.792 | indicative, not isolated |
-| Mixed 10000 | 8 | N/A | N/A | 348.860/397.984 | 223.231/240.946 | indicative, not isolated |
+| Joints-only 10000 | 2 | N/A | N/A | 117.540/124.184 | N/A | not measured after |
+| Joints-only 10000 | 4 | N/A | N/A | 91.823/96.013 | N/A | not measured after |
+| Joints-only 10000 | 8 | historical safe ~3.6–5.3% over unsafe | N/A | 80.451/90.301 | N/A | not measured after |
+| Contacts-only 10000 | 2 | N/A | N/A | 525.435/575.206 | N/A | not measured after |
+| Contacts-only 10000 | 4 | N/A | N/A | 465.245/537.318 | N/A | not measured after |
+| Contacts-only 10000 | 8 | N/A | N/A | 463.767/522.324 | N/A | not measured after |
+| Mixed 10000 | 2 | N/A | N/A | 419.171/454.126 | N/A | not measured after |
+| Mixed 10000 | 4 | N/A | N/A | 359.544/445.859 | N/A | not measured after |
+| Mixed 10000 | 8 | N/A | N/A | 348.860/397.984 | N/A | not measured after |
 
 The benchmark output also covers 128, 512, 1000, and 5000 constraints, all
 three workload types, workers 2/4/8, and scalar worker-count-one samples.
+The metadata optimization experiment was reverted because its recorded run
+was not a controlled before/after comparison.
 
 ## Timing breakdown
 
@@ -80,7 +79,7 @@ tighter environmental control before drawing a percentage conclusion.
 | `1fc2ff6` | colored diagnostics | Gate detailed timers and atomics behind feature | same algorithm, less normal-mode instrumentation | normal mode no longer pays detailed timing cost |
 | `82ec5ba` | benchmark reporting | Print `N/A` when constraint timing is disabled | O(1) output change | removes misleading zero metrics |
 | `80e643d` | scalar benchmark | Use 40 samples and p50/p95 | one sampled loop instead of one step | comparable scalar data |
-| `c71d05d` | `execute_colored_phase` | Combine metadata scans into one pass | O(3B) to O(B) per color group | promising but requires repeated controlled reruns |
+| `9782fcd` | `execute_colored_phase` | Revert unconfirmed metadata-scan optimization | baseline restored | no claim made without controlled evidence |
 
 ## Rejected or unresolved hypotheses
 
