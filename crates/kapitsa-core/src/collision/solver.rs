@@ -1569,33 +1569,35 @@ impl SolverWorkspace {
                 continue;
             }
             let batches = &self.colored_batches[start..end];
-            let active_batch_count = batches
-                .iter()
-                .filter(|batch| !contact_only || batch.has_contacts())
-                .count();
-            if active_batch_count == 0 {
-                continue;
-            }
-            let constraint_count = batches
-                .iter()
-                .filter(|batch| !contact_only || batch.has_contacts())
-                .map(|batch| {
-                    if contact_only {
+            let mut active_batch_count = 0;
+            let mut constraint_count = 0;
+            let mut contact_prefix = 0;
+            let mut contact_prefix_open = true;
+            for batch in batches {
+                let has_contacts = batch.has_contacts();
+                if contact_only && has_contacts && contact_prefix_open {
+                    contact_prefix += 1;
+                } else if contact_only {
+                    contact_prefix_open = false;
+                }
+                if !contact_only || has_contacts {
+                    active_batch_count += 1;
+                    constraint_count += if contact_only {
                         batch.contact_task_count
                     } else {
                         batch.tasks.len()
-                    }
-                })
-                .sum::<usize>();
+                    };
+                }
+            }
+            if active_batch_count == 0 {
+                continue;
+            }
+
             // Contact constraints precede joints in each color, so inactive
             // joint batches form a suffix that does not need to be dispatched.
             let process_end = if contact_only {
-                let prefix = batches
-                    .iter()
-                    .take_while(|batch| batch.has_contacts())
-                    .count();
-                if prefix == active_batch_count {
-                    start + prefix
+                if contact_prefix == active_batch_count {
+                    start + contact_prefix
                 } else {
                     end
                 }
