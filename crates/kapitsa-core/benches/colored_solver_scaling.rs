@@ -95,6 +95,12 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
                     .constraint_coloring_cache_hits,
                 nanos_to_ms(times[0]),
             );
+            println!(
+                "timing mode={mode} workers={workers} binding_ms={:.3} processing_ms={:.3} dispatch_overhead_ms={:.3}",
+                metrics.colored_binding.as_secs_f64() * 1_000.0,
+                metrics.colored_constraint_processing.as_secs_f64() * 1_000.0,
+                metrics.colored_dispatch_overhead.as_secs_f64() * 1_000.0,
+            );
         }
     }
     times.sort_unstable();

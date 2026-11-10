@@ -1347,6 +1347,9 @@ impl CollisionSystem {
             let mut selected = false;
             let mut groups = 0_usize;
             let mut batches = 0_usize;
+            let mut binding = std::time::Duration::ZERO;
+            let mut processing = std::time::Duration::ZERO;
+            let mut dispatch = std::time::Duration::ZERO;
             for island in self.solver_islands.iter().take(island_count) {
                 let (island_selected, island_groups, island_batches) =
                     island.workspace.colored_dispatch_metrics();
@@ -1357,10 +1360,18 @@ impl CollisionSystem {
                 selected |= island_selected;
                 groups = groups.saturating_add(island_groups);
                 batches = batches.saturating_add(island_batches);
+                let (island_binding, island_processing, island_dispatch) =
+                    island.workspace.colored_phase_timings();
+                binding += island_binding;
+                processing += island_processing;
+                dispatch += island_dispatch;
             }
             self.benchmark_metrics.colored_solver_selected = selected;
             self.benchmark_metrics.colored_groups_dispatched = groups;
             self.benchmark_metrics.colored_parallel_batches = batches;
+            self.benchmark_metrics.colored_binding = binding;
+            self.benchmark_metrics.colored_constraint_processing = processing;
+            self.benchmark_metrics.colored_dispatch_overhead = dispatch;
         }
 
         for island_index in 0..island_count {

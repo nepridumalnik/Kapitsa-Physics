@@ -299,6 +299,12 @@ pub(crate) struct SolverWorkspace {
     #[cfg(feature = "bench-internals")]
     colored_parallel_batches: usize,
     #[cfg(feature = "bench-internals")]
+    colored_binding: std::time::Duration,
+    #[cfg(feature = "bench-internals")]
+    colored_constraint_processing: std::time::Duration,
+    #[cfg(feature = "bench-internals")]
+    colored_dispatch_overhead: std::time::Duration,
+    #[cfg(feature = "bench-internals")]
     reduced_fixed_tree_offsets: Vec<Transform>,
     #[cfg(feature = "bench-internals")]
     reduced_fixed_tree_signature: Vec<[usize; 2]>,
@@ -588,6 +594,9 @@ impl SolverWorkspace {
             colored_groups_dispatched: 0,
             #[cfg(feature = "bench-internals")]
             colored_parallel_batches: 0,
+            colored_binding: std::time::Duration::ZERO,
+            colored_constraint_processing: std::time::Duration::ZERO,
+            colored_dispatch_overhead: std::time::Duration::ZERO,
             #[cfg(feature = "bench-internals")]
             reduced_fixed_tree_offsets: Vec::new(),
             #[cfg(feature = "bench-internals")]
@@ -626,6 +635,21 @@ impl SolverWorkspace {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub(crate) fn colored_phase_timings(
+        &self,
+    ) -> (
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
+        (
+            self.colored_binding,
+            self.colored_constraint_processing,
+            self.colored_dispatch_overhead,
+        )
+    }
+
+    #[cfg(feature = "bench-internals")]
     fn reset_colored_dispatch_metrics(&mut self) {
         self.colored_schedule = super::ColoredScheduleMetrics {
             rejection: "not-evaluated",
@@ -634,6 +658,9 @@ impl SolverWorkspace {
         self.colored_solver_selected = false;
         self.colored_groups_dispatched = 0;
         self.colored_parallel_batches = 0;
+        self.colored_binding = std::time::Duration::ZERO;
+        self.colored_constraint_processing = std::time::Duration::ZERO;
+        self.colored_dispatch_overhead = std::time::Duration::ZERO;
     }
 
     pub(crate) fn clear(&mut self) {
@@ -1547,14 +1574,26 @@ impl SolverWorkspace {
                 .constraint_coloring
                 .bodies_in_schedule_group(group)
                 .ok_or(CollisionError::InvalidContact)?;
+            #[cfg(feature = "bench-internals")]
+            let binding_started = std::time::Instant::now();
             let mut bound_batches = bind_colored_batches(
                 &mut self.colored_batches[start..process_end],
                 bodies,
                 indices,
             )?;
+            #[cfg(feature = "bench-internals")]
+            {
+                self.colored_binding += binding_started.elapsed();
+            }
             if !use_parallel {
+                #[cfg(feature = "bench-internals")]
+                let processing_started = std::time::Instant::now();
                 for batch in &mut bound_batches {
                     Self::process_colored_batch(batch, config, joint_solver_step, phase)?;
+                }
+                #[cfg(feature = "bench-internals")]
+                {
+                    self.colored_constraint_processing += processing_started.elapsed();
                 }
             } else {
                 #[cfg(feature = "bench-internals")]
@@ -1574,10 +1613,16 @@ impl SolverWorkspace {
                 let chunk_size = batch_count.div_ceil(task_count);
                 #[cfg(feature = "bench-internals")]
                 let started = std::sync::atomic::AtomicUsize::new(0);
+                #[cfg(feature = "bench-internals")]
+                let dispatch_started = std::time::Instant::now();
+                #[cfg(feature = "bench-internals")]
+                let processing_nanos = std::sync::atomic::AtomicU64::new(0);
                 let batch_result =
                     executor.for_each_chunk_mut(&mut bound_batches, chunk_size, |_, batches| {
                         #[cfg(feature = "bench-internals")]
                         started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        #[cfg(feature = "bench-internals")]
+                        let processing_started = std::time::Instant::now();
                         for batch in batches {
                             *batch.error = Self::process_colored_batch(
                                 batch,
@@ -1587,7 +1632,25 @@ impl SolverWorkspace {
                             )
                             .err();
                         }
+                        #[cfg(feature = "bench-internals")]
+                        processing_nanos.fetch_add(
+                            processing_started
+                                .elapsed()
+                                .as_nanos()
+                                .min(u64::MAX as u128) as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                     });
+                #[cfg(feature = "bench-internals")]
+                {
+                    let dispatch_elapsed = dispatch_started.elapsed();
+                    let processing_elapsed = std::time::Duration::from_nanos(
+                        processing_nanos.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                    self.colored_constraint_processing += processing_elapsed;
+                    self.colored_dispatch_overhead +=
+                        dispatch_elapsed.saturating_sub(processing_elapsed);
+                }
                 #[cfg(feature = "bench-internals")]
                 {
                     self.colored_schedule.tasks_started +=

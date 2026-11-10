@@ -170,6 +170,12 @@ pub struct CollisionStepMetrics {
     pub colored_groups_dispatched: usize,
     /// Batches processed by the step executor in parallel color groups.
     pub colored_parallel_batches: usize,
+    /// Time spent materializing safe colored body references.
+    pub colored_binding: Duration,
+    /// Wall time spent executing colored constraint work.
+    pub colored_constraint_processing: Duration,
+    /// Executor interval excluding the measured constraint-processing interval.
+    pub colored_dispatch_overhead: Duration,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -246,6 +252,9 @@ impl CollisionStepMetrics {
         colored_solver_selected: false,
         colored_groups_dispatched: 0,
         colored_parallel_batches: 0,
+        colored_binding: Duration::ZERO,
+        colored_constraint_processing: Duration::ZERO,
+        colored_dispatch_overhead: Duration::ZERO,
     };
 }
 pub(crate) use event::{CollisionInteraction, CollisionLifecycle};
