@@ -47,6 +47,7 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
     let mut executor_times = Vec::with_capacity(SAMPLES);
     let mut processing_times = Vec::with_capacity(SAMPLES);
     let mut outside_times = Vec::with_capacity(SAMPLES);
+    let mut phase_samples = Vec::with_capacity(SAMPLES);
     let mut rebuild_steps = 0;
     let mut cache_hit_steps = 0;
     for sample in 0..SAMPLES {
@@ -62,6 +63,7 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         executor_times.push(metrics.colored_executor_wall.as_nanos());
         processing_times.push(metrics.colored_processing_sum.as_nanos());
         outside_times.push(metrics.colored_outside_callbacks.as_nanos());
+        phase_samples.push(PhaseSample::from(metrics));
         if !metrics.colored_solver_selected
             || metrics.colored_groups_dispatched == 0
             || metrics.colored_parallel_batches == 0
@@ -132,7 +134,112 @@ fn run_case(count: usize, mode: &str, workers: usize) -> Result<(), Box<dyn Erro
         nanos_to_ms(outside_times[SAMPLES / 2]),
         nanos_to_ms(outside_times[p95_index(SAMPLES)]),
     );
+    let phase_p50 = phase_percentile(&phase_samples, SAMPLES / 2);
+    let phase_p95 = phase_percentile(&phase_samples, p95_index(SAMPLES));
+    println!(
+        "phases mode={mode} workers={workers} spatial_p50_p95_ms={:.3}/{:.3} broad_p50_p95_ms={:.3}/{:.3} narrow_p50_p95_ms={:.3}/{:.3} ccd_p50_p95_ms={:.3}/{:.3} island_p50_p95_ms={:.3}/{:.3} solver_p50_p95_ms={:.3}/{:.3} prepare_p50_p95_ms={:.3}/{:.3} iterations_p50_p95_ms={:.3}/{:.3} writeback_p50_p95_ms={:.3}/{:.3} constraint_p50_p95_ms={:.3}/{:.3} growth_bytes_p50_p95={}/{} body_copies_p50_p95={}/{} manifold_copies_p50_p95={}/{} retained_p50_p95={}/{} peak_p50_p95={}/{}",
+        nanos_to_ms(phase_p50.spatial_ns),
+        nanos_to_ms(phase_p95.spatial_ns),
+        nanos_to_ms(phase_p50.broad_ns),
+        nanos_to_ms(phase_p95.broad_ns),
+        nanos_to_ms(phase_p50.narrow_ns),
+        nanos_to_ms(phase_p95.narrow_ns),
+        nanos_to_ms(phase_p50.ccd_ns),
+        nanos_to_ms(phase_p95.ccd_ns),
+        nanos_to_ms(phase_p50.island_ns),
+        nanos_to_ms(phase_p95.island_ns),
+        nanos_to_ms(phase_p50.solver_ns),
+        nanos_to_ms(phase_p95.solver_ns),
+        nanos_to_ms(phase_p50.prepare_ns),
+        nanos_to_ms(phase_p95.prepare_ns),
+        nanos_to_ms(phase_p50.iterations_ns),
+        nanos_to_ms(phase_p95.iterations_ns),
+        nanos_to_ms(phase_p50.writeback_ns),
+        nanos_to_ms(phase_p95.writeback_ns),
+        nanos_to_ms(phase_p50.constraint_ns),
+        nanos_to_ms(phase_p95.constraint_ns),
+        phase_p50.growth,
+        phase_p95.growth,
+        phase_p50.body_copies,
+        phase_p95.body_copies,
+        phase_p50.manifold_copies,
+        phase_p95.manifold_copies,
+        phase_p50.retained,
+        phase_p95.retained,
+        phase_p50.peak,
+        phase_p95.peak,
+    );
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct PhaseSample {
+    spatial_ns: u128,
+    broad_ns: u128,
+    narrow_ns: u128,
+    ccd_ns: u128,
+    island_ns: u128,
+    solver_ns: u128,
+    prepare_ns: u128,
+    iterations_ns: u128,
+    writeback_ns: u128,
+    constraint_ns: u128,
+    growth: usize,
+    body_copies: usize,
+    manifold_copies: usize,
+    retained: usize,
+    peak: usize,
+}
+
+impl PhaseSample {
+    fn from(metrics: kapitsa_core::collision::CollisionStepMetrics) -> Self {
+        Self {
+            spatial_ns: metrics.spatial_index.as_nanos(),
+            broad_ns: metrics.broad_phase.as_nanos(),
+            narrow_ns: metrics.narrow_phase.as_nanos(),
+            ccd_ns: metrics.ccd.as_nanos(),
+            island_ns: metrics.island_build.as_nanos(),
+            solver_ns: metrics.solver.as_nanos(),
+            prepare_ns: metrics.solver_prepare.as_nanos(),
+            iterations_ns: metrics.solver_iterations.as_nanos(),
+            writeback_ns: metrics.solver_writeback.as_nanos(),
+            constraint_ns: metrics.colored_constraint_processing.as_nanos(),
+            growth: metrics.logical_capacity_growth_bytes,
+            body_copies: metrics.solver_body_copies,
+            manifold_copies: metrics.solver_manifold_copies,
+            retained: metrics.retained_scratch_bytes,
+            peak: metrics.peak_scratch_bytes,
+        }
+    }
+}
+
+fn phase_percentile(samples: &[PhaseSample], index: usize) -> PhaseSample {
+    fn value<T: Ord + Copy>(
+        samples: &[PhaseSample],
+        index: usize,
+        get: impl Fn(&PhaseSample) -> T,
+    ) -> T {
+        let mut values: Vec<T> = samples.iter().map(get).collect();
+        values.sort_unstable();
+        values[index]
+    }
+    PhaseSample {
+        spatial_ns: value(samples, index, |s| s.spatial_ns),
+        broad_ns: value(samples, index, |s| s.broad_ns),
+        narrow_ns: value(samples, index, |s| s.narrow_ns),
+        ccd_ns: value(samples, index, |s| s.ccd_ns),
+        island_ns: value(samples, index, |s| s.island_ns),
+        solver_ns: value(samples, index, |s| s.solver_ns),
+        prepare_ns: value(samples, index, |s| s.prepare_ns),
+        iterations_ns: value(samples, index, |s| s.iterations_ns),
+        writeback_ns: value(samples, index, |s| s.writeback_ns),
+        constraint_ns: value(samples, index, |s| s.constraint_ns),
+        growth: value(samples, index, |s| s.growth),
+        body_copies: value(samples, index, |s| s.body_copies),
+        manifold_copies: value(samples, index, |s| s.manifold_copies),
+        retained: value(samples, index, |s| s.retained),
+        peak: value(samples, index, |s| s.peak),
+    }
 }
 
 fn run_sequential(count: usize, mode: &str) -> Result<(), Box<dyn Error>> {
