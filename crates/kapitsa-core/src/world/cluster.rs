@@ -13,7 +13,7 @@ use crate::{
         motion::{transfer_motion, velocity_field, world_properties},
     },
     mass::MassProperties,
-    rigid_body::BodyType,
+    rigid_body::{BodyType, RigidBody},
     transform::Transform,
 };
 
@@ -316,6 +316,11 @@ impl PhysicsWorld {
             collider.set_local_transform(local_transform);
             prepared_colliders.push(collider);
         }
+        let rebased_surfaces = if let Some(prepared) = &prepared_body {
+            Some(self.rebase_cluster_surfaces(body, &original, prepared)?)
+        } else {
+            None
+        };
         let part_dense = self
             .parts
             .insert(ClusterPart {
@@ -367,10 +372,12 @@ impl PhysicsWorld {
         };
 
         if let Some(prepared) = prepared_body {
-            self.bodies
+            let entry = self
+                .bodies
                 .get_mut(body.dense)
-                .expect("cluster body must exist")
-                .body = prepared;
+                .expect("cluster body must exist");
+            entry.body = prepared;
+            entry.aerodynamics = rebased_surfaces.expect("surfaces prepared with body");
         }
         let cluster = self
             .bodies
@@ -517,6 +524,8 @@ impl PhysicsWorld {
             }
         }
 
+        let mut rebased_surfaces = self.rebase_cluster_surfaces(body, &original, &prepared)?;
+        rebased_surfaces.retain(|surface| surface.target() != AerodynamicTarget::Part(part));
         let removed_sources = self
             .force_sources
             .iter()
@@ -552,11 +561,6 @@ impl PhysicsWorld {
                 .remove(weld.dense)
                 .ok_or(ClusterError::InvalidTopology)?;
         }
-        self.bodies
-            .get_mut(body.dense)
-            .ok_or(ClusterError::InvalidBodyId)?
-            .aerodynamics
-            .retain(|surface| surface.target() != AerodynamicTarget::Part(part));
         self.parts
             .remove(part.dense)
             .ok_or(ClusterError::InvalidTopology)?;
@@ -578,10 +582,12 @@ impl PhysicsWorld {
         cluster.root = root;
         cluster.parts.retain(|id| *id != part);
         cluster.welds.retain(|id| !removed_welds.contains(id));
-        self.bodies
+        let entry = self
+            .bodies
             .get_mut(body.dense)
-            .expect("cluster body must exist")
-            .body = prepared;
+            .expect("cluster body must exist");
+        entry.body = prepared;
+        entry.aerodynamics = rebased_surfaces;
         self.synchronize_cluster_physics_state(&[body]);
         Ok(())
     }
@@ -1427,6 +1433,7 @@ impl PhysicsWorld {
                 prepared.apply_torque(torque).map_err(ClusterError::Body)?;
             }
         }
+        let rebased_surfaces = self.rebase_cluster_surfaces(body, &original, &prepared)?;
         let target = self
             .parts
             .get_mut(part.dense)
@@ -1437,6 +1444,7 @@ impl PhysicsWorld {
             .ok_or(ClusterError::InvalidBodyId)?;
         target.mass = mass;
         entry.body = prepared;
+        entry.aerodynamics = rebased_surfaces;
         let mut collider = entry.first_collider;
         while let Some(id) = collider {
             collider = self.colliders.get(id.dense).and_then(|entry| entry.next);
@@ -1444,6 +1452,34 @@ impl PhysicsWorld {
         }
         self.synchronize_cluster_physics_state(&[body]);
         Ok(())
+    }
+
+    fn rebase_cluster_surfaces(
+        &self,
+        body: BodyId,
+        original: &RigidBody,
+        prepared: &RigidBody,
+    ) -> Result<Vec<crate::aerodynamics::AerodynamicSurface>, ClusterError> {
+        let surfaces = &self
+            .bodies
+            .get(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .aerodynamics;
+        let mut rebased = Vec::new();
+        rebased
+            .try_reserve(surfaces.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for &surface in surfaces {
+            if original.physics().body_type() == BodyType::Dynamic {
+                rebased.push(
+                    Self::rebase_aerodynamic_surface(surface, original, prepared)
+                        .map_err(|_| ClusterError::ArithmeticOverflow)?,
+                );
+            } else {
+                rebased.push(surface);
+            }
+        }
+        Ok(rebased)
     }
 
     #[allow(dead_code)]

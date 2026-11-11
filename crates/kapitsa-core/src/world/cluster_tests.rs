@@ -34,6 +34,67 @@ fn part(world: &mut PhysicsWorld, body: BodyId) -> PartId {
     }
 }
 
+#[test]
+fn body_surface_stays_fixed_when_cluster_mass_changes() {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).unwrap())
+        .unwrap();
+    let root = world.enable_cluster(body).unwrap();
+    let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::Y)
+        .unwrap()
+        .with_lift(1.0, Vec3::Z)
+        .unwrap();
+    world.set_aerodynamics(body, Some(properties)).unwrap();
+    let check = |world: &PhysicsWorld| {
+        let rigid = world.body(body).unwrap();
+        let properties = world.aerodynamics(body).unwrap();
+        let point = rigid.world_center_of_mass().unwrap().unwrap()
+            + rigid
+                .state()
+                .transform()
+                .transform_vector(properties.local_application_offset());
+        assert!((point - Vec3::Y).length() < 1e-12);
+        assert_eq!(properties.local_lift_axis(), Some(Vec3::Z));
+    };
+    let child = world
+        .add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::new(Vec3::X, Quat::IDENTITY).unwrap(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame {
+                    local_anchor: Vec3::X,
+                    local_rotation: Quat::IDENTITY,
+                },
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )
+        .unwrap();
+    check(&world);
+    world
+        .set_part_mass(
+            child,
+            MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+            crate::cluster::MassChangeMode::KeepVelocityField,
+        )
+        .unwrap();
+    check(&world);
+    world.destroy_cluster_part(child).unwrap();
+    check(&world);
+}
+
 fn weld(world: &mut PhysicsWorld, a: PartId, b: PartId) -> WeldId {
     let desc = WeldDesc {
         frame_a: JointFrame::IDENTITY,

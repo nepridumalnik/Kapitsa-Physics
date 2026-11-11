@@ -10,6 +10,7 @@ use crate::collision::ContactManifold;
 #[cfg(feature = "bench-internals")]
 use std::time::Instant;
 
+mod aerodynamics;
 #[cfg(test)]
 mod aerodynamics_tests;
 mod ccd;
@@ -23,6 +24,7 @@ mod id;
 mod metrics;
 mod query;
 
+pub use aerodynamics::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
 pub use chunk::{AddChunkBatchError, AddChunkError, ChunkOperationError, RemoveChunkBatchError};
 pub use error::{ClusterError, ForceSourceError, StepError, WorldError};
 pub use id::{BodyId, ChunkId, ColliderId, ForceSourceId, GravityId, JointId, PartId, WeldId};
@@ -41,9 +43,7 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 
 use crate::{
     aabb::Aabb,
-    aerodynamics::{
-        AerodynamicProperties, AerodynamicSurface, AerodynamicTarget, AtmosphericState,
-    },
+    aerodynamics::{AerodynamicProperties, AtmosphericState},
     cluster::{ClusterPart, RigidCluster, Weld},
     collider::Collider,
     collision::{
@@ -318,6 +318,7 @@ impl PhysicsWorld {
         })
     }
 
+    /// Replaces body surfaces. All previously returned surface indices are invalidated.
     pub fn set_aerodynamics(
         &mut self,
         id: BodyId,
@@ -356,6 +357,7 @@ impl PhysicsWorld {
             .map(|entry| entry.aerodynamics.as_slice())
     }
 
+    /// Returns an index valid until the surface list changes or the cluster is split or merged.
     pub fn add_aerodynamic_surface(
         &mut self,
         id: BodyId,
@@ -376,6 +378,7 @@ impl PhysicsWorld {
         Ok(surfaces.len() - 1)
     }
 
+    /// Removes a surface by its current index, invalidating previously returned indices.
     pub fn remove_aerodynamic_surface(
         &mut self,
         id: BodyId,
@@ -395,6 +398,7 @@ impl PhysicsWorld {
         Ok(surfaces.remove(index).properties())
     }
 
+    /// Returns an index valid until the surface list changes or the cluster is split or merged.
     pub fn add_aerodynamic_surface_for_part(
         &mut self,
         part: PartId,
@@ -1471,6 +1475,8 @@ impl PhysicsWorld {
             .ok_or_else(error)?;
         let mut drag = Vec3::ZERO;
         let mut drag_torque = Vec3::ZERO;
+        let mut lift_force = Vec3::ZERO;
+        let mut lift_torque = Vec3::ZERO;
         for surface in surfaces {
             let properties = surface.properties();
             let target_transform = match surface.target() {
@@ -1506,22 +1512,19 @@ impl PhysicsWorld {
             let point_properties = properties
                 .with_local_application_offset(Vec3::ZERO)
                 .map_err(|_| error())?;
-            let force = point_properties
-                .drag_force(atmosphere, target_transform, point_velocity, Vec3::ZERO)
+            let (surface_drag, lift) = point_properties
+                .force_components(atmosphere, target_transform, point_velocity, Vec3::ZERO)
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
-            let surface_drag = point_properties
-                .without_lift()
-                .drag_force(atmosphere, target_transform, point_velocity, Vec3::ZERO)
-                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?
-                .force();
-            let lift = force.force().checked_sub(surface_drag).ok_or_else(error)?;
             drag = drag.checked_add(surface_drag).ok_or_else(error)?;
             drag_torque = offset
                 .checked_cross(surface_drag)
                 .and_then(|torque| drag_torque.checked_add(torque))
                 .ok_or_else(error)?;
-            body.apply_force_at_point(lift, point)
-                .map_err(|_| error())?;
+            lift_force = lift_force.checked_add(lift).ok_or_else(error)?;
+            lift_torque = offset
+                .checked_cross(lift)
+                .and_then(|torque| lift_torque.checked_add(torque))
+                .ok_or_else(error)?;
         }
         let mut scale = 1.0_f64;
         if let Some(dt) = dt {
@@ -1571,6 +1574,136 @@ impl PhysicsWorld {
             .map_err(|_| error())?;
         body.apply_torque(drag_torque.checked_mul_scalar(scale).ok_or_else(error)?)
             .map_err(|_| error())?;
+        if let Some(dt) = dt
+            && (lift_force != Vec3::ZERO || lift_torque != Vec3::ZERO)
+        {
+            let mass = body.physics().mass().ok_or_else(error)?;
+            let rotation = body.state().transform().rotation();
+            let inverse = rotation.conjugate();
+            let drag_angular_acceleration = rotation
+                .rotate_vector(
+                    mass.inertia()
+                        .solve_spd(inverse.rotate_vector(drag_torque).ok_or_else(error)?)
+                        .map_err(|_| error())?,
+                )
+                .ok_or_else(error)?;
+            let angular_velocity = body
+                .state()
+                .angular_velocity()
+                .checked_add(
+                    drag_angular_acceleration
+                        .checked_mul_scalar(scale * dt)
+                        .ok_or_else(error)?,
+                )
+                .ok_or_else(error)?;
+            let local_omega = inverse.rotate_vector(angular_velocity).ok_or_else(error)?;
+            let angular_momentum = rotation
+                .rotate_vector(
+                    mass.inertia()
+                        .checked_mul_vector(local_omega)
+                        .ok_or_else(error)?,
+                )
+                .ok_or_else(error)?;
+            let relative_velocity = body
+                .state()
+                .linear_velocity()
+                .checked_sub(atmosphere.wind_velocity())
+                .and_then(|velocity| {
+                    drag.checked_mul_scalar(scale * dt / mass.mass())
+                        .and_then(|change| velocity.checked_add(change))
+                })
+                .ok_or_else(error)?;
+            let linear_momentum = relative_velocity
+                .checked_mul_scalar(mass.mass())
+                .ok_or_else(error)?;
+            let metric = relative_velocity
+                .checked_dot(linear_momentum)
+                .and_then(|linear| {
+                    angular_velocity
+                        .checked_dot(angular_momentum)
+                        .map(|angular| linear + angular)
+                })
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(error)?;
+            if metric == 0.0 {
+                return Ok(());
+            }
+            let power = relative_velocity
+                .checked_dot(lift_force)
+                .and_then(|linear| {
+                    angular_velocity
+                        .checked_dot(lift_torque)
+                        .map(|angular| linear + angular)
+                })
+                .filter(|value| value.is_finite())
+                .ok_or_else(error)?;
+            let projection = power / metric;
+            lift_force = lift_force
+                .checked_sub(
+                    linear_momentum
+                        .checked_mul_scalar(projection)
+                        .ok_or_else(error)?,
+                )
+                .ok_or_else(error)?;
+            lift_torque = lift_torque
+                .checked_sub(
+                    angular_momentum
+                        .checked_mul_scalar(projection)
+                        .ok_or_else(error)?,
+                )
+                .ok_or_else(error)?;
+            let local_lift_torque = inverse.rotate_vector(lift_torque).ok_or_else(error)?;
+            let angular_acceleration = rotation
+                .rotate_vector(
+                    mass.inertia()
+                        .solve_spd(local_lift_torque)
+                        .map_err(|_| error())?,
+                )
+                .ok_or_else(error)?;
+            let curvature = lift_force
+                .checked_dot(lift_force)
+                .and_then(|linear| {
+                    lift_torque
+                        .checked_dot(angular_acceleration)
+                        .map(|angular| linear / mass.mass() + angular)
+                })
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(error)?;
+            let rate = (curvature / metric).sqrt();
+            let half_angle = 0.5 * dt * rate;
+            if !half_angle.is_finite() {
+                return Err(error());
+            }
+            let (factor, damping) = if half_angle <= 1.0 {
+                let factor = 1.0 / (1.0 + half_angle * half_angle);
+                (factor, rate * half_angle * factor)
+            } else {
+                let inverse_angle = 1.0 / half_angle;
+                let denominator = 1.0 + inverse_angle * inverse_angle;
+                (
+                    inverse_angle * inverse_angle / denominator,
+                    rate * inverse_angle / denominator,
+                )
+            };
+            lift_force = lift_force
+                .checked_mul_scalar(factor)
+                .and_then(|force| {
+                    linear_momentum
+                        .checked_mul_scalar(damping)
+                        .and_then(|correction| force.checked_sub(correction))
+                })
+                .ok_or_else(error)?;
+            lift_torque = lift_torque
+                .checked_mul_scalar(factor)
+                .and_then(|torque| {
+                    angular_momentum
+                        .checked_mul_scalar(damping)
+                        .and_then(|correction| torque.checked_sub(correction))
+                })
+                .ok_or_else(error)?;
+        }
+        body.apply_force(lift_force).map_err(|_| error())?;
+        body.apply_torque(lift_torque).map_err(|_| error())?;
         Ok(())
     }
 
@@ -2814,6 +2947,7 @@ impl PhysicsWorld {
                                 .bodies
                                 .get(step.body_id.dense)
                                 .map(|entry| entry.aerodynamics.as_slice())
+                                .filter(|surfaces| !surfaces.is_empty())
                         {
                             step.error = Self::apply_aerodynamics(
                                 atmosphere,

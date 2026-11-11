@@ -1,13 +1,12 @@
-//! Aerodynamic force models and the step task entry point.
+//! Aerodynamic force models.
 
 use std::fmt;
 
 use kapitsa_math::Vec3;
 
-use crate::{
-    transform::Transform,
-    world::{PartId, PhysicsWorld},
-};
+use crate::transform::Transform;
+
+pub use crate::world::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
 
 /// Local atmospheric conditions used by an aerodynamic force model.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -51,7 +50,9 @@ pub struct AerodynamicProperties {
 }
 
 impl AerodynamicProperties {
-    /// Creates drag parameters. The application offset is relative to the center of mass.
+    /// Creates drag parameters. For body surfaces the offset is relative to the
+    /// body center of mass; for part surfaces it is relative to the part origin.
+    /// Both the offset and lift axis are expressed in the target's local frame.
     pub fn new(
         reference_area: f64,
         drag_coefficient: f64,
@@ -88,24 +89,14 @@ impl AerodynamicProperties {
     }
 
     pub(crate) fn with_local_application_offset(
-        self,
+        mut self,
         local_application_offset: Vec3,
     ) -> Result<Self, AerodynamicsError> {
-        let mut properties = Self::new(
-            self.reference_area,
-            self.drag_coefficient,
-            local_application_offset,
-        )?;
-        if let Some(axis) = self.local_lift_axis {
-            properties = properties.with_lift(self.lift_coefficient, axis)?;
+        if !local_application_offset.is_finite() {
+            return Err(AerodynamicsError::NonFiniteApplicationOffset);
         }
-        Ok(properties)
-    }
-
-    pub(crate) fn without_lift(mut self) -> Self {
-        self.lift_coefficient = 0.0;
-        self.local_lift_axis = None;
-        self
+        self.local_application_offset = local_application_offset;
+        Ok(self)
     }
 
     pub fn lift_coefficient(self) -> f64 {
@@ -148,11 +139,36 @@ impl AerodynamicProperties {
         linear_velocity: Vec3,
         angular_velocity: Vec3,
     ) -> Result<AerodynamicForce, AerodynamicsError> {
+        let (drag, lift) =
+            self.force_components(atmosphere, transform, linear_velocity, angular_velocity)?;
+        let force = drag
+            .checked_add(lift)
+            .ok_or(AerodynamicsError::ArithmeticOverflow)?;
+        Ok(AerodynamicForce {
+            force,
+            local_application_offset: self.local_application_offset,
+        })
+    }
+
+    pub(crate) fn force_components(
+        self,
+        atmosphere: AtmosphericState,
+        transform: Transform,
+        linear_velocity: Vec3,
+        angular_velocity: Vec3,
+    ) -> Result<(Vec3, Vec3), AerodynamicsError> {
         if !linear_velocity.is_finite() {
             return Err(AerodynamicsError::NonFiniteLinearVelocity);
         }
         if !angular_velocity.is_finite() {
             return Err(AerodynamicsError::NonFiniteAngularVelocity);
+        }
+
+        if self.reference_area == 0.0
+            || (self.drag_coefficient == 0.0
+                && (self.lift_coefficient == 0.0 || self.local_lift_axis.is_none()))
+        {
+            return Ok((Vec3::ZERO, Vec3::ZERO));
         }
 
         let world_offset = transform.transform_vector(self.local_application_offset);
@@ -173,10 +189,7 @@ impl AerodynamicProperties {
             .ok_or(AerodynamicsError::ArithmeticOverflow)?;
 
         if speed == 0.0 || atmosphere.density == 0.0 {
-            return Ok(AerodynamicForce {
-                force: Vec3::ZERO,
-                local_application_offset: self.local_application_offset,
-            });
+            return Ok((Vec3::ZERO, Vec3::ZERO));
         }
 
         let speed_squared = speed * speed;
@@ -209,10 +222,7 @@ impl AerodynamicProperties {
                     )
                     .ok_or(AerodynamicsError::ArithmeticOverflow)?;
                 let Some(lift_direction) = lift_direction.try_normalize() else {
-                    return Ok(AerodynamicForce {
-                        force: drag_force,
-                        local_application_offset: self.local_application_offset,
-                    });
+                    return Ok((drag_force, Vec3::ZERO));
                 };
                 let lift_magnitude =
                     dynamic_pressure * self.reference_area * self.lift_coefficient * lift_factor;
@@ -225,59 +235,7 @@ impl AerodynamicProperties {
             }
             _ => Vec3::ZERO,
         };
-        let force = drag_force
-            .checked_add(lift_force)
-            .ok_or(AerodynamicsError::ArithmeticOverflow)?;
-        if !force.is_finite() {
-            return Err(AerodynamicsError::ArithmeticOverflow);
-        }
-
-        Ok(AerodynamicForce {
-            force,
-            local_application_offset: self.local_application_offset,
-        })
-    }
-}
-
-/// Identifies the rigid object that owns an aerodynamic surface.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AerodynamicTarget {
-    Body,
-    Part(PartId),
-}
-
-/// Aerodynamic properties attached to a body or one of its cluster parts.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AerodynamicSurface {
-    properties: AerodynamicProperties,
-    target: AerodynamicTarget,
-}
-
-impl AerodynamicSurface {
-    pub fn new(properties: AerodynamicProperties) -> Self {
-        Self {
-            properties,
-            target: AerodynamicTarget::Body,
-        }
-    }
-
-    pub fn for_part(part: PartId, properties: AerodynamicProperties) -> Self {
-        Self {
-            properties,
-            target: AerodynamicTarget::Part(part),
-        }
-    }
-
-    pub fn properties(self) -> AerodynamicProperties {
-        self.properties
-    }
-
-    pub fn target(self) -> AerodynamicTarget {
-        self.target
-    }
-
-    pub(crate) fn with_properties(self, properties: AerodynamicProperties) -> Self {
-        Self { properties, ..self }
+        Ok((drag_force, lift_force))
     }
 }
 
@@ -333,20 +291,52 @@ impl fmt::Display for AerodynamicsError {
 
 impl std::error::Error for AerodynamicsError {}
 
-/// Step-local entry point reserved for world integration.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AerodynamicsTask;
-
-impl AerodynamicsTask {
-    pub fn execute(self, _world: &PhysicsWorld) {}
-}
-
 #[cfg(test)]
 mod tests {
     use kapitsa_math::Vec3;
 
     use super::{AerodynamicProperties, AerodynamicsError, AtmosphericState};
     use crate::transform::Transform;
+
+    #[test]
+    fn disabled_surface_avoids_overflow_and_components_match_total() {
+        let atmosphere = AtmosphericState::new(1.0, Vec3::ZERO).unwrap();
+        for properties in [
+            AerodynamicProperties::new(0.0, 1.0, Vec3::ZERO).unwrap(),
+            AerodynamicProperties::new(1.0, 0.0, Vec3::ZERO)
+                .unwrap()
+                .with_lift(0.0, Vec3::Y)
+                .unwrap(),
+        ] {
+            assert_eq!(
+                properties
+                    .drag_force(
+                        atmosphere,
+                        Transform::identity(),
+                        Vec3::X * f64::MAX,
+                        Vec3::ZERO
+                    )
+                    .unwrap()
+                    .force(),
+                Vec3::ZERO
+            );
+        }
+        let properties = AerodynamicProperties::new(2.0, 0.5, Vec3::ZERO)
+            .unwrap()
+            .with_lift(0.7, Vec3::Y)
+            .unwrap();
+        let velocity = Vec3::new(10.0, 1.0, 0.0);
+        let (drag, lift) = properties
+            .force_components(atmosphere, Transform::identity(), velocity, Vec3::ZERO)
+            .unwrap();
+        assert_eq!(
+            properties
+                .drag_force(atmosphere, Transform::identity(), velocity, Vec3::ZERO)
+                .unwrap()
+                .force(),
+            drag + lift
+        );
+    }
 
     #[test]
     fn drag_points_against_relative_flow() {
