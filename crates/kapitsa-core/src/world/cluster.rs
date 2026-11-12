@@ -316,11 +316,9 @@ impl PhysicsWorld {
             collider.set_local_transform(local_transform);
             prepared_colliders.push(collider);
         }
-        let rebased_surfaces = if let Some(prepared) = &prepared_body {
-            Some(self.rebase_cluster_surfaces(body, &original, prepared)?)
-        } else {
-            None
-        };
+        if let Some(prepared) = &prepared_body {
+            self.validate_cluster_surface_rebase(body, &original, prepared)?;
+        }
         let part_dense = self
             .parts
             .insert(ClusterPart {
@@ -376,8 +374,8 @@ impl PhysicsWorld {
                 .bodies
                 .get_mut(body.dense)
                 .expect("cluster body must exist");
+            Self::commit_cluster_surface_rebase(&mut entry.aerodynamics, &original, &prepared);
             entry.body = prepared;
-            entry.aerodynamics = rebased_surfaces.expect("surfaces prepared with body");
         }
         let cluster = self
             .bodies
@@ -524,8 +522,7 @@ impl PhysicsWorld {
             }
         }
 
-        let mut rebased_surfaces = self.rebase_cluster_surfaces(body, &original, &prepared)?;
-        rebased_surfaces.retain(|surface| surface.target() != AerodynamicTarget::Part(part));
+        self.validate_cluster_surface_rebase(body, &original, &prepared)?;
         let removed_sources = self
             .force_sources
             .iter()
@@ -586,8 +583,11 @@ impl PhysicsWorld {
             .bodies
             .get_mut(body.dense)
             .expect("cluster body must exist");
+        Self::commit_cluster_surface_rebase(&mut entry.aerodynamics, &original, &prepared);
+        entry
+            .aerodynamics
+            .retain(|surface| surface.target() != AerodynamicTarget::Part(part));
         entry.body = prepared;
-        entry.aerodynamics = rebased_surfaces;
         self.synchronize_cluster_physics_state(&[body]);
         Ok(())
     }
@@ -1433,7 +1433,7 @@ impl PhysicsWorld {
                 prepared.apply_torque(torque).map_err(ClusterError::Body)?;
             }
         }
-        let rebased_surfaces = self.rebase_cluster_surfaces(body, &original, &prepared)?;
+        self.validate_cluster_surface_rebase(body, &original, &prepared)?;
         let target = self
             .parts
             .get_mut(part.dense)
@@ -1443,8 +1443,8 @@ impl PhysicsWorld {
             .get_mut(body.dense)
             .ok_or(ClusterError::InvalidBodyId)?;
         target.mass = mass;
+        Self::commit_cluster_surface_rebase(&mut entry.aerodynamics, &original, &prepared);
         entry.body = prepared;
-        entry.aerodynamics = rebased_surfaces;
         let mut collider = entry.first_collider;
         while let Some(id) = collider {
             collider = self.colliders.get(id.dense).and_then(|entry| entry.next);
@@ -1454,32 +1454,45 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn rebase_cluster_surfaces(
+    fn validate_cluster_surface_rebase(
         &self,
         body: BodyId,
         original: &RigidBody,
         prepared: &RigidBody,
-    ) -> Result<Vec<crate::aerodynamics::AerodynamicSurface>, ClusterError> {
+    ) -> Result<(), ClusterError> {
+        if original.physics().body_type() != BodyType::Dynamic {
+            return Ok(());
+        }
         let surfaces = &self
             .bodies
             .get(body.dense)
             .ok_or(ClusterError::InvalidBodyId)?
             .aerodynamics;
-        let mut rebased = Vec::new();
-        rebased
-            .try_reserve(surfaces.len())
-            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
-        for &surface in surfaces {
-            if original.physics().body_type() == BodyType::Dynamic {
-                rebased.push(
-                    Self::rebase_aerodynamic_surface(surface, original, prepared)
-                        .map_err(|_| ClusterError::ArithmeticOverflow)?,
-                );
-            } else {
-                rebased.push(surface);
-            }
+        for &surface in surfaces
+            .iter()
+            .filter(|surface| surface.target() == AerodynamicTarget::Body)
+        {
+            Self::rebase_aerodynamic_surface(surface, original, prepared)
+                .map_err(|_| ClusterError::ArithmeticOverflow)?;
         }
-        Ok(rebased)
+        Ok(())
+    }
+
+    fn commit_cluster_surface_rebase(
+        surfaces: &mut [crate::aerodynamics::AerodynamicSurface],
+        original: &RigidBody,
+        prepared: &RigidBody,
+    ) {
+        if original.physics().body_type() != BodyType::Dynamic {
+            return;
+        }
+        for surface in surfaces
+            .iter_mut()
+            .filter(|surface| surface.target() == AerodynamicTarget::Body)
+        {
+            *surface = Self::rebase_aerodynamic_surface(*surface, original, prepared)
+                .expect("surface rebase was validated before mutation");
+        }
     }
 
     #[allow(dead_code)]

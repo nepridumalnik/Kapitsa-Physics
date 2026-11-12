@@ -164,7 +164,8 @@ impl AerodynamicProperties {
             return Err(AerodynamicsError::NonFiniteAngularVelocity);
         }
 
-        if self.reference_area == 0.0
+        if atmosphere.density == 0.0
+            || self.reference_area == 0.0
             || (self.drag_coefficient == 0.0
                 && (self.lift_coefficient == 0.0 || self.local_lift_axis.is_none()))
         {
@@ -188,7 +189,7 @@ impl AerodynamicProperties {
             .checked_length()
             .ok_or(AerodynamicsError::ArithmeticOverflow)?;
 
-        if speed == 0.0 || atmosphere.density == 0.0 {
+        if speed == 0.0 {
             return Ok((Vec3::ZERO, Vec3::ZERO));
         }
 
@@ -297,6 +298,32 @@ mod tests {
 
     use super::{AerodynamicProperties, AerodynamicsError, AtmosphericState};
     use crate::transform::Transform;
+
+    #[test]
+    fn vacuum_returns_zero_before_relative_velocity_overflows() {
+        let wind = Vec3::X * (0.75 * f64::MAX);
+        let atmosphere = AtmosphericState::new(0.0, wind).unwrap();
+        let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::Y)
+            .unwrap()
+            .with_lift(1.0, Vec3::Z)
+            .unwrap();
+        assert_eq!(
+            properties
+                .drag_force(atmosphere, Transform::identity(), -wind, Vec3::Z * f64::MAX)
+                .unwrap()
+                .force(),
+            Vec3::ZERO
+        );
+        assert_eq!(
+            properties.drag_force(
+                atmosphere,
+                Transform::identity(),
+                Vec3::new(f64::NAN, 0.0, 0.0),
+                Vec3::ZERO
+            ),
+            Err(AerodynamicsError::NonFiniteLinearVelocity)
+        );
+    }
 
     #[test]
     fn disabled_surface_avoids_overflow_and_components_match_total() {

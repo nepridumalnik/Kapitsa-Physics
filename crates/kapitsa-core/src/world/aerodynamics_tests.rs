@@ -8,6 +8,43 @@ use crate::{
     world::PhysicsWorld,
 };
 
+#[test]
+fn vacuum_skips_aerodynamics_in_both_world_paths() {
+    for sharded in [false, true] {
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass).unwrap();
+        body.set_linear_velocity(Vec3::X * (-0.75 * f64::MAX))
+            .unwrap();
+        let mut world = PhysicsWorld::new();
+        let id = world.add_body(body).unwrap();
+        world.set_atmosphere(Some(
+            AtmosphericState::new(0.0, Vec3::X * (0.75 * f64::MAX)).unwrap(),
+        ));
+        world
+            .set_aerodynamics(
+                id,
+                Some(AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO).unwrap()),
+            )
+            .unwrap();
+        if sharded {
+            world
+                .step_with_shards(
+                    1e-310,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+                .unwrap();
+        } else {
+            world.step(1e-310).unwrap();
+        }
+        assert_eq!(
+            world.body(id).unwrap().state().linear_velocity(),
+            body.state().linear_velocity()
+        );
+    }
+}
+
 fn lift_trajectory(dt: f64, steps: usize, sharded: bool, drag: f64) -> Vec3 {
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
     let mut body = RigidBody::new_dynamic(Transform::identity(), mass).unwrap();

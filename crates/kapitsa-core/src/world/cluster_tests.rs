@@ -47,6 +47,10 @@ fn body_surface_stays_fixed_when_cluster_mass_changes() {
         .with_lift(1.0, Vec3::Z)
         .unwrap();
     world.set_aerodynamics(body, Some(properties)).unwrap();
+    world
+        .add_aerodynamic_surface_for_part(root, properties)
+        .unwrap();
+    let original_buffer = world.aerodynamic_surfaces(body).unwrap().as_ptr();
     let check = |world: &PhysicsWorld| {
         let rigid = world.body(body).unwrap();
         let properties = world.aerodynamics(body).unwrap();
@@ -83,6 +87,10 @@ fn body_surface_stays_fixed_when_cluster_mass_changes() {
         )
         .unwrap();
     check(&world);
+    assert_eq!(
+        world.aerodynamic_surfaces(body).unwrap().as_ptr(),
+        original_buffer
+    );
     world
         .set_part_mass(
             child,
@@ -91,8 +99,56 @@ fn body_surface_stays_fixed_when_cluster_mass_changes() {
         )
         .unwrap();
     check(&world);
+    assert_eq!(
+        world.aerodynamic_surfaces(body).unwrap().as_ptr(),
+        original_buffer
+    );
     world.destroy_cluster_part(child).unwrap();
     check(&world);
+    assert_eq!(
+        world.aerodynamic_surfaces(body).unwrap().as_ptr(),
+        original_buffer
+    );
+}
+
+#[test]
+fn mass_change_preserves_part_surface_buffer_and_rebase_failure_is_atomic() {
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let pose = Transform::new(Vec3::X * (f64::MAX * 0.5), Quat::IDENTITY).unwrap();
+    let mut world = PhysicsWorld::new();
+    let body = world
+        .add_body(RigidBody::new_dynamic(pose, mass).unwrap())
+        .unwrap();
+    let root = world.enable_cluster(body).unwrap();
+    let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO).unwrap();
+    world
+        .add_aerodynamic_surface_for_part(root, properties)
+        .unwrap();
+    let pointer = world.aerodynamic_surfaces(body).unwrap().as_ptr();
+    let new_mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    world
+        .set_part_mass(
+            root,
+            new_mass,
+            crate::cluster::MassChangeMode::KeepVelocityField,
+        )
+        .unwrap();
+    assert_eq!(world.aerodynamic_surfaces(body).unwrap().as_ptr(), pointer);
+    let overflow = AerodynamicProperties::new(1.0, 1.0, Vec3::X * f64::MAX).unwrap();
+    world.add_aerodynamic_surface(body, overflow).unwrap();
+    let before = *world.body(body).unwrap();
+    let before_surfaces = world.aerodynamic_surfaces(body).unwrap().to_vec();
+    assert_eq!(
+        world.set_part_mass(
+            root,
+            mass,
+            crate::cluster::MassChangeMode::KeepVelocityField
+        ),
+        Err(ClusterError::ArithmeticOverflow)
+    );
+    assert_eq!(*world.body(body).unwrap(), before);
+    assert_eq!(world.cluster_part(root).unwrap().mass(), new_mass);
+    assert_eq!(world.aerodynamic_surfaces(body).unwrap(), before_surfaces);
 }
 
 fn weld(world: &mut PhysicsWorld, a: PartId, b: PartId) -> WeldId {

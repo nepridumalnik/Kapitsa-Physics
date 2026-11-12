@@ -10,7 +10,85 @@ use crate::collision::ContactManifold;
 #[cfg(feature = "bench-internals")]
 use std::time::Instant;
 
-mod aerodynamics;
+mod aerodynamics {
+    use super::{BodyId, PartId, PhysicsWorld, StepError};
+    use crate::aerodynamics::AerodynamicProperties;
+
+    /// Identifies the rigid object that owns an aerodynamic surface.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum AerodynamicTarget {
+        Body,
+        Part(PartId),
+    }
+
+    /// Aerodynamic properties attached to a body or one of its cluster parts.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct AerodynamicSurface {
+        properties: AerodynamicProperties,
+        target: AerodynamicTarget,
+    }
+
+    impl AerodynamicSurface {
+        pub fn new(properties: AerodynamicProperties) -> Self {
+            Self {
+                properties,
+                target: AerodynamicTarget::Body,
+            }
+        }
+
+        pub fn for_part(part: PartId, properties: AerodynamicProperties) -> Self {
+            Self {
+                properties,
+                target: AerodynamicTarget::Part(part),
+            }
+        }
+
+        pub fn properties(self) -> AerodynamicProperties {
+            self.properties
+        }
+
+        pub fn target(self) -> AerodynamicTarget {
+            self.target
+        }
+
+        pub(crate) fn with_properties(self, properties: AerodynamicProperties) -> Self {
+            Self { properties, ..self }
+        }
+    }
+
+    /// Checks the current aerodynamic force calculation without advancing the world.
+    ///
+    /// This preflight does not apply forces or check timestep-dependent integration.
+    /// Use [`PhysicsWorld::step`] to advance the simulation.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct AerodynamicsTask;
+
+    impl AerodynamicsTask {
+        pub fn execute(self, world: &PhysicsWorld) -> Result<(), StepError> {
+            let Some(atmosphere) = world.atmosphere else {
+                return Ok(());
+            };
+            for (dense, entry) in world.bodies.iter() {
+                if entry.aerodynamics.is_empty() {
+                    continue;
+                }
+                let mut body = entry.body;
+                PhysicsWorld::apply_aerodynamics(
+                    atmosphere,
+                    &entry.aerodynamics,
+                    BodyId {
+                        world: world.world_id,
+                        dense,
+                    },
+                    &mut body,
+                    &world.parts,
+                    None,
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
 #[cfg(test)]
 mod aerodynamics_tests;
 mod ccd;
@@ -1462,7 +1540,7 @@ impl PhysicsWorld {
         parts: &DensePool<ClusterPart>,
         dt: Option<f64>,
     ) -> Result<(), StepError> {
-        if body.physics().body_type() != BodyType::Dynamic {
+        if atmosphere.density() == 0.0 || body.physics().body_type() != BodyType::Dynamic {
             return Ok(());
         }
         let error = || StepError::Aerodynamics {
