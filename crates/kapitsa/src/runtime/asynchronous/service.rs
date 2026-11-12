@@ -167,6 +167,24 @@ pub struct SimulationBuilder {
 
 impl SimulationBuilder {
     /// Configures the atmosphere before the simulation starts. Defaults to vacuum.
+    ///
+    /// ```no_run
+    /// use kapitsa::{Simulation, aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere}};
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let sphere = SphericalAtmosphere::builder()
+    ///     .reference_radius(600_000.0)
+    ///     .reference_density(1.225)
+    ///     .height(80_000.0)
+    ///     .profile(DensityProfile::Exponential { scale_height: 5_600.0 })
+    ///     .build()?;
+    /// let mut simulation = Simulation::builder()
+    ///     .atmosphere(Atmosphere::Sphere(sphere))
+    ///     .spawn_on_tokio(&tokio::runtime::Handle::current())?;
+    /// simulation.stop().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn atmosphere(mut self, atmosphere: Atmosphere) -> Self {
         self.atmosphere = atmosphere;
         self

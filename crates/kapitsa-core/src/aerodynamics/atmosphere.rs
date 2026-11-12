@@ -35,9 +35,15 @@ impl Atmosphere {
 /// Density decay above the reference radius; heights are in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DensityProfile {
-    Exponential { scale_height: f64 },
+    /// `density = reference_density * exp(-altitude / scale_height)`.
+    Exponential {
+        /// Positive, finite height in metres over which density decreases by a factor of `e`.
+        scale_height: f64,
+    },
 }
 
+/// A spherical density field with constant wind, configured with
+/// [`SphericalAtmosphere::builder`]. Distances are measured from its world-space centre.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SphericalAtmosphere {
     center: Vec3,
@@ -51,6 +57,7 @@ pub struct SphericalAtmosphere {
 }
 
 impl SphericalAtmosphere {
+    /// Starts a builder; see [`SphericalAtmosphereBuilder`] for a complete example.
     pub fn builder() -> SphericalAtmosphereBuilder {
         SphericalAtmosphereBuilder::default()
     }
@@ -83,34 +90,68 @@ impl SphericalAtmosphere {
         AtmosphericState::new(self.reference_density * factor * edge, self.wind)
     }
 
+    /// World-space centre in metres.
     pub fn center(self) -> Vec3 {
         self.center
     }
+    /// Reference radius from the centre, in metres.
     pub fn reference_radius(self) -> f64 {
         self.reference_radius
     }
+    /// Density at and below the reference radius, in kg/m?.
     pub fn reference_density(self) -> f64 {
         self.reference_density
     }
+    /// Atmosphere height above the reference radius, in metres.
     pub fn height(self) -> f64 {
         self.height
     }
+    /// Cutoff radius from the centre, in metres.
     pub fn outer_radius(self) -> f64 {
         self.outer_radius
     }
+    /// Configured density decay formula.
     pub fn profile(self) -> DensityProfile {
         self.profile
     }
+    /// Optional smoothing width in metres; `None` means a hard cutoff.
     pub fn smooth_edge(self) -> Option<f64> {
         self.smooth_edge
     }
+    /// Constant world-space wind velocity in m/s.
     pub fn wind(self) -> Vec3 {
         self.wind
     }
 }
 
 /// Required: reference radius, reference density, height and profile.
-/// Defaults: origin, no wind, hard cutoff.
+/// Defaults: origin, no wind, hard cutoff. Repeated setters replace the previous value;
+/// validation happens in [`Self::build`].
+///
+/// # Example
+///
+/// ```
+/// use kapitsa_core::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
+/// use kapitsa_core::world::PhysicsWorld;
+/// use kapitsa_math::Vec3;
+///
+/// let sphere = SphericalAtmosphere::builder()
+///     .center(Vec3::ZERO)
+///     .reference_radius(600_000.0)
+///     .reference_density(1.225)
+///     .height(80_000.0)
+///     .profile(DensityProfile::Exponential { scale_height: 5_600.0 })
+///     .smooth_edge(5_600.0)
+///     .wind(Vec3::X * 10.0)
+///     .build()?;
+///
+/// let mut world = PhysicsWorld::new();
+/// world.set_atmosphere(Atmosphere::Sphere(sphere));
+/// let surface = sphere.state_at(Vec3::Y * 600_000.0)?;
+/// assert_eq!(surface.density(), 1.225);
+/// world.set_atmosphere(Atmosphere::Vacuum);
+/// # Ok::<(), kapitsa_core::aerodynamics::AerodynamicsError>(())
+/// ```
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SphericalAtmosphereBuilder {
     center: Vec3,
@@ -123,35 +164,57 @@ pub struct SphericalAtmosphereBuilder {
 }
 
 impl SphericalAtmosphereBuilder {
+    /// Sets the centre in world coordinates, in metres. Components must be finite.
+    /// Defaults to `Vec3::ZERO`.
     pub fn center(mut self, value: Vec3) -> Self {
         self.center = value;
         self
     }
+    /// Sets the reference radius from the centre, in metres. Required, finite and non-negative.
+    /// Density is constant at the reference density at and below this radius.
     pub fn reference_radius(mut self, value: f64) -> Self {
         self.reference_radius = Some(value);
         self
     }
+    /// Sets density at the reference radius, in kg/m?. Required, finite and non-negative.
+    /// Zero density disables aerodynamic forces throughout the sphere.
     pub fn reference_density(mut self, value: f64) -> Self {
         self.reference_density = Some(value);
         self
     }
+    /// Sets the atmosphere height above the reference radius, in metres. Required and positive.
+    /// The sum with the reference radius must be finite and strictly greater than that radius.
+    /// At and beyond this outer radius, density is zero.
     pub fn height(mut self, value: f64) -> Self {
         self.height = Some(value);
         self
     }
+    /// Selects the density decay formula above the reference radius. Required.
+    /// Profile parameters are validated by `build()`.
     pub fn profile(mut self, value: DensityProfile) -> Self {
         self.profile = Some(value);
         self
     }
+    /// Enables smooth density tapering over the final `value` metres inside the outer boundary.
+    /// The width must be finite, positive and no greater than the atmosphere height.
+    /// Multiplies the profile by `t?(3 - 2t)`, where `t` is the remaining distance
+    /// to the boundary divided by the width, clamped to `[0, 1]`. Defaults to a hard cutoff.
     pub fn smooth_edge(mut self, value: f64) -> Self {
         self.smooth_edge = Some(value);
         self
     }
+    /// Sets constant wind velocity in world coordinates, in m/s. Components must be finite.
+    /// Defaults to `Vec3::ZERO`.
     pub fn wind(mut self, value: Vec3) -> Self {
         self.wind = value;
         self
     }
 
+    /// Validates all settings and constructs the atmosphere.
+    ///
+    /// # Errors
+    /// Returns [`AerodynamicsError`] for missing required fields, non-finite values,
+    /// invalid profile/edge parameters, or an unrepresentable outer radius.
     pub fn build(self) -> Result<SphericalAtmosphere, AerodynamicsError> {
         let invalid = AerodynamicsError::InvalidAtmosphere;
         let reference_radius = self
