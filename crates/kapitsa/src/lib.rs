@@ -9,7 +9,10 @@ pub mod execution {
 }
 
 pub mod aerodynamics {
-    pub use kapitsa_core::aerodynamics::AerodynamicsTask;
+    pub use kapitsa_core::aerodynamics::{
+        AerodynamicForce, AerodynamicProperties, AerodynamicSurface, AerodynamicTarget,
+        AerodynamicsError, AerodynamicsTask, AtmosphericState,
+    };
 }
 
 pub mod hydrodynamics {

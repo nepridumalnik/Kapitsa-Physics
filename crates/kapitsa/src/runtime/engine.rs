@@ -182,10 +182,7 @@ impl<E: StepExecutor> StepEngine<E> {
     }
 
     fn run_step(&mut self, physics_dt: f64) -> Result<(), StepError> {
-        self.executor.join(
-            || kapitsa_core::aerodynamics::AerodynamicsTask.execute(&self.world),
-            || kapitsa_core::hydrodynamics::HydrodynamicsTask.execute(&self.world),
-        );
+        kapitsa_core::hydrodynamics::HydrodynamicsTask.execute(&self.world);
         let body_count = self.world.body_count();
         let worker_count = self.active_workers.min(body_count).max(1);
         if worker_count <= 1 {

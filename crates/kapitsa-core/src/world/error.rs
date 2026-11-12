@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::aerodynamics::AerodynamicsError;
 use crate::collision::CollisionError;
 use crate::containers::DensePoolError;
 use crate::gravity::GravityError;
@@ -117,6 +118,10 @@ pub enum StepError {
         body_id: BodyId,
         cause: GravityError,
     },
+    Aerodynamics {
+        body_id: BodyId,
+        cause: AerodynamicsError,
+    },
 }
 
 impl fmt::Display for StepError {
@@ -136,6 +141,9 @@ impl fmt::Display for StepError {
             Self::Gravity { body_id, cause } => {
                 write!(formatter, "gravity failed for {body_id:?}: {cause}")
             }
+            Self::Aerodynamics { body_id, cause } => {
+                write!(formatter, "aerodynamics failed for {body_id:?}: {cause}")
+            }
         }
     }
 }
@@ -148,6 +156,7 @@ impl std::error::Error for StepError {
             Self::BodyIntegration { cause, .. } => Some(cause),
             Self::ForceSource { cause, .. } => Some(cause),
             Self::Gravity { cause, .. } => Some(cause),
+            Self::Aerodynamics { cause, .. } => Some(cause),
         }
     }
 }
@@ -160,6 +169,7 @@ pub enum WorldError {
     DensePoolInvalidFreeList,
     WorldIdExhausted,
     InvalidBodyId,
+    InvalidAerodynamicSurface,
     InvalidColliderId,
     InvalidJointId,
     InvalidGravityId,
@@ -183,6 +193,9 @@ impl fmt::Display for WorldError {
             }
             Self::WorldIdExhausted => formatter.write_str("physics world ID space is exhausted"),
             Self::InvalidBodyId => formatter.write_str("body ID is invalid for this world"),
+            Self::InvalidAerodynamicSurface => {
+                formatter.write_str("aerodynamic surface index is invalid for this body")
+            }
             Self::InvalidColliderId => formatter.write_str("collider ID is invalid for this world"),
             Self::InvalidJointId => formatter.write_str("joint ID is invalid for this world"),
             Self::InvalidGravityId => formatter.write_str("gravity ID is invalid for this world"),
@@ -212,6 +225,7 @@ impl std::error::Error for WorldError {
             | Self::DensePoolInvalidFreeList
             | Self::WorldIdExhausted
             | Self::InvalidBodyId
+            | Self::InvalidAerodynamicSurface
             | Self::InvalidColliderId
             | Self::InvalidJointId
             | Self::InvalidGravityId

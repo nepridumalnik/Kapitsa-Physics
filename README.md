@@ -250,7 +250,9 @@ If a command has already changed the world but the subsequent physics step fails
 
 ## Aerodynamics and Hydrodynamics
 
-The `aerodynamics` and `hydrodynamics` modules currently provide extension points without an active physics model. For now, control spacecraft using explicit forces and torques.
+The aerodynamics module provides quadratic drag and an optional simplified lift model for body and cluster-part surfaces. Configure atmospheric density and wind on `PhysicsWorld`; aerodynamic forces are applied during world steps. The hydrodynamics module currently provides an extension point without an active physics model.
+
+The lift step uses a frozen-force, energy-preserving velocity update relative to the wind, with drag applied first. This is an approximation: coupled external forces and the rotational integrator can introduce energy error, particularly at large timesteps or with asymmetric inertia. Reduce the timestep to check convergence. The low-level `fill_step_shards` interface does not receive a timestep and therefore does not apply this timestep-dependent correction; prefer `step` or `step_with_shards` for aerodynamic simulation.
 
 ## Verification
 

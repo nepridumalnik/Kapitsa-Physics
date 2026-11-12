@@ -10,6 +10,87 @@ use crate::collision::ContactManifold;
 #[cfg(feature = "bench-internals")]
 use std::time::Instant;
 
+mod aerodynamics {
+    use super::{BodyId, PartId, PhysicsWorld, StepError};
+    use crate::aerodynamics::AerodynamicProperties;
+
+    /// Identifies the rigid object that owns an aerodynamic surface.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum AerodynamicTarget {
+        Body,
+        Part(PartId),
+    }
+
+    /// Aerodynamic properties attached to a body or one of its cluster parts.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct AerodynamicSurface {
+        properties: AerodynamicProperties,
+        target: AerodynamicTarget,
+    }
+
+    impl AerodynamicSurface {
+        pub fn new(properties: AerodynamicProperties) -> Self {
+            Self {
+                properties,
+                target: AerodynamicTarget::Body,
+            }
+        }
+
+        pub fn for_part(part: PartId, properties: AerodynamicProperties) -> Self {
+            Self {
+                properties,
+                target: AerodynamicTarget::Part(part),
+            }
+        }
+
+        pub fn properties(self) -> AerodynamicProperties {
+            self.properties
+        }
+
+        pub fn target(self) -> AerodynamicTarget {
+            self.target
+        }
+
+        pub(crate) fn with_properties(self, properties: AerodynamicProperties) -> Self {
+            Self { properties, ..self }
+        }
+    }
+
+    /// Checks the current aerodynamic force calculation without advancing the world.
+    ///
+    /// This preflight does not apply forces or check timestep-dependent integration.
+    /// Use [`PhysicsWorld::step`] to advance the simulation.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct AerodynamicsTask;
+
+    impl AerodynamicsTask {
+        pub fn execute(self, world: &PhysicsWorld) -> Result<(), StepError> {
+            let Some(atmosphere) = world.atmosphere else {
+                return Ok(());
+            };
+            for (dense, entry) in world.bodies.iter() {
+                if entry.aerodynamics.is_empty() {
+                    continue;
+                }
+                let mut body = entry.body;
+                PhysicsWorld::apply_aerodynamics(
+                    atmosphere,
+                    &entry.aerodynamics,
+                    BodyId {
+                        world: world.world_id,
+                        dense,
+                    },
+                    &mut body,
+                    &world.parts,
+                    None,
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+#[cfg(test)]
+mod aerodynamics_tests;
 mod ccd;
 mod chunk;
 mod cluster;
@@ -21,6 +102,7 @@ mod id;
 mod metrics;
 mod query;
 
+pub use aerodynamics::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
 pub use chunk::{AddChunkBatchError, AddChunkError, ChunkOperationError, RemoveChunkBatchError};
 pub use error::{ClusterError, ForceSourceError, StepError, WorldError};
 pub use id::{BodyId, ChunkId, ColliderId, ForceSourceId, GravityId, JointId, PartId, WeldId};
@@ -39,6 +121,7 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 
 use crate::{
     aabb::Aabb,
+    aerodynamics::{AerodynamicProperties, AtmosphericState},
     cluster::{ClusterPart, RigidCluster, Weld},
     collider::Collider,
     collision::{
@@ -56,6 +139,7 @@ use crate::{
 
 struct BodyEntry {
     body: RigidBody,
+    aerodynamics: Vec<AerodynamicSurface>,
     first_collider: Option<ColliderId>,
     cluster: Option<RigidCluster>,
 }
@@ -132,6 +216,13 @@ struct GravityBodyUpdate {
     prepared: RigidBody,
 }
 
+struct AerodynamicsBodyUpdate {
+    id: BodyId,
+    error: Option<StepError>,
+    original: RigidBody,
+    prepared: RigidBody,
+}
+
 const FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT: usize = 128;
 
 struct ColliderEntry {
@@ -195,6 +286,8 @@ pub struct PhysicsWorld {
     central_gravity: Option<CentralGravity>,
     gravity_fields: DensePool<Gravity>,
     gravity_body_updates: Vec<GravityBodyUpdate>,
+    atmosphere: Option<AtmosphericState>,
+    aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
     joint_events: Vec<JointBreakEvent>,
@@ -258,6 +351,8 @@ impl PhysicsWorld {
             central_gravity: None,
             gravity_fields: DensePool::new(),
             gravity_body_updates: Vec::new(),
+            atmosphere: None,
+            aerodynamics_body_updates: Vec::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
             joint_events: Vec::new(),
@@ -278,6 +373,185 @@ impl PhysicsWorld {
 
     pub fn set_central_gravity(&mut self, gravity: Option<CentralGravity>) {
         self.central_gravity = gravity;
+    }
+
+    pub fn atmosphere(&self) -> Option<AtmosphericState> {
+        self.atmosphere
+    }
+
+    pub fn set_atmosphere(&mut self, atmosphere: Option<AtmosphericState>) {
+        self.atmosphere = atmosphere;
+    }
+
+    pub fn aerodynamics(&self, id: BodyId) -> Option<AerodynamicProperties> {
+        if id.world != self.world_id {
+            return None;
+        }
+        self.bodies.get(id.dense).and_then(|entry| {
+            entry
+                .aerodynamics
+                .iter()
+                .find(|surface| surface.target() == AerodynamicTarget::Body)
+                .map(|surface| surface.properties())
+        })
+    }
+
+    /// Replaces body surfaces. All previously returned surface indices are invalidated.
+    pub fn set_aerodynamics(
+        &mut self,
+        id: BodyId,
+        properties: Option<AerodynamicProperties>,
+    ) -> Result<(), WorldError> {
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidBodyId);
+        }
+        let surfaces = &mut self
+            .bodies
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidBodyId)?
+            .aerodynamics;
+        if properties.is_some()
+            && !surfaces
+                .iter()
+                .any(|surface| surface.target() == AerodynamicTarget::Body)
+        {
+            surfaces
+                .try_reserve(1)
+                .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
+        }
+        surfaces.retain(|surface| surface.target() != AerodynamicTarget::Body);
+        if let Some(properties) = properties {
+            surfaces.push(AerodynamicSurface::new(properties));
+        }
+        Ok(())
+    }
+
+    pub fn aerodynamic_surfaces(&self, id: BodyId) -> Option<&[AerodynamicSurface]> {
+        if id.world != self.world_id {
+            return None;
+        }
+        self.bodies
+            .get(id.dense)
+            .map(|entry| entry.aerodynamics.as_slice())
+    }
+
+    /// Returns an index valid until the surface list changes or the cluster is split or merged.
+    pub fn add_aerodynamic_surface(
+        &mut self,
+        id: BodyId,
+        properties: AerodynamicProperties,
+    ) -> Result<usize, WorldError> {
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidBodyId);
+        }
+        let surfaces = &mut self
+            .bodies
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidBodyId)?
+            .aerodynamics;
+        surfaces
+            .try_reserve(1)
+            .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
+        surfaces.push(AerodynamicSurface::new(properties));
+        Ok(surfaces.len() - 1)
+    }
+
+    /// Removes a surface by its current index, invalidating previously returned indices.
+    pub fn remove_aerodynamic_surface(
+        &mut self,
+        id: BodyId,
+        index: usize,
+    ) -> Result<AerodynamicProperties, WorldError> {
+        if id.world != self.world_id {
+            return Err(WorldError::InvalidBodyId);
+        }
+        let surfaces = &mut self
+            .bodies
+            .get_mut(id.dense)
+            .ok_or(WorldError::InvalidBodyId)?
+            .aerodynamics;
+        if index >= surfaces.len() {
+            return Err(WorldError::InvalidAerodynamicSurface);
+        }
+        Ok(surfaces.remove(index).properties())
+    }
+
+    /// Returns an index valid until the surface list changes or the cluster is split or merged.
+    pub fn add_aerodynamic_surface_for_part(
+        &mut self,
+        part: PartId,
+        properties: AerodynamicProperties,
+    ) -> Result<usize, WorldError> {
+        let part_entry = self.cluster_part(part).ok_or(WorldError::InvalidBodyId)?;
+        let body = part_entry.body();
+        let surfaces = &mut self
+            .bodies
+            .get_mut(body.dense)
+            .ok_or(WorldError::InvalidBodyId)?
+            .aerodynamics;
+        surfaces
+            .try_reserve(1)
+            .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
+        surfaces.push(AerodynamicSurface::for_part(part, properties));
+        Ok(surfaces.len() - 1)
+    }
+
+    pub(crate) fn rebase_aerodynamic_surface(
+        surface: AerodynamicSurface,
+        old_body: &RigidBody,
+        new_body: &RigidBody,
+    ) -> Result<AerodynamicSurface, crate::aerodynamics::AerodynamicsError> {
+        if !matches!(surface.target(), AerodynamicTarget::Body) {
+            return Ok(surface);
+        }
+        let old_center = old_body
+            .world_center_of_mass()
+            .map_err(|_| crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?
+            .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+        let new_center = new_body
+            .world_center_of_mass()
+            .map_err(|_| crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?
+            .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+        let world_point = old_center
+            .checked_add(
+                old_body
+                    .state()
+                    .transform()
+                    .transform_vector(surface.properties().local_application_offset()),
+            )
+            .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+        let inverse_rotation = new_body
+            .state()
+            .transform()
+            .rotation()
+            .conjugate()
+            .rotate_vector(
+                world_point
+                    .checked_sub(new_center)
+                    .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?,
+            )
+            .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+        let mut properties = surface
+            .properties()
+            .with_local_application_offset(inverse_rotation)?;
+        if let Some(axis) = surface.properties().local_lift_axis() {
+            let world_axis = old_body
+                .state()
+                .transform()
+                .rotation()
+                .rotate_vector(axis)
+                .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+            let local_axis = new_body
+                .state()
+                .transform()
+                .rotation()
+                .conjugate()
+                .rotate_vector(world_axis)
+                .ok_or(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow)?;
+            properties =
+                properties.with_lift(surface.properties().lift_coefficient(), local_axis)?;
+        }
+        Ok(surface.with_properties(properties))
     }
 
     /// Adds an independently managed gravity field.
@@ -448,6 +722,7 @@ impl PhysicsWorld {
             .bodies
             .insert(BodyEntry {
                 body,
+                aerodynamics: Vec::new(),
                 first_collider: None,
                 cluster: None,
             })
@@ -898,6 +1173,7 @@ impl PhysicsWorld {
             Err(_) => {
                 self.collision_system.abort_step();
                 self.rollback_gravity_updates();
+                self.rollback_aerodynamics_updates();
                 self.rollback_force_source_updates();
                 Err(StepError::Collision(CollisionError::WorkerFailed))
             }
@@ -914,6 +1190,7 @@ impl PhysicsWorld {
             return Err(StepError::InvalidDeltaTime);
         }
         self.with_force_source_updates(|world| {
+            world.prepare_aerodynamics_updates(executor, worker_count, dt)?;
             world.prepare_gravity_updates(executor, worker_count)?;
             world.step_prepared(dt, executor, worker_count)
         })
@@ -932,8 +1209,10 @@ impl PhysicsWorld {
         let result = operation(self);
         if result.is_err() {
             self.rollback_gravity_updates();
+            self.rollback_aerodynamics_updates();
             self.rollback_force_source_updates();
         } else {
+            self.aerodynamics_body_updates.clear();
             self.clear_gravity_updates();
             self.clear_force_source_updates();
         }
@@ -963,6 +1242,7 @@ impl PhysicsWorld {
             Err(_) => {
                 self.collision_system.abort_step();
                 self.rollback_gravity_updates();
+                self.rollback_aerodynamics_updates();
                 self.rollback_force_source_updates();
                 Err(StepError::Collision(CollisionError::WorkerFailed))
             }
@@ -984,7 +1264,7 @@ impl PhysicsWorld {
             if shards.is_empty() {
                 return Err(StepError::InvalidStepResults);
             }
-            world.fill_step_shards_with_executor(shards, executor)?;
+            world.fill_step_shards_with_executor_at_dt(shards, executor, Some(dt))?;
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunk| {
                     for shard in chunk {
@@ -1250,6 +1530,359 @@ impl PhysicsWorld {
         if let Some(indices) = &mut self.force_source_body_indices {
             indices.clear();
         }
+    }
+
+    fn apply_aerodynamics(
+        atmosphere: AtmosphericState,
+        surfaces: &[AerodynamicSurface],
+        body_id: BodyId,
+        body: &mut RigidBody,
+        parts: &DensePool<ClusterPart>,
+        dt: Option<f64>,
+    ) -> Result<(), StepError> {
+        if atmosphere.density() == 0.0 || body.physics().body_type() != BodyType::Dynamic {
+            return Ok(());
+        }
+        let error = || StepError::Aerodynamics {
+            body_id,
+            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+        };
+        let center = body
+            .world_center_of_mass()
+            .map_err(|_| error())?
+            .ok_or_else(error)?;
+        let mut drag = Vec3::ZERO;
+        let mut drag_torque = Vec3::ZERO;
+        let mut lift_force = Vec3::ZERO;
+        let mut lift_torque = Vec3::ZERO;
+        for surface in surfaces {
+            let properties = surface.properties();
+            let target_transform = match surface.target() {
+                AerodynamicTarget::Body => body.state().transform(),
+                AerodynamicTarget::Part(part) => parts
+                    .get(part.dense)
+                    .filter(|entry| part.world == body_id.world && entry.body() == body_id)
+                    .and_then(|entry| {
+                        body.state()
+                            .transform()
+                            .compose(&entry.local_transform())
+                            .ok()
+                    })
+                    .ok_or_else(error)?,
+            };
+            let point = match surface.target() {
+                AerodynamicTarget::Body => center.checked_add(
+                    target_transform.transform_vector(properties.local_application_offset()),
+                ),
+                AerodynamicTarget::Part(_) => {
+                    Some(target_transform.transform_point(properties.local_application_offset()))
+                }
+            }
+            .filter(|point| point.is_finite())
+            .ok_or_else(error)?;
+            let offset = point.checked_sub(center).ok_or_else(error)?;
+            let point_velocity = body
+                .state()
+                .angular_velocity()
+                .checked_cross(offset)
+                .and_then(|velocity| velocity.checked_add(body.state().linear_velocity()))
+                .ok_or_else(error)?;
+            let point_properties = properties
+                .with_local_application_offset(Vec3::ZERO)
+                .map_err(|_| error())?;
+            let (surface_drag, lift) = point_properties
+                .force_components(atmosphere, target_transform, point_velocity, Vec3::ZERO)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            drag = drag.checked_add(surface_drag).ok_or_else(error)?;
+            drag_torque = offset
+                .checked_cross(surface_drag)
+                .and_then(|torque| drag_torque.checked_add(torque))
+                .ok_or_else(error)?;
+            lift_force = lift_force.checked_add(lift).ok_or_else(error)?;
+            lift_torque = offset
+                .checked_cross(lift)
+                .and_then(|torque| lift_torque.checked_add(torque))
+                .ok_or_else(error)?;
+        }
+        let mut scale = 1.0_f64;
+        if let Some(dt) = dt {
+            let mass = body.physics().mass().ok_or_else(error)?;
+            let rotation = body.state().transform().rotation();
+            let local_torque = rotation
+                .conjugate()
+                .rotate_vector(drag_torque)
+                .ok_or_else(error)?;
+            let local_angular_acceleration = mass
+                .inertia()
+                .solve_spd(local_torque)
+                .map_err(|_| error())?;
+            let angular_acceleration = rotation
+                .rotate_vector(local_angular_acceleration)
+                .ok_or_else(error)?;
+            let relative_velocity = body
+                .state()
+                .linear_velocity()
+                .checked_sub(atmosphere.wind_velocity())
+                .ok_or_else(error)?;
+            let power = relative_velocity
+                .checked_dot(drag)
+                .and_then(|linear| {
+                    body.state()
+                        .angular_velocity()
+                        .checked_dot(drag_torque)
+                        .map(|angular| linear + angular)
+                })
+                .ok_or_else(error)?;
+            let curvature = drag
+                .checked_dot(drag)
+                .and_then(|linear| {
+                    drag_torque
+                        .checked_dot(angular_acceleration)
+                        .map(|angular| linear / mass.mass() + angular)
+                })
+                .ok_or_else(error)?;
+            if !power.is_finite() || !curvature.is_finite() {
+                return Err(error());
+            }
+            if curvature > 0.0 {
+                scale = (-power / dt / curvature).clamp(0.0, 1.0);
+            }
+        }
+        body.apply_force(drag.checked_mul_scalar(scale).ok_or_else(error)?)
+            .map_err(|_| error())?;
+        body.apply_torque(drag_torque.checked_mul_scalar(scale).ok_or_else(error)?)
+            .map_err(|_| error())?;
+        if let Some(dt) = dt
+            && (lift_force != Vec3::ZERO || lift_torque != Vec3::ZERO)
+        {
+            let mass = body.physics().mass().ok_or_else(error)?;
+            let rotation = body.state().transform().rotation();
+            let inverse = rotation.conjugate();
+            let drag_angular_acceleration = rotation
+                .rotate_vector(
+                    mass.inertia()
+                        .solve_spd(inverse.rotate_vector(drag_torque).ok_or_else(error)?)
+                        .map_err(|_| error())?,
+                )
+                .ok_or_else(error)?;
+            let angular_velocity = body
+                .state()
+                .angular_velocity()
+                .checked_add(
+                    drag_angular_acceleration
+                        .checked_mul_scalar(scale * dt)
+                        .ok_or_else(error)?,
+                )
+                .ok_or_else(error)?;
+            let local_omega = inverse.rotate_vector(angular_velocity).ok_or_else(error)?;
+            let angular_momentum = rotation
+                .rotate_vector(
+                    mass.inertia()
+                        .checked_mul_vector(local_omega)
+                        .ok_or_else(error)?,
+                )
+                .ok_or_else(error)?;
+            let relative_velocity = body
+                .state()
+                .linear_velocity()
+                .checked_sub(atmosphere.wind_velocity())
+                .and_then(|velocity| {
+                    drag.checked_mul_scalar(scale * dt / mass.mass())
+                        .and_then(|change| velocity.checked_add(change))
+                })
+                .ok_or_else(error)?;
+            let linear_momentum = relative_velocity
+                .checked_mul_scalar(mass.mass())
+                .ok_or_else(error)?;
+            let metric = relative_velocity
+                .checked_dot(linear_momentum)
+                .and_then(|linear| {
+                    angular_velocity
+                        .checked_dot(angular_momentum)
+                        .map(|angular| linear + angular)
+                })
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(error)?;
+            if metric == 0.0 {
+                return Ok(());
+            }
+            let power = relative_velocity
+                .checked_dot(lift_force)
+                .and_then(|linear| {
+                    angular_velocity
+                        .checked_dot(lift_torque)
+                        .map(|angular| linear + angular)
+                })
+                .filter(|value| value.is_finite())
+                .ok_or_else(error)?;
+            let projection = power / metric;
+            lift_force = lift_force
+                .checked_sub(
+                    linear_momentum
+                        .checked_mul_scalar(projection)
+                        .ok_or_else(error)?,
+                )
+                .ok_or_else(error)?;
+            lift_torque = lift_torque
+                .checked_sub(
+                    angular_momentum
+                        .checked_mul_scalar(projection)
+                        .ok_or_else(error)?,
+                )
+                .ok_or_else(error)?;
+            let local_lift_torque = inverse.rotate_vector(lift_torque).ok_or_else(error)?;
+            let angular_acceleration = rotation
+                .rotate_vector(
+                    mass.inertia()
+                        .solve_spd(local_lift_torque)
+                        .map_err(|_| error())?,
+                )
+                .ok_or_else(error)?;
+            let curvature = lift_force
+                .checked_dot(lift_force)
+                .and_then(|linear| {
+                    lift_torque
+                        .checked_dot(angular_acceleration)
+                        .map(|angular| linear / mass.mass() + angular)
+                })
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(error)?;
+            let rate = (curvature / metric).sqrt();
+            let half_angle = 0.5 * dt * rate;
+            if !half_angle.is_finite() {
+                return Err(error());
+            }
+            let (factor, damping) = if half_angle <= 1.0 {
+                let factor = 1.0 / (1.0 + half_angle * half_angle);
+                (factor, rate * half_angle * factor)
+            } else {
+                let inverse_angle = 1.0 / half_angle;
+                let denominator = 1.0 + inverse_angle * inverse_angle;
+                (
+                    inverse_angle * inverse_angle / denominator,
+                    rate * inverse_angle / denominator,
+                )
+            };
+            lift_force = lift_force
+                .checked_mul_scalar(factor)
+                .and_then(|force| {
+                    linear_momentum
+                        .checked_mul_scalar(damping)
+                        .and_then(|correction| force.checked_sub(correction))
+                })
+                .ok_or_else(error)?;
+            lift_torque = lift_torque
+                .checked_mul_scalar(factor)
+                .and_then(|torque| {
+                    angular_momentum
+                        .checked_mul_scalar(damping)
+                        .and_then(|correction| torque.checked_sub(correction))
+                })
+                .ok_or_else(error)?;
+        }
+        body.apply_force(lift_force).map_err(|_| error())?;
+        body.apply_torque(lift_torque).map_err(|_| error())?;
+        Ok(())
+    }
+
+    fn prepare_aerodynamics_updates<E: StepExecutor>(
+        &mut self,
+        executor: &E,
+        workers: usize,
+        dt: f64,
+    ) -> Result<(), StepError> {
+        self.aerodynamics_body_updates.clear();
+        let Some(atmosphere) = self.atmosphere else {
+            return Ok(());
+        };
+
+        for (dense_id, entry) in self.bodies.iter() {
+            if entry.aerodynamics.is_empty()
+                || entry.body.physics().body_type() != BodyType::Dynamic
+            {
+                continue;
+            }
+            let body_id = BodyId {
+                world: self.world_id,
+                dense: dense_id,
+            };
+            if self.aerodynamics_body_updates.try_reserve(1).is_err() {
+                self.aerodynamics_body_updates.clear();
+                return Err(StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                });
+            }
+            self.aerodynamics_body_updates.push(AerodynamicsBodyUpdate {
+                id: body_id,
+                error: None,
+                original: entry.body,
+                prepared: entry.body,
+            });
+        }
+
+        let bodies = &self.bodies;
+        let chunk_size = self
+            .aerodynamics_body_updates
+            .len()
+            .div_ceil(workers.max(1))
+            .max(1);
+        executor
+            .for_each_chunk_mut(
+                &mut self.aerodynamics_body_updates,
+                chunk_size,
+                |_, updates| {
+                    for update in updates {
+                        update.error = bodies
+                            .get(update.id.dense)
+                            .map(|entry| {
+                                Self::apply_aerodynamics(
+                                    atmosphere,
+                                    &entry.aerodynamics,
+                                    update.id,
+                                    &mut update.prepared,
+                                    &self.parts,
+                                    Some(dt),
+                                )
+                            })
+                            .unwrap_or(Ok(()))
+                            .err();
+                    }
+                },
+            )
+            .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
+        if let Some(error) = self
+            .aerodynamics_body_updates
+            .iter()
+            .find_map(|update| update.error)
+        {
+            self.aerodynamics_body_updates.clear();
+            return Err(error);
+        }
+
+        for update in &self.aerodynamics_body_updates {
+            if let Some(entry) = self
+                .bodies
+                .get_mut(update.id.dense)
+                .filter(|_| update.id.world == self.world_id)
+            {
+                entry.body = update.prepared;
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_aerodynamics_updates(&mut self) {
+        for update in &self.aerodynamics_body_updates {
+            if let Some(entry) = self
+                .bodies
+                .get_mut(update.id.dense)
+                .filter(|_| update.id.world == self.world_id)
+            {
+                entry.body = update.original;
+            }
+        }
+        self.aerodynamics_body_updates.clear();
     }
 
     fn gravity_force_for_body(
@@ -2333,6 +2966,15 @@ impl PhysicsWorld {
         shards: &mut [Vec<BodyStep>],
         executor: &E,
     ) -> Result<(), StepError> {
+        self.fill_step_shards_with_executor_at_dt(shards, executor, None)
+    }
+
+    fn fill_step_shards_with_executor_at_dt<E: StepExecutor>(
+        &self,
+        shards: &mut [Vec<BodyStep>],
+        executor: &E,
+        dt: Option<f64>,
+    ) -> Result<(), StepError> {
         if shards.is_empty() {
             return Err(StepError::InvalidStepResults);
         }
@@ -2370,17 +3012,40 @@ impl PhysicsWorld {
             });
             shard_remaining -= 1;
         }
-        if self.central_gravity.is_some() || !self.gravity_fields.is_empty() {
+        if self.atmosphere.is_some()
+            || self.central_gravity.is_some()
+            || !self.gravity_fields.is_empty()
+        {
+            let atmosphere = self.atmosphere;
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunks| {
                     for step in chunks.iter_mut().flatten() {
-                        step.error = Self::apply_gravity(
-                            self.central_gravity,
-                            &self.gravity_fields,
-                            step.body_id,
-                            &mut step.prepared,
-                        )
-                        .err();
+                        if let Some(atmosphere) = atmosphere
+                            && let Some(properties) = self
+                                .bodies
+                                .get(step.body_id.dense)
+                                .map(|entry| entry.aerodynamics.as_slice())
+                                .filter(|surfaces| !surfaces.is_empty())
+                        {
+                            step.error = Self::apply_aerodynamics(
+                                atmosphere,
+                                properties,
+                                step.body_id,
+                                &mut step.prepared,
+                                &self.parts,
+                                dt,
+                            )
+                            .err();
+                        }
+                        if step.error.is_none() {
+                            step.error = Self::apply_gravity(
+                                self.central_gravity,
+                                &self.gravity_fields,
+                                step.body_id,
+                                &mut step.prepared,
+                            )
+                            .err();
+                        }
                     }
                 })
                 .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
@@ -2457,6 +3122,7 @@ impl PhysicsWorld {
         if let Err(error) = self.prepare_joint_collision_pairs() {
             self.collision_system.abort_step();
             self.rollback_gravity_updates();
+            self.rollback_aerodynamics_updates();
             return Err(StepError::Collision(error));
         }
         for step in shards.iter().flatten() {
@@ -2468,16 +3134,19 @@ impl PhysicsWorld {
         if let Err(error) = self.prepare_collision_candidates(dt, worker_count, executor) {
             self.collision_system.abort_step();
             self.rollback_gravity_updates();
+            self.rollback_aerodynamics_updates();
             return Err(StepError::Collision(error));
         }
         if let Err(error) = self.process_collision_candidates(worker_count, executor, dt) {
             self.collision_system.abort_step();
             self.rollback_gravity_updates();
+            self.rollback_aerodynamics_updates();
             return Err(StepError::Collision(error));
         }
         if let Err(error) = self.prepare_joint_break_commit() {
             self.collision_system.abort_step();
             self.rollback_gravity_updates();
+            self.rollback_aerodynamics_updates();
             return Err(StepError::Collision(error));
         }
 
