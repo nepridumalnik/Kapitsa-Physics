@@ -12,7 +12,7 @@ use std::time::Instant;
 
 mod aerodynamics {
     use super::{BodyId, PartId, PhysicsWorld, StepError};
-    use crate::aerodynamics::AerodynamicProperties;
+    use crate::aerodynamics::{AerodynamicProperties, Atmosphere};
 
     /// Identifies the rigid object that owns an aerodynamic surface.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +65,8 @@ mod aerodynamics {
 
     impl AerodynamicsTask {
         pub fn execute(self, world: &PhysicsWorld) -> Result<(), StepError> {
-            let Some(atmosphere) = world.atmosphere else {
+            let atmosphere = world.atmosphere;
+            if matches!(atmosphere, Atmosphere::Vacuum) {
                 return Ok(());
             };
             for (dense, entry) in world.bodies.iter() {
@@ -121,7 +122,7 @@ fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
 
 use crate::{
     aabb::Aabb,
-    aerodynamics::{AerodynamicProperties, AtmosphericState},
+    aerodynamics::{AerodynamicProperties, Atmosphere},
     cluster::{ClusterPart, RigidCluster, Weld},
     collider::Collider,
     collision::{
@@ -286,7 +287,7 @@ pub struct PhysicsWorld {
     central_gravity: Option<CentralGravity>,
     gravity_fields: DensePool<Gravity>,
     gravity_body_updates: Vec<GravityBodyUpdate>,
-    atmosphere: Option<AtmosphericState>,
+    atmosphere: Atmosphere,
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
@@ -351,7 +352,7 @@ impl PhysicsWorld {
             central_gravity: None,
             gravity_fields: DensePool::new(),
             gravity_body_updates: Vec::new(),
-            atmosphere: None,
+            atmosphere: Atmosphere::Vacuum,
             aerodynamics_body_updates: Vec::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
@@ -375,11 +376,11 @@ impl PhysicsWorld {
         self.central_gravity = gravity;
     }
 
-    pub fn atmosphere(&self) -> Option<AtmosphericState> {
+    pub fn atmosphere(&self) -> Atmosphere {
         self.atmosphere
     }
 
-    pub fn set_atmosphere(&mut self, atmosphere: Option<AtmosphericState>) {
+    pub fn set_atmosphere(&mut self, atmosphere: Atmosphere) {
         self.atmosphere = atmosphere;
     }
 
@@ -1533,14 +1534,16 @@ impl PhysicsWorld {
     }
 
     fn apply_aerodynamics(
-        atmosphere: AtmosphericState,
+        atmosphere: Atmosphere,
         surfaces: &[AerodynamicSurface],
         body_id: BodyId,
         body: &mut RigidBody,
         parts: &DensePool<ClusterPart>,
         dt: Option<f64>,
     ) -> Result<(), StepError> {
-        if atmosphere.density() == 0.0 || body.physics().body_type() != BodyType::Dynamic {
+        if matches!(atmosphere, Atmosphere::Vacuum)
+            || body.physics().body_type() != BodyType::Dynamic
+        {
             return Ok(());
         }
         let error = || StepError::Aerodynamics {
@@ -1580,6 +1583,12 @@ impl PhysicsWorld {
             }
             .filter(|point| point.is_finite())
             .ok_or_else(error)?;
+            let local_atmosphere = atmosphere
+                .state_at(point)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            if local_atmosphere.density() == 0.0 {
+                continue;
+            }
             let offset = point.checked_sub(center).ok_or_else(error)?;
             let point_velocity = body
                 .state()
@@ -1591,7 +1600,12 @@ impl PhysicsWorld {
                 .with_local_application_offset(Vec3::ZERO)
                 .map_err(|_| error())?;
             let (surface_drag, lift) = point_properties
-                .force_components(atmosphere, target_transform, point_velocity, Vec3::ZERO)
+                .force_components(
+                    local_atmosphere,
+                    target_transform,
+                    point_velocity,
+                    Vec3::ZERO,
+                )
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             drag = drag.checked_add(surface_drag).ok_or_else(error)?;
             drag_torque = offset
@@ -1603,6 +1617,13 @@ impl PhysicsWorld {
                 .checked_cross(lift)
                 .and_then(|torque| lift_torque.checked_add(torque))
                 .ok_or_else(error)?;
+        }
+        if drag == Vec3::ZERO
+            && drag_torque == Vec3::ZERO
+            && lift_force == Vec3::ZERO
+            && lift_torque == Vec3::ZERO
+        {
+            return Ok(());
         }
         let mut scale = 1.0_f64;
         if let Some(dt) = dt {
@@ -1792,7 +1813,8 @@ impl PhysicsWorld {
         dt: f64,
     ) -> Result<(), StepError> {
         self.aerodynamics_body_updates.clear();
-        let Some(atmosphere) = self.atmosphere else {
+        let atmosphere = self.atmosphere;
+        if matches!(atmosphere, Atmosphere::Vacuum) {
             return Ok(());
         };
 
@@ -3012,7 +3034,7 @@ impl PhysicsWorld {
             });
             shard_remaining -= 1;
         }
-        if self.atmosphere.is_some()
+        if !matches!(self.atmosphere, Atmosphere::Vacuum)
             || self.central_gravity.is_some()
             || !self.gravity_fields.is_empty()
         {
@@ -3020,7 +3042,7 @@ impl PhysicsWorld {
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunks| {
                     for step in chunks.iter_mut().flatten() {
-                        if let Some(atmosphere) = atmosphere
+                        if !matches!(atmosphere, Atmosphere::Vacuum)
                             && let Some(properties) = self
                                 .bodies
                                 .get(step.body_id.dense)
@@ -3704,3 +3726,8 @@ fn merge_interaction(
 #[cfg(test)]
 #[path = "world_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+fn test_atmosphere(state: crate::aerodynamics::AtmosphericState) -> Atmosphere {
+    crate::aerodynamics::atmosphere::test_atmosphere(state)
+}
