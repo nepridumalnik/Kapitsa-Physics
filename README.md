@@ -250,7 +250,42 @@ If a command has already changed the world but the subsequent physics step fails
 
 ## Aerodynamics and Hydrodynamics
 
-The aerodynamics module provides quadratic drag and an optional simplified lift model for body and cluster-part surfaces. Configure atmospheric density and wind on `PhysicsWorld`; aerodynamic forces are applied during world steps. The hydrodynamics module currently provides an extension point without an active physics model.
+The aerodynamics module provides quadratic drag and an optional simplified lift model for body and cluster-part surfaces. Configure a spherical atmosphere on `PhysicsWorld` or `Simulation::builder()`; aerodynamic forces are applied during world steps. Worlds and simulation builders default to `Atmosphere::Vacuum`. The hydrodynamics module currently provides an extension point without an active physics model.
+
+```rust
+use kapitsa::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
+// Vec3 is the engine's f64 vector type.
+let atmosphere = SphericalAtmosphere::builder()
+    .reference_radius(600_000.0) // metres from the centre
+    .reference_density(1.225)   // kg/m? at the reference radius
+    .height(80_000.0)          // metres above the reference radius
+    .profile(DensityProfile::Exponential { scale_height: 5_600.0 })
+    .smooth_edge(5_600.0)      // optional transition width in metres
+    .build()?;
+
+world.set_atmosphere(Atmosphere::Sphere(atmosphere));
+// Or configure before starting a simulation:
+let builder = kapitsa::Simulation::builder()
+    .atmosphere(Atmosphere::Sphere(atmosphere));
+// Restore vacuum:
+world.set_atmosphere(Atmosphere::Vacuum);
+```
+
+The reference radius, reference density, height and profile are required. The centre
+and wind default to zero; configure them with `.center(Vec3)` and `.wind(Vec3)`.
+The default boundary is a hard cutoff. All lengths and vector components use `f64`.
+The builder rejects missing fields, non-finite values, negative density/radius,
+non-positive height/scale height, and smoothing widths outside `(0, height]`.
+
+Each surface samples density at its world-space application point using Euclidean
+distance from the atmosphere centre. Density is constant below the reference
+radius, then follows `rho = reference_density * exp(-altitude / scale_height)`.
+At or beyond `reference_radius + height`, density is zero and the profile is not
+evaluated. Optional smoothing multiplies density by `t?(3 - 2t)` over the final
+transition width, where `t` is the remaining distance to the boundary divided by
+that width and clamped to `[0, 1]`. Wind is constant throughout the sphere.
+`Atmosphere::state_at(point)` exposes the same local density and wind used by the
+simulation. Pressure, temperature and gas composition are not modeled.
 
 The lift step uses a frozen-force, energy-preserving velocity update relative to the wind, with drag applied first. This is an approximation: coupled external forces and the rotational integrator can introduce energy error, particularly at large timesteps or with asymmetric inertia. Reduce the timestep to check convergence. The low-level `fill_step_shards` interface does not receive a timestep and therefore does not apply this timestep-dependent correction; prefer `step` or `step_with_shards` for aerodynamic simulation.
 

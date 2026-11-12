@@ -17,7 +17,7 @@ fn vacuum_skips_aerodynamics_in_both_world_paths() {
             .unwrap();
         let mut world = PhysicsWorld::new();
         let id = world.add_body(body).unwrap();
-        world.set_atmosphere(Some(
+        world.set_atmosphere(super::test_atmosphere(
             AtmosphericState::new(0.0, Vec3::X * (0.75 * f64::MAX)).unwrap(),
         ));
         world
@@ -51,7 +51,9 @@ fn lift_trajectory(dt: f64, steps: usize, sharded: bool, drag: f64) -> Vec3 {
     body.set_linear_velocity(Vec3::X * 10.0).unwrap();
     let mut world = PhysicsWorld::new();
     let id = world.add_body(body).unwrap();
-    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    world.set_atmosphere(super::test_atmosphere(
+        AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+    ));
     world
         .set_aerodynamics(
             id,
@@ -107,7 +109,9 @@ fn offset_lift_preserves_energy_with_rotation_and_wind() {
         let mut world = PhysicsWorld::new();
         let id = world.add_body(body).unwrap();
         let wind = Vec3::X * 2.0;
-        world.set_atmosphere(Some(AtmosphericState::new(1.0, wind).unwrap()));
+        world.set_atmosphere(super::test_atmosphere(
+            AtmosphericState::new(1.0, wind).unwrap(),
+        ));
         world
             .set_aerodynamics(
                 id,
@@ -148,7 +152,9 @@ fn aerodynamic_task_checks_without_mutating_the_world() {
     body.set_linear_velocity(Vec3::X * 1e200).unwrap();
     let mut world = PhysicsWorld::new();
     let id = world.add_body(body).unwrap();
-    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    world.set_atmosphere(super::test_atmosphere(
+        AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+    ));
     assert!(
         crate::aerodynamics::AerodynamicsTask
             .execute(&world)
@@ -178,7 +184,9 @@ fn lift_energy_drift_converges_for_anisotropic_inertia() {
         body.set_angular_velocity(Vec3::new(0.5, 0.3, 0.2)).unwrap();
         let mut world = PhysicsWorld::new();
         let id = world.add_body(body).unwrap();
-        world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+        world.set_atmosphere(super::test_atmosphere(
+            AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+        ));
         world
             .set_aerodynamics(
                 id,
@@ -224,7 +232,7 @@ fn atmosphere_without_surfaces_does_not_evaluate_relative_wind() {
             .unwrap();
         let mut world = PhysicsWorld::new();
         let id = world.add_body(body).unwrap();
-        world.set_atmosphere(Some(
+        world.set_atmosphere(super::test_atmosphere(
             AtmosphericState::new(1.0, Vec3::X * (f64::MAX * 0.75)).unwrap(),
         ));
         if sharded {
@@ -252,7 +260,9 @@ fn aerodynamic_drag_is_applied_during_world_step() {
 
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(body).unwrap();
-    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    world.set_atmosphere(super::test_atmosphere(
+        AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+    ));
     world
         .set_aerodynamics(
             body_id,
@@ -276,7 +286,9 @@ fn aerodynamic_drag_produces_torque_at_an_offset_point() {
 
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(body).unwrap();
-    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    world.set_atmosphere(super::test_atmosphere(
+        AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+    ));
     world
         .set_aerodynamics(
             body_id,
@@ -298,7 +310,9 @@ fn body_can_combine_multiple_aerodynamic_surfaces() {
 
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(body).unwrap();
-    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    world.set_atmosphere(super::test_atmosphere(
+        AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+    ));
     let surface = AerodynamicProperties::new(2.0, 0.5, Vec3::ZERO).unwrap();
     assert_eq!(world.add_aerodynamic_surface(body_id, surface).unwrap(), 0);
     assert_eq!(world.add_aerodynamic_surface(body_id, surface).unwrap(), 1);
@@ -320,7 +334,9 @@ fn strong_drag_does_not_reverse_linear_velocity_in_one_step() {
 
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(body).unwrap();
-    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    world.set_atmosphere(super::test_atmosphere(
+        AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+    ));
     world
         .set_aerodynamics(
             body_id,
@@ -344,7 +360,9 @@ fn ordinary_and_sharded_steps_match_with_aerodynamics() {
         body.set_linear_velocity(Vec3::new(10.0, 0.0, 0.0)).unwrap();
         let mut world = PhysicsWorld::new();
         let body_id = world.add_body(body).unwrap();
-        world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+        world.set_atmosphere(super::test_atmosphere(
+            AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+        ));
         world
             .set_aerodynamics(
                 body_id,
@@ -380,7 +398,9 @@ fn failed_step_restores_body_after_aerodynamics_and_gravity_preparation() {
 
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(body).unwrap();
-    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    world.set_atmosphere(super::test_atmosphere(
+        AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+    ));
     world
         .set_aerodynamics(
             body_id,
@@ -403,7 +423,9 @@ fn wind_accelerates_a_stationary_body() {
     let body = world
         .add_body(RigidBody::new_dynamic(Transform::identity(), mass).unwrap())
         .unwrap();
-    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::X * 10.0).unwrap()));
+    world.set_atmosphere(super::test_atmosphere(
+        AtmosphericState::new(1.0, Vec3::X * 10.0).unwrap(),
+    ));
     world
         .set_aerodynamics(
             body,
@@ -422,7 +444,9 @@ fn rotating_body_experiences_drag_at_an_offset() {
     rigid_body.set_angular_velocity(Vec3::Z).unwrap();
     let mut world = PhysicsWorld::new();
     let body = world.add_body(rigid_body).unwrap();
-    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    world.set_atmosphere(super::test_atmosphere(
+        AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+    ));
     world
         .set_aerodynamics(
             body,
@@ -440,7 +464,9 @@ fn many_surfaces_cannot_reverse_motion_under_large_drag() {
     rigid_body.set_linear_velocity(Vec3::X * 10.0).unwrap();
     let mut world = PhysicsWorld::new();
     let body = world.add_body(rigid_body).unwrap();
-    world.set_atmosphere(Some(AtmosphericState::new(1.0, Vec3::ZERO).unwrap()));
+    world.set_atmosphere(super::test_atmosphere(
+        AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+    ));
     for _ in 0..3 {
         world
             .add_aerodynamic_surface(
@@ -475,4 +501,49 @@ fn changing_body_aerodynamics_preserves_part_surfaces() {
         surfaces[0].target(),
         crate::aerodynamics::AerodynamicTarget::Part(part)
     );
+}
+
+#[test]
+fn sphere_samples_surface_position_in_both_world_paths() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
+    for sharded in [false, true] {
+        for offset in [0.0, 20.0] {
+            let mut world = PhysicsWorld::new();
+            assert_eq!(world.atmosphere(), Atmosphere::Vacuum);
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 10.0)?;
+            let id = world.add_body(body)?;
+            let sphere = SphericalAtmosphere::builder()
+                .reference_radius(5.0)
+                .reference_density(1.0)
+                .height(5.0)
+                .profile(DensityProfile::Exponential { scale_height: 1.0 })
+                .build()?;
+            world.set_atmosphere(Atmosphere::Sphere(sphere));
+            world.add_aerodynamic_surface(
+                id,
+                AerodynamicProperties::new(1.0, 1.0, Vec3::X * offset)?,
+            )?;
+            if sharded {
+                world.step_with_shards(
+                    0.01,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(0.01)?;
+            }
+            let body = world.body(id).ok_or("missing body")?;
+            if offset == 0.0 {
+                assert!(body.state().linear_velocity().x < 10.0);
+            } else {
+                assert_eq!(body.state().linear_velocity(), Vec3::X * 10.0);
+            }
+            world.set_atmosphere(Atmosphere::Vacuum);
+            assert_eq!(world.atmosphere(), Atmosphere::Vacuum);
+        }
+    }
+    Ok(())
 }

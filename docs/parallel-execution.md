@@ -45,9 +45,10 @@ Gravity is computed independently per body in ordered reusable output buffers.
 Errors are checked in body order before applying outputs. Integration and
 collision tasks retain their existing dependency order, rollback, island
 partitioning, and solver algorithms. Summations within a body are unchanged.
-`AerodynamicsTask` and `HydrodynamicsTask` are step-local no-op entry points,
-executed as independent branches before the existing physics pipeline. They
-produce `()` and do not implement any force model yet.
+`AerodynamicsTask` checks aerodynamic force calculations without advancing the
+world. World steps apply drag and optional lift using atmospheric conditions
+sampled at each surface. `HydrodynamicsTask` remains an extension point without
+an active force model.
 
 Validation commands:
 

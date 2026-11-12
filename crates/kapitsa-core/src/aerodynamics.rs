@@ -1,5 +1,8 @@
 //! Aerodynamic force models.
 
+pub(crate) mod atmosphere;
+pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};
+
 use std::fmt;
 
 use kapitsa_math::Vec3;
@@ -260,6 +263,7 @@ impl AerodynamicForce {
 /// Invalid aerodynamic parameters or an unrepresentable force calculation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AerodynamicsError {
+    InvalidAtmosphere(&'static str),
     InvalidDensity,
     InvalidReferenceArea,
     InvalidDragCoefficient,
@@ -275,6 +279,7 @@ pub enum AerodynamicsError {
 impl fmt::Display for AerodynamicsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::InvalidAtmosphere(message) => message,
             Self::InvalidDensity => "air density must be finite and non-negative",
             Self::InvalidReferenceArea => "reference area must be finite and non-negative",
             Self::InvalidDragCoefficient => "drag coefficient must be finite and non-negative",

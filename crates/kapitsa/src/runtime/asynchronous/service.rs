@@ -8,6 +8,7 @@ use std::{
 };
 
 use kapitsa_core::{
+    aerodynamics::Atmosphere,
     collision::CollisionError,
     world::{PhysicsWorld, StepError},
 };
@@ -159,11 +160,36 @@ impl OwnedRuntime {
 /// Settings for starting a clock-driven simulation.
 #[derive(Default)]
 pub struct SimulationBuilder {
+    atmosphere: Atmosphere,
     config: SimulationConfig,
     invalid_worker_count: bool,
 }
 
 impl SimulationBuilder {
+    /// Configures the atmosphere before the simulation starts. Defaults to vacuum.
+    ///
+    /// ```no_run
+    /// use kapitsa::{Simulation, aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere}};
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let sphere = SphericalAtmosphere::builder()
+    ///     .reference_radius(600_000.0)
+    ///     .reference_density(1.225)
+    ///     .height(80_000.0)
+    ///     .profile(DensityProfile::Exponential { scale_height: 5_600.0 })
+    ///     .build()?;
+    /// let mut simulation = Simulation::builder()
+    ///     .atmosphere(Atmosphere::Sphere(sphere))
+    ///     .spawn_on_tokio(&tokio::runtime::Handle::current())?;
+    /// simulation.stop().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn atmosphere(mut self, atmosphere: Atmosphere) -> Self {
+        self.atmosphere = atmosphere;
+        self
+    }
+
     /// Sets the base physics frequency in hertz.
     pub fn frequency(mut self, frequency: u32) -> Self {
         self.config.tick_rate = frequency;
@@ -189,7 +215,9 @@ impl SimulationBuilder {
             return Err(SimulationError::InvalidWorkerCount);
         }
         let _entered = runtime.enter();
-        let mut simulation = Simulation::new_from_config(self.config)?;
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(self.atmosphere);
+        let mut simulation = Simulation::new_with_world(world, self.config)?;
         simulation.start()?;
         Ok(simulation)
     }
@@ -206,11 +234,10 @@ impl SimulationBuilder {
             .validate()
             .map_err(SimulationError::InvalidConfig)?;
         let (owned_runtime, runtime) = OwnedRuntime::start()?;
-        let runner = StepRunner::new_with_executor(
-            PhysicsWorld::new(),
-            self.config,
-            RayonExecutor::from_pool(pool),
-        )?;
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(self.atmosphere);
+        let runner =
+            StepRunner::new_with_executor(world, self.config, RayonExecutor::from_pool(pool))?;
         let mut simulation = Simulation::from_runner(runner, runtime)?;
         simulation.owned_runtime = Some(owned_runtime);
         simulation.start()?;
@@ -1152,6 +1179,41 @@ mod chunk_tests;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn builder_installs_atmosphere_on_both_executors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use kapitsa_core::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
+        let atmosphere = Atmosphere::Sphere(
+            SphericalAtmosphere::builder()
+                .reference_radius(100.0)
+                .reference_density(1.0)
+                .height(20.0)
+                .profile(DensityProfile::Exponential { scale_height: 10.0 })
+                .build()?,
+        );
+        assert_eq!(
+            super::SimulationBuilder::default().atmosphere,
+            Atmosphere::Vacuum
+        );
+        for rayon in [false, true] {
+            let builder = super::Simulation::builder().atmosphere(atmosphere);
+            let mut simulation = if rayon {
+                builder.spawn_on_rayon(std::sync::Arc::new(
+                    rayon::ThreadPoolBuilder::new().num_threads(1).build()?,
+                ))?
+            } else {
+                builder.spawn_on_tokio(&tokio::runtime::Handle::current())?
+            };
+            simulation.stop().await?;
+            let runner = simulation
+                .simulation
+                .as_ref()
+                .ok_or("missing stopped simulation")?;
+            assert_eq!(runner.world()?.atmosphere(), atmosphere);
+        }
+        Ok(())
+    }
+
     use std::{
         future::Future,
         num::NonZeroUsize,

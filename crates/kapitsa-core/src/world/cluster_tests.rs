@@ -193,7 +193,7 @@ fn rotated_cluster_surface_uses_part_position_for_velocity_and_torque() {
             AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO).unwrap(),
         )
         .unwrap();
-    world.set_atmosphere(Some(
+    world.set_atmosphere(crate::world::test_atmosphere(
         crate::aerodynamics::AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
     ));
     world.step(0.01).unwrap();
