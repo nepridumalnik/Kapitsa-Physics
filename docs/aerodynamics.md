@@ -4,6 +4,40 @@ Kapitsa's geometry-based aerodynamics is an independent implementation. FAR is a
 
 This document distinguishes physical equations from numerical approximations. Inclusion of a formula below does **not** mean that the corresponding model is implemented. Implementation status must be established from code and tests.
 
+## Scalar geometry preparation
+
+`kapitsa::aerodynamics::geometry::PreparedGeometry::prepare` prepares borrowed `GeometryInstance` meshes in one stable body-local frame. Each instance has a local transform and `GeometryOwner::Body` or `GeometryOwner::Part(PartId)`. It does not change the body, sample an atmosphere, calculate forces, or automatically prepare `Aerodynamics::Mesh` during a physics step.
+
+```rust
+use kapitsa::aerodynamics::geometry::{
+    GeometryConfig, GeometryInstance, GeometryOwner, OpenMeshPolicy, PreparedGeometry,
+};
+
+let prepared = PreparedGeometry::prepare(
+    &[GeometryInstance {
+        mesh: &mesh,
+        local_transform: Transform::identity(),
+        owner: GeometryOwner::Body,
+    }],
+    GeometryConfig {
+        cell_size: 0.25,
+        max_cells: 100_000,
+        max_work: 10_000_000,
+        open_mesh_policy: OpenMeshPolicy::Reject,
+    },
+)?;
+```
+
+The scalar reference uses a uniform grid with a padded boundary, conservative triangle/box separating-axis intersection, and six-connected exterior flood filling for each closed instance. Instances are unioned before extracting sections and exposed faces. All cells touching a triangle are fully occupied, including boundary contact; this preserves thin geometry but overestimates its volume. Each axis section reports `A = occupied_cells * h²` and the mean of occupied cell centers. Volume is `occupied_cells * h³`. Exposed faces are streamed without a separate face buffer. Occupancy is x-fastest: `(z * ny + y) * nx + x`.
+
+Overlaps count once; the lowest `GeometryOwner` wins attribution ties, independent of input order. This is geometric bookkeeping, not a physical load-sharing rule. Preparing parts separately and adding their exposed areas is **not** equivalent to preparing their union.
+
+`Reject` requires paired oppositely directed indexed edges and nonzero signed volume. `SurfaceOnly` rasterizes nonclosed meshes without interior filling. Seams must be welded. Self-intersections are not detected; sealed cavities use solid-fill semantics. Thin surfaces are preserved, but their physical thickness is not reconstructed. Grid-face normals remain axis-aligned and do not converge to smooth triangle normals for pressure integration.
+
+`max_cells` and `max_work` are mandatory budgets, with hard ceilings of 1,048,576 cells and 100,000,000 work units. Preparation bounds triangle/box tests, input vertex scans and per-instance cell scans before allocating the grid; edge closure sorting adds `O(triangles log triangles)` work. This deliberately simple scalar reference scans the full grid per triangle and is not yet optimized for large ships. Allocation failures and invalid/unrepresentable input are explicit errors. No SIMD, background cache publication, collider conversion or geometry force model is supplied in this stage. World movement and center-of-mass edits do not change the prepared local geometry; construction edits require an explicit new preparation.
+
+References for geometric concepts: [Voxel](https://en.wikipedia.org/wiki/Voxel), [Hyperplane separation theorem — separating axis theorem](https://en.wikipedia.org/wiki/Hyperplane_separation_theorem), [Flood fill](https://en.wikipedia.org/wiki/Flood_fill). No FAR implementation code is used.
+
 ## Conventions
 
 Use SI units. Let `v = v_COM + omega × (x - x_COM) - wind(x)` be the body's velocity relative to the atmosphere at a force application point. The incoming fluid velocity is `-v`. Surface normals point outwards. Forces and torques are accumulated in world coordinates; geometry is prepared in body-local coordinates, independent of the center of mass.

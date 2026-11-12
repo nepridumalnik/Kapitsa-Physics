@@ -1,6 +1,7 @@
-//! Aerodynamic force models.
+//! Aerodynamic force models and independent geometry preparation.
 
 pub(crate) mod atmosphere;
+pub mod geometry;
 pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};
 
 use std::fmt;
