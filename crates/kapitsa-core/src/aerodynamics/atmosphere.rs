@@ -98,7 +98,7 @@ impl SphericalAtmosphere {
     pub fn reference_radius(self) -> f64 {
         self.reference_radius
     }
-    /// Density at and below the reference radius, in kg/m?.
+    /// Density at and below the reference radius, in kg/m^3.
     pub fn reference_density(self) -> f64 {
         self.reference_density
     }
@@ -176,7 +176,7 @@ impl SphericalAtmosphereBuilder {
         self.reference_radius = Some(value);
         self
     }
-    /// Sets density at the reference radius, in kg/m?. Required, finite and non-negative.
+    /// Sets density at the reference radius, in kg/m^3. Required, finite and non-negative.
     /// Zero density disables aerodynamic forces throughout the sphere.
     pub fn reference_density(mut self, value: f64) -> Self {
         self.reference_density = Some(value);
@@ -197,7 +197,7 @@ impl SphericalAtmosphereBuilder {
     }
     /// Enables smooth density tapering over the final `value` metres inside the outer boundary.
     /// The width must be finite, positive and no greater than the atmosphere height.
-    /// Multiplies the profile by `t?(3 - 2t)`, where `t` is the remaining distance
+    /// Multiplies the profile by `t * t * (3.0 - 2.0 * t)`, where `t` is the remaining distance
     /// to the boundary divided by the width, clamped to `[0, 1]`. Defaults to a hard cutoff.
     pub fn smooth_edge(mut self, value: f64) -> Self {
         self.smooth_edge = Some(value);
