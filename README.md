@@ -250,7 +250,21 @@ If a command has already changed the world but the subsequent physics step fails
 
 ## Aerodynamics and Hydrodynamics
 
-The aerodynamics module provides quadratic drag and an optional simplified lift model for body and cluster-part surfaces. Configure a spherical atmosphere on `PhysicsWorld` or `Simulation::builder()`; aerodynamic forces are applied during world steps. Worlds and simulation builders default to `Atmosphere::Vacuum`. The hydrodynamics module currently provides an extension point without an active physics model.
+The aerodynamics module provides quadratic drag and an optional simplified lift model for body and cluster-part surfaces. Aerodynamic configuration and additional surfaces are owned by `RigidBody`; the world supplies the atmosphere and evaluates loads. Configure a spherical atmosphere on `PhysicsWorld` or `Simulation::builder()`; aerodynamic forces are applied during world steps. Worlds and simulation builders default to `Atmosphere::Vacuum`. The hydrodynamics module currently provides an extension point without an active physics model.
+
+```rust
+use kapitsa::aerodynamics::{AerodynamicProperties, Aerodynamics};
+
+body.set_aerodynamics(Aerodynamics::Simple(AerodynamicProperties::new(
+    2.0,       // reference area, m²
+    0.5,       // drag coefficient
+    Vec3::ZERO // application offset from COM, body-local
+)?));
+```
+
+`Aerodynamics::None` is the default. `Mesh(TriangleMesh)` owns its mesh by value and `Colliders` selects attached collision geometry. In this API migration stage these two geometry modes are configuration only: aerodynamic evaluation in a non-vacuum atmosphere reports an explicit unsupported-model error, rather than silently returning zero loads. They are not yet a FAR-equivalent physical model. See [physical formulas and their limits](docs/aerodynamics.md).
+
+`RigidBody` is no longer `Copy` or `Clone`. Its `motion()` method returns a compact `BodyMotion` snapshot containing motion, mass, accumulated forces and CCD mode, but not aerodynamic configuration or geometry. Physics staging and runtime command batches copy only this snapshot; they do not clone meshes.
 
 ```rust
 use kapitsa::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};

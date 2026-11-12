@@ -70,13 +70,19 @@ mod aerodynamics {
                 return Ok(());
             };
             for (dense, entry) in world.bodies.iter() {
-                if entry.aerodynamics.is_empty() {
+                if entry.body.aerodynamic_surfaces.is_empty()
+                    && matches!(
+                        entry.body.aerodynamics(),
+                        crate::aerodynamics::Aerodynamics::None
+                    )
+                {
                     continue;
                 }
-                let mut body = entry.body;
+                let mut body = entry.body.motion();
                 PhysicsWorld::apply_aerodynamics(
                     atmosphere,
-                    &entry.aerodynamics,
+                    entry.body.aerodynamics(),
+                    &entry.body.aerodynamic_surfaces,
                     BodyId {
                         world: world.world_id,
                         dense,
@@ -135,12 +141,11 @@ use crate::{
     gravity::{CentralGravity, Gravity, GravityError},
     joint::{Joint, JointBreakEvent, JointFrame},
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
-    rigid_body::{BodyState, BodyType, CcdMode, RigidBody, predict},
+    rigid_body::{BodyMotion, BodyState, BodyType, CcdMode, RigidBody, predict},
 };
 
 struct BodyEntry {
     body: RigidBody,
-    aerodynamics: Vec<AerodynamicSurface>,
     first_collider: Option<ColliderId>,
     cluster: Option<RigidCluster>,
 }
@@ -191,8 +196,8 @@ impl ForceSource {
 
 struct ForceSourceBodyUpdate {
     id: BodyId,
-    original: RigidBody,
-    prepared: RigidBody,
+    original: BodyMotion,
+    prepared: BodyMotion,
 }
 
 struct JointEntry {
@@ -213,15 +218,15 @@ pub enum JointTarget {
 struct GravityBodyUpdate {
     id: BodyId,
     error: Option<StepError>,
-    original: RigidBody,
-    prepared: RigidBody,
+    original: BodyMotion,
+    prepared: BodyMotion,
 }
 
 struct AerodynamicsBodyUpdate {
     id: BodyId,
     error: Option<StepError>,
-    original: RigidBody,
-    prepared: RigidBody,
+    original: BodyMotion,
+    prepared: BodyMotion,
 }
 
 const FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT: usize = 128;
@@ -275,6 +280,7 @@ fn swept_bounds_for_trajectory(
 /// Owns rigid bodies and colliders and assigns IDs scoped to this world instance.
 pub struct PhysicsWorld {
     world_id: u64,
+    body_revision: u64,
     bodies: DensePool<BodyEntry>,
     parts: DensePool<ClusterPart>,
     welds: DensePool<Weld>,
@@ -303,11 +309,12 @@ pub struct PhysicsWorld {
 #[derive(Clone, Copy, Debug)]
 pub struct BodyStep {
     body_id: BodyId,
-    source: RigidBody,
+    source: BodyMotion,
+    body_revision: u64,
     predicted: Option<BodyState>,
     dt: Option<f64>,
     error: Option<StepError>,
-    prepared: RigidBody,
+    prepared: BodyMotion,
 }
 
 impl BodyStep {
@@ -340,6 +347,7 @@ impl PhysicsWorld {
     pub const fn new() -> Self {
         Self {
             world_id: 0,
+            body_revision: 0,
             bodies: DensePool::new(),
             parts: DensePool::new(),
             welds: DensePool::new(),
@@ -384,46 +392,25 @@ impl PhysicsWorld {
         self.atmosphere = atmosphere;
     }
 
-    pub fn aerodynamics(&self, id: BodyId) -> Option<AerodynamicProperties> {
-        if id.world != self.world_id {
-            return None;
-        }
-        self.bodies.get(id.dense).and_then(|entry| {
-            entry
-                .aerodynamics
-                .iter()
-                .find(|surface| surface.target() == AerodynamicTarget::Body)
-                .map(|surface| surface.properties())
-        })
+    pub fn aerodynamics(&self, id: BodyId) -> Option<&crate::aerodynamics::Aerodynamics> {
+        self.body(id).map(RigidBody::aerodynamics)
     }
 
-    /// Replaces body surfaces. All previously returned surface indices are invalidated.
+    /// Replaces the primary aerodynamic model, retaining additional surfaces.
     pub fn set_aerodynamics(
         &mut self,
         id: BodyId,
-        properties: Option<AerodynamicProperties>,
+        aerodynamics: crate::aerodynamics::Aerodynamics,
     ) -> Result<(), WorldError> {
         if id.world != self.world_id {
             return Err(WorldError::InvalidBodyId);
         }
-        let surfaces = &mut self
-            .bodies
+        self.bodies
             .get_mut(id.dense)
             .ok_or(WorldError::InvalidBodyId)?
-            .aerodynamics;
-        if properties.is_some()
-            && !surfaces
-                .iter()
-                .any(|surface| surface.target() == AerodynamicTarget::Body)
-        {
-            surfaces
-                .try_reserve(1)
-                .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
-        }
-        surfaces.retain(|surface| surface.target() != AerodynamicTarget::Body);
-        if let Some(properties) = properties {
-            surfaces.push(AerodynamicSurface::new(properties));
-        }
+            .body
+            .set_aerodynamics(aerodynamics);
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(())
     }
 
@@ -433,7 +420,7 @@ impl PhysicsWorld {
         }
         self.bodies
             .get(id.dense)
-            .map(|entry| entry.aerodynamics.as_slice())
+            .map(|entry| entry.body.aerodynamic_surfaces.as_slice())
     }
 
     /// Returns an index valid until the surface list changes or the cluster is split or merged.
@@ -445,11 +432,13 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return Err(WorldError::InvalidBodyId);
         }
+        self.body_revision = self.body_revision.wrapping_add(1);
         let surfaces = &mut self
             .bodies
             .get_mut(id.dense)
             .ok_or(WorldError::InvalidBodyId)?
-            .aerodynamics;
+            .body
+            .aerodynamic_surfaces;
         surfaces
             .try_reserve(1)
             .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
@@ -466,11 +455,13 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return Err(WorldError::InvalidBodyId);
         }
+        self.body_revision = self.body_revision.wrapping_add(1);
         let surfaces = &mut self
             .bodies
             .get_mut(id.dense)
             .ok_or(WorldError::InvalidBodyId)?
-            .aerodynamics;
+            .body
+            .aerodynamic_surfaces;
         if index >= surfaces.len() {
             return Err(WorldError::InvalidAerodynamicSurface);
         }
@@ -485,11 +476,13 @@ impl PhysicsWorld {
     ) -> Result<usize, WorldError> {
         let part_entry = self.cluster_part(part).ok_or(WorldError::InvalidBodyId)?;
         let body = part_entry.body();
+        self.body_revision = self.body_revision.wrapping_add(1);
         let surfaces = &mut self
             .bodies
             .get_mut(body.dense)
             .ok_or(WorldError::InvalidBodyId)?
-            .aerodynamics;
+            .body
+            .aerodynamic_surfaces;
         surfaces
             .try_reserve(1)
             .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
@@ -499,8 +492,8 @@ impl PhysicsWorld {
 
     pub(crate) fn rebase_aerodynamic_surface(
         surface: AerodynamicSurface,
-        old_body: &RigidBody,
-        new_body: &RigidBody,
+        old_body: &BodyMotion,
+        new_body: &BodyMotion,
     ) -> Result<AerodynamicSurface, crate::aerodynamics::AerodynamicsError> {
         if !matches!(surface.target(), AerodynamicTarget::Body) {
             return Ok(surface);
@@ -723,7 +716,6 @@ impl PhysicsWorld {
             .bodies
             .insert(BodyEntry {
                 body,
-                aerodynamics: Vec::new(),
                 first_collider: None,
                 cluster: None,
             })
@@ -755,11 +747,25 @@ impl PhysicsWorld {
     pub fn edit_body(
         &mut self,
         id: BodyId,
-        edit: impl FnOnce(&mut RigidBody) -> Result<(), crate::rigid_body::BodyError>,
+        edit: impl FnOnce(&mut BodyMotion) -> Result<(), crate::rigid_body::BodyError>,
     ) -> Result<(), ClusterError> {
-        let mut body = *self.body(id).ok_or(ClusterError::InvalidBodyId)?;
-        edit(&mut body).map_err(ClusterError::Body)?;
-        self.replace_body_state(id, body)
+        let entry = self
+            .bodies
+            .get(id.dense)
+            .filter(|_| id.world == self.world_id)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        let mut motion = entry.body.motion();
+        edit(&mut motion).map_err(ClusterError::Body)?;
+        if entry.cluster.is_some() && entry.body.physics() != motion.physics() {
+            return Err(ClusterError::ManagedMass);
+        }
+        self.invalidate_body_edit(id);
+        self.bodies
+            .get_mut(id.dense)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .body
+            .set_motion(motion);
+        Ok(())
     }
 
     /// Replaces body state while protecting cluster-managed physical properties.
@@ -784,6 +790,7 @@ impl PhysicsWorld {
     }
 
     fn invalidate_body_edit(&mut self, id: BodyId) {
+        self.body_revision = self.body_revision.wrapping_add(1);
         self.synchronize_cluster_physics_state(&[id]);
     }
 
@@ -1383,7 +1390,7 @@ impl PhysicsWorld {
             if !source.enabled {
                 continue;
             }
-            let Some(body) = self.body(source.body).copied() else {
+            let Some(body) = self.body(source.body).map(RigidBody::motion) else {
                 self.force_source_body_updates.clear();
                 if let Some(indices) = &mut self.force_source_body_indices {
                     indices.clear();
@@ -1520,7 +1527,7 @@ impl PhysicsWorld {
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.prepared;
+                entry.body.set_motion(update.prepared);
             }
         }
         Ok(())
@@ -1535,9 +1542,10 @@ impl PhysicsWorld {
 
     fn apply_aerodynamics(
         atmosphere: Atmosphere,
+        primary: &crate::aerodynamics::Aerodynamics,
         surfaces: &[AerodynamicSurface],
         body_id: BodyId,
-        body: &mut RigidBody,
+        body: &mut BodyMotion,
         parts: &DensePool<ClusterPart>,
         dt: Option<f64>,
     ) -> Result<(), StepError> {
@@ -1554,11 +1562,30 @@ impl PhysicsWorld {
             .world_center_of_mass()
             .map_err(|_| error())?
             .ok_or_else(error)?;
+        let primary_surface = match primary {
+            crate::aerodynamics::Aerodynamics::None => None,
+            crate::aerodynamics::Aerodynamics::Simple(properties) => {
+                Some(AerodynamicSurface::new(*properties))
+            }
+            crate::aerodynamics::Aerodynamics::Mesh(_)
+            | crate::aerodynamics::Aerodynamics::Colliders => {
+                let sampled = atmosphere
+                    .state_at(center)
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                if sampled.density() > 0.0 {
+                    return Err(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                    });
+                }
+                None
+            }
+        };
         let mut drag = Vec3::ZERO;
         let mut drag_torque = Vec3::ZERO;
         let mut lift_force = Vec3::ZERO;
         let mut lift_torque = Vec3::ZERO;
-        for surface in surfaces {
+        for surface in primary_surface.iter().chain(surfaces.iter()) {
             let properties = surface.properties();
             let target_transform = match surface.target() {
                 AerodynamicTarget::Body => body.state().transform(),
@@ -1819,7 +1846,11 @@ impl PhysicsWorld {
         };
 
         for (dense_id, entry) in self.bodies.iter() {
-            if entry.aerodynamics.is_empty()
+            if (entry.body.aerodynamic_surfaces.is_empty()
+                && matches!(
+                    entry.body.aerodynamics(),
+                    crate::aerodynamics::Aerodynamics::None
+                ))
                 || entry.body.physics().body_type() != BodyType::Dynamic
             {
                 continue;
@@ -1838,8 +1869,8 @@ impl PhysicsWorld {
             self.aerodynamics_body_updates.push(AerodynamicsBodyUpdate {
                 id: body_id,
                 error: None,
-                original: entry.body,
-                prepared: entry.body,
+                original: entry.body.motion(),
+                prepared: entry.body.motion(),
             });
         }
 
@@ -1860,7 +1891,8 @@ impl PhysicsWorld {
                             .map(|entry| {
                                 Self::apply_aerodynamics(
                                     atmosphere,
-                                    &entry.aerodynamics,
+                                    entry.body.aerodynamics(),
+                                    &entry.body.aerodynamic_surfaces,
                                     update.id,
                                     &mut update.prepared,
                                     &self.parts,
@@ -1888,7 +1920,7 @@ impl PhysicsWorld {
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.prepared;
+                entry.body.set_motion(update.prepared);
             }
         }
         Ok(())
@@ -1901,7 +1933,7 @@ impl PhysicsWorld {
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.original;
+                entry.body.set_motion(update.original);
             }
         }
         self.aerodynamics_body_updates.clear();
@@ -1911,7 +1943,7 @@ impl PhysicsWorld {
         gravity: Option<CentralGravity>,
         fields: &DensePool<Gravity>,
         body_id: BodyId,
-        body: &RigidBody,
+        body: &BodyMotion,
     ) -> Result<Vec3, StepError> {
         if gravity.is_none() && fields.is_empty() {
             return Ok(Vec3::ZERO);
@@ -1960,7 +1992,7 @@ impl PhysicsWorld {
         gravity: Option<CentralGravity>,
         fields: &DensePool<Gravity>,
         body_id: BodyId,
-        body: &mut RigidBody,
+        body: &mut BodyMotion,
     ) -> Result<(), StepError> {
         let force = Self::gravity_force_for_body(gravity, fields, body_id, body)?;
         if force != Vec3::ZERO {
@@ -2000,8 +2032,8 @@ impl PhysicsWorld {
             self.gravity_body_updates.push(GravityBodyUpdate {
                 id: body_id,
                 error: None,
-                original: entry.body,
-                prepared: entry.body,
+                original: entry.body.motion(),
+                prepared: entry.body.motion(),
             });
         }
 
@@ -2035,7 +2067,7 @@ impl PhysicsWorld {
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.prepared;
+                entry.body.set_motion(update.prepared);
             }
         }
         Ok(())
@@ -2048,7 +2080,7 @@ impl PhysicsWorld {
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.original;
+                entry.body.set_motion(update.original);
             }
         }
         self.clear_gravity_updates();
@@ -2065,7 +2097,7 @@ impl PhysicsWorld {
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.original;
+                entry.body.set_motion(update.original);
             }
         }
         self.clear_force_source_updates();
@@ -2101,7 +2133,7 @@ impl PhysicsWorld {
                 }
                 let bounds = if body_type != BodyType::Static {
                     let trajectory = CcdTrajectory::new(
-                        body_entry.body,
+                        body_entry.body.motion(),
                         *body_entry.body.state(),
                         0.0,
                         0.0,
@@ -2882,7 +2914,7 @@ impl PhysicsWorld {
             .get(body_id.dense)
             .filter(|_| body_id.world == world_id)
             .ok_or(CollisionError::InvalidContact)?;
-        let body = entry.body;
+        let body = entry.body.motion();
         let constrained_start = (entry.first_collider.is_none()
             && entry.cluster.is_none()
             && body.ccd_mode() == CcdMode::Discrete)
@@ -3026,11 +3058,12 @@ impl PhysicsWorld {
             };
             shards[shard_index].push(BodyStep {
                 body_id,
-                source: entry.body,
+                source: entry.body.motion(),
+                body_revision: self.body_revision,
                 predicted: None,
                 dt: None,
                 error: None,
-                prepared: entry.body,
+                prepared: entry.body.motion(),
             });
             shard_remaining -= 1;
         }
@@ -3043,15 +3076,17 @@ impl PhysicsWorld {
                 .for_each_chunk_mut(shards, 1, |_, chunks| {
                     for step in chunks.iter_mut().flatten() {
                         if !matches!(atmosphere, Atmosphere::Vacuum)
-                            && let Some(properties) = self
-                                .bodies
-                                .get(step.body_id.dense)
-                                .map(|entry| entry.aerodynamics.as_slice())
-                                .filter(|surfaces| !surfaces.is_empty())
+                            && let Some(entry) = self.bodies.get(step.body_id.dense)
+                            && (!entry.body.aerodynamic_surfaces.is_empty()
+                                || !matches!(
+                                    entry.body.aerodynamics(),
+                                    crate::aerodynamics::Aerodynamics::None
+                                ))
                         {
                             step.error = Self::apply_aerodynamics(
                                 atmosphere,
-                                properties,
+                                entry.body.aerodynamics(),
+                                &entry.body.aerodynamic_surfaces,
                                 step.body_id,
                                 &mut step.prepared,
                                 &self.parts,
@@ -3121,7 +3156,8 @@ impl PhysicsWorld {
                     world: self.world_id,
                     dense: dense_id,
                 })
-                || step.source != entry.body
+                || step.source != entry.body.motion()
+                || step.body_revision != self.body_revision
                 || step.predicted.is_none()
                 || step.dt.is_none_or(|dt| !dt.is_finite() || dt <= 0.0)
             {
@@ -3473,6 +3509,7 @@ impl PhysicsWorld {
     /// Mutably iterates over non-cluster bodies in dense storage order.
     /// The order may change after removal; cluster-managed bodies are omitted.
     pub fn bodies_mut(&mut self) -> impl Iterator<Item = (BodyId, &mut RigidBody)> {
+        self.body_revision = self.body_revision.wrapping_add(1);
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.bodies.iter_mut().filter_map(|(dense, entry)| {
@@ -3540,7 +3577,7 @@ pub(crate) fn transform_joint_frame(
 }
 
 fn body_point_velocity(
-    mut body: RigidBody,
+    mut body: BodyMotion,
     state: BodyState,
     point: Vec3,
 ) -> Result<Vec3, CollisionError> {

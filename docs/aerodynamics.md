@@ -80,6 +80,12 @@ Reference: [Whitcomb area rule](https://en.wikipedia.org/wiki/Whitcomb_area_rule
 
 This explains why the longitudinal total cross-sectional area distribution matters to wave drag. The article does not provide a complete wave-drag integral suitable for implementing FAR's transonic closure. Smoothing areas and differentiating them is geometry processing, not by itself a physical wave-drag formula.
 
+For a slender axisymmetric body in linearized supersonic flow, the Kármán–Moore expression is `D_w = -rho U² / (4 pi) * integral integral S''(x) S''(y) ln|x-y| dx dy`.
+
+Reference: [Sears–Haack body](https://en.wikipedia.org/wiki/Sears%E2%80%93Haack_body).
+
+Its derivation assumes smooth pointed endpoints `S(0) = S(L) = 0` and a slender body. A numerical logarithm needs a dimensionless argument and consistent endpoint assumptions; the diagonal logarithmic singularity must be integrated rather than evaluated at zero. The analytic Sears–Haack benchmark is `D_w = 64 rho U² V² / (pi L⁴)`. The Wikipedia page does not provide a general Mach-number coefficient for this body formula; do not insert one by analogy with wing theory. This supersonic result is not a transonic closure, nor does it justify applying axial sections unmodified to arbitrary wing-body configurations. Differentiating noisy voxel areas twice requires a separately validated regularization strategy.
+
 The Wikipedia article titled `Slender-body theory` concerns low-Reynolds-number Stokes flow; it must not be cited as justification for an aerodynamic lifting-body section formula.
 
 ## Numerical validation requirements

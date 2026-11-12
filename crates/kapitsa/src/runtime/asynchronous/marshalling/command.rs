@@ -11,7 +11,7 @@ use kapitsa_core::{
     joint::Joint,
     mass::MassProperties,
     material::{MaterialId, PhysicsMaterial},
-    rigid_body::{BodyError, CcdMode, RigidBody},
+    rigid_body::{BodyError, BodyMotion, CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
     world::{
@@ -580,7 +580,7 @@ struct StagedJoint {
 
 #[derive(Default)]
 pub(crate) struct BatchScratch {
-    updated_bodies: Vec<(BodyId, RigidBody)>,
+    updated_bodies: Vec<(BodyId, BodyMotion)>,
     body_indices: HashMap<BodyId, usize>,
     updated_force_sources: Vec<StagedForceSource>,
     force_source_indices: HashMap<ForceSourceId, usize>,
@@ -710,7 +710,7 @@ fn apply_command_batch_staged(
         let body_index = match body_index {
             Some(index) => index,
             None => {
-                let Some(body) = world.body(id).copied() else {
+                let Some(body) = world.body(id).map(RigidBody::motion) else {
                     return Err(PhysicsBatchError {
                         command_index: Some(command_index),
                         error: PhysicsClientError::World(WorldError::InvalidBodyId),
@@ -771,7 +771,10 @@ fn apply_command_batch_staged(
     // remains live until the final copyback.
     for (id, body) in &scratch.updated_bodies {
         world
-            .replace_body_state(*id, *body)
+            .edit_body(*id, |motion| {
+                *motion = *body;
+                Ok(())
+            })
             .map_err(|error| PhysicsBatchError {
                 command_index: None,
                 error: error.into(),
@@ -932,7 +935,7 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
     }
 }
 
-fn apply_body_command(body: &mut RigidBody, command: &PhysicsCommand) -> Result<(), BodyError> {
+fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result<(), BodyError> {
     match command {
         PhysicsCommand::SetTransform { transform, .. } => body.set_transform(*transform)?,
         PhysicsCommand::SetLinearVelocity { velocity, .. } => {
@@ -1523,7 +1526,7 @@ pub(crate) mod tests {
     fn staged_buffer_control(case: &BatchCase) {
         let mut bodies = Vec::with_capacity(case.commands.len());
         for id in &case.staged_bodies {
-            bodies.push((*id, *case.world.body(*id).expect("staged body")));
+            bodies.push((*id, case.world.body(*id).expect("staged body").motion()));
         }
 
         let mut sources = Vec::new();
@@ -1690,6 +1693,56 @@ pub(crate) mod tests {
             ),
             Err(PhysicsClientError::World(WorldError::InvalidBodyId))
         ));
+    }
+
+    #[test]
+    fn motion_batch_preserves_owned_aerodynamic_mesh() {
+        use kapitsa_core::{aerodynamics::Aerodynamics, shape::TriangleMesh};
+
+        let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).unwrap();
+        let vertices = mesh.vertices().as_ptr();
+        let mut body = dynamic_body();
+        body.set_aerodynamics(Aerodynamics::Mesh(mesh));
+        let mut world = PhysicsWorld::new();
+        let id = world.add_body(body).unwrap();
+        let mut scratch = BatchScratch::default();
+        apply_command_batch(
+            &mut world,
+            &[PhysicsCommand::SetLinearVelocity {
+                id,
+                velocity: Vec3::X,
+            }],
+            &mut scratch,
+        )
+        .unwrap();
+        let body = world.body(id).unwrap();
+        let Aerodynamics::Mesh(mesh) = body.aerodynamics() else {
+            panic!("motion batch discarded aerodynamic mesh");
+        };
+        assert_eq!(mesh.vertices().as_ptr(), vertices);
+        assert_eq!(body.state().linear_velocity(), Vec3::X);
+
+        let result = apply_command_batch(
+            &mut world,
+            &[
+                PhysicsCommand::SetLinearVelocity {
+                    id,
+                    velocity: Vec3::Y,
+                },
+                PhysicsCommand::SetAngularVelocity {
+                    id,
+                    velocity: Vec3::splat(f64::NAN),
+                },
+            ],
+            &mut scratch,
+        );
+        assert!(result.is_err());
+        let body = world.body(id).unwrap();
+        assert_eq!(body.state().linear_velocity(), Vec3::X);
+        let Aerodynamics::Mesh(mesh) = body.aerodynamics() else {
+            panic!("failed motion batch discarded aerodynamic mesh");
+        };
+        assert_eq!(mesh.vertices().as_ptr(), vertices);
     }
 
     #[test]

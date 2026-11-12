@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    aerodynamics::{AerodynamicProperties, AerodynamicTarget},
+    aerodynamics::{AerodynamicProperties, AerodynamicTarget, Aerodynamics},
     cluster::{
         ClusterPart, ClusterPartDesc, RigidCluster, Weld, WeldDesc, WeldStiffness, WeldStrength,
     },
@@ -46,14 +46,18 @@ fn body_surface_stays_fixed_when_cluster_mass_changes() {
         .unwrap()
         .with_lift(1.0, Vec3::Z)
         .unwrap();
-    world.set_aerodynamics(body, Some(properties)).unwrap();
+    world
+        .set_aerodynamics(body, Aerodynamics::Simple(properties))
+        .unwrap();
     world
         .add_aerodynamic_surface_for_part(root, properties)
         .unwrap();
     let original_buffer = world.aerodynamic_surfaces(body).unwrap().as_ptr();
     let check = |world: &PhysicsWorld| {
         let rigid = world.body(body).unwrap();
-        let properties = world.aerodynamics(body).unwrap();
+        let Aerodynamics::Simple(properties) = world.aerodynamics(body).unwrap() else {
+            panic!("expected simple aerodynamics");
+        };
         let point = rigid.world_center_of_mass().unwrap().unwrap()
             + rigid
                 .state()
@@ -136,7 +140,7 @@ fn mass_change_preserves_part_surface_buffer_and_rebase_failure_is_atomic() {
     assert_eq!(world.aerodynamic_surfaces(body).unwrap().as_ptr(), pointer);
     let overflow = AerodynamicProperties::new(1.0, 1.0, Vec3::X * f64::MAX).unwrap();
     world.add_aerodynamic_surface(body, overflow).unwrap();
-    let before = *world.body(body).unwrap();
+    let before = world.body(body).unwrap().motion();
     let before_surfaces = world.aerodynamic_surfaces(body).unwrap().to_vec();
     assert_eq!(
         world.set_part_mass(
@@ -146,7 +150,7 @@ fn mass_change_preserves_part_surface_buffer_and_rebase_failure_is_atomic() {
         ),
         Err(ClusterError::ArithmeticOverflow)
     );
-    assert_eq!(*world.body(body).unwrap(), before);
+    assert_eq!(world.body(body).unwrap().motion(), before);
     assert_eq!(world.cluster_part(root).unwrap().mass(), new_mass);
     assert_eq!(world.aerodynamic_surfaces(body).unwrap(), before_surfaces);
 }
@@ -236,9 +240,11 @@ fn merge_rebase_overflow_preserves_topology() {
     let first_root = world.enable_cluster(first).unwrap();
     let second_root = world.enable_cluster(second).unwrap();
     let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::X * f64::MAX).unwrap();
-    world.set_aerodynamics(first, Some(properties)).unwrap();
-    let first_before = *world.body(first).unwrap();
-    let second_before = *world.body(second).unwrap();
+    world
+        .set_aerodynamics(first, Aerodynamics::Simple(properties))
+        .unwrap();
+    let first_before = world.body(first).unwrap().motion();
+    let second_before = world.body(second).unwrap().motion();
     let desc = WeldDesc {
         frame_a: JointFrame::IDENTITY,
         frame_b: JointFrame::IDENTITY,
@@ -253,13 +259,15 @@ fn merge_rebase_overflow_preserves_topology() {
         Err(ClusterError::ArithmeticOverflow)
     );
     assert_eq!(world.body_count(), 2);
-    assert_eq!(*world.body(first).unwrap(), first_before);
-    assert_eq!(*world.body(second).unwrap(), second_before);
+    assert_eq!(world.body(first).unwrap().motion(), first_before);
+    assert_eq!(world.body(second).unwrap().motion(), second_before);
     assert_eq!(world.part_body(first_root), Some(first));
     assert_eq!(world.part_body(second_root), Some(second));
     assert!(world.cluster(first).unwrap().welds().is_empty());
     assert!(world.cluster(second).unwrap().welds().is_empty());
-    assert_eq!(world.aerodynamics(first), Some(properties));
+    assert!(
+        matches!(world.aerodynamics(first), Some(Aerodynamics::Simple(actual)) if *actual == properties)
+    );
     assert_eq!(world.validate_clusters(), Ok(()));
 }
 
@@ -296,18 +304,22 @@ fn split_rebase_overflow_preserves_topology() {
         .unwrap();
     let bridge = world.cluster(body).unwrap().welds()[0];
     let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::X * f64::MAX).unwrap();
-    world.set_aerodynamics(body, Some(properties)).unwrap();
-    let before = *world.body(body).unwrap();
+    world
+        .set_aerodynamics(body, Aerodynamics::Simple(properties))
+        .unwrap();
+    let before = world.body(body).unwrap().motion();
     assert_eq!(
         world.break_weld(bridge),
         Err(ClusterError::ArithmeticOverflow)
     );
     assert_eq!(world.body_count(), 1);
-    assert_eq!(*world.body(body).unwrap(), before);
+    assert_eq!(world.body(body).unwrap().motion(), before);
     assert_eq!(world.part_body(root), Some(body));
     assert_eq!(world.part_body(child), Some(body));
     assert_eq!(world.cluster(body).unwrap().welds(), &[bridge]);
-    assert_eq!(world.aerodynamics(body), Some(properties));
+    assert!(
+        matches!(world.aerodynamics(body), Some(Aerodynamics::Simple(actual)) if *actual == properties)
+    );
     assert_eq!(world.validate_clusters(), Ok(()));
 }
 
@@ -540,7 +552,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
         Ok(())
     );
     let updated = match world.body(body) {
-        Some(value) => *value,
+        Some(value) => value.motion(),
         None => panic!("missing body"),
     };
     assert_eq!(updated.state().linear_velocity(), Vec3::X);
@@ -553,7 +565,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
         ),
         Err(ClusterError::InvalidMotion)
     );
-    assert_eq!(world.body(body), Some(&updated));
+    assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
     let invalid = crate::cluster::MassTransfer {
         linear_impulse: Vec3::splat(f64::NAN),
         ..transfer
@@ -562,7 +574,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
         world.set_part_mass_with_transfer(root, mass, invalid),
         Err(ClusterError::InvalidMotion)
     );
-    assert_eq!(world.body(body), Some(&updated));
+    assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
     let overflow = crate::cluster::MassTransfer {
         world_origin: Vec3::splat(f64::MAX),
         linear_impulse: Vec3::splat(f64::MAX),
@@ -573,7 +585,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
             .set_part_mass_with_transfer(root, mass, overflow)
             .is_err()
     );
-    assert_eq!(world.body(body), Some(&updated));
+    assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
     assert_eq!(world.cluster_part(root).map(ClusterPart::mass), Some(mass));
     let unlinked = part(&mut world, body);
     assert_eq!(
@@ -584,7 +596,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
         ),
         Err(ClusterError::InvalidTopology)
     );
-    assert_eq!(world.body(body), Some(&updated));
+    assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
 }
 
 #[test]

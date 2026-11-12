@@ -66,7 +66,7 @@ fn dynamic_solver_body(position: Vec3, local_com: Vec3) -> SolverBody {
     )
     .expect("dynamic body");
     let state = *body.state();
-    SolverBody::from_prediction(body, state)
+    SolverBody::from_prediction(body.motion(), state)
 }
 
 fn static_solver_body(position: Vec3) -> SolverBody {
@@ -74,7 +74,7 @@ fn static_solver_body(position: Vec3) -> SolverBody {
         Transform::new(position, kapitsa_math::Quat::IDENTITY).expect("transform"),
     );
     let state = *body.state();
-    SolverBody::from_prediction(body, state)
+    SolverBody::from_prediction(body.motion(), state)
 }
 
 fn reaction_constraint(common: JointCommon) -> JointConstraint {

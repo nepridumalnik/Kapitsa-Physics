@@ -63,7 +63,9 @@ fn fixture_graph(count: usize, branching: bool) -> (Vec<SolverBody>, Vec<JointCo
     }
     let bodies = world
         .bodies()
-        .map(|(_, body)| SolverBody { body: *body })
+        .map(|(_, body)| SolverBody {
+            body: body.motion(),
+        })
         .collect();
     let joints = world
         .joints()
@@ -366,7 +368,11 @@ fn production_fixture(count: usize) -> (PhysicsWorld, Vec<crate::world::BodyId>)
     let mut world = PhysicsWorld::new();
     let ids: Vec<_> = bodies
         .iter()
-        .map(|body| world.add_body(*body.body()).unwrap())
+        .map(|body| {
+            world
+                .add_body(RigidBody::from_motion(*body.body()))
+                .unwrap()
+        })
         .collect();
     for joint in joints {
         world
@@ -423,7 +429,10 @@ fn eligible_island_is_independent_of_legacy_contacts_and_external_work() {
         reference.step(1.0 / 120.0).unwrap();
         mixed.step(1.0 / 120.0).unwrap();
         for (&a, &b) in ids.iter().zip(&reference_ids) {
-            assert_eq!(mixed.body(a), reference.body(b));
+            assert_eq!(
+                mixed.body(a).map(RigidBody::motion),
+                reference.body(b).map(RigidBody::motion)
+            );
         }
     }
 }
@@ -469,7 +478,7 @@ fn constrained_parallel_scaling_and_single_island_cost() {
                 let ids: Vec<_> = bodies
                     .into_iter()
                     .map(|body| {
-                        let mut body = body.body;
+                        let mut body = RigidBody::from_motion(body.body);
                         let transform = body.state().transform();
                         body.set_transform(
                             Transform::new(
@@ -614,7 +623,7 @@ fn world_from_graph(bodies: Vec<SolverBody>, joints: Vec<JointConstraint>) -> Ph
     let mut world = PhysicsWorld::new();
     let ids: Vec<_> = bodies
         .into_iter()
-        .map(|body| world.add_body(body.body).unwrap())
+        .map(|body| world.add_body(RigidBody::from_motion(body.body)).unwrap())
         .collect();
     for joint in joints {
         world
@@ -673,7 +682,7 @@ fn constrained_failure_rolls_back_other_eligible_and_legacy_islands() {
     let bad_ids: Vec<_> = bodies
         .into_iter()
         .map(|body| {
-            let mut body = body.body;
+            let mut body = RigidBody::from_motion(body.body);
             body.set_angular_velocity(Vec3::new(10.0, 15.0, 20.0))
                 .unwrap();
             world.add_body(body).unwrap()
@@ -684,11 +693,11 @@ fn constrained_failure_rolls_back_other_eligible_and_legacy_islands() {
             .add_joint(bad_ids[joint.body_a], bad_ids[joint.body_b], joint.joint)
             .unwrap();
     }
-    let mut forced = *world.body(ids[0]).unwrap();
+    let mut forced = RigidBody::from_motion(world.body(ids[0]).unwrap().motion());
     forced.set_angular_velocity(Vec3::ZERO).unwrap();
     let forced = world.add_body(forced).unwrap();
     world.add_force_source(forced, Vec3::ZERO, Vec3::Y).unwrap();
-    let original: Vec<_> = world.bodies().map(|(_, body)| *body).collect();
+    let original: Vec<_> = world.bodies().map(|(_, body)| body.motion()).collect();
     assert_eq!(
         world.step(1.0),
         Err(crate::world::StepError::Collision(
@@ -696,7 +705,10 @@ fn constrained_failure_rolls_back_other_eligible_and_legacy_islands() {
         ))
     );
     assert_eq!(
-        world.bodies().map(|(_, body)| *body).collect::<Vec<_>>(),
+        world
+            .bodies()
+            .map(|(_, body)| body.motion())
+            .collect::<Vec<_>>(),
         original
     );
     assert!(world.collision_events().is_empty());
@@ -710,7 +722,7 @@ fn constrained_geometric_degeneracy_is_an_explicit_atomic_error() {
     let common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
     joints[0].joint = Joint::Distance(crate::joint::DistanceJoint::fixed_length(common, 1.0));
     let mut world = world_from_graph(bodies, joints);
-    let original: Vec<_> = world.bodies().map(|(_, body)| *body).collect();
+    let original: Vec<_> = world.bodies().map(|(_, body)| body.motion()).collect();
     assert_eq!(
         world.step(1.0 / 120.0),
         Err(crate::world::StepError::Collision(
@@ -718,7 +730,10 @@ fn constrained_geometric_degeneracy_is_an_explicit_atomic_error() {
         ))
     );
     assert_eq!(
-        world.bodies().map(|(_, body)| *body).collect::<Vec<_>>(),
+        world
+            .bodies()
+            .map(|(_, body)| body.motion())
+            .collect::<Vec<_>>(),
         original
     );
 }

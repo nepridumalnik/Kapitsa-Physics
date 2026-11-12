@@ -6,7 +6,7 @@ use crate::{
         IterationRange, JointConstraint, JointIterations, JointSolver, JointSolverOptions,
         JointSolverStep, JointTolerance, JointWorkspace,
     },
-    rigid_body::RigidBody,
+    rigid_body::BodyMotion,
 };
 #[cfg(feature = "bench-internals")]
 use crate::{mass::MassProperties, rigid_body::BodyType, transform::Transform};
@@ -429,7 +429,7 @@ fn velocity_projection_work(
 
 #[cfg(feature = "bench-internals")]
 pub(crate) fn body_energy_components(
-    body: &RigidBody,
+    body: &BodyMotion,
     state: crate::rigid_body::BodyState,
     gravity: Option<CentralGravity>,
 ) -> crate::joint::diagnostics::EnergyComponents {
@@ -1000,7 +1000,7 @@ impl SolverWorkspace {
         let angular_velocity = aggregate_inertia_world
             .solve_spd(angular_momentum)
             .map_err(|_| CollisionError::ArithmeticOverflow)?;
-        let mut aggregate_body = RigidBody::new_dynamic(root_transform, aggregate_mass)
+        let mut aggregate_body = BodyMotion::new_dynamic(root_transform, aggregate_mass)
             .map_err(|_| CollisionError::ArithmeticOverflow)?;
         aggregate_body
             .set_linear_velocity(linear_velocity)
@@ -2884,8 +2884,8 @@ fn parallel_axis(offset: Vec3, mass: f64) -> Mat3 {
 }
 
 fn solve_tangent_impulse(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     point: SolverPoint,
     contact: ContactPoint,
     material: SolverMaterial,
@@ -2981,8 +2981,8 @@ fn solve_tangent_impulse(
 }
 
 fn effective_mass(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     position_a: Vec3,
     position_b: Vec3,
     direction: Vec3,
@@ -2991,8 +2991,8 @@ fn effective_mass(
 }
 
 fn effective_cross_mass(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     position_a: Vec3,
     position_b: Vec3,
     measurement: Vec3,
@@ -3010,8 +3010,8 @@ fn effective_cross_mass(
 }
 
 fn relative_velocity(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     position_a: Vec3,
     position_b: Vec3,
 ) -> Result<Vec3, CollisionError> {

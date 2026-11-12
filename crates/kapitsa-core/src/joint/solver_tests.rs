@@ -78,7 +78,7 @@ fn solver_body_with_velocities(
     body.set_angular_velocity(angular_velocity)
         .expect("finite angular velocity");
     let state = *body.state();
-    SolverBody::from_prediction(body, state)
+    SolverBody::from_prediction(body.motion(), state)
 }
 
 fn solver_body_with_properties(
@@ -101,13 +101,13 @@ fn solver_body_with_properties(
     body.set_angular_velocity(angular_velocity)
         .expect("finite angular velocity");
     let state = *body.state();
-    SolverBody::from_prediction(body, state)
+    SolverBody::from_prediction(body.motion(), state)
 }
 
 fn static_solver_body(position: Vec3, rotation: Quat) -> SolverBody {
     let body = RigidBody::new_static(Transform::new(position, rotation).expect("transform"));
     let state = *body.state();
-    SolverBody::from_prediction(body, state)
+    SolverBody::from_prediction(body.motion(), state)
 }
 
 fn solve_joint(joint: super::super::Joint, bodies: &mut [SolverBody]) {
@@ -974,7 +974,7 @@ fn fixed_joint_point_jacobians_match_finite_differences_with_offset_com() {
         )
         .expect("dynamic body");
         let state = *body.state();
-        SolverBody::from_prediction(body, state)
+        SolverBody::from_prediction(body.motion(), state)
     }
 
     fn rotate_about_center(
@@ -1103,7 +1103,7 @@ fn fixed_joint_position_order_reports_anchor_rotation_coupling() {
         )
         .expect("dynamic body");
         let state = *body.state();
-        SolverBody::from_prediction(body, state)
+        SolverBody::from_prediction(body.motion(), state)
     }
 
     fn make_constraint() -> JointConstraint {
@@ -1195,7 +1195,11 @@ fn fixed_joint_position_order_reports_anchor_rotation_coupling() {
     fn run_world_steps(angle: f64, constraint: JointConstraint) -> [Residual; 3] {
         let bodies = make_bodies(angle);
         let mut world = crate::world::PhysicsWorld::new();
-        let ids = bodies.map(|body| world.add_body(body.body).expect("world dynamic body"));
+        let ids = bodies.map(|body| {
+            world
+                .add_body(RigidBody::from_motion(body.body))
+                .expect("world dynamic body")
+        });
         let joint = match constraint.joint {
             Joint::Fixed(joint) => Joint::Fixed(joint),
             _ => unreachable!("fixed diagnostic constraint"),
@@ -1552,7 +1556,9 @@ fn loaded_fixed_joint_prediction_precedes_velocity_projection() {
                 let ids = (0..count)
                     .map(|index| {
                         let body = solver_body(Vec3::X * initial_x[index]);
-                        world.add_body(*body.body()).expect("world body")
+                        world
+                            .add_body(RigidBody::from_motion(*body.body()))
+                            .expect("world body")
                     })
                     .collect::<Vec<_>>();
                 world
@@ -1749,7 +1755,9 @@ fn diagnose_loaded_graph_integration_order_trajectory() {
                 .iter()
                 .map(|position| {
                     world
-                        .add_body(*solver_body(Vec3::X * *position).body())
+                        .add_body(RigidBody::from_motion(
+                            *solver_body(Vec3::X * *position).body(),
+                        ))
                         .expect("body")
                 })
                 .collect::<Vec<_>>();
@@ -1932,7 +1940,9 @@ fn loaded_fixed_joint_chain_stays_close_after_root_force() {
     let ids = (0..10)
         .map(|index| {
             world
-                .add_body(*solver_body(Vec3::X * index as f64).body())
+                .add_body(RigidBody::from_motion(
+                    *solver_body(Vec3::X * index as f64).body(),
+                ))
                 .expect("body")
         })
         .collect::<Vec<_>>();

@@ -28,15 +28,91 @@ use crate::{mass::MassProperties, transform::Transform};
 ///
 /// The transform describes the body's world-space local origin. Its center of mass
 /// may be offset from that origin by [`MassProperties::center_of_mass`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct RigidBody {
+    motion: BodyMotion,
+    aerodynamics: crate::aerodynamics::Aerodynamics,
+    pub(crate) aerodynamic_surfaces: Vec<crate::aerodynamics::AerodynamicSurface>,
+}
+
+impl RigidBody {
+    pub fn new_static(transform: Transform) -> Self {
+        Self::from_motion(BodyMotion::new_static(transform))
+    }
+
+    pub fn new_kinematic(transform: Transform) -> Self {
+        Self::from_motion(BodyMotion::new_kinematic(transform))
+    }
+
+    pub fn new_dynamic(transform: Transform, mass: MassProperties) -> Result<Self, BodyError> {
+        BodyMotion::new_dynamic(transform, mass).map(Self::from_motion)
+    }
+
+    pub(crate) fn from_motion(motion: BodyMotion) -> Self {
+        Self {
+            motion,
+            aerodynamics: crate::aerodynamics::Aerodynamics::None,
+            aerodynamic_surfaces: Vec::new(),
+        }
+    }
+
+    pub fn aerodynamics(&self) -> &crate::aerodynamics::Aerodynamics {
+        &self.aerodynamics
+    }
+
+    pub fn set_aerodynamics(&mut self, aerodynamics: crate::aerodynamics::Aerodynamics) {
+        if matches!(aerodynamics, crate::aerodynamics::Aerodynamics::None) {
+            self.aerodynamic_surfaces.clear();
+        }
+        self.set_primary_aerodynamics(aerodynamics);
+    }
+
+    pub(crate) fn set_primary_aerodynamics(
+        &mut self,
+        aerodynamics: crate::aerodynamics::Aerodynamics,
+    ) {
+        self.aerodynamics = aerodynamics;
+    }
+
+    pub fn aerodynamic_surfaces(&self) -> &[crate::aerodynamics::AerodynamicSurface] {
+        &self.aerodynamic_surfaces
+    }
+
+    /// Copies only motion, mass, and force state; owned geometry is never cloned.
+    pub fn motion(&self) -> BodyMotion {
+        self.motion
+    }
+
+    pub(crate) fn set_motion(&mut self, motion: BodyMotion) {
+        self.motion = motion;
+    }
+}
+
+impl std::ops::Deref for RigidBody {
+    type Target = BodyMotion;
+
+    fn deref(&self) -> &BodyMotion {
+        &self.motion
+    }
+}
+
+impl std::ops::DerefMut for RigidBody {
+    fn deref_mut(&mut self) -> &mut BodyMotion {
+        &mut self.motion
+    }
+}
+
+/// Copyable physical state used for transactional preparation and solver staging.
+/// Aerodynamic configuration and geometry remain owned by [`RigidBody`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyMotion {
     state: BodyState,
     physics: BodyPhysics,
     forces: BodyForces,
     ccd_mode: CcdMode,
 }
 
-impl RigidBody {
+impl BodyMotion {
     /// Creates a stationary body with no mass properties.
     pub fn new_static(transform: Transform) -> Self {
         Self::new(BodyType::Static, transform, None)

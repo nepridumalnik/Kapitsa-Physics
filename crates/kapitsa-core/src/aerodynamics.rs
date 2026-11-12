@@ -11,6 +11,27 @@ use crate::transform::Transform;
 
 pub use crate::world::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
 
+/// Aerodynamic geometry and force model owned by a rigid body.
+#[derive(Default)]
+pub enum Aerodynamics {
+    #[default]
+    None,
+    Simple(AerodynamicProperties),
+    Mesh(crate::shape::TriangleMesh),
+    Colliders,
+}
+
+impl fmt::Debug for Aerodynamics {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => formatter.write_str("None"),
+            Self::Simple(properties) => formatter.debug_tuple("Simple").field(properties).finish(),
+            Self::Mesh(_) => formatter.write_str("Mesh(..)"),
+            Self::Colliders => formatter.write_str("Colliders"),
+        }
+    }
+}
+
 /// Local atmospheric conditions used by an aerodynamic force model.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AtmosphericState {
@@ -263,6 +284,7 @@ impl AerodynamicForce {
 /// Invalid aerodynamic parameters or an unrepresentable force calculation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AerodynamicsError {
+    UnsupportedModel,
     InvalidAtmosphere(&'static str),
     InvalidDensity,
     InvalidReferenceArea,
@@ -279,6 +301,7 @@ pub enum AerodynamicsError {
 impl fmt::Display for AerodynamicsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::UnsupportedModel => "this aerodynamic model is not implemented",
             Self::InvalidAtmosphere(message) => message,
             Self::InvalidDensity => "air density must be finite and non-negative",
             Self::InvalidReferenceArea => "reference area must be finite and non-negative",

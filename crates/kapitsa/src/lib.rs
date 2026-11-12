@@ -11,8 +11,8 @@ pub mod execution {
 pub mod aerodynamics {
     pub use kapitsa_core::aerodynamics::{
         AerodynamicForce, AerodynamicProperties, AerodynamicSurface, AerodynamicTarget,
-        AerodynamicsError, AerodynamicsTask, Atmosphere, AtmosphericState, DensityProfile,
-        SphericalAtmosphere, SphericalAtmosphereBuilder,
+        Aerodynamics, AerodynamicsError, AerodynamicsTask, Atmosphere, AtmosphericState,
+        DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder,
     };
 }
 
@@ -105,7 +105,7 @@ pub use kapitsa_core::{
     joint::{Joint, JointBreakEvent},
     mass::MassProperties,
     material::{MaterialId, PhysicsMaterial},
-    rigid_body::{BodyState, CcdMode, RigidBody},
+    rigid_body::{BodyMotion, BodyState, CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
     world::{

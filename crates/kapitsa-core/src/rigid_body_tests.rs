@@ -126,10 +126,10 @@ fn dynamic_constructor_rejects_world_center_of_mass_overflow() {
     let mass_properties = MassProperties::new(1.0, Vec3::X * f64::MAX, Mat3::IDENTITY)
         .expect("valid mass properties");
 
-    assert_eq!(
+    assert!(matches!(
         RigidBody::new_dynamic(transform, mass_properties),
         Err(super::BodyError::ArithmeticOverflow)
-    );
+    ));
 }
 
 #[test]

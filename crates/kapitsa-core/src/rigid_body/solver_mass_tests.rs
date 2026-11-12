@@ -11,8 +11,8 @@ fn mass(inertia: Mat3, center: Vec3) -> MassProperties {
     MassProperties::new(2.5, center, inertia).expect("valid physical mass properties")
 }
 
-fn dynamic_body(transform: Transform, mass: MassProperties) -> RigidBody {
-    RigidBody::new_dynamic(transform, mass).expect("valid dynamic body")
+fn dynamic_body(transform: Transform, mass: MassProperties) -> BodyMotion {
+    BodyMotion::new_dynamic(transform, mass).expect("valid dynamic body")
 }
 
 fn assert_close(actual: f64, expected: f64) {
@@ -64,7 +64,7 @@ fn jacobian(linear: Vec3, arm: Vec3) -> Jacobian {
     }
 }
 
-fn assert_pair_matches_reference(body_a: &RigidBody, body_b: &RigidBody) {
+fn assert_pair_matches_reference(body_a: &BodyMotion, body_b: &BodyMotion) {
     let measurement = [
         jacobian(Vec3::new(0.3, -0.7, 0.2), Vec3::new(0.4, 0.1, -0.3)),
         jacobian(Vec3::new(-0.2, 0.5, 0.9), Vec3::new(-0.1, 0.6, 0.2)),
@@ -137,15 +137,15 @@ fn solver_mass_matches_reference_for_identity_rotated_and_off_center_bodies() {
         ),
     ];
     for body in &bodies {
-        assert_pair_matches_reference(body, &RigidBody::new_static(Transform::identity()));
+        assert_pair_matches_reference(body, &BodyMotion::new_static(Transform::identity()));
     }
 }
 
 #[test]
 fn solver_mass_handles_static_kinematic_and_dynamic_pairs() {
     let dynamic = dynamic_body(Transform::identity(), mass(Mat3::IDENTITY, Vec3::ZERO));
-    let static_body = RigidBody::new_static(Transform::identity());
-    let kinematic_body = RigidBody::new_kinematic(Transform::identity());
+    let static_body = BodyMotion::new_static(Transform::identity());
+    let kinematic_body = BodyMotion::new_kinematic(Transform::identity());
     assert_eq!(
         SolverMass::from_body(&static_body).expect("static mass"),
         SolverMass::STATIC
@@ -189,8 +189,8 @@ fn solver_mass_slot_hits_for_unchanged_mass_and_pose() {
 fn solver_mass_slot_keeps_static_and_kinematic_response_zero() {
     let mut static_slot = SolverMassSlot::default();
     let mut kinematic_slot = SolverMassSlot::default();
-    let static_body = RigidBody::new_static(Transform::identity());
-    let kinematic_body = RigidBody::new_kinematic(Transform::identity());
+    let static_body = BodyMotion::new_static(Transform::identity());
+    let kinematic_body = BodyMotion::new_kinematic(Transform::identity());
     let (static_mass, _) = static_slot.resolve(&static_body).expect("static mass");
     let (kinematic_mass, _) = kinematic_slot
         .resolve(&kinematic_body)
@@ -435,8 +435,8 @@ fn cached_position_impulse_ignores_static_and_kinematic_bodies() {
         Quat::from_axis_angle(Vec3::Y, 0.4).expect("rotation"),
     )
     .expect("transform");
-    let mut static_body = RigidBody::new_static(transform);
-    let mut kinematic_body = RigidBody::new_kinematic(transform);
+    let mut static_body = BodyMotion::new_static(transform);
+    let mut kinematic_body = BodyMotion::new_kinematic(transform);
 
     static_body
         .apply_constraint_position_impulse_cached(Vec3::X, Vec3::Y, SolverMass::STATIC)
@@ -595,7 +595,7 @@ fn cached_impulse_application_matches_the_reference_body_operation() {
     assert_eq!(optimized.ccd_mode(), reference.ccd_mode());
 }
 
-fn spin_momentum(body: &RigidBody) -> Vec3 {
+fn spin_momentum(body: &BodyMotion) -> Vec3 {
     let state = body.state();
     let rotation = state.transform().rotation();
     let omega = rotation

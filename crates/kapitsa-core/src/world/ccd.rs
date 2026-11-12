@@ -106,7 +106,7 @@ impl PhysicsWorld {
                 .bodies
                 .get(body_id.dense)
                 .filter(|_| body_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .map(|entry| entry.body.motion())
                 .ok_or(CollisionError::InvalidContact)?;
             let context = &mut self.collision_system.context;
             context.ccd_states.push(*body.state());
@@ -240,13 +240,13 @@ impl PhysicsWorld {
                             .bodies
                             .get(collider_a.body.dense)
                             .filter(|_| collider_a.body.world == self.world_id)
-                            .map(|entry| entry.body)
+                            .map(|entry| entry.body.motion())
                             .ok_or(CollisionError::InvalidContact)?;
                         let body_b = self
                             .bodies
                             .get(collider_b.body.dense)
                             .filter(|_| collider_b.body.world == self.world_id)
-                            .map(|entry| entry.body)
+                            .map(|entry| entry.body.motion())
                             .ok_or(CollisionError::InvalidContact)?;
                         if ![body_a, body_b].into_iter().any(|body| {
                             body.physics().body_type() == BodyType::Dynamic
@@ -463,12 +463,12 @@ impl PhysicsWorld {
                             self.bodies
                                 .get(body_a_id.dense)
                                 .filter(|_| body_a_id.world == self.world_id)
-                                .map(|entry| entry.body)
+                                .map(|entry| entry.body.motion())
                                 .ok_or(CollisionError::InvalidContact)?,
                             self.bodies
                                 .get(body_b_id.dense)
                                 .filter(|_| body_b_id.world == self.world_id)
-                                .map(|entry| entry.body)
+                                .map(|entry| entry.body.motion())
                                 .ok_or(CollisionError::InvalidContact)?,
                         )
                     };
@@ -944,7 +944,7 @@ impl PhysicsWorld {
                             .bodies
                             .get(body_id.dense)
                             .filter(|_| body_id.world == self.world_id)
-                            .map(|entry| entry.body)
+                            .map(|entry| entry.body.motion())
                             .ok_or(CollisionError::InvalidContact)?;
                         body.set_state_preserving_forces(solved);
                         predict(&body, remaining_after_impact)
@@ -956,7 +956,7 @@ impl PhysicsWorld {
                     .bodies
                     .get(body_id.dense)
                     .filter(|_| body_id.world == self.world_id)
-                    .map(|entry| entry.body)
+                    .map(|entry| entry.body.motion())
                     .ok_or(CollisionError::InvalidContact)?;
                 if body.physics().body_type() == BodyType::Dynamic
                     && body.ccd_mode() == CcdMode::Continuous
@@ -1122,12 +1122,12 @@ impl PhysicsWorld {
             self.bodies
                 .get(body_a_id.dense)
                 .filter(|_| body_a_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .map(|entry| entry.body.motion())
                 .ok_or(CollisionError::InvalidContact)?,
             self.bodies
                 .get(body_b_id.dense)
                 .filter(|_| body_b_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .map(|entry| entry.body.motion())
                 .ok_or(CollisionError::InvalidContact)?,
         );
         let exhausted = [(body_a, prediction_a), (body_b, prediction_b)]
@@ -1525,7 +1525,7 @@ impl PhysicsWorld {
                     .bodies
                     .get(body_id.dense)
                     .filter(|_| body_id.world == self.world_id)
-                    .map(|entry| entry.body)
+                    .map(|entry| entry.body.motion())
                     .ok_or(CollisionError::InvalidContact)?;
                 let end_state =
                     predict(&body, dt).map_err(|_| CollisionError::ArithmeticOverflow)?;
@@ -1769,7 +1769,7 @@ impl PhysicsWorld {
             .bodies
             .get(body_id.dense)
             .filter(|_| body_id.world == self.world_id)
-            .map(|entry| entry.body)
+            .map(|entry| entry.body.motion())
             .ok_or(CollisionError::InvalidContact)?;
         let end_state = predict(&body, dt).map_err(|_| CollisionError::ArithmeticOverflow)?;
         let context = &mut self.collision_system.context;
@@ -1964,7 +1964,7 @@ impl PhysicsWorld {
                     .bodies
                     .get(body_id.dense)
                     .filter(|_| body_id.world == self.world_id)
-                    .map(|entry| entry.body)
+                    .map(|entry| entry.body.motion())
                     .ok_or(CollisionError::InvalidContact)?;
                 let prediction = Self::predicted_body_index(
                     &self.collision_system.context.body_indices,
@@ -2032,13 +2032,13 @@ impl PhysicsWorld {
             .bodies
             .get(collider_a.body.dense)
             .filter(|_| collider_a.body.world == self.world_id)
-            .map(|entry| entry.body)
+            .map(|entry| entry.body.motion())
             .ok_or(CollisionError::InvalidContact)?;
         let body_b = self
             .bodies
             .get(collider_b.body.dense)
             .filter(|_| collider_b.body.world == self.world_id)
-            .map(|entry| entry.body)
+            .map(|entry| entry.body.motion())
             .ok_or(CollisionError::InvalidContact)?;
         let mut cache = CcdCandidateToi {
             evaluated: true,
@@ -2286,7 +2286,7 @@ impl PhysicsWorld {
                 .get(body_id.dense)
                 .filter(|_| body_id.world == world_id)
                 .ok_or(CollisionError::InvalidContact)?;
-            let body = body_entry.body;
+            let body = body_entry.body.motion();
             let end_state = collision_system
                 .context
                 .predicted_states
@@ -2391,7 +2391,7 @@ impl PhysicsWorld {
                 .bodies
                 .get(body_id.dense)
                 .filter(|_| body_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .map(|entry| entry.body.motion())
                 .ok_or(CollisionError::InvalidContact)?;
             let end_state = predict(&body, dt).map_err(|_| CollisionError::ArithmeticOverflow)?;
             let context = &mut self.collision_system.context;
@@ -2432,7 +2432,7 @@ impl PhysicsWorld {
             .bodies
             .get(id.dense)
             .filter(|_| id.world == self.world_id)
-            .map(|entry| entry.body)
+            .map(|entry| entry.body.motion())
             .ok_or(CollisionError::InvalidContact)?;
         let state_start = *self
             .collision_system
@@ -2489,7 +2489,7 @@ impl PhysicsWorld {
                 .bodies
                 .get(body_id.dense)
                 .filter(|_| body_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .map(|entry| entry.body.motion())
                 .ok_or(CollisionError::InvalidContact)?;
             body.set_state_preserving_forces(state);
             body.set_linear_velocity(Vec3::ZERO)

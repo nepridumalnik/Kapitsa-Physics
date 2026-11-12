@@ -1509,9 +1509,9 @@ impl CollisionSystem {
 
     pub(crate) fn solve_ccd_contact(
         &mut self,
-        body_a: crate::rigid_body::RigidBody,
+        body_a: crate::rigid_body::BodyMotion,
         state_a: BodyState,
-        body_b: crate::rigid_body::RigidBody,
+        body_b: crate::rigid_body::BodyMotion,
         state_b: BodyState,
         manifold: ContactManifold,
         material: SolverMaterial,
@@ -1531,9 +1531,9 @@ impl CollisionSystem {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn solve_ccd_contact_with_workspace(
         workspace: &mut SolverWorkspace,
-        body_a: crate::rigid_body::RigidBody,
+        body_a: crate::rigid_body::BodyMotion,
         state_a: BodyState,
-        body_b: crate::rigid_body::RigidBody,
+        body_b: crate::rigid_body::BodyMotion,
         state_b: BodyState,
         manifold: ContactManifold,
         material: SolverMaterial,

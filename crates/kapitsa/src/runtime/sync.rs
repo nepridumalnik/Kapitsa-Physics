@@ -105,7 +105,7 @@ mod tests {
                 .bodies()
                 .map(|(_, body)| body)
                 .zip(expected.bodies())
-                .all(|(body, (_, expected_body))| body == expected_body)
+                .all(|(body, (_, expected_body))| body.motion() == expected_body.motion())
         );
         assert_eq!(stats.task_wait_duration, Duration::ZERO);
         assert_eq!(stats.active_workers, 1);

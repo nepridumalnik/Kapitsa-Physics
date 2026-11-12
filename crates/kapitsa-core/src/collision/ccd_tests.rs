@@ -467,7 +467,7 @@ fn rotational_ccd_follows_integrator_samples_across_multiple_turns() {
                 .map_err(|_| crate::collision::CollisionError::ArithmeticOverflow)
         };
         let trajectory = CcdTrajectory::new(
-            body,
+            body.motion(),
             start_state,
             0.0,
             0.0,

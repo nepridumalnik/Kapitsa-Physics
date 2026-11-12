@@ -406,7 +406,10 @@ mod tests {
         for workers in [1, 4] {
             let (mut reference, reference_ids) = world_with_force_sources();
             let (world, ids) = world_with_force_sources();
-            let original: Vec<_> = ids.iter().map(|id| *world.body(*id).unwrap()).collect();
+            let original: Vec<_> = ids
+                .iter()
+                .map(|id| world.body(*id).unwrap().motion())
+                .collect();
             let config = SimulationConfig {
                 tick_rate: 120,
                 central_gravity: Some(CentralGravity::new(Vec3::new(8.0, 0.0, 0.0), 1.0).unwrap()),
@@ -422,7 +425,7 @@ mod tests {
                 })
             );
             for (id, before) in ids.iter().zip(&original) {
-                assert_eq!(engine.world().body(*id).unwrap(), before);
+                assert_eq!(&engine.world().body(*id).unwrap().motion(), before);
             }
             engine.world_mut().set_central_gravity(None);
             reference.step(1.0 / 120.0).unwrap();
