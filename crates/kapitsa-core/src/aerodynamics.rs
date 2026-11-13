@@ -2,6 +2,7 @@
 
 pub(crate) mod atmosphere;
 pub mod geometry;
+pub mod pressure;
 pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};
 
 use std::fmt;

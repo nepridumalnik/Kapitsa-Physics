@@ -66,6 +66,14 @@ This is a hypersonic impact approximation. It must **not** be represented as FAR
 
 Modified Newtonian theory replaces `2` with a stagnation pressure coefficient; it requires appropriate gas and Mach data. Do not infer those from density alone.
 
+### Implemented patch pressure evaluator
+
+`kapitsa::aerodynamics::pressure::PressurePatch` implements the unmodified Newtonian equation above for caller-selected physical surface patches. `PressureFlow` supplies an explicit sound speed, the atmosphere sampled at the patch, the body's rigid transform, body-local COM, and world-space linear/angular velocities. The evaluator computes point velocity `v_COM + omega × r`, subtracts wind, and returns world-space `PressureWrench { force, moment }` about the COM. Patch centers are body-origin-relative, not COM-relative; changing COM does not rebuild patches. Normals are normalized at construction. Evaluation allocates nothing and does not mutate the body.
+
+For nonzero density, patch area and relative speed, Mach below 5 returns `UnsupportedMach`. This threshold is a declared engineering policy, not a universal accuracy boundary derived from the source. Vacuum, zero-area patches and zero relative speed return zero loads, after validating motion and sound speed. Invalid input and unrepresentable arithmetic are explicit errors.
+
+The evaluator **does not** accept unfiltered mesh triangles as a complete ship model. The caller must remove internal/overlapping surfaces and determine upstream exposure; no shielding algorithm is implemented here. It is deliberately not attached to `PreparedGeometry`: voxel staircase normals would introduce a persistent orientation bias. This module is the pressure component of a future model, not complete FAR-like aerodynamics or automatic `Mesh`/`Colliders` support. The world continues to reject those unsupported geometry models in air. No changes to atmosphere defaults, solver or physics-step behavior are made in this stage.
+
 ## Lift and finite wings
 
 For a thin symmetric two-dimensional airfoil at small angle of attack, `c_l = 2 pi alpha`, with `alpha` in radians. More generally, `c_l = 2 pi (alpha - alpha_zero_lift)`.
