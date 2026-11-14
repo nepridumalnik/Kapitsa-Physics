@@ -111,8 +111,9 @@ atomic motion batches (the entire batch is rejected without mutation).
 
 Construct configurations through `kapitsa::aerodynamics::wing` and
 `kapitsa::aerodynamics::hull`. The runtime transfers owned vectors in-process;
-it does not require or provide wire serialization. `WingSurface` is `Clone + Copy`,
-`HullSection` is `Clone`, and its immutable Mach curve shares owned `Arc` data.
+it does not require or provide wire serialization. `WingSurface` is `Clone` (not
+`Copy`); cloning shares its optional immutable polar through `Arc`. `HullSection`
+is `Clone`, and its immutable Mach curve shares owned `Arc` data.
 No borrowed world references or mutable shared configuration cross the queue.
 The setters do not change physical models, infer coefficients, exclude overlapping
 loads or alter topology ownership.
@@ -252,8 +253,8 @@ this model for a body's primary loads in ordinary and sharded world steps.
 wings; an empty list contributes no loads. Each wing samples its own atmosphere.
 Atmosphere is sampled at the wing application point; sound speed uses the
 world's explicit uniform setting. Errors retain `AerodynamicsError::Wing`
-and step rollback semantics. Cluster conversion rejects this model until
-part-owned wing transfer/rebasing is supported; it must not silently lose loads.
+and step rollback semantics. Cluster conversion transfers primary wings into
+root-part ownership; part-local application points remain stable as COM changes.
 The wing does not exclude geometry from hull loads, and timestep convergence
 must be checked (there is no implicit large-step wing stabilizer).
 
@@ -267,6 +268,49 @@ or compressibility continuation is implied. `WingSurface` uses this primitive
 for the world loads described above; it does not replace `Simple` lift or infer
 wings from meshes. The finite-span slope relation is the classical lifting-line
 approximation, not a FAR code port.
+
+### Explicit wing polars and control deflection — UNVERIFIED
+
+`WingPolar::new(mach, angles, coefficients)` validates a rectangular grid:
+there must be at least two finite strictly increasing knots on each axis,
+Mach is nonnegative, and values have exactly `mach.len() * angles.len()` entries.
+Angles are radians. Values are Mach-major, with AoA varying fastest; CL is
+finite and signed, CD is finite and nonnegative. Coefficients are TOTAL
+finite-wing values referenced to the surface planform area: `L = q S CL`,
+`D = q S CD`, `q = rho V² / 2`. They are **not** 2D section coefficients.
+Use `surface.with_polar(Arc::new(polar))` to replace the analytic coefficient
+source, without adding `FiniteWing` profile or induced drag a second time.
+Bilinear interpolation includes boundary knots; outside either supplied axis
+returns `UnsupportedFlow`, never clamping or extrapolating. Transonic drag rise
+or poststall lift reduction is represented only if the caller supplies such
+values. Table support is not prediction of those phenomena. There is no default
+poststall dataset; test numbers are synthetic regression fixtures, not source data.
+
+`surface.with_control(WingControl::new(deflection, max_deflection, effectiveness)?)`
+adds `effectiveness * deflection` to physical AoA for coefficient lookup only.
+Deflection is radians, bounded by the supplied nonnegative maximum below pi/2;
+invalid values are rejected, not saturated. Effectiveness is caller-supplied
+and signed. Positive deflection with positive effectiveness increases effective
+incidence. Physical drag and lift directions continue to follow the rotated
+planar relative flow, not an artificially rotated velocity. Both analytic and
+tabulated coefficient domains still apply after the shift. This is a limited
+quasi-steady polar shift, **not** a universal flap/hinge/slat model, dynamic stall,
+actuator dynamics or geometry-based effectiveness calculation. No intrinsic
+pitching coefficient `C_m` is implemented; all moments remain application-arm
+cross force about the current COM. Existing primary/part-owned wing setters
+coexist with hull and mesh setters without suppressing overlapping loads.
+
+Definitions only (not sources of numerical polar data):
+[Lift coefficient](https://en.wikipedia.org/wiki/Lift_coefficient),
+[Drag coefficient](https://en.wikipedia.org/wiki/Drag_coefficient),
+[Stall](https://en.wikipedia.org/wiki/Stall_(fluid_dynamics)), and
+[Flight control surfaces](https://en.wikipedia.org/wiki/Flight_control_surfaces).
+Stall denotes the loss of attached-flow lift behavior, not a prescribed universal
+curve. Control surfaces modify aerodynamic forces and moments; the incidence
+shift above is only a caller-calibrated approximation of those effects.
+
+This stage is **UNVERIFIED**: regression fixtures were added but not ignored;
+no tests, build, check, clippy or benchmarks were executed at the user's request.
 
 For a thin symmetric two-dimensional airfoil at small angle of attack, `c_l = 2 pi alpha`, with `alpha` in radians. More generally, `c_l = 2 pi (alpha - alpha_zero_lift)`.
 

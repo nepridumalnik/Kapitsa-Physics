@@ -428,7 +428,7 @@ async fn part_wings_and_hull_replace_clear_and_follow_queue_while_paused()
 -> Result<(), Box<dyn std::error::Error>> {
     use kapitsa::aerodynamics::{
         hull::{HullSection, MachCurve, MachKnot},
-        wing::{FiniteWing, WingSurface},
+        wing::{FiniteWing, WingCoefficients, WingControl, WingPolar, WingSurface},
     };
     fn assert_owned_configuration<T: Clone + Send + Sync + 'static>() {}
     assert_owned_configuration::<WingSurface>();
@@ -453,7 +453,19 @@ async fn part_wings_and_hull_replace_clear_and_follow_queue_while_paused()
             FiniteWing::new(6.0, 0.8, 0.02, 0.0, 0.2)?,
             Transform::identity(),
             2.0,
-        )?;
+        )?
+        .with_polar(std::sync::Arc::new(WingPolar::new(
+            vec![0.0, 1.2],
+            vec![-0.5, 0.5],
+            vec![
+                WingCoefficients {
+                    lift: 0.2,
+                    drag: 0.1
+                };
+                4
+            ],
+        )?))
+        .with_control(WingControl::new(0.1, 0.2, 0.5)?);
         let section = HullSection::new(
             Transform::identity(),
             Vec3::X,
@@ -478,17 +490,19 @@ async fn part_wings_and_hull_replace_clear_and_follow_queue_while_paused()
             },
         ])?);
         client
-            .set_part_aerodynamic_wings(part, vec![wing, wing])
+            .set_part_aerodynamic_wings(part, vec![wing.clone(), wing.clone()])
             .await?;
         client
             .set_part_aerodynamic_hull(part, vec![section.clone(), section.clone()])
             .await?;
-        client.set_part_aerodynamic_wings(part, vec![wing]).await?;
+        client
+            .set_part_aerodynamic_wings(part, vec![wing.clone()])
+            .await?;
         client
             .set_part_aerodynamic_hull(part, vec![section.clone()])
             .await?;
         let configured = client.cluster_part(part).await?.ok_or("missing part")?;
-        assert_eq!(configured.aerodynamic_wings(), &[wing]);
+        assert_eq!(configured.aerodynamic_wings(), std::slice::from_ref(&wing));
         assert_eq!(configured.aerodynamic_hull(), &[section]);
         // Owned query snapshots are not modified by subsequent queued edits.
         client.set_part_aerodynamic_wings(part, Vec::new()).await?;

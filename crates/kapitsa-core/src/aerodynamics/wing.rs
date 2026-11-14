@@ -1,7 +1,9 @@
-//! Independent finite-wing, attached-flow reference model.
+//! Finite-wing loads with an analytic attached-flow primitive or explicit polar.
 //!
-//! Uses lifting-line slope a = a0 / (1 + a0 / (pi e AR)) and
-//! CDi = CL² / (pi e AR). No stall, compressibility or wing interference.
+//! `FiniteWing` uses lifting-line slope a = a0 / (1 + a0 / (pi e AR)) and
+//! CDi = CL² / (pi e AR), without stall or compressibility continuation.
+//! `WingSurface` optionally replaces that closure with caller-supplied TOTAL
+//! CL/CD data and a quasi-steady control incidence shift. No wing interference.
 //! Coefficients refer to planform area; angles are in radians.
 //!
 //! Configure two surfaces in a body's stable local frame:
@@ -19,7 +21,132 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::f64::consts::PI;
+use std::{f64::consts::PI, sync::Arc};
+
+/// Caller-supplied TOTAL finite-wing CL/CD on a rectangular Mach/AoA grid.
+/// Values are Mach-major (`mach_index * angles.len() + angle_index`).
+/// CD already includes induced and profile drag; these are not 2D section data.
+/// Bilinear interpolation is supported only inside the closed supplied domain.
+/// No stall or transonic behavior is inferred beyond the supplied data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WingPolar {
+    mach: Box<[f64]>,
+    angles: Box<[f64]>,
+    coefficients: Box<[WingCoefficients]>,
+}
+
+impl WingPolar {
+    pub fn new(
+        mach: Vec<f64>,
+        angles: Vec<f64>,
+        coefficients: Vec<WingCoefficients>,
+    ) -> Result<Self, WingError> {
+        let valid_axis = |axis: &[f64]| {
+            axis.len() >= 2
+                && axis.iter().all(|v| v.is_finite())
+                && axis.windows(2).all(|pair| pair[0] < pair[1])
+        };
+        if !valid_axis(&mach)
+            || mach[0] < 0.0
+            || !valid_axis(&angles)
+            || mach.len().checked_mul(angles.len()) != Some(coefficients.len())
+            || coefficients
+                .iter()
+                .any(|c| !c.lift.is_finite() || !c.drag.is_finite() || c.drag < 0.0)
+        {
+            return Err(WingError::InvalidParameters);
+        }
+        Ok(Self {
+            mach: mach.into_boxed_slice(),
+            angles: angles.into_boxed_slice(),
+            coefficients: coefficients.into_boxed_slice(),
+        })
+    }
+
+    pub fn coefficients(&self, angle: f64, mach: f64) -> Result<WingCoefficients, WingError> {
+        if !angle.is_finite() || !mach.is_finite() || mach < 0.0 {
+            return Err(WingError::InvalidFlow);
+        }
+        fn interval(axis: &[f64], value: f64) -> Result<(usize, f64), WingError> {
+            if value < axis[0] || value > axis[axis.len() - 1] {
+                return Err(WingError::UnsupportedFlow);
+            }
+            let index = axis
+                .partition_point(|knot| *knot <= value)
+                .saturating_sub(1)
+                .min(axis.len() - 2);
+            let lo = axis[index];
+            let hi = axis[index + 1];
+            // Halve only when subtraction overflows, preserving tiny intervals.
+            let span = hi - lo;
+            let t = if span.is_finite() {
+                (value - lo) / span
+            } else {
+                (value * 0.5 - lo * 0.5) / (hi * 0.5 - lo * 0.5)
+            };
+            Ok((index, t))
+        }
+        let (m, mt) = interval(&self.mach, mach)?;
+        let (a, at) = interval(&self.angles, angle)?;
+        let mix = |x: WingCoefficients, y: WingCoefficients, t: f64| WingCoefficients {
+            lift: x.lift * (1.0 - t) + y.lift * t,
+            drag: x.drag * (1.0 - t) + y.drag * t,
+        };
+        let n = self.angles.len();
+        let result = mix(
+            mix(
+                self.coefficients[m * n + a],
+                self.coefficients[m * n + a + 1],
+                at,
+            ),
+            mix(
+                self.coefficients[(m + 1) * n + a],
+                self.coefficients[(m + 1) * n + a + 1],
+                at,
+            ),
+            mt,
+        );
+        if !result.lift.is_finite() || !result.drag.is_finite() {
+            return Err(WingError::ArithmeticOverflow);
+        }
+        Ok(result)
+    }
+}
+
+/// Quasi-steady incidence shift, NOT a universal hinge, flap or slat model.
+/// All angles are radians. Effective AoA = physical AoA + effectiveness *
+/// deflection; positive effectiveness and deflection increase effective AoA.
+/// Force directions still follow the physical flow. No actuator dynamics or Cm.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WingControl {
+    deflection: f64,
+    max_deflection: f64,
+    effectiveness: f64,
+}
+
+impl WingControl {
+    pub fn new(
+        deflection: f64,
+        max_deflection: f64,
+        effectiveness: f64,
+    ) -> Result<Self, WingError> {
+        if !deflection.is_finite()
+            || !max_deflection.is_finite()
+            || max_deflection < 0.0
+            || max_deflection >= PI / 2.0
+            || deflection.abs() > max_deflection
+            || !effectiveness.is_finite()
+            || !(deflection * effectiveness).is_finite()
+        {
+            return Err(WingError::InvalidParameters);
+        }
+        Ok(Self {
+            deflection,
+            max_deflection,
+            effectiveness,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WingError {
@@ -54,16 +181,44 @@ pub struct WingCoefficients {
 
 /// One explicitly configured wing. Transform maps wing coordinates to the
 /// stable body-local frame; its origin is the force application point.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WingSurface {
     model: FiniteWing,
+    polar: Option<Arc<WingPolar>>,
+    control: Option<WingControl>,
     local_transform: crate::transform::Transform,
     planform_area: f64,
 }
 
 impl WingSurface {
-    pub fn local_transform(self) -> crate::transform::Transform {
+    pub fn local_transform(&self) -> crate::transform::Transform {
         self.local_transform
+    }
+
+    /// Replaces the analytic coefficient source; clones share immutable data.
+    pub fn with_polar(mut self, polar: Arc<WingPolar>) -> Self {
+        self.polar = Some(polar);
+        self
+    }
+
+    pub fn with_control(mut self, control: WingControl) -> Self {
+        self.control = Some(control);
+        self
+    }
+
+    /// Evaluate at physical AoA, with an optional configured incidence shift.
+    pub fn coefficients(&self, angle: f64, mach: f64) -> Result<WingCoefficients, WingError> {
+        let effective = angle + self.control.map_or(0.0, |c| c.deflection * c.effectiveness);
+        if !angle.is_finite() {
+            return Err(WingError::InvalidFlow);
+        }
+        if !effective.is_finite() {
+            return Err(WingError::ArithmeticOverflow);
+        }
+        match &self.polar {
+            Some(polar) => polar.coefficients(effective, mach),
+            None => self.model.coefficients(effective, mach),
+        }
     }
 
     pub fn new(
@@ -76,6 +231,8 @@ impl WingSurface {
         }
         Ok(Self {
             model,
+            polar: None,
+            control: None,
             local_transform,
             planform_area,
         })
@@ -84,7 +241,7 @@ impl WingSurface {
     /// Returns world force and COM moment using atmosphere supplied at the wing.
     /// No intrinsic airfoil pitching moment or mesh load exclusion is implied.
     pub fn evaluate(
-        self,
+        &self,
         flow: super::pressure::PressureFlow,
     ) -> Result<super::pressure::PressureWrench, WingError> {
         if !flow.center_of_mass.is_finite()
@@ -126,11 +283,12 @@ impl WingSurface {
             .conjugate()
             .rotate_vector(body_velocity)
             .ok_or(overflow)?;
-        let local_force = self.model.force(
+        let local_force = planar_force(
             wing_velocity,
             flow.atmosphere.density(),
             flow.sound_speed,
             self.planform_area,
+            |alpha, mach| self.coefficients(alpha, mach),
         )?;
         let force = flow
             .transform
@@ -155,42 +313,13 @@ impl FiniteWing {
         sound_speed: f64,
         planform_area: f64,
     ) -> Result<kapitsa_math::Vec3, WingError> {
-        use kapitsa_math::Vec3;
-        if !relative_velocity.is_finite()
-            || !density.is_finite()
-            || density < 0.0
-            || !sound_speed.is_finite()
-            || sound_speed <= 0.0
-            || !planform_area.is_finite()
-            || planform_area < 0.0
-        {
-            return Err(WingError::InvalidFlow);
-        }
-        if density == 0.0 || planform_area == 0.0 || relative_velocity == Vec3::ZERO {
-            return Ok(Vec3::ZERO);
-        }
-        // Permit roundoff from rigid frame transforms, not physical sideslip.
-        let planar_scale = relative_velocity.x.abs().max(relative_velocity.z.abs());
-        if relative_velocity.y.abs() > 64.0 * f64::EPSILON * planar_scale
-            || relative_velocity.x <= 0.0
-        {
-            return Err(WingError::UnsupportedFlow);
-        }
-        let relative_velocity = Vec3::new(relative_velocity.x, 0.0, relative_velocity.z);
-        let speed = relative_velocity
-            .checked_length()
-            .ok_or(WingError::ArithmeticOverflow)?;
-        // Nose-up attitude at horizontal flight gives negative local Z velocity.
-        let alpha = (-relative_velocity.z).atan2(relative_velocity.x);
-        let coefficients = self.coefficients(alpha, speed / sound_speed)?;
-        let direction = relative_velocity / speed;
-        let lift_direction = Vec3::new(-direction.z, 0.0, direction.x);
-        let scale = (0.5 * density * speed) * speed * planform_area;
-        let force = (lift_direction * coefficients.lift - direction * coefficients.drag) * scale;
-        if !scale.is_finite() || !force.is_finite() {
-            return Err(WingError::ArithmeticOverflow);
-        }
-        Ok(force)
+        planar_force(
+            relative_velocity,
+            density,
+            sound_speed,
+            planform_area,
+            |alpha, mach| self.coefficients(alpha, mach),
+        )
     }
 
     /// `efficiency` is in (0, 1]; `max_attached_angle` is in (0, pi/2).
@@ -257,12 +386,194 @@ impl FiniteWing {
     }
 }
 
+/// Shared physical-flow domain and force projection, independent of polar source.
+fn planar_force(
+    relative_velocity: kapitsa_math::Vec3,
+    density: f64,
+    sound_speed: f64,
+    planform_area: f64,
+    coefficients: impl FnOnce(f64, f64) -> Result<WingCoefficients, WingError>,
+) -> Result<kapitsa_math::Vec3, WingError> {
+    use kapitsa_math::Vec3;
+    if !relative_velocity.is_finite()
+        || !density.is_finite()
+        || density < 0.0
+        || !sound_speed.is_finite()
+        || sound_speed <= 0.0
+        || !planform_area.is_finite()
+        || planform_area < 0.0
+    {
+        return Err(WingError::InvalidFlow);
+    }
+    if density == 0.0 || planform_area == 0.0 || relative_velocity == Vec3::ZERO {
+        return Ok(Vec3::ZERO);
+    }
+    // Permit rigid-frame roundoff, never physical sideslip or reversed flow.
+    let planar_scale = relative_velocity.x.abs().max(relative_velocity.z.abs());
+    if relative_velocity.y.abs() > 64.0 * f64::EPSILON * planar_scale || relative_velocity.x <= 0.0
+    {
+        return Err(WingError::UnsupportedFlow);
+    }
+    let velocity = Vec3::new(relative_velocity.x, 0.0, relative_velocity.z);
+    let speed = velocity
+        .checked_length()
+        .ok_or(WingError::ArithmeticOverflow)?;
+    let alpha = (-velocity.z).atan2(velocity.x);
+    let c = coefficients(alpha, speed / sound_speed)?;
+    let direction = velocity / speed;
+    let lift_direction = Vec3::new(-direction.z, 0.0, direction.x);
+    let scale = (0.5 * density * speed) * speed * planform_area;
+    let force = (lift_direction * c.lift - direction * c.drag) * scale;
+    if !scale.is_finite() || !force.is_finite() {
+        return Err(WingError::ArithmeticOverflow);
+    }
+    Ok(force)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn wing(ar: f64) -> FiniteWing {
         FiniteWing::new(ar, 0.8, 0.02, 0.0, 0.2).unwrap()
+    }
+
+    // Synthetic regression values, NOT measured data or a default aerodynamic model.
+    fn polar() -> Arc<WingPolar> {
+        Arc::new(
+            WingPolar::new(
+                vec![0.0, 0.8, 1.2],
+                vec![-0.5, 0.0, 0.2, 0.5],
+                [1.0, 1.5, 2.0]
+                    .into_iter()
+                    .flat_map(|factor| {
+                        [-0.4, 0.0, 1.0, 0.4]
+                            .into_iter()
+                            .map(move |lift| WingCoefficients {
+                                lift: lift * factor,
+                                drag: 0.1 * factor,
+                            })
+                    })
+                    .collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn supplied_polar_interpolates_transonic_and_poststall_values_only() {
+        let p = polar();
+        let c = p.coefficients(0.1, 1.0).unwrap();
+        assert!((c.lift - 0.875).abs() < 1e-14);
+        assert!((c.drag - 0.175).abs() < 1e-14);
+        assert_eq!(p.coefficients(0.5, 1.2).unwrap().lift, 0.8);
+        assert!(p.coefficients(0.35, 1.0).unwrap().lift < p.coefficients(0.2, 1.0).unwrap().lift);
+        assert!(p.coefficients(-0.25, 0.0).unwrap().lift < 0.0);
+        for (angle, mach) in [(0.51, 1.0), (-0.51, 1.0), (0.0, 1.21)] {
+            assert_eq!(p.coefficients(angle, mach), Err(WingError::UnsupportedFlow));
+        }
+        assert_eq!(p.coefficients(f64::NAN, 0.0), Err(WingError::InvalidFlow));
+    }
+
+    #[test]
+    fn polar_rejects_invalid_rectangles_and_coefficients() {
+        let c = WingCoefficients {
+            lift: -1.0,
+            drag: 0.0,
+        };
+        for (mach, angles, values) in [
+            (vec![0.0], vec![0.0, 0.1], vec![c; 2]),
+            (vec![0.0, 0.0], vec![0.0, 0.1], vec![c; 4]),
+            (vec![-0.1, 1.0], vec![0.0, 0.1], vec![c; 4]),
+            (vec![0.0, 1.0], vec![0.1, 0.0], vec![c; 4]),
+            (vec![0.0, f64::NAN], vec![0.0, 0.1], vec![c; 4]),
+            (vec![0.0, 1.0], vec![0.0, f64::INFINITY], vec![c; 4]),
+            (vec![0.0, 1.0], vec![0.0, 0.1], vec![c; 3]),
+            (
+                vec![0.0, 1.0],
+                vec![0.0, 0.1],
+                vec![
+                    WingCoefficients {
+                        lift: 0.0,
+                        drag: -0.1
+                    };
+                    4
+                ],
+            ),
+            (
+                vec![0.0, 1.0],
+                vec![0.0, 0.1],
+                vec![
+                    WingCoefficients {
+                        lift: f64::INFINITY,
+                        drag: 0.0
+                    };
+                    4
+                ],
+            ),
+        ] {
+            assert_eq!(
+                WingPolar::new(mach, angles, values),
+                Err(WingError::InvalidParameters)
+            );
+        }
+        assert!(WingControl::new(0.21, 0.2, 1.0).is_err());
+        assert!(WingControl::new(0.0, 0.2, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn control_shift_preserves_physical_force_axes_total_drag_and_com_arm() {
+        use crate::{
+            aerodynamics::{AtmosphericState, pressure::PressureFlow},
+            transform::Transform,
+        };
+        use kapitsa_math::{Quat, Vec3};
+        let p = polar();
+        let base = WingSurface::new(
+            // Deliberately huge analytic profile drag: must not enter table forces.
+            FiniteWing::new(1.0, 0.1, 100.0, 0.0, 0.1).unwrap(),
+            Transform::new(Vec3::X * 2.0, Quat::IDENTITY).unwrap(),
+            2.0,
+        )
+        .unwrap()
+        .with_polar(Arc::clone(&p));
+        let positive = base
+            .clone()
+            .with_control(WingControl::new(0.1, 0.2, 1.0).unwrap());
+        let negative = base
+            .clone()
+            .with_control(WingControl::new(-0.1, 0.2, 1.0).unwrap());
+        assert!(Arc::ptr_eq(
+            base.polar.as_ref().unwrap(),
+            positive.polar.as_ref().unwrap()
+        ));
+        let flow = PressureFlow {
+            atmosphere: AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+            sound_speed: 100.0,
+            transform: Transform::identity(),
+            center_of_mass: Vec3::X,
+            linear_velocity: Vec3::X * 100.0,
+            angular_velocity: Vec3::ZERO,
+        };
+        let load = positive.evaluate(flow).unwrap();
+        assert!(load.force.z > 0.0);
+        assert!(negative.evaluate(flow).unwrap().force.z < 0.0);
+        let c = p.coefficients(0.1, 1.0).unwrap();
+        assert!((load.force.x + 10000.0 * c.drag).abs() < 1e-9);
+        assert!((load.force.z - 10000.0 * c.lift).abs() < 1e-9);
+        assert_eq!(load.moment, Vec3::X.cross(load.force));
+        assert!(load.moment.y < 0.0);
+        for velocity in [Vec3::new(100.0, 1.0, 0.0), -Vec3::X * 100.0] {
+            assert_eq!(
+                positive.evaluate(PressureFlow {
+                    linear_velocity: velocity,
+                    ..flow
+                }),
+                Err(WingError::UnsupportedFlow)
+            );
+        }
+        let beyond = base.with_control(WingControl::new(0.2, 0.2, 3.0).unwrap());
+        assert_eq!(beyond.evaluate(flow), Err(WingError::UnsupportedFlow));
     }
 
     #[test]

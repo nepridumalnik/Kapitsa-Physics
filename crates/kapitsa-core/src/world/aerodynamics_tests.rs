@@ -1146,7 +1146,7 @@ fn later_wing_failure_rolls_back_earlier_loads() {
         .unwrap();
         body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0))
             .unwrap();
-        body.set_aerodynamics(Aerodynamics::Wings(vec![valid, invalid]));
+        body.set_aerodynamics(Aerodynamics::Wings(vec![valid.clone(), invalid]));
         let mut world = PhysicsWorld::new();
         let id = world.add_body(body).unwrap();
         world.set_atmosphere(super::test_atmosphere(
@@ -1253,7 +1253,7 @@ fn wing_cluster_transfer_preserves_body_and_configuration() {
     let id = world.add_body(body).unwrap();
     let before = world.body(id).unwrap().motion();
     let original = match world.body(id).unwrap().aerodynamics() {
-        Aerodynamics::Wing(wing) => *wing,
+        Aerodynamics::Wing(wing) => wing.clone(),
         _ => panic!("wing"),
     };
     let root = world.enable_cluster(id).unwrap();

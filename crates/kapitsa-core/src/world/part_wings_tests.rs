@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     aerodynamics::{
         Aerodynamics, AtmosphericState,
-        wing::{FiniteWing, WingSurface},
+        wing::{FiniteWing, WingCoefficients, WingControl, WingPolar, WingSurface},
     },
     cluster::{MassChangeMode, WeldDesc, WeldStiffness, WeldStrength},
     joint::JointFrame,
@@ -223,8 +223,20 @@ fn part_wings_sample_application_point_with_rotated_part_and_com_in_vacuum()
         let id = world.add_body(body)?;
         let root = world.enable_cluster(id)?;
         // Source coordinates remain fixed even when the assembly COM changes.
-        let surface = wing(Transform::new(Vec3::X * -13.0, Quat::IDENTITY)?)?;
-        world.set_part_aerodynamic_wings(root, vec![surface])?;
+        let surface = wing(Transform::new(Vec3::X * -13.0, Quat::IDENTITY)?)?
+            .with_polar(std::sync::Arc::new(WingPolar::new(
+                vec![0.0, 1.2],
+                vec![-0.5, 0.5],
+                vec![
+                    WingCoefficients {
+                        lift: 0.5,
+                        drag: 0.1
+                    };
+                    4
+                ],
+            )?))
+            .with_control(WingControl::new(0.1, 0.2, 0.5)?);
+        world.set_part_aerodynamic_wings(root, vec![surface.clone()])?;
         world.set_part_mass(
             root,
             MassProperties::new(110.0, Vec3::X, Mat3::IDENTITY * 100.0)?,
@@ -232,7 +244,7 @@ fn part_wings_sample_application_point_with_rotated_part_and_com_in_vacuum()
         )?;
         assert_eq!(
             world.part_aerodynamic_wings(root),
-            Some([surface].as_slice())
+            Some(std::slice::from_ref(&surface))
         );
         let body = world.body(id).ok_or("body")?;
         assert_eq!(
@@ -279,7 +291,7 @@ fn part_wings_later_failure_rolls_back_and_primary_transfer_rejects_atomically()
             Vec3::ZERO,
             Quat::from_axis_angle(Vec3::Y, 1.0).ok_or("rotation")?,
         )?)?;
-        body.set_aerodynamics(Aerodynamics::Wings(vec![good, bad]));
+        body.set_aerodynamics(Aerodynamics::Wings(vec![good.clone(), bad.clone()]));
         let id = world.add_body(body)?;
         let before = world.body(id).ok_or("body")?.motion();
         assert_eq!(
@@ -291,12 +303,12 @@ fn part_wings_later_failure_rolls_back_and_primary_transfer_rejects_atomically()
         );
         assert_eq!(world.body(id).ok_or("body")?.motion(), before);
         assert!(
-            matches!(world.body(id).ok_or("body")?.aerodynamics(), Aerodynamics::Wings(w) if w == &[good, bad])
+            matches!(world.body(id).ok_or("body")?.aerodynamics(), Aerodynamics::Wings(w) if w == &[good.clone(), bad.clone()])
         );
         let root = world.enable_cluster(id)?;
         assert_eq!(
             world.part_aerodynamic_wings(root),
-            Some([good, bad].as_slice())
+            Some([good.clone(), bad].as_slice())
         );
         assert_eq!(
             advance(&mut world, sharded),
