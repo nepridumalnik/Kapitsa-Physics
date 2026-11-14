@@ -236,7 +236,10 @@ impl HullSection {
             && self.wetted_area != 0.0
             && let Some(friction) = self.skin_friction
         {
-            let reynolds = density * axial_speed.abs() * self.length / friction.dynamic_viscosity;
+            let reynolds = scaled_product(
+                &[density, axial_speed.abs(), self.length],
+                friction.dynamic_viscosity,
+            )?;
             let cf = friction.mean_coefficient(reynolds)?;
             axial_force = axial_force
                 .checked_add(resistance(
@@ -272,12 +275,64 @@ fn resistance(
     if speed == 0.0 || area == 0.0 || cd == 0.0 {
         return Ok(Vec3::ZERO);
     }
-    let scale = -0.5 * density * speed * area * cd;
-    if !scale.is_finite() {
-        return Err(HullError::ArithmeticOverflow);
+    // Include each velocity component before restoring the exponent: even the
+    // shared scalar can overflow while the complete force is representable.
+    let component = |v: f64| {
+        scaled_product(&[0.5, density, speed, area, cd, v.abs()], 1.0)
+            .map(|magnitude| -magnitude.copysign(v))
+    };
+    Ok(Vec3::new(
+        component(velocity.x)?,
+        component(velocity.y)?,
+        component(velocity.z)?,
+    ))
+}
+
+// Products/quotients here have finite nonnegative factors and a positive divisor.
+// Keep binary exponents separate so neither large nor tiny intermediate products
+// lose a representable result. Unlike logarithms, power-of-two scaling is exact.
+fn scaled_product(factors: &[f64], divisor: f64) -> Result<f64, HullError> {
+    fn split(mut value: f64) -> (f64, i32) {
+        let mut adjustment = 0;
+        if value < f64::MIN_POSITIVE {
+            value *= 2.0_f64.powi(54);
+            adjustment = -54;
+        }
+        let bits = value.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023 + adjustment;
+        let mantissa = f64::from_bits((bits & ((1_u64 << 52) - 1)) | (1023_u64 << 52));
+        (mantissa, exponent)
     }
-    velocity
-        .checked_mul_scalar(scale)
+
+    if factors.contains(&0.0) {
+        return Ok(0.0);
+    }
+    let (denominator, denominator_exponent) = split(divisor);
+    let mut mantissa = 1.0 / denominator;
+    let mut exponent = -denominator_exponent;
+    for &factor in factors {
+        let (fraction, power) = split(factor);
+        mantissa *= fraction;
+        exponent += power;
+        if mantissa >= 2.0 {
+            mantissa *= 0.5;
+            exponent += 1;
+        }
+    }
+    if mantissa < 1.0 {
+        mantissa *= 2.0;
+        exponent -= 1;
+    }
+    // Chunking also handles subnormal outputs without constructing an infinite
+    // or zero power of two before applying the mantissa.
+    while exponent != 0 {
+        let power = exponent.clamp(-1022, 1023);
+        mantissa *= 2.0_f64.powi(power);
+        exponent -= power;
+    }
+    mantissa
+        .is_finite()
+        .then_some(mantissa)
         .ok_or(HullError::ArithmeticOverflow)
 }
 
@@ -355,6 +410,57 @@ mod tests {
                 Err(HullError::UnsupportedReynolds)
             );
         }
+    }
+
+    #[test]
+    fn extreme_representable_loads_and_reynolds() {
+        let mut s = section(Vec3::ZERO);
+        s.length = 1.0;
+        s.axial_area = 1e-4;
+        s.crossflow_area = 1e-4;
+        s.axial_cd = 1e-2;
+        s.crossflow_cd = 1e-2;
+        let mut f = flow(Vec3::X * 100.0);
+        f.atmosphere = AtmosphericState::new(1e308, Vec3::ZERO).unwrap();
+        for velocity in [Vec3::X * 100.0, Vec3::Y * 100.0, -Vec3::X * 100.0] {
+            f.linear_velocity = velocity;
+            let wrench = s.evaluate(f).unwrap();
+            let component = if velocity.x != 0.0 {
+                wrench.force.x / -velocity.x.signum()
+            } else {
+                -wrench.force.y
+            };
+            assert!((component / 5e305 - 1.0).abs() < 1e-14);
+            assert_eq!(wrench.moment, Vec3::ZERO);
+        }
+        f.linear_velocity = Vec3::X * 100.0;
+        s.axial_cd = 0.0;
+        s.wetted_area = 1e-4;
+        s.skin_friction =
+            Some(SkinFriction::new(1e308, BoundaryLayer::Laminar, 100.0, 100.0).unwrap());
+        let wrench = s.evaluate(f).unwrap();
+        assert!((wrench.force.x / -6.64e306 - 1.0).abs() < 1e-14);
+        s.skin_friction =
+            Some(SkinFriction::new(1.0, BoundaryLayer::Laminar, 1.0, f64::MAX).unwrap());
+        assert_eq!(s.evaluate(f), Err(HullError::ArithmeticOverflow));
+        s.skin_friction = None;
+        s.axial_cd = 1.0;
+        s.axial_area = 1.0;
+        assert_eq!(s.evaluate(f), Err(HullError::ArithmeticOverflow));
+    }
+
+    #[test]
+    fn scaled_products_keep_small_factors_and_reject_overflow() {
+        assert_eq!(scaled_product(&[1e308, 100.0, 1.0], 1e308), Ok(100.0));
+        assert_eq!(
+            scaled_product(&[f64::MAX, 2.0], 1.0),
+            Err(HullError::ArithmeticOverflow)
+        );
+        let tiny = f64::from_bits(1);
+        assert_eq!(scaled_product(&[tiny, 0.5, 2.0], 1.0), Ok(tiny));
+        assert_eq!(scaled_product(&[tiny, f64::MAX], tiny), Ok(f64::MAX));
+        let force = resistance(Vec3::X * 1e-100, 1e-100, 1e308, 1e308, 1e-200).unwrap();
+        assert!((force.x / -5e215 - 1.0).abs() < 1e-14);
     }
 
     #[test]

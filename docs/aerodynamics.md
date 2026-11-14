@@ -62,7 +62,7 @@ One body-wide `ColliderTessellation` applies to collider parts, including its ag
 
 A preparation entry compares instance membership, mesh identity and part-local transforms. Changed unions are prepared in temporary entries and published only on success. Failed preparation does not apply partial forces. Collider transforms are already body-local after conversion and are not applied twice. When collider sources are present, the existing 1e-10 positional welding tolerance is used for closure checks across all instances; it does not move pressure vertices, change source normals or offset shadow rays. Geometry failures retain their `GeometryError` through `AerodynamicsError::Geometry` and its error source.
 
-Part pressure currently retains Mach >= 5, explicit uniform sound speed, COM atmosphere sampling and centroid rotational-flow quadrature. Vacuum skips preparation. Tests cover ordinary/sharded paths, mixed Mesh/Colliders assemblies, merge/split, overlap ownership, triangle budgets, configuration replacement, preparation errors, cleanup, and runtime commands on Tokio/Rayon. General physical equivalence to FAR is not established; subsonic/transonic hull physics and wing models remain subsequent work.
+Part pressure currently retains Mach >= 5, explicit uniform sound speed, COM atmosphere sampling and centroid rotational-flow quadrature. Vacuum skips preparation. Tests cover ordinary/sharded paths, mixed Mesh/Colliders assemblies, merge/split, overlap ownership, triangle budgets, configuration replacement, preparation errors, cleanup, and runtime commands on Tokio/Rayon. General physical equivalence to FAR is not established; the explicit subsonic hull and wing models below do not supply transonic hull physics.
 
 ## Conventions
 
@@ -79,6 +79,54 @@ References: [Rigid body — velocity](https://en.wikipedia.org/wiki/Rigid_body#L
 Reference: [Drag equation](https://en.wikipedia.org/wiki/Drag_equation).
 
 The reference area must match the coefficient's convention. This equation defines the drag coefficient; it is **not** a predictive closure for `C_D`. A constant drag coefficient is a deliberate simplified model, not a universal description across Reynolds and Mach numbers. Zero density and zero speed produce zero load.
+
+## Distributed subsonic hull resistance
+
+`Aerodynamics::Hull(Vec<hull::HullSection>)` enables caller-parameterized sections
+in ordinary and sharded body world stepping. `HullSection::new` takes a
+section-to-body transform, local axis, friction development length, axial,
+crossflow and wetted areas, axial and crossflow drag coefficients, and optional
+`SkinFriction`. The axis is normalized; length must be finite and positive, and
+areas and coefficients finite and nonnegative. Section origins are load points
+in the stable body frame, not offsets from COM. Every point samples its own
+atmosphere; point velocity includes `omega × r` and local wind. Sound speed uses
+the world's existing explicit uniform setting. Cluster conversion rejects Hull
+until part-owned section transfer is supported. An empty section list adds no
+loads; Simple, Wings and hypersonic Mesh keep their existing semantics.
+
+For world axis `a`, split relative velocity into `u_axial = a (v · a)` and
+`u_cross = v - u_axial`. Each component contributes
+`F_i = -0.5 rho |u_i| A_i Cd_i u_i`, using its **own** speed, not total-flow
+dynamic pressure. Axial area must match axial/form Cd, crossflow area must match
+projected-crossflow Cd, and skin friction uses wetted area. These are applications
+of the [drag equation](https://en.wikipedia.org/wiki/Drag_equation), not inferred
+hull coefficients. Sum forces and `r × F` moments about the current COM; no
+intrinsic pitching moment or end-cap load is added. Choose enough sections to
+resolve rotation and spatial atmospheric variation; this is point quadrature.
+
+The declared domain is local total Mach `|v| / sound_speed <= 0.3`, including
+rotational velocity. Optional `SkinFriction::new` requires explicit positive
+finite dynamic viscosity, `BoundaryLayer::Laminar` or `Turbulent`, and positive
+finite inclusive Reynolds bounds. It uses `Re_L = rho |v · a| L / mu` and the
+mean flat-plate coefficients derived in [Skin friction](#skin-friction):
+`Cf = 1.328 / sqrt(Re_L)` or `0.072 / Re_L^0.2`. Friction opposes axial flow
+only; length is per-section development length, not accumulated automatically.
+No transition threshold or mixed-regime closure is inferred. Zero axial speed
+skips friction and its Reynolds check. Omitting friction is inviscid.
+
+Finite kinematics and positive finite sound speed are validated even in vacuum
+or with all areas disabled; these zero-load cases then skip Mach and Reynolds
+checks. Invalid inputs, unsupported Mach/Reynolds and unrepresentable arithmetic
+are explicit `HullError` values (retained through `AerodynamicsError::Hull` in
+world integration). Products use binary exponent scaling so intermediate
+pressure or Reynolds numerators need not fit when the complete result does;
+truly nonfinite loads still fail rather than being clamped or discarded.
+
+This is empirical sectional resistance, **not potential-flow normal force or
+lift**, transonic continuation, area-rule wave drag, interference, shielding,
+separation prediction or FAR equivalence. Geometry/voxel preparation does not
+infer hull coefficients or automatically generate these sections. Explicit
+wings are separate; callers must avoid counting a physical contribution twice.
 
 ## Pressure loads
 
