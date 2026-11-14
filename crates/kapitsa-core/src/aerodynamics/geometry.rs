@@ -161,6 +161,173 @@ fn check_surface_work(work: Option<usize>, max_work: usize) -> Result<(), Geomet
     Ok(())
 }
 
+/// Temporary broad phase for visibility blockers. Each query is an axis-aligned
+/// conservative bound of the source triangle swept to the prepared geometry's
+/// bounds along the ray; it may return extra triangles, but never omits a hit.
+struct TriangleGrid {
+    origin: Vec3,
+    cell_size: Vec3,
+    dimensions: [usize; 3],
+    offsets: Vec<usize>,
+    triangles: Vec<usize>,
+}
+
+impl TriangleGrid {
+    fn build(triangles: &[SurfaceTriangle], max_work: usize) -> Result<Self, GeometryError> {
+        if triangles.is_empty() {
+            return Err(GeometryError::EmptyGeometry);
+        }
+        let mut min = Vec3::splat(f64::INFINITY);
+        let mut max = Vec3::splat(f64::NEG_INFINITY);
+        for triangle in triangles {
+            for &point in &triangle.vertices {
+                if !point.is_finite() {
+                    return Err(GeometryError::ArithmeticOverflow);
+                }
+                min = min.min(point);
+                max = max.max(point);
+            }
+        }
+        let extent = max - min;
+        let target = (triangles.len() as f64).cbrt().ceil().clamp(1.0, 16.0) as usize;
+        let dimensions = components(extent).map(|value| if value == 0.0 { 1 } else { target });
+        let cell_size = components(extent).map(|value| {
+            if value == 0.0 {
+                1.0
+            } else {
+                value / target as f64
+            }
+        });
+        let cell_count = dimensions
+            .into_iter()
+            .try_fold(1usize, |n, d| n.checked_mul(d))
+            .ok_or(GeometryError::WorkBudgetExceeded)?;
+        let mut entries = Vec::new();
+        entries
+            .try_reserve(triangles.len().saturating_mul(target))
+            .map_err(|_| GeometryError::AllocationFailed)?;
+        let mut counts = allocated(cell_count, 0usize)?;
+        let cell = |point: Vec3| -> Result<[usize; 3], GeometryError> {
+            let values = components((point - min) / cell_size);
+            if !values.iter().all(|value| value.is_finite()) {
+                return Err(GeometryError::PrecisionLoss);
+            }
+            Ok(values.map(|value| (value.floor().max(0.0) as usize).min(target.saturating_sub(1))))
+        };
+        for (triangle_index, triangle) in triangles.iter().enumerate() {
+            let lower = cell(
+                triangle
+                    .vertices
+                    .iter()
+                    .fold(Vec3::splat(f64::INFINITY), |v, &p| v.min(p)),
+            )?;
+            let upper = cell(
+                triangle
+                    .vertices
+                    .iter()
+                    .fold(Vec3::splat(f64::NEG_INFINITY), |v, &p| v.max(p)),
+            )?;
+            for z in lower[2]..=upper[2] {
+                for y in lower[1]..=upper[1] {
+                    for x in lower[0]..=upper[0] {
+                        let i = index([x, y, z], dimensions);
+                        counts[i] = counts[i]
+                            .checked_add(1)
+                            .ok_or(GeometryError::WorkBudgetExceeded)?;
+                        checked_push(&mut entries, (i, triangle_index))?;
+                    }
+                }
+            }
+        }
+        let build_work = entries
+            .len()
+            .checked_add(cell_count)
+            .ok_or(GeometryError::WorkBudgetExceeded)?;
+        check_surface_work(Some(build_work), max_work)?;
+        let mut offsets = allocated(cell_count + 1, 0usize)?;
+        for (i, count) in counts.into_iter().enumerate() {
+            offsets[i + 1] = offsets[i]
+                .checked_add(count)
+                .ok_or(GeometryError::WorkBudgetExceeded)?;
+        }
+        entries.sort_unstable();
+        let triangles = entries.into_iter().map(|(_, triangle)| triangle).collect();
+        Ok(Self {
+            origin: min,
+            cell_size,
+            dimensions,
+            offsets,
+            triangles,
+        })
+    }
+
+    fn candidates(
+        &self,
+        source: &SurfaceTriangle,
+        direction: Vec3,
+        marks: &mut [u32],
+        stamp: u32,
+    ) -> Result<(Vec<usize>, usize), GeometryError> {
+        let source_min = source
+            .vertices
+            .iter()
+            .fold(Vec3::splat(f64::INFINITY), |v, &p| v.min(p));
+        let source_max = source
+            .vertices
+            .iter()
+            .fold(Vec3::splat(f64::NEG_INFINITY), |v, &p| v.max(p));
+        let global_max = self.origin + self.cell_size * vector(self.dimensions.map(|d| d as f64));
+        let lower =
+            components(source_min).map(|value| if value.is_finite() { value } else { f64::NAN });
+        let upper =
+            components(source_max).map(|value| if value.is_finite() { value } else { f64::NAN });
+        let mut swept_min = lower;
+        let mut swept_max = upper;
+        for axis in 0..3 {
+            if direction[axis] > 0.0 {
+                swept_max[axis] = global_max[axis];
+            }
+            if direction[axis] < 0.0 {
+                swept_min[axis] = self.origin[axis];
+            }
+        }
+        let origin = components(self.origin);
+        let cell_size = components(self.cell_size);
+        let to_cell = |point: [f64; 3]| -> Result<[usize; 3], GeometryError> {
+            if !point.iter().all(|value| value.is_finite()) {
+                return Err(GeometryError::PrecisionLoss);
+            }
+            Ok(std::array::from_fn(|axis| {
+                ((point[axis] - origin[axis]) / cell_size[axis])
+                    .floor()
+                    .max(0.0) as usize
+            }))
+        };
+        let mut lower = to_cell(swept_min)?;
+        let mut upper = to_cell(swept_max)?;
+        for axis in 0..3 {
+            lower[axis] = lower[axis].min(self.dimensions[axis].saturating_sub(1));
+            upper[axis] = upper[axis].min(self.dimensions[axis].saturating_sub(1));
+        }
+        let mut result = Vec::new();
+        for z in lower[2]..=upper[2] {
+            for y in lower[1]..=upper[1] {
+                for x in lower[0]..=upper[0] {
+                    let range = index([x, y, z], self.dimensions);
+                    for &triangle in &self.triangles[self.offsets[range]..self.offsets[range + 1]] {
+                        if marks[triangle] != stamp {
+                            marks[triangle] = stamp;
+                            checked_push(&mut result, triangle)?;
+                        }
+                    }
+                }
+            }
+        }
+        let query_work = result.len();
+        Ok((result, query_work))
+    }
+}
+
 fn compare_vertex(a: &Vec3, b: &Vec3) -> std::cmp::Ordering {
     // Normalize signed zero so equivalent coordinates have the same ordering.
     let canonical = |v: f64| if v == 0.0 { 0.0 } else { v };
@@ -666,15 +833,11 @@ impl PreparedGeometry {
         flow: impl Fn(Vec3) -> Result<Vec3, GeometryError>,
     ) -> Result<PreparedSurfacePatches, GeometryError> {
         let total = surface_triangle_count(instances)?;
-        let preflight = total
-            .checked_mul(total)
-            .and_then(|pairs| pairs.checked_mul(128)?.checked_add(total.checked_mul(8)?));
         let preprocessing = total
             .checked_mul(16)
             .and_then(|n| n.checked_mul(usize::BITS as usize - total.leading_zeros() as usize + 1));
-        let work = preflight.and_then(|n| n.checked_add(preprocessing?));
-        check_surface_work(work, max_work)?;
-        let work = work.ok_or(GeometryError::WorkBudgetExceeded)?;
+        check_surface_work(preprocessing, max_work)?;
+        let mut work = preprocessing.ok_or(GeometryError::WorkBudgetExceeded)?;
         let Some(reference) = instances
             .iter()
             .min_by(|a, b| {
@@ -776,6 +939,13 @@ impl PreparedGeometry {
                 .then_with(|| compare_vertex(&a.normal, &b.normal))
                 .then_with(|| a.area.total_cmp(&b.area))
         });
+        let grid = TriangleGrid::build(&triangles, max_work.saturating_sub(work))?;
+        work = work
+            .checked_add(grid.triangles.len())
+            .ok_or(GeometryError::WorkBudgetExceeded)?;
+        check_surface_work(Some(work), max_work)?;
+        let mut marks = allocated(triangles.len(), 0u32)?;
+        let mut stamp = 0u32;
         let mut patches: Vec<PreparedSurfacePatch> = Vec::new();
         for (i, triangle) in triangles.iter().enumerate() {
             let [a, b, c] = triangle.vertices;
@@ -823,10 +993,20 @@ impl PreparedGeometry {
             let mut pieces = Vec::new();
             checked_push(&mut pieces, initial)?;
             let mut shadows = Vec::new();
-            for (j, blocker) in triangles.iter().enumerate() {
+            stamp = stamp
+                .checked_add(1)
+                .ok_or(GeometryError::WorkBudgetExceeded)?;
+            let (candidates, query_work) =
+                grid.candidates(triangle, upstream, &mut marks, stamp)?;
+            work = work
+                .checked_add(query_work)
+                .ok_or(GeometryError::WorkBudgetExceeded)?;
+            check_surface_work(Some(work), max_work)?;
+            for j in candidates {
                 if i == j {
                     continue;
                 }
+                let blocker = &triangles[j];
                 let Some(shadow) = visibility::Shadow::new(triangle, blocker, i, j, upstream)?
                 else {
                     continue;

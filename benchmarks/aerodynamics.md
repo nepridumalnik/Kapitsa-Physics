@@ -101,6 +101,14 @@ Visibility dominates this moderate workload (~12 ms versus ~0.27 ms for voxel
 preparation). That observation motivates measuring exposure separately; it does
 not establish universal scaling or show that SIMD alone addresses blocker work.
 
+The visibility implementation now builds a temporary, deterministic uniform grid
+of transformed source triangles for each preparation. Upstream queries conservatively
+walk the swept source bounds and deduplicate triangle candidates before the exact
+shadow predicates and clipping run. The index is charged to the caller's patch
+work budget and uses fallible allocation; it is deliberately not retained in
+pose-dependent geometry caches. This is an expected scalability rationale, not a
+new measured result.
+
 ## Approximation and coverage limits
 
 See [physical models and references](../docs/aerodynamics.md),
