@@ -78,6 +78,11 @@ fn triangle_grid_candidates_are_conservative_for_axis_and_diagonal_sweeps() {
         ),
     ];
     let grid = TriangleGrid::build(&triangles, 10_000).unwrap();
+    assert!(matches!(
+        TriangleGrid::build(&triangles, grid.build_work - 1),
+        Err(GeometryError::WorkBudgetExceeded)
+    ));
+    assert!(TriangleGrid::build(&triangles, grid.build_work).is_ok());
     let mut marks = vec![0; triangles.len()];
     for (stamp, direction) in [
         Vec3::X,
@@ -118,8 +123,27 @@ fn triangle_grid_candidates_are_conservative_for_axis_and_diagonal_sweeps() {
                 .iter()
                 .flat_map(|t| t.vertices)
                 .fold(Vec3::splat(f64::NEG_INFINITY), |v, p| v.max(p));
-            let lower = source_min.min(global_min);
-            let upper = source_max.max(global_max);
+            let direction = components(direction);
+            let (source_min, source_max, global_min, global_max) = (
+                components(source_min),
+                components(source_max),
+                components(global_min),
+                components(global_max),
+            );
+            let lower: [f64; 3] = std::array::from_fn(|axis| {
+                if direction[axis] < 0.0 {
+                    global_min[axis]
+                } else {
+                    source_min[axis]
+                }
+            });
+            let upper: [f64; 3] = std::array::from_fn(|axis| {
+                if direction[axis] > 0.0 {
+                    global_max[axis]
+                } else {
+                    source_max[axis]
+                }
+            });
             let candidate_min = candidate
                 .vertices
                 .iter()
@@ -128,12 +152,40 @@ fn triangle_grid_candidates_are_conservative_for_axis_and_diagonal_sweeps() {
                 .vertices
                 .iter()
                 .fold(Vec3::splat(f64::NEG_INFINITY), |v, &p| v.max(p));
+            let (candidate_max, candidate_min, lower, upper) = (
+                components(candidate_max),
+                components(candidate_min),
+                lower,
+                upper,
+            );
             let intersects = (0..3).all(|axis| {
                 candidate_max[axis] >= lower[axis] && candidate_min[axis] <= upper[axis]
             });
             !intersects || candidates.contains(&index)
         }));
     }
+}
+
+#[test]
+fn triangle_grid_counts_empty_buckets_toward_query_budget() {
+    let grid = TriangleGrid {
+        origin: Vec3::ZERO,
+        cell_size: Vec3::ONE,
+        dimensions: [3, 1, 1],
+        offsets: vec![0; 4],
+        triangles: vec![],
+        build_work: 0,
+    };
+    let source = visibility_triangle(Vec3::ZERO, Vec3::Y * 0.1, Vec3::Z * 0.1);
+    assert_eq!(
+        grid.candidates(&source, Vec3::X, &mut [], 1, 2)
+            .unwrap_err(),
+        GeometryError::WorkBudgetExceeded
+    );
+    assert_eq!(
+        grid.candidates(&source, Vec3::X, &mut [], 1, 3).unwrap().1,
+        3
+    );
 }
 
 #[test]

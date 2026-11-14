@@ -1542,7 +1542,13 @@ mod tests {
 
         let previous_steps = simulation.metrics().total_steps;
         simulation.start().expect("restart");
-        sleep(Duration::from_millis(25)).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while simulation.metrics().total_steps <= previous_steps {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("simulation advances after restart");
         simulation.stop().await.expect("second stop");
         assert!(simulation.metrics().total_steps > previous_steps);
     }

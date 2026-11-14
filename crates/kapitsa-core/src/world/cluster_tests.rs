@@ -1,6 +1,5 @@
 use super::*;
 use crate::{
-    aerodynamics::hull::HullSection,
     aerodynamics::{AerodynamicProperties, AerodynamicTarget, Aerodynamics},
     cluster::{
         ClusterPart, ClusterPartDesc, RigidCluster, Weld, WeldDesc, WeldStiffness, WeldStrength,

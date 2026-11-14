@@ -262,7 +262,7 @@ body.set_aerodynamics(Aerodynamics::Simple(AerodynamicProperties::new(
 )?));
 ```
 
-`Aerodynamics::None` is the default. `Mesh(TriangleMesh)` owns its mesh by value and `Colliders` selects attached collision geometry. In this API migration stage these two geometry modes are configuration only: aerodynamic evaluation in a non-vacuum atmosphere reports an explicit unsupported-model error, rather than silently returning zero loads. They are not yet a FAR-equivalent physical model. See [physical formulas and their limits](docs/aerodynamics.md).
+`Aerodynamics::None` is the default. `Mesh(TriangleMesh)` owns its mesh by value and `Colliders` selects attached collision geometry. These modes prepare geometry for pressure evaluation during world stepping. The current Newtonian pressure model requires Mach >= 5 and a sound speed supplied by the atmosphere or world fallback; it is not a FAR-equivalent model. See [physical formulas and their limits](docs/aerodynamics.md).
 
 `RigidBody` is no longer `Copy` or `Clone`. Its `motion()` method returns a compact `BodyMotion` snapshot containing motion, mass, accumulated forces and CCD mode, but not aerodynamic configuration or geometry. Physics staging and runtime command batches copy only this snapshot; they do not clone meshes.
 
@@ -297,7 +297,7 @@ radius, then follows `rho = reference_density * exp(-altitude / scale_height)`.
 At or beyond `reference_radius + height`, density is zero and the profile is not
 evaluated. Optional smoothing multiplies density by `t?(3 - 2t)` over the final
 transition width, where `t` is the remaining distance to the boundary divided by
-that width and clamped to `[0, 1]`. Wind is constant throughout the sphere.
+that width and clamped to `[0, 1]`. Wind is constant by default; `wind_at_top` optionally sets a world-space wind at the outer radius, linearly interpolated with altitude from `wind` at the reference radius.
 `Atmosphere::state_at(point)` exposes the same local density and wind used by the
 simulation. Pressure, temperature and gas composition are not modeled.
 

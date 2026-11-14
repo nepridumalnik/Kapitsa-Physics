@@ -50,6 +50,7 @@ impl fmt::Debug for Aerodynamics {
 pub struct AtmosphericState {
     density: f64,
     wind_velocity: Vec3,
+    sound_speed: Option<f64>,
 }
 
 impl AtmosphericState {
@@ -64,6 +65,7 @@ impl AtmosphericState {
         Ok(Self {
             density,
             wind_velocity,
+            sound_speed: None,
         })
     }
 
@@ -73,6 +75,11 @@ impl AtmosphericState {
 
     pub fn wind_velocity(self) -> Vec3 {
         self.wind_velocity
+    }
+
+    /// Optional locally sampled speed of sound in m/s.
+    pub fn sound_speed(self) -> Option<f64> {
+        self.sound_speed
     }
 }
 
