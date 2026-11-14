@@ -1057,6 +1057,7 @@ fn mesh_pressure_errors_preserve_cause_and_motion_in_all_world_paths() {
 #[test]
 fn wing_world_loads_and_failures_match_between_step_paths() {
     use crate::aerodynamics::{wing::{FiniteWing, WingSurface, WingError}, AerodynamicsError};
+    let mut reference = None;
     for sharded in [false, true] {
         for speed in [50.0, 500.0] {
             let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
@@ -1078,11 +1079,30 @@ fn wing_world_loads_and_failures_match_between_step_paths() {
                 // Lift can have a positive X component while descending;
                 // drag must remove energy, not necessarily reduce world X.
                 assert!(velocity.length_squared() < Vec3::new(50.0, 0.0, -5.0).length_squared());
+                let motion = world.body(id).unwrap().motion();
+                if let Some(expected) = reference { assert_eq!(motion, expected); }
+                else { reference = Some(motion); }
             } else {
                 assert_eq!(result, Err(super::StepError::Aerodynamics { body_id: id, cause: AerodynamicsError::Wing(WingError::UnsupportedFlow) }));
                 assert_eq!(world.body(id).unwrap().motion(), before);
             }
         }
     }
+}
+
+
+#[test]
+fn wing_cluster_rejection_preserves_body_and_configuration() {
+    use crate::aerodynamics::wing::{FiniteWing, WingSurface};
+    let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
+    body.set_aerodynamics(Aerodynamics::Wing(WingSurface::new(
+        FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap(), Transform::identity(), 2.0,
+    ).unwrap()));
+    let mut world = PhysicsWorld::new();
+    let id = world.add_body(body).unwrap();
+    let before = world.body(id).unwrap().motion();
+    assert_eq!(world.enable_cluster(id), Err(super::ClusterError::UnsupportedGeometry));
+    assert_eq!(world.body(id).unwrap().motion(), before);
+    assert!(matches!(world.body(id).unwrap().aerodynamics(), Aerodynamics::Wing(_)));
 }
 
