@@ -902,7 +902,7 @@ fn symmetric_wings_sum_loads_and_cancel_roll_moment() {
 }
 
 #[test]
-fn wing_cluster_rejection_preserves_body_and_configuration() {
+fn wing_cluster_transfer_preserves_body_and_configuration() {
     use crate::aerodynamics::wing::{FiniteWing, WingSurface};
     let mut body = RigidBody::new_dynamic(
         Transform::identity(),
@@ -920,15 +920,20 @@ fn wing_cluster_rejection_preserves_body_and_configuration() {
     let mut world = PhysicsWorld::new();
     let id = world.add_body(body).unwrap();
     let before = world.body(id).unwrap().motion();
-    assert_eq!(
-        world.enable_cluster(id),
-        Err(super::ClusterError::UnsupportedGeometry)
-    );
+    let original = match world.body(id).unwrap().aerodynamics() {
+        Aerodynamics::Wing(wing) => *wing,
+        _ => panic!("wing"),
+    };
+    let root = world.enable_cluster(id).unwrap();
     assert_eq!(world.body(id).unwrap().motion(), before);
     assert!(matches!(
         world.body(id).unwrap().aerodynamics(),
-        Aerodynamics::Wing(_)
+        Aerodynamics::None
     ));
+    assert_eq!(
+        world.part_aerodynamic_wings(root),
+        Some([original].as_slice())
+    );
 }
 
 #[test]

@@ -72,6 +72,7 @@ mod aerodynamics {
             let mut assembly_cache = None;
             for (dense, entry) in world.bodies.iter() {
                 if entry.body.aerodynamic_surfaces.is_empty()
+                    && !super::assembly_aerodynamics::wings_configured(entry, &world.parts)
                     && matches!(
                         entry.body.aerodynamics(),
                         crate::aerodynamics::Aerodynamics::None
@@ -107,6 +108,7 @@ mod aerodynamics {
                     },
                     &mut body,
                     &world.parts,
+                    entry.cluster.as_ref(),
                     None,
                     patches.as_ref(),
                     world.mesh_sound_speed,
@@ -128,6 +130,8 @@ mod gravity_fields_tests;
 mod id;
 #[cfg(feature = "bench-internals")]
 mod metrics;
+#[cfg(test)]
+mod part_wings_tests;
 mod query;
 
 pub use aerodynamics::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
@@ -1661,6 +1665,7 @@ impl PhysicsWorld {
         body_id: BodyId,
         body: &mut BodyMotion,
         parts: &DensePool<ClusterPart>,
+        cluster: Option<&RigidCluster>,
         dt: Option<f64>,
         mesh_patches: Option<&crate::aerodynamics::geometry::PreparedSurfacePatches>,
         mesh_sound_speed: f64,
@@ -1732,11 +1737,28 @@ impl PhysicsWorld {
             crate::aerodynamics::Aerodynamics::Wings(surfaces) => surfaces,
             _ => &[],
         };
-        for surface in wings {
-            let point = body
+        let part_wings = cluster
+            .into_iter()
+            .flat_map(|cluster| cluster.parts())
+            .map(|id| {
+                parts
+                    .get(id.dense)
+                    .filter(|part| id.world == body_id.world && part.body() == body_id)
+                    .ok_or_else(error)
+            });
+        let mut evaluate_wing = |surface: &crate::aerodynamics::wing::WingSurface,
+                                 local: crate::transform::Transform|
+         -> Result<(), StepError> {
+            let transform = body
                 .state()
                 .transform()
-                .transform_point(surface.local_transform().translation());
+                .compose(&local)
+                .map_err(|_| error())?;
+            let local_center = local
+                .inverse()
+                .map_err(|_| error())?
+                .transform_point(body.physics().mass().ok_or_else(error)?.center_of_mass());
+            let point = transform.transform_point(surface.local_transform().translation());
             if !point.is_finite() {
                 return Err(error());
             }
@@ -1747,8 +1769,8 @@ impl PhysicsWorld {
                 let flow = crate::aerodynamics::pressure::PressureFlow {
                     atmosphere,
                     sound_speed: mesh_sound_speed,
-                    transform: body.state().transform(),
-                    center_of_mass: body.physics().mass().ok_or_else(error)?.center_of_mass(),
+                    transform,
+                    center_of_mass: local_center,
                     linear_velocity: body.state().linear_velocity(),
                     angular_velocity: body.state().angular_velocity(),
                 };
@@ -1760,6 +1782,16 @@ impl PhysicsWorld {
                     })?;
                 body.apply_force(wrench.force).map_err(|_| error())?;
                 body.apply_torque(wrench.moment).map_err(|_| error())?;
+            }
+            Ok(())
+        };
+        for surface in wings {
+            evaluate_wing(surface, crate::transform::Transform::identity())?;
+        }
+        for part in part_wings {
+            let part = part?;
+            for surface in &part.aerodynamic_wings {
+                evaluate_wing(surface, part.local_transform())?;
             }
         }
         let mut drag_torque = Vec3::ZERO;
@@ -2027,6 +2059,7 @@ impl PhysicsWorld {
 
         for (dense_id, entry) in self.bodies.iter_mut() {
             if (entry.body.aerodynamic_surfaces.is_empty()
+                && !assembly_aerodynamics::wings_configured(entry, &self.parts)
                 && matches!(
                     entry.body.aerodynamics(),
                     crate::aerodynamics::Aerodynamics::None
@@ -2254,6 +2287,7 @@ impl PhysicsWorld {
                                     update.id,
                                     &mut update.prepared,
                                     &self.parts,
+                                    entry.cluster.as_ref(),
                                     Some(dt),
                                     update.mesh_patches.as_ref(),
                                     self.mesh_sound_speed,
@@ -3440,6 +3474,7 @@ impl PhysicsWorld {
                             && !matches!(atmosphere, Atmosphere::Vacuum)
                             && let Some(entry) = self.bodies.get(step.body_id.dense)
                             && (!entry.body.aerodynamic_surfaces.is_empty()
+                                || assembly_aerodynamics::wings_configured(entry, &self.parts)
                                 || !matches!(
                                     entry.body.aerodynamics(),
                                     crate::aerodynamics::Aerodynamics::None
@@ -3456,6 +3491,7 @@ impl PhysicsWorld {
                                 step.body_id,
                                 &mut step.prepared,
                                 &self.parts,
+                                entry.cluster.as_ref(),
                                 dt,
                                 self.aerodynamics_body_updates
                                     .iter()

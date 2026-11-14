@@ -30,6 +30,38 @@ pub(super) struct AssemblyAerodynamics {
 }
 
 impl PhysicsWorld {
+    /// Replaces explicit finite wings in the stable part-local frame.
+    /// Wing transforms map wing coordinates to part coordinates, independently
+    /// of mass/COM edits. Empty clears wings. Loads are additive to hull and
+    /// other explicit surfaces: callers must avoid counting a contribution twice.
+    /// No interference or automatic hull/wing exclusion is inferred.
+    /// Ownership follows the stable PartId through topology edits; no solver
+    /// body is created. The asynchronous runtime has no setter for this API yet.
+    pub fn set_part_aerodynamic_wings(
+        &mut self,
+        part: PartId,
+        wings: Vec<crate::aerodynamics::wing::WingSurface>,
+    ) -> Result<(), ClusterError> {
+        let body = self
+            .cluster_part(part)
+            .ok_or(ClusterError::InvalidPartId)?
+            .body();
+        self.parts
+            .get_mut(part.dense)
+            .ok_or(ClusterError::InvalidPartId)?
+            .aerodynamic_wings = wings;
+        self.invalidate_body_edit(body);
+        Ok(())
+    }
+
+    /// Explicit wings in part-local physical coordinates, or None for a stale ID.
+    pub fn part_aerodynamic_wings(
+        &self,
+        part: PartId,
+    ) -> Option<&[crate::aerodynamics::wing::WingSurface]> {
+        Some(&self.cluster_part(part)?.aerodynamic_wings)
+    }
+
     /// Replaces the part's geometry with a Mesh in its local frame.
     /// `None` disables geometric loads. Explicit surfaces remain additive;
     /// configure each physical contribution once to avoid duplicated loads.
@@ -113,6 +145,16 @@ impl PhysicsWorld {
             PartGeometry::Colliders => None,
         }
     }
+}
+
+pub(super) fn wings_configured(entry: &BodyEntry, parts: &DensePool<ClusterPart>) -> bool {
+    entry.cluster.as_ref().is_some_and(|cluster| {
+        cluster.parts().iter().any(|id| {
+            parts
+                .get(id.dense)
+                .is_some_and(|part| !part.aerodynamic_wings.is_empty())
+        })
+    })
 }
 
 pub(super) fn configured(

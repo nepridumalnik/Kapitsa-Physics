@@ -143,11 +143,11 @@ impl PhysicsWorld {
         if body_entry.cluster.is_some() {
             return Err(ClusterError::AlreadyClustered);
         }
-        if matches!(
-            body_entry.body.aerodynamics(),
-            Aerodynamics::Wing(_) | Aerodynamics::Wings(_)
-        ) {
-            return Err(ClusterError::UnsupportedGeometry);
+        let mut root_wings = Vec::new();
+        if matches!(body_entry.body.aerodynamics(), Aerodynamics::Wing(_)) {
+            root_wings
+                .try_reserve(1)
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         }
         let mesh_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::Mesh(_));
         let collider_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::Colliders);
@@ -188,6 +188,7 @@ impl PhysicsWorld {
                 local_transform: Transform::identity(),
                 mass,
                 colliders,
+                aerodynamic_wings: Vec::new(),
             })
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let part = PartId {
@@ -222,7 +223,12 @@ impl PhysicsWorld {
                 entry.mesh_aerodynamics = None;
                 entry.collider_aerodynamic_mesh = None;
             }
+            Aerodynamics::Wing(wing) => root_wings.push(wing),
+            Aerodynamics::Wings(wings) => root_wings = wings,
             model => entry.body.set_primary_aerodynamics(model),
+        }
+        if let Some(root) = self.parts.get_mut(part.dense) {
+            root.aerodynamic_wings = root_wings;
         }
         self.body_revision = self.body_revision.wrapping_add(1);
         Ok(part)
@@ -396,6 +402,7 @@ impl PhysicsWorld {
                 local_transform: desc.local_transform,
                 mass: desc.mass,
                 colliders: Vec::new(),
+                aerodynamic_wings: Vec::new(),
             })
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let part = PartId {

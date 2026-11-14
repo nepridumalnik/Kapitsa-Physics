@@ -37,7 +37,7 @@ impl std::fmt::Display for WingError {
 impl std::error::Error for WingError {}
 
 /// Explicit parameters, not inferred from voxel geometry.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FiniteWing {
     aspect_ratio: f64,
     efficiency: f64,
@@ -54,7 +54,7 @@ pub struct WingCoefficients {
 
 /// One explicitly configured wing. Transform maps wing coordinates to the
 /// stable body-local frame; its origin is the force application point.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WingSurface {
     model: FiniteWing,
     local_transform: crate::transform::Transform,

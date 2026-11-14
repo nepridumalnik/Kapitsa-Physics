@@ -24,6 +24,7 @@ fn part(world: &mut PhysicsWorld, body: BodyId) -> PartId {
         local_transform: Transform::identity(),
         mass,
         colliders: Vec::new(),
+        aerodynamic_wings: Vec::new(),
     }) {
         Ok(value) => value,
         Err(error) => panic!("part: {error}"),
