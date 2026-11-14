@@ -766,6 +766,22 @@ fn collider_pressure_cache_invalidation_and_sharded_parity()
                 .last_prepared()
                 .ok_or("prepared")?
                 .1 as *const _;
+            let unrelated = world.add_body(RigidBody::new_static(Transform::identity()))?;
+            world.set_aerodynamics(unrelated, Aerodynamics::None)?;
+            let current_transform = world.body(id).ok_or("body")?.state().transform();
+            world
+                .body_mut(id)
+                .ok_or("body")?
+                .set_transform(current_transform)?;
+            world
+                .body_mut(id)
+                .ok_or("body")?
+                .set_mass(MassProperties::new(
+                    100.0,
+                    Vec3::Y * 0.1,
+                    Mat3::IDENTITY * 100.0,
+                )?)?;
+            world.body_mut(id).ok_or("body")?.set_mass(mass)?;
             step(&mut world)?;
             let entry = world.bodies.get(id.dense).ok_or("entry")?;
             assert_eq!(
@@ -788,6 +804,34 @@ fn collider_pressure_cache_invalidation_and_sharded_parity()
                     .ok_or("prepared")?
                     .1 as *const _
             );
+            let previous_identity = world
+                .bodies
+                .get(id.dense)
+                .ok_or("entry")?
+                .mesh_aerodynamics
+                .as_ref()
+                .ok_or("cache")?
+                .identity
+                .clone()
+                .ok_or("identity")?;
+            let mut replacement = RigidBody::from_motion(world.body(id).ok_or("body")?.motion());
+            replacement.set_aerodynamics(Aerodynamics::Colliders);
+            world.replace_body_state(id, replacement)?;
+            step(&mut world)?;
+            let current_identity = world
+                .bodies
+                .get(id.dense)
+                .ok_or("entry")?
+                .mesh_aerodynamics
+                .as_ref()
+                .ok_or("cache")?
+                .identity
+                .as_ref()
+                .ok_or("identity")?;
+            assert!(!std::sync::Arc::ptr_eq(
+                &previous_identity,
+                current_identity
+            ));
             outcomes.push(world.body(id).ok_or("body")?.motion());
             world.set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)?;
             assert!(
@@ -910,6 +954,20 @@ fn sphere_samples_surface_position_in_both_world_paths() -> Result<(), Box<dyn s
             world.set_atmosphere(Atmosphere::Vacuum);
             assert_eq!(world.atmosphere(), Atmosphere::Vacuum);
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn mesh_sound_speed_rejects_invalid_changes() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    world.set_mesh_sound_speed(123.0)?;
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            world.set_mesh_sound_speed(invalid),
+            Err(crate::aerodynamics::pressure::PressureError::InvalidSoundSpeed)
+        );
+        assert_eq!(world.mesh_sound_speed(), 123.0);
     }
     Ok(())
 }

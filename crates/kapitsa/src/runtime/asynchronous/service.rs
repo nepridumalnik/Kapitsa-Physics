@@ -161,6 +161,7 @@ impl OwnedRuntime {
 #[derive(Default)]
 pub struct SimulationBuilder {
     atmosphere: Atmosphere,
+    mesh_sound_speed: Option<f64>,
     config: SimulationConfig,
     invalid_worker_count: bool,
 }
@@ -187,6 +188,15 @@ impl SimulationBuilder {
     /// ```
     pub fn atmosphere(mut self, atmosphere: Atmosphere) -> Self {
         self.atmosphere = atmosphere;
+        self
+    }
+
+    /// Sets uniform Mesh/Colliders sound speed in m/s (compatibility default: 340).
+    /// Supply a finite positive value matching the selected atmosphere.
+    /// Invalid values are rejected when spawning, before starting any service.
+    /// Example: `Simulation::builder().mesh_sound_speed(295.0)`.
+    pub fn mesh_sound_speed(mut self, sound_speed: f64) -> Self {
+        self.mesh_sound_speed = Some(sound_speed);
         self
     }
 
@@ -217,6 +227,11 @@ impl SimulationBuilder {
         let _entered = runtime.enter();
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(self.atmosphere);
+        if let Some(sound_speed) = self.mesh_sound_speed {
+            world
+                .set_mesh_sound_speed(sound_speed)
+                .map_err(SimulationError::InvalidMeshSoundSpeed)?;
+        }
         let mut simulation = Simulation::new_with_world(world, self.config)?;
         simulation.start()?;
         Ok(simulation)
@@ -233,9 +248,14 @@ impl SimulationBuilder {
         self.config
             .validate()
             .map_err(SimulationError::InvalidConfig)?;
-        let (owned_runtime, runtime) = OwnedRuntime::start()?;
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(self.atmosphere);
+        if let Some(sound_speed) = self.mesh_sound_speed {
+            world
+                .set_mesh_sound_speed(sound_speed)
+                .map_err(SimulationError::InvalidMeshSoundSpeed)?;
+        }
+        let (owned_runtime, runtime) = OwnedRuntime::start()?;
         let runner =
             StepRunner::new_with_executor(world, self.config, RayonExecutor::from_pool(pool))?;
         let mut simulation = Simulation::from_runner(runner, runtime)?;
@@ -253,6 +273,7 @@ pub enum SimulationError {
     SimulationTimeOverflow,
     InvalidTimeMultiplier,
     InvalidWorkerCount,
+    InvalidMeshSoundSpeed(kapitsa_core::aerodynamics::pressure::PressureError),
     AlreadyRunning,
     TaskRequiresStop,
     Physics(kapitsa_core::world::StepError),
@@ -265,6 +286,9 @@ pub enum SimulationError {
 impl std::fmt::Display for SimulationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidMeshSoundSpeed(error) => {
+                write!(formatter, "invalid mesh flow configuration: {error}")
+            }
             Self::InvalidConfig(error) => write!(formatter, "invalid simulation config: {error}"),
             Self::MissingRuntime => {
                 formatter.write_str("starting a physics service requires a Tokio runtime")
@@ -295,6 +319,7 @@ impl std::error::Error for SimulationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidConfig(error) => Some(error),
+            Self::InvalidMeshSoundSpeed(error) => Some(error),
             Self::Physics(error) => Some(error),
             _ => None,
         }
@@ -1196,7 +1221,9 @@ mod tests {
             Atmosphere::Vacuum
         );
         for rayon in [false, true] {
-            let builder = super::Simulation::builder().atmosphere(atmosphere);
+            let builder = super::Simulation::builder()
+                .atmosphere(atmosphere)
+                .mesh_sound_speed(295.0);
             let mut simulation = if rayon {
                 builder.spawn_on_rayon(std::sync::Arc::new(
                     rayon::ThreadPoolBuilder::new().num_threads(1).build()?,
@@ -1210,6 +1237,28 @@ mod tests {
                 .as_ref()
                 .ok_or("missing stopped simulation")?;
             assert_eq!(runner.world()?.atmosphere(), atmosphere);
+            assert_eq!(runner.world()?.mesh_sound_speed(), 295.0);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_invalid_sound_speed_on_both_executors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = std::sync::Arc::new(rayon::ThreadPoolBuilder::new().num_threads(1).build()?);
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            for rayon in [false, true] {
+                let builder = super::Simulation::builder().mesh_sound_speed(invalid);
+                let result = if rayon {
+                    builder.spawn_on_rayon(pool.clone())
+                } else {
+                    builder.spawn_on_tokio(&tokio::runtime::Handle::current())
+                };
+                assert!(matches!(
+                    result,
+                    Err(super::SimulationError::InvalidMeshSoundSpeed(_))
+                ));
+            }
         }
         Ok(())
     }

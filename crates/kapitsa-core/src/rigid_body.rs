@@ -32,6 +32,7 @@ use crate::{mass::MassProperties, transform::Transform};
 pub struct RigidBody {
     motion: BodyMotion,
     aerodynamics: crate::aerodynamics::Aerodynamics,
+    pub(crate) aerodynamic_geometry_identity: Option<std::sync::Arc<()>>,
     pub(crate) aerodynamic_surfaces: Vec<crate::aerodynamics::AerodynamicSurface>,
 }
 
@@ -52,6 +53,7 @@ impl RigidBody {
         Self {
             motion,
             aerodynamics: crate::aerodynamics::Aerodynamics::None,
+            aerodynamic_geometry_identity: None,
             aerodynamic_surfaces: Vec::new(),
         }
     }
@@ -68,6 +70,12 @@ impl RigidBody {
         &mut self,
         aerodynamics: crate::aerodynamics::Aerodynamics,
     ) {
+        self.aerodynamic_geometry_identity = matches!(
+            aerodynamics,
+            crate::aerodynamics::Aerodynamics::Mesh(_)
+                | crate::aerodynamics::Aerodynamics::Colliders
+        )
+        .then(|| std::sync::Arc::new(()));
         self.aerodynamics = aerodynamics;
     }
 

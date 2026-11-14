@@ -147,6 +147,7 @@ use crate::{
 };
 
 struct MeshAerodynamics {
+    identity: Option<std::sync::Arc<()>>,
     cache: crate::aerodynamics::cache::PreparedGeometryCache,
     config: crate::aerodynamics::geometry::GeometryConfig,
     sound_speed: f64,
@@ -407,6 +408,26 @@ impl PhysicsWorld {
 
     pub fn set_atmosphere(&mut self, atmosphere: Atmosphere) {
         self.atmosphere = atmosphere;
+    }
+
+    /// Sets the uniform sound speed used by Mesh/Colliders, in m/s.
+    /// Must be finite and positive and match the configured atmospheric medium.
+    /// The compatibility default is 340 m/s; density alone cannot determine it.
+    /// This changes Mach classification without invalidating local geometry.
+    pub fn set_mesh_sound_speed(
+        &mut self,
+        sound_speed: f64,
+    ) -> Result<(), crate::aerodynamics::pressure::PressureError> {
+        if !sound_speed.is_finite() || sound_speed <= 0.0 {
+            return Err(crate::aerodynamics::pressure::PressureError::InvalidSoundSpeed);
+        }
+        self.mesh_sound_speed = sound_speed;
+        Ok(())
+    }
+
+    /// Returns the uniform Mesh/Colliders sound speed in m/s.
+    pub fn mesh_sound_speed(&self) -> f64 {
+        self.mesh_sound_speed
     }
 
     pub fn aerodynamics(&self, id: BodyId) -> Option<&crate::aerodynamics::Aerodynamics> {
@@ -1956,6 +1977,19 @@ impl PhysicsWorld {
                     cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
                 });
             }
+            if entry.mesh_aerodynamics.as_ref().is_some_and(|prepared| {
+                match (
+                    &prepared.identity,
+                    &entry.body.aerodynamic_geometry_identity,
+                ) {
+                    (Some(cached), Some(current)) => !std::sync::Arc::ptr_eq(cached, current),
+                    (None, None) => false,
+                    _ => true,
+                }
+            }) {
+                entry.mesh_aerodynamics = None;
+                entry.collider_aerodynamic_mesh = None;
+            }
             let mut mesh_patches = None;
             // Only the primary geometry samples the COM. Additional surfaces
             // still evaluate their own positions, including when the COM is in vacuum.
@@ -2034,6 +2068,7 @@ impl PhysicsWorld {
                 let prepared = entry
                     .mesh_aerodynamics
                     .get_or_insert_with(|| MeshAerodynamics {
+                        identity: entry.body.aerodynamic_geometry_identity.clone(),
                         cache: crate::aerodynamics::cache::PreparedGeometryCache::default(),
                         config,
                         sound_speed: self.mesh_sound_speed,
@@ -2043,7 +2078,7 @@ impl PhysicsWorld {
                 prepared.sound_speed = self.mesh_sound_speed;
                 let key = crate::aerodynamics::cache::GeometryCacheKey {
                     body: body_id,
-                    geometry_version: self.body_revision,
+                    geometry_version: 0,
                     config_version: 1,
                 };
                 let geometry = prepared.cache.prepare(key, mesh, config).map_err(|_| {
