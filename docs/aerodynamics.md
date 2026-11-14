@@ -36,7 +36,7 @@ Overlaps count once; the lowest `GeometryOwner` wins attribution ties, independe
 
 `Reject` requires paired oppositely directed indexed edges and nonzero signed volume. `SurfaceOnly` rasterizes nonclosed meshes without interior filling. By default, seams must be welded in the source index topology; `GeometryConfig::weld_tolerance` enables an explicit, per-instance positional welding pass used only for the closure check. It never mutates source vertices, never welds across instances or owners, and can change topology only within the configured tolerance. Self-intersections are not detected; sealed cavities use solid-fill semantics. Thin surfaces are preserved, but their physical thickness is not reconstructed. Grid-face normals remain axis-aligned and do not converge to smooth triangle normals for pressure integration.
 
-`max_cells` and `max_work` are mandatory budgets, with hard ceilings of 1,048,576 cells and 100,000,000 work units. Preparation bounds triangle/box tests, input vertex scans and per-instance cell scans before allocating the grid; edge closure sorting adds `O(triangles log triangles)` work. This deliberately simple scalar reference scans the full grid per triangle and is not yet optimized for large ships. Allocation failures and invalid/unrepresentable input are explicit errors. This preparation primitive supplies no SIMD or background cache publication; world force integration and collider conversion are described below. World movement and center-of-mass edits do not change the prepared local geometry; construction edits require an explicit new preparation.
+`max_cells` and `max_work` are mandatory budgets, with hard ceilings of 1,048,576 cells and 100,000,000 work units. Preparation bounds triangle/box tests, input vertex scans and per-instance cell scans before allocating the grid; edge closure sorting adds `O(triangles log triangles)` work. Triangle/box tests are restricted to each triangle's conservative grid-index bounds; per-instance occupancy and flood-fill passes still traverse the grid. The scalar baseline is measured in [the aerodynamic benchmark report](../benchmarks/aerodynamics.md). Allocation failures and invalid/unrepresentable input are explicit errors. This preparation primitive supplies no SIMD or background cache publication; world force integration and collider conversion are described below. World movement and center-of-mass edits do not change the prepared local geometry; construction edits require an explicit new preparation.
 
 References for geometric concepts: [Voxel](https://en.wikipedia.org/wiki/Voxel), [Hyperplane separation theorem — separating axis theorem](https://en.wikipedia.org/wiki/Hyperplane_separation_theorem), [Flood fill](https://en.wikipedia.org/wiki/Flood_fill). No FAR implementation code is used.
 
@@ -137,9 +137,10 @@ finite-span slope `a = a0 / (1 + a0 / (pi e AR))`, and induced drag
 `CL² / (pi e AR)`, plus caller-specified profile drag. Aspect ratio, span
 efficiency, zero-lift angle and attached-flow angle limit are explicit inputs.
 Mach above 0.3 or angles beyond that limit return `UnsupportedFlow`; no stall
-or compressibility continuation is implied. This primitive does not yet apply
-world loads, replace `Simple` lift, or infer wings from meshes. The finite-span
-slope relation is the classical lifting-line approximation, not a FAR code port.
+or compressibility continuation is implied. `WingSurface` uses this primitive
+for the world loads described above; it does not replace `Simple` lift or infer
+wings from meshes. The finite-span slope relation is the classical lifting-line
+approximation, not a FAR code port.
 
 For a thin symmetric two-dimensional airfoil at small angle of attack, `c_l = 2 pi alpha`, with `alpha` in radians. More generally, `c_l = 2 pi (alpha - alpha_zero_lift)`.
 

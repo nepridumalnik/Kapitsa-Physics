@@ -1,0 +1,147 @@
+# Scalar aerodynamic baseline
+
+Recorded 2026-11-14 from production baseline `97e9f36`, with only the benchmark
+and relevant documentation added. No physics equations or production code changed.
+This is a pre-SIMD local comparison baseline, not a performance acceptance gate.
+
+## Reproduction and environment
+
+```powershell
+cargo bench -p kapitsa-core --bench aerodynamics
+```
+
+Source: [permanent benchmark](../crates/kapitsa-core/benches/aerodynamics.rs).
+It follows the neighboring [math baseline](math-baseline.md): harness-free Cargo
+bench target, `std::time::Instant`, seven samples, median and min/max, and
+`std::hint::black_box` at kernel input/output boundaries. It needs no extra
+dependencies or feature flags. Cargo's default optimized bench profile is used;
+there is no explicit target-cpu/native setting, SIMD kernel or parallel dispatch.
+
+- AMD Ryzen 9 7900X3D, 12 cores / 24 logical processors.
+- Windows 11 Pro 64-bit, version 10.0.26300.
+- `rustc 1.98.0 (88d9e12ae 2026-08-18)`, LLVM 22.1.8.
+- `cargo 1.98.0 (797e8a9bc 2026-08-05)`, target `x86_64-pc-windows-msvc`.
+- `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS` unset/empty.
+- Ordinary local run: no CPU affinity, frequency pinning or isolated-host control.
+
+Each kernel has three untimed warmup operations. All geometry/model construction
+and correctness assertions occur before timing. Each operation uses fixed inputs;
+only cache-miss geometry versions advance to force invalidation. Results are
+consumed through `black_box`. Timings include loop overhead, successful `Result`
+unwrapping and output destruction; allocating preparation includes allocation
+and freeing, not input construction. There are no timing assertions or arbitrary
+pass thresholds. Sample ranges are observed variability, not confidence intervals.
+
+## Workloads and untimed validation
+
+Both sizes use one deterministic open mesh instance, body ownership, identity
+transform and `SurfaceOnly`. Each tile contains a rear unit square at X=0,
+an exact coplanar duplicate, and an upstream unit square at X=1 offset by 0.5 in
+Y. Tiles are separated by 3 m in Y. Every square has two +X triangles. This
+exercises duplicate overlap removal, partial occlusion, clipping/triangulation,
+and unobstructed upstream geometry in the same workload, not merely a fully
+visible mesh. Uniform upstream direction is +X. Closure welding is disabled.
+
+Cell size is 0.25 m; budgets are 100,000 cells and 100,000,000 voxel/patch work
+units. Compatibility exposure epsilon is 0.01 m (it does not offset rays).
+
+| Size | Tiles | Input triangles | Grid dimensions | Cells / occupied | Visible patches | Exposed area | Wing surfaces |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| Small | 1 | 6 | 6 x 8 x 6 | 288 / 50 | 5 | 1.5 m² | 2 |
+| Moderate | 16 | 96 | 6 x 188 x 6 | 6768 / 800 | 80 | 24 m² | 32 |
+
+Before timing the executable verifies repeatable voxel and patch preparation,
+exact occupied count/volume (50 cells per tile), exposed area 1.5 per tile rather
+than unfiltered area 3, and physical +X normals. Cache checks establish equality
+with standalone preparation, retained pointer identity on a hit, and no current
+entry after a version change, followed by correct rebuilding.
+
+Pressure uses the prepared visible patches, density 1 kg/m³, sound speed 340 m/s,
+COM velocity (2000,0,0) m/s, angular velocity (0.1,0,0) rad/s, zero wind/COM,
+and identity pose. The expected force is (-4,000,000 * exposed_area,0,0) N;
+rotation adds transverse point velocity but does not change Newtonian normal
+pressure here. The moment is checked against the area-weighted patch-center
+cross-product sum. Visibility is not recomputed in this kernel.
+
+Wing loads use 2 or 32 symmetric explicit `WingSurface`s, each of area 1 m²,
+with aspect ratio 8, efficiency 0.8, profile drag 0.02, zero-lift angle 0,
+and attached limit 0.2 rad. Velocity is (60,0,-3) m/s, angular velocity
+(0,0.1,0) rad/s, and other atmospheric/pose settings match pressure. Symmetric
+Y offsets are parallel to the rotation axis, so each wing's point velocity is
+known and equal. Untimed checks compare the sum with the single `FiniteWing`
+force times surface count, require drag/positive lift and near-zero total moment.
+This measures surface transforms, point-flow evaluation, coefficient/force work
+and summation, not just the coefficient primitive.
+
+## Release measurements
+
+All values are **ns per whole operation**, not ns per triangle, patch or wing.
+
+| Kernel | Iterations/sample small / moderate | Small median | Small min–max | Moderate median | Moderate min–max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Voxel preparation | 100 / 10 | 14256.00 | 14182.00–14504.00 | 271460.00 | 267480.00–328570.00 |
+| Partial visibility | 100 / 10 | 16986.00 | 16597.00–20186.00 | 12010820.00 | 11709500.00–12358250.00 |
+| Cache hit | 100000 / 100000 | 7.59 | 7.44–8.81 | 7.54 | 7.54–7.69 |
+| Cache miss + preparation | 100 / 10 | 14538.00 | 14418.00–14612.00 | 279010.00 | 275470.00–280210.00 |
+| Prepared pressure | 10000 / 10000 | 544.07 | 543.02–554.51 | 8211.08 | 8176.47–8357.42 |
+| Finite-wing surfaces | 10000 / 10000 | 372.55 | 359.42–389.31 | 5667.14 | 5608.61–5893.17 |
+
+Voxel preparation invokes `PreparedGeometry::prepare`, including topology checks,
+rasterization and section construction. Partial visibility invokes
+`exposed_surface_patches` on already prepared geometry, including transformation,
+canonicalization, blocker processing and patch allocation, **without voxelization**.
+Cache hit times the public synchronous `prepare_instances` path, including
+request/config comparisons and ticket clone/drop. Cache miss changes the version
+on the same single-entry cache and includes voxel rebuilding, publication and
+replacement/destruction of the previous entry; it does **not** include visibility.
+Prepared pressure times `evaluate_prepared_mesh`; wings time a checked evaluator
+call per surface plus local wrench accumulation. No world stepping is timed.
+
+Visibility dominates this moderate workload (~12 ms versus ~0.27 ms for voxel
+preparation). That observation motivates measuring exposure separately; it does
+not establish universal scaling or show that SIMD alone addresses blocker work.
+
+## Approximation and coverage limits
+
+See [physical models and references](../docs/aerodynamics.md),
+[geometry implementation](../crates/kapitsa-core/src/aerodynamics/geometry.rs),
+[pressure](../crates/kapitsa-core/src/aerodynamics/pressure.rs), and
+[wing](../crates/kapitsa-core/src/aerodynamics/wing.rs). No math source was changed.
+
+- Open plates do not benchmark closed-solid flood fill, welding, curved collider
+  tessellation, assembly owner attribution, extreme predicates or large ships.
+  Moderate means 96 input triangles, not a production-complexity hull.
+- Occupied cells conservatively thicken the plates; volume is voxel bookkeeping,
+  not their physical volume. Pressure uses original-surface normals and areas,
+  never staircase voxel faces.
+- Public visibility uses one uniform direction. Rotation-dependent per-source
+  visibility used by world integration is not benchmarked. The chosen axial
+  pressure rotation leaves X-normal incidence unchanged; general rotational
+  quadrature and clipping validity require separate numerical tests.
+- Pressure is Newtonian hypersonic impact (Mach >= 5), not low-speed hull flow.
+  Wing evaluation is attached incompressible flow (Mach <= 0.3); no stall,
+  compressibility, interference or inferred wing geometry is included.
+- Repeated fixed data favors warm caches. Cache-miss timing is geometry-identity
+  invalidation, not a claim about CPU hardware cache misses. No cold-memory,
+  atmosphere lookup, world distribution, timestep integration, multithreading,
+  SIMD throughput or cross-machine target is established.
+
+## Verification
+
+The scoped formatting check and core checks passed:
+
+```powershell
+rustfmt --edition 2024 --check crates/kapitsa-core/benches/aerodynamics.rs
+cargo check -p kapitsa-core --all-targets
+cargo clippy -p kapitsa-core --all-targets -- -D warnings
+cargo test -p kapitsa-core aerodynamics
+cargo bench -p kapitsa-core --bench aerodynamics
+```
+
+The focused test command passed 113 tests (792 unrelated unit tests filtered
+out). The final release benchmark passed all untimed checks for both sizes and
+produced the table above. `cargo fmt --all -- --check` was also run; it fails on
+pre-existing formatting in `src/world.rs`, `src/world/cluster.rs` and
+`src/world/aerodynamics_tests.rs` under `kapitsa-core`. Incidental formatting
+changes there were discarded to preserve the benchmark-only scope. No production
+source changes are included. Workspace-wide checks remain the supervising stage.
