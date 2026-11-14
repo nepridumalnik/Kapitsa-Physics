@@ -633,54 +633,95 @@ fn geometry_modes_preserve_mesh_in_vacuum_and_reject_air_atomically() {
 
 #[test]
 fn mesh_pressure_errors_preserve_cause_and_motion_in_all_world_paths() {
-    use crate::{aerodynamics::{AerodynamicsError, pressure::PressureError}, shape::TriangleMesh, world::StepError};
+    use crate::{
+        aerodynamics::{AerodynamicsError, pressure::PressureError},
+        shape::TriangleMesh,
+        world::StepError,
+    };
     for sharded in [false, true] {
         for cluster in [false, true] {
             let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
             let mut body = RigidBody::new_dynamic(Transform::identity(), mass).unwrap();
             body.set_linear_velocity(Vec3::X * 100.0).unwrap();
-            body.set_aerodynamics(Aerodynamics::Mesh(TriangleMesh::new(
-                vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]],
-            ).unwrap()));
+            body.set_aerodynamics(Aerodynamics::Mesh(
+                TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]]).unwrap(),
+            ));
             let mut world = PhysicsWorld::new();
             let id = world.add_body(body).unwrap();
-            if cluster { world.enable_cluster(id).unwrap(); }
+            if cluster {
+                world.enable_cluster(id).unwrap();
+            }
             world.set_atmosphere(super::test_atmosphere(
                 AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
             ));
             let before = world.body(id).unwrap().motion();
             let result = if sharded {
-                world.step_with_shards(0.1, &mut vec![Vec::new(); 2], &crate::execution::SequentialExecutor, 1)
-            } else { world.step(0.1) };
-            assert_eq!(result, Err(StepError::Aerodynamics {
-                body_id: id,
-                cause: AerodynamicsError::Pressure(PressureError::UnsupportedMach),
-            }));
+                world.step_with_shards(
+                    0.1,
+                    &mut vec![Vec::new(); 2],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+            } else {
+                world.step(0.1)
+            };
+            assert_eq!(
+                result,
+                Err(StepError::Aerodynamics {
+                    body_id: id,
+                    cause: AerodynamicsError::Pressure(PressureError::UnsupportedMach),
+                })
+            );
             assert_eq!(world.body(id).unwrap().motion(), before);
             let error = AerodynamicsError::Pressure(PressureError::UnsupportedMach);
-            assert_eq!(std::error::Error::source(&error).unwrap().to_string(), PressureError::UnsupportedMach.to_string());
+            assert_eq!(
+                std::error::Error::source(&error).unwrap().to_string(),
+                PressureError::UnsupportedMach.to_string()
+            );
         }
     }
 }
 
 #[test]
 fn wing_world_loads_and_failures_match_between_step_paths() {
-    use crate::aerodynamics::{wing::{FiniteWing, WingSurface, WingError}, AerodynamicsError};
+    use crate::aerodynamics::{
+        AerodynamicsError,
+        wing::{FiniteWing, WingError, WingSurface},
+    };
     let mut reference = None;
     for sharded in [false, true] {
         for speed in [50.0, 500.0] {
-            let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
-            body.set_linear_velocity(Vec3::new(speed, 0.0, -speed * 0.1)).unwrap();
-            body.set_aerodynamics(Aerodynamics::Wing(WingSurface::new(
-                FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap(), Transform::identity(), 2.0,
-            ).unwrap()));
+            let mut body = RigidBody::new_dynamic(
+                Transform::identity(),
+                MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+            )
+            .unwrap();
+            body.set_linear_velocity(Vec3::new(speed, 0.0, -speed * 0.1))
+                .unwrap();
+            body.set_aerodynamics(Aerodynamics::Wing(
+                WingSurface::new(
+                    FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap(),
+                    Transform::identity(),
+                    2.0,
+                )
+                .unwrap(),
+            ));
             let mut world = PhysicsWorld::new();
             let id = world.add_body(body).unwrap();
-            world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO).unwrap()));
+            world.set_atmosphere(super::test_atmosphere(
+                AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
+            ));
             let before = world.body(id).unwrap().motion();
             let result = if sharded {
-                world.step_with_shards(1e-4, &mut vec![Vec::new(); 2], &crate::execution::SequentialExecutor, 1)
-            } else { world.step(1e-4) };
+                world.step_with_shards(
+                    1e-4,
+                    &mut vec![Vec::new(); 2],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+            } else {
+                world.step(1e-4)
+            };
             if speed == 50.0 {
                 result.unwrap();
                 let velocity = world.body(id).unwrap().state().linear_velocity();
@@ -689,10 +730,19 @@ fn wing_world_loads_and_failures_match_between_step_paths() {
                 // drag must remove energy, not necessarily reduce world X.
                 assert!(velocity.length_squared() < Vec3::new(50.0, 0.0, -5.0).length_squared());
                 let motion = world.body(id).unwrap().motion();
-                if let Some(expected) = reference { assert_eq!(motion, expected); }
-                else { reference = Some(motion); }
+                if let Some(expected) = reference {
+                    assert_eq!(motion, expected);
+                } else {
+                    reference = Some(motion);
+                }
             } else {
-                assert_eq!(result, Err(super::StepError::Aerodynamics { body_id: id, cause: AerodynamicsError::Wing(WingError::UnsupportedFlow) }));
+                assert_eq!(
+                    result,
+                    Err(super::StepError::Aerodynamics {
+                        body_id: id,
+                        cause: AerodynamicsError::Wing(WingError::UnsupportedFlow)
+                    })
+                );
                 assert_eq!(world.body(id).unwrap().motion(), before);
             }
         }
@@ -703,15 +753,29 @@ fn wing_world_loads_and_failures_match_between_step_paths() {
 fn wing_trajectory_converges_with_timestep() {
     use crate::aerodynamics::wing::{FiniteWing, WingSurface};
     let simulate = |steps: usize| {
-        let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
-        body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0)).unwrap();
-        body.set_aerodynamics(Aerodynamics::Wing(WingSurface::new(
-            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap(), Transform::identity(), 2.0,
-        ).unwrap()));
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+        )
+        .unwrap();
+        body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0))
+            .unwrap();
+        body.set_aerodynamics(Aerodynamics::Wing(
+            WingSurface::new(
+                FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap(),
+                Transform::identity(),
+                2.0,
+            )
+            .unwrap(),
+        ));
         let mut world = PhysicsWorld::new();
         let id = world.add_body(body).unwrap();
-        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO).unwrap()));
-        for _ in 0..steps { world.step(0.1 / steps as f64).unwrap(); }
+        world.set_atmosphere(super::test_atmosphere(
+            AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
+        ));
+        for _ in 0..steps {
+            world.step(0.1 / steps as f64).unwrap();
+        }
         let velocity = world.body(id).unwrap().state().linear_velocity();
         assert!(velocity.length_squared() < 2525.0);
         velocity
@@ -726,24 +790,59 @@ fn wing_trajectory_converges_with_timestep() {
 
 #[test]
 fn later_wing_failure_rolls_back_earlier_loads() {
-    use crate::aerodynamics::{wing::{FiniteWing, WingSurface, WingError}, AerodynamicsError};
+    use crate::aerodynamics::{
+        AerodynamicsError,
+        wing::{FiniteWing, WingError, WingSurface},
+    };
     for sharded in [false, true] {
         let model = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap();
         let valid = WingSurface::new(model, Transform::identity(), 1.0).unwrap();
-        let invalid = WingSurface::new(model, Transform::new(Vec3::ZERO,
-            kapitsa_math::Quat::from_axis_angle(Vec3::Y, 1.0).unwrap()).unwrap(), 1.0).unwrap();
-        let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
-        body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0)).unwrap();
+        let invalid = WingSurface::new(
+            model,
+            Transform::new(
+                Vec3::ZERO,
+                kapitsa_math::Quat::from_axis_angle(Vec3::Y, 1.0).unwrap(),
+            )
+            .unwrap(),
+            1.0,
+        )
+        .unwrap();
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+        )
+        .unwrap();
+        body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0))
+            .unwrap();
         body.set_aerodynamics(Aerodynamics::Wings(vec![valid, invalid]));
         let mut world = PhysicsWorld::new();
         let id = world.add_body(body).unwrap();
-        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO).unwrap()));
+        world.set_atmosphere(super::test_atmosphere(
+            AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
+        ));
         let before = world.body(id).unwrap().motion();
-        let result = if sharded { world.step_with_shards(1e-4, &mut vec![Vec::new(); 2], &crate::execution::SequentialExecutor, 1) }
-        else { world.step(1e-4) };
-        assert_eq!(result, Err(super::StepError::Aerodynamics { body_id: id, cause: AerodynamicsError::Wing(WingError::UnsupportedFlow) }));
+        let result = if sharded {
+            world.step_with_shards(
+                1e-4,
+                &mut vec![Vec::new(); 2],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(1e-4)
+        };
+        assert_eq!(
+            result,
+            Err(super::StepError::Aerodynamics {
+                body_id: id,
+                cause: AerodynamicsError::Wing(WingError::UnsupportedFlow)
+            })
+        );
         assert_eq!(world.body(id).unwrap().motion(), before);
-        world.body_mut(id).unwrap().set_aerodynamics(Aerodynamics::Wings(vec![valid]));
+        world
+            .body_mut(id)
+            .unwrap()
+            .set_aerodynamics(Aerodynamics::Wings(vec![valid]));
         world.step(1e-4).unwrap();
         assert!(world.body(id).unwrap().state().linear_velocity().z > -5.0);
     }
@@ -755,37 +854,81 @@ fn symmetric_wings_sum_loads_and_cancel_roll_moment() {
     let mut reference = None;
     for sharded in [false, true] {
         let model = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap();
-        let wings: Vec<_> = [-2.0, 2.0].into_iter().map(|y| WingSurface::new(model,
-            Transform::new(Vec3::Y * y, kapitsa_math::Quat::IDENTITY).unwrap(), 1.0).unwrap()).collect();
-        let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
-        body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0)).unwrap();
+        let wings: Vec<_> = [-2.0, 2.0]
+            .into_iter()
+            .map(|y| {
+                WingSurface::new(
+                    model,
+                    Transform::new(Vec3::Y * y, kapitsa_math::Quat::IDENTITY).unwrap(),
+                    1.0,
+                )
+                .unwrap()
+            })
+            .collect();
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+        )
+        .unwrap();
+        body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0))
+            .unwrap();
         body.set_aerodynamics(Aerodynamics::Wings(wings));
         let mut world = PhysicsWorld::new();
         let id = world.add_body(body).unwrap();
-        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO).unwrap()));
-        if sharded { world.step_with_shards(1e-4, &mut vec![Vec::new(); 2], &crate::execution::SequentialExecutor, 1).unwrap(); }
-        else { world.step(1e-4).unwrap(); }
+        world.set_atmosphere(super::test_atmosphere(
+            AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
+        ));
+        if sharded {
+            world
+                .step_with_shards(
+                    1e-4,
+                    &mut vec![Vec::new(); 2],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+                .unwrap();
+        } else {
+            world.step(1e-4).unwrap();
+        }
         let body = world.body(id).unwrap();
         assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
         assert!(body.state().linear_velocity().z > -5.0);
-        if let Some(expected) = reference { assert_eq!(body.motion(), expected); }
-        else { reference = Some(body.motion()); }
+        if let Some(expected) = reference {
+            assert_eq!(body.motion(), expected);
+        } else {
+            reference = Some(body.motion());
+        }
     }
 }
 
 #[test]
 fn wing_cluster_rejection_preserves_body_and_configuration() {
     use crate::aerodynamics::wing::{FiniteWing, WingSurface};
-    let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
-    body.set_aerodynamics(Aerodynamics::Wing(WingSurface::new(
-        FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap(), Transform::identity(), 2.0,
-    ).unwrap()));
+    let mut body = RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+    )
+    .unwrap();
+    body.set_aerodynamics(Aerodynamics::Wing(
+        WingSurface::new(
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap(),
+            Transform::identity(),
+            2.0,
+        )
+        .unwrap(),
+    ));
     let mut world = PhysicsWorld::new();
     let id = world.add_body(body).unwrap();
     let before = world.body(id).unwrap().motion();
-    assert_eq!(world.enable_cluster(id), Err(super::ClusterError::UnsupportedGeometry));
+    assert_eq!(
+        world.enable_cluster(id),
+        Err(super::ClusterError::UnsupportedGeometry)
+    );
     assert_eq!(world.body(id).unwrap().motion(), before);
-    assert!(matches!(world.body(id).unwrap().aerodynamics(), Aerodynamics::Wing(_)));
+    assert!(matches!(
+        world.body(id).unwrap().aerodynamics(),
+        Aerodynamics::Wing(_)
+    ));
 }
 
 #[test]

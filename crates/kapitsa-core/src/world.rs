@@ -1733,21 +1733,31 @@ impl PhysicsWorld {
             _ => &[],
         };
         for surface in wings {
-            let point = body.state().transform().transform_point(surface.local_transform().translation());
-            if !point.is_finite() { return Err(error()); }
-            let atmosphere = atmosphere.state_at(point)
+            let point = body
+                .state()
+                .transform()
+                .transform_point(surface.local_transform().translation());
+            if !point.is_finite() {
+                return Err(error());
+            }
+            let atmosphere = atmosphere
+                .state_at(point)
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             if atmosphere.density() != 0.0 {
                 let flow = crate::aerodynamics::pressure::PressureFlow {
-                    atmosphere, sound_speed: mesh_sound_speed,
+                    atmosphere,
+                    sound_speed: mesh_sound_speed,
                     transform: body.state().transform(),
                     center_of_mass: body.physics().mass().ok_or_else(error)?.center_of_mass(),
                     linear_velocity: body.state().linear_velocity(),
                     angular_velocity: body.state().angular_velocity(),
                 };
-                let wrench = surface.evaluate(flow).map_err(|cause| StepError::Aerodynamics {
-                    body_id, cause: crate::aerodynamics::AerodynamicsError::Wing(cause),
-                })?;
+                let wrench = surface
+                    .evaluate(flow)
+                    .map_err(|cause| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::Wing(cause),
+                    })?;
                 body.apply_force(wrench.force).map_err(|_| error())?;
                 body.apply_torque(wrench.moment).map_err(|_| error())?;
             }
