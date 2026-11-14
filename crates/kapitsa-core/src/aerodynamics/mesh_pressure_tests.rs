@@ -494,3 +494,68 @@ fn shielding_load_varies_continuously_with_blocker_width() -> Result<(), Box<dyn
     }
     Ok(())
 }
+
+#[test]
+fn rotational_force_and_moment_converge_under_mesh_refinement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut previous_error = f64::INFINITY;
+    for subdivisions in [1, 2, 4, 8] {
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        for x in 0..subdivisions {
+            for z in 0..subdivisions {
+                let start = vertices.len();
+                let h = 1.0 / subdivisions as f64;
+                let a = Vec3::new(1.0 + x as f64 * h, 0.0, z as f64 * h);
+                vertices.extend([
+                    a,
+                    a + Vec3::X * h,
+                    a + Vec3::Z * h,
+                    a + (Vec3::X + Vec3::Z) * h,
+                ]);
+                triangles.extend([
+                    [start, start + 2, start + 1],
+                    [start + 1, start + 2, start + 3],
+                ]);
+            }
+        }
+        let mesh = TriangleMesh::new(vertices, triangles)?;
+        let instances = [GeometryInstance {
+            mesh: &mesh,
+            local_transform: Transform::identity(),
+            owner: GeometryOwner::Body,
+        }];
+        let geometry = PreparedGeometry::prepare(
+            &instances,
+            GeometryConfig {
+                cell_size: 0.25,
+                max_cells: 100_000,
+                max_work: 10_000_000,
+                open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+                weld_tolerance: None,
+                max_patch_work: 10_000_000,
+            },
+        )?;
+        let patches = geometry.surface_patches_with_flow(&instances, 10_000_000, |point| {
+            Ok(Vec3::Z.cross(point) * 1000.0)
+        })?;
+        let wrench = evaluate_prepared_mesh(
+            &patches,
+            PressureFlow {
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::Z * 1000.0,
+                ..flow()
+            },
+        )?;
+        // Integrals on x in [1,2], z in [0,1]: x^2, z*x^2 and x^3.
+        let force = -Vec3::Y * (7_000_000.0 / 3.0);
+        let moment = Vec3::new(7_000_000.0 / 6.0, 0.0, -3_750_000.0);
+        let error = (wrench.force - force).length() + (wrench.moment - moment).length();
+        assert!(
+            error < previous_error * 0.3,
+            "subdivisions={subdivisions}, error={error}, previous={previous_error}"
+        );
+        previous_error = error;
+    }
+    Ok(())
+}

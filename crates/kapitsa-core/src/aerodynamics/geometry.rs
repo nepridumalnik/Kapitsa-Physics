@@ -648,6 +648,17 @@ impl PreparedGeometry {
         let upstream = direction
             .try_normalize()
             .ok_or(GeometryError::InvalidGeometry)?;
+        self.surface_patches_with_flow(instances, max_work, |_| Ok(upstream))
+    }
+
+    /// Centroid flow quadrature: each source triangle has its own upstream ray.
+    /// Mesh refinement is required when rotational flow varies within a triangle.
+    pub(crate) fn surface_patches_with_flow(
+        &self,
+        instances: &[GeometryInstance<'_>],
+        max_work: usize,
+        flow: impl Fn(Vec3) -> Result<Vec3, GeometryError>,
+    ) -> Result<PreparedSurfacePatches, GeometryError> {
         let total = surface_triangle_count(instances)?;
         let work = total
             .checked_mul(total)
@@ -677,6 +688,14 @@ impl PreparedGeometry {
         let mut patches: Vec<PreparedSurfacePatch> = Vec::new();
         let mut work = work.ok_or(GeometryError::WorkBudgetExceeded)?;
         for (i, triangle) in triangles.iter().enumerate() {
+            let [a, b, c] = triangle.vertices;
+            let velocity = flow(a + (b - a) / 3.0 + (c - a) / 3.0)?;
+            if !velocity.is_finite() {
+                return Err(GeometryError::ArithmeticOverflow);
+            }
+            let Some(upstream) = velocity.try_normalize() else {
+                continue;
+            };
             if triangle.normal.dot(upstream) <= 0.0 {
                 continue;
             }

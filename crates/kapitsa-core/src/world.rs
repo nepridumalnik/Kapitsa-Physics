@@ -151,7 +151,6 @@ struct MeshAerodynamics {
     cache: crate::aerodynamics::cache::PreparedGeometryCache,
     config: crate::aerodynamics::geometry::GeometryConfig,
     sound_speed: f64,
-    exposure_epsilon: f64,
 }
 
 struct BodyEntry {
@@ -2072,7 +2071,6 @@ impl PhysicsWorld {
                         cache: crate::aerodynamics::cache::PreparedGeometryCache::default(),
                         config,
                         sound_speed: self.mesh_sound_speed,
-                        exposure_epsilon: 0.01,
                     });
                 prepared.config = config;
                 prepared.sound_speed = self.mesh_sound_speed;
@@ -2107,17 +2105,35 @@ impl PhysicsWorld {
                         body_id,
                         cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
                     })?;
+                let inverse = entry.body.state().transform().inverse().map_err(|_| {
+                    StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    }
+                })?;
+                let omega = inverse.transform_vector(entry.body.state().angular_velocity());
+                let center = entry
+                    .body
+                    .physics()
+                    .mass()
+                    .ok_or(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    })?
+                    .center_of_mass();
                 mesh_patches = Some(
                     geometry
-                        .exposed_surface_patches(
+                        .surface_patches_with_flow(
                             &[crate::aerodynamics::geometry::GeometryInstance {
                                 mesh,
                                 local_transform: crate::transform::Transform::identity(),
                                 owner: crate::aerodynamics::geometry::GeometryOwner::Body,
                             }],
-                            direction,
-                            prepared.exposure_epsilon,
                             config.max_patch_work,
+                            |point| point.checked_sub(center)
+                                .and_then(|arm| omega.checked_cross(arm))
+                                .and_then(|velocity| direction.checked_add(velocity))
+                                .ok_or(crate::aerodynamics::geometry::GeometryError::ArithmeticOverflow),
                         )
                         .map_err(|_| StepError::Aerodynamics {
                             body_id,

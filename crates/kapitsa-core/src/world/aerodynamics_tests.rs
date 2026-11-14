@@ -971,3 +971,52 @@ fn mesh_sound_speed_rejects_invalid_changes() -> Result<(), Box<dyn std::error::
     }
     Ok(())
 }
+
+#[test]
+fn mesh_zero_translation_preserves_rest_and_resolves_rotational_loads()
+-> Result<(), Box<dyn std::error::Error>> {
+    for sharded in [false, true] {
+        for rotating in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                0.001,
+                Vec3::ZERO,
+            )?));
+            world.set_mesh_sound_speed(100.0)?;
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            if rotating {
+                body.set_angular_velocity(Vec3::Z * 10_000.0)?;
+            }
+            body.set_aerodynamics(Aerodynamics::Mesh(crate::shape::TriangleMesh::new(
+                vec![
+                    Vec3::X,
+                    Vec3::X * 2.0,
+                    Vec3::X + Vec3::Z,
+                    Vec3::X * 2.0 + Vec3::Z,
+                ],
+                vec![[0, 2, 1], [1, 2, 3]],
+            )?));
+            let id = world.add_body(body)?;
+            if sharded {
+                world.step_with_shards(
+                    1e-8,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(1e-8)?;
+            }
+            let state = world.body(id).ok_or("body")?.state();
+            if rotating {
+                assert!(state.linear_velocity().y < 0.0);
+                assert!(state.angular_velocity().z < 10_000.0);
+            } else {
+                assert_eq!(state.linear_velocity(), Vec3::ZERO);
+                assert_eq!(state.angular_velocity(), Vec3::ZERO);
+            }
+        }
+    }
+    Ok(())
+}
