@@ -144,12 +144,29 @@ sections. `HullSection` is now `Clone`, not `Copy`, and evaluation borrows it.
 
 This is a **DATA-DRIVEN transonic resistance interface**, not a predictive FAR
 solver. There are no default invented transonic coefficients. `NormalForceCurve`
-provides an optional immutable rectangular CFD/experimental table of signed
-`C_N(Mach, alpha)` values and an explicit reference area; `with_normal_curve`
-attaches it to a hull section. Inside the strict Mach/angle domain, values are
-bilinearly interpolated and applied as `F_N = q C_N A_ref n`, where `n` is
-perpendicular to the section axis and local relative velocity. The caller owns
-the angle convention and table validity; no automatic lift, transonic closure,
+provides an optional immutable rectangular CFD/experimental axisymmetric table of
+`C_N(Mach, alpha)` values and an explicit positive reference area;
+`with_normal_curve` attaches it to a hull section. Its `angle_of_attack` field
+uses **unsigned incidence** `alpha = atan2(|v_perp|, v_axial)` in `[0, pi]`, not
+signed planar angle of attack; negative angle knots are rejected. Inside the
+inclusive Mach/incidence domain, coefficients are bilinearly interpolated and
+applied as `F_N = -q C_N A_ref v_perp / |v_perp|`, with full-speed
+`q = rho |v|^2 / 2`. Positive `C_N` opposes crossflow and dissipates relative-flow
+energy; finite negative `C_N` is permitted and intentionally reverses the force.
+The force is normal to the **axis**, not to velocity, so it is not pure lift.
+Reversing crossflow reverses force without changing incidence. Reversing the
+axis maps incidence to `pi - alpha`, so asymmetric tables can change magnitude.
+At zero crossflow (including zero speed), normal force is zero and its table's
+Mach/incidence checks are skipped. Enabled drag and normal tables have independent
+domains: unused constant drag does not impose Mach 0.3 on normal-only sections,
+and absent normal data never restricts a configured Mach drag table. Vacuum and
+fully disabled loads skip all coefficient-domain checks. Outside a sampled table's
+domain evaluation fails with `UnsupportedMach` (also used for incidence range).
+The caller must supply measured/CFD coefficients using this axisymmetric
+incidence, force-sign and full-speed reference-pressure convention; a signed
+planar lift table cannot be used unchanged. This incidence/domain correction and
+its regression fixtures are source-only and unverified: tests, builds, checks,
+Clippy and benchmarks were not run, as requested. No automatic lift, transonic closure,
 or Newtonian/wing model is supplied. The same [drag equation](https://en.wikipedia.org/wiki/Drag_equation),
 [Mach number](https://en.wikipedia.org/wiki/Mach_number), and [angle of attack](https://en.wikipedia.org/wiki/Angle_of_attack)
 references define quantities, not coefficient data. Supply measured or

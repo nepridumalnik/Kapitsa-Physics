@@ -945,6 +945,103 @@ fn data_driven_hull_body_part_dispatch_and_range_failure_rollback() {
 }
 
 #[test]
+fn normal_hull_table_range_failure_rolls_back_body_and_part_loads() {
+    use crate::aerodynamics::{
+        AerodynamicsError,
+        hull::{HullError, HullSection, NormalForceCurve, NormalForceKnot},
+    };
+    // Synthetic axisymmetric tables; exercise Mach and incidence failures.
+    for part_owned in [false, true] {
+        for sharded in [false, true] {
+            for angle_failure in [false, true] {
+                let section = |point, invalid| {
+                    let min_mach = if invalid && !angle_failure { 1.1 } else { 0.5 };
+                    let max_angle = if invalid && angle_failure {
+                        0.5
+                    } else {
+                        std::f64::consts::PI
+                    };
+                    let knots = [min_mach, 1.5]
+                        .into_iter()
+                        .flat_map(|mach| {
+                            [0.0, max_angle].into_iter().map(move |angle_of_attack| {
+                                NormalForceKnot {
+                                    mach,
+                                    angle_of_attack,
+                                    normal_cn: 0.5,
+                                }
+                            })
+                        })
+                        .collect();
+                    HullSection::new(
+                        Transform::new(point, kapitsa_math::Quat::IDENTITY).unwrap(),
+                        Vec3::X,
+                        1.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        None,
+                    )
+                    .unwrap()
+                    .with_normal_curve(NormalForceCurve::new(2.0, knots).unwrap())
+                };
+                let sections = vec![section(-Vec3::X, false), section(Vec3::X, true)];
+                let mut body = RigidBody::new_dynamic(
+                    Transform::identity(),
+                    MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0).unwrap(),
+                )
+                .unwrap();
+                body.set_linear_velocity(Vec3::Y * 340.0).unwrap();
+                body.set_aerodynamics(Aerodynamics::Hull(sections.clone()));
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(super::test_atmosphere(
+                    AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
+                ));
+                let id = world.add_body(body).unwrap();
+                let root = part_owned.then(|| world.enable_cluster(id).unwrap());
+                let before = world.body(id).unwrap().motion();
+                let result = if sharded {
+                    world.step_with_shards(
+                        1e-6,
+                        &mut vec![Vec::new(); 2],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )
+                } else {
+                    world.step(1e-6)
+                };
+                assert_eq!(
+                    result,
+                    Err(super::StepError::Aerodynamics {
+                        body_id: id,
+                        cause: AerodynamicsError::Hull(HullError::UnsupportedMach),
+                    })
+                );
+                assert_eq!(world.body(id).unwrap().motion(), before);
+                if let Some(root) = root {
+                    assert_eq!(world.part_aerodynamic_hull(root), Some(sections.as_slice()));
+                    world
+                        .set_part_aerodynamic_hull(root, vec![sections[0].clone()])
+                        .unwrap();
+                } else {
+                    assert!(
+                        matches!(world.body(id).unwrap().aerodynamics(), Aerodynamics::Hull(s) if s == &sections)
+                    );
+                    world
+                        .body_mut(id)
+                        .unwrap()
+                        .set_aerodynamics(Aerodynamics::Hull(vec![sections[0].clone()]));
+                }
+                world.step(1e-6).unwrap();
+                assert!(world.body(id).unwrap().state().linear_velocity().y < 340.0);
+            }
+        }
+    }
+}
+
+#[test]
 fn hull_sections_sample_spatial_density_independently() {
     use crate::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
     let atmosphere = Atmosphere::Sphere(

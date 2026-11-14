@@ -39,7 +39,9 @@
 //! Finite kinematics and positive sound speed are validated even in vacuum or
 //! with disabled areas; those cases then skip Mach and Reynolds domain checks.
 //! Mach is based on the full local relative speed, including omega cross r.
-//! Each component uses its own speed squared in q, not full-flow q. Length is
+//! Drag components use their own speed squared in q, not full-flow q. Optional
+//! [`NormalForceCurve`] data instead uses full-flow q and unsigned axisymmetric
+//! incidence in [0, pi]; positive Cn opposes crossflow, not pure lift. Length is
 //! the caller's friction development length, not automatically accumulated across
 //! sections. No end-cap loads or intrinsic pitching moments are inferred.
 //!
@@ -166,16 +168,22 @@ impl MachCurve {
     }
 }
 
-/// A caller-supplied normal-force coefficient at Mach and signed angle of attack (radians).
+/// A caller-supplied axisymmetric normal-force coefficient at Mach and incidence.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NormalForceKnot {
     pub mach: f64,
+    /// Unsigned incidence in radians: atan2(|v_perp|, v_axial), in [0, pi].
     pub angle_of_attack: f64,
+    /// Positive Cn opposes crossflow; negative Cn intentionally reverses that force.
     pub normal_cn: f64,
 }
 
-/// Immutable rectangular CFD/experimental normal-force table. Values are bilinearly
-/// interpolated only inside its finite, inclusive Mach/angle domain.
+/// Immutable rectangular CFD/experimental axisymmetric normal-force table.
+/// Values are bilinearly interpolated only inside its inclusive Mach/incidence
+/// domain. There is no fixed reference side or signed planar angle of attack.
+/// Force uses full-speed dynamic pressure and points opposite crossflow for
+/// positive Cn: it is normal to the axis, not to the velocity (not pure lift).
+/// Supply measured coefficients matching this convention; none are provided.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalForceCurve {
     reference_area: f64,
@@ -192,7 +200,7 @@ impl NormalForceCurve {
             !k.mach.is_finite()
                 || k.mach < 0.0
                 || !k.angle_of_attack.is_finite()
-                || k.angle_of_attack < -std::f64::consts::PI
+                || k.angle_of_attack < 0.0
                 || k.angle_of_attack > std::f64::consts::PI
                 || !k.normal_cn.is_finite()
         }) {
@@ -260,15 +268,24 @@ impl NormalForceCurve {
                 (alpha >= a && alpha <= b).then_some((j, (alpha - a) / (b - a)))
             })
             .ok_or(HullError::UnsupportedMach)?;
-        let lerp = |x: f64, y: f64, t: f64| x + t * (y - x);
+        // Opposite-sign differences can overflow even for a finite convex result.
+        let lerp = |x: f64, y: f64, t: f64| {
+            if x.is_sign_negative() != y.is_sign_negative() {
+                (1.0 - t) * x + t * y
+            } else if x <= y {
+                x + t * (y - x)
+            } else {
+                y + (1.0 - t) * (x - y)
+            }
+        };
         let a = lerp(
-            self.knots[m.0 * self.angle_count + j].normal_cn,
-            self.knots[m.0 * self.angle_count + j + 1].normal_cn,
+            self.knots[m.0 * self.angle_count + j.0].normal_cn,
+            self.knots[m.0 * self.angle_count + j.0 + 1].normal_cn,
             j.1,
         );
         let b = lerp(
-            self.knots[(m.0 + 1) * self.angle_count + j].normal_cn,
-            self.knots[(m.0 + 1) * self.angle_count + j + 1].normal_cn,
+            self.knots[(m.0 + 1) * self.angle_count + j.0].normal_cn,
+            self.knots[(m.0 + 1) * self.angle_count + j.0 + 1].normal_cn,
             j.1,
         );
         Ok(lerp(a, b, m.1))
@@ -344,7 +361,8 @@ pub struct HullSection {
 }
 impl HullSection {
     /// Length must be positive; areas and coefficients must be nonnegative.
-    /// The local axis is normalized. Reversing it does not change resistance.
+    /// The local axis is normalized. Reversing it leaves drag unchanged but maps
+    /// normal-table incidence to pi - alpha, so asymmetric data can change Cn.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         local_transform: Transform,
@@ -399,7 +417,11 @@ impl HullSection {
         self.mach_curve.as_ref()
     }
 
-    /// Attach caller-supplied signed normal-force data and its reference area.
+    /// Attach axisymmetric normal-force data using unsigned incidence [0, pi].
+    /// Positive Cn opposes crossflow and dissipates relative-flow energy; negative
+    /// Cn reverses it intentionally. This is not a pure lift model.
+    /// With zero crossflow the force is zero and the normal table is not sampled
+    /// (including zero total speed); its Mach/incidence domain is then skipped.
     pub fn with_normal_curve(mut self, curve: NormalForceCurve) -> Self {
         self.normal_curve = Some(curve);
         self
@@ -436,9 +458,11 @@ impl HullSection {
             self.crossflow_cd != 0.0,
             MachCurve::has_crossflow_resistance,
         );
+        let drag_enabled = (self.axial_area != 0.0 && axial_enabled)
+            || (self.crossflow_area != 0.0 && crossflow_enabled);
         if flow.atmosphere.density() == 0.0
-            || (self.axial_area == 0.0 || !axial_enabled)
-                && (self.crossflow_area == 0.0 || !crossflow_enabled)
+            || !drag_enabled
+                && self.normal_curve.is_none()
                 && (self.wetted_area == 0.0 || self.skin_friction.is_none())
         {
             return Ok(zero);
@@ -461,7 +485,10 @@ impl HullSection {
         if !mach.is_finite() {
             return Err(HullError::UnsupportedMach);
         }
-        let (axial_cd, crossflow_cd) = if let Some(curve) = &self.mach_curve {
+        // Unused drag coefficients must not gate normal-only or friction loads.
+        let (axial_cd, crossflow_cd) = if !drag_enabled {
+            (0.0, 0.0)
+        } else if let Some(curve) = &self.mach_curve {
             curve.coefficients(mach)?
         } else {
             if mach > 0.3 {
@@ -513,28 +540,33 @@ impl HullSection {
             self.crossflow_area,
             crossflow_cd,
         )?;
-        let normal_force = if let Some(curve) = &self.normal_curve {
-            let axial_unit = axis;
-            let along = velocity.checked_dot(axial_unit).ok_or(overflow)?;
-            let axial_velocity = axial_unit.checked_mul_scalar(along).ok_or(overflow)?;
-            let perpendicular = velocity.checked_sub(axial_velocity).ok_or(overflow)?;
-            let perp_speed = perpendicular.checked_length().ok_or(overflow)?;
-            if perp_speed == 0.0 {
-                Vec3::ZERO
-            } else {
-                let alpha = perpendicular.checked_dot(velocity).ok_or(overflow)?;
-                let alpha = alpha.atan2(along * perp_speed);
-                let cn = curve.coefficient(mach, alpha)?;
-                let magnitude = scaled_product(
-                    &[0.5, density, speed, speed, curve.reference_area, cn.abs()],
-                    1.0,
-                )?;
-                perpendicular
-                    .checked_mul_scalar(magnitude.copysign(cn) / perp_speed)
-                    .ok_or(overflow)?
-            }
-        } else if mach > 0.3 {
-            return Err(HullError::UnsupportedMach);
+        let normal_force = if let Some(curve) = &self.normal_curve
+            && cross_speed != 0.0
+        {
+            let alpha = cross_speed.atan2(axial_speed);
+            let cn = curve.coefficient(mach, alpha)?;
+            // Scale each complete component, including the normalization divisor.
+            // Neither q*A*Cn nor magnitude/|v_perp| need fit on their own.
+            let component = |v: f64| {
+                scaled_product(
+                    &[
+                        0.5,
+                        density,
+                        speed,
+                        speed,
+                        curve.reference_area,
+                        cn.abs(),
+                        v.abs(),
+                    ],
+                    cross_speed,
+                )
+                .map(|magnitude| -magnitude.copysign(v) * cn.signum())
+            };
+            Vec3::new(
+                component(crossflow.x)?,
+                component(crossflow.y)?,
+                component(crossflow.z)?,
+            )
         } else {
             Vec3::ZERO
         };
@@ -672,6 +704,195 @@ mod tests {
             },
         ])
         .unwrap()
+    }
+
+    // Synthetic axisymmetric fixtures, not measured aerodynamic data.
+    fn normal_curve(cn: f64) -> NormalForceCurve {
+        NormalForceCurve::new(
+            2.0,
+            [0.5, 1.5]
+                .into_iter()
+                .flat_map(|mach| {
+                    [0.0, std::f64::consts::PI]
+                        .into_iter()
+                        .map(move |angle_of_attack| NormalForceKnot {
+                            mach,
+                            angle_of_attack,
+                            normal_cn: cn,
+                        })
+                })
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn normal_only(cn: f64) -> HullSection {
+        let mut s = section(Vec3::ZERO).with_normal_curve(normal_curve(cn));
+        s.axial_area = 0.0;
+        s.crossflow_area = 0.0;
+        s
+    }
+
+    #[test]
+    fn normal_only_transonic_crossflow_sign_and_axis_incidence() {
+        let s = normal_only(0.5);
+        for sign in [-1.0, 1.0] {
+            let v = Vec3::new(204.0, sign * 272.0, 0.0);
+            let w = s.evaluate(flow(v)).unwrap();
+            close(w.force, Vec3::Y * (-sign * 0.5 * 1.2 * 340.0 * 340.0));
+            assert!(w.force.dot(v) < 0.0);
+            let negative = normal_only(-0.5).evaluate(flow(v)).unwrap();
+            close(negative.force, -w.force);
+        }
+        // A zero constant Cd also disables drag without disabling a normal table.
+        let mut zero_cd = s.clone();
+        zero_cd.axial_area = 3.0;
+        zero_cd.crossflow_area = 4.0;
+        zero_cd.axial_cd = 0.0;
+        zero_cd.crossflow_cd = 0.0;
+        assert_eq!(
+            zero_cd.evaluate(flow(Vec3::Y * 340.0)),
+            s.evaluate(flow(Vec3::Y * 340.0))
+        );
+
+        let mut asymmetric = normal_curve(0.0).knots().to_vec();
+        for k in &mut asymmetric {
+            k.normal_cn = k.angle_of_attack;
+        }
+        let mut s = s.with_normal_curve(NormalForceCurve::new(2.0, asymmetric).unwrap());
+        let v = Vec3::new(204.0, 272.0, 0.0);
+        let alpha = 272.0_f64.atan2(204.0);
+        let first = s.evaluate(flow(v)).unwrap();
+        s.axis = -Vec3::X;
+        let reversed = s.evaluate(flow(v)).unwrap();
+        assert!(
+            (reversed.force.y / first.force.y - (std::f64::consts::PI - alpha) / alpha).abs()
+                < 1e-14
+        );
+        assert!(first.force.y < 0.0 && reversed.force.y < 0.0);
+    }
+
+    #[test]
+    fn normal_zero_crossflow_skips_only_its_domain_and_domains_are_independent() {
+        let s = normal_only(0.5);
+        for v in [Vec3::ZERO, Vec3::X * 680.0, -Vec3::X * 680.0] {
+            assert_eq!(s.evaluate(flow(v)).unwrap().force, Vec3::ZERO);
+        }
+        assert_eq!(
+            s.evaluate(flow(Vec3::Y * 680.0)),
+            Err(HullError::UnsupportedMach)
+        );
+        let mut drag = s.clone().with_mach_curve(curve());
+        drag.axial_area = 3.0;
+        assert_eq!(
+            drag.evaluate(flow(Vec3::ZERO)),
+            Err(HullError::UnsupportedMach)
+        );
+        let narrow = NormalForceCurve::new(
+            2.0,
+            normal_curve(0.5)
+                .knots()
+                .iter()
+                .map(|k| NormalForceKnot {
+                    mach: k.mach + 1.0,
+                    ..*k
+                })
+                .collect(),
+        )
+        .unwrap();
+        let drag = section(Vec3::ZERO)
+            .with_mach_curve(curve())
+            .with_normal_curve(narrow);
+        assert!(drag.evaluate(flow(Vec3::X * 340.0)).is_ok());
+        assert_eq!(
+            drag.evaluate(flow(Vec3::Y * 340.0)),
+            Err(HullError::UnsupportedMach)
+        );
+        // Normal data cannot extend the domain of enabled constant drag.
+        let constant = section(Vec3::ZERO).with_normal_curve(normal_curve(0.5));
+        assert_eq!(
+            constant.evaluate(flow(Vec3::Y * 340.0)),
+            Err(HullError::UnsupportedMach)
+        );
+    }
+
+    #[test]
+    fn normal_tables_reject_invalid_data_and_interpolate_signed_extremes() {
+        let valid = normal_curve(0.5).knots().to_vec();
+        for knots in [vec![], valid[..3].to_vec(), vec![valid[0]; 4]] {
+            assert_eq!(
+                NormalForceCurve::new(2.0, knots),
+                Err(HullError::InvalidParameters)
+            );
+        }
+        for area in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                NormalForceCurve::new(area, valid.clone()),
+                Err(HullError::InvalidParameters)
+            );
+        }
+        for bad in [-0.1, std::f64::consts::PI + 0.1, f64::NAN, f64::INFINITY] {
+            let mut knots = valid.clone();
+            knots[0].angle_of_attack = bad;
+            assert_eq!(
+                NormalForceCurve::new(2.0, knots),
+                Err(HullError::InvalidParameters)
+            );
+        }
+        for bad in [-1.0, f64::NAN, f64::INFINITY] {
+            let mut knots = valid.clone();
+            knots[0].mach = bad;
+            assert_eq!(
+                NormalForceCurve::new(2.0, knots),
+                Err(HullError::InvalidParameters)
+            );
+        }
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut knots = valid.clone();
+            knots[0].normal_cn = bad;
+            assert_eq!(
+                NormalForceCurve::new(2.0, knots),
+                Err(HullError::InvalidParameters)
+            );
+        }
+        let mut knots = valid;
+        for k in &mut knots {
+            k.normal_cn = if k.angle_of_attack == 0.0 {
+                -f64::MAX
+            } else {
+                f64::MAX
+            };
+        }
+        let c = NormalForceCurve::new(2.0, knots).unwrap();
+        assert_eq!(c.coefficient(1.0, std::f64::consts::FRAC_PI_2), Ok(0.0));
+        for k in c.knots() {
+            assert_eq!(c.coefficient(k.mach, k.angle_of_attack), Ok(k.normal_cn));
+        }
+        assert_eq!(c.coefficient(1.0, -0.1), Err(HullError::UnsupportedMach));
+        assert_eq!(c.coefficient(1.0, f64::NAN), Err(HullError::InvalidFlow));
+    }
+
+    #[test]
+    fn normal_extreme_components_remain_finite_or_report_true_overflow() {
+        let mut s = normal_only(1.0);
+        s.normal_curve =
+            Some(NormalForceCurve::new(1e-4, normal_curve(1e-2).knots().to_vec()).unwrap());
+        let mut f = flow(Vec3::new(1e100, 1e-100, 0.0));
+        f.sound_speed = 1e100;
+        // Magnitude/|v_perp| overflows, but the complete component fits.
+        f.atmosphere = AtmosphericState::new(1e100, Vec3::ZERO).unwrap();
+        let w = s.evaluate(f).unwrap();
+        assert!((w.force.y / -5e293 - 1.0).abs() < 1e-14);
+        // A vector magnitude may overflow while each output component fits.
+        let s = normal_only(1.0);
+        let mut f = flow(Vec3::new(0.0, 1.0, 1.0));
+        f.sound_speed = f.linear_velocity.length();
+        f.atmosphere = AtmosphericState::new(1e308, Vec3::ZERO).unwrap();
+        let w = s.evaluate(f).unwrap();
+        assert!(w.force.is_finite());
+        assert!((w.force.y / -std::f64::consts::SQRT_2 / 1e308 - 1.0).abs() < 1e-14);
+        f.atmosphere = AtmosphericState::new(f64::MAX, Vec3::ZERO).unwrap();
+        assert_eq!(s.evaluate(f), Err(HullError::ArithmeticOverflow));
     }
 
     #[test]
