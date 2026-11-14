@@ -1686,7 +1686,8 @@ impl PhysicsWorld {
         let primary_surface = match primary {
             crate::aerodynamics::Aerodynamics::None
             | crate::aerodynamics::Aerodynamics::Wing(_)
-            | crate::aerodynamics::Aerodynamics::Wings(_) => None,
+            | crate::aerodynamics::Aerodynamics::Wings(_)
+            | crate::aerodynamics::Aerodynamics::Hull(_) => None,
             crate::aerodynamics::Aerodynamics::Simple(properties) => {
                 Some(AerodynamicSurface::new(*properties))
             }
@@ -1730,6 +1731,33 @@ impl PhysicsWorld {
                 })?;
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;
+        }
+        if let crate::aerodynamics::Aerodynamics::Hull(sections) = primary {
+            for section in sections {
+                let transform = body.state().transform();
+                let point = transform.transform_point(section.local_transform().translation());
+                if !point.is_finite() {
+                    return Err(error());
+                }
+                let state = atmosphere
+                    .state_at(point)
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                let wrench = section
+                    .evaluate(crate::aerodynamics::pressure::PressureFlow {
+                        atmosphere: state,
+                        sound_speed: mesh_sound_speed,
+                        transform,
+                        center_of_mass: body.physics().mass().ok_or_else(error)?.center_of_mass(),
+                        linear_velocity: body.state().linear_velocity(),
+                        angular_velocity: body.state().angular_velocity(),
+                    })
+                    .map_err(|cause| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
+                    })?;
+                body.apply_force(wrench.force).map_err(|_| error())?;
+                body.apply_torque(wrench.moment).map_err(|_| error())?;
+            }
         }
         let mut drag = Vec3::ZERO;
         let wings: &[crate::aerodynamics::wing::WingSurface] = match primary {

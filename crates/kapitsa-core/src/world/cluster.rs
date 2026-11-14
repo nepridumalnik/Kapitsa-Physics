@@ -143,6 +143,11 @@ impl PhysicsWorld {
         if body_entry.cluster.is_some() {
             return Err(ClusterError::AlreadyClustered);
         }
+        // Hull sections are body-owned; part transfer is not implemented yet.
+        // Reject before allocating or modifying topology, never drop the model.
+        if matches!(body_entry.body.aerodynamics(), Aerodynamics::Hull(_)) {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
         let mut root_wings = Vec::new();
         if matches!(body_entry.body.aerodynamics(), Aerodynamics::Wing(_)) {
             root_wings
@@ -1594,7 +1599,8 @@ impl PhysicsWorld {
             Aerodynamics::Mesh(_)
             | Aerodynamics::Colliders
             | Aerodynamics::Wing(_)
-            | Aerodynamics::Wings(_) => {
+            | Aerodynamics::Wings(_)
+            | Aerodynamics::Hull(_) => {
                 return Err(ClusterError::UnsupportedGeometry);
             }
         };

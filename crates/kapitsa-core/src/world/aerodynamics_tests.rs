@@ -788,6 +788,149 @@ fn wing_trajectory_converges_with_timestep() {
     assert!(fine < medium * 0.6, "{medium} {fine}");
 }
 
+fn hull_section(point: Vec3) -> crate::aerodynamics::hull::HullSection {
+    crate::aerodynamics::hull::HullSection::new(
+        Transform::new(point, kapitsa_math::Quat::IDENTITY).unwrap(),
+        Vec3::X,
+        2.0,
+        1.0,
+        2.0,
+        3.0,
+        0.2,
+        0.8,
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn hull_world_parity_and_cluster_rejection_preserve_model() {
+    let mut reference = None;
+    for sharded in [false, true] {
+        let sections = vec![hull_section(-Vec3::Y * 2.0), hull_section(Vec3::Y * 2.0)];
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+        )
+        .unwrap();
+        body.set_linear_velocity(Vec3::X * 50.0).unwrap();
+        body.set_aerodynamics(Aerodynamics::Hull(sections.clone()));
+        let mut world = PhysicsWorld::new();
+        let id = world.add_body(body).unwrap();
+        let before = world.body(id).unwrap().motion();
+        assert_eq!(
+            world.enable_cluster(id),
+            Err(crate::cluster::ClusterError::UnsupportedGeometry)
+        );
+        assert_eq!(world.body(id).unwrap().motion(), before);
+        assert!(
+            matches!(world.body(id).unwrap().aerodynamics(), Aerodynamics::Hull(s) if s == &sections)
+        );
+        world.set_atmosphere(super::test_atmosphere(
+            AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
+        ));
+        if sharded {
+            world
+                .step_with_shards(
+                    1e-4,
+                    &mut vec![Vec::new(); 2],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+                .unwrap();
+        } else {
+            world.step(1e-4).unwrap();
+        }
+        let b = world.body(id).unwrap();
+        assert!(b.state().linear_velocity().x < 50.0);
+        assert_eq!(b.state().angular_velocity(), Vec3::ZERO);
+        if let Some(expected) = reference {
+            assert_eq!(b.motion(), expected);
+        } else {
+            reference = Some(b.motion());
+        }
+    }
+}
+
+#[test]
+fn hull_sections_sample_spatial_density_independently() {
+    use crate::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
+    let atmosphere = Atmosphere::Sphere(
+        SphericalAtmosphere::builder()
+            .reference_radius(1.0)
+            .reference_density(1.2)
+            .height(100.0)
+            .profile(DensityProfile::Exponential { scale_height: 10.0 })
+            .build()
+            .unwrap(),
+    );
+    let mut body = RigidBody::new_dynamic(
+        Transform::new(Vec3::Y * 10.0, kapitsa_math::Quat::IDENTITY).unwrap(),
+        MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+    )
+    .unwrap();
+    body.set_linear_velocity(Vec3::X * 50.0).unwrap();
+    body.set_aerodynamics(Aerodynamics::Hull(vec![
+        hull_section(-Vec3::Y * 2.0),
+        hull_section(Vec3::Y * 2.0),
+    ]));
+    let mut world = PhysicsWorld::new();
+    let id = world.add_body(body).unwrap();
+    world.set_atmosphere(atmosphere);
+    world.step(1e-5).unwrap();
+    // Equal point sampling at COM would incorrectly cancel this torque.
+    assert!(world.body(id).unwrap().state().angular_velocity().z < 0.0);
+}
+
+#[test]
+fn hull_later_section_error_rolls_back_all_loads() {
+    use crate::aerodynamics::{AerodynamicsError, hull::HullError};
+    for sharded in [false, true] {
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap(),
+        )
+        .unwrap();
+        body.set_linear_velocity(Vec3::X * 50.0).unwrap();
+        body.set_angular_velocity(Vec3::Z * 10.0).unwrap();
+        let sections = vec![hull_section(Vec3::ZERO), hull_section(Vec3::X * 20.0)];
+        body.set_aerodynamics(Aerodynamics::Hull(sections.clone()));
+        let mut world = PhysicsWorld::new();
+        let id = world.add_body(body).unwrap();
+        world.set_atmosphere(super::test_atmosphere(
+            AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
+        ));
+        let before = world.body(id).unwrap().motion();
+        let result = if sharded {
+            world.step_with_shards(
+                1e-4,
+                &mut vec![Vec::new(); 2],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(1e-4)
+        };
+        assert_eq!(
+            result,
+            Err(super::StepError::Aerodynamics {
+                body_id: id,
+                cause: AerodynamicsError::Hull(HullError::UnsupportedMach)
+            })
+        );
+        assert_eq!(world.body(id).unwrap().motion(), before);
+        assert!(
+            matches!(world.body(id).unwrap().aerodynamics(), Aerodynamics::Hull(s) if s == &sections)
+        );
+        world
+            .body_mut(id)
+            .unwrap()
+            .set_aerodynamics(Aerodynamics::Hull(vec![sections[0]]));
+        world.step(1e-4).unwrap();
+        assert!(world.body(id).unwrap().state().linear_velocity().x < 50.0);
+    }
+}
+
 #[test]
 fn later_wing_failure_rolls_back_earlier_loads() {
     use crate::aerodynamics::{

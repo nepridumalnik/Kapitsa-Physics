@@ -4,6 +4,7 @@ pub(crate) mod atmosphere;
 pub mod cache;
 pub mod colliders;
 pub mod geometry;
+pub mod hull;
 pub mod pressure;
 pub mod wing;
 pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};
@@ -25,6 +26,7 @@ pub enum Aerodynamics {
     Simple(AerodynamicProperties),
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
+    Hull(Vec<hull::HullSection>),
     Mesh(crate::shape::TriangleMesh),
     Colliders,
 }
@@ -36,6 +38,7 @@ impl fmt::Debug for Aerodynamics {
             Self::Simple(properties) => formatter.debug_tuple("Simple").field(properties).finish(),
             Self::Wing(surface) => formatter.debug_tuple("Wing").field(surface).finish(),
             Self::Wings(surfaces) => formatter.debug_tuple("Wings").field(surfaces).finish(),
+            Self::Hull(sections) => formatter.debug_tuple("Hull").field(sections).finish(),
             Self::Mesh(_) => formatter.write_str("Mesh(..)"),
             Self::Colliders => formatter.write_str("Colliders"),
         }
@@ -297,6 +300,7 @@ pub enum AerodynamicsError {
     Geometry(geometry::GeometryError),
     Pressure(pressure::PressureError),
     Wing(wing::WingError),
+    Hull(hull::HullError),
     UnsupportedModel,
     InvalidTessellation,
     TessellationBudgetExceeded,
@@ -319,6 +323,7 @@ impl fmt::Display for AerodynamicsError {
             Self::Geometry(error) => return write!(formatter, "{error}"),
             Self::Pressure(error) => return write!(formatter, "{error}"),
             Self::Wing(error) => return write!(formatter, "{error}"),
+            Self::Hull(error) => return write!(formatter, "{error}"),
             Self::UnsupportedModel => "this aerodynamic model is not implemented",
             Self::InvalidTessellation => "invalid collider tessellation parameters",
             Self::TessellationBudgetExceeded => "collider tessellation triangle budget exceeded",
@@ -344,6 +349,7 @@ impl std::error::Error for AerodynamicsError {
             Self::Geometry(error) => Some(error),
             Self::Pressure(error) => Some(error),
             Self::Wing(error) => Some(error),
+            Self::Hull(error) => Some(error),
             _ => None,
         }
     }
