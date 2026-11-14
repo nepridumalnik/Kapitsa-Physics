@@ -1020,3 +1020,36 @@ fn mesh_zero_translation_preserves_rest_and_resolves_rotational_loads()
     }
     Ok(())
 }
+
+#[test]
+fn mesh_pressure_errors_preserve_cause_and_motion_in_all_world_paths() {
+    use crate::{aerodynamics::{AerodynamicsError, pressure::PressureError}, shape::TriangleMesh, world::StepError};
+    for sharded in [false, true] {
+        for cluster in [false, true] {
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass).unwrap();
+            body.set_linear_velocity(Vec3::X * 100.0).unwrap();
+            body.set_aerodynamics(Aerodynamics::Mesh(TriangleMesh::new(
+                vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]],
+            ).unwrap()));
+            let mut world = PhysicsWorld::new();
+            let id = world.add_body(body).unwrap();
+            if cluster { world.enable_cluster(id).unwrap(); }
+            world.set_atmosphere(super::test_atmosphere(
+                AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+            ));
+            let before = world.body(id).unwrap().motion();
+            let result = if sharded {
+                world.step_with_shards(0.1, &mut vec![Vec::new(); 2], &crate::execution::SequentialExecutor, 1)
+            } else { world.step(0.1) };
+            assert_eq!(result, Err(StepError::Aerodynamics {
+                body_id: id,
+                cause: AerodynamicsError::Pressure(PressureError::UnsupportedMach),
+            }));
+            assert_eq!(world.body(id).unwrap().motion(), before);
+            let error = AerodynamicsError::Pressure(PressureError::UnsupportedMach);
+            assert_eq!(std::error::Error::source(&error).unwrap().to_string(), PressureError::UnsupportedMach.to_string());
+        }
+    }
+}
+

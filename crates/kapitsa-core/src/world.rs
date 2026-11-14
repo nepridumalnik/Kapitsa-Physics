@@ -1717,9 +1717,9 @@ impl PhysicsWorld {
                 angular_velocity: body.state().angular_velocity(),
             };
             let wrench = crate::aerodynamics::pressure::evaluate_prepared_mesh(patches, flow)
-                .map_err(|_| StepError::Aerodynamics {
+                .map_err(|cause| StepError::Aerodynamics {
                     body_id,
-                    cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                    cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
                 })?;
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;

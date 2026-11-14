@@ -290,6 +290,7 @@ impl AerodynamicForce {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AerodynamicsError {
     Geometry(geometry::GeometryError),
+    Pressure(pressure::PressureError),
     UnsupportedModel,
     InvalidTessellation,
     TessellationBudgetExceeded,
@@ -310,6 +311,7 @@ impl fmt::Display for AerodynamicsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::Geometry(error) => return write!(formatter, "{error}"),
+            Self::Pressure(error) => return write!(formatter, "{error}"),
             Self::UnsupportedModel => "this aerodynamic model is not implemented",
             Self::InvalidTessellation => "invalid collider tessellation parameters",
             Self::TessellationBudgetExceeded => "collider tessellation triangle budget exceeded",
@@ -333,6 +335,7 @@ impl std::error::Error for AerodynamicsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Geometry(error) => Some(error),
+            Self::Pressure(error) => Some(error),
             _ => None,
         }
     }

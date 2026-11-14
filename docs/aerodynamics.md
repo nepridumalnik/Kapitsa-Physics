@@ -168,6 +168,12 @@ The Wikipedia article titled `Slender-body theory` concerns low-Reynolds-number 
 
 ## Numerical validation requirements
 
+World pressure failures retain their original `PressureError` in
+`AerodynamicsError::Pressure`, including `std::error::Error::source`.
+In particular, unsupported Mach is not reported as an unsupported geometry
+model and does not silently select another physical model. Regression tests
+check motion rollback for body and assembly geometry in ordinary and sharded steps.
+
 - Validate forces and torques, not only occupied voxels.
 - Measure geometric and force convergence separately as resolution increases.
 - Check symmetry, frame covariance, rotational damping and force direction.
