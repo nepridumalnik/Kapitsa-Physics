@@ -1,6 +1,7 @@
 //! Aerodynamic force models and independent geometry preparation.
 
 pub(crate) mod atmosphere;
+pub mod cache;
 pub mod geometry;
 pub mod pressure;
 pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};

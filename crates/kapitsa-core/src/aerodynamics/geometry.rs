@@ -35,7 +35,7 @@ pub enum OpenMeshPolicy {
 
 /// Hard ceilings also apply: 1,048,576 cells and 100,000,000 work units.
 /// Work counts triangle/box tests and per-instance cell scans.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeometryConfig {
     pub cell_size: f64,
     pub max_cells: usize,
