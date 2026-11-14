@@ -69,15 +69,32 @@ mod aerodynamics {
             if matches!(atmosphere, Atmosphere::Vacuum) {
                 return Ok(());
             };
+            let mut assembly_cache = None;
             for (dense, entry) in world.bodies.iter() {
                 if entry.body.aerodynamic_surfaces.is_empty()
                     && matches!(
                         entry.body.aerodynamics(),
                         crate::aerodynamics::Aerodynamics::None
                     )
+                    && !super::assembly_aerodynamics::configured(
+                        entry,
+                        world.part_aerodynamic_meshes.as_ref(),
+                    )
                 {
                     continue;
                 }
+                let body_id = BodyId {
+                    world: world.world_id,
+                    dense,
+                };
+                let patches = super::assembly_aerodynamics::prepare(
+                    body_id,
+                    entry,
+                    &world.parts,
+                    world.part_aerodynamic_meshes.as_ref(),
+                    &mut assembly_cache,
+                    atmosphere,
+                )?;
                 let mut body = entry.body.motion();
                 PhysicsWorld::apply_aerodynamics(
                     atmosphere,
@@ -90,7 +107,7 @@ mod aerodynamics {
                     &mut body,
                     &world.parts,
                     None,
-                    None,
+                    patches.as_ref(),
                     world.mesh_sound_speed,
                 )?;
             }
@@ -100,6 +117,7 @@ mod aerodynamics {
 }
 #[cfg(test)]
 mod aerodynamics_tests;
+mod assembly_aerodynamics;
 mod ccd;
 mod chunk;
 mod cluster;
@@ -296,6 +314,8 @@ pub struct PhysicsWorld {
     body_revision: u64,
     bodies: DensePool<BodyEntry>,
     parts: DensePool<ClusterPart>,
+    part_aerodynamic_meshes: Option<HashMap<PartId, std::sync::Arc<crate::shape::TriangleMesh>>>,
+    assembly_aerodynamics: Option<HashMap<BodyId, assembly_aerodynamics::AssemblyAerodynamics>>,
     welds: DensePool<Weld>,
     colliders: DensePool<ColliderEntry>,
     chunks: DensePool<chunk::ChunkEntry>,
@@ -366,6 +386,8 @@ impl PhysicsWorld {
             body_revision: 0,
             bodies: DensePool::new(),
             parts: DensePool::new(),
+            part_aerodynamic_meshes: None,
+            assembly_aerodynamics: None,
             welds: DensePool::new(),
             colliders: DensePool::new(),
             chunks: DensePool::new(),
@@ -856,6 +878,15 @@ impl PhysicsWorld {
             .ok_or(ClusterError::InvalidBodyId)?;
         if entry.cluster.is_some() && entry.body.physics() != body.physics() {
             return Err(ClusterError::ManagedMass);
+        }
+        if entry.cluster.is_some()
+            && matches!(
+                body.aerodynamics(),
+                crate::aerodynamics::Aerodynamics::Mesh(_)
+                    | crate::aerodynamics::Aerodynamics::Colliders
+            )
+        {
+            return Err(ClusterError::UnsupportedGeometry);
         }
         self.invalidate_body_edit(id);
         let entry = self
@@ -1654,11 +1685,12 @@ impl PhysicsWorld {
             crate::aerodynamics::Aerodynamics::Mesh(_)
             | crate::aerodynamics::Aerodynamics::Colliders => None,
         };
-        let primary_atmosphere = if matches!(
-            primary,
-            crate::aerodynamics::Aerodynamics::Mesh(_)
-                | crate::aerodynamics::Aerodynamics::Colliders
-        ) {
+        let primary_atmosphere = if mesh_patches.is_some()
+            || matches!(
+                primary,
+                crate::aerodynamics::Aerodynamics::Mesh(_)
+                    | crate::aerodynamics::Aerodynamics::Colliders
+            ) {
             Some(
                 atmosphere
                     .state_at(center)
@@ -1960,7 +1992,8 @@ impl PhysicsWorld {
                 && matches!(
                     entry.body.aerodynamics(),
                     crate::aerodynamics::Aerodynamics::None
-                ))
+                )
+                && !assembly_aerodynamics::configured(entry, self.part_aerodynamic_meshes.as_ref()))
                 || entry.body.physics().body_type() != BodyType::Dynamic
             {
                 continue;
@@ -1989,7 +2022,14 @@ impl PhysicsWorld {
                 entry.mesh_aerodynamics = None;
                 entry.collider_aerodynamic_mesh = None;
             }
-            let mut mesh_patches = None;
+            let mut mesh_patches = assembly_aerodynamics::prepare(
+                body_id,
+                entry,
+                &self.parts,
+                self.part_aerodynamic_meshes.as_ref(),
+                &mut self.assembly_aerodynamics,
+                atmosphere,
+            )?;
             // Only the primary geometry samples the COM. Additional surfaces
             // still evaluate their own positions, including when the COM is in vacuum.
             let primary_atmosphere = if matches!(
@@ -3361,6 +3401,10 @@ impl PhysicsWorld {
                                 || !matches!(
                                     entry.body.aerodynamics(),
                                     crate::aerodynamics::Aerodynamics::None
+                                )
+                                || assembly_aerodynamics::configured(
+                                    entry,
+                                    self.part_aerodynamic_meshes.as_ref(),
                                 ))
                         {
                             step.error = Self::apply_aerodynamics(
@@ -3783,7 +3827,13 @@ impl PhysicsWorld {
             }
             for part in cluster.parts {
                 self.parts.remove(part.dense);
+                if let Some(meshes) = &mut self.part_aerodynamic_meshes {
+                    meshes.remove(&part);
+                }
             }
+        }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&id);
         }
         Some(removed)
     }

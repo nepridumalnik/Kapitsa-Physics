@@ -24,6 +24,8 @@ let prepared = PreparedGeometry::prepare(
         max_cells: 100_000,
         max_work: 10_000_000,
         open_mesh_policy: OpenMeshPolicy::Reject,
+        weld_tolerance: None,
+        max_patch_work: 100_000_000,
     },
 )?;
 ```
@@ -40,7 +42,7 @@ References for geometric concepts: [Voxel](https://en.wikipedia.org/wiki/Voxel),
 
 ## World Mesh and Colliders integration
 
-Non-cluster dynamic bodies support `Aerodynamics::Mesh` and `Aerodynamics::Colliders` through `PreparedGeometryCache`, direction-dependent exposed physical patches, and the pressure evaluator. The current pressure policy requires Mach >= 5 and samples primary atmosphere at the COM. `PhysicsWorld::set_mesh_sound_speed` and `SimulationBuilder::mesh_sound_speed` configure a finite positive uniform sound speed in m/s; callers must match their atmospheric medium. The compatibility default remains 340 m/s and is not inferred from density. Both Tokio and Rayon builders apply the configured value before service start. Additional explicit surfaces sample their own positions even when the COM is outside the atmosphere. Clusters still reject the geometry models.
+Non-cluster dynamic bodies support `Aerodynamics::Mesh` and `Aerodynamics::Colliders` through `PreparedGeometryCache`, direction-dependent exposed physical patches, and the pressure evaluator. The current pressure policy requires Mach >= 5 and samples primary atmosphere at the COM. `PhysicsWorld::set_mesh_sound_speed` and `SimulationBuilder::mesh_sound_speed` configure a finite positive uniform sound speed in m/s; callers must match their atmospheric medium. The compatibility default remains 340 m/s and is not inferred from density. Both Tokio and Rayon builders apply the configured value before service start. Additional explicit surfaces sample their own positions even when the COM is outside the atmosphere. Cluster-level primary Mesh/Colliders modes still reject configuration; per-part Mesh configuration is supported as described below.
 
 Each geometry-bearing primary configuration has a private shared identity token. Replacing a model or the whole `RigidBody` changes identity; world motion, COM edits and edits to other bodies do not. Prepared world entries compare identity before use and discard both the cache and collider-derived mesh on mismatch. The token remains alive in the cached entry, preventing allocator-address ABA. Collider topology and tessellation mutations retain their explicit per-body invalidation. Global motion `body_revision` is no longer used as geometry identity.
 
@@ -49,6 +51,14 @@ Collider geometry is derived from actual attached surfaces in body-local coordin
 `ColliderTessellation::new(radial_segments, sphere_rings, max_triangles)` validates 3..=128 radial segments, 3..=128 sphere rings (including poles), and 1..=65,536 aggregate triangles per body. Defaults are 16 segments, 8 rings, and 16,384 triangles. Budget exhaustion returns `TessellationBudgetExceeded` before emitting an over-budget shape. Referenced source faces, rather than unreferenced vertex arrays, are copied; allocation failures and unrepresentable transformed triangles are errors. `PhysicsWorld::set_collider_tessellation` changes a body's settings and invalidates preparation. Collider insertion, removal and mutable access invalidate that body's derived geometry/cache; motion and world pose do not. The pressure exposure is regenerated for each step's upstream direction (from each patch toward the oncoming air); fluid velocity is the opposite direction. Collider-derived triangle seams use explicit 1e-10 positional welding for closure detection and `SurfaceOnly` for open geometry. Existing voxel budgets (1,048,576 cells, 100,000,000 work units), 0.125 m cells and 0.01 m exposure epsilon still apply and may reject large or complex bodies independently of the tessellation budget.
 
 This is a faceted, scalar hypersonic approximation, not an analytic sphere/cylinder fluid solution. Resolution affects forces as well as geometry. Overlapping colliders are prepared together; duplicate surfaces and occlusion use the same conservative occupancy rules as Mesh. No wing, SIMD or transonic model is introduced.
+
+## Assembly part meshes
+
+`PhysicsWorld::set_part_aerodynamic_mesh(part, Some(mesh))` assigns a physical mesh in the stable local frame of that `PartId`; `None` disables it. `part_aerodynamic_mesh` inspects the configuration. Part IDs retain these configurations through merge and split. Preparation unions all configured instances in the current solver body's local frame and retains `GeometryOwner::Part` ownership. One existing solver body represents each rigid connected assembly. Coincident or shielded part geometry is not independently added to pressure loads.
+
+A per-body preparation entry compares instance membership, mesh identity and part-local transforms. World pose is absent. A changed union is prepared in a temporary entry and published only on success; failed preparation does not apply partial forces. Primary geometry and explicitly configured additional surfaces are additive by explicit policy: configure a physical load once unless the additional surface intentionally models a separate contribution. Mesh generation from part colliders and migration of existing body-level Mesh/Colliders configurations into parts are not yet supported.
+
+Part-mesh pressure uses the same Mach >= 5 policy, sound-speed configuration, COM atmosphere sampling and centroid rotational-flow approximation as ordinary meshes. Vacuum skips preparation. Tests cover ordinary/sharded merge and split, overlap ownership, union load area, preparation failure and removal cleanup. General physical equivalence to FAR is not established.
 
 ## Conventions
 

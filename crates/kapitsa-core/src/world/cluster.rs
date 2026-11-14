@@ -1018,6 +1018,9 @@ impl PhysicsWorld {
         self.bodies
             .remove(second.dense)
             .expect("second body must exist during merge commit");
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&second);
+        }
         self.synchronize_cluster_physics_state(&[first]);
         Ok(())
     }
