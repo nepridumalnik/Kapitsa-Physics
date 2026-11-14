@@ -1634,16 +1634,24 @@ impl PhysicsWorld {
             crate::aerodynamics::Aerodynamics::Mesh(_)
             | crate::aerodynamics::Aerodynamics::Colliders => None,
         };
-        if matches!(
+        let primary_atmosphere = if matches!(
             primary,
             crate::aerodynamics::Aerodynamics::Mesh(_)
                 | crate::aerodynamics::Aerodynamics::Colliders
         ) {
-            let patches = mesh_patches.ok_or_else(error)?;
-            let flow = crate::aerodynamics::pressure::PressureFlow {
-                atmosphere: atmosphere
+            Some(
+                atmosphere
                     .state_at(center)
                     .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
+            )
+            .filter(|state| state.density() != 0.0)
+        } else {
+            None
+        };
+        if let Some(primary_atmosphere) = primary_atmosphere {
+            let patches = mesh_patches.ok_or_else(error)?;
+            let flow = crate::aerodynamics::pressure::PressureFlow {
+                atmosphere: primary_atmosphere,
                 sound_speed: mesh_sound_speed,
                 transform: body.state().transform(),
                 center_of_mass: body
@@ -1949,10 +1957,39 @@ impl PhysicsWorld {
                 });
             }
             let mut mesh_patches = None;
-            if matches!(
+            // Only the primary geometry samples the COM. Additional surfaces
+            // still evaluate their own positions, including when the COM is in vacuum.
+            let primary_atmosphere = if matches!(
                 entry.body.aerodynamics(),
-                crate::aerodynamics::Aerodynamics::Colliders
-            ) && entry.collider_aerodynamic_mesh.is_none()
+                crate::aerodynamics::Aerodynamics::Mesh(_)
+                    | crate::aerodynamics::Aerodynamics::Colliders
+            ) {
+                let center = entry
+                    .body
+                    .world_center_of_mass()
+                    .map_err(|_| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    })?
+                    .ok_or(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    })?;
+                Some(
+                    atmosphere
+                        .state_at(center)
+                        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
+                )
+                .filter(|state| state.density() != 0.0)
+            } else {
+                None
+            };
+            if primary_atmosphere.is_some()
+                && matches!(
+                    entry.body.aerodynamics(),
+                    crate::aerodynamics::Aerodynamics::Colliders
+                )
+                && entry.collider_aerodynamic_mesh.is_none()
             {
                 let mut next = entry.first_collider;
                 let attached = std::iter::from_fn(|| {
@@ -1976,7 +2013,7 @@ impl PhysicsWorld {
                 }
                 _ => None,
             };
-            if let Some(mesh) = mesh {
+            if let (Some(mesh), Some(primary_atmosphere)) = (mesh, primary_atmosphere) {
                 let config = entry
                     .mesh_aerodynamics
                     .as_ref()
@@ -2015,27 +2052,11 @@ impl PhysicsWorld {
                         cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
                     }
                 })?;
-                let sample_point = entry
-                    .body
-                    .world_center_of_mass()
-                    .map_err(|_| StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                    })?
-                    .ok_or(StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                    })?;
                 let relative = entry
                     .body
                     .state()
                     .linear_velocity()
-                    .checked_sub(
-                        atmosphere
-                            .state_at(sample_point)
-                            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?
-                            .wind_velocity(),
-                    )
+                    .checked_sub(primary_atmosphere.wind_velocity())
                     .ok_or(StepError::Aerodynamics {
                         body_id,
                         cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,

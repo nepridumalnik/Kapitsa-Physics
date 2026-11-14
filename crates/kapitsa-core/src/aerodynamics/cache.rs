@@ -4,9 +4,9 @@
 //! `BodyId`, and advance geometry/config versions when replacing a mesh or its
 //! preparation settings. Versions must not be reused for different geometry.
 //! Remove/drop the cache when the body is removed or switches models. Motion,
-//! world pose and COM are deliberately absent from the identity. This module
-//! does not enable mesh force evaluation; the world's `UnsupportedModel` in air
-//! remains unchanged.
+//! world pose and COM are deliberately absent from the identity. The world uses
+//! prepared geometry for Mesh/Colliders pressure evaluation in nonzero density;
+//! vacuum samples skip preparation and primary geometry force evaluation.
 //!
 //! A request borrows no body or mesh and may be sent to a worker. Preparation
 //! borrows the mesh only while computing. Publish under the world's exclusive

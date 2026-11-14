@@ -10,6 +10,84 @@ use crate::{
 };
 
 #[test]
+fn spherical_vacuum_skips_collider_preparation() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{Atmosphere, ColliderTessellation, SphericalAtmosphere},
+        collider::Collider,
+        shape::{Capsule, Shape, Sphere},
+    };
+    for sharded in [false, true] {
+        for geometry in 0..3 {
+            // Also exercise a COM outside the atmosphere with an additional
+            // surface inside it: skipping primary geometry must not skip surfaces.
+            for surface_in_air in [false, true] {
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(Atmosphere::Sphere(
+                    SphericalAtmosphere::builder()
+                        .reference_radius(5.0)
+                        .reference_density(if surface_in_air { 1.0 } else { 0.0 })
+                        .height(5.0)
+                        .profile(crate::aerodynamics::DensityProfile::Exponential {
+                            scale_height: 1.0,
+                        })
+                        .build()?,
+                ));
+                let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+                let position = if surface_in_air {
+                    Vec3::X * 20.0
+                } else {
+                    Vec3::ZERO
+                };
+                let mut body = RigidBody::new_dynamic(
+                    Transform::new(position, kapitsa_math::Quat::IDENTITY)?,
+                    mass,
+                )?;
+                body.set_linear_velocity(Vec3::X * 10.0)?;
+                body.set_aerodynamics(Aerodynamics::Colliders);
+                let id = world.add_body(body)?;
+                if geometry != 0 {
+                    let shape = if geometry == 1 {
+                        Shape::Capsule(Capsule::new(-Vec3::Z, Vec3::Z, 0.5)?)
+                    } else {
+                        world
+                            .set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1)?)?;
+                        Shape::Sphere(Sphere::new(0.5)?)
+                    };
+                    world.add_collider(id, Collider::new(shape, Transform::identity()))?;
+                }
+                if surface_in_air {
+                    world.add_aerodynamic_surface(
+                        id,
+                        AerodynamicProperties::new(1.0, 1.0, -Vec3::X * 20.0)?,
+                    )?;
+                }
+                if sharded {
+                    world.step_with_shards(
+                        0.01,
+                        &mut [Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )?;
+                } else {
+                    world.step(0.01)?;
+                }
+                let body = world.body(id).ok_or("body")?;
+                if surface_in_air {
+                    assert!(body.state().linear_velocity().x < 10.0);
+                } else {
+                    assert_eq!(body.state().linear_velocity(), Vec3::X * 10.0);
+                    assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
+                }
+                let entry = world.bodies.get(id.dense).ok_or("entry")?;
+                assert!(entry.collider_aerodynamic_mesh.is_none());
+                assert!(entry.mesh_aerodynamics.is_none());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn vacuum_skips_aerodynamics_in_both_world_paths() {
     for sharded in [false, true] {
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
