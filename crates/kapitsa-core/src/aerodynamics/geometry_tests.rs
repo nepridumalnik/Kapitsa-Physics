@@ -261,6 +261,48 @@ fn separating_axes_reject_empty_corner_of_triangle_bounds() {
 }
 
 #[test]
+fn exposed_surface_patches_remove_internal_overlap() {
+    let mesh = cube();
+    let g = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125)).unwrap();
+    let patches = g
+        .exposed_surface_patches(&[instance(&mesh, Vec3::ZERO)], -Vec3::X, 0.01)
+        .unwrap();
+    assert_eq!(patches.len(), 2);
+    assert!(patches.iter().all(|patch| patch.normal.dot(-Vec3::X) > 0.0));
+}
+
+#[test]
+fn nested_and_duplicate_source_surfaces_are_filtered() {
+    let outer = cube();
+    let inner = TriangleMesh::new(
+        outer.vertices().iter().map(|v| *v * 0.25).collect(),
+        outer.triangles().to_vec(),
+    )
+    .unwrap();
+    let outer_instance = instance(&outer, Vec3::ZERO);
+    let inner_instance = instance(&inner, Vec3::splat(0.375));
+    let g = PreparedGeometry::prepare(&[outer_instance, inner_instance], config(0.125)).unwrap();
+    let nested = g
+        .exposed_surface_patches(&[outer_instance, inner_instance], -Vec3::X, 0.01)
+        .unwrap();
+    let duplicate = g
+        .exposed_surface_patches(&[outer_instance, outer_instance], -Vec3::X, 0.01)
+        .unwrap();
+    assert_eq!(nested.len(), 2);
+    assert_eq!(duplicate.len(), 2);
+}
+
+#[test]
+fn exposed_surface_patches_are_empty_for_leeward_direction() {
+    let mesh = cube();
+    let g = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125)).unwrap();
+    let patches = g
+        .exposed_surface_patches(&[instance(&mesh, Vec3::ZERO)], Vec3::X, 0.01)
+        .unwrap();
+    assert_eq!(patches.len(), 2);
+}
+
+#[test]
 fn open_box_is_not_filled() {
     let cube = cube();
     let mesh = TriangleMesh::new(cube.vertices().to_vec(), cube.triangles()[2..].to_vec()).unwrap();

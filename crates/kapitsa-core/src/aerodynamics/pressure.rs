@@ -126,8 +126,11 @@ impl PressurePatch {
         if mach < 5.0 {
             return Err(PressureError::UnsupportedMach);
         }
+        let incoming_direction = (relative / speed)
+            .checked_mul_scalar(-1.0)
+            .ok_or(overflow)?;
         let incidence = normal
-            .checked_dot(relative / speed)
+            .checked_dot(incoming_direction)
             .ok_or(overflow)?
             .max(0.0);
         if incidence == 0.0 {
@@ -138,7 +141,7 @@ impl PressurePatch {
         if !q.is_finite() || !magnitude.is_finite() {
             return Err(overflow);
         }
-        let force = normal.checked_mul_scalar(-magnitude).ok_or(overflow)?;
+        let force = normal.checked_mul_scalar(magnitude).ok_or(overflow)?;
         let moment = arm.checked_cross(force).ok_or(overflow)?;
         Ok(PressureWrench { force, moment })
     }

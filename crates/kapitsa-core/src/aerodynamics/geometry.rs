@@ -77,6 +77,42 @@ pub struct GeometryFace {
     pub owner: GeometryOwner,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceTriangle {
+    pub vertices: [Vec3; 3],
+    pub normal: Vec3,
+    pub area: f64,
+    pub owner: GeometryOwner,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedSurfacePatch {
+    pub center: Vec3,
+    pub normal: Vec3,
+    pub area: f64,
+    pub owner: GeometryOwner,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreparedSurfacePatches {
+    patches: Vec<PreparedSurfacePatch>,
+}
+
+impl PreparedSurfacePatches {
+    pub fn as_slice(&self) -> &[PreparedSurfacePatch] {
+        &self.patches
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &PreparedSurfacePatch> {
+        self.patches.iter()
+    }
+    pub fn len(&self) -> usize {
+        self.patches.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.patches.is_empty()
+    }
+}
+
 /// Immutable union geometry. World motion and COM changes do not affect it.
 #[derive(Debug, PartialEq)]
 pub struct PreparedGeometry {
@@ -402,11 +438,120 @@ impl PreparedGeometry {
     pub fn occupancy(&self) -> &[Option<GeometryOwner>] {
         &self.occupancy
     }
+
+    pub fn surface_triangles(
+        instances: &[GeometryInstance<'_>],
+    ) -> Result<Vec<SurfaceTriangle>, GeometryError> {
+        let mut triangles = Vec::new();
+        let total = instances
+            .iter()
+            .try_fold(0usize, |n, instance| {
+                n.checked_add(instance.mesh.triangles().len())
+            })
+            .ok_or(GeometryError::WorkBudgetExceeded)?;
+        triangles
+            .try_reserve_exact(total)
+            .map_err(|_| GeometryError::AllocationFailed)?;
+        for instance in instances {
+            for &[a, b, c] in instance.mesh.triangles() {
+                let vertices = [a, b, c].map(|i| {
+                    instance
+                        .local_transform
+                        .transform_point(instance.mesh.vertices()[i])
+                });
+                let cross = (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0]);
+                let length = cross
+                    .checked_length()
+                    .ok_or(GeometryError::ArithmeticOverflow)?;
+                if length == 0.0 {
+                    return Err(GeometryError::InvalidGeometry);
+                }
+                triangles.push(SurfaceTriangle {
+                    vertices,
+                    normal: cross / length,
+                    area: length * 0.5,
+                    owner: instance.owner,
+                });
+            }
+        }
+        Ok(triangles)
+    }
+
     pub fn sections(&self) -> &[Vec<GeometrySection>; 3] {
         &self.sections
     }
     pub fn volume(&self) -> f64 {
         self.volume
+    }
+
+    pub fn exposed_surface_patches(
+        &self,
+        instances: &[GeometryInstance<'_>],
+        direction: Vec3,
+        epsilon: f64,
+    ) -> Result<PreparedSurfacePatches, GeometryError> {
+        if !direction.is_finite() || !epsilon.is_finite() || epsilon <= 0.0 {
+            return Err(GeometryError::InvalidGeometry);
+        }
+        let incoming = direction
+            .try_normalize()
+            .ok_or(GeometryError::InvalidGeometry)?;
+        let triangles = Self::surface_triangles(instances)?;
+        let mut patches = Vec::new();
+        patches
+            .try_reserve_exact(triangles.len())
+            .map_err(|_| GeometryError::AllocationFailed)?;
+        for triangle in triangles {
+            let center = (triangle.vertices[0] + triangle.vertices[1] + triangle.vertices[2]) / 3.0;
+            if triangle.normal.dot(incoming) <= 0.0
+                || self.ray_hits_union(center, incoming, epsilon)
+            {
+                continue;
+            }
+            let duplicate = patches.iter().any(|patch: &PreparedSurfacePatch| {
+                (patch.center - center).length_squared() <= epsilon * epsilon
+                    && (patch.normal - triangle.normal).length_squared() <= 1e-12
+                    && (patch.area - triangle.area).abs() <= epsilon * epsilon
+            });
+            if !duplicate {
+                patches.push(PreparedSurfacePatch {
+                    center,
+                    normal: triangle.normal,
+                    area: triangle.area,
+                    owner: triangle.owner,
+                });
+            }
+        }
+        Ok(PreparedSurfacePatches { patches })
+    }
+
+    fn ray_hits_union(&self, point: Vec3, direction: Vec3, epsilon: f64) -> bool {
+        let start = point + direction * (epsilon + self.cell_size);
+        let max_steps = self.dimensions[0]
+            .saturating_add(self.dimensions[1])
+            .saturating_add(self.dimensions[2])
+            .saturating_add(4);
+        for step in 0..max_steps {
+            let sample = start + direction * (step as f64 * self.cell_size);
+            let relative = (sample - self.origin) / self.cell_size;
+            let coordinates =
+                [relative.x, relative.y, relative.z].map(|value| value.floor() as isize);
+            if coordinates.iter().any(|&value| value < 0) {
+                return false;
+            }
+            let coordinates = coordinates.map(|value| value as usize);
+            if coordinates
+                .iter()
+                .enumerate()
+                .any(|(axis, &value)| value >= self.dimensions[axis])
+            {
+                return false;
+            }
+            if self.occupancy[index(coordinates, self.dimensions)].is_some() {
+                return true;
+            }
+        }
+        false
     }
 
     /// Streams union boundary faces without allocating a worst-case face buffer.
