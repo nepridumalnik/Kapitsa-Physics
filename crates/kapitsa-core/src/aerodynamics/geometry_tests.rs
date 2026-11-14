@@ -1,6 +1,16 @@
 use super::*;
 use kapitsa_math::Quat;
 
+fn visibility_triangle(a: Vec3, b: Vec3, c: Vec3) -> SurfaceTriangle {
+    let normal = (b - a).cross(c - a).try_normalize().unwrap();
+    SurfaceTriangle {
+        vertices: [a, b, c],
+        normal,
+        area: (b - a).cross(c - a).length() * 0.5,
+        owner: GeometryOwner::Body,
+    }
+}
+
 fn cube() -> TriangleMesh {
     TriangleMesh::new(
         vec![
@@ -46,6 +56,103 @@ fn instance(mesh: &TriangleMesh, offset: Vec3) -> GeometryInstance<'_> {
         owner: GeometryOwner::Body,
         local_transform: Transform::new(offset, Quat::IDENTITY).unwrap(),
     }
+}
+
+#[test]
+fn triangle_grid_candidates_are_conservative_for_axis_and_diagonal_sweeps() {
+    let triangles = vec![
+        visibility_triangle(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.2, 0.0, 0.0),
+            Vec3::new(0.0, 0.2, 0.0),
+        ),
+        visibility_triangle(
+            Vec3::new(0.8, 0.8, 0.8),
+            Vec3::new(1.0, 0.8, 0.8),
+            Vec3::new(0.8, 1.0, 0.8),
+        ),
+        visibility_triangle(
+            Vec3::new(0.4, 0.4, 0.4),
+            Vec3::new(0.6, 0.4, 0.4),
+            Vec3::new(0.4, 0.6, 0.4),
+        ),
+    ];
+    let grid = TriangleGrid::build(&triangles, 10_000).unwrap();
+    let mut marks = vec![0; triangles.len()];
+    for (stamp, direction) in [
+        Vec3::X,
+        -Vec3::X,
+        Vec3::Y,
+        Vec3::Z,
+        Vec3::new(1.0, -1.0, 1.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (candidates, _) = grid
+            .candidates(
+                &triangles[1],
+                direction,
+                &mut marks,
+                stamp as u32 + 1,
+                10_000,
+            )
+            .unwrap();
+        assert!(triangles.iter().enumerate().all(|(index, _)| {
+            // Every exhaustive swept candidate is allowed; the index must not omit
+            // any triangle whose AABB intersects the axis-aligned swept bounds.
+            let candidate = &triangles[index];
+            let source_min = triangles[1]
+                .vertices
+                .iter()
+                .fold(Vec3::splat(f64::INFINITY), |v, &p| v.min(p));
+            let source_max = triangles[1]
+                .vertices
+                .iter()
+                .fold(Vec3::splat(f64::NEG_INFINITY), |v, &p| v.max(p));
+            let global_min = triangles
+                .iter()
+                .flat_map(|t| t.vertices)
+                .fold(Vec3::splat(f64::INFINITY), |v, p| v.min(p));
+            let global_max = triangles
+                .iter()
+                .flat_map(|t| t.vertices)
+                .fold(Vec3::splat(f64::NEG_INFINITY), |v, p| v.max(p));
+            let lower = source_min.min(global_min);
+            let upper = source_max.max(global_max);
+            let candidate_min = candidate
+                .vertices
+                .iter()
+                .fold(Vec3::splat(f64::INFINITY), |v, &p| v.min(p));
+            let candidate_max = candidate
+                .vertices
+                .iter()
+                .fold(Vec3::splat(f64::NEG_INFINITY), |v, &p| v.max(p));
+            let intersects = (0..3).all(|axis| {
+                candidate_max[axis] >= lower[axis] && candidate_min[axis] <= upper[axis]
+            });
+            !intersects || candidates.contains(&index)
+        }));
+    }
+}
+
+#[test]
+fn triangle_grid_rejects_query_after_work_limit_before_scanning_all_buckets() {
+    let triangles = vec![
+        visibility_triangle(Vec3::ZERO, Vec3::X * 0.2, Vec3::Y * 0.2),
+        visibility_triangle(
+            Vec3::new(0.1, 0.1, 0.1),
+            Vec3::new(0.3, 0.1, 0.1),
+            Vec3::new(0.1, 0.3, 0.1),
+        ),
+    ];
+    let grid = TriangleGrid::build(&triangles, 10_000).unwrap();
+    let mut marks = vec![0; triangles.len()];
+    assert_eq!(
+        grid.candidates(&triangles[0], Vec3::X, &mut marks, 1, 1)
+            .unwrap_err(),
+        GeometryError::WorkBudgetExceeded
+    );
 }
 
 #[test]

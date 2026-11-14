@@ -202,11 +202,6 @@ impl TriangleGrid {
             .into_iter()
             .try_fold(1usize, |n, d| n.checked_mul(d))
             .ok_or(GeometryError::WorkBudgetExceeded)?;
-        let mut entries = Vec::new();
-        entries
-            .try_reserve(triangles.len().saturating_mul(target))
-            .map_err(|_| GeometryError::AllocationFailed)?;
-        let mut counts = allocated(cell_count, 0usize)?;
         let cell = |point: Vec3| -> Result<[usize; 3], GeometryError> {
             let values = components((point - min) / cell_size);
             if !values.iter().all(|value| value.is_finite()) {
@@ -214,6 +209,43 @@ impl TriangleGrid {
             }
             Ok(values.map(|value| (value.floor().max(0.0) as usize).min(target.saturating_sub(1))))
         };
+        let mut entry_count = 0usize;
+        for triangle in triangles {
+            let lower = cell(
+                triangle
+                    .vertices
+                    .iter()
+                    .fold(Vec3::splat(f64::INFINITY), |v, &p| v.min(p)),
+            )?;
+            let upper = cell(
+                triangle
+                    .vertices
+                    .iter()
+                    .fold(Vec3::splat(f64::NEG_INFINITY), |v, &p| v.max(p)),
+            )?;
+            let spans = [
+                upper[0].saturating_sub(lower[0]).saturating_add(1),
+                upper[1].saturating_sub(lower[1]).saturating_add(1),
+                upper[2].saturating_sub(lower[2]).saturating_add(1),
+            ];
+            entry_count = entry_count
+                .checked_add(
+                    spans[0]
+                        .checked_mul(spans[1])
+                        .and_then(|n| n.checked_mul(spans[2]))
+                        .ok_or(GeometryError::WorkBudgetExceeded)?,
+                )
+                .ok_or(GeometryError::WorkBudgetExceeded)?;
+        }
+        let build_work = entry_count
+            .checked_add(cell_count)
+            .ok_or(GeometryError::WorkBudgetExceeded)?;
+        check_surface_work(Some(build_work), max_work)?;
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(entry_count)
+            .map_err(|_| GeometryError::AllocationFailed)?;
+        let mut counts = allocated(cell_count, 0usize)?;
         for (triangle_index, triangle) in triangles.iter().enumerate() {
             let lower = cell(
                 triangle
@@ -239,11 +271,6 @@ impl TriangleGrid {
                 }
             }
         }
-        let build_work = entries
-            .len()
-            .checked_add(cell_count)
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
-        check_surface_work(Some(build_work), max_work)?;
         let mut offsets = allocated(cell_count + 1, 0usize)?;
         for (i, count) in counts.into_iter().enumerate() {
             offsets[i + 1] = offsets[i]
@@ -251,7 +278,14 @@ impl TriangleGrid {
                 .ok_or(GeometryError::WorkBudgetExceeded)?;
         }
         entries.sort_unstable();
-        let triangles = entries.into_iter().map(|(_, triangle)| triangle).collect();
+        let mut indexed_triangles = Vec::new();
+        indexed_triangles
+            .try_reserve_exact(entries.len())
+            .map_err(|_| GeometryError::AllocationFailed)?;
+        for (_, triangle) in entries {
+            checked_push(&mut indexed_triangles, triangle)?;
+        }
+        let triangles = indexed_triangles;
         Ok(Self {
             origin: min,
             cell_size,
@@ -267,6 +301,7 @@ impl TriangleGrid {
         direction: Vec3,
         marks: &mut [u32],
         stamp: u32,
+        max_work: usize,
     ) -> Result<(Vec<usize>, usize), GeometryError> {
         let source_min = source
             .vertices
@@ -310,11 +345,16 @@ impl TriangleGrid {
             upper[axis] = upper[axis].min(self.dimensions[axis].saturating_sub(1));
         }
         let mut result = Vec::new();
+        let mut query_work = 0usize;
         for z in lower[2]..=upper[2] {
             for y in lower[1]..=upper[1] {
                 for x in lower[0]..=upper[0] {
                     let range = index([x, y, z], self.dimensions);
                     for &triangle in &self.triangles[self.offsets[range]..self.offsets[range + 1]] {
+                        query_work = query_work
+                            .checked_add(1)
+                            .ok_or(GeometryError::WorkBudgetExceeded)?;
+                        check_surface_work(Some(query_work), max_work)?;
                         if marks[triangle] != stamp {
                             marks[triangle] = stamp;
                             checked_push(&mut result, triangle)?;
@@ -323,7 +363,6 @@ impl TriangleGrid {
                 }
             }
         }
-        let query_work = result.len();
         Ok((result, query_work))
     }
 }
@@ -996,8 +1035,13 @@ impl PreparedGeometry {
             stamp = stamp
                 .checked_add(1)
                 .ok_or(GeometryError::WorkBudgetExceeded)?;
-            let (candidates, query_work) =
-                grid.candidates(triangle, upstream, &mut marks, stamp)?;
+            let (candidates, query_work) = grid.candidates(
+                triangle,
+                upstream,
+                &mut marks,
+                stamp,
+                max_work.saturating_sub(work),
+            )?;
             work = work
                 .checked_add(query_work)
                 .ok_or(GeometryError::WorkBudgetExceeded)?;
