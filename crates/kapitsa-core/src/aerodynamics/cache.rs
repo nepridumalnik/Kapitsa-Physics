@@ -1,8 +1,9 @@
-//! Standalone cache for body-local `Aerodynamics::Mesh` preparation.
+//! Cache for body-local meshes and unions of assembly-local instances.
 //!
 //! Integration boundary: the world must own one cache per body, supply its full
 //! `BodyId`, and advance geometry/config versions when replacing a mesh or its
-//! preparation settings. Versions must not be reused for different geometry.
+//! preparation settings. Assembly identity also covers membership, owners and
+//! instance-local transforms. Versions must not be reused for different geometry.
 //! Remove/drop the cache when the body is removed or switches models. Motion,
 //! world pose and COM are deliberately absent from the identity. The world uses
 //! prepared geometry for Mesh/Colliders pressure evaluation in nonzero density;
@@ -43,14 +44,22 @@ impl GeometryPreparation {
 
     /// Prepare a mesh in the body's local frame, without cloning it.
     pub fn prepare(self, mesh: &TriangleMesh) -> Result<PreparedMeshGeometry, GeometryError> {
-        let geometry = PreparedGeometry::prepare(
-            &[GeometryInstance {
-                mesh,
-                local_transform: Transform::identity(),
-                owner: GeometryOwner::Body,
-            }],
-            self.config,
-        )?;
+        self.prepare_instances(&[GeometryInstance {
+            mesh,
+            local_transform: Transform::identity(),
+            owner: GeometryOwner::Body,
+        }])
+    }
+
+    /// Prepares the union of assembly instances in their stable assembly frame.
+    /// Owner IDs and local transforms are retained by the geometry preparation.
+    /// The caller must change geometry identity for mesh, membership, owner or
+    /// local-transform edits; world motion and COM changes are not shape edits.
+    pub fn prepare_instances(
+        self,
+        instances: &[GeometryInstance<'_>],
+    ) -> Result<PreparedMeshGeometry, GeometryError> {
+        let geometry = PreparedGeometry::prepare(instances, self.config)?;
         Ok(PreparedMeshGeometry {
             request: self,
             geometry,
@@ -132,10 +141,29 @@ impl PreparedGeometryCache {
         mesh: &TriangleMesh,
         config: GeometryConfig,
     ) -> Result<&PreparedGeometry, GeometryError> {
+        self.prepare_instances(
+            key,
+            &[GeometryInstance {
+                mesh,
+                local_transform: Transform::identity(),
+                owner: GeometryOwner::Body,
+            }],
+            config,
+        )
+    }
+
+    /// Prepares or reuses one assembly union. Identity covers every instance's
+    /// geometry, membership, owner and assembly-local transform. Preparation is
+    /// transactional: failure never publishes a partially prepared union.
+    pub fn prepare_instances(
+        &mut self,
+        key: GeometryCacheKey,
+        instances: &[GeometryInstance<'_>],
+        config: GeometryConfig,
+    ) -> Result<&PreparedGeometry, GeometryError> {
         let request = self.request(key, config);
         if self.get().is_none() {
-            let prepared = request.prepare(mesh)?;
-            // Exclusive access and no intervening request make this current.
+            let prepared = request.prepare_instances(instances)?;
             self.publish(prepared);
         }
         self.get().ok_or(GeometryError::InvalidGeometry)
@@ -177,6 +205,76 @@ mod tests {
             geometry_version: 1,
             config_version: 1,
         }
+    }
+
+    #[test]
+    fn assembly_union_preserves_owners_and_rejects_stale_topology()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?)?;
+        let part = world.enable_cluster(body)?;
+        let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]])?;
+        let instances = [
+            GeometryInstance {
+                mesh: &mesh,
+                local_transform: Transform::identity(),
+                owner: GeometryOwner::Body,
+            },
+            GeometryInstance {
+                mesh: &mesh,
+                local_transform: Transform::new(Vec3::X * 2.0, Quat::IDENTITY)?,
+                owner: GeometryOwner::Part(part),
+            },
+        ];
+        let first = GeometryCacheKey {
+            body,
+            geometry_version: 1,
+            config_version: 1,
+        };
+        let second = GeometryCacheKey {
+            geometry_version: 2,
+            ..first
+        };
+        let mut cache = PreparedGeometryCache::default();
+        let expected = PreparedGeometry::prepare(&instances, config())?;
+        assert_eq!(
+            cache.prepare_instances(first, &instances, config())?,
+            &expected
+        );
+        assert!(expected.occupancy().contains(&Some(GeometryOwner::Body)));
+        assert!(
+            expected
+                .occupancy()
+                .contains(&Some(GeometryOwner::Part(part)))
+        );
+        let incarnation = cache.request(first, config()).incarnation.clone();
+        cache.prepare_instances(first, &instances, config())?;
+        assert!(
+            cache
+                .requested
+                .as_ref()
+                .is_some_and(|r| Arc::ptr_eq(&incarnation, &r.incarnation))
+        );
+        let stale = cache
+            .request(first, config())
+            .prepare_instances(&instances)?;
+        cache.request(second, config());
+        assert!(!cache.publish(stale));
+        assert!(cache.prepare_instances(second, &[], config()).is_err());
+        assert!(cache.get().is_none());
+        assert_eq!(
+            cache.last_prepared().ok_or("missing retained union")?.1,
+            &expected
+        );
+        let remaining = PreparedGeometry::prepare(&instances[..1], config())?;
+        assert_eq!(
+            cache.prepare_instances(second, &instances[..1], config())?,
+            &remaining
+        );
+        Ok(())
     }
 
     #[test]
