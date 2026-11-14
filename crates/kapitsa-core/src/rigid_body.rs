@@ -79,6 +79,12 @@ impl RigidBody {
         self.aerodynamics = aerodynamics;
     }
 
+    /// Moves primary configuration into a part without cloning owned geometry.
+    pub(crate) fn take_primary_aerodynamics(&mut self) -> crate::aerodynamics::Aerodynamics {
+        self.aerodynamic_geometry_identity = None;
+        std::mem::take(&mut self.aerodynamics)
+    }
+
     pub fn aerodynamic_surfaces(&self) -> &[crate::aerodynamics::AerodynamicSurface] {
         &self.aerodynamic_surfaces
     }

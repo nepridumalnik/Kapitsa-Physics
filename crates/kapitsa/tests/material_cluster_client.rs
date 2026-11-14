@@ -342,3 +342,82 @@ async fn detached_part_keeps_its_force_source_after_resuming() {
     .unwrap();
     simulation.stop().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
+-> Result<(), Box<dyn std::error::Error>> {
+    use kapitsa::aerodynamics::{
+        Atmosphere, ColliderTessellation, DensityProfile, SphericalAtmosphere,
+    };
+    for rayon_executor in [false, true] {
+        let atmosphere = Atmosphere::Sphere(
+            SphericalAtmosphere::builder()
+                .reference_radius(1_000_000.0)
+                .reference_density(0.001)
+                .height(1_000_000.0)
+                .profile(DensityProfile::Exponential {
+                    scale_height: 1_000_000.0,
+                })
+                .build()?,
+        );
+        let builder = Simulation::builder()
+            .max_workers(2)
+            .atmosphere(atmosphere)
+            .mesh_sound_speed(100.0);
+        let mut simulation = if rayon_executor {
+            builder.spawn_on_rayon(std::sync::Arc::new(
+                rayon::ThreadPoolBuilder::new().num_threads(2).build()?,
+            ))?
+        } else {
+            builder.spawn_on_tokio(&tokio::runtime::Handle::current())?
+        };
+        simulation.pause()?;
+        let mut client = simulation.client();
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?,
+        )?;
+        body.set_linear_velocity(Vec3::X * 2000.0)?;
+        let id = client.add_body(body).await?;
+        let part = client.enable_cluster(id).await?;
+        let collider = client
+            .add_part_collider(
+                part,
+                Collider::new(
+                    Shape::Cuboid(kapitsa::shape::Cuboid::new(1.0, 1.0, 1.0)?),
+                    Transform::identity(),
+                ),
+            )
+            .await?;
+        let mesh =
+            kapitsa::shape::TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])?;
+        client.set_part_aerodynamic_mesh(part, Some(mesh)).await?;
+        client.set_part_aerodynamic_colliders(part, true).await?;
+        client
+            .set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)
+            .await?;
+        client
+            .set_part_collider_transform(
+                part,
+                collider,
+                Transform::new(Vec3::Y, kapitsa::math::Quat::IDENTITY)?,
+            )
+            .await?;
+        simulation.resume()?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let snapshot = client.next_snapshot().await?;
+                if let Some(body) = snapshot.body(id)
+                    && body.linear_velocity().x < 2000.0
+                    && body.angular_velocity().z > 0.0
+                {
+                    break;
+                }
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        simulation.stop().await?;
+    }
+    Ok(())
+}

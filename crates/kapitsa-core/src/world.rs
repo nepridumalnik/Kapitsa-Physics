@@ -78,7 +78,7 @@ mod aerodynamics {
                     )
                     && !super::assembly_aerodynamics::configured(
                         entry,
-                        world.part_aerodynamic_meshes.as_ref(),
+                        world.part_aerodynamic_geometry.as_ref(),
                     )
                 {
                     continue;
@@ -91,7 +91,8 @@ mod aerodynamics {
                     body_id,
                     entry,
                     &world.parts,
-                    world.part_aerodynamic_meshes.as_ref(),
+                    world.part_aerodynamic_geometry.as_ref(),
+                    &world.colliders,
                     &mut assembly_cache,
                     atmosphere,
                 )?;
@@ -314,7 +315,7 @@ pub struct PhysicsWorld {
     body_revision: u64,
     bodies: DensePool<BodyEntry>,
     parts: DensePool<ClusterPart>,
-    part_aerodynamic_meshes: Option<HashMap<PartId, std::sync::Arc<crate::shape::TriangleMesh>>>,
+    part_aerodynamic_geometry: Option<HashMap<PartId, assembly_aerodynamics::PartGeometry>>,
     assembly_aerodynamics: Option<HashMap<BodyId, assembly_aerodynamics::AssemblyAerodynamics>>,
     welds: DensePool<Weld>,
     colliders: DensePool<ColliderEntry>,
@@ -386,7 +387,7 @@ impl PhysicsWorld {
             body_revision: 0,
             bodies: DensePool::new(),
             parts: DensePool::new(),
-            part_aerodynamic_meshes: None,
+            part_aerodynamic_geometry: None,
             assembly_aerodynamics: None,
             welds: DensePool::new(),
             colliders: DensePool::new(),
@@ -792,13 +793,13 @@ impl PhysicsWorld {
             .bodies
             .get_mut(body.dense)
             .ok_or(WorldError::InvalidBodyId)?;
-        if entry.cluster.is_some() {
-            return Err(WorldError::UnsupportedAerodynamics);
-        }
         if entry.collider_tessellation != config {
             entry.collider_tessellation = config;
             entry.collider_aerodynamic_mesh = None;
             entry.mesh_aerodynamics = None;
+            if let Some(caches) = &mut self.assembly_aerodynamics {
+                caches.remove(&body);
+            }
             self.body_revision = self.body_revision.wrapping_add(1);
         }
         Ok(())
@@ -1993,7 +1994,10 @@ impl PhysicsWorld {
                     entry.body.aerodynamics(),
                     crate::aerodynamics::Aerodynamics::None
                 )
-                && !assembly_aerodynamics::configured(entry, self.part_aerodynamic_meshes.as_ref()))
+                && !assembly_aerodynamics::configured(
+                    entry,
+                    self.part_aerodynamic_geometry.as_ref(),
+                ))
                 || entry.body.physics().body_type() != BodyType::Dynamic
             {
                 continue;
@@ -2026,7 +2030,8 @@ impl PhysicsWorld {
                 body_id,
                 entry,
                 &self.parts,
-                self.part_aerodynamic_meshes.as_ref(),
+                self.part_aerodynamic_geometry.as_ref(),
+                &self.colliders,
                 &mut self.assembly_aerodynamics,
                 atmosphere,
             )?;
@@ -2119,10 +2124,10 @@ impl PhysicsWorld {
                     geometry_version: 0,
                     config_version: 1,
                 };
-                let geometry = prepared.cache.prepare(key, mesh, config).map_err(|_| {
+                let geometry = prepared.cache.prepare(key, mesh, config).map_err(|cause| {
                     StepError::Aerodynamics {
                         body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
                     }
                 })?;
                 let relative = entry
@@ -2175,9 +2180,9 @@ impl PhysicsWorld {
                                 .and_then(|velocity| direction.checked_add(velocity))
                                 .ok_or(crate::aerodynamics::geometry::GeometryError::ArithmeticOverflow),
                         )
-                        .map_err(|_| StepError::Aerodynamics {
+                        .map_err(|cause| StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                            cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
                         })?,
                 );
             }
@@ -3404,7 +3409,7 @@ impl PhysicsWorld {
                                 )
                                 || assembly_aerodynamics::configured(
                                     entry,
-                                    self.part_aerodynamic_meshes.as_ref(),
+                                    self.part_aerodynamic_geometry.as_ref(),
                                 ))
                         {
                             step.error = Self::apply_aerodynamics(
@@ -3627,6 +3632,9 @@ impl PhysicsWorld {
             entry.collider_aerodynamic_mesh = None;
             entry.mesh_aerodynamics = None;
         }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
+        }
         if has_finite_bounds {
             self.update_query_index_for_collider(id);
         } else {
@@ -3690,6 +3698,9 @@ impl PhysicsWorld {
         if let Some(entry) = self.bodies.get_mut(body.dense) {
             entry.collider_aerodynamic_mesh = None;
             entry.mesh_aerodynamics = None;
+        }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
         }
         self.colliders
             .get_mut(id.dense)
@@ -3763,6 +3774,9 @@ impl PhysicsWorld {
             entry.collider_aerodynamic_mesh = None;
             entry.mesh_aerodynamics = None;
         }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
+        }
         if let Some(prev) = prev {
             if let Some(entry) = self.colliders.get_mut(prev.dense) {
                 entry.next = next;
@@ -3827,7 +3841,7 @@ impl PhysicsWorld {
             }
             for part in cluster.parts {
                 self.parts.remove(part.dense);
-                if let Some(meshes) = &mut self.part_aerodynamic_meshes {
+                if let Some(meshes) = &mut self.part_aerodynamic_geometry {
                     meshes.remove(&part);
                 }
             }

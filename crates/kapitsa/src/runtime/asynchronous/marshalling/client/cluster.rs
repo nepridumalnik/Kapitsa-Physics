@@ -110,6 +110,57 @@ impl PhysicsClient {
             _ => Err(PhysicsClientError::UnexpectedResult),
         }
     }
+    /// Replaces a part's Mesh in its local frame; None disables geometric loads.
+    /// Explicit aerodynamic surfaces remain additive and must not duplicate it.
+    pub async fn set_part_aerodynamic_mesh(
+        &self,
+        part: PartId,
+        mesh: Option<kapitsa_core::shape::TriangleMesh>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartAerodynamicMesh { part, mesh })
+                .await?,
+        )
+    }
+    /// Enables collider geometry in place of the part's Mesh configuration.
+    pub async fn set_part_aerodynamic_colliders(
+        &self,
+        part: PartId,
+        enabled: bool,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartAerodynamicColliders { part, enabled })
+                .await?,
+        )
+    }
+    /// Changes the collider transform in its owner's part-local frame (metres).
+    pub async fn set_part_collider_transform(
+        &self,
+        part: PartId,
+        collider: ColliderId,
+        transform: kapitsa_core::transform::Transform,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartColliderTransform {
+                part,
+                collider,
+                transform,
+            })
+            .await?,
+        )
+    }
+    /// Sets the solver body's collider-derived aerodynamic resolution and budget.
+    pub async fn set_collider_tessellation(
+        &self,
+        body: BodyId,
+        config: kapitsa_core::aerodynamics::ColliderTessellation,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetColliderTessellation { body, config })
+                .await?,
+        )
+    }
+
     /// Removes a collider owned by a cluster part.
     pub async fn remove_part_collider(&self, id: ColliderId) -> Result<(), PhysicsClientError> {
         expect_done(

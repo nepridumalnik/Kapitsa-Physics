@@ -48,6 +48,37 @@ impl PhysicsWorld {
         Ok(id)
     }
 
+    /// Changes a collider's rigid transform relative to its owning part.
+    /// Validates ownership and composition before changing collision or aero state.
+    pub fn set_part_collider_transform(
+        &mut self,
+        part: PartId,
+        collider: ColliderId,
+        part_local_transform: Transform,
+    ) -> Result<(), ClusterError> {
+        let owner = self.cluster_part(part).ok_or(ClusterError::InvalidPartId)?;
+        if !owner.colliders().contains(&collider) {
+            return Err(ClusterError::InvalidTopology);
+        }
+        let body = owner.body();
+        let local = owner
+            .local_transform()
+            .compose(&part_local_transform)
+            .map_err(ClusterError::Transform)?;
+        self.rebind_collider(collider, body, local)?;
+        let entry = self
+            .bodies
+            .get_mut(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        entry.collider_aerodynamic_mesh = None;
+        entry.mesh_aerodynamics = None;
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
+        }
+        self.body_revision = self.body_revision.wrapping_add(1);
+        Ok(())
+    }
+
     /// Removes a collider from its owning cluster part.
     pub fn remove_part_collider(
         &mut self,
@@ -112,12 +143,8 @@ impl PhysicsWorld {
         if body_entry.cluster.is_some() {
             return Err(ClusterError::AlreadyClustered);
         }
-        if matches!(
-            body_entry.body.aerodynamics(),
-            Aerodynamics::Mesh(_) | Aerodynamics::Colliders
-        ) {
-            return Err(ClusterError::UnsupportedGeometry);
-        }
+        let mesh_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::Mesh(_));
+        let collider_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::Colliders);
         if body_entry.body.physics().body_type() == BodyType::Dynamic
             && body_entry.body.physics().mass() != Some(mass)
         {
@@ -141,6 +168,12 @@ impl PhysicsWorld {
         self.parts
             .try_reserve_insertions(1)
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        if mesh_mode || collider_mode {
+            self.part_aerodynamic_geometry
+                .get_or_insert_with(HashMap::new)
+                .try_reserve(1)
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        }
 
         let dense = self
             .parts
@@ -164,6 +197,28 @@ impl PhysicsWorld {
             parts: vec![part],
             welds: Vec::new(),
         });
+        // Capacity was reserved before inserting the part; these moves cannot
+        // lose the original body model on a fallible preparation operation.
+        match entry.body.take_primary_aerodynamics() {
+            Aerodynamics::Mesh(mesh) => {
+                self.part_aerodynamic_geometry
+                    .get_or_insert_with(HashMap::new)
+                    .insert(
+                        part,
+                        super::assembly_aerodynamics::PartGeometry::Mesh(std::sync::Arc::new(mesh)),
+                    );
+                entry.mesh_aerodynamics = None;
+            }
+            Aerodynamics::Colliders => {
+                self.part_aerodynamic_geometry
+                    .get_or_insert_with(HashMap::new)
+                    .insert(part, super::assembly_aerodynamics::PartGeometry::Colliders);
+                entry.mesh_aerodynamics = None;
+                entry.collider_aerodynamic_mesh = None;
+            }
+            model => entry.body.set_primary_aerodynamics(model),
+        }
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(part)
     }
 
@@ -656,6 +711,19 @@ impl PhysicsWorld {
         weld_desc.validate()?;
         let first_cluster = self.cluster(first).ok_or(ClusterError::NotClustered)?;
         let second_cluster = self.cluster(second).ok_or(ClusterError::NotClustered)?;
+        let first_tessellation = self
+            .bodies
+            .get(first.dense)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .collider_tessellation;
+        let second_tessellation = self
+            .bodies
+            .get(second.dense)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .collider_tessellation;
+        if first_tessellation != second_tessellation {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
         let first_root = first_cluster.root();
         let second_root = second_cluster.root();
         let first_parts = first_cluster.parts().to_vec();
@@ -1210,6 +1278,11 @@ impl PhysicsWorld {
         }
         let mut component_aerodynamics = component_aerodynamics.into_iter();
         let root_aerodynamics = component_aerodynamics.next().unwrap();
+        let collider_tessellation = self
+            .bodies
+            .get(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .collider_tessellation;
         let entries = prepared_bodies
             .iter()
             .skip(1)
@@ -1224,7 +1297,7 @@ impl PhysicsWorld {
                     cluster: None,
                     mesh_aerodynamics: None,
                     collider_aerodynamic_mesh: None,
-                    collider_tessellation: crate::aerodynamics::ColliderTessellation::default(),
+                    collider_tessellation,
                 }
             })
             .collect::<Vec<_>>();

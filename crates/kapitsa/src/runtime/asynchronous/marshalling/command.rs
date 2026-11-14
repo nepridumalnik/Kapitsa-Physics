@@ -78,6 +78,27 @@ pub enum PhysicsCommand {
         part: PartId,
         collider: Collider,
     },
+    /// Selects a part-local physical aerodynamic Mesh; None disables geometry.
+    SetPartAerodynamicMesh {
+        part: PartId,
+        mesh: Option<kapitsa_core::shape::TriangleMesh>,
+    },
+    /// Selects collider-derived part geometry, replacing Mesh mode when enabled.
+    SetPartAerodynamicColliders {
+        part: PartId,
+        enabled: bool,
+    },
+    /// Changes an owned collider's transform in the part-local frame.
+    SetPartColliderTransform {
+        part: PartId,
+        collider: ColliderId,
+        transform: Transform,
+    },
+    /// Changes geometric aerodynamic tessellation for one solver body.
+    SetColliderTessellation {
+        body: BodyId,
+        config: kapitsa_core::aerodynamics::ColliderTessellation,
+    },
     /// Removes a part-owned collider.
     RemovePartCollider {
         id: ColliderId,
@@ -899,6 +920,10 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::EnableClusterWithMass { .. }
         | PhysicsCommand::AddClusterPart { .. }
         | PhysicsCommand::AddPartCollider { .. }
+        | PhysicsCommand::SetPartAerodynamicMesh { .. }
+        | PhysicsCommand::SetPartAerodynamicColliders { .. }
+        | PhysicsCommand::SetPartColliderTransform { .. }
+        | PhysicsCommand::SetColliderTessellation { .. }
         | PhysicsCommand::RemovePartCollider { .. }
         | PhysicsCommand::DestroyClusterPart { .. }
         | PhysicsCommand::BreakWeld { .. }
@@ -969,6 +994,10 @@ fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result
         | PhysicsCommand::EnableClusterWithMass { .. }
         | PhysicsCommand::AddClusterPart { .. }
         | PhysicsCommand::AddPartCollider { .. }
+        | PhysicsCommand::SetPartAerodynamicMesh { .. }
+        | PhysicsCommand::SetPartAerodynamicColliders { .. }
+        | PhysicsCommand::SetPartColliderTransform { .. }
+        | PhysicsCommand::SetColliderTessellation { .. }
         | PhysicsCommand::RemovePartCollider { .. }
         | PhysicsCommand::DestroyClusterPart { .. }
         | PhysicsCommand::BreakWeld { .. }
@@ -1056,6 +1085,26 @@ pub(crate) fn apply_command(
         }
         PhysicsCommand::AddPartCollider { part, collider } => {
             PhysicsCommandResult::Collider(world.add_part_collider(part, collider)?)
+        }
+        PhysicsCommand::SetPartAerodynamicMesh { part, mesh } => {
+            world.set_part_aerodynamic_mesh(part, mesh)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartAerodynamicColliders { part, enabled } => {
+            world.set_part_aerodynamic_colliders(part, enabled)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartColliderTransform {
+            part,
+            collider,
+            transform,
+        } => {
+            world.set_part_collider_transform(part, collider, transform)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetColliderTessellation { body, config } => {
+            world.set_collider_tessellation(body, config)?;
+            PhysicsCommandResult::Done
         }
         PhysicsCommand::RemovePartCollider { id } => {
             world.remove_part_collider(id)?;
