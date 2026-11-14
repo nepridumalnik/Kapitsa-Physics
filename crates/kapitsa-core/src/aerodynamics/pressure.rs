@@ -8,7 +8,7 @@
 //! voxel staircase normals are not a consistent replacement for smooth normals.
 //! Overlap removal and upstream shielding are the caller's responsibility.
 
-use super::AtmosphericState;
+use super::{AtmosphericState, geometry::PreparedSurfacePatches};
 use crate::transform::Transform;
 use kapitsa_math::Vec3;
 use std::fmt;
@@ -147,6 +147,43 @@ impl PressurePatch {
     }
 }
 
+/// Sums centroid pressure loads over prepared physical mesh patches.
+///
+/// `flow` supplies one uniform atmospheric state and sound speed for all patches,
+/// a body-to-world transform, body-local COM, and world-space COM/angular velocity.
+/// The returned wrench is world-space and its moment is about that COM.
+///
+/// This allocation-free evaluation preserves `PressurePatch`'s Mach policy and
+/// force convention. It does not prepare geometry or update exposure/shielding:
+/// callers must select patches for the current body-local incoming direction.
+/// Rotation-induced local flow can invalidate that single-direction visibility
+/// approximation. No world integration or per-owner load distribution occurs.
+/// An error from any patch or a nonfinite sum rejects the entire result.
+/// Empty sets return zero after validating motion and sound speed.
+pub fn evaluate_prepared_mesh(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+) -> Result<PressureWrench, PressureError> {
+    // Validate even an empty set, using the same rules as patch evaluation.
+    let mut total = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
+    for patch in patches.iter() {
+        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
+        total.force = total
+            .force
+            .checked_add(load.force)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        total.moment = total
+            .moment
+            .checked_add(load.moment)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 #[path = "pressure_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mesh_pressure_tests.rs"]
+mod mesh_tests;
