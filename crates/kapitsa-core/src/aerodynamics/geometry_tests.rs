@@ -438,9 +438,13 @@ fn equal_centroid_and_area_distinct_triangles_are_not_deduplicated() {
     let patches = surface_geometry(&instances)
         .exposed_surface_patches(&instances, Vec3::X, 10.0, 100_000)
         .unwrap();
-    assert_eq!(patches.len(), 2);
-    assert_eq!(patches.as_slice()[0].center, patches.as_slice()[1].center);
-    assert_eq!(patches.as_slice()[0].area, patches.as_slice()[1].area);
+    // Each source has area 3; their intersection has area 2.
+    let area: f64 = patches.iter().map(|patch| patch.area).sum();
+    assert!((area - 4.0).abs() < 1e-12);
+    let first_moment = patches
+        .iter()
+        .fold(Vec3::ZERO, |sum, patch| sum + patch.center * patch.area);
+    assert!(first_moment.length() < 1e-12);
 }
 
 #[test]
@@ -485,7 +489,7 @@ fn patch_budget_is_checked_before_transform_and_allocation() {
         Err(GeometryError::WorkBudgetExceeded)
     );
     assert_eq!(
-        g.exposed_surface_patches(&instances, Vec3::X, 0.01, 528)
+        g.exposed_surface_patches(&instances, Vec3::X, 0.01, 100_000)
             .unwrap()
             .len(),
         2

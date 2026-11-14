@@ -136,6 +136,14 @@ fn allocated<T: Clone>(len: usize, value: T) -> Result<Vec<T>, GeometryError> {
     Ok(values)
 }
 
+fn checked_push<T>(values: &mut Vec<T>, value: T) -> Result<(), GeometryError> {
+    values
+        .try_reserve(1)
+        .map_err(|_| GeometryError::AllocationFailed)?;
+    values.push(value);
+    Ok(())
+}
+
 fn surface_triangle_count(instances: &[GeometryInstance<'_>]) -> Result<usize, GeometryError> {
     instances.iter().try_fold(0usize, |total, instance| {
         total
@@ -345,6 +353,29 @@ impl PreparedGeometry {
         {
             return Err(GeometryError::WorkBudgetExceeded);
         }
+        // Closure checks sort three edges per triangle; optional positional
+        // welding compares each vertex with preceding representatives.
+        let preprocessing_work = instances
+            .iter()
+            .try_fold(0usize, |work, instance| {
+                let edges = instance.mesh.triangles().len().checked_mul(3)?;
+                let sorting =
+                    edges.checked_mul(usize::BITS as usize - edges.leading_zeros() as usize + 1)?;
+                let welding = if config.weld_tolerance.is_some() {
+                    instance
+                        .mesh
+                        .vertices()
+                        .len()
+                        .checked_mul(instance.mesh.vertices().len())?
+                } else {
+                    instance.mesh.vertices().len()
+                };
+                work.checked_add(sorting)?.checked_add(welding)
+            })
+            .ok_or(GeometryError::WorkBudgetExceeded)?;
+        if preprocessing_work > config.max_work {
+            return Err(GeometryError::WorkBudgetExceeded);
+        }
         let mut min = Vec3::splat(f64::INFINITY);
         let mut max = Vec3::splat(f64::NEG_INFINITY);
         for instance in instances {
@@ -392,6 +423,7 @@ impl PreparedGeometry {
             .ok_or(GeometryError::WorkBudgetExceeded)?;
         if work
             .checked_add(vertex_count)
+            .and_then(|n| n.checked_add(preprocessing_work))
             .is_none_or(|n| n > config.max_work)
         {
             return Err(GeometryError::WorkBudgetExceeded);
@@ -596,16 +628,13 @@ impl PreparedGeometry {
         self.volume
     }
 
-    /// Bounded O(T²) reference visibility against original, two-sided triangles.
-    /// A whole patch is classified at its centroid; no partial visibility or
-    /// subdivision is modeled. Voxel shells never participate in pressure shading.
-    /// `direction` points upstream, opposite the fluid velocity. `epsilon` is
-    /// validated for compatibility but is NOT a ray offset or a dedup tolerance:
-    /// even blockers closer than epsilon must occlude. The ray's t tolerance is
-    /// exactly zero: zero-distance coincident surfaces do not block, t > 0 does.
-    /// The preflight ceiling includes transformation (4T), canonicalization and
-    /// classification (4T), dedup and self/coincident comparisons (<= 2T²),
-    /// and ray tests (<= T²), before allocation.
+    /// Partitions triangles along projected blocker edges and depth planes.
+    /// Coplanar overlap belongs to the first canonical triangle (owner first).
+    /// Source physical normals are preserved. Fully visible source triangles
+    /// retain their centroid sampling; partial polygons are triangulated.
+    /// Floating-point predicates are used, without an exact-arithmetic guarantee.
+    /// Work exhaustion rejects the entire result; allocation is fallible.
+    /// `epsilon` is validated for compatibility and never offsets shadow rays.
     pub fn exposed_surface_patches(
         &self,
         instances: &[GeometryInstance<'_>],
@@ -622,7 +651,12 @@ impl PreparedGeometry {
         let total = surface_triangle_count(instances)?;
         let work = total
             .checked_mul(total)
-            .and_then(|pairs| pairs.checked_mul(3)?.checked_add(total.checked_mul(8)?));
+            .and_then(|pairs| pairs.checked_mul(128)?.checked_add(total.checked_mul(8)?));
+        check_surface_work(work, max_work)?;
+        let preprocessing = total
+            .checked_mul(16)
+            .and_then(|n| n.checked_mul(usize::BITS as usize - total.leading_zeros() as usize + 1));
+        let work = work.and_then(|n| n.checked_add(preprocessing?));
         check_surface_work(work, max_work)?;
         let mut triangles = Self::surface_triangles(instances, max_work)?;
         // Exact canonical vertex triples avoid centroid/area aliasing and
@@ -630,41 +664,198 @@ impl PreparedGeometry {
         for triangle in &mut triangles {
             triangle.vertices.sort_unstable_by(compare_vertex);
         }
+        triangles.sort_by(|a, b| {
+            a.owner.cmp(&b.owner).then_with(|| {
+                a.vertices
+                    .iter()
+                    .zip(&b.vertices)
+                    .map(|(a, b)| compare_vertex(a, b))
+                    .find(|order| !order.is_eq())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
         let mut patches: Vec<PreparedSurfacePatch> = Vec::new();
-        patches
-            .try_reserve_exact(total)
-            .map_err(|_| GeometryError::AllocationFailed)?;
+        let mut work = work.ok_or(GeometryError::WorkBudgetExceeded)?;
         for (i, triangle) in triangles.iter().enumerate() {
             if triangle.normal.dot(upstream) <= 0.0 {
                 continue;
             }
-            if let Some(patch) = patches.iter_mut().find(|p| p.vertices == triangle.vertices) {
-                patch.owner = patch.owner.min(triangle.owner);
-                continue;
+            let first_patch = patches.len();
+            let mut any_blocked = false;
+            let mut initial = Vec::new();
+            for vertex in triangle.vertices {
+                checked_push(&mut initial, vertex)?;
             }
-            let [a, b, c] = triangle.vertices;
-            let center = a + (b - a) / 3.0 + (c - a) / 3.0;
-            if !center.is_finite() {
-                return Err(GeometryError::ArithmeticOverflow);
-            }
-            let mut blocked = false;
+            let mut pieces = Vec::new();
+            checked_push(&mut pieces, initial)?;
             for (j, blocker) in triangles.iter().enumerate() {
-                if i != j
-                    && triangle.vertices != blocker.vertices
-                    && ray_hits_triangle(center, upstream, blocker.vertices)?
+                if i == j {
+                    continue;
+                }
+                let [a, b, c] = blocker.vertices;
+                let denominator = blocker.normal.dot(upstream);
+                if denominator == 0.0 {
+                    continue;
+                }
+                let depths = triangle
+                    .vertices
+                    .map(|v| (a - v).dot(blocker.normal) / denominator);
+                if !depths.iter().all(|d| d.is_finite()) {
+                    return Err(GeometryError::ArithmeticOverflow);
+                }
+                if depths.iter().all(|d| *d <= 0.0) && !(j < i && depths.iter().all(|d| *d == 0.0))
                 {
-                    blocked = true;
-                    break;
+                    continue;
+                }
+                let mut disjoint = false;
+                for (start, end, opposite) in [(a, b, c), (b, c, a), (c, a, b)] {
+                    let edge_normal = (end - start).cross(upstream);
+                    let reference = (opposite - start).dot(edge_normal);
+                    if triangle.vertices.iter().all(|v| {
+                        let side = (*v - start).dot(edge_normal);
+                        (reference > 0.0 && side <= 0.0) || (reference < 0.0 && side >= 0.0)
+                    }) {
+                        disjoint = true;
+                        break;
+                    }
+                }
+                if disjoint {
+                    continue;
+                }
+                let planes = [
+                    (a, (b - a).cross(upstream)),
+                    (b, (c - b).cross(upstream)),
+                    (c, (a - c).cross(upstream)),
+                    (a, blocker.normal),
+                ];
+                for (origin, normal) in planes {
+                    let mut next = Vec::new();
+                    for polygon in pieces {
+                        work = work
+                            .checked_add(
+                                polygon
+                                    .len()
+                                    .checked_mul(16)
+                                    .ok_or(GeometryError::WorkBudgetExceeded)?,
+                            )
+                            .ok_or(GeometryError::WorkBudgetExceeded)?;
+                        check_surface_work(Some(work), max_work)?;
+                        let mut distances = Vec::new();
+                        for point in &polygon {
+                            checked_push(&mut distances, (*point - origin).dot(normal))?;
+                        }
+                        if !distances.iter().all(|d| d.is_finite()) {
+                            return Err(GeometryError::ArithmeticOverflow);
+                        }
+                        if !distances.iter().any(|d| *d > 0.0)
+                            || !distances.iter().any(|d| *d < 0.0)
+                        {
+                            checked_push(&mut next, polygon)?;
+                            continue;
+                        }
+                        let mut positive = Vec::new();
+                        let mut negative = Vec::new();
+                        for k in 0..polygon.len() {
+                            let n = (k + 1) % polygon.len();
+                            let (d, e) = (distances[k], distances[n]);
+                            if d >= 0.0 {
+                                checked_push(&mut positive, polygon[k])?;
+                            }
+                            if d <= 0.0 {
+                                checked_push(&mut negative, polygon[k])?;
+                            }
+                            if (d > 0.0 && e < 0.0) || (d < 0.0 && e > 0.0) {
+                                let denominator = d - e;
+                                if !denominator.is_finite() {
+                                    return Err(GeometryError::ArithmeticOverflow);
+                                }
+                                let point =
+                                    polygon[k] + (polygon[n] - polygon[k]) * (d / denominator);
+                                if !point.is_finite() {
+                                    return Err(GeometryError::ArithmeticOverflow);
+                                }
+                                checked_push(&mut positive, point)?;
+                                checked_push(&mut negative, point)?;
+                            }
+                        }
+                        checked_push(&mut next, positive)?;
+                        checked_push(&mut next, negative)?;
+                    }
+                    pieces = next;
                 }
             }
-            if !blocked {
-                patches.push(PreparedSurfacePatch {
-                    vertices: triangle.vertices,
-                    center,
-                    normal: triangle.normal,
-                    area: triangle.area,
-                    owner: triangle.owner,
-                });
+            for polygon in pieces {
+                for k in 1..polygon.len().saturating_sub(1) {
+                    let vertices = [polygon[0], polygon[k], polygon[k + 1]];
+                    let area = (vertices[1] - vertices[0])
+                        .cross(vertices[2] - vertices[0])
+                        .length()
+                        * 0.5;
+                    if !area.is_finite() {
+                        return Err(GeometryError::ArithmeticOverflow);
+                    }
+                    if area == 0.0 {
+                        continue;
+                    }
+                    let center = vertices[0]
+                        + (vertices[1] - vertices[0]) / 3.0
+                        + (vertices[2] - vertices[0]) / 3.0;
+                    if !center.is_finite() {
+                        return Err(GeometryError::ArithmeticOverflow);
+                    }
+                    let mut blocked = false;
+                    for (j, blocker) in triangles.iter().enumerate() {
+                        work = work
+                            .checked_add(1)
+                            .ok_or(GeometryError::WorkBudgetExceeded)?;
+                        check_surface_work(Some(work), max_work)?;
+                        if i == j {
+                            continue;
+                        }
+                        let coplanar = blocker
+                            .vertices
+                            .iter()
+                            .all(|v| (*v - triangle.vertices[0]).dot(triangle.normal) == 0.0);
+                        let [a, b, c] = blocker.vertices;
+                        let n = (b - a).cross(c - a);
+                        let inside = [(a, b), (b, c), (c, a)]
+                            .iter()
+                            .all(|(a, b)| (*b - *a).cross(center - *a).dot(n) >= 0.0);
+                        if (coplanar && j < i && inside)
+                            || (!coplanar && ray_hits_triangle(center, upstream, blocker.vertices)?)
+                        {
+                            blocked = true;
+                            break;
+                        }
+                    }
+                    any_blocked |= blocked;
+                    if !blocked {
+                        checked_push(
+                            &mut patches,
+                            PreparedSurfacePatch {
+                                vertices,
+                                center,
+                                normal: triangle.normal,
+                                area,
+                                owner: triangle.owner,
+                            },
+                        )?;
+                    }
+                }
+            }
+            if !any_blocked {
+                patches.truncate(first_patch);
+                let [a, b, c] = triangle.vertices;
+                checked_push(
+                    &mut patches,
+                    PreparedSurfacePatch {
+                        vertices: triangle.vertices,
+                        center: a + (b - a) / 3.0 + (c - a) / 3.0,
+                        normal: triangle.normal,
+                        area: triangle.area,
+                        owner: triangle.owner,
+                    },
+                )?;
             }
         }
         Ok(PreparedSurfacePatches { patches })

@@ -349,3 +349,148 @@ fn empty_prepared_set_is_zero_but_still_validates_input() {
         Err(PressureError::InvalidSoundSpeed)
     );
 }
+
+#[test]
+fn regression_half_shield_and_coplanar_overlap() -> Result<(), Box<dyn std::error::Error>> {
+    let plate = TriangleMesh::new(
+        vec![Vec3::ZERO, Vec3::Y, Vec3::Z, Vec3::Y + Vec3::Z],
+        vec![[0, 1, 2], [1, 3, 2]],
+    )?;
+    let shield = TriangleMesh::new(
+        vec![Vec3::ZERO, Vec3::Y * 0.5, Vec3::Z, Vec3::Y * 0.5 + Vec3::Z],
+        vec![[0, 2, 1], [1, 2, 3]],
+    )?;
+    let instances = [
+        GeometryInstance {
+            mesh: &plate,
+            local_transform: Transform::identity(),
+            owner: GeometryOwner::Body,
+        },
+        GeometryInstance {
+            mesh: &shield,
+            local_transform: Transform::new(Vec3::X, Quat::IDENTITY)?,
+            owner: GeometryOwner::Body,
+        },
+    ];
+    let geometry = PreparedGeometry::prepare(
+        &instances,
+        GeometryConfig {
+            cell_size: 0.25,
+            max_cells: 100_000,
+            max_work: 10_000_000,
+            open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+            weld_tolerance: None,
+            max_patch_work: 100_000,
+        },
+    )?;
+    let patches = geometry.exposed_surface_patches(&instances, Vec3::X, 1e-6, 100_000)?;
+    let area: f64 = patches.iter().map(|p| p.area).sum();
+    let wrench = evaluate_prepared_mesh(&patches, flow())?;
+    eprintln!(
+        "half shield: area={area}, force={:?}, moment={:?}; expected area=0.5, force=(-500000,0,0), moment=(0,-250000,375000)",
+        wrench.force, wrench.moment
+    );
+    assert!((area - 0.5).abs() < 1e-9);
+    close(wrench.force, -Vec3::X * 500_000.0);
+    close(wrench.moment, Vec3::new(0.0, -250_000.0, 375_000.0));
+    Ok(())
+}
+#[test]
+fn regression_coplanar_overlap_different_triangulation() -> Result<(), Box<dyn std::error::Error>> {
+    let first = TriangleMesh::new(
+        vec![Vec3::ZERO, Vec3::Y, Vec3::Z, Vec3::Y + Vec3::Z],
+        vec![[0, 1, 2], [1, 3, 2]],
+    )?;
+    let second = TriangleMesh::new(
+        vec![Vec3::ZERO, Vec3::Y, Vec3::Z, Vec3::Y + Vec3::Z],
+        vec![[0, 1, 3], [0, 3, 2]],
+    )?;
+    let instances = [
+        GeometryInstance {
+            mesh: &first,
+            local_transform: Transform::identity(),
+            owner: GeometryOwner::Body,
+        },
+        GeometryInstance {
+            mesh: &second,
+            local_transform: Transform::identity(),
+            owner: GeometryOwner::Body,
+        },
+    ];
+    let geometry = PreparedGeometry::prepare(
+        &instances,
+        GeometryConfig {
+            cell_size: 0.25,
+            max_cells: 100_000,
+            max_work: 10_000_000,
+            open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+            weld_tolerance: None,
+            max_patch_work: 100_000,
+        },
+    )?;
+    let patches = geometry.exposed_surface_patches(&instances, Vec3::X, 1e-6, 100_000)?;
+    let area: f64 = patches.iter().map(|p| p.area).sum();
+    let wrench = evaluate_prepared_mesh(&patches, flow())?;
+    eprintln!(
+        "coplanar overlap: area={area}, force={:?}, moment={:?}; expected area=1, force=(-1000000,0,0), moment=(0,-500000,500000)",
+        wrench.force, wrench.moment
+    );
+    assert!((area - 1.0).abs() < 1e-9);
+    close(wrench.force, -Vec3::X * 1_000_000.0);
+    close(wrench.moment, Vec3::new(0.0, -500_000.0, 500_000.0));
+    Ok(())
+}
+
+#[test]
+fn shielding_load_varies_continuously_with_blocker_width() -> Result<(), Box<dyn std::error::Error>>
+{
+    let plate = TriangleMesh::new(
+        vec![Vec3::ZERO, Vec3::Y, Vec3::Z, Vec3::Y + Vec3::Z],
+        vec![[0, 1, 2], [1, 3, 2]],
+    )?;
+    for width in [0.1, 0.25, 0.49, 0.5, 0.51, 0.75, 0.9] {
+        let shield = TriangleMesh::new(
+            vec![
+                Vec3::ZERO,
+                Vec3::Y * width,
+                Vec3::Z,
+                Vec3::Y * width + Vec3::Z,
+            ],
+            vec![[0, 2, 1], [1, 2, 3]],
+        )?;
+        let instances = [
+            GeometryInstance {
+                mesh: &plate,
+                local_transform: Transform::identity(),
+                owner: GeometryOwner::Body,
+            },
+            GeometryInstance {
+                mesh: &shield,
+                local_transform: Transform::new(Vec3::X * 1e-9, Quat::IDENTITY)?,
+                owner: GeometryOwner::Body,
+            },
+        ];
+        let geometry = PreparedGeometry::prepare(
+            &instances,
+            GeometryConfig {
+                cell_size: 0.25,
+                max_cells: 100_000,
+                max_work: 10_000_000,
+                open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+                weld_tolerance: None,
+                max_patch_work: 100_000,
+            },
+        )?;
+        for sources in [instances, [instances[1], instances[0]]] {
+            let patches = geometry.exposed_surface_patches(&sources, Vec3::X, 0.01, 100_000)?;
+            let result = evaluate_prepared_mesh(&patches, flow())?;
+            let magnitude = 1_000_000.0 * (1.0 - width);
+            close(result.force, -Vec3::X * magnitude);
+            close(
+                result.moment,
+                Vec3::new(0.0, -0.5 * magnitude, 0.5 * (1.0 + width) * magnitude),
+            );
+        }
+    }
+    Ok(())
+}
