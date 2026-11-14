@@ -90,6 +90,8 @@ mod aerodynamics {
                     &mut body,
                     &world.parts,
                     None,
+                    None,
+                    world.mesh_sound_speed,
                 )?;
             }
             Ok(())
@@ -144,10 +146,18 @@ use crate::{
     rigid_body::{BodyMotion, BodyState, BodyType, CcdMode, RigidBody, predict},
 };
 
+struct MeshAerodynamics {
+    cache: crate::aerodynamics::cache::PreparedGeometryCache,
+    config: crate::aerodynamics::geometry::GeometryConfig,
+    sound_speed: f64,
+    exposure_epsilon: f64,
+}
+
 struct BodyEntry {
     body: RigidBody,
     first_collider: Option<ColliderId>,
     cluster: Option<RigidCluster>,
+    mesh_aerodynamics: Option<MeshAerodynamics>,
 }
 
 /// Object receiving a persistent force source.
@@ -227,6 +237,7 @@ struct AerodynamicsBodyUpdate {
     error: Option<StepError>,
     original: BodyMotion,
     prepared: BodyMotion,
+    mesh_patches: Option<crate::aerodynamics::geometry::PreparedSurfacePatches>,
 }
 
 const FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT: usize = 128;
@@ -294,6 +305,9 @@ pub struct PhysicsWorld {
     gravity_fields: DensePool<Gravity>,
     gravity_body_updates: Vec<GravityBodyUpdate>,
     atmosphere: Atmosphere,
+    /// Sound speed used by the Newtonian mesh pressure model (m/s).
+    /// The default is 340 m/s; callers should set this for their atmosphere.
+    mesh_sound_speed: f64,
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
@@ -361,6 +375,7 @@ impl PhysicsWorld {
             gravity_fields: DensePool::new(),
             gravity_body_updates: Vec::new(),
             atmosphere: Atmosphere::Vacuum,
+            mesh_sound_speed: 340.0,
             aerodynamics_body_updates: Vec::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
@@ -728,6 +743,7 @@ impl PhysicsWorld {
                 body,
                 first_collider: None,
                 cluster: None,
+                mesh_aerodynamics: None,
             })
             .map_err(WorldError::from)?;
         Ok(BodyId {
@@ -1558,6 +1574,8 @@ impl PhysicsWorld {
         body: &mut BodyMotion,
         parts: &DensePool<ClusterPart>,
         dt: Option<f64>,
+        mesh_patches: Option<&crate::aerodynamics::geometry::PreparedSurfacePatches>,
+        mesh_sound_speed: f64,
     ) -> Result<(), StepError> {
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
@@ -1577,8 +1595,8 @@ impl PhysicsWorld {
             crate::aerodynamics::Aerodynamics::Simple(properties) => {
                 Some(AerodynamicSurface::new(*properties))
             }
-            crate::aerodynamics::Aerodynamics::Mesh(_)
-            | crate::aerodynamics::Aerodynamics::Colliders => {
+            crate::aerodynamics::Aerodynamics::Mesh(_) => None,
+            crate::aerodynamics::Aerodynamics::Colliders => {
                 let sampled = atmosphere
                     .state_at(center)
                     .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
@@ -1591,6 +1609,31 @@ impl PhysicsWorld {
                 None
             }
         };
+        if let crate::aerodynamics::Aerodynamics::Mesh(_) = primary {
+            let patches = mesh_patches.ok_or_else(error)?;
+            let flow = crate::aerodynamics::pressure::PressureFlow {
+                atmosphere: atmosphere
+                    .state_at(center)
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
+                sound_speed: mesh_sound_speed,
+                transform: body.state().transform(),
+                center_of_mass: body
+                    .state()
+                    .transform()
+                    .inverse()
+                    .map_err(|_| error())?
+                    .transform_point(center),
+                linear_velocity: body.state().linear_velocity(),
+                angular_velocity: body.state().angular_velocity(),
+            };
+            let wrench = crate::aerodynamics::pressure::evaluate_prepared_mesh(patches, flow)
+                .map_err(|_| StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                })?;
+            body.apply_force(wrench.force).map_err(|_| error())?;
+            body.apply_torque(wrench.moment).map_err(|_| error())?;
+        }
         let mut drag = Vec3::ZERO;
         let mut drag_torque = Vec3::ZERO;
         let mut lift_force = Vec3::ZERO;
@@ -1855,7 +1898,7 @@ impl PhysicsWorld {
             return Ok(());
         };
 
-        for (dense_id, entry) in self.bodies.iter() {
+        for (dense_id, entry) in self.bodies.iter_mut() {
             if (entry.body.aerodynamic_surfaces.is_empty()
                 && matches!(
                     entry.body.aerodynamics(),
@@ -1876,11 +1919,102 @@ impl PhysicsWorld {
                     cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
                 });
             }
+            let mut mesh_patches = None;
+            if let crate::aerodynamics::Aerodynamics::Mesh(mesh) = entry.body.aerodynamics() {
+                let config = entry
+                    .mesh_aerodynamics
+                    .as_ref()
+                    .map(|prepared| prepared.config)
+                    .unwrap_or(crate::aerodynamics::geometry::GeometryConfig {
+                        cell_size: 0.125,
+                        max_cells: 1_048_576,
+                        max_work: 100_000_000,
+                        open_mesh_policy:
+                            crate::aerodynamics::geometry::OpenMeshPolicy::SurfaceOnly,
+                        weld_tolerance: None,
+                        max_patch_work: 100_000_000,
+                    });
+                let prepared = entry
+                    .mesh_aerodynamics
+                    .get_or_insert_with(|| MeshAerodynamics {
+                        cache: crate::aerodynamics::cache::PreparedGeometryCache::default(),
+                        config,
+                        sound_speed: self.mesh_sound_speed,
+                        exposure_epsilon: 0.01,
+                    });
+                prepared.config = config;
+                prepared.sound_speed = self.mesh_sound_speed;
+                let key = crate::aerodynamics::cache::GeometryCacheKey {
+                    body: body_id,
+                    geometry_version: self.body_revision,
+                    config_version: 1,
+                };
+                let geometry = prepared.cache.prepare(key, mesh, config).map_err(|_| {
+                    StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    }
+                })?;
+                let sample_point = entry
+                    .body
+                    .world_center_of_mass()
+                    .map_err(|_| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    })?
+                    .ok_or(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    })?;
+                let relative = entry
+                    .body
+                    .state()
+                    .linear_velocity()
+                    .checked_sub(
+                        atmosphere
+                            .state_at(sample_point)
+                            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?
+                            .wind_velocity(),
+                    )
+                    .ok_or(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    })?;
+                let direction = entry
+                    .body
+                    .state()
+                    .transform()
+                    .rotation()
+                    .conjugate()
+                    .rotate_vector(-relative)
+                    .ok_or(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    })?;
+                mesh_patches = Some(
+                    geometry
+                        .exposed_surface_patches(
+                            &[crate::aerodynamics::geometry::GeometryInstance {
+                                mesh,
+                                local_transform: crate::transform::Transform::identity(),
+                                owner: crate::aerodynamics::geometry::GeometryOwner::Body,
+                            }],
+                            direction,
+                            prepared.exposure_epsilon,
+                            config.max_patch_work,
+                        )
+                        .map_err(|_| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        })?,
+                );
+            }
             self.aerodynamics_body_updates.push(AerodynamicsBodyUpdate {
                 id: body_id,
                 error: None,
                 original: entry.body.motion(),
                 prepared: entry.body.motion(),
+                mesh_patches,
             });
         }
 
@@ -1907,6 +2041,8 @@ impl PhysicsWorld {
                                     &mut update.prepared,
                                     &self.parts,
                                     Some(dt),
+                                    update.mesh_patches.as_ref(),
+                                    self.mesh_sound_speed,
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -3101,6 +3237,8 @@ impl PhysicsWorld {
                                 &mut step.prepared,
                                 &self.parts,
                                 dt,
+                                None,
+                                self.mesh_sound_speed,
                             )
                             .err();
                         }

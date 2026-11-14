@@ -1219,6 +1219,7 @@ impl PhysicsWorld {
                     body,
                     first_collider: None,
                     cluster: None,
+                    mesh_aerodynamics: None,
                 }
             })
             .collect::<Vec<_>>();
