@@ -537,14 +537,18 @@ fn geometry_modes_preserve_mesh_in_vacuum_and_reject_air_atomically() {
             } else {
                 world.step(0.1)
             };
-            assert_eq!(
-                result,
-                Err(StepError::Aerodynamics {
-                    body_id: id,
-                    cause: AerodynamicsError::UnsupportedModel,
-                })
-            );
-            assert_eq!(world.body(id).unwrap().motion(), before);
+            if mesh_mode {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(
+                    result,
+                    Err(StepError::Aerodynamics {
+                        body_id: id,
+                        cause: AerodynamicsError::UnsupportedModel,
+                    })
+                );
+                assert_eq!(world.body(id).unwrap().motion(), before);
+            }
         }
     }
 }

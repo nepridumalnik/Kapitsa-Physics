@@ -1298,7 +1298,11 @@ impl PhysicsWorld {
             if shards.is_empty() {
                 return Err(StepError::InvalidStepResults);
             }
-            world.fill_step_shards_with_executor_at_dt(shards, executor, Some(dt))?;
+            // Prepare persistent aerodynamic forces through the same path as the
+            // ordinary step.  In particular, Mesh requires prepared surface
+            // patches and must not be evaluated with a missing patch set.
+            world.prepare_aerodynamics_updates(executor, worker_count, dt)?;
+            world.fill_step_shards_with_executor_at_dt(shards, executor, Some(dt), false)?;
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunk| {
                     for shard in chunk {
@@ -1566,6 +1570,7 @@ impl PhysicsWorld {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_aerodynamics(
         atmosphere: Atmosphere,
         primary: &crate::aerodynamics::Aerodynamics,
@@ -3166,7 +3171,7 @@ impl PhysicsWorld {
         shards: &mut [Vec<BodyStep>],
         executor: &E,
     ) -> Result<(), StepError> {
-        self.fill_step_shards_with_executor_at_dt(shards, executor, None)
+        self.fill_step_shards_with_executor_at_dt(shards, executor, None, true)
     }
 
     fn fill_step_shards_with_executor_at_dt<E: StepExecutor>(
@@ -3174,6 +3179,7 @@ impl PhysicsWorld {
         shards: &mut [Vec<BodyStep>],
         executor: &E,
         dt: Option<f64>,
+        apply_aerodynamics: bool,
     ) -> Result<(), StepError> {
         if shards.is_empty() {
             return Err(StepError::InvalidStepResults);
@@ -3221,7 +3227,8 @@ impl PhysicsWorld {
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunks| {
                     for step in chunks.iter_mut().flatten() {
-                        if !matches!(atmosphere, Atmosphere::Vacuum)
+                        if apply_aerodynamics
+                            && !matches!(atmosphere, Atmosphere::Vacuum)
                             && let Some(entry) = self.bodies.get(step.body_id.dense)
                             && (!entry.body.aerodynamic_surfaces.is_empty()
                                 || !matches!(
@@ -3237,7 +3244,10 @@ impl PhysicsWorld {
                                 &mut step.prepared,
                                 &self.parts,
                                 dt,
-                                None,
+                                self.aerodynamics_body_updates
+                                    .iter()
+                                    .find(|update| update.id == step.body_id)
+                                    .and_then(|update| update.mesh_patches.as_ref()),
                                 self.mesh_sound_speed,
                             )
                             .err();
