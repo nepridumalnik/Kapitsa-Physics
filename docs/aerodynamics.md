@@ -96,13 +96,30 @@ sections to the identity root part. `set_part_aerodynamic_hull(part, sections)` 
 They are stored with the part, alongside explicit wings, and follow its ownership
 through topology changes. Part transforms and the assembly COM are applied once;
 the evaluator already returns moment about that COM. Hull, wing and geometry
-loads are additive; callers must avoid duplicated physical contributions. No
-asynchronous runtime setter is provided yet. An empty section list adds no loads;
-Simple, Wings and hypersonic Mesh keep their existing semantics.
+loads are additive; callers must avoid duplicated physical contributions. An
+empty section list clears the part's hull loads; Simple, Wings and hypersonic
+Mesh keep their existing semantics.
 
-The part-owned and data-driven Mach extensions are currently source-reviewed
-only: their new regression tests and workspace compilation were not run, at the
-user's request.
+`PhysicsClient::set_part_aerodynamic_wings(part, wings)` and
+`PhysicsClient::set_part_aerodynamic_hull(part, sections)` expose the corresponding
+core setters through `PhysicsCommand::SetPartAerodynamicWings` and
+`PhysicsCommand::SetPartAerodynamicHull`. Both replace the entire list in stable
+part-local coordinates; an empty vector clears it. They use the existing ordered
+command queue, including while paused, and reject stale/foreign part IDs through
+the core's `ClusterError`. Like other metadata edits they are unsupported in
+atomic motion batches (the entire batch is rejected without mutation).
+
+Construct configurations through `kapitsa::aerodynamics::wing` and
+`kapitsa::aerodynamics::hull`. The runtime transfers owned vectors in-process;
+it does not require or provide wire serialization. `WingSurface` is `Clone + Copy`,
+`HullSection` is `Clone`, and its immutable Mach curve shares owned `Arc` data.
+No borrowed world references or mutable shared configuration cross the queue.
+The setters do not change physical models, infer coefficients, exclude overlapping
+loads or alter topology ownership.
+
+The part-owned, data-driven Mach and runtime API extensions are **unverified**:
+source inspection and formatting only; their regression tests and workspace
+compilation were not run, at the user's request.
 
 For world axis `a`, split relative velocity into `u_axial = a (v · a)` and
 `u_cross = v - u_axial`. Each component contributes

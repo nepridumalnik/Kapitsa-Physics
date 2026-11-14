@@ -110,6 +110,36 @@ impl PhysicsClient {
             _ => Err(PhysicsClientError::UnexpectedResult),
         }
     }
+    /// Replaces explicit finite wings in the stable part-local frame; empty clears.
+    /// Takes owned configuration and applies it in queue order, even while paused.
+    /// Loads are additive to hull, geometry and other explicit surfaces; callers
+    /// must avoid double counting. Ownership follows PartId through topology edits.
+    /// This metadata edit is unsupported in atomic motion batches.
+    pub async fn set_part_aerodynamic_wings(
+        &self,
+        part: PartId,
+        wings: Vec<kapitsa_core::aerodynamics::wing::WingSurface>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartAerodynamicWings { part, wings })
+                .await?,
+        )
+    }
+    /// Replaces explicit hull sections in the stable part-local frame; empty clears.
+    /// Takes owned configuration (including shared immutable Mach data) and applies
+    /// it in queue order, even while paused. Loads remain additive; no coefficients
+    /// or interference are inferred. Ownership follows PartId through topology edits.
+    /// This metadata edit is unsupported in atomic motion batches.
+    pub async fn set_part_aerodynamic_hull(
+        &self,
+        part: PartId,
+        sections: Vec<kapitsa_core::aerodynamics::hull::HullSection>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartAerodynamicHull { part, sections })
+                .await?,
+        )
+    }
     /// Replaces a part's Mesh in its local frame; None disables geometric loads.
     /// Explicit aerodynamic surfaces remain additive and must not duplicate it.
     pub async fn set_part_aerodynamic_mesh(

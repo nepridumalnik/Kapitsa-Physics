@@ -36,7 +36,7 @@ impl PhysicsWorld {
     /// other explicit surfaces: callers must avoid counting a contribution twice.
     /// No interference or automatic hull/wing exclusion is inferred.
     /// Ownership follows the stable PartId through topology edits; no solver
-    /// body is created. The asynchronous runtime has no setter for this API yet.
+    /// body is created. PhysicsClient exposes the corresponding queued setter.
     pub fn set_part_aerodynamic_wings(
         &mut self,
         part: PartId,

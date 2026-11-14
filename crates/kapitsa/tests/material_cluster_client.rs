@@ -421,3 +421,98 @@ async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
     }
     Ok(())
 }
+
+// Authored only: execution is intentionally deferred at the user's request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn part_wings_and_hull_replace_clear_and_follow_queue_while_paused()
+-> Result<(), Box<dyn std::error::Error>> {
+    use kapitsa::aerodynamics::{
+        hull::{HullSection, MachCurve, MachKnot},
+        wing::{FiniteWing, WingSurface},
+    };
+    fn assert_owned_configuration<T: Clone + Send + Sync + 'static>() {}
+    assert_owned_configuration::<WingSurface>();
+    assert_owned_configuration::<HullSection>();
+
+    for rayon_executor in [false, true] {
+        let builder = Simulation::builder().max_workers(2);
+        let mut simulation = if rayon_executor {
+            builder.spawn_on_rayon(std::sync::Arc::new(
+                rayon::ThreadPoolBuilder::new().num_threads(2).build()?,
+            ))?
+        } else {
+            builder.spawn_on_tokio(&tokio::runtime::Handle::current())?
+        };
+        simulation.pause()?;
+        let client = simulation.client();
+        let body = client
+            .add_body(RigidBody::new_dynamic(Transform::identity(), mass(1.0))?)
+            .await?;
+        let part = client.enable_cluster(body).await?;
+        let wing = WingSurface::new(
+            FiniteWing::new(6.0, 0.8, 0.02, 0.0, 0.2)?,
+            Transform::identity(),
+            2.0,
+        )?;
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            1.0,
+            2.0,
+            0.0,
+            0.2,
+            0.8,
+            None,
+        )?
+        .with_mach_curve(MachCurve::new(vec![
+            MachKnot {
+                mach: 0.0,
+                axial_cd: 0.2,
+                crossflow_cd: 0.8,
+            },
+            MachKnot {
+                mach: 1.0,
+                axial_cd: 0.4,
+                crossflow_cd: 1.0,
+            },
+        ])?);
+        client
+            .set_part_aerodynamic_wings(part, vec![wing, wing])
+            .await?;
+        client
+            .set_part_aerodynamic_hull(part, vec![section.clone(), section.clone()])
+            .await?;
+        client.set_part_aerodynamic_wings(part, vec![wing]).await?;
+        client
+            .set_part_aerodynamic_hull(part, vec![section.clone()])
+            .await?;
+        let configured = client.cluster_part(part).await?.ok_or("missing part")?;
+        assert_eq!(configured.aerodynamic_wings(), &[wing]);
+        assert_eq!(configured.aerodynamic_hull(), &[section]);
+        // Owned query snapshots are not modified by subsequent queued edits.
+        client.set_part_aerodynamic_wings(part, Vec::new()).await?;
+        client.set_part_aerodynamic_hull(part, Vec::new()).await?;
+        let cleared = client.cluster_part(part).await?.ok_or("missing part")?;
+        assert!(cleared.aerodynamic_wings().is_empty());
+        assert!(cleared.aerodynamic_hull().is_empty());
+        assert_eq!(configured.aerodynamic_wings().len(), 1);
+        assert_eq!(configured.aerodynamic_hull().len(), 1);
+
+        client.remove_body(body).await?;
+        assert!(matches!(
+            client.set_part_aerodynamic_wings(part, vec![wing]).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::InvalidPartId
+            ))
+        ));
+        assert!(matches!(
+            client.set_part_aerodynamic_hull(part, Vec::new()).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::InvalidPartId
+            ))
+        ));
+        simulation.stop().await?;
+    }
+    Ok(())
+}
