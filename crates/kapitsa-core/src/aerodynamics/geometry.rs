@@ -41,6 +41,8 @@ pub struct GeometryConfig {
     pub max_cells: usize,
     pub max_work: usize,
     pub open_mesh_policy: OpenMeshPolicy,
+    pub weld_tolerance: Option<f64>,
+    pub max_patch_work: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +89,7 @@ pub struct SurfaceTriangle {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PreparedSurfacePatch {
+    pub vertices: [Vec3; 3],
     pub center: Vec3,
     pub normal: Vec3,
     pub area: f64,
@@ -154,7 +157,29 @@ fn neighbor(mut p: [usize; 3], axis: usize, positive: bool, d: [usize; 3]) -> Op
     (p[axis] < d[axis]).then(|| index(p, d))
 }
 
-fn closed(mesh: &TriangleMesh) -> Result<bool, GeometryError> {
+fn closed(mesh: &TriangleMesh, weld_tolerance: Option<f64>) -> Result<bool, GeometryError> {
+    let welded = if let Some(tolerance) = weld_tolerance {
+        if !tolerance.is_finite() || tolerance <= 0.0 {
+            return Err(GeometryError::InvalidConfig);
+        }
+        let mut representatives: Vec<usize> = Vec::new();
+        representatives
+            .try_reserve_exact(mesh.vertices().len())
+            .map_err(|_| GeometryError::AllocationFailed)?;
+        for vertex in mesh.vertices() {
+            let representative = representatives.iter().position(|&index| {
+                (mesh.vertices()[index] - *vertex).length_squared() <= tolerance * tolerance
+            });
+            let index = match representative {
+                Some(index) => index,
+                None => representatives.len(),
+            };
+            representatives.push(index);
+        }
+        Some(representatives)
+    } else {
+        None
+    };
     let mut edges = Vec::new();
     edges
         .try_reserve_exact(
@@ -166,6 +191,8 @@ fn closed(mesh: &TriangleMesh) -> Result<bool, GeometryError> {
         .map_err(|_| GeometryError::AllocationFailed)?;
     for &[a, b, c] in mesh.triangles() {
         for (a, b) in [(a, b), (b, c), (c, a)] {
+            let a = welded.as_ref().map_or(a, |w| w[a]);
+            let b = welded.as_ref().map_or(b, |w| w[b]);
             edges.push((a.min(b), a.max(b), a < b));
         }
     }
@@ -183,9 +210,10 @@ fn closed(mesh: &TriangleMesh) -> Result<bool, GeometryError> {
     }
     let reference = mesh.vertices()[mesh.triangles()[0][0]];
     let scale = mesh
-        .vertices()
+        .triangles()
         .iter()
-        .map(|v| (*v - reference).abs().max_element())
+        .flat_map(|triangle| triangle.iter())
+        .map(|&index| (mesh.vertices()[index] - reference).abs().max_element())
         .fold(0.0_f64, f64::max);
     if !scale.is_finite() || scale == 0.0 {
         return Err(GeometryError::InvalidGeometry);
@@ -267,13 +295,16 @@ impl PreparedGeometry {
         let mut min = Vec3::splat(f64::INFINITY);
         let mut max = Vec3::splat(f64::NEG_INFINITY);
         for instance in instances {
-            for vertex in instance.mesh.vertices() {
-                let v = instance.local_transform.transform_point(*vertex);
-                if !v.is_finite() {
-                    return Err(GeometryError::ArithmeticOverflow);
+            for triangle in instance.mesh.triangles() {
+                for &index in triangle {
+                    let vertex = instance.mesh.vertices()[index];
+                    let v = instance.local_transform.transform_point(vertex);
+                    if !v.is_finite() {
+                        return Err(GeometryError::ArithmeticOverflow);
+                    }
+                    min = min.min(v);
+                    max = max.max(v);
                 }
-                min = min.min(v);
-                max = max.max(v);
             }
         }
         let origin = min - Vec3::splat(h);
@@ -327,7 +358,7 @@ impl PreparedGeometry {
             .try_reserve_exact(count)
             .map_err(|_| GeometryError::AllocationFailed)?;
         for instance in instances {
-            let is_closed = closed(instance.mesh)?;
+            let is_closed = closed(instance.mesh, config.weld_tolerance)?;
             if !is_closed && config.open_mesh_policy == OpenMeshPolicy::Reject {
                 return Err(GeometryError::OpenMesh);
             }
@@ -340,11 +371,40 @@ impl PreparedGeometry {
                         .local_transform
                         .transform_point(instance.mesh.vertices()[i])
                 });
-                for (i, occupied) in shell.iter_mut().enumerate() {
-                    let p = coordinates(i, dimensions);
-                    let center = origin + vector(p.map(|v| (v as f64 + 0.5) * h));
-                    if intersects(triangle, center, h * 0.5)? {
-                        *occupied = true;
+                let triangle_min = triangle
+                    .iter()
+                    .fold(Vec3::splat(f64::INFINITY), |min, &v| min.min(v));
+                let triangle_max = triangle
+                    .iter()
+                    .fold(Vec3::splat(f64::NEG_INFINITY), |max, &v| max.max(v));
+                let lower = components((triangle_min - origin) / h)
+                    .map(|value| value.floor().max(0.0) as usize);
+                let upper = components((triangle_max - origin) / h)
+                    .map(|value| value.ceil().max(0.0) as usize);
+                let lower = [
+                    lower[0].min(dimensions[0].saturating_sub(1)),
+                    lower[1].min(dimensions[1].saturating_sub(1)),
+                    lower[2].min(dimensions[2].saturating_sub(1)),
+                ];
+                let upper = [
+                    upper[0].min(dimensions[0].saturating_sub(1)),
+                    upper[1].min(dimensions[1].saturating_sub(1)),
+                    upper[2].min(dimensions[2].saturating_sub(1)),
+                ];
+                for z in lower[2]..=upper[2] {
+                    for y in lower[1]..=upper[1] {
+                        for x in lower[0]..=upper[0] {
+                            let i = index([x, y, z], dimensions);
+                            let center = origin
+                                + vector([
+                                    (x as f64 + 0.5) * h,
+                                    (y as f64 + 0.5) * h,
+                                    (z as f64 + 0.5) * h,
+                                ]);
+                            if intersects(triangle, center, h * 0.5)? {
+                                shell[i] = true;
+                            }
+                        }
                     }
                 }
             }
@@ -489,6 +549,7 @@ impl PreparedGeometry {
         instances: &[GeometryInstance<'_>],
         direction: Vec3,
         epsilon: f64,
+        max_work: usize,
     ) -> Result<PreparedSurfacePatches, GeometryError> {
         if !direction.is_finite() || !epsilon.is_finite() || epsilon <= 0.0 {
             return Err(GeometryError::InvalidGeometry);
@@ -497,24 +558,45 @@ impl PreparedGeometry {
             .try_normalize()
             .ok_or(GeometryError::InvalidGeometry)?;
         let triangles = Self::surface_triangles(instances)?;
+        let projected_work = triangles
+            .len()
+            .checked_mul(self.dimensions.iter().sum::<usize>())
+            .ok_or(GeometryError::WorkBudgetExceeded)?;
+        if max_work == 0 || projected_work > max_work {
+            return Err(GeometryError::WorkBudgetExceeded);
+        }
         let mut patches = Vec::new();
         patches
             .try_reserve_exact(triangles.len())
             .map_err(|_| GeometryError::AllocationFailed)?;
+        let mut work = 0usize;
         for triangle in triangles {
             let center = (triangle.vertices[0] + triangle.vertices[1] + triangle.vertices[2]) / 3.0;
-            if triangle.normal.dot(incoming) <= 0.0
-                || self.ray_hits_union(center, incoming, epsilon)
-            {
+            if triangle.normal.dot(incoming) <= 0.0 {
                 continue;
             }
-            let duplicate = patches.iter().any(|patch: &PreparedSurfacePatch| {
-                (patch.center - center).length_squared() <= epsilon * epsilon
-                    && (patch.normal - triangle.normal).length_squared() <= 1e-12
-                    && (patch.area - triangle.area).abs() <= epsilon * epsilon
+            work = work
+                .checked_add(self.dimensions.iter().sum::<usize>())
+                .ok_or(GeometryError::WorkBudgetExceeded)?;
+            if work > max_work {
+                return Err(GeometryError::WorkBudgetExceeded);
+            }
+            if self.ray_hits_union(center, incoming, epsilon) {
+                continue;
+            }
+            let duplicate = patches.iter().position(|patch: &PreparedSurfacePatch| {
+                patch.vertices.iter().all(|vertex| {
+                    triangle.vertices.iter().any(|candidate| {
+                        (*vertex - *candidate).length_squared() <= epsilon * epsilon
+                    })
+                })
             });
-            if !duplicate {
+            if let Some(index) = duplicate {
+                let owner = patches[index].owner.min(triangle.owner);
+                patches[index].owner = owner;
+            } else {
                 patches.push(PreparedSurfacePatch {
+                    vertices: triangle.vertices,
                     center,
                     normal: triangle.normal,
                     area: triangle.area,

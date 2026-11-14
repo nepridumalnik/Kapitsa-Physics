@@ -4,6 +4,7 @@ use crate::{
     aerodynamics::{AerodynamicProperties, Aerodynamics, AtmosphericState},
     mass::MassProperties,
     rigid_body::RigidBody,
+    shape::TriangleMesh,
     transform::Transform,
     world::PhysicsWorld,
 };
@@ -549,6 +550,23 @@ fn geometry_modes_preserve_mesh_in_vacuum_and_reject_air_atomically() {
 }
 
 #[test]
+fn failed_surface_removal_does_not_invalidate_prepared_motion() {
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let mut world = PhysicsWorld::new();
+    let id = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).unwrap())
+        .unwrap();
+    let mut shards = vec![Vec::new()];
+    world.fill_step_shards(&mut shards).unwrap();
+    shards[0][0].integrate(0.1).unwrap();
+    assert_eq!(
+        world.remove_aerodynamic_surface(id, usize::MAX),
+        Err(crate::world::WorldError::InvalidAerodynamicSurface)
+    );
+    assert!(world.commit_step_shards(&shards).is_ok());
+}
+
+#[test]
 fn changing_aerodynamics_invalidates_prepared_motion() {
     use crate::world::StepError;
 
@@ -574,7 +592,32 @@ fn changing_aerodynamics_invalidates_prepared_motion() {
 }
 
 #[test]
-fn changing_body_aerodynamics_none_clears_all_surfaces() {
+fn cluster_rejects_unsupported_geometry_without_mutating_state() {
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let mut world = PhysicsWorld::new();
+    let body = world
+        .add_body(RigidBody::new_dynamic(Transform::identity(), mass).unwrap())
+        .unwrap();
+    let part = world.enable_cluster(body).unwrap();
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).unwrap();
+    assert!(matches!(
+        world.body(body).unwrap().aerodynamics(),
+        Aerodynamics::None
+    ));
+    assert_eq!(
+        world.set_aerodynamics(body, Aerodynamics::Mesh(mesh)),
+        Err(crate::world::WorldError::UnsupportedAerodynamics)
+    );
+    assert!(matches!(
+        world.body(body).unwrap().aerodynamics(),
+        Aerodynamics::None
+    ));
+    assert!(world.cluster(body).is_some());
+    assert_eq!(world.cluster_part(part).unwrap().body(), body);
+}
+
+#[test]
+fn changing_body_aerodynamics_none_preserves_part_surfaces() {
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
     let mut world = PhysicsWorld::new();
     let body = world
@@ -599,7 +642,12 @@ fn changing_body_aerodynamics_none_clears_all_surfaces() {
         Aerodynamics::Simple(value) if *value == properties
     ));
     world.set_aerodynamics(body, Aerodynamics::None).unwrap();
-    assert!(world.aerodynamic_surfaces(body).unwrap().is_empty());
+    let surfaces = world.aerodynamic_surfaces(body).unwrap();
+    assert_eq!(surfaces.len(), 1);
+    assert_eq!(
+        surfaces[0].target(),
+        crate::aerodynamics::AerodynamicTarget::Part(part)
+    );
 }
 
 #[test]

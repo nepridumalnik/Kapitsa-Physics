@@ -61,9 +61,6 @@ impl RigidBody {
     }
 
     pub fn set_aerodynamics(&mut self, aerodynamics: crate::aerodynamics::Aerodynamics) {
-        if matches!(aerodynamics, crate::aerodynamics::Aerodynamics::None) {
-            self.aerodynamic_surfaces.clear();
-        }
         self.set_primary_aerodynamics(aerodynamics);
     }
 

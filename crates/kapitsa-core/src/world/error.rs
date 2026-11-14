@@ -170,6 +170,7 @@ pub enum WorldError {
     WorldIdExhausted,
     InvalidBodyId,
     InvalidAerodynamicSurface,
+    UnsupportedAerodynamics,
     InvalidColliderId,
     InvalidJointId,
     InvalidGravityId,
@@ -195,6 +196,9 @@ impl fmt::Display for WorldError {
             Self::InvalidBodyId => formatter.write_str("body ID is invalid for this world"),
             Self::InvalidAerodynamicSurface => {
                 formatter.write_str("aerodynamic surface index is invalid for this body")
+            }
+            Self::UnsupportedAerodynamics => {
+                formatter.write_str("aerodynamic model is unsupported for this body")
             }
             Self::InvalidColliderId => formatter.write_str("collider ID is invalid for this world"),
             Self::InvalidJointId => formatter.write_str("joint ID is invalid for this world"),
@@ -226,6 +230,7 @@ impl std::error::Error for WorldError {
             | Self::WorldIdExhausted
             | Self::InvalidBodyId
             | Self::InvalidAerodynamicSurface
+            | Self::UnsupportedAerodynamics
             | Self::InvalidColliderId
             | Self::InvalidJointId
             | Self::InvalidGravityId

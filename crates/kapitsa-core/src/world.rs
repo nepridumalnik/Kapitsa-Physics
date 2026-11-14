@@ -405,11 +405,20 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return Err(WorldError::InvalidBodyId);
         }
-        self.bodies
+        if self.cluster(id).is_some()
+            && matches!(
+                aerodynamics,
+                crate::aerodynamics::Aerodynamics::Mesh(_)
+                    | crate::aerodynamics::Aerodynamics::Colliders
+            )
+        {
+            return Err(WorldError::UnsupportedAerodynamics);
+        }
+        let entry = self
+            .bodies
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidBodyId)?
-            .body
-            .set_aerodynamics(aerodynamics);
+            .ok_or(WorldError::InvalidBodyId)?;
+        entry.body.set_aerodynamics(aerodynamics);
         self.body_revision = self.body_revision.wrapping_add(1);
         Ok(())
     }
@@ -432,7 +441,6 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return Err(WorldError::InvalidBodyId);
         }
-        self.body_revision = self.body_revision.wrapping_add(1);
         let surfaces = &mut self
             .bodies
             .get_mut(id.dense)
@@ -443,6 +451,7 @@ impl PhysicsWorld {
             .try_reserve(1)
             .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
         surfaces.push(AerodynamicSurface::new(properties));
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(surfaces.len() - 1)
     }
 
@@ -455,7 +464,6 @@ impl PhysicsWorld {
         if id.world != self.world_id {
             return Err(WorldError::InvalidBodyId);
         }
-        self.body_revision = self.body_revision.wrapping_add(1);
         let surfaces = &mut self
             .bodies
             .get_mut(id.dense)
@@ -465,7 +473,9 @@ impl PhysicsWorld {
         if index >= surfaces.len() {
             return Err(WorldError::InvalidAerodynamicSurface);
         }
-        Ok(surfaces.remove(index).properties())
+        let properties = surfaces.remove(index).properties();
+        self.body_revision = self.body_revision.wrapping_add(1);
+        Ok(properties)
     }
 
     /// Returns an index valid until the surface list changes or the cluster is split or merged.
@@ -476,7 +486,6 @@ impl PhysicsWorld {
     ) -> Result<usize, WorldError> {
         let part_entry = self.cluster_part(part).ok_or(WorldError::InvalidBodyId)?;
         let body = part_entry.body();
-        self.body_revision = self.body_revision.wrapping_add(1);
         let surfaces = &mut self
             .bodies
             .get_mut(body.dense)
@@ -487,6 +496,7 @@ impl PhysicsWorld {
             .try_reserve(1)
             .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
         surfaces.push(AerodynamicSurface::for_part(part, properties));
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(surfaces.len() - 1)
     }
 

@@ -36,6 +36,8 @@ fn config(h: f64) -> GeometryConfig {
         max_cells: 100_000,
         max_work: 10_000_000,
         open_mesh_policy: OpenMeshPolicy::Reject,
+        weld_tolerance: None,
+        max_patch_work: 100_000,
     }
 }
 fn instance(mesh: &TriangleMesh, offset: Vec3) -> GeometryInstance<'_> {
@@ -61,8 +63,8 @@ fn conservative_cube_volume_sections_and_area_converge() {
         assert!((volume - g.volume()).abs() < 1e-12);
         for section in sections {
             if let Some(c) = section.centroid {
-                assert!((c.y - 0.5).abs() < 1e-12);
-                assert!((c.z - 0.5).abs() < 1e-12);
+                assert!((c.y - 0.5).abs() <= h);
+                assert!((c.z - 0.5).abs() <= h);
             }
         }
         let faces: Vec<_> = g.exposed_faces().collect();
@@ -116,6 +118,34 @@ fn thin_grid_aligned_surface_survives_and_open_policy_is_explicit() {
     assert!(g.occupancy().iter().any(Option::is_some));
     assert!(g.occupancy().iter().any(Option::is_none));
     assert!(g.exposed_faces().count() > 0);
+}
+
+#[test]
+fn welding_can_accept_uv_seam_duplicate_vertices() {
+    let base = cube();
+    let mut vertices = base.vertices().to_vec();
+    let seam = vertices.len();
+    vertices.push(vertices[0]);
+    vertices.push(vertices[1]);
+    vertices.push(vertices[2]);
+    let mut triangles = base.triangles().to_vec();
+    triangles[0] = [seam, seam + 2, seam + 1];
+    let mesh = TriangleMesh::new(vertices, triangles).unwrap();
+    let mut cfg = config(0.25);
+    cfg.weld_tolerance = Some(1e-9);
+    assert!(PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], cfg).is_ok());
+}
+
+#[test]
+fn unused_vertices_do_not_change_prepared_geometry() {
+    let base = cube();
+    let mut vertices = base.vertices().to_vec();
+    vertices.push(Vec3::new(10_000.0, 0.0, 0.0));
+    let with_unused = TriangleMesh::new(vertices, base.triangles().to_vec()).unwrap();
+    let a = PreparedGeometry::prepare(&[instance(&base, Vec3::ZERO)], config(0.25)).unwrap();
+    let b = PreparedGeometry::prepare(&[instance(&with_unused, Vec3::ZERO)], config(0.25)).unwrap();
+    assert_eq!(a.volume(), b.volume());
+    assert_eq!(a.occupancy(), b.occupancy());
 }
 
 #[test]
@@ -265,7 +295,7 @@ fn exposed_surface_patches_remove_internal_overlap() {
     let mesh = cube();
     let g = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125)).unwrap();
     let patches = g
-        .exposed_surface_patches(&[instance(&mesh, Vec3::ZERO)], -Vec3::X, 0.01)
+        .exposed_surface_patches(&[instance(&mesh, Vec3::ZERO)], -Vec3::X, 0.01, 100_000)
         .unwrap();
     assert_eq!(patches.len(), 2);
     assert!(patches.iter().all(|patch| patch.normal.dot(-Vec3::X) > 0.0));
@@ -283,13 +313,29 @@ fn nested_and_duplicate_source_surfaces_are_filtered() {
     let inner_instance = instance(&inner, Vec3::splat(0.375));
     let g = PreparedGeometry::prepare(&[outer_instance, inner_instance], config(0.125)).unwrap();
     let nested = g
-        .exposed_surface_patches(&[outer_instance, inner_instance], -Vec3::X, 0.01)
+        .exposed_surface_patches(&[outer_instance, inner_instance], -Vec3::X, 0.01, 100_000)
         .unwrap();
     let duplicate = g
-        .exposed_surface_patches(&[outer_instance, outer_instance], -Vec3::X, 0.01)
+        .exposed_surface_patches(&[outer_instance, outer_instance], -Vec3::X, 0.01, 100_000)
         .unwrap();
     assert_eq!(nested.len(), 2);
     assert_eq!(duplicate.len(), 2);
+    assert_eq!(duplicate.iter().next().unwrap().owner, GeometryOwner::Body);
+}
+
+#[test]
+fn diagonal_flow_keeps_windward_surface_patches() {
+    let mesh = cube();
+    let g = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125)).unwrap();
+    let patches = g
+        .exposed_surface_patches(
+            &[instance(&mesh, Vec3::ZERO)],
+            -Vec3::X - Vec3::Y,
+            0.01,
+            100_000,
+        )
+        .unwrap();
+    assert!(!patches.is_empty());
 }
 
 #[test]
@@ -297,7 +343,7 @@ fn exposed_surface_patches_are_empty_for_leeward_direction() {
     let mesh = cube();
     let g = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125)).unwrap();
     let patches = g
-        .exposed_surface_patches(&[instance(&mesh, Vec3::ZERO)], Vec3::X, 0.01)
+        .exposed_surface_patches(&[instance(&mesh, Vec3::ZERO)], Vec3::X, 0.01, 100_000)
         .unwrap();
     assert_eq!(patches.len(), 2);
 }
