@@ -101,14 +101,16 @@ impl WingSurface {
             .ok_or(overflow)?;
         let body_velocity = flow
             .transform
-            .inverse()
-            .map_err(|_| overflow)?
-            .transform_vector(velocity);
+            .rotation()
+            .conjugate()
+            .rotate_vector(velocity)
+            .ok_or(overflow)?;
         let wing_velocity = self
             .local_transform
-            .inverse()
-            .map_err(|_| overflow)?
-            .transform_vector(body_velocity);
+            .rotation()
+            .conjugate()
+            .rotate_vector(body_velocity)
+            .ok_or(overflow)?;
         let local_force = self.model.force(
             wing_velocity,
             flow.atmosphere.density(),
@@ -223,12 +225,17 @@ impl FiniteWing {
         if mach > 0.3 || alpha.abs() > self.max_attached_angle {
             return Err(WingError::UnsupportedFlow);
         }
-        let denominator = PI * self.efficiency * self.aspect_ratio;
-        let slope = 2.0 * PI / (1.0 + 2.0 * PI / denominator);
+        let effective_aspect = self.efficiency * self.aspect_ratio;
+        // Algebraically equivalent form without overflowing pi*e*AR, or
+        // underflowing the slope by first dividing 2*pi by a tiny denominator.
+        let slope = if effective_aspect >= 2.0 {
+            2.0 * PI / (1.0 + 2.0 / effective_aspect)
+        } else {
+            PI * effective_aspect / (1.0 + effective_aspect / 2.0)
+        };
         let lift = slope * alpha;
-        let drag = self.profile_drag + lift * lift / denominator;
-        if denominator == 0.0 || !denominator.is_finite() || !lift.is_finite() || !drag.is_finite()
-        {
+        let drag = self.profile_drag + (lift / effective_aspect) * (lift / PI);
+        if effective_aspect == 0.0 || !lift.is_finite() || !drag.is_finite() {
             return Err(WingError::ArithmeticOverflow);
         }
         Ok(WingCoefficients { lift, drag })
@@ -249,6 +256,15 @@ mod tests {
         let expected = (2.0 * PI / (1.0 + 2.0 / (0.8 * 8.0))) * 0.1;
         assert!((c.lift - expected).abs() < 1e-14);
         assert!((c.drag - 0.02 - expected * expected / (PI * 0.8 * 8.0)).abs() < 1e-14);
+    }
+
+    #[test]
+    fn representable_extreme_aspect_ratios_do_not_overflow_intermediates() {
+        for ar in [1e-300, 1e300, f64::MAX] {
+            let coefficients = wing(ar).coefficients(0.1, 0.0).unwrap();
+            assert!(coefficients.lift.is_finite() && coefficients.lift > 0.0);
+            assert!(coefficients.drag.is_finite() && coefficients.drag >= 0.02);
+        }
     }
 
     #[test]
