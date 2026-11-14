@@ -3,6 +3,21 @@
 //! Uses lifting-line slope a = a0 / (1 + a0 / (pi e AR)) and
 //! CDi = CL² / (pi e AR). No stall, compressibility or wing interference.
 //! Coefficients refer to planform area; angles are in radians.
+//!
+//! Configure two surfaces in a body's stable local frame:
+//! ```
+//! use kapitsa_core::{aerodynamics::{Aerodynamics, wing::{FiniteWing, WingSurface}}, transform::Transform};
+//! use kapitsa_math::{Quat, Vec3};
+//! let model = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?;
+//! let mut wings = Vec::new();
+//! for y in [-2.0, 2.0] {
+//!     wings.push(WingSurface::new(model,
+//!         Transform::new(Vec3::Y * y, Quat::IDENTITY)?, 1.0)?);
+//! }
+//! let aerodynamics = Aerodynamics::Wings(wings);
+//! # let _ = aerodynamics;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use std::f64::consts::PI;
 
