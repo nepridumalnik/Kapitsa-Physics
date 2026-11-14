@@ -122,6 +122,8 @@ and wind. Physical sideslip and reversed flow are unsupported; spanwise
 components within 64 machine epsilons of planar speed are discarded solely
 to tolerate rigid-transform roundoff. `Aerodynamics::Wing(surface)` enables
 this model for a body's primary loads in ordinary and sharded world steps.
+`Aerodynamics::Wings(Vec<WingSurface>)` evaluates multiple explicitly placed
+wings; an empty list contributes no loads. Each wing samples its own atmosphere.
 Atmosphere is sampled at the wing application point; sound speed uses the
 world's explicit uniform setting. Errors retain `AerodynamicsError::Wing`
 and step rollback semantics. Cluster conversion rejects this model until

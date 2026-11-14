@@ -24,6 +24,7 @@ pub enum Aerodynamics {
     None,
     Simple(AerodynamicProperties),
     Wing(wing::WingSurface),
+    Wings(Vec<wing::WingSurface>),
     Mesh(crate::shape::TriangleMesh),
     Colliders,
 }
@@ -34,6 +35,7 @@ impl fmt::Debug for Aerodynamics {
             Self::None => formatter.write_str("None"),
             Self::Simple(properties) => formatter.debug_tuple("Simple").field(properties).finish(),
             Self::Wing(surface) => formatter.debug_tuple("Wing").field(surface).finish(),
+            Self::Wings(surfaces) => formatter.debug_tuple("Wings").field(surfaces).finish(),
             Self::Mesh(_) => formatter.write_str("Mesh(..)"),
             Self::Colliders => formatter.write_str("Colliders"),
         }

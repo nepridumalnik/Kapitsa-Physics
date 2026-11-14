@@ -1680,7 +1680,8 @@ impl PhysicsWorld {
             .ok_or_else(error)?;
         let primary_surface = match primary {
             crate::aerodynamics::Aerodynamics::None
-            | crate::aerodynamics::Aerodynamics::Wing(_) => None,
+            | crate::aerodynamics::Aerodynamics::Wing(_)
+            | crate::aerodynamics::Aerodynamics::Wings(_) => None,
             crate::aerodynamics::Aerodynamics::Simple(properties) => {
                 Some(AerodynamicSurface::new(*properties))
             }
@@ -1726,7 +1727,12 @@ impl PhysicsWorld {
             body.apply_torque(wrench.moment).map_err(|_| error())?;
         }
         let mut drag = Vec3::ZERO;
-        if let crate::aerodynamics::Aerodynamics::Wing(surface) = primary {
+        let wings: &[crate::aerodynamics::wing::WingSurface] = match primary {
+            crate::aerodynamics::Aerodynamics::Wing(surface) => std::slice::from_ref(surface),
+            crate::aerodynamics::Aerodynamics::Wings(surfaces) => surfaces,
+            _ => &[],
+        };
+        for surface in wings {
             let point = body.state().transform().transform_point(surface.local_transform().translation());
             if !point.is_finite() { return Err(error()); }
             let atmosphere = atmosphere.state_at(point)

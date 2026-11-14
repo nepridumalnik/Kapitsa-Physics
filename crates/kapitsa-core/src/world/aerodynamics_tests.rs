@@ -700,6 +700,30 @@ fn wing_world_loads_and_failures_match_between_step_paths() {
 }
 
 #[test]
+fn symmetric_wings_sum_loads_and_cancel_roll_moment() {
+    use crate::aerodynamics::wing::{FiniteWing, WingSurface};
+    let mut reference = None;
+    for sharded in [false, true] {
+        let model = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap();
+        let wings: Vec<_> = [-2.0, 2.0].into_iter().map(|y| WingSurface::new(model,
+            Transform::new(Vec3::Y * y, kapitsa_math::Quat::IDENTITY).unwrap(), 1.0).unwrap()).collect();
+        let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
+        body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0)).unwrap();
+        body.set_aerodynamics(Aerodynamics::Wings(wings));
+        let mut world = PhysicsWorld::new();
+        let id = world.add_body(body).unwrap();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO).unwrap()));
+        if sharded { world.step_with_shards(1e-4, &mut vec![Vec::new(); 2], &crate::execution::SequentialExecutor, 1).unwrap(); }
+        else { world.step(1e-4).unwrap(); }
+        let body = world.body(id).unwrap();
+        assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
+        assert!(body.state().linear_velocity().z > -5.0);
+        if let Some(expected) = reference { assert_eq!(body.motion(), expected); }
+        else { reference = Some(body.motion()); }
+    }
+}
+
+#[test]
 fn wing_cluster_rejection_preserves_body_and_configuration() {
     use crate::aerodynamics::wing::{FiniteWing, WingSurface};
     let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
