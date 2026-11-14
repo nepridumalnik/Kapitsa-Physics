@@ -112,6 +112,16 @@ The evaluator does not accept unfiltered mesh triangles as a complete ship model
 
 ## Lift and finite wings
 
+`aerodynamics::wing::FiniteWing` provides an independent coefficient primitive
+for attached incompressible flow. It uses a thin-airfoil slope of `2 pi`, the
+finite-span slope `a = a0 / (1 + a0 / (pi e AR))`, and induced drag
+`CL² / (pi e AR)`, plus caller-specified profile drag. Aspect ratio, span
+efficiency, zero-lift angle and attached-flow angle limit are explicit inputs.
+Mach above 0.3 or angles beyond that limit return `UnsupportedFlow`; no stall
+or compressibility continuation is implied. This primitive does not yet apply
+world loads, replace `Simple` lift, or infer wings from meshes. The finite-span
+slope relation is the classical lifting-line approximation, not a FAR code port.
+
 For a thin symmetric two-dimensional airfoil at small angle of attack, `c_l = 2 pi alpha`, with `alpha` in radians. More generally, `c_l = 2 pi (alpha - alpha_zero_lift)`.
 
 Reference: [Airfoil — thin airfoil theory](https://en.wikipedia.org/wiki/Airfoil#Thin_airfoil_theory).

@@ -5,6 +5,7 @@ pub mod cache;
 pub mod colliders;
 pub mod geometry;
 pub mod pressure;
+pub mod wing;
 pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};
 pub use colliders::ColliderTessellation;
 
