@@ -62,6 +62,34 @@ impl PhysicsWorld {
         Some(&self.cluster_part(part)?.aerodynamic_wings)
     }
 
+    /// Replaces explicit hull sections in the stable part-local frame.
+    /// Sections are additive to wings and the body's primary aerodynamics.
+    /// No shape inference or coefficient changes are performed.
+    pub fn set_part_aerodynamic_hull(
+        &mut self,
+        part: PartId,
+        sections: Vec<crate::aerodynamics::hull::HullSection>,
+    ) -> Result<(), ClusterError> {
+        let body = self
+            .cluster_part(part)
+            .ok_or(ClusterError::InvalidPartId)?
+            .body();
+        self.parts
+            .get_mut(part.dense)
+            .ok_or(ClusterError::InvalidPartId)?
+            .aerodynamic_hull = sections;
+        self.invalidate_body_edit(body);
+        Ok(())
+    }
+
+    /// Explicit hull sections in part-local physical coordinates.
+    pub fn part_aerodynamic_hull(
+        &self,
+        part: PartId,
+    ) -> Option<&[crate::aerodynamics::hull::HullSection]> {
+        Some(&self.cluster_part(part)?.aerodynamic_hull)
+    }
+
     /// Replaces the part's geometry with a Mesh in its local frame.
     /// `None` disables geometric loads. Explicit surfaces remain additive;
     /// configure each physical contribution once to avoid duplicated loads.
@@ -153,6 +181,16 @@ pub(super) fn wings_configured(entry: &BodyEntry, parts: &DensePool<ClusterPart>
             parts
                 .get(id.dense)
                 .is_some_and(|part| !part.aerodynamic_wings.is_empty())
+        })
+    })
+}
+
+pub(super) fn hull_configured(entry: &BodyEntry, parts: &DensePool<ClusterPart>) -> bool {
+    entry.cluster.as_ref().is_some_and(|cluster| {
+        cluster.parts().iter().any(|id| {
+            parts
+                .get(id.dense)
+                .is_some_and(|part| !part.aerodynamic_hull.is_empty())
         })
     })
 }

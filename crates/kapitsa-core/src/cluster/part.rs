@@ -24,6 +24,7 @@ pub struct ClusterPart {
     pub(crate) mass: MassProperties,
     pub(crate) colliders: Vec<ColliderId>,
     pub(crate) aerodynamic_wings: Vec<crate::aerodynamics::wing::WingSurface>,
+    pub(crate) aerodynamic_hull: Vec<crate::aerodynamics::hull::HullSection>,
 }
 
 impl ClusterPart {
@@ -46,5 +47,10 @@ impl ClusterPart {
     /// Explicit wings in this part's stable local frame, additive to hull loads.
     pub fn aerodynamic_wings(&self) -> &[crate::aerodynamics::wing::WingSurface] {
         &self.aerodynamic_wings
+    }
+
+    /// Explicit hull sections in this part's stable local frame, additive to wings.
+    pub fn aerodynamic_hull(&self) -> &[crate::aerodynamics::hull::HullSection] {
+        &self.aerodynamic_hull
     }
 }

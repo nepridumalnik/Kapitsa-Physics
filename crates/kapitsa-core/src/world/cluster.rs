@@ -143,10 +143,11 @@ impl PhysicsWorld {
         if body_entry.cluster.is_some() {
             return Err(ClusterError::AlreadyClustered);
         }
-        // Hull sections are body-owned; part transfer is not implemented yet.
-        // Reject before allocating or modifying topology, never drop the model.
-        if matches!(body_entry.body.aerodynamics(), Aerodynamics::Hull(_)) {
-            return Err(ClusterError::UnsupportedGeometry);
+        let mut root_hull = Vec::new();
+        if let Aerodynamics::Hull(sections) = body_entry.body.aerodynamics() {
+            root_hull
+                .try_reserve(sections.len())
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         }
         let mut root_wings = Vec::new();
         if matches!(body_entry.body.aerodynamics(), Aerodynamics::Wing(_)) {
@@ -194,6 +195,7 @@ impl PhysicsWorld {
                 mass,
                 colliders,
                 aerodynamic_wings: Vec::new(),
+                aerodynamic_hull: Vec::new(),
             })
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let part = PartId {
@@ -230,10 +232,12 @@ impl PhysicsWorld {
             }
             Aerodynamics::Wing(wing) => root_wings.push(wing),
             Aerodynamics::Wings(wings) => root_wings = wings,
+            Aerodynamics::Hull(sections) => root_hull = sections,
             model => entry.body.set_primary_aerodynamics(model),
         }
         if let Some(root) = self.parts.get_mut(part.dense) {
             root.aerodynamic_wings = root_wings;
+            root.aerodynamic_hull = root_hull;
         }
         self.body_revision = self.body_revision.wrapping_add(1);
         Ok(part)
@@ -408,6 +412,7 @@ impl PhysicsWorld {
                 mass: desc.mass,
                 colliders: Vec::new(),
                 aerodynamic_wings: Vec::new(),
+                aerodynamic_hull: Vec::new(),
             })
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let part = PartId {

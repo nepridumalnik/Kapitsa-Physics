@@ -90,9 +90,18 @@ crossflow and wetted areas, axial and crossflow drag coefficients, and optional
 areas and coefficients finite and nonnegative. Section origins are load points
 in the stable body frame, not offsets from COM. Every point samples its own
 atmosphere; point velocity includes `omega × r` and local wind. Sound speed uses
-the world's existing explicit uniform setting. Cluster conversion rejects Hull
-until part-owned section transfer is supported. An empty section list adds no
-loads; Simple, Wings and hypersonic Mesh keep their existing semantics.
+the world's existing explicit uniform setting. Cluster conversion moves primary Hull
+sections to the identity root part. `set_part_aerodynamic_hull(part, sections)` and
+`part_aerodynamic_hull(part)` configure/query sections in a stable part-local frame.
+They are stored with the part, alongside explicit wings, and follow its ownership
+through topology changes. Part transforms and the assembly COM are applied once;
+the evaluator already returns moment about that COM. Hull, wing and geometry
+loads are additive; callers must avoid duplicated physical contributions. No
+asynchronous runtime setter is provided yet. An empty section list adds no loads;
+Simple, Wings and hypersonic Mesh keep their existing semantics.
+
+The part-owned extension is currently source-reviewed only: its new regression
+tests and workspace compilation were not run, at the user's request.
 
 For world axis `a`, split relative velocity into `u_axial = a (v · a)` and
 `u_cross = v - u_axial`. Each component contributes

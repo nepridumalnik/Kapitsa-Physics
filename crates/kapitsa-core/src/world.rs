@@ -73,6 +73,7 @@ mod aerodynamics {
             for (dense, entry) in world.bodies.iter() {
                 if entry.body.aerodynamic_surfaces.is_empty()
                     && !super::assembly_aerodynamics::wings_configured(entry, &world.parts)
+                    && !super::assembly_aerodynamics::hull_configured(entry, &world.parts)
                     && matches!(
                         entry.body.aerodynamics(),
                         crate::aerodynamics::Aerodynamics::None
@@ -130,6 +131,8 @@ mod gravity_fields_tests;
 mod id;
 #[cfg(feature = "bench-internals")]
 mod metrics;
+#[cfg(test)]
+mod part_hull_tests;
 #[cfg(test)]
 mod part_wings_tests;
 mod query;
@@ -1822,6 +1825,51 @@ impl PhysicsWorld {
                 evaluate_wing(surface, part.local_transform())?;
             }
         }
+        let part_hulls = cluster
+            .into_iter()
+            .flat_map(|cluster| cluster.parts())
+            .map(|id| {
+                parts
+                    .get(id.dense)
+                    .filter(|part| id.world == body_id.world && part.body() == body_id)
+                    .ok_or_else(error)
+            });
+        for part in part_hulls {
+            let part = part?;
+            let part_transform = body
+                .state()
+                .transform()
+                .compose(&part.local_transform())
+                .map_err(|_| error())?;
+            let part_com = part_transform
+                .inverse()
+                .map_err(|_| error())?
+                .transform_point(center);
+            for section in &part.aerodynamic_hull {
+                let point = part_transform.transform_point(section.local_transform().translation());
+                if !point.is_finite() {
+                    return Err(error());
+                }
+                let state = atmosphere
+                    .state_at(point)
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                let wrench = section
+                    .evaluate(crate::aerodynamics::pressure::PressureFlow {
+                        atmosphere: state,
+                        sound_speed: mesh_sound_speed,
+                        transform: part_transform,
+                        center_of_mass: part_com,
+                        linear_velocity: body.state().linear_velocity(),
+                        angular_velocity: body.state().angular_velocity(),
+                    })
+                    .map_err(|cause| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
+                    })?;
+                body.apply_force(wrench.force).map_err(|_| error())?;
+                body.apply_torque(wrench.moment).map_err(|_| error())?;
+            }
+        }
         let mut drag_torque = Vec3::ZERO;
         let mut lift_force = Vec3::ZERO;
         let mut lift_torque = Vec3::ZERO;
@@ -2088,6 +2136,7 @@ impl PhysicsWorld {
         for (dense_id, entry) in self.bodies.iter_mut() {
             if (entry.body.aerodynamic_surfaces.is_empty()
                 && !assembly_aerodynamics::wings_configured(entry, &self.parts)
+                && !assembly_aerodynamics::hull_configured(entry, &self.parts)
                 && matches!(
                     entry.body.aerodynamics(),
                     crate::aerodynamics::Aerodynamics::None
@@ -3503,6 +3552,7 @@ impl PhysicsWorld {
                             && let Some(entry) = self.bodies.get(step.body_id.dense)
                             && (!entry.body.aerodynamic_surfaces.is_empty()
                                 || assembly_aerodynamics::wings_configured(entry, &self.parts)
+                                || assembly_aerodynamics::hull_configured(entry, &self.parts)
                                 || !matches!(
                                     entry.body.aerodynamics(),
                                     crate::aerodynamics::Aerodynamics::None

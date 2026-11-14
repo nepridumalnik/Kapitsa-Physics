@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    aerodynamics::hull::HullSection,
     aerodynamics::{AerodynamicProperties, AerodynamicTarget, Aerodynamics},
     cluster::{
         ClusterPart, ClusterPartDesc, RigidCluster, Weld, WeldDesc, WeldStiffness, WeldStrength,
@@ -25,6 +26,7 @@ fn part(world: &mut PhysicsWorld, body: BodyId) -> PartId {
         mass,
         colliders: Vec::new(),
         aerodynamic_wings: Vec::new(),
+        aerodynamic_hull: Vec::new(),
     }) {
         Ok(value) => value,
         Err(error) => panic!("part: {error}"),

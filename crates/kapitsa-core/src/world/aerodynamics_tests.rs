@@ -804,7 +804,7 @@ fn hull_section(point: Vec3) -> crate::aerodynamics::hull::HullSection {
 }
 
 #[test]
-fn hull_world_parity_and_cluster_rejection_preserve_model() {
+fn hull_world_parity_and_cluster_transfer_preserve_model() {
     let mut reference = None;
     for sharded in [false, true] {
         let sections = vec![hull_section(-Vec3::Y * 2.0), hull_section(Vec3::Y * 2.0)];
@@ -818,14 +818,13 @@ fn hull_world_parity_and_cluster_rejection_preserve_model() {
         let mut world = PhysicsWorld::new();
         let id = world.add_body(body).unwrap();
         let before = world.body(id).unwrap().motion();
-        assert_eq!(
-            world.enable_cluster(id),
-            Err(crate::cluster::ClusterError::UnsupportedGeometry)
-        );
+        let root = world.enable_cluster(id).unwrap();
         assert_eq!(world.body(id).unwrap().motion(), before);
-        assert!(
-            matches!(world.body(id).unwrap().aerodynamics(), Aerodynamics::Hull(s) if s == &sections)
-        );
+        assert_eq!(world.part_aerodynamic_hull(root), Some(sections.as_slice()));
+        assert!(matches!(
+            world.body(id).unwrap().aerodynamics(),
+            Aerodynamics::None
+        ));
         world.set_atmosphere(super::test_atmosphere(
             AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
         ));

@@ -28,7 +28,9 @@
 //!
 //! `Aerodynamics::Hull` owns these sections for ordinary body world stepping;
 //! each point samples its own atmosphere and uses the world's existing sound
-//! speed setting. Cluster conversion rejects Hull until part transfer exists.
+//! speed setting. Cluster conversion transfers them to the identity root part;
+//! part-owned sections use the same evaluator and remain additive to explicit
+//! wings and body surfaces. There is no runtime setter for body-owned Hull.
 //! Simple, Wings and hypersonic Newtonian Mesh retain their existing semantics.
 //!
 //! ```
