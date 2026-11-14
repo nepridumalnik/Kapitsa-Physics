@@ -700,6 +700,31 @@ fn wing_world_loads_and_failures_match_between_step_paths() {
 }
 
 #[test]
+fn wing_trajectory_converges_with_timestep() {
+    use crate::aerodynamics::wing::{FiniteWing, WingSurface};
+    let simulate = |steps: usize| {
+        let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
+        body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0)).unwrap();
+        body.set_aerodynamics(Aerodynamics::Wing(WingSurface::new(
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap(), Transform::identity(), 2.0,
+        ).unwrap()));
+        let mut world = PhysicsWorld::new();
+        let id = world.add_body(body).unwrap();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO).unwrap()));
+        for _ in 0..steps { world.step(0.1 / steps as f64).unwrap(); }
+        let velocity = world.body(id).unwrap().state().linear_velocity();
+        assert!(velocity.length_squared() < 2525.0);
+        velocity
+    };
+    let reference = simulate(1024);
+    let coarse = (simulate(16) - reference).length();
+    let medium = (simulate(32) - reference).length();
+    let fine = (simulate(64) - reference).length();
+    assert!(medium < coarse * 0.6, "{coarse} {medium}");
+    assert!(fine < medium * 0.6, "{medium} {fine}");
+}
+
+#[test]
 fn later_wing_failure_rolls_back_earlier_loads() {
     use crate::aerodynamics::{wing::{FiniteWing, WingSurface, WingError}, AerodynamicsError};
     for sharded in [false, true] {
