@@ -80,7 +80,7 @@ Reference: [Drag equation](https://en.wikipedia.org/wiki/Drag_equation).
 
 The reference area must match the coefficient's convention. This equation defines the drag coefficient; it is **not** a predictive closure for `C_D`. A constant drag coefficient is a deliberate simplified model, not a universal description across Reynolds and Mach numbers. Zero density and zero speed produce zero load.
 
-## Distributed subsonic hull resistance
+## Distributed hull resistance: subsonic constants or explicit Mach data
 
 `Aerodynamics::Hull(Vec<hull::HullSection>)` enables caller-parameterized sections
 in ordinary and sharded body world stepping. `HullSection::new` takes a
@@ -100,8 +100,9 @@ loads are additive; callers must avoid duplicated physical contributions. No
 asynchronous runtime setter is provided yet. An empty section list adds no loads;
 Simple, Wings and hypersonic Mesh keep their existing semantics.
 
-The part-owned extension is currently source-reviewed only: its new regression
-tests and workspace compilation were not run, at the user's request.
+The part-owned and data-driven Mach extensions are currently source-reviewed
+only: their new regression tests and workspace compilation were not run, at the
+user's request.
 
 For world axis `a`, split relative velocity into `u_axial = a (v · a)` and
 `u_cross = v - u_axial`. Each component contributes
@@ -113,15 +114,40 @@ hull coefficients. Sum forces and `r × F` moments about the current COM; no
 intrinsic pitching moment or end-cap load is added. Choose enough sections to
 resolve rotation and spatial atmospheric variation; this is point quadrature.
 
-The declared domain is local total Mach `|v| / sound_speed <= 0.3`, including
-rotational velocity. Optional `SkinFriction::new` requires explicit positive
+The default constant-Cd domain is local total Mach `|v| / sound_speed <= 0.3`,
+including rotational velocity. An explicit `section.with_mach_curve(curve)`
+replaces **both** constant coefficients with caller data over the curve's inclusive
+Mach domain, also below 0.3; it never falls back to constants outside that domain.
+`MachCurve::new(Vec<MachKnot>)` validates at least two strictly increasing finite
+nonnegative Mach knots and finite nonnegative `axial_cd`/`crossflow_cd`. Coefficients
+are piecewise linear between knots, exact at endpoints, with no extrapolation or
+clamping. Mach 1 is an ordinary finite interpolation point. The immutable curve
+owns its data in an internal `Arc`; cloning it reuses that allocation across
+sections. `HullSection` is now `Clone`, not `Copy`, and evaluation borrows it.
+
+This is a **DATA-DRIVEN transonic resistance interface**, not a predictive FAR
+solver. There are no default invented transonic coefficients. Supply measured or
+CFD data consistent with the sectional reference areas and component-speed
+convention above, Reynolds conditions and angle of attack. A Mach-only curve does
+not model variation with Reynolds number or angle of attack; applicability of
+the supplied data remains the caller's responsibility. Definitions, not table
+data: [drag coefficient](https://en.wikipedia.org/wiki/Drag_coefficient),
+[Mach number](https://en.wikipedia.org/wiki/Mach_number),
+[transonic](https://en.wikipedia.org/wiki/Transonic).
+
+Optional `SkinFriction::new` requires explicit positive
 finite dynamic viscosity, `BoundaryLayer::Laminar` or `Turbulent`, and positive
 finite inclusive Reynolds bounds. It uses `Re_L = rho |v · a| L / mu` and the
 mean flat-plate coefficients derived in [Skin friction](#skin-friction):
 `Cf = 1.328 / sqrt(Re_L)` or `0.072 / Re_L^0.2`. Friction opposes axial flow
 only; length is per-section development length, not accumulated automatically.
 No transition threshold or mixed-regime closure is inferred. Zero axial speed
-skips friction and its Reynolds check. Omitting friction is inviscid.
+skips friction and its Reynolds check. Omitting friction is inviscid. These
+flat-plate correlations are incompressible only: an enabled wetted friction load
+above total Mach 0.3 returns `UnsupportedSkinFrictionMach`, even with an explicit
+Mach Cd curve and zero axial speed. No compressible viscosity correlation is
+available; viscosity alone cannot enable one. Vacuum and fully disabled loads
+still skip these domain checks.
 
 Finite kinematics and positive finite sound speed are validated even in vacuum
 or with all areas disabled; these zero-load cases then skip Mach and Reynolds
@@ -132,8 +158,8 @@ pressure or Reynolds numerators need not fit when the complete result does;
 truly nonfinite loads still fail rather than being clamped or discarded.
 
 This is empirical sectional resistance, **not potential-flow normal force or
-lift**, transonic continuation, area-rule wave drag, interference, shielding,
-separation prediction or FAR equivalence. Geometry/voxel preparation does not
+lift**, predictive transonic continuation, area-rule wave drag, interference,
+shielding, separation prediction or FAR equivalence. Geometry/voxel preparation does not
 infer hull coefficients or automatically generate these sections. Explicit
 wings are separate; callers must avoid counting a physical contribution twice.
 

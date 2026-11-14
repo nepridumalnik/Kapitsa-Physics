@@ -1,4 +1,18 @@
-//! Caller-parameterized distributed subsonic hull drag (Mach <= 0.3).
+//! Caller-parameterized distributed hull resistance.
+//!
+//! The default constant coefficients retain Mach <= 0.3. Explicitly attaching a
+//! [`MachCurve`] enables a DATA-DRIVEN transonic resistance interface, not a
+//! predictive FAR solver. No transonic coefficients are supplied by the engine.
+//! Callers must supply measured/CFD coefficients consistent with each section's
+//! reference areas, Reynolds range, angle of attack and component-speed convention
+//! below; a Mach-only table cannot infer their dependence on Re or angle of attack.
+//! The table replaces both constant Cd values throughout its inclusive domain;
+//! outside that domain evaluation fails, without fallback or extrapolation.
+//! Mach 1 is ordinary finite interpolation, not a singular correction factor.
+//! Basic definitions (not coefficient data):
+//! <https://en.wikipedia.org/wiki/Drag_coefficient>,
+//! <https://en.wikipedia.org/wiki/Mach_number>,
+//! <https://en.wikipedia.org/wiki/Transonic>.
 //!
 //! This is an empirical sectional resistance model, not potential-flow normal
 //! force, lift, area-rule, interference, shielding, separation or FAR prediction.
@@ -19,6 +33,9 @@
 //! assumed. Turbulent means the whole plate, not transition partway along it.
 //! Friction opposes axial flow only, never total perpendicular speed. Zero
 //! axial speed skips friction and its Reynolds check. None is inviscid.
+//! These incompressible correlations have no compressible viscosity closure:
+//! enabled wetted friction above total Mach 0.3 is explicitly rejected even when
+//! a Mach curve is configured, including pure crossflow.
 //! Finite kinematics and positive sound speed are validated even in vacuum or
 //! with disabled areas; those cases then skip Mach and Reynolds domain checks.
 //! Mach is based on the full local relative speed, including omega cross r.
@@ -51,6 +68,7 @@
 use super::pressure::{PressureFlow, PressureWrench};
 use crate::transform::Transform;
 use kapitsa_math::Vec3;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HullError {
@@ -58,14 +76,95 @@ pub enum HullError {
     InvalidFlow,
     UnsupportedMach,
     UnsupportedReynolds,
+    /// The configured incompressible flat-plate correlation has no compressible closure.
+    UnsupportedSkinFrictionMach,
     ArithmeticOverflow,
 }
 impl std::fmt::Display for HullError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "subsonic hull evaluation failed: {self:?}")
+        write!(f, "hull evaluation failed: {self:?}")
     }
 }
 impl std::error::Error for HullError {}
+
+/// A caller-supplied Mach knot and dimensionless sectional resistance coefficients.
+/// Fields are validated when constructing a [`MachCurve`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MachKnot {
+    pub mach: f64,
+    pub axial_cd: f64,
+    pub crossflow_cd: f64,
+}
+
+/// Immutable, cheaply shared, piecewise-linear measured/CFD coefficient table.
+/// At least two finite, nonnegative, strictly increasing Mach knots are required;
+/// both Cd values must be finite and nonnegative. No extrapolation is performed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MachCurve {
+    knots: Arc<[MachKnot]>,
+}
+impl MachCurve {
+    pub fn new(knots: Vec<MachKnot>) -> Result<Self, HullError> {
+        if knots.len() < 2
+            || knots.iter().any(|k| {
+                [k.mach, k.axial_cd, k.crossflow_cd]
+                    .iter()
+                    .any(|v| !v.is_finite() || *v < 0.0)
+            })
+            || knots.windows(2).any(|pair| pair[0].mach >= pair[1].mach)
+        {
+            return Err(HullError::InvalidParameters);
+        }
+        Ok(Self {
+            knots: knots.into(),
+        })
+    }
+
+    pub fn knots(&self) -> &[MachKnot] {
+        &self.knots
+    }
+
+    /// Returns (axial Cd, crossflow Cd), including both endpoints exactly.
+    /// Nonfinite or negative input is invalid; finite out-of-domain Mach is unsupported.
+    pub fn coefficients(&self, mach: f64) -> Result<(f64, f64), HullError> {
+        if !mach.is_finite() || mach < 0.0 {
+            return Err(HullError::InvalidFlow);
+        }
+        for pair in self.knots.windows(2) {
+            let [a, b] = [pair[0], pair[1]];
+            if mach == a.mach {
+                return Ok((a.axial_cd, a.crossflow_cd));
+            }
+            if mach == b.mach {
+                return Ok((b.axial_cd, b.crossflow_cd));
+            }
+            if mach > a.mach && mach < b.mach {
+                let t = (mach - a.mach) / (b.mach - a.mach);
+                // Interpolate from the smaller coefficient to avoid overflowing
+                // an otherwise representable convex combination near f64::MAX.
+                let interpolate = |x: f64, y: f64| {
+                    if x <= y {
+                        x + t * (y - x)
+                    } else {
+                        y + (1.0 - t) * (x - y)
+                    }
+                };
+                return Ok((
+                    interpolate(a.axial_cd, b.axial_cd),
+                    interpolate(a.crossflow_cd, b.crossflow_cd),
+                ));
+            }
+        }
+        Err(HullError::UnsupportedMach)
+    }
+
+    fn has_axial_resistance(&self) -> bool {
+        self.knots.iter().any(|k| k.axial_cd != 0.0)
+    }
+    fn has_crossflow_resistance(&self) -> bool {
+        self.knots.iter().any(|k| k.crossflow_cd != 0.0)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundaryLayer {
@@ -119,7 +218,8 @@ impl SkinFriction {
 }
 
 /// Geometry and empirical coefficients for one load point, not inferred from mesh.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Clone shares immutable Mach data; sections are no longer Copy.
+#[derive(Clone, Debug, PartialEq)]
 pub struct HullSection {
     local_transform: Transform,
     axis: Vec3,
@@ -130,6 +230,7 @@ pub struct HullSection {
     axial_cd: f64,
     crossflow_cd: f64,
     skin_friction: Option<SkinFriction>,
+    mach_curve: Option<MachCurve>,
 }
 impl HullSection {
     /// Length must be positive; areas and coefficients must be nonnegative.
@@ -171,15 +272,29 @@ impl HullSection {
             axial_cd,
             crossflow_cd,
             skin_friction,
+            mach_curve: None,
         })
     }
-    pub fn local_transform(self) -> Transform {
+
+    /// Replace constant Cd values with explicit caller data, without changing geometry.
+    /// Cloning the curve shares its immutable allocation across sections.
+    /// SkinFriction remains incompressible and cannot be used above Mach 0.3.
+    pub fn with_mach_curve(mut self, curve: MachCurve) -> Self {
+        self.mach_curve = Some(curve);
+        self
+    }
+
+    pub fn mach_curve(&self) -> Option<&MachCurve> {
+        self.mach_curve.as_ref()
+    }
+
+    pub fn local_transform(&self) -> Transform {
         self.local_transform
     }
 
     /// Independent evaluator; atmosphere must be sampled at this section's point.
     /// Returns world force and moment about the current COM (body-local in flow).
-    pub fn evaluate(self, flow: PressureFlow) -> Result<PressureWrench, HullError> {
+    pub fn evaluate(&self, flow: PressureFlow) -> Result<PressureWrench, HullError> {
         if !flow.center_of_mass.is_finite()
             || !flow.linear_velocity.is_finite()
             || !flow.angular_velocity.is_finite()
@@ -192,9 +307,17 @@ impl HullSection {
             force: Vec3::ZERO,
             moment: Vec3::ZERO,
         };
+        let axial_enabled = self
+            .mach_curve
+            .as_ref()
+            .map_or(self.axial_cd != 0.0, MachCurve::has_axial_resistance);
+        let crossflow_enabled = self.mach_curve.as_ref().map_or(
+            self.crossflow_cd != 0.0,
+            MachCurve::has_crossflow_resistance,
+        );
         if flow.atmosphere.density() == 0.0
-            || (self.axial_area == 0.0 || self.axial_cd == 0.0)
-                && (self.crossflow_area == 0.0 || self.crossflow_cd == 0.0)
+            || (self.axial_area == 0.0 || !axial_enabled)
+                && (self.crossflow_area == 0.0 || !crossflow_enabled)
                 && (self.wetted_area == 0.0 || self.skin_friction.is_none())
         {
             return Ok(zero);
@@ -213,8 +336,22 @@ impl HullSection {
             .and_then(|v| v.checked_sub(flow.atmosphere.wind_velocity()))
             .ok_or(overflow)?;
         let speed = velocity.checked_length().ok_or(overflow)?;
-        if speed / flow.sound_speed > 0.3 {
+        let mach = speed / flow.sound_speed;
+        if !mach.is_finite() {
             return Err(HullError::UnsupportedMach);
+        }
+        let (axial_cd, crossflow_cd) = if let Some(curve) = &self.mach_curve {
+            curve.coefficients(mach)?
+        } else {
+            if mach > 0.3 {
+                return Err(HullError::UnsupportedMach);
+            }
+            (self.axial_cd, self.crossflow_cd)
+        };
+        // No compressible viscosity correlation is supplied. Reject explicit
+        // friction above its domain even if this point's axial speed is zero.
+        if mach > 0.3 && self.wetted_area != 0.0 && self.skin_friction.is_some() {
+            return Err(HullError::UnsupportedSkinFrictionMach);
         }
         if speed == 0.0 {
             return Ok(zero);
@@ -227,13 +364,8 @@ impl HullSection {
         let crossflow = velocity.checked_sub(axial).ok_or(overflow)?;
         let cross_speed = crossflow.checked_length().ok_or(overflow)?;
         let density = flow.atmosphere.density();
-        let mut axial_force = resistance(
-            axial,
-            axial_speed.abs(),
-            density,
-            self.axial_area,
-            self.axial_cd,
-        )?;
+        let mut axial_force =
+            resistance(axial, axial_speed.abs(), density, self.axial_area, axial_cd)?;
         if axial_speed != 0.0
             && self.wetted_area != 0.0
             && let Some(friction) = self.skin_friction
@@ -259,7 +391,7 @@ impl HullSection {
                 cross_speed,
                 density,
                 self.crossflow_area,
-                self.crossflow_cd,
+                crossflow_cd,
             )?)
             .ok_or(overflow)?;
         let moment = arm.checked_cross(force).ok_or(overflow)?;
@@ -370,6 +502,171 @@ mod tests {
     }
     fn close(a: Vec3, b: Vec3) {
         assert!((a - b).length() < 1e-9, "{a:?} != {b:?}");
+    }
+
+    // Synthetic arithmetic fixtures only: these are not physical coefficient data.
+    fn curve() -> MachCurve {
+        MachCurve::new(vec![
+            MachKnot {
+                mach: 0.5,
+                axial_cd: 0.2,
+                crossflow_cd: 0.4,
+            },
+            MachKnot {
+                mach: 1.0,
+                axial_cd: 0.6,
+                crossflow_cd: 0.8,
+            },
+            MachKnot {
+                mach: 1.5,
+                axial_cd: 0.4,
+                crossflow_cd: 0.6,
+            },
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn mach_curve_knots_interpolation_and_explicit_domain() {
+        let c = curve();
+        for k in c.knots() {
+            assert_eq!(c.coefficients(k.mach), Ok((k.axial_cd, k.crossflow_cd)));
+        }
+        for (mach, expected) in [(0.75, (0.4, 0.6)), (1.25, (0.5, 0.7))] {
+            let (a, b) = c.coefficients(mach).unwrap();
+            assert!((a - expected.0).abs() < 1e-14);
+            assert!((b - expected.1).abs() < 1e-14);
+        }
+        // Mach 1 need not itself be a knot; there is no sonic singularity.
+        let across = MachCurve::new(vec![c.knots()[0], c.knots()[2]]).unwrap();
+        let (a, b) = across.coefficients(1.0).unwrap();
+        assert!((a - 0.3).abs() < 1e-14 && (b - 0.5).abs() < 1e-14);
+        for mach in [0.0, 0.4999, 1.5001, f64::MAX] {
+            assert_eq!(c.coefficients(mach), Err(HullError::UnsupportedMach));
+        }
+        for mach in [f64::NAN, f64::INFINITY, -0.1] {
+            assert_eq!(c.coefficients(mach), Err(HullError::InvalidFlow));
+        }
+        let large = MachCurve::new(vec![
+            MachKnot {
+                mach: 0.0,
+                axial_cd: f64::MAX,
+                crossflow_cd: f64::MAX,
+            },
+            MachKnot {
+                mach: 2.0,
+                axial_cd: f64::MAX,
+                crossflow_cd: 0.0,
+            },
+        ])
+        .unwrap();
+        assert_eq!(large.coefficients(1.0), Ok((f64::MAX, f64::MAX * 0.5)));
+    }
+
+    #[test]
+    fn mach_curve_rejects_invalid_tables_and_shares_immutable_storage() {
+        let valid = curve().knots().to_vec();
+        for knots in [
+            vec![],
+            vec![valid[0]],
+            vec![valid[1], valid[0]],
+            vec![valid[0], valid[0]],
+        ] {
+            assert_eq!(MachCurve::new(knots), Err(HullError::InvalidParameters));
+        }
+        for bad in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for field in 0..3 {
+                let mut knots = valid.clone();
+                match field {
+                    0 => knots[1].mach = bad,
+                    1 => knots[1].axial_cd = bad,
+                    _ => knots[1].crossflow_cd = bad,
+                }
+                assert_eq!(MachCurve::new(knots), Err(HullError::InvalidParameters));
+            }
+        }
+        let c = curve();
+        let a = section(Vec3::ZERO).with_mach_curve(c.clone());
+        let b = section(Vec3::Y).with_mach_curve(c);
+        assert!(Arc::ptr_eq(
+            &a.mach_curve().unwrap().knots,
+            &b.mach_curve().unwrap().knots
+        ));
+    }
+
+    #[test]
+    fn configured_transonic_resistance_uses_local_full_speed_and_com() {
+        let mut s = section(Vec3::Y * 2.0).with_mach_curve(curve());
+        // Constant zero Cd must not disable a configured nonzero table.
+        s.axial_cd = 0.0;
+        s.crossflow_cd = 0.0;
+        for mach in [0.5, 0.75, 1.0, 1.25, 1.5] {
+            let speed = 340.0 * mach;
+            let w = s.evaluate(flow(Vec3::X * speed)).unwrap();
+            let cd = s.mach_curve().unwrap().coefficients(mach).unwrap().0;
+            close(w.force, Vec3::X * (-0.5 * 1.2 * speed * speed * 3.0 * cd));
+            close(w.moment, (Vec3::Y * 2.0).cross(w.force));
+            assert!(w.force.is_finite() && w.force.x < 0.0);
+        }
+        let mut f = flow(Vec3::new(204.0, 272.0, 0.0));
+        f.center_of_mass = Vec3::Y;
+        f.angular_velocity = Vec3::Z * 20.0;
+        let local_velocity = f.linear_velocity + f.angular_velocity.cross(Vec3::Y);
+        let mach = local_velocity.length() / f.sound_speed;
+        let (a, b) = curve().coefficients(mach).unwrap();
+        let w = s.evaluate(f).unwrap();
+        close(
+            w.force,
+            Vec3::new(
+                -0.5 * 1.2 * 184.0_f64.powi(2) * 3.0 * a,
+                -0.5 * 1.2 * 272.0_f64.powi(2) * 4.0 * b,
+                0.0,
+            ),
+        );
+        close(w.moment, Vec3::Y.cross(w.force));
+        let rotation = Quat::from_axis_angle(Vec3::Z, 0.7).unwrap();
+        f.transform = Transform::new(Vec3::new(100.0, -20.0, 4.0), rotation).unwrap();
+        f.linear_velocity = f.transform.transform_vector(f.linear_velocity);
+        f.angular_velocity = f.transform.transform_vector(f.angular_velocity);
+        let rotated = s.evaluate(f).unwrap();
+        close(rotated.force, f.transform.transform_vector(w.force));
+        close(rotated.moment, f.transform.transform_vector(w.moment));
+    }
+
+    #[test]
+    fn transonic_vacuum_disabled_and_incompressible_friction_domains() {
+        let s = section(Vec3::ZERO).with_mach_curve(curve());
+        assert_eq!(
+            s.evaluate(flow(Vec3::X * 100.0)),
+            Err(HullError::UnsupportedMach)
+        );
+        assert_eq!(
+            s.evaluate(flow(Vec3::X * 600.0)),
+            Err(HullError::UnsupportedMach)
+        );
+        let mut f = flow(Vec3::X * 600.0);
+        f.atmosphere = AtmosphericState::new(0.0, Vec3::ZERO).unwrap();
+        assert_eq!(s.evaluate(f).unwrap().force, Vec3::ZERO);
+        let mut disabled = s.clone();
+        disabled.axial_area = 0.0;
+        disabled.crossflow_area = 0.0;
+        assert_eq!(
+            disabled.evaluate(flow(Vec3::X * 600.0)).unwrap().force,
+            Vec3::ZERO
+        );
+        let mut viscous = s;
+        viscous.skin_friction =
+            Some(SkinFriction::new(1e-5, BoundaryLayer::Laminar, 1.0, 1e12).unwrap());
+        for velocity in [Vec3::X * 340.0, Vec3::Y * 340.0] {
+            assert_eq!(
+                viscous.evaluate(flow(velocity)),
+                Err(HullError::UnsupportedSkinFrictionMach)
+            );
+        }
+        // Vacuum still skips correlation domains, not finite-flow validation.
+        assert_eq!(viscous.evaluate(f).unwrap().force, Vec3::ZERO);
+        f.sound_speed = f64::NAN;
+        assert_eq!(viscous.evaluate(f), Err(HullError::InvalidFlow));
     }
 
     #[test]
@@ -495,7 +792,7 @@ mod tests {
         let rotated = s.evaluate(f).unwrap();
         close(rotated.force, f.transform.transform_vector(w.force));
         close(rotated.moment, f.transform.transform_vector(w.moment));
-        let mut shifted = s;
+        let mut shifted = s.clone();
         shifted.local_transform = Transform::new(
             s.local_transform.translation() + Vec3::Y * 7.0,
             Quat::IDENTITY,
@@ -518,7 +815,7 @@ mod tests {
         assert_eq!(s.evaluate(f).unwrap().force, Vec3::ZERO);
         f.sound_speed = f64::NAN;
         assert_eq!(s.evaluate(f), Err(HullError::InvalidFlow));
-        let mut disabled = s;
+        let mut disabled = s.clone();
         disabled.axial_cd = 0.0;
         disabled.crossflow_cd = 0.0;
         assert_eq!(
