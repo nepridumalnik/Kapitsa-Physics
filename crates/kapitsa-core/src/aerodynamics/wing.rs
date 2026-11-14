@@ -37,6 +37,85 @@ pub struct WingCoefficients {
     pub drag: f64,
 }
 
+/// One explicitly configured wing. Transform maps wing coordinates to the
+/// stable body-local frame; its origin is the force application point.
+#[derive(Clone, Copy, Debug)]
+pub struct WingSurface {
+    model: FiniteWing,
+    local_transform: crate::transform::Transform,
+    planform_area: f64,
+}
+
+impl WingSurface {
+    pub fn new(
+        model: FiniteWing,
+        local_transform: crate::transform::Transform,
+        planform_area: f64,
+    ) -> Result<Self, WingError> {
+        if !planform_area.is_finite() || planform_area < 0.0 {
+            return Err(WingError::InvalidParameters);
+        }
+        Ok(Self {
+            model,
+            local_transform,
+            planform_area,
+        })
+    }
+
+    /// Returns world force and COM moment using atmosphere supplied at the wing.
+    /// No intrinsic airfoil pitching moment or mesh load exclusion is implied.
+    pub fn evaluate(
+        self,
+        flow: super::pressure::PressureFlow,
+    ) -> Result<super::pressure::PressureWrench, WingError> {
+        if !flow.center_of_mass.is_finite()
+            || !flow.linear_velocity.is_finite()
+            || !flow.angular_velocity.is_finite()
+            || !flow.sound_speed.is_finite()
+            || flow.sound_speed <= 0.0
+        {
+            return Err(WingError::InvalidFlow);
+        }
+        let overflow = WingError::ArithmeticOverflow;
+        let arm = flow.transform.transform_vector(
+            self.local_transform
+                .translation()
+                .checked_sub(flow.center_of_mass)
+                .ok_or(overflow)?,
+        );
+        let velocity = flow
+            .angular_velocity
+            .checked_cross(arm)
+            .and_then(|v| flow.linear_velocity.checked_add(v))
+            .and_then(|v| v.checked_sub(flow.atmosphere.wind_velocity()))
+            .ok_or(overflow)?;
+        let body_velocity = flow
+            .transform
+            .inverse()
+            .map_err(|_| overflow)?
+            .transform_vector(velocity);
+        let wing_velocity = self
+            .local_transform
+            .inverse()
+            .map_err(|_| overflow)?
+            .transform_vector(body_velocity);
+        let local_force = self.model.force(
+            wing_velocity,
+            flow.atmosphere.density(),
+            flow.sound_speed,
+            self.planform_area,
+        )?;
+        let force = flow
+            .transform
+            .transform_vector(self.local_transform.transform_vector(local_force));
+        let moment = arm.checked_cross(force).ok_or(overflow)?;
+        if !force.is_finite() {
+            return Err(overflow);
+        }
+        Ok(super::pressure::PressureWrench { force, moment })
+    }
+}
+
 impl FiniteWing {
     /// Evaluate a planar wing in its local orthonormal frame: +X points
     /// toward the leading edge, +Y along span, +Z toward positive lift.
@@ -63,13 +142,19 @@ impl FiniteWing {
         if density == 0.0 || planform_area == 0.0 || relative_velocity == Vec3::ZERO {
             return Ok(Vec3::ZERO);
         }
-        if relative_velocity.y != 0.0 || relative_velocity.x <= 0.0 {
+        // Permit roundoff from rigid frame transforms, not physical sideslip.
+        let planar_scale = relative_velocity.x.abs().max(relative_velocity.z.abs());
+        if relative_velocity.y.abs() > 64.0 * f64::EPSILON * planar_scale
+            || relative_velocity.x <= 0.0
+        {
             return Err(WingError::UnsupportedFlow);
         }
+        let relative_velocity = Vec3::new(relative_velocity.x, 0.0, relative_velocity.z);
         let speed = relative_velocity
             .checked_length()
             .ok_or(WingError::ArithmeticOverflow)?;
-        let alpha = relative_velocity.z.atan2(relative_velocity.x);
+        // Nose-up attitude at horizontal flight gives negative local Z velocity.
+        let alpha = (-relative_velocity.z).atan2(relative_velocity.x);
         let coefficients = self.coefficients(alpha, speed / sound_speed)?;
         let direction = relative_velocity / speed;
         let lift_direction = Vec3::new(-direction.z, 0.0, direction.x);
@@ -197,12 +282,12 @@ mod tests {
         let velocity = Vec3::new(50.0, 0.0, 5.0);
         let speed = velocity.length();
         let c = wing(8.0)
-            .coefficients(5.0_f64.atan2(50.0), speed / 340.0)
+            .coefficients((-5.0_f64).atan2(50.0), speed / 340.0)
             .unwrap();
         let force = wing(8.0).force(velocity, 1.2, 340.0, 2.0).unwrap();
         let q_area = 0.5 * 1.2 * speed * speed * 2.0;
         assert!((force.dot(velocity / speed) + q_area * c.drag).abs() < 1e-10);
-        assert!(force.z > 0.0);
+        assert!(force.z < 0.0);
         let reverse = wing(8.0)
             .force(Vec3::new(50.0, 0.0, -5.0), 1.2, 340.0, 2.0)
             .unwrap();
@@ -213,5 +298,82 @@ mod tests {
             wing(8.0).force(Vec3::Y, 1.2, 340.0, 2.0),
             Err(WingError::UnsupportedFlow)
         );
+    }
+
+    #[test]
+    fn nose_up_attitude_generates_positive_world_lift_and_com_moment() {
+        use crate::transform::Transform;
+        use kapitsa_math::{Quat, Vec3};
+        let attitude =
+            Transform::new(Vec3::ZERO, Quat::from_axis_angle(Vec3::Y, -0.1).unwrap()).unwrap();
+        let surface = WingSurface::new(
+            wing(8.0),
+            Transform::new(Vec3::Y * 2.0, Quat::IDENTITY).unwrap(),
+            2.0,
+        )
+        .unwrap();
+        let flow = super::super::pressure::PressureFlow {
+            atmosphere: super::super::AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
+            sound_speed: 340.0,
+            transform: attitude,
+            center_of_mass: Vec3::ZERO,
+            linear_velocity: Vec3::X * 50.0,
+            angular_velocity: Vec3::ZERO,
+        };
+        let load = surface.evaluate(flow).unwrap();
+        assert!(load.force.z > 0.0);
+        assert!(load.force.x < 0.0);
+        assert!((load.moment - (Vec3::Y * 2.0).cross(load.force)).length() < 1e-10);
+        let centered = surface
+            .evaluate(super::super::pressure::PressureFlow {
+                center_of_mass: Vec3::Y * 2.0,
+                ..flow
+            })
+            .unwrap();
+        assert_eq!(centered.force, load.force);
+        assert_eq!(centered.moment, Vec3::ZERO);
+    }
+
+    #[test]
+    fn surface_uses_rotational_velocity_and_is_world_frame_covariant() {
+        use crate::transform::Transform;
+        use kapitsa_math::{Quat, Vec3};
+        let surface = WingSurface::new(
+            wing(8.0),
+            Transform::new(Vec3::X * 2.0, Quat::IDENTITY).unwrap(),
+            2.0,
+        )
+        .unwrap();
+        let flow = super::super::pressure::PressureFlow {
+            atmosphere: super::super::AtmosphericState::new(1.2, Vec3::X * 3.0).unwrap(),
+            sound_speed: 340.0,
+            transform: Transform::identity(),
+            center_of_mass: Vec3::ZERO,
+            linear_velocity: Vec3::X * 53.0,
+            angular_velocity: Vec3::Y,
+        };
+        let load = surface.evaluate(flow).unwrap();
+        assert!(load.force.z > 0.0);
+        assert!(load.moment.dot(flow.angular_velocity) < 0.0);
+        let rotation = Transform::new(
+            Vec3::splat(1e10),
+            Quat::from_axis_angle(Vec3::Z, 0.7).unwrap(),
+        )
+        .unwrap();
+        let rotated = surface
+            .evaluate(super::super::pressure::PressureFlow {
+                transform: rotation,
+                atmosphere: super::super::AtmosphericState::new(
+                    1.2,
+                    rotation.transform_vector(flow.atmosphere.wind_velocity()),
+                )
+                .unwrap(),
+                linear_velocity: rotation.transform_vector(flow.linear_velocity),
+                angular_velocity: rotation.transform_vector(flow.angular_velocity),
+                ..flow
+            })
+            .unwrap();
+        assert!((rotated.force - rotation.transform_vector(load.force)).length() < 1e-9);
+        assert!((rotated.moment - rotation.transform_vector(load.moment)).length() < 1e-9);
     }
 }

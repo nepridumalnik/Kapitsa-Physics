@@ -112,6 +112,17 @@ The evaluator does not accept unfiltered mesh triangles as a complete ship model
 
 ## Lift and finite wings
 
+`wing::WingSurface` evaluates an explicitly positioned wing and returns world
+force and moment about the current COM. Its transform maps wing coordinates
+to body coordinates, with the origin at the application point. Wing axes are
++X toward the leading edge, +Y spanwise and +Z toward positive lift. For body
+velocity relative to air, `alpha = atan2(-v_z, v_x)`: a nose-up wing in
+horizontal flight has positive incidence. Point velocity includes rotation
+and wind. Physical sideslip and reversed flow are unsupported; spanwise
+components within 64 machine epsilons of planar speed are discarded solely
+to tolerate rigid-transform roundoff. This evaluator is not yet registered
+as a world surface and does not exclude wing geometry from hull loads.
+
 `aerodynamics::wing::FiniteWing` provides an independent coefficient primitive
 for attached incompressible flow. It uses a thin-airfoil slope of `2 pi`, the
 finite-span slope `a = a0 / (1 + a0 / (pi e AR))`, and induced drag
