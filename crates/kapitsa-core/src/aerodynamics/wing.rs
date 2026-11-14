@@ -38,6 +38,49 @@ pub struct WingCoefficients {
 }
 
 impl FiniteWing {
+    /// Evaluate a planar wing in its local orthonormal frame: +X points
+    /// toward the leading edge, +Y along span, +Z toward positive lift.
+    /// Spanwise flow is outside this unswept reference model's domain.
+    /// The returned force is local; application-point moments are caller-owned.
+    pub fn force(
+        self,
+        relative_velocity: kapitsa_math::Vec3,
+        density: f64,
+        sound_speed: f64,
+        planform_area: f64,
+    ) -> Result<kapitsa_math::Vec3, WingError> {
+        use kapitsa_math::Vec3;
+        if !relative_velocity.is_finite()
+            || !density.is_finite()
+            || density < 0.0
+            || !sound_speed.is_finite()
+            || sound_speed <= 0.0
+            || !planform_area.is_finite()
+            || planform_area < 0.0
+        {
+            return Err(WingError::InvalidFlow);
+        }
+        if density == 0.0 || planform_area == 0.0 || relative_velocity == Vec3::ZERO {
+            return Ok(Vec3::ZERO);
+        }
+        if relative_velocity.y != 0.0 || relative_velocity.x <= 0.0 {
+            return Err(WingError::UnsupportedFlow);
+        }
+        let speed = relative_velocity
+            .checked_length()
+            .ok_or(WingError::ArithmeticOverflow)?;
+        let alpha = relative_velocity.z.atan2(relative_velocity.x);
+        let coefficients = self.coefficients(alpha, speed / sound_speed)?;
+        let direction = relative_velocity / speed;
+        let lift_direction = Vec3::new(-direction.z, 0.0, direction.x);
+        let scale = (0.5 * density * speed) * speed * planform_area;
+        let force = (lift_direction * coefficients.lift - direction * coefficients.drag) * scale;
+        if !scale.is_finite() || !force.is_finite() {
+            return Err(WingError::ArithmeticOverflow);
+        }
+        Ok(force)
+    }
+
     /// `efficiency` is in (0, 1]; `max_attached_angle` is in (0, pi/2).
     /// The caller selects an attached-flow validity limit from airfoil data.
     pub fn new(
@@ -146,5 +189,29 @@ mod tests {
             Err(WingError::InvalidFlow)
         );
         assert!(FiniteWing::new(0.0, 0.8, 0.02, 0.0, 0.2).is_err());
+    }
+
+    #[test]
+    fn force_has_dissipative_drag_and_perpendicular_lift() {
+        use kapitsa_math::Vec3;
+        let velocity = Vec3::new(50.0, 0.0, 5.0);
+        let speed = velocity.length();
+        let c = wing(8.0)
+            .coefficients(5.0_f64.atan2(50.0), speed / 340.0)
+            .unwrap();
+        let force = wing(8.0).force(velocity, 1.2, 340.0, 2.0).unwrap();
+        let q_area = 0.5 * 1.2 * speed * speed * 2.0;
+        assert!((force.dot(velocity / speed) + q_area * c.drag).abs() < 1e-10);
+        assert!(force.z > 0.0);
+        let reverse = wing(8.0)
+            .force(Vec3::new(50.0, 0.0, -5.0), 1.2, 340.0, 2.0)
+            .unwrap();
+        assert!((force.x - reverse.x).abs() < 1e-10);
+        assert!((force.z + reverse.z).abs() < 1e-10);
+        assert_eq!(wing(8.0).force(Vec3::X, 0.0, 340.0, 2.0), Ok(Vec3::ZERO));
+        assert_eq!(
+            wing(8.0).force(Vec3::Y, 1.2, 340.0, 2.0),
+            Err(WingError::UnsupportedFlow)
+        );
     }
 }
