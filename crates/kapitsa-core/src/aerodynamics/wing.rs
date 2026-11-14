@@ -80,6 +80,12 @@ impl WingSurface {
         {
             return Err(WingError::InvalidFlow);
         }
+        if flow.atmosphere.density() == 0.0 || self.planform_area == 0.0 {
+            return Ok(super::pressure::PressureWrench {
+                force: kapitsa_math::Vec3::ZERO,
+                moment: kapitsa_math::Vec3::ZERO,
+            });
+        }
         let overflow = WingError::ArithmeticOverflow;
         let arm = flow.transform.transform_vector(
             self.local_transform
@@ -379,5 +385,30 @@ mod tests {
             .unwrap();
         assert!((rotated.force - rotation.transform_vector(load.force)).length() < 1e-9);
         assert!((rotated.moment - rotation.transform_vector(load.moment)).length() < 1e-9);
+    }
+
+    #[test]
+    fn vacuum_skips_overflowing_motion_but_validates_inputs() {
+        use crate::transform::Transform;
+        use kapitsa_math::Vec3;
+        let surface = WingSurface::new(wing(8.0), Transform::identity(), 2.0).unwrap();
+        let flow = super::super::pressure::PressureFlow {
+            atmosphere: super::super::AtmosphericState::new(0.0, Vec3::X * f64::MAX).unwrap(),
+            sound_speed: 340.0,
+            transform: Transform::identity(),
+            center_of_mass: Vec3::Y,
+            linear_velocity: -Vec3::X * f64::MAX,
+            angular_velocity: Vec3::Z * f64::MAX,
+        };
+        let result = surface.evaluate(flow).unwrap();
+        assert_eq!(result.force, Vec3::ZERO);
+        assert_eq!(result.moment, Vec3::ZERO);
+        assert_eq!(
+            surface.evaluate(super::super::pressure::PressureFlow {
+                sound_speed: 0.0,
+                ..flow
+            }),
+            Err(WingError::InvalidFlow)
+        );
     }
 }
