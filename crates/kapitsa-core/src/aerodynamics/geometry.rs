@@ -7,6 +7,7 @@
 //! Indexed seams must be welded; self-intersections are not diagnosed.
 
 use std::fmt;
+mod visibility;
 
 use kapitsa_math::Vec3;
 
@@ -55,6 +56,7 @@ pub enum GeometryError {
     WorkBudgetExceeded,
     AllocationFailed,
     ArithmeticOverflow,
+    PrecisionLoss,
 }
 
 impl fmt::Display for GeometryError {
@@ -170,6 +172,7 @@ fn compare_vertex(a: &Vec3, b: &Vec3) -> std::cmp::Ordering {
 
 /// Two-sided Möller–Trumbore intersection, inclusive of triangle edges.
 /// No geometric epsilon: t > 0 preserves arbitrarily close genuine blockers.
+#[cfg(test)]
 fn ray_hits_triangle(
     origin: Vec3,
     direction: Vec3,
@@ -632,7 +635,8 @@ impl PreparedGeometry {
     /// Coplanar overlap belongs to the first canonical triangle (owner first).
     /// Source physical normals are preserved. Fully visible source triangles
     /// retain their centroid sampling; partial polygons are triangulated.
-    /// Floating-point predicates are used, without an exact-arithmetic guarantee.
+    /// Affine clipping uses adaptive orientation predicates and rejects unsupported
+    /// predicate ranges or unstable area partitions with `PrecisionLoss`.
     /// Work exhaustion rejects the entire result; allocation is fallible.
     /// `epsilon` is validated for compatibility and never offsets shadow rays.
     pub fn exposed_surface_patches(
@@ -652,6 +656,8 @@ impl PreparedGeometry {
     }
 
     /// Centroid flow quadrature: each source triangle has its own upstream ray.
+    /// The callback must be affine in position (rigid motion, uniform wind).
+    /// Windward sign changes are clipped before choosing a representative ray.
     /// Mesh refinement is required when rotational flow varies within a triangle.
     pub(crate) fn surface_patches_with_flow(
         &self,
@@ -660,15 +666,96 @@ impl PreparedGeometry {
         flow: impl Fn(Vec3) -> Result<Vec3, GeometryError>,
     ) -> Result<PreparedSurfacePatches, GeometryError> {
         let total = surface_triangle_count(instances)?;
-        let work = total
+        let preflight = total
             .checked_mul(total)
             .and_then(|pairs| pairs.checked_mul(128)?.checked_add(total.checked_mul(8)?));
-        check_surface_work(work, max_work)?;
         let preprocessing = total
             .checked_mul(16)
             .and_then(|n| n.checked_mul(usize::BITS as usize - total.leading_zeros() as usize + 1));
-        let work = work.and_then(|n| n.checked_add(preprocessing?));
+        let work = preflight.and_then(|n| n.checked_add(preprocessing?));
         check_surface_work(work, max_work)?;
+        let work = work.ok_or(GeometryError::WorkBudgetExceeded)?;
+        let Some(reference) = instances
+            .iter()
+            .min_by(|a, b| {
+                compare_vertex(
+                    &a.local_transform.translation(),
+                    &b.local_transform.translation(),
+                )
+                .then_with(|| {
+                    let (a, b) = (a.local_transform.rotation(), b.local_transform.rotation());
+                    compare_vertex(&Vec3::new(a.x, a.y, a.z), &Vec3::new(b.x, b.y, b.z))
+                        .then_with(|| a.w.total_cmp(&b.w))
+                })
+            })
+            .map(|instance| instance.local_transform)
+        else {
+            return Ok(PreparedSurfacePatches {
+                patches: Vec::new(),
+            });
+        };
+        let inverse_rotation = reference.rotation().conjugate();
+        let mut relative = Vec::new();
+        relative
+            .try_reserve_exact(instances.len())
+            .map_err(|_| GeometryError::AllocationFailed)?;
+        for instance in instances {
+            let local_transform = if instance.local_transform == reference {
+                Transform::identity()
+            } else {
+                let delta = instance
+                    .local_transform
+                    .translation()
+                    .checked_sub(reference.translation())
+                    .ok_or(GeometryError::ArithmeticOverflow)?;
+                let translation = inverse_rotation
+                    .rotate_vector(delta)
+                    .ok_or(GeometryError::ArithmeticOverflow)?;
+                let rotation = if instance.local_transform.rotation() == reference.rotation() {
+                    kapitsa_math::Quat::IDENTITY
+                } else {
+                    (inverse_rotation * instance.local_transform.rotation())
+                        .try_normalize()
+                        .ok_or(GeometryError::ArithmeticOverflow)?
+                };
+                Transform::new(translation, rotation)
+                    .map_err(|_| GeometryError::ArithmeticOverflow)?
+            };
+            relative.push(GeometryInstance {
+                local_transform,
+                ..*instance
+            });
+        }
+        let mut patches = self.surface_patches_in_frame(&relative, max_work, work, |point| {
+            let point = reference.transform_point(point);
+            if !point.is_finite() {
+                return Err(GeometryError::ArithmeticOverflow);
+            }
+            inverse_rotation
+                .rotate_vector(flow(point)?)
+                .ok_or(GeometryError::ArithmeticOverflow)
+        })?;
+        for patch in &mut patches.patches {
+            patch.vertices = patch.vertices.map(|point| reference.transform_point(point));
+            patch.center = reference.transform_point(patch.center);
+            patch.normal = reference.transform_vector(patch.normal);
+            if !patch.vertices.iter().all(|p| p.is_finite())
+                || !patch.center.is_finite()
+                || !patch.normal.is_finite()
+            {
+                return Err(GeometryError::ArithmeticOverflow);
+            }
+        }
+        Ok(patches)
+    }
+
+    fn surface_patches_in_frame(
+        &self,
+        instances: &[GeometryInstance<'_>],
+        max_work: usize,
+        mut work: usize,
+        flow: impl Fn(Vec3) -> Result<Vec3, GeometryError>,
+    ) -> Result<PreparedSurfacePatches, GeometryError> {
         let mut triangles = Self::surface_triangles(instances, max_work)?;
         // Exact canonical vertex triples avoid centroid/area aliasing and
         // many-to-one epsilon matching. Winding remains in the source normal.
@@ -676,78 +763,80 @@ impl PreparedGeometry {
             triangle.vertices.sort_unstable_by(compare_vertex);
         }
         triangles.sort_by(|a, b| {
-            a.owner.cmp(&b.owner).then_with(|| {
-                a.vertices
-                    .iter()
-                    .zip(&b.vertices)
-                    .map(|(a, b)| compare_vertex(a, b))
-                    .find(|order| !order.is_eq())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            a.owner
+                .cmp(&b.owner)
+                .then_with(|| {
+                    a.vertices
+                        .iter()
+                        .zip(&b.vertices)
+                        .map(|(a, b)| compare_vertex(a, b))
+                        .find(|order| !order.is_eq())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| compare_vertex(&a.normal, &b.normal))
+                .then_with(|| a.area.total_cmp(&b.area))
         });
         let mut patches: Vec<PreparedSurfacePatch> = Vec::new();
-        let mut work = work.ok_or(GeometryError::WorkBudgetExceeded)?;
         for (i, triangle) in triangles.iter().enumerate() {
             let [a, b, c] = triangle.vertices;
-            let velocity = flow(a + (b - a) / 3.0 + (c - a) / 3.0)?;
-            if !velocity.is_finite() {
-                return Err(GeometryError::ArithmeticOverflow);
-            }
-            let Some(upstream) = velocity.try_normalize() else {
+            work = work
+                .checked_add(48)
+                .ok_or(GeometryError::WorkBudgetExceeded)?;
+            check_surface_work(Some(work), max_work)?;
+            let velocities = [flow(a)?, flow(b)?, flow(c)?];
+            let Some(initial) = visibility::windward_triangle(triangle.normal, velocities)? else {
                 continue;
             };
-            if triangle.normal.dot(upstream) <= 0.0 {
-                continue;
+            let initial_fraction = visibility::polygon_fraction(&initial)?;
+            if initial_fraction == 0.0 {
+                return Err(GeometryError::PrecisionLoss);
+            }
+            let centroid = initial
+                .iter()
+                .copied()
+                .fold(Vec3::ZERO, |sum, point| sum + point)
+                / (initial.len() as f64);
+            let weights = [1.0 - centroid.x - centroid.y, centroid.x, centroid.y];
+            if weights.iter().any(|weight| *weight < 0.0) {
+                return Err(GeometryError::PrecisionLoss);
+            }
+            let mut velocity = Vec3::ZERO;
+            for (value, weight) in velocities.into_iter().zip(weights) {
+                velocity = value
+                    .checked_mul_scalar(weight)
+                    .and_then(|v| velocity.checked_add(v))
+                    .ok_or(GeometryError::ArithmeticOverflow)?;
+            }
+            let upstream = velocity
+                .try_normalize()
+                .ok_or(GeometryError::ArithmeticOverflow)?;
+            if triangle
+                .normal
+                .checked_dot(upstream)
+                .ok_or(GeometryError::ArithmeticOverflow)?
+                <= 0.0
+            {
+                return Err(GeometryError::PrecisionLoss);
             }
             let first_patch = patches.len();
             let mut any_blocked = false;
-            let mut initial = Vec::new();
-            for vertex in triangle.vertices {
-                checked_push(&mut initial, vertex)?;
-            }
             let mut pieces = Vec::new();
             checked_push(&mut pieces, initial)?;
+            let mut shadows = Vec::new();
             for (j, blocker) in triangles.iter().enumerate() {
                 if i == j {
                     continue;
                 }
-                let [a, b, c] = blocker.vertices;
-                let denominator = blocker.normal.dot(upstream);
-                if denominator == 0.0 {
+                let Some(shadow) = visibility::Shadow::new(triangle, blocker, i, j, upstream)?
+                else {
                     continue;
-                }
-                let depths = triangle
-                    .vertices
-                    .map(|v| (a - v).dot(blocker.normal) / denominator);
-                if !depths.iter().all(|d| d.is_finite()) {
-                    return Err(GeometryError::ArithmeticOverflow);
-                }
-                if depths.iter().all(|d| *d <= 0.0) && !(j < i && depths.iter().all(|d| *d == 0.0))
-                {
-                    continue;
-                }
-                let mut disjoint = false;
-                for (start, end, opposite) in [(a, b, c), (b, c, a), (c, a, b)] {
-                    let edge_normal = (end - start).cross(upstream);
-                    let reference = (opposite - start).dot(edge_normal);
-                    if triangle.vertices.iter().all(|v| {
-                        let side = (*v - start).dot(edge_normal);
-                        (reference > 0.0 && side <= 0.0) || (reference < 0.0 && side >= 0.0)
-                    }) {
-                        disjoint = true;
-                        break;
+                };
+                for coefficients in shadow.planes {
+                    if !coefficients.iter().any(|value| *value > 0.0)
+                        || !coefficients.iter().any(|value| *value < 0.0)
+                    {
+                        continue;
                     }
-                }
-                if disjoint {
-                    continue;
-                }
-                let planes = [
-                    (a, (b - a).cross(upstream)),
-                    (b, (c - b).cross(upstream)),
-                    (c, (a - c).cross(upstream)),
-                    (a, blocker.normal),
-                ];
-                for (origin, normal) in planes {
                     let mut next = Vec::new();
                     for polygon in pieces {
                         work = work
@@ -761,7 +850,8 @@ impl PreparedGeometry {
                         check_surface_work(Some(work), max_work)?;
                         let mut distances = Vec::new();
                         for point in &polygon {
-                            checked_push(&mut distances, (*point - origin).dot(normal))?;
+                            let distance = visibility::distance(coefficients, *point);
+                            checked_push(&mut distances, distance)?;
                         }
                         if !distances.iter().all(|d| d.is_finite()) {
                             return Err(GeometryError::ArithmeticOverflow);
@@ -802,47 +892,41 @@ impl PreparedGeometry {
                     }
                     pieces = next;
                 }
+                checked_push(&mut shadows, shadow)?;
             }
+            let mut partition_fraction = 0.0;
             for polygon in pieces {
                 for k in 1..polygon.len().saturating_sub(1) {
-                    let vertices = [polygon[0], polygon[k], polygon[k + 1]];
-                    let area = (vertices[1] - vertices[0])
-                        .cross(vertices[2] - vertices[0])
-                        .length()
-                        * 0.5;
+                    let coordinates = [polygon[0], polygon[k], polygon[k + 1]];
+                    let fraction = visibility::triangle_fraction(coordinates)?;
+                    partition_fraction += fraction;
+                    let area = triangle.area * fraction;
+                    let [a, b, c] = triangle.vertices;
+                    let reconstruct = |point: Vec3| a + (b - a) * point.x + (c - a) * point.y;
+                    let vertices = coordinates.map(reconstruct);
                     if !area.is_finite() {
                         return Err(GeometryError::ArithmeticOverflow);
                     }
                     if area == 0.0 {
+                        if fraction != 0.0 {
+                            return Err(GeometryError::PrecisionLoss);
+                        }
                         continue;
                     }
-                    let center = vertices[0]
-                        + (vertices[1] - vertices[0]) / 3.0
-                        + (vertices[2] - vertices[0]) / 3.0;
+                    let centroid = coordinates[0]
+                        + (coordinates[1] - coordinates[0]) / 3.0
+                        + (coordinates[2] - coordinates[0]) / 3.0;
+                    let center = reconstruct(centroid);
                     if !center.is_finite() {
                         return Err(GeometryError::ArithmeticOverflow);
                     }
                     let mut blocked = false;
-                    for (j, blocker) in triangles.iter().enumerate() {
+                    for shadow in &shadows {
                         work = work
                             .checked_add(1)
                             .ok_or(GeometryError::WorkBudgetExceeded)?;
                         check_surface_work(Some(work), max_work)?;
-                        if i == j {
-                            continue;
-                        }
-                        let coplanar = blocker
-                            .vertices
-                            .iter()
-                            .all(|v| (*v - triangle.vertices[0]).dot(triangle.normal) == 0.0);
-                        let [a, b, c] = blocker.vertices;
-                        let n = (b - a).cross(c - a);
-                        let inside = [(a, b), (b, c), (c, a)]
-                            .iter()
-                            .all(|(a, b)| (*b - *a).cross(center - *a).dot(n) >= 0.0);
-                        if (coplanar && j < i && inside)
-                            || (!coplanar && ray_hits_triangle(center, upstream, blocker.vertices)?)
-                        {
+                        if shadow.covers(centroid) {
                             blocked = true;
                             break;
                         }
@@ -862,7 +946,17 @@ impl PreparedGeometry {
                     }
                 }
             }
-            if !any_blocked {
+            // Splitting must conserve the source's unit barycentric area.
+            // Require conservation within gamma_n at the charged work scale.
+            // This is a partition consistency check, not a flow-model error bound.
+            let roundoff = work as f64 * f64::EPSILON;
+            let allowance = roundoff / (1.0 - roundoff);
+            if !partition_fraction.is_finite()
+                || (partition_fraction - initial_fraction).abs() > allowance
+            {
+                return Err(GeometryError::PrecisionLoss);
+            }
+            if !any_blocked && initial_fraction == 1.0 {
                 patches.truncate(first_patch);
                 let [a, b, c] = triangle.vertices;
                 checked_push(

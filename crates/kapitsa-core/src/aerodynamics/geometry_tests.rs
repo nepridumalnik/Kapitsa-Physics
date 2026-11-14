@@ -529,3 +529,132 @@ fn translated_rotated_source_instances_preserve_diagonal_visibility() {
         }));
     }
 }
+
+#[test]
+fn diagonal_cube_pressure_is_covariant_over_many_instance_rotations()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{
+        AtmosphericState,
+        pressure::{PressureFlow, evaluate_prepared_mesh},
+    };
+    let mesh = cube();
+    for step in 1..=200 {
+        let angle = step as f64 * 0.013;
+        let rotation = kapitsa_math::Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0), angle)
+            .ok_or("rotation")?;
+        let transform = Transform::new(Vec3::new(2.3, -4.1, 0.7), rotation)?;
+        let instances = [GeometryInstance {
+            mesh: &mesh,
+            local_transform: transform,
+            owner: GeometryOwner::Body,
+        }];
+        let geometry = PreparedGeometry::prepare(&instances, config(0.25))?;
+        let direction = transform.transform_vector(Vec3::ONE);
+        let patches = geometry.exposed_surface_patches(&instances, direction, 0.01, 100_000)?;
+        let wrench = evaluate_prepared_mesh(
+            &patches,
+            PressureFlow {
+                atmosphere: AtmosphericState::new(1.0, Vec3::ZERO)?,
+                sound_speed: 100.0,
+                transform: Transform::identity(),
+                center_of_mass: transform.transform_point(Vec3::splat(0.5)),
+                linear_velocity: direction.try_normalize().ok_or("direction")? * 1000.0,
+                angular_velocity: Vec3::ZERO,
+            },
+        )?;
+        let force = -direction * (1_000_000.0 / 3.0);
+        assert!(
+            (wrench.force - force).length() < 1e-7,
+            "angle={angle}, force={:?}, expected={force:?}, patches={}",
+            wrench.force,
+            patches.len()
+        );
+        assert!(
+            wrench.moment.length() < 1e-7,
+            "angle={angle}, moment={:?}",
+            wrench.moment
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn rotated_coplanar_retriangulation_preserves_union_pressure()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{
+        AtmosphericState,
+        pressure::{PressureFlow, evaluate_prepared_mesh},
+    };
+    let vertices = vec![Vec3::ZERO, Vec3::Y, Vec3::Z, Vec3::Y + Vec3::Z];
+    let first = TriangleMesh::new(vertices.clone(), vec![[0, 1, 2], [1, 3, 2]])?;
+    let second = TriangleMesh::new(vertices, vec![[0, 1, 3], [0, 3, 2]])?;
+    for baked in [false, true] {
+        for step in 1..=200 {
+            let angle = step as f64 * 0.013;
+            let rotation = kapitsa_math::Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0), angle)
+                .ok_or("rotation")?;
+            let transform = Transform::new(Vec3::new(2.3, -4.1, 0.7), rotation)?;
+            let baked_first = TriangleMesh::new(
+                first
+                    .vertices()
+                    .iter()
+                    .map(|point| transform.transform_point(*point))
+                    .collect(),
+                first.triangles().to_vec(),
+            )?;
+            let baked_second = TriangleMesh::new(
+                second
+                    .vertices()
+                    .iter()
+                    .map(|point| transform.transform_point(*point))
+                    .collect(),
+                second.triangles().to_vec(),
+            )?;
+            let placement = if baked {
+                Transform::identity()
+            } else {
+                transform
+            };
+            let instances = [
+                GeometryInstance {
+                    mesh: if baked { &baked_first } else { &first },
+                    local_transform: placement,
+                    owner: GeometryOwner::Body,
+                },
+                GeometryInstance {
+                    mesh: if baked { &baked_second } else { &second },
+                    local_transform: placement,
+                    owner: GeometryOwner::Body,
+                },
+            ];
+            let mut settings = config(0.25);
+            settings.open_mesh_policy = OpenMeshPolicy::SurfaceOnly;
+            let geometry = PreparedGeometry::prepare(&instances, settings)?;
+            let direction = transform.transform_vector(Vec3::X);
+            let patches = geometry.exposed_surface_patches(&instances, direction, 0.01, 100_000)?;
+            let wrench = evaluate_prepared_mesh(
+                &patches,
+                PressureFlow {
+                    atmosphere: AtmosphericState::new(1.0, Vec3::ZERO)?,
+                    sound_speed: 100.0,
+                    transform: Transform::identity(),
+                    center_of_mass: transform.transform_point((Vec3::Y + Vec3::Z) * 0.5),
+                    linear_velocity: direction * 1000.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+            )?;
+            assert!(
+                (wrench.force + direction * 1_000_000.0).length() < 1e-7,
+                "baked={baked}, angle={angle}, force={:?}, patches={}",
+                wrench.force,
+                patches.len()
+            );
+            assert!(
+                wrench.moment.length() < 1e-7,
+                "angle={angle}, moment={:?}",
+                wrench.moment
+            );
+        }
+    }
+    Ok(())
+}

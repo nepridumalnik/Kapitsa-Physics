@@ -1,0 +1,366 @@
+//! Shadow half-spaces evaluated in the source triangle's affine domain.
+//! Adaptive orientation predicates come from GeoRust's MIT/Apache-2.0 `robust`.
+use super::{GeometryError, SurfaceTriangle, Vec3};
+use robust::{Coord, Coord3D, orient2d, orient3d};
+
+pub(super) struct Shadow {
+    pub planes: [[f64; 3]; 4],
+    coplanar: bool,
+}
+
+// After a common power-of-two scale, this span keeps coordinates within
+// [2^-127, 2^128). Including 53-bit significands, degree-three orientation
+// expansions stay well inside the normal f64 range (roughly 2^-540..2^400).
+// Unrepresentable cases are errors, never a distance epsilon or a missed hit.
+const MAX_EXPONENT_SPAN: i32 = 254;
+
+struct PredicateFrame {
+    shift: i32,
+}
+impl PredicateFrame {
+    fn new(points: &[Vec3]) -> Result<Self, GeometryError> {
+        let mut bounds: Option<(i32, i32)> = None;
+        for point in points {
+            if !point.is_finite() {
+                return Err(GeometryError::ArithmeticOverflow);
+            }
+            for value in [point.x, point.y, point.z] {
+                if value == 0.0 {
+                    continue;
+                }
+                let bits = value.abs().to_bits();
+                let biased = ((bits >> 52) & 0x7ff) as i32;
+                let exponent = if biased == 0 {
+                    (u64::BITS - 1 - bits.leading_zeros()) as i32 - 1074
+                } else {
+                    biased - 1023
+                };
+                bounds = Some(bounds.map_or((exponent, exponent), |(low, high)| {
+                    (low.min(exponent), high.max(exponent))
+                }));
+            }
+        }
+        let Some((low, high)) = bounds else {
+            return Ok(Self { shift: 0 });
+        };
+        if high - low > MAX_EXPONENT_SPAN {
+            return Err(GeometryError::PrecisionLoss);
+        }
+        Ok(Self {
+            shift: -((low + high) / 2),
+        })
+    }
+
+    fn point(&self, point: Vec3) -> Result<Coord3D<f64>, GeometryError> {
+        let point = Vec3::new(
+            scale(point.x, self.shift)?,
+            scale(point.y, self.shift)?,
+            scale(point.z, self.shift)?,
+        );
+        Ok(Coord3D {
+            x: point.x,
+            y: point.y,
+            z: point.z,
+        })
+    }
+
+    fn orientation(&self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> Result<f64, GeometryError> {
+        finite(orient3d(
+            self.point(a)?,
+            self.point(b)?,
+            self.point(c)?,
+            self.point(d)?,
+        ))
+    }
+}
+
+fn scale(mut value: f64, mut shift: i32) -> Result<f64, GeometryError> {
+    while shift != 0 {
+        let step = shift.clamp(-512, 512);
+        let scaled = value * 2.0_f64.powi(step);
+        if !scaled.is_finite() {
+            return Err(GeometryError::ArithmeticOverflow);
+        }
+        if value != 0.0 && scaled == 0.0 {
+            return Err(GeometryError::PrecisionLoss);
+        }
+        value = scaled;
+        shift -= step;
+    }
+    Ok(value)
+}
+
+fn finite(value: f64) -> Result<f64, GeometryError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(GeometryError::ArithmeticOverflow)
+    }
+}
+
+fn normalize(values: [f64; 3]) -> Result<[f64; 3], GeometryError> {
+    let maximum = values.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    if maximum == 0.0 {
+        return Ok(values);
+    }
+    let scaled = values.map(|v| v / maximum);
+    if values
+        .iter()
+        .zip(&scaled)
+        .any(|(a, b)| *a != 0.0 && *b == 0.0)
+    {
+        return Err(GeometryError::PrecisionLoss);
+    }
+    Ok(scaled)
+}
+
+pub(super) fn distance(values: [f64; 3], point: Vec3) -> f64 {
+    (values[1] - values[0]).mul_add(point.x, (values[2] - values[0]).mul_add(point.y, values[0]))
+}
+
+impl Shadow {
+    pub fn new(
+        source: &SurfaceTriangle,
+        blocker: &SurfaceTriangle,
+        source_index: usize,
+        blocker_index: usize,
+        upstream: Vec3,
+    ) -> Result<Option<Self>, GeometryError> {
+        if source.vertices == blocker.vertices {
+            return Ok(
+                (blocker_index < source_index && blocker.normal.dot(upstream) > 0.0).then_some(
+                    Self {
+                        planes: [[1.0; 3], [1.0; 3], [1.0; 3], [0.0; 3]],
+                        coplanar: true,
+                    },
+                ),
+            );
+        }
+        let [a, b, c] = blocker.vertices;
+        let edge = b - a;
+        let other = c - a;
+        let size = edge.abs().max_element().max(other.abs().max_element());
+        if !size.is_finite() || size == 0.0 {
+            return Err(GeometryError::InvalidGeometry);
+        }
+        // Direction may be positively rescaled without changing a shadow plane.
+        let direction = upstream * size;
+        if !direction.is_finite()
+            || [upstream.x, upstream.y, upstream.z]
+                .iter()
+                .zip([direction.x, direction.y, direction.z])
+                .any(|(a, b)| *a != 0.0 && b == 0.0)
+        {
+            return Err(GeometryError::PrecisionLoss);
+        }
+        let frame = PredicateFrame::new(&[Vec3::ZERO, edge, other, direction])?;
+        let denominator = -frame.orientation(Vec3::ZERO, edge, other, direction)?;
+        if denominator == 0.0 {
+            return Ok(None);
+        }
+        let frame = PredicateFrame::new(&[
+            a,
+            b,
+            c,
+            source.vertices[0],
+            source.vertices[1],
+            source.vertices[2],
+        ])?;
+        let mut depth = [0.0; 3];
+        for (value, point) in depth.iter_mut().zip(source.vertices) {
+            // orient(a,b,c,p) is minus the signed plane distance numerator.
+            *value = frame.orientation(a, b, c, point)? * denominator.signum();
+        }
+        let coplanar = depth.iter().all(|v| *v == 0.0);
+        if coplanar {
+            if blocker_index >= source_index || blocker.normal.dot(upstream) <= 0.0 {
+                return Ok(None);
+            }
+        } else if !depth.iter().any(|v| *v > 0.0) {
+            return Ok(None);
+        }
+        let mut planes = [[0.0; 3]; 4];
+        planes[3] = normalize(depth)?;
+        for (plane, (start, end, opposite)) in
+            planes[..3]
+                .iter_mut()
+                .zip([(a, b, c), (b, c, a), (c, a, b)])
+        {
+            let edge = end - start;
+            let offsets = source.vertices.map(|p| p - start);
+            let opposite = opposite - start;
+            let frame = PredicateFrame::new(&[
+                Vec3::ZERO,
+                edge,
+                direction,
+                opposite,
+                offsets[0],
+                offsets[1],
+                offsets[2],
+            ])?;
+            let reference = frame.orientation(Vec3::ZERO, edge, direction, opposite)?;
+            if reference == 0.0 {
+                return Err(GeometryError::PrecisionLoss);
+            }
+            for (value, offset) in plane.iter_mut().zip(offsets) {
+                *value =
+                    frame.orientation(Vec3::ZERO, edge, direction, offset)? * reference.signum();
+            }
+            if !plane.iter().any(|v| *v > 0.0) {
+                return Ok(None);
+            }
+            *plane = normalize(*plane)?;
+        }
+        Ok(Some(Self { planes, coplanar }))
+    }
+
+    pub fn covers(&self, point: Vec3) -> bool {
+        self.planes[..3]
+            .iter()
+            .all(|plane| distance(*plane, point) >= 0.0)
+            && (self.coplanar || distance(self.planes[3], point) > 0.0)
+    }
+}
+
+/// Restrict an affine rigid-body flow to its genuinely windward region.
+/// A stagnation point at the original centroid must not discard positive area.
+pub(super) fn windward_triangle(
+    normal: Vec3,
+    velocities: [Vec3; 3],
+) -> Result<Option<Vec<Vec3>>, GeometryError> {
+    let mut values = [0.0; 3];
+    for (value, velocity) in values.iter_mut().zip(velocities) {
+        *value = normal
+            .checked_dot(velocity)
+            .ok_or(GeometryError::ArithmeticOverflow)?;
+    }
+    if !values.iter().any(|value| *value > 0.0) {
+        return Ok(None);
+    }
+    let values = normalize(values)?;
+    let vertices = [Vec3::ZERO, Vec3::X, Vec3::Y];
+    let mut positive = Vec::new();
+    positive
+        .try_reserve_exact(4)
+        .map_err(|_| GeometryError::AllocationFailed)?;
+    for index in 0..3 {
+        let next = (index + 1) % 3;
+        let (a, b) = (values[index], values[next]);
+        if a >= 0.0 {
+            super::checked_push(&mut positive, vertices[index])?;
+        }
+        if (a > 0.0 && b < 0.0) || (a < 0.0 && b > 0.0) {
+            let point = vertices[index] + (vertices[next] - vertices[index]) * (a / (a - b));
+            if !point.is_finite() {
+                return Err(GeometryError::ArithmeticOverflow);
+            }
+            super::checked_push(&mut positive, point)?;
+        }
+    }
+    if positive.len() < 3 {
+        return Err(GeometryError::PrecisionLoss);
+    }
+    Ok(Some(positive))
+}
+
+pub(super) fn polygon_fraction(points: &[Vec3]) -> Result<f64, GeometryError> {
+    let mut area = 0.0;
+    for index in 1..points.len().saturating_sub(1) {
+        area += triangle_fraction([points[0], points[index], points[index + 1]])?;
+    }
+    finite(area)
+}
+
+pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, GeometryError> {
+    if points[0] == points[1] || points[1] == points[2] || points[2] == points[0] {
+        return Ok(0.0);
+    }
+    let frame = PredicateFrame::new(&points)?;
+    let [a, b, c] = [
+        frame.point(points[0])?,
+        frame.point(points[1])?,
+        frame.point(points[2])?,
+    ];
+    let value = finite(orient2d(
+        Coord { x: a.x, y: a.y },
+        Coord { x: b.x, y: b.y },
+        Coord { x: c.x, y: c.y },
+    ))?;
+    scale(value.abs(), -2 * frame.shift)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aerodynamics::geometry::GeometryOwner;
+
+    #[test]
+    fn affine_shadow_matches_scalar_rays_away_from_boundaries() -> Result<(), GeometryError> {
+        let source = SurfaceTriangle {
+            vertices: [Vec3::ZERO, Vec3::Y, Vec3::Z],
+            normal: Vec3::X,
+            area: 0.5,
+            owner: GeometryOwner::Body,
+        };
+        for size in [1e-50, 1.0, 1e50] {
+            let source = SurfaceTriangle {
+                vertices: source.vertices.map(|point| point * size),
+                area: 0.5 * size * size,
+                ..source
+            };
+            for relative_separation in [1.0, 1e-14, 1e-70] {
+                let separation = relative_separation * size;
+                let blocker = SurfaceTriangle {
+                    vertices: [
+                        Vec3::X * separation,
+                        Vec3::X * separation + Vec3::Y * (0.5 * size),
+                        Vec3::X * separation + Vec3::Z * size,
+                    ],
+                    normal: Vec3::X,
+                    area: 0.25,
+                    owner: GeometryOwner::Body,
+                };
+                for direction in [Vec3::X, Vec3::new(1.0, 0.2, 0.1)] {
+                    let direction = direction
+                        .try_normalize()
+                        .ok_or(GeometryError::InvalidGeometry)?;
+                    let shadow = Shadow::new(&source, &blocker, 0, 1, direction)?;
+                    for u in [0.13, 0.27, 0.51, 0.73] {
+                        for v in [0.11, 0.29, 0.53] {
+                            if u + v >= 0.95 {
+                                continue;
+                            }
+                            let point = Vec3::new(u, v, 0.0);
+                            let origin = (Vec3::Y * u + Vec3::Z * v) * size;
+                            let expected = super::super::ray_hits_triangle(
+                                origin,
+                                direction,
+                                blocker.vertices,
+                            )?;
+                            assert_eq!(shadow.as_ref().is_some_and(|s| s.covers(point)), expected);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_precision_is_an_error_instead_of_a_missed_blocker() {
+        let source = SurfaceTriangle {
+            vertices: [Vec3::ZERO, Vec3::Y, Vec3::Z],
+            normal: Vec3::X,
+            area: 0.5,
+            owner: GeometryOwner::Body,
+        };
+        let blocker = SurfaceTriangle {
+            vertices: source.vertices.map(|p| p + Vec3::X * 1e-100),
+            ..source
+        };
+        assert!(matches!(
+            Shadow::new(&source, &blocker, 0, 1, Vec3::X),
+            Err(GeometryError::PrecisionLoss)
+        ));
+    }
+}

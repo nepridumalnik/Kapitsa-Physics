@@ -559,3 +559,83 @@ fn rotational_force_and_moment_converge_under_mesh_refinement()
     }
     Ok(())
 }
+
+#[test]
+fn stagnation_at_source_centroid_does_not_erase_rotational_windward_area()
+-> Result<(), Box<dyn std::error::Error>> {
+    let a = Vec3::new(-2.0, 0.0, 0.0);
+    let b = Vec3::new(1.0, 0.0, -1.0);
+    let c = Vec3::new(1.0, 0.0, 1.0);
+    let mut previous_error = None;
+    for subdivisions in [1, 3, 6, 12] {
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        let point = |u: usize, v: usize| {
+            a + (b - a) * (u as f64 / subdivisions as f64)
+                + (c - a) * (v as f64 / subdivisions as f64)
+        };
+        for u in 0..subdivisions {
+            for v in 0..subdivisions - u {
+                let base = vertices.len();
+                vertices.extend([point(u, v), point(u + 1, v), point(u, v + 1)]);
+                triangles.push([base, base + 2, base + 1]);
+                if u + v + 1 < subdivisions {
+                    let base = vertices.len();
+                    vertices.extend([point(u + 1, v), point(u + 1, v + 1), point(u, v + 1)]);
+                    triangles.push([base, base + 2, base + 1]);
+                }
+            }
+        }
+        let mesh = TriangleMesh::new(vertices, triangles)?;
+        let instances = [GeometryInstance {
+            mesh: &mesh,
+            local_transform: Transform::identity(),
+            owner: GeometryOwner::Body,
+        }];
+        let geometry = PreparedGeometry::prepare(
+            &instances,
+            GeometryConfig {
+                cell_size: 0.25,
+                max_cells: 100_000,
+                max_work: 10_000_000,
+                open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+                weld_tolerance: None,
+                max_patch_work: 10_000_000,
+            },
+        )?;
+        let omega = Vec3::Z * 10_000.0;
+        let patches =
+            geometry.surface_patches_with_flow(&instances, 10_000_000, |p| Ok(omega.cross(p)))?;
+        let area: f64 = patches.iter().map(|patch| patch.area).sum();
+        assert!(
+            (area - 5.0 / 3.0).abs() < 1e-12,
+            "subdivisions={subdivisions}, windward_area={area}"
+        );
+        let result = evaluate_prepared_mesh(
+            &patches,
+            PressureFlow {
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: omega,
+                sound_speed: 1.0,
+                ..flow()
+            },
+        )?;
+        assert!(result.force.y < 0.0 && result.moment.z < 0.0);
+        // Positive x has width 2(x+2)/3, x in [0,1]. Integrate x^2 and x^3.
+        let force = -Vec3::Y * (1e8 * 11.0 / 18.0);
+        let moment = -Vec3::Z * (1e8 * 7.0 / 15.0);
+        let error = (result.force - force).length() + (result.moment - moment).length();
+        // n=1 clipping and n=3 both have one 1 m-wide active x layer.
+        // n=3,6,12 then halve that layer width and test quadratic convergence.
+        if subdivisions >= 3 {
+            if let Some(previous) = previous_error {
+                assert!(
+                    error < previous * 0.3,
+                    "subdivisions={subdivisions}, error={error}, previous={previous}"
+                );
+            }
+            previous_error = Some(error);
+        }
+    }
+    Ok(())
+}
