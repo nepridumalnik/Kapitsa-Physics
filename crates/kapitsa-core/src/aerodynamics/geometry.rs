@@ -136,6 +136,59 @@ fn allocated<T: Clone>(len: usize, value: T) -> Result<Vec<T>, GeometryError> {
     Ok(values)
 }
 
+fn surface_triangle_count(instances: &[GeometryInstance<'_>]) -> Result<usize, GeometryError> {
+    instances.iter().try_fold(0usize, |total, instance| {
+        total
+            .checked_add(instance.mesh.triangles().len())
+            .ok_or(GeometryError::WorkBudgetExceeded)
+    })
+}
+
+fn check_surface_work(work: Option<usize>, max_work: usize) -> Result<(), GeometryError> {
+    if max_work == 0 || work.is_none_or(|w| w > max_work.min(100_000_000)) {
+        return Err(GeometryError::WorkBudgetExceeded);
+    }
+    Ok(())
+}
+
+fn compare_vertex(a: &Vec3, b: &Vec3) -> std::cmp::Ordering {
+    // Normalize signed zero so equivalent coordinates have the same ordering.
+    let canonical = |v: f64| if v == 0.0 { 0.0 } else { v };
+    canonical(a.x)
+        .total_cmp(&canonical(b.x))
+        .then_with(|| canonical(a.y).total_cmp(&canonical(b.y)))
+        .then_with(|| canonical(a.z).total_cmp(&canonical(b.z)))
+}
+
+/// Two-sided Möller–Trumbore intersection, inclusive of triangle edges.
+/// No geometric epsilon: t > 0 preserves arbitrarily close genuine blockers.
+fn ray_hits_triangle(
+    origin: Vec3,
+    direction: Vec3,
+    vertices: [Vec3; 3],
+) -> Result<bool, GeometryError> {
+    let [a, b, c] = vertices;
+    let e1 = b - a;
+    let e2 = c - a;
+    let p = direction.cross(e2);
+    let determinant = e1.dot(p);
+    if !determinant.is_finite() {
+        return Err(GeometryError::ArithmeticOverflow);
+    }
+    if determinant == 0.0 {
+        return Ok(false);
+    }
+    let offset = origin - a;
+    let q = offset.cross(e1);
+    let u = offset.dot(p) / determinant;
+    let v = direction.dot(q) / determinant;
+    let t = e2.dot(q) / determinant;
+    if ![u, v, t].iter().all(|n| n.is_finite()) {
+        return Err(GeometryError::ArithmeticOverflow);
+    }
+    Ok(t > 0.0 && u >= 0.0 && v >= 0.0 && u + v <= 1.0)
+}
+
 fn components(v: Vec3) -> [f64; 3] {
     [v.x, v.y, v.z]
 }
@@ -499,16 +552,15 @@ impl PreparedGeometry {
         &self.occupancy
     }
 
+    /// Transforms source triangles with a checked allocation and work ceiling.
+    /// Each triangle costs four units (three vertices and one normal/area).
     pub fn surface_triangles(
         instances: &[GeometryInstance<'_>],
+        max_work: usize,
     ) -> Result<Vec<SurfaceTriangle>, GeometryError> {
+        let total = surface_triangle_count(instances)?;
+        check_surface_work(total.checked_mul(4), max_work)?;
         let mut triangles = Vec::new();
-        let total = instances
-            .iter()
-            .try_fold(0usize, |n, instance| {
-                n.checked_add(instance.mesh.triangles().len())
-            })
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
         triangles
             .try_reserve_exact(total)
             .map_err(|_| GeometryError::AllocationFailed)?;
@@ -544,6 +596,16 @@ impl PreparedGeometry {
         self.volume
     }
 
+    /// Bounded O(T²) reference visibility against original, two-sided triangles.
+    /// A whole patch is classified at its centroid; no partial visibility or
+    /// subdivision is modeled. Voxel shells never participate in pressure shading.
+    /// `direction` points upstream, opposite the fluid velocity. `epsilon` is
+    /// validated for compatibility but is NOT a ray offset or a dedup tolerance:
+    /// even blockers closer than epsilon must occlude. The ray's t tolerance is
+    /// exactly zero: zero-distance coincident surfaces do not block, t > 0 does.
+    /// The preflight ceiling includes transformation (4T), canonicalization and
+    /// classification (4T), dedup and self/coincident comparisons (<= 2T²),
+    /// and ray tests (<= T²), before allocation.
     pub fn exposed_surface_patches(
         &self,
         instances: &[GeometryInstance<'_>],
@@ -554,49 +616,48 @@ impl PreparedGeometry {
         if !direction.is_finite() || !epsilon.is_finite() || epsilon <= 0.0 {
             return Err(GeometryError::InvalidGeometry);
         }
-        // Direction points from a patch toward its upstream/oncoming source.
-        // The fluid velocity itself is the opposite direction.
         let upstream = direction
             .try_normalize()
             .ok_or(GeometryError::InvalidGeometry)?;
-        let triangles = Self::surface_triangles(instances)?;
-        let projected_work = triangles
-            .len()
-            .checked_mul(self.dimensions.iter().sum::<usize>())
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
-        if max_work == 0 || projected_work > max_work {
-            return Err(GeometryError::WorkBudgetExceeded);
+        let total = surface_triangle_count(instances)?;
+        let work = total
+            .checked_mul(total)
+            .and_then(|pairs| pairs.checked_mul(3)?.checked_add(total.checked_mul(8)?));
+        check_surface_work(work, max_work)?;
+        let mut triangles = Self::surface_triangles(instances, max_work)?;
+        // Exact canonical vertex triples avoid centroid/area aliasing and
+        // many-to-one epsilon matching. Winding remains in the source normal.
+        for triangle in &mut triangles {
+            triangle.vertices.sort_unstable_by(compare_vertex);
         }
-        let mut patches = Vec::new();
+        let mut patches: Vec<PreparedSurfacePatch> = Vec::new();
         patches
-            .try_reserve_exact(triangles.len())
+            .try_reserve_exact(total)
             .map_err(|_| GeometryError::AllocationFailed)?;
-        let mut work = 0usize;
-        for triangle in triangles {
-            let center = (triangle.vertices[0] + triangle.vertices[1] + triangle.vertices[2]) / 3.0;
+        for (i, triangle) in triangles.iter().enumerate() {
             if triangle.normal.dot(upstream) <= 0.0 {
                 continue;
             }
-            work = work
-                .checked_add(self.dimensions.iter().sum::<usize>())
-                .ok_or(GeometryError::WorkBudgetExceeded)?;
-            if work > max_work {
-                return Err(GeometryError::WorkBudgetExceeded);
-            }
-            if self.ray_hits_union(center, -upstream, epsilon) {
+            if let Some(patch) = patches.iter_mut().find(|p| p.vertices == triangle.vertices) {
+                patch.owner = patch.owner.min(triangle.owner);
                 continue;
             }
-            let duplicate = patches.iter().position(|patch: &PreparedSurfacePatch| {
-                patch.vertices.iter().all(|vertex| {
-                    triangle.vertices.iter().any(|candidate| {
-                        (*vertex - *candidate).length_squared() <= epsilon * epsilon
-                    })
-                })
-            });
-            if let Some(index) = duplicate {
-                let owner = patches[index].owner.min(triangle.owner);
-                patches[index].owner = owner;
-            } else {
+            let [a, b, c] = triangle.vertices;
+            let center = a + (b - a) / 3.0 + (c - a) / 3.0;
+            if !center.is_finite() {
+                return Err(GeometryError::ArithmeticOverflow);
+            }
+            let mut blocked = false;
+            for (j, blocker) in triangles.iter().enumerate() {
+                if i != j
+                    && triangle.vertices != blocker.vertices
+                    && ray_hits_triangle(center, upstream, blocker.vertices)?
+                {
+                    blocked = true;
+                    break;
+                }
+            }
+            if !blocked {
                 patches.push(PreparedSurfacePatch {
                     vertices: triangle.vertices,
                     center,
@@ -607,35 +668,6 @@ impl PreparedGeometry {
             }
         }
         Ok(PreparedSurfacePatches { patches })
-    }
-
-    fn ray_hits_union(&self, point: Vec3, direction: Vec3, epsilon: f64) -> bool {
-        let start = point + direction * (epsilon + self.cell_size);
-        let max_steps = self.dimensions[0]
-            .saturating_add(self.dimensions[1])
-            .saturating_add(self.dimensions[2])
-            .saturating_add(4);
-        for step in 0..max_steps {
-            let sample = start + direction * (step as f64 * self.cell_size);
-            let relative = (sample - self.origin) / self.cell_size;
-            let coordinates =
-                [relative.x, relative.y, relative.z].map(|value| value.floor() as isize);
-            if coordinates.iter().any(|&value| value < 0) {
-                return false;
-            }
-            let coordinates = coordinates.map(|value| value as usize);
-            if coordinates
-                .iter()
-                .enumerate()
-                .any(|(axis, &value)| value >= self.dimensions[axis])
-            {
-                return false;
-            }
-            if self.occupancy[index(coordinates, self.dimensions)].is_some() {
-                return true;
-            }
-        }
-        false
     }
 
     /// Streams union boundary faces without allocating a worst-case face buffer.

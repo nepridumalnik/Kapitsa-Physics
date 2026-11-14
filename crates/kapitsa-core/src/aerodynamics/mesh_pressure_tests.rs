@@ -82,7 +82,7 @@ fn prepared_cube_has_opposing_drag_and_symmetric_com_moment() {
         ],
     )
     .unwrap();
-    let patches = prepare(&mesh, -Vec3::X);
+    let patches = prepare(&mesh, Vec3::X);
     assert_eq!(patches.len(), 2);
     let state = PressureFlow {
         center_of_mass: Vec3::splat(0.5),
@@ -104,13 +104,14 @@ fn asymmetric_pyramid_nose_loads_windward_slopes_and_drags_at_nose() {
             Vec3::new(0.0, 1.0, 0.5),
             Vec3::new(0.0, -1.0, 0.5),
         ],
+        // Outward winding: all nose slopes point +X, rear cap points -X.
         vec![
-            [0, 2, 1],
-            [0, 3, 2],
-            [0, 4, 3],
-            [0, 1, 4],
-            [1, 2, 3],
-            [1, 3, 4],
+            [0, 1, 2],
+            [0, 2, 3],
+            [0, 3, 4],
+            [0, 4, 1],
+            [1, 3, 2],
+            [1, 4, 3],
         ],
     )
     .unwrap();
@@ -195,7 +196,7 @@ fn prepared_wrench_matches_explicit_patch_sum_with_wind_and_rotation() {
         vec![[0, 2, 1], [1, 2, 3]],
     )
     .unwrap();
-    let patches = prepare(&mesh, -Vec3::X);
+    let patches = prepare(&mesh, Vec3::X);
     assert_eq!(patches.len(), 2);
     let state = PressureFlow {
         atmosphere: AtmosphericState::new(0.8, Vec3::X * 50.0).unwrap(),
@@ -305,7 +306,7 @@ fn finite_patch_loads_that_overflow_the_sum_are_rejected() {
         vec![[0, 2, 1], [1, 2, 3]],
     )
     .unwrap();
-    let patches = prepare(&mesh, -Vec3::X);
+    let patches = prepare(&mesh, Vec3::X);
     assert_eq!(patches.len(), 2);
     let state = PressureFlow {
         atmosphere: AtmosphericState::new((f64::MAX / 1_000_000.0) * 0.6, Vec3::ZERO).unwrap(),

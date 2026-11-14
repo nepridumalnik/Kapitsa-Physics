@@ -212,6 +212,15 @@ fn part_overlap_ownership_is_order_independent() {
     let first = PreparedGeometry::prepare(&[a, b], config(0.25)).unwrap();
     let second = PreparedGeometry::prepare(&[b, a], config(0.25)).unwrap();
     assert_eq!(first, second);
+    let first_patches = first
+        .exposed_surface_patches(&[a, b], Vec3::X, 0.01, 100_000)
+        .unwrap();
+    let second_patches = second
+        .exposed_surface_patches(&[b, a], Vec3::X, 0.01, 100_000)
+        .unwrap();
+    assert_eq!(first_patches, second_patches);
+    assert_eq!(first_patches.len(), 2);
+    assert!(first_patches.iter().all(|p| p.owner == GeometryOwner::Body));
     assert!(
         first
             .occupancy()
@@ -335,7 +344,9 @@ fn diagonal_flow_keeps_windward_surface_patches() {
             100_000,
         )
         .unwrap();
-    assert!(!patches.is_empty());
+    assert_eq!(patches.len(), 4);
+    assert_eq!(patches.iter().filter(|p| p.normal == Vec3::X).count(), 2);
+    assert_eq!(patches.iter().filter(|p| p.normal == Vec3::Y).count(), 2);
 }
 
 #[test]
@@ -371,4 +382,146 @@ fn open_box_is_not_filled() {
         g.dimensions()[2] / 2,
     ];
     assert_eq!(g.occupancy()[index(midpoint, g.dimensions())], None);
+}
+
+fn surface_geometry(instances: &[GeometryInstance<'_>]) -> PreparedGeometry {
+    let mut cfg = config(0.25);
+    cfg.open_mesh_policy = OpenMeshPolicy::SurfaceOnly;
+    PreparedGeometry::prepare(instances, cfg).unwrap()
+}
+
+#[test]
+fn upstream_blocker_shadows_but_side_by_side_does_not_and_backfaces_block() {
+    let plate = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]]).unwrap();
+    let backface = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 2, 1]]).unwrap();
+    // Both blockers are much closer than epsilon and the voxel cell size.
+    for separation in [1e-9, 0.01, 0.5] {
+        let rear = instance(&plate, Vec3::ZERO);
+        let front = instance(&plate, Vec3::X * separation);
+        let instances = [rear, front];
+        let g = surface_geometry(&instances);
+        let patches = g
+            .exposed_surface_patches(&instances, Vec3::X, 0.1, 100_000)
+            .unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches.as_slice()[0].center.x, separation);
+        let instances = [rear, instance(&backface, Vec3::X * separation)];
+        assert!(
+            g.exposed_surface_patches(&instances, Vec3::X, 0.1, 100_000)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let instances = [
+        instance(&plate, Vec3::ZERO),
+        instance(&plate, Vec3::Y * 2.0),
+    ];
+    let patches = surface_geometry(&instances)
+        .exposed_surface_patches(&instances, Vec3::X, 0.1, 100_000)
+        .unwrap();
+    assert_eq!(patches.len(), 2);
+}
+
+#[test]
+fn equal_centroid_and_area_distinct_triangles_are_not_deduplicated() {
+    let a = TriangleMesh::new(
+        vec![
+            Vec3::new(0.0, -1.0, -1.0),
+            Vec3::new(0.0, 1.0, -1.0),
+            Vec3::new(0.0, 0.0, 2.0),
+        ],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let b = TriangleMesh::new(a.vertices().iter().map(|v| -*v).collect(), vec![[0, 1, 2]]).unwrap();
+    let instances = [instance(&a, Vec3::ZERO), instance(&b, Vec3::ZERO)];
+    let patches = surface_geometry(&instances)
+        .exposed_surface_patches(&instances, Vec3::X, 10.0, 100_000)
+        .unwrap();
+    assert_eq!(patches.len(), 2);
+    assert_eq!(patches.as_slice()[0].center, patches.as_slice()[1].center);
+    assert_eq!(patches.as_slice()[0].area, patches.as_slice()[1].area);
+}
+
+#[test]
+fn canonical_dedup_handles_vertex_permutations_without_epsilon_aliasing() {
+    let a = TriangleMesh::new(
+        vec![Vec3::ZERO, Vec3::Y * 0.01, Vec3::Z * 0.01],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let b = TriangleMesh::new(a.vertices().to_vec(), vec![[2, 0, 1]]).unwrap();
+    let instances = [
+        instance(&a, Vec3::ZERO),
+        instance(&b, Vec3::ZERO),
+        instance(&a, Vec3::Y * 0.02),
+    ];
+    let g = surface_geometry(&instances);
+    let patches = g
+        .exposed_surface_patches(&instances, Vec3::X, 1.0, 100_000)
+        .unwrap();
+    assert_eq!(patches.len(), 2);
+}
+
+#[test]
+fn patch_budget_is_checked_before_transform_and_allocation() {
+    let mesh = cube();
+    let instances = [instance(&mesh, Vec3::ZERO)];
+    let g = surface_geometry(&instances);
+    let invalid_transform = [instance(&mesh, Vec3::splat(f64::MAX))];
+    for sources in [&instances[..], &invalid_transform[..]] {
+        assert_eq!(
+            PreparedGeometry::surface_triangles(sources, 1),
+            Err(GeometryError::WorkBudgetExceeded)
+        );
+        assert_eq!(
+            g.exposed_surface_patches(sources, Vec3::X, 0.01, 1),
+            Err(GeometryError::WorkBudgetExceeded)
+        );
+    }
+    // Exact conservative preflight: 3T² + 8T (T = 12).
+    assert_eq!(
+        g.exposed_surface_patches(&instances, Vec3::X, 0.01, 527),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    assert_eq!(
+        g.exposed_surface_patches(&instances, Vec3::X, 0.01, 528)
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn translated_rotated_source_instances_preserve_diagonal_visibility() {
+    let mesh = cube();
+    let base = [instance(&mesh, Vec3::ZERO)];
+    let transform = Transform::new(
+        Vec3::new(3.0, -4.0, 7.0),
+        Quat::from_axis_angle(Vec3::Z, 0.7).unwrap(),
+    )
+    .unwrap();
+    let moved = [GeometryInstance {
+        local_transform: transform,
+        ..base[0]
+    }];
+    let original = surface_geometry(&base)
+        .exposed_surface_patches(&base, Vec3::X + Vec3::Y, 0.01, 100_000)
+        .unwrap();
+    let transformed = surface_geometry(&moved)
+        .exposed_surface_patches(
+            &moved,
+            transform.transform_vector(Vec3::X + Vec3::Y),
+            0.01,
+            100_000,
+        )
+        .unwrap();
+    assert_eq!(original.len(), 4);
+    assert_eq!(transformed.len(), 4);
+    for patch in original.iter() {
+        assert!(transformed.iter().any(|p| {
+            (p.center - transform.transform_point(patch.center)).length() < 1e-12
+                && (p.normal - transform.transform_vector(patch.normal)).length() < 1e-12
+        }));
+    }
 }
