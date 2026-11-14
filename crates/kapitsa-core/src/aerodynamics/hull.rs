@@ -166,6 +166,115 @@ impl MachCurve {
     }
 }
 
+/// A caller-supplied normal-force coefficient at Mach and signed angle of attack (radians).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NormalForceKnot {
+    pub mach: f64,
+    pub angle_of_attack: f64,
+    pub normal_cn: f64,
+}
+
+/// Immutable rectangular CFD/experimental normal-force table. Values are bilinearly
+/// interpolated only inside its finite, inclusive Mach/angle domain.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NormalForceCurve {
+    reference_area: f64,
+    knots: Arc<[NormalForceKnot]>,
+    mach_count: usize,
+    angle_count: usize,
+}
+impl NormalForceCurve {
+    pub fn new(reference_area: f64, knots: Vec<NormalForceKnot>) -> Result<Self, HullError> {
+        if !reference_area.is_finite() || reference_area <= 0.0 || knots.len() < 4 {
+            return Err(HullError::InvalidParameters);
+        }
+        if knots.iter().any(|k| {
+            !k.mach.is_finite()
+                || k.mach < 0.0
+                || !k.angle_of_attack.is_finite()
+                || k.angle_of_attack < -std::f64::consts::PI
+                || k.angle_of_attack > std::f64::consts::PI
+                || !k.normal_cn.is_finite()
+        }) {
+            return Err(HullError::InvalidParameters);
+        }
+        let mut machs = Vec::new();
+        let mut angles = Vec::new();
+        for k in &knots {
+            if !machs.contains(&k.mach) {
+                machs.push(k.mach);
+            }
+            if !angles.contains(&k.angle_of_attack) {
+                angles.push(k.angle_of_attack);
+            }
+        }
+        machs.sort_by(f64::total_cmp);
+        angles.sort_by(f64::total_cmp);
+        if machs.len() < 2
+            || angles.len() < 2
+            || knots.len() != machs.len() * angles.len()
+            || knots.iter().any(|k| {
+                knots
+                    .iter()
+                    .filter(|x| x.mach == k.mach && x.angle_of_attack == k.angle_of_attack)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(HullError::InvalidParameters);
+        }
+        let mut ordered = knots;
+        ordered.sort_by(|a, b| {
+            a.mach
+                .total_cmp(&b.mach)
+                .then(a.angle_of_attack.total_cmp(&b.angle_of_attack))
+        });
+        Ok(Self {
+            reference_area,
+            knots: ordered.into(),
+            mach_count: machs.len(),
+            angle_count: angles.len(),
+        })
+    }
+    pub fn reference_area(&self) -> f64 {
+        self.reference_area
+    }
+    pub fn knots(&self) -> &[NormalForceKnot] {
+        &self.knots
+    }
+    fn coefficient(&self, mach: f64, alpha: f64) -> Result<f64, HullError> {
+        if !mach.is_finite() || mach < 0.0 || !alpha.is_finite() {
+            return Err(HullError::InvalidFlow);
+        }
+        let m = (0..self.mach_count - 1)
+            .find_map(|i| {
+                let a = self.knots[i * self.angle_count].mach;
+                let b = self.knots[(i + 1) * self.angle_count].mach;
+                (mach >= a && mach <= b).then_some((i, (mach - a) / (b - a)))
+            })
+            .ok_or(HullError::UnsupportedMach)?;
+        let j = (0..self.angle_count - 1)
+            .find_map(|j| {
+                let a = self.knots[j].angle_of_attack;
+                let b = self.knots[j + 1].angle_of_attack;
+                (alpha >= a && alpha <= b).then_some((j, (alpha - a) / (b - a)))
+            })
+            .ok_or(HullError::UnsupportedMach)?;
+        let lerp = |x: f64, y: f64, t: f64| x + t * (y - x);
+        let a = lerp(
+            self.knots[m.0 * self.angle_count + j].normal_cn,
+            self.knots[m.0 * self.angle_count + j + 1].normal_cn,
+            j.1,
+        );
+        let b = lerp(
+            self.knots[(m.0 + 1) * self.angle_count + j].normal_cn,
+            self.knots[(m.0 + 1) * self.angle_count + j + 1].normal_cn,
+            j.1,
+        );
+        Ok(lerp(a, b, m.1))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundaryLayer {
     Laminar,
@@ -231,6 +340,7 @@ pub struct HullSection {
     crossflow_cd: f64,
     skin_friction: Option<SkinFriction>,
     mach_curve: Option<MachCurve>,
+    normal_curve: Option<NormalForceCurve>,
 }
 impl HullSection {
     /// Length must be positive; areas and coefficients must be nonnegative.
@@ -273,6 +383,7 @@ impl HullSection {
             crossflow_cd,
             skin_friction,
             mach_curve: None,
+            normal_curve: None,
         })
     }
 
@@ -286,6 +397,16 @@ impl HullSection {
 
     pub fn mach_curve(&self) -> Option<&MachCurve> {
         self.mach_curve.as_ref()
+    }
+
+    /// Attach caller-supplied signed normal-force data and its reference area.
+    pub fn with_normal_curve(mut self, curve: NormalForceCurve) -> Self {
+        self.normal_curve = Some(curve);
+        self
+    }
+
+    pub fn normal_curve(&self) -> Option<&NormalForceCurve> {
+        self.normal_curve.as_ref()
     }
 
     pub fn local_transform(&self) -> Transform {
@@ -385,14 +506,41 @@ impl HullSection {
                 )?)
                 .ok_or(overflow)?;
         }
+        let cross_force = resistance(
+            crossflow,
+            cross_speed,
+            density,
+            self.crossflow_area,
+            crossflow_cd,
+        )?;
+        let normal_force = if let Some(curve) = &self.normal_curve {
+            let axial_unit = axis;
+            let along = velocity.checked_dot(axial_unit).ok_or(overflow)?;
+            let axial_velocity = axial_unit.checked_mul_scalar(along).ok_or(overflow)?;
+            let perpendicular = velocity.checked_sub(axial_velocity).ok_or(overflow)?;
+            let perp_speed = perpendicular.checked_length().ok_or(overflow)?;
+            if perp_speed == 0.0 {
+                Vec3::ZERO
+            } else {
+                let alpha = perpendicular.checked_dot(velocity).ok_or(overflow)?;
+                let alpha = alpha.atan2(along * perp_speed);
+                let cn = curve.coefficient(mach, alpha)?;
+                let magnitude = scaled_product(
+                    &[0.5, density, speed, speed, curve.reference_area, cn.abs()],
+                    1.0,
+                )?;
+                perpendicular
+                    .checked_mul_scalar(magnitude.copysign(cn) / perp_speed)
+                    .ok_or(overflow)?
+            }
+        } else if mach > 0.3 {
+            return Err(HullError::UnsupportedMach);
+        } else {
+            Vec3::ZERO
+        };
         let force = axial_force
-            .checked_add(resistance(
-                crossflow,
-                cross_speed,
-                density,
-                self.crossflow_area,
-                crossflow_cd,
-            )?)
+            .checked_add(cross_force)
+            .and_then(|f| f.checked_add(normal_force))
             .ok_or(overflow)?;
         let moment = arm.checked_cross(force).ok_or(overflow)?;
         Ok(PressureWrench { force, moment })

@@ -143,7 +143,16 @@ owns its data in an internal `Arc`; cloning it reuses that allocation across
 sections. `HullSection` is now `Clone`, not `Copy`, and evaluation borrows it.
 
 This is a **DATA-DRIVEN transonic resistance interface**, not a predictive FAR
-solver. There are no default invented transonic coefficients. Supply measured or
+solver. There are no default invented transonic coefficients. `NormalForceCurve`
+provides an optional immutable rectangular CFD/experimental table of signed
+`C_N(Mach, alpha)` values and an explicit reference area; `with_normal_curve`
+attaches it to a hull section. Inside the strict Mach/angle domain, values are
+bilinearly interpolated and applied as `F_N = q C_N A_ref n`, where `n` is
+perpendicular to the section axis and local relative velocity. The caller owns
+the angle convention and table validity; no automatic lift, transonic closure,
+or Newtonian/wing model is supplied. The same [drag equation](https://en.wikipedia.org/wiki/Drag_equation),
+[Mach number](https://en.wikipedia.org/wiki/Mach_number), and [angle of attack](https://en.wikipedia.org/wiki/Angle_of_attack)
+references define quantities, not coefficient data. Supply measured or
 CFD data consistent with the sectional reference areas and component-speed
 convention above, Reynolds conditions and angle of attack. A Mach-only curve does
 not model variation with Reynolds number or angle of attack; applicability of
