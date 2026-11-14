@@ -2,9 +2,11 @@
 
 pub(crate) mod atmosphere;
 pub mod cache;
+pub mod colliders;
 pub mod geometry;
 pub mod pressure;
 pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};
+pub use colliders::ColliderTessellation;
 
 use std::fmt;
 
@@ -288,6 +290,8 @@ impl AerodynamicForce {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AerodynamicsError {
     UnsupportedModel,
+    InvalidTessellation,
+    TessellationBudgetExceeded,
     InvalidAtmosphere(&'static str),
     InvalidDensity,
     InvalidReferenceArea,
@@ -305,6 +309,8 @@ impl fmt::Display for AerodynamicsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::UnsupportedModel => "this aerodynamic model is not implemented",
+            Self::InvalidTessellation => "invalid collider tessellation parameters",
+            Self::TessellationBudgetExceeded => "collider tessellation triangle budget exceeded",
             Self::InvalidAtmosphere(message) => message,
             Self::InvalidDensity => "air density must be finite and non-negative",
             Self::InvalidReferenceArea => "reference area must be finite and non-negative",

@@ -618,6 +618,143 @@ fn cluster_rejects_unsupported_geometry_without_mutating_state() {
     ));
     assert!(world.cluster(body).is_some());
     assert_eq!(world.cluster_part(part).unwrap().body(), body);
+    assert_eq!(
+        world.set_aerodynamics(body, Aerodynamics::Colliders),
+        Err(crate::world::WorldError::UnsupportedAerodynamics)
+    );
+}
+
+#[test]
+fn collider_pressure_cache_invalidation_and_sharded_parity()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::ColliderTessellation,
+        collider::Collider,
+        shape::{Cuboid, Shape, Sphere},
+    };
+    let mut outcomes = Vec::new();
+    for sharded in [false, true] {
+        for sphere in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                0.001,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 2000.0)?;
+            body.set_aerodynamics(Aerodynamics::Colliders);
+            let id = world.add_body(body)?;
+            let shape = if sphere {
+                Shape::Sphere(Sphere::new(0.5)?)
+            } else {
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?)
+            };
+            let collider = world.add_collider(
+                id,
+                Collider::new(
+                    shape,
+                    Transform::new(Vec3::Y, kapitsa_math::Quat::IDENTITY)?,
+                ),
+            )?;
+            let step = |world: &mut PhysicsWorld| {
+                if sharded {
+                    world.step_with_shards(
+                        0.00001,
+                        &mut [Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )
+                } else {
+                    world.step(0.00001)
+                }
+            };
+            step(&mut world)?;
+            let motion = world.body(id).ok_or("body")?.motion();
+            assert!(motion.state().linear_velocity().x < 2000.0);
+            assert!(motion.state().angular_velocity().z > 0.0);
+            let entry = world.bodies.get(id.dense).ok_or("entry")?;
+            let pointer = entry
+                .collider_aerodynamic_mesh
+                .as_ref()
+                .ok_or("mesh")?
+                .vertices()
+                .as_ptr();
+            let geometry = entry
+                .mesh_aerodynamics
+                .as_ref()
+                .ok_or("cache")?
+                .cache
+                .last_prepared()
+                .ok_or("prepared")?
+                .1 as *const _;
+            step(&mut world)?;
+            let entry = world.bodies.get(id.dense).ok_or("entry")?;
+            assert_eq!(
+                pointer,
+                entry
+                    .collider_aerodynamic_mesh
+                    .as_ref()
+                    .ok_or("mesh")?
+                    .vertices()
+                    .as_ptr()
+            );
+            assert_eq!(
+                geometry,
+                entry
+                    .mesh_aerodynamics
+                    .as_ref()
+                    .ok_or("cache")?
+                    .cache
+                    .last_prepared()
+                    .ok_or("prepared")?
+                    .1 as *const _
+            );
+            outcomes.push(world.body(id).ok_or("body")?.motion());
+            world.set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)?;
+            assert!(
+                world
+                    .bodies
+                    .get(id.dense)
+                    .ok_or("entry")?
+                    .collider_aerodynamic_mesh
+                    .is_none()
+            );
+            step(&mut world)?;
+            let _ = world.collider_mut(collider).ok_or("collider")?;
+            assert!(
+                world
+                    .bodies
+                    .get(id.dense)
+                    .ok_or("entry")?
+                    .mesh_aerodynamics
+                    .is_none()
+            );
+            step(&mut world)?;
+            world.remove_collider(collider).ok_or("remove")?;
+            let before = world.body(id).ok_or("body")?.motion();
+            assert!(step(&mut world).is_err());
+            assert_eq!(before, world.body(id).ok_or("body")?.motion());
+            world.add_collider(
+                id,
+                Collider::new(
+                    Shape::Capsule(crate::shape::Capsule::new(-Vec3::Z, Vec3::Z, 0.5)?),
+                    Transform::identity(),
+                ),
+            )?;
+            assert_eq!(
+                step(&mut world),
+                Err(crate::world::StepError::Aerodynamics {
+                    body_id: id,
+                    cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel
+                })
+            );
+            assert_eq!(before, world.body(id).ok_or("body")?.motion());
+        }
+    }
+    assert_eq!(outcomes[0], outcomes[2]);
+    assert_eq!(outcomes[1], outcomes[3]);
+    Ok(())
 }
 
 #[test]

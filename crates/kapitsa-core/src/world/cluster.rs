@@ -1220,6 +1220,8 @@ impl PhysicsWorld {
                     first_collider: None,
                     cluster: None,
                     mesh_aerodynamics: None,
+                    collider_aerodynamic_mesh: None,
+                    collider_tessellation: crate::aerodynamics::ColliderTessellation::default(),
                 }
             })
             .collect::<Vec<_>>();

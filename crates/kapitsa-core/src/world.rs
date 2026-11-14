@@ -158,6 +158,8 @@ struct BodyEntry {
     first_collider: Option<ColliderId>,
     cluster: Option<RigidCluster>,
     mesh_aerodynamics: Option<MeshAerodynamics>,
+    collider_aerodynamic_mesh: Option<crate::shape::TriangleMesh>,
+    collider_tessellation: crate::aerodynamics::ColliderTessellation,
 }
 
 /// Object receiving a persistent force source.
@@ -434,6 +436,8 @@ impl PhysicsWorld {
             .get_mut(id.dense)
             .ok_or(WorldError::InvalidBodyId)?;
         entry.body.set_aerodynamics(aerodynamics);
+        entry.mesh_aerodynamics = None;
+        entry.collider_aerodynamic_mesh = None;
         self.body_revision = self.body_revision.wrapping_add(1);
         Ok(())
     }
@@ -733,6 +737,31 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    /// Changes collider aerodynamic resolution, invalidating local preparation.
+    pub fn set_collider_tessellation(
+        &mut self,
+        body: BodyId,
+        config: crate::aerodynamics::ColliderTessellation,
+    ) -> Result<(), WorldError> {
+        if body.world != self.world_id {
+            return Err(WorldError::InvalidBodyId);
+        }
+        let entry = self
+            .bodies
+            .get_mut(body.dense)
+            .ok_or(WorldError::InvalidBodyId)?;
+        if entry.cluster.is_some() {
+            return Err(WorldError::UnsupportedAerodynamics);
+        }
+        if entry.collider_tessellation != config {
+            entry.collider_tessellation = config;
+            entry.collider_aerodynamic_mesh = None;
+            entry.mesh_aerodynamics = None;
+            self.body_revision = self.body_revision.wrapping_add(1);
+        }
+        Ok(())
+    }
+
     pub fn add_body(&mut self, body: RigidBody) -> Result<BodyId, WorldError> {
         if self.world_id == 0 {
             self.world_id = allocate_world_id(&NEXT_WORLD_ID)?;
@@ -744,6 +773,8 @@ impl PhysicsWorld {
                 first_collider: None,
                 cluster: None,
                 mesh_aerodynamics: None,
+                collider_aerodynamic_mesh: None,
+                collider_tessellation: crate::aerodynamics::ColliderTessellation::default(),
             })
             .map_err(WorldError::from)?;
         Ok(BodyId {
@@ -1600,21 +1631,14 @@ impl PhysicsWorld {
             crate::aerodynamics::Aerodynamics::Simple(properties) => {
                 Some(AerodynamicSurface::new(*properties))
             }
-            crate::aerodynamics::Aerodynamics::Mesh(_) => None,
-            crate::aerodynamics::Aerodynamics::Colliders => {
-                let sampled = atmosphere
-                    .state_at(center)
-                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
-                if sampled.density() > 0.0 {
-                    return Err(StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
-                    });
-                }
-                None
-            }
+            crate::aerodynamics::Aerodynamics::Mesh(_)
+            | crate::aerodynamics::Aerodynamics::Colliders => None,
         };
-        if let crate::aerodynamics::Aerodynamics::Mesh(_) = primary {
+        if matches!(
+            primary,
+            crate::aerodynamics::Aerodynamics::Mesh(_)
+                | crate::aerodynamics::Aerodynamics::Colliders
+        ) {
             let patches = mesh_patches.ok_or_else(error)?;
             let flow = crate::aerodynamics::pressure::PressureFlow {
                 atmosphere: atmosphere
@@ -1925,7 +1949,34 @@ impl PhysicsWorld {
                 });
             }
             let mut mesh_patches = None;
-            if let crate::aerodynamics::Aerodynamics::Mesh(mesh) = entry.body.aerodynamics() {
+            if matches!(
+                entry.body.aerodynamics(),
+                crate::aerodynamics::Aerodynamics::Colliders
+            ) && entry.collider_aerodynamic_mesh.is_none()
+            {
+                let mut next = entry.first_collider;
+                let attached = std::iter::from_fn(|| {
+                    let id = next?;
+                    let collider = self.colliders.get(id.dense)?;
+                    next = collider.next;
+                    Some(&collider.collider)
+                });
+                entry.collider_aerodynamic_mesh = Some(
+                    crate::aerodynamics::colliders::collider_mesh(
+                        attached,
+                        entry.collider_tessellation,
+                    )
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
+                );
+            }
+            let mesh = match entry.body.aerodynamics() {
+                crate::aerodynamics::Aerodynamics::Mesh(mesh) => Some(mesh),
+                crate::aerodynamics::Aerodynamics::Colliders => {
+                    entry.collider_aerodynamic_mesh.as_ref()
+                }
+                _ => None,
+            };
+            if let Some(mesh) = mesh {
                 let config = entry
                     .mesh_aerodynamics
                     .as_ref()
@@ -1936,7 +1987,11 @@ impl PhysicsWorld {
                         max_work: 100_000_000,
                         open_mesh_policy:
                             crate::aerodynamics::geometry::OpenMeshPolicy::SurfaceOnly,
-                        weld_tolerance: None,
+                        weld_tolerance: matches!(
+                            entry.body.aerodynamics(),
+                            crate::aerodynamics::Aerodynamics::Colliders
+                        )
+                        .then_some(1e-10),
                         max_patch_work: 100_000_000,
                     });
                 let prepared = entry
@@ -3453,6 +3508,8 @@ impl PhysicsWorld {
         }
         if let Some(entry) = self.bodies.get_mut(body.dense) {
             entry.first_collider = Some(id);
+            entry.collider_aerodynamic_mesh = None;
+            entry.mesh_aerodynamics = None;
         }
         if has_finite_bounds {
             self.update_query_index_for_collider(id);
@@ -3514,6 +3571,10 @@ impl PhysicsWorld {
         }
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
+        if let Some(entry) = self.bodies.get_mut(body.dense) {
+            entry.collider_aerodynamic_mesh = None;
+            entry.mesh_aerodynamics = None;
+        }
         self.colliders
             .get_mut(id.dense)
             .map(|entry| &mut entry.collider)
@@ -3582,6 +3643,10 @@ impl PhysicsWorld {
             .retain(|collider| *collider != id);
 
         let removed = self.colliders.remove(id.dense)?;
+        if let Some(entry) = self.bodies.get_mut(body.dense) {
+            entry.collider_aerodynamic_mesh = None;
+            entry.mesh_aerodynamics = None;
+        }
         if let Some(prev) = prev {
             if let Some(entry) = self.colliders.get_mut(prev.dense) {
                 entry.next = next;
