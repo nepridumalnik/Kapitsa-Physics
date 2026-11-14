@@ -295,10 +295,10 @@ fn exposed_surface_patches_remove_internal_overlap() {
     let mesh = cube();
     let g = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125)).unwrap();
     let patches = g
-        .exposed_surface_patches(&[instance(&mesh, Vec3::ZERO)], -Vec3::X, 0.01, 100_000)
+        .exposed_surface_patches(&[instance(&mesh, Vec3::ZERO)], Vec3::X, 0.01, 100_000)
         .unwrap();
     assert_eq!(patches.len(), 2);
-    assert!(patches.iter().all(|patch| patch.normal.dot(-Vec3::X) > 0.0));
+    assert!(patches.iter().all(|patch| patch.normal.dot(Vec3::X) > 0.0));
 }
 
 #[test]
@@ -313,10 +313,10 @@ fn nested_and_duplicate_source_surfaces_are_filtered() {
     let inner_instance = instance(&inner, Vec3::splat(0.375));
     let g = PreparedGeometry::prepare(&[outer_instance, inner_instance], config(0.125)).unwrap();
     let nested = g
-        .exposed_surface_patches(&[outer_instance, inner_instance], -Vec3::X, 0.01, 100_000)
+        .exposed_surface_patches(&[outer_instance, inner_instance], Vec3::X, 0.01, 100_000)
         .unwrap();
     let duplicate = g
-        .exposed_surface_patches(&[outer_instance, outer_instance], -Vec3::X, 0.01, 100_000)
+        .exposed_surface_patches(&[outer_instance, outer_instance], Vec3::X, 0.01, 100_000)
         .unwrap();
     assert_eq!(nested.len(), 2);
     assert_eq!(duplicate.len(), 2);
@@ -330,7 +330,7 @@ fn diagonal_flow_keeps_windward_surface_patches() {
     let patches = g
         .exposed_surface_patches(
             &[instance(&mesh, Vec3::ZERO)],
-            -Vec3::X - Vec3::Y,
+            Vec3::X + Vec3::Y,
             0.01,
             100_000,
         )
@@ -339,13 +339,23 @@ fn diagonal_flow_keeps_windward_surface_patches() {
 }
 
 #[test]
-fn exposed_surface_patches_are_empty_for_leeward_direction() {
+fn exposed_surface_patches_keep_only_upstream_windward_direction() {
     let mesh = cube();
     let g = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125)).unwrap();
-    let patches = g
+    let upstream = g
         .exposed_surface_patches(&[instance(&mesh, Vec3::ZERO)], Vec3::X, 0.01, 100_000)
         .unwrap();
-    assert_eq!(patches.len(), 2);
+    let downstream = g
+        .exposed_surface_patches(&[instance(&mesh, Vec3::ZERO)], -Vec3::X, 0.01, 100_000)
+        .unwrap();
+    assert_eq!(upstream.len(), 2);
+    assert_eq!(downstream.len(), 2);
+    assert!(upstream.iter().all(|patch| patch.normal.dot(Vec3::X) > 0.0));
+    assert!(
+        downstream
+            .iter()
+            .all(|patch| patch.normal.dot(-Vec3::X) > 0.0)
+    );
 }
 
 #[test]

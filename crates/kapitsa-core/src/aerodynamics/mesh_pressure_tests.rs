@@ -27,7 +27,7 @@ fn prepare(mesh: &TriangleMesh, direction: Vec3) -> PreparedSurfacePatches {
     let geometry = PreparedGeometry::prepare(
         &instances,
         GeometryConfig {
-            cell_size: 0.25,
+            cell_size: 0.1,
             max_cells: 100_000,
             max_work: 10_000_000,
             open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
@@ -42,8 +42,8 @@ fn prepare(mesh: &TriangleMesh, direction: Vec3) -> PreparedSurfacePatches {
 }
 
 fn plate() -> PreparedSurfacePatches {
-    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Z, Vec3::Y], vec![[0, 1, 2]]).unwrap();
-    prepare(&mesh, -Vec3::X)
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Z, Vec3::Y], vec![[0, 2, 1]]).unwrap();
+    prepare(&mesh, Vec3::X)
 }
 
 fn close(actual: Vec3, expected: Vec3) {
@@ -92,6 +92,44 @@ fn prepared_cube_has_opposing_drag_and_symmetric_com_moment() {
     close(result.force, -Vec3::X * 1_000_000.0);
     close(result.moment, Vec3::ZERO);
     assert!(result.force.dot(state.linear_velocity) < 0.0);
+}
+
+#[test]
+fn asymmetric_pyramid_nose_loads_windward_slopes_and_drags_at_nose() {
+    let mesh = TriangleMesh::new(
+        vec![
+            Vec3::new(1.0, 0.35, 0.15),
+            Vec3::new(0.0, -1.0, -0.5),
+            Vec3::new(0.0, 1.0, -0.5),
+            Vec3::new(0.0, 1.0, 0.5),
+            Vec3::new(0.0, -1.0, 0.5),
+        ],
+        vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [0, 4, 3],
+            [0, 1, 4],
+            [1, 2, 3],
+            [1, 3, 4],
+        ],
+    )
+    .unwrap();
+    let patches = prepare(&mesh, Vec3::X);
+    assert_eq!(patches.len(), 4);
+    assert!(patches.iter().all(|patch| patch.normal.x > 0.0));
+    assert!(patches.iter().all(|patch| patch.center.x > 0.0));
+    let result = evaluate_prepared_mesh(
+        &patches,
+        PressureFlow {
+            center_of_mass: Vec3::new(0.2, 0.0, 0.0),
+            linear_velocity: Vec3::X * 1000.0,
+            ..flow()
+        },
+    )
+    .unwrap();
+    assert!(result.force.x < 0.0);
+    assert!(result.force.length() > 0.0);
+    assert!(result.moment.length() > 0.0);
 }
 
 #[test]
@@ -154,7 +192,7 @@ fn prepared_wrench_rotates_with_motion_and_ignores_world_translation() {
 fn prepared_wrench_matches_explicit_patch_sum_with_wind_and_rotation() {
     let mesh = TriangleMesh::new(
         vec![Vec3::ZERO, Vec3::Z, Vec3::Y, Vec3::Y + Vec3::Z],
-        vec![[0, 1, 2], [1, 3, 2]],
+        vec![[0, 2, 1], [1, 2, 3]],
     )
     .unwrap();
     let patches = prepare(&mesh, -Vec3::X);
@@ -264,7 +302,7 @@ fn prepared_wrench_preserves_vacuum_mach_and_input_errors() {
 fn finite_patch_loads_that_overflow_the_sum_are_rejected() {
     let mesh = TriangleMesh::new(
         vec![Vec3::ZERO, Vec3::Z, Vec3::Y * 2.0, Vec3::Y * 2.0 + Vec3::Z],
-        vec![[0, 1, 2], [1, 3, 2]],
+        vec![[0, 2, 1], [1, 2, 3]],
     )
     .unwrap();
     let patches = prepare(&mesh, -Vec3::X);

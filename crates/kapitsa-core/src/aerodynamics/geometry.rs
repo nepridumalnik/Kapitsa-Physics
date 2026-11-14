@@ -554,7 +554,9 @@ impl PreparedGeometry {
         if !direction.is_finite() || !epsilon.is_finite() || epsilon <= 0.0 {
             return Err(GeometryError::InvalidGeometry);
         }
-        let incoming = direction
+        // Direction points from a patch toward its upstream/oncoming source.
+        // The fluid velocity itself is the opposite direction.
+        let upstream = direction
             .try_normalize()
             .ok_or(GeometryError::InvalidGeometry)?;
         let triangles = Self::surface_triangles(instances)?;
@@ -572,7 +574,7 @@ impl PreparedGeometry {
         let mut work = 0usize;
         for triangle in triangles {
             let center = (triangle.vertices[0] + triangle.vertices[1] + triangle.vertices[2]) / 3.0;
-            if triangle.normal.dot(incoming) <= 0.0 {
+            if triangle.normal.dot(upstream) <= 0.0 {
                 continue;
             }
             work = work
@@ -581,7 +583,7 @@ impl PreparedGeometry {
             if work > max_work {
                 return Err(GeometryError::WorkBudgetExceeded);
             }
-            if self.ray_hits_union(center, incoming, epsilon) {
+            if self.ray_hits_union(center, -upstream, epsilon) {
                 continue;
             }
             let duplicate = patches.iter().position(|patch: &PreparedSurfacePatch| {

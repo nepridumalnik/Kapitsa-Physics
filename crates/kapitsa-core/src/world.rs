@@ -2067,7 +2067,7 @@ impl PhysicsWorld {
                     .transform()
                     .rotation()
                     .conjugate()
-                    .rotate_vector(-relative)
+                    .rotate_vector(relative)
                     .ok_or(StepError::Aerodynamics {
                         body_id,
                         cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
