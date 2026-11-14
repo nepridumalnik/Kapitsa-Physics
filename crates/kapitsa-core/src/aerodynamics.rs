@@ -23,6 +23,7 @@ pub enum Aerodynamics {
     #[default]
     None,
     Simple(AerodynamicProperties),
+    Wing(wing::WingSurface),
     Mesh(crate::shape::TriangleMesh),
     Colliders,
 }
@@ -32,6 +33,7 @@ impl fmt::Debug for Aerodynamics {
         match self {
             Self::None => formatter.write_str("None"),
             Self::Simple(properties) => formatter.debug_tuple("Simple").field(properties).finish(),
+            Self::Wing(surface) => formatter.debug_tuple("Wing").field(surface).finish(),
             Self::Mesh(_) => formatter.write_str("Mesh(..)"),
             Self::Colliders => formatter.write_str("Colliders"),
         }
@@ -292,6 +294,7 @@ impl AerodynamicForce {
 pub enum AerodynamicsError {
     Geometry(geometry::GeometryError),
     Pressure(pressure::PressureError),
+    Wing(wing::WingError),
     UnsupportedModel,
     InvalidTessellation,
     TessellationBudgetExceeded,
@@ -313,6 +316,7 @@ impl fmt::Display for AerodynamicsError {
         let message = match self {
             Self::Geometry(error) => return write!(formatter, "{error}"),
             Self::Pressure(error) => return write!(formatter, "{error}"),
+            Self::Wing(error) => return write!(formatter, "{error}"),
             Self::UnsupportedModel => "this aerodynamic model is not implemented",
             Self::InvalidTessellation => "invalid collider tessellation parameters",
             Self::TessellationBudgetExceeded => "collider tessellation triangle budget exceeded",
@@ -337,6 +341,7 @@ impl std::error::Error for AerodynamicsError {
         match self {
             Self::Geometry(error) => Some(error),
             Self::Pressure(error) => Some(error),
+            Self::Wing(error) => Some(error),
             _ => None,
         }
     }

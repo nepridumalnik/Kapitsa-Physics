@@ -120,8 +120,14 @@ velocity relative to air, `alpha = atan2(-v_z, v_x)`: a nose-up wing in
 horizontal flight has positive incidence. Point velocity includes rotation
 and wind. Physical sideslip and reversed flow are unsupported; spanwise
 components within 64 machine epsilons of planar speed are discarded solely
-to tolerate rigid-transform roundoff. This evaluator is not yet registered
-as a world surface and does not exclude wing geometry from hull loads.
+to tolerate rigid-transform roundoff. `Aerodynamics::Wing(surface)` enables
+this model for a body's primary loads in ordinary and sharded world steps.
+Atmosphere is sampled at the wing application point; sound speed uses the
+world's explicit uniform setting. Errors retain `AerodynamicsError::Wing`
+and step rollback semantics. Cluster conversion rejects this model until
+part-owned wing transfer/rebasing is supported; it must not silently lose loads.
+The wing does not exclude geometry from hull loads, and timestep convergence
+must be checked (there is no implicit large-step wing stabilizer).
 
 `aerodynamics::wing::FiniteWing` provides an independent coefficient primitive
 for attached incompressible flow. It uses a thin-airfoil slope of `2 pi`, the

@@ -47,6 +47,10 @@ pub struct WingSurface {
 }
 
 impl WingSurface {
+    pub fn local_transform(self) -> crate::transform::Transform {
+        self.local_transform
+    }
+
     pub fn new(
         model: FiniteWing,
         local_transform: crate::transform::Transform,

@@ -1053,3 +1053,36 @@ fn mesh_pressure_errors_preserve_cause_and_motion_in_all_world_paths() {
     }
 }
 
+
+#[test]
+fn wing_world_loads_and_failures_match_between_step_paths() {
+    use crate::aerodynamics::{wing::{FiniteWing, WingSurface, WingError}, AerodynamicsError};
+    for sharded in [false, true] {
+        for speed in [50.0, 500.0] {
+            let mut body = RigidBody::new_dynamic(Transform::identity(), MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY).unwrap()).unwrap();
+            body.set_linear_velocity(Vec3::new(speed, 0.0, -speed * 0.1)).unwrap();
+            body.set_aerodynamics(Aerodynamics::Wing(WingSurface::new(
+                FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2).unwrap(), Transform::identity(), 2.0,
+            ).unwrap()));
+            let mut world = PhysicsWorld::new();
+            let id = world.add_body(body).unwrap();
+            world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO).unwrap()));
+            let before = world.body(id).unwrap().motion();
+            let result = if sharded {
+                world.step_with_shards(1e-4, &mut vec![Vec::new(); 2], &crate::execution::SequentialExecutor, 1)
+            } else { world.step(1e-4) };
+            if speed == 50.0 {
+                result.unwrap();
+                let velocity = world.body(id).unwrap().state().linear_velocity();
+                assert!(velocity.z > -5.0);
+                // Lift can have a positive X component while descending;
+                // drag must remove energy, not necessarily reduce world X.
+                assert!(velocity.length_squared() < Vec3::new(50.0, 0.0, -5.0).length_squared());
+            } else {
+                assert_eq!(result, Err(super::StepError::Aerodynamics { body_id: id, cause: AerodynamicsError::Wing(WingError::UnsupportedFlow) }));
+                assert_eq!(world.body(id).unwrap().motion(), before);
+            }
+        }
+    }
+}
+

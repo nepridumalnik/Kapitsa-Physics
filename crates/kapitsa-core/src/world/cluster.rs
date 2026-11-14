@@ -143,6 +143,9 @@ impl PhysicsWorld {
         if body_entry.cluster.is_some() {
             return Err(ClusterError::AlreadyClustered);
         }
+        if matches!(body_entry.body.aerodynamics(), Aerodynamics::Wing(_)) {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
         let mesh_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::Mesh(_));
         let collider_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::Colliders);
         if body_entry.body.physics().body_type() == BodyType::Dynamic
@@ -1578,7 +1581,7 @@ impl PhysicsWorld {
         let primary = match body.aerodynamics() {
             Aerodynamics::None => None,
             Aerodynamics::Simple(properties) => Some(AerodynamicSurface::new(*properties)),
-            Aerodynamics::Mesh(_) | Aerodynamics::Colliders => {
+            Aerodynamics::Mesh(_) | Aerodynamics::Colliders | Aerodynamics::Wing(_) => {
                 return Err(ClusterError::UnsupportedGeometry);
             }
         };
