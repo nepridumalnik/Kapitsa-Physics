@@ -427,4 +427,30 @@ mod tests {
             Err(WingError::InvalidFlow)
         );
     }
+
+    #[test]
+    fn world_translation_is_not_inverted_for_vector_only_evaluation() {
+        use crate::transform::Transform;
+        use kapitsa_math::{Quat, Vec3};
+        let surface = WingSurface::new(wing(8.0), Transform::identity(), 2.0).unwrap();
+        let rotation = Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_4).unwrap();
+        let transform = Transform::new(Vec3::new(f64::MAX, f64::MAX, 0.0), rotation).unwrap();
+        let flow = super::super::pressure::PressureFlow {
+            atmosphere: super::super::AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
+            sound_speed: 340.0,
+            transform,
+            center_of_mass: Vec3::ZERO,
+            linear_velocity: transform.transform_vector(Vec3::new(50.0, 0.0, -5.0)),
+            angular_velocity: Vec3::ZERO,
+        };
+        assert!(transform.inverse().is_err());
+        let translated = surface.evaluate(flow).unwrap();
+        let origin = surface
+            .evaluate(super::super::pressure::PressureFlow {
+                transform: Transform::new(Vec3::ZERO, rotation).unwrap(),
+                ..flow
+            })
+            .unwrap();
+        assert_eq!(translated, origin);
+    }
 }
