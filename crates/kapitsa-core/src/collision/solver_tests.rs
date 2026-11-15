@@ -247,6 +247,45 @@ fn friction_limits_tangent_impulses_and_creates_angular_response() {
 }
 
 #[test]
+fn accumulated_contact_vector_matches_velocity_change_with_warm_start()
+-> Result<(), Box<dyn std::error::Error>> {
+    for warm in [false, true] {
+        let initial_velocity = Vec3::new(2.0, -1.0, 0.5);
+        let (mut bodies, mut manifolds) = ball_on_plane(initial_velocity);
+        manifolds[0].material.static_friction = 0.6;
+        manifolds[0].material.dynamic_friction = 0.5;
+        let contact = manifolds[0].manifold.point_mut(0).ok_or("contact")?;
+        if warm {
+            contact.normal_impulse = 0.4;
+            contact.tangent_impulse = [0.05, -0.03];
+        }
+        let position = bodies[1]
+            .body()
+            .state()
+            .transform()
+            .transform_point(contact.local_b);
+        let center = bodies[1].body().world_center_of_mass()?.ok_or("center")?;
+        let mut solver = SolverWorkspace::default();
+        solver.solve(
+            &mut bodies,
+            &mut manifolds,
+            super::CollisionConfig::default(),
+        )?;
+        let contact = manifolds[0].manifold.point(0).ok_or("solved contact")?;
+        let (tangent_a, tangent_b) = super::tangent_basis(contact.normal)?;
+        let impulse = contact.normal * contact.normal_impulse
+            + tangent_a * contact.tangent_impulse[0]
+            + tangent_b * contact.tangent_impulse[1];
+        assert!(contact.normal_impulse > 0.0);
+        assert!(contact.tangent_impulse[0].hypot(contact.tangent_impulse[1]) > 0.0);
+        let state = bodies[1].body().state();
+        assert!((state.linear_velocity() - initial_velocity - impulse).length() < 1e-12);
+        assert!((state.angular_velocity() - (position - center).cross(impulse)).length() < 1e-12);
+    }
+    Ok(())
+}
+
+#[test]
 fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
     fn solve(warm_start: bool) -> (f64, f64) {
         let pair = pair();
