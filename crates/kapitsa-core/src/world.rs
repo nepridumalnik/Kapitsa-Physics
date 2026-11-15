@@ -647,6 +647,8 @@ pub struct PhysicsWorld {
     raw_simple_buffers: Vec<Vec<RawSimpleSurfaceWrench>>,
     contact_impulses_published: Vec<ContactImpulse>,
     contact_impulses_pending: Vec<ContactImpulse>,
+    contact_impulses_omitted_published: usize,
+    contact_impulses_omitted_pending: usize,
     part_hull_buffers: Vec<Vec<PartHullWrench>>,
     part_wing_buffers: Vec<Vec<PartWingWrench>>,
     owner_pressure: Option<HashMap<BodyId, crate::aerodynamics::pressure::OwnerPressureWorkspace>>,
@@ -705,6 +707,13 @@ impl PhysicsWorld {
     /// Low-level shard commits do not publish this snapshot.
     pub fn contact_impulses(&self) -> &[ContactImpulse] {
         &self.contact_impulses_published
+    }
+
+    /// Number of staged contact points missing velocity-solve data in the
+    /// last successful full step. Zero does not establish completeness of
+    /// other solver paths, CCD replay, or the overall part-load balance.
+    pub fn contact_impulses_omitted_points(&self) -> usize {
+        self.contact_impulses_omitted_published
     }
 
     /// Part-targeted persistent-source contributions from the last successful
@@ -808,6 +817,8 @@ impl PhysicsWorld {
             raw_simple_buffers: Vec::new(),
             contact_impulses_published: Vec::new(),
             contact_impulses_pending: Vec::new(),
+            contact_impulses_omitted_published: 0,
+            contact_impulses_omitted_pending: 0,
             part_hull_buffers: Vec::new(),
             part_wing_buffers: Vec::new(),
             owner_pressure: None,
@@ -1782,6 +1793,7 @@ impl PhysicsWorld {
         operation: impl FnOnce(&mut Self) -> Result<T, StepError>,
     ) -> Result<T, StepError> {
         self.contact_impulses_pending.clear();
+        self.contact_impulses_omitted_pending = 0;
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
         if let Err((source_id, cause)) = self.prepare_force_source_updates() {
@@ -1815,6 +1827,10 @@ impl PhysicsWorld {
             std::mem::swap(
                 &mut self.contact_impulses_published,
                 &mut self.contact_impulses_pending,
+            );
+            std::mem::swap(
+                &mut self.contact_impulses_omitted_published,
+                &mut self.contact_impulses_omitted_pending,
             );
             self.recycle_aerodynamics_updates();
             self.clear_gravity_updates();
@@ -1961,6 +1977,7 @@ impl PhysicsWorld {
 
     fn stage_contact_impulses(&mut self) -> Result<(), CollisionError> {
         self.contact_impulses_pending.clear();
+        self.contact_impulses_omitted_pending = 0;
         let context = &self.collision_system.context;
         let count = context
             .ccd_solved_manifolds
@@ -1991,6 +2008,8 @@ impl PhysicsWorld {
                             impulse_on_b,
                             ccd,
                         });
+                    } else {
+                        self.contact_impulses_omitted_pending += 1;
                     }
                 }
             }

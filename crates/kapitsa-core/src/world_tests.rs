@@ -71,6 +71,42 @@ fn replay_discards_only_affected_ccd_solves() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn contact_snapshot_counts_missing_velocity_data_without_publishing_early()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        ids.push(world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?);
+    }
+    let pair = CollisionPair::new(ids[0], ids[1]).ok_or("pair")?;
+    let point = crate::collision::ContactPoint::from_world(
+        &Transform::identity(),
+        &Transform::identity(),
+        Vec3::ZERO,
+        Vec3::ZERO,
+        Vec3::X,
+        0.0,
+        0,
+    )?;
+    let mut manifold = crate::collision::ContactManifold::new(pair);
+    manifold.insert(point, Vec3::ZERO)?;
+    world.collision_system.context.manifolds.push(manifold);
+    world.stage_contact_impulses()?;
+    assert_eq!(world.contact_impulses_omitted_pending, 1);
+    assert!(world.contact_impulses_pending.is_empty());
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    world.collision_system.abort_step();
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    world.step(0.01)?;
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    Ok(())
+}
+
+#[test]
 fn resting_contact_keeps_the_previous_ccd_impact_witness() -> Result<(), Box<dyn std::error::Error>>
 {
     let mut world = PhysicsWorld::new();
