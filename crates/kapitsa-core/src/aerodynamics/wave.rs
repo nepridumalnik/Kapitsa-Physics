@@ -18,6 +18,7 @@ pub enum WaveDragError {
     ArithmeticOverflow,
     PrecisionLoss,
     WorkLimitExceeded,
+    AllocationFailed,
 }
 
 impl std::fmt::Display for WaveDragError {
@@ -79,6 +80,82 @@ impl WaveMachCurve {
         }
         Err(WaveDragError::UnsupportedMach)
     }
+}
+
+/// Computes uniformly spaced `dA/dx` samples from voxel cross sections.
+///
+/// `cell_size` is the spacing in metres and `smoothing_radius` is the radius
+/// of an explicitly chosen centered box filter in cells. Zeros are padded
+/// outside the input, and the returned array includes that padding; its first
+/// and last derivatives are zero. The moving average is applied to areas
+/// before centered differencing. Work and output are bounded by 2048 intervals.
+///
+/// Voxel sections overestimate area and differentiating them amplifies noise.
+/// The caller must choose and validate the smoothing scale and grid resolution
+/// for the shape; this routine does not establish axisymmetry, slenderness,
+/// convergence, or the validity of a wave-drag calculation.
+pub fn area_slopes_from_sections(
+    sections: &[super::geometry::GeometrySection],
+    cell_size: f64,
+    smoothing_radius: usize,
+) -> Result<Vec<f64>, WaveDragError> {
+    if sections.is_empty()
+        || !cell_size.is_finite()
+        || cell_size <= 0.0
+        || sections
+            .iter()
+            .any(|section| !section.area.is_finite() || section.area < 0.0)
+    {
+        return Err(WaveDragError::InvalidInput);
+    }
+    let padding = smoothing_radius
+        .checked_add(2)
+        .ok_or(WaveDragError::WorkLimitExceeded)?;
+    let length = padding
+        .checked_mul(2)
+        .and_then(|n| sections.len().checked_add(n))
+        .ok_or(WaveDragError::WorkLimitExceeded)?;
+    if length > 2049 {
+        return Err(WaveDragError::WorkLimitExceeded);
+    }
+    let width = smoothing_radius
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(1))
+        .ok_or(WaveDragError::WorkLimitExceeded)?;
+    let mut smoothed = Vec::new();
+    smoothed
+        .try_reserve_exact(length)
+        .map_err(|_| WaveDragError::AllocationFailed)?;
+    for index in 0..length {
+        let mut area = 0.0;
+        for offset in 0..width {
+            if let Some(source) = index
+                .checked_add(offset)
+                .and_then(|v| v.checked_sub(smoothing_radius))
+                .and_then(|v| v.checked_sub(padding))
+                .and_then(|v| sections.get(v))
+            {
+                area += source.area / width as f64;
+            }
+        }
+        if !area.is_finite() {
+            return Err(WaveDragError::ArithmeticOverflow);
+        }
+        smoothed.push(area);
+    }
+    let mut slopes = Vec::new();
+    slopes
+        .try_reserve_exact(length)
+        .map_err(|_| WaveDragError::AllocationFailed)?;
+    slopes.push(0.0);
+    for pair in smoothed.windows(3) {
+        let delta = pair[2] - pair[0];
+        let slope = super::hull::scaled_product(&[delta.abs(), 0.5], cell_size)
+            .map_err(|_| WaveDragError::ArithmeticOverflow)?;
+        slopes.push(slope.copysign(delta));
+    }
+    slopes.push(0.0);
+    Ok(slopes)
 }
 
 /// Calculates wave drag in newtons from equally spaced samples of `dA/dx`.
@@ -170,8 +247,57 @@ pub fn wave_drag(
 
 #[cfg(test)]
 mod tests {
-    use super::{WaveDragError, WaveMachCurve, wave_drag};
+    use super::{WaveDragError, WaveMachCurve, area_slopes_from_sections, wave_drag};
+    use crate::aerodynamics::geometry::GeometrySection;
     use std::f64::consts::PI;
+
+    #[test]
+    fn section_wave_drag_converges_for_smooth_slender_body() -> Result<(), WaveDragError> {
+        let mut errors = Vec::new();
+        for n in [128, 256, 512] {
+            let sections: Vec<_> = (0..n)
+                .map(|i| {
+                    let x = (i as f64 + 0.5) / n as f64;
+                    GeometrySection {
+                        area: (128.0 / (3.0 * PI)) * (x * (1.0 - x)).powf(1.5),
+                        centroid: None,
+                    }
+                })
+                .collect();
+            let slopes = area_slopes_from_sections(&sections, 1.0 / n as f64, 1)?;
+            assert_eq!(slopes.first(), Some(&0.0));
+            assert_eq!(slopes.last(), Some(&0.0));
+            let drag = wave_drag(&slopes, 1.0, 2.0, 1.0)?;
+            errors.push((drag - 256.0 / PI).abs());
+        }
+        assert!(errors[2] < errors[1] && errors[1] < errors[0], "{errors:?}");
+        assert!(errors[2] < (256.0 / PI) * 0.02, "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn section_smoothing_validates_resources_and_numeric_input() {
+        let invalid = [GeometrySection {
+            area: -1.0,
+            centroid: None,
+        }];
+        assert_eq!(
+            area_slopes_from_sections(&invalid, 1.0, 0),
+            Err(WaveDragError::InvalidInput)
+        );
+        let valid = [GeometrySection {
+            area: 1.0,
+            centroid: None,
+        }];
+        assert_eq!(
+            area_slopes_from_sections(&valid, 0.0, 0),
+            Err(WaveDragError::InvalidInput)
+        );
+        assert_eq!(
+            area_slopes_from_sections(&valid, 1.0, usize::MAX),
+            Err(WaveDragError::WorkLimitExceeded)
+        );
+    }
 
     #[test]
     fn mach_curve_validates_data_and_endpoints() -> Result<(), WaveDragError> {

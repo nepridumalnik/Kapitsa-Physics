@@ -434,6 +434,47 @@ impl HullSection {
         Ok(self)
     }
 
+    /// Configures wave drag from one axis of a prepared voxel union.
+    ///
+    /// `axis` selects the body-local X, Y or Z sections (0, 1 or 2).
+    /// `smoothing_radius` is an explicit box-filter radius in cells. The caller
+    /// must choose the force application point and validate resolution,
+    /// smoothing and applicability
+    /// to a slender axisymmetric body. No automatic center of pressure or Mach
+    /// transition is inferred, and geometry changes require reconfiguration.
+    pub fn with_voxel_wave_drag(
+        self,
+        geometry: &super::geometry::PreparedGeometry,
+        axis: usize,
+        smoothing_radius: usize,
+    ) -> Result<Self, HullError> {
+        let sections = geometry
+            .sections()
+            .get(axis)
+            .ok_or(HullError::InvalidParameters)?;
+        let expected_axis = match axis {
+            0 => Vec3::X,
+            1 => Vec3::Y,
+            2 => Vec3::Z,
+            _ => return Err(HullError::InvalidParameters),
+        };
+        let actual_axis = self.local_transform.transform_vector(self.axis);
+        let misalignment = actual_axis
+            .checked_cross(expected_axis)
+            .and_then(Vec3::checked_length)
+            .ok_or(HullError::ArithmeticOverflow)?;
+        if misalignment > 64.0 * f64::EPSILON {
+            return Err(HullError::InvalidParameters);
+        }
+        let slopes = super::wave::area_slopes_from_sections(
+            sections,
+            geometry.cell_size(),
+            smoothing_radius,
+        )
+        .map_err(HullError::Wave)?;
+        self.with_wave_drag(&slopes)
+    }
+
     /// Attach caller-supplied Mach multipliers to the wave-drag factor.
     ///
     /// The curve applies only when wave drag has also been configured. It can

@@ -429,6 +429,22 @@ zero multiplier contributes no wave force, and nonzero multipliers still require
 aligned flow. This is a data-driven transition, not a predictive transonic
 closure; the caller must establish the applicability of the supplied data.
 
+### Explicit voxel sections for wave drag
+
+`HullSection::with_voxel_wave_drag(&prepared, axis, smoothing_radius)` can
+configure the same slender-body wave-drag model from a prepared geometry union.
+The selected axis must match the section's body-local axis. A centered box
+filter with the caller-specified radius is applied before centered area
+differencing; padding supplies zero slopes at both ends. The section's origin
+remains the caller-selected application point. This is a one-time preparation:
+geometry or topology changes require constructing a new configuration.
+
+Voxel occupancy conservatively thickens geometry, and differentiation can
+amplify grid noise. Callers must check convergence under grid and smoothing
+refinement and establish that the shape and flow meet the slender axisymmetric
+assumptions. A smooth analytic area distribution has a convergence test; this
+is not validation of arbitrary voxelized vessels or wave loads.
+
 ## Numerical validation requirements
 
 World pressure failures retain their original `PressureError` in

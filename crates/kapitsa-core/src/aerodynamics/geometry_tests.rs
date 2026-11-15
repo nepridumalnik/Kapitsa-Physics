@@ -817,3 +817,49 @@ fn rotated_coplanar_retriangulation_preserves_union_pressure()
     }
     Ok(())
 }
+
+#[test]
+fn voxel_sections_configure_wave_drag_with_checked_axis() -> Result<(), Box<dyn std::error::Error>>
+{
+    use crate::aerodynamics::{
+        AtmosphericState,
+        hull::{HullError, HullSection},
+        pressure::PressureFlow,
+        wave,
+    };
+    let mesh = cube();
+    let geometry = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125))?;
+    let section = HullSection::new(
+        Transform::identity(),
+        Vec3::X,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        None,
+    )?;
+    assert!(matches!(
+        section.clone().with_voxel_wave_drag(&geometry, 1, 1),
+        Err(HullError::InvalidParameters)
+    ));
+    assert!(matches!(
+        section.clone().with_voxel_wave_drag(&geometry, 3, 1),
+        Err(HullError::InvalidParameters)
+    ));
+    let configured = section.with_voxel_wave_drag(&geometry, 0, 1)?;
+    let slopes = wave::area_slopes_from_sections(&geometry.sections()[0], geometry.cell_size(), 1)?;
+    let expected = wave::wave_drag(&slopes, 1.0, 680.0, 340.0)?;
+    let result = configured.evaluate(PressureFlow {
+        atmosphere: AtmosphericState::new(1.0, Vec3::ZERO)?,
+        sound_speed: 340.0,
+        transform: Transform::identity(),
+        center_of_mass: Vec3::ZERO,
+        linear_velocity: Vec3::X * 680.0,
+        angular_velocity: Vec3::ZERO,
+    })?;
+    assert!(expected > 0.0);
+    assert!((result.force.x + expected).abs() < expected * 1e-12);
+    Ok(())
+}
