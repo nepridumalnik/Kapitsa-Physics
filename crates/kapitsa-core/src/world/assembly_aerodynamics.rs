@@ -37,6 +37,13 @@ pub(super) struct AssemblyAerodynamics {
 pub(super) struct PreparedAssembly {
     pub patches: Option<PreparedSurfacePatches>,
     pub wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
+    pub wing_visibility: Vec<PreparedWingVisibility>,
+}
+
+pub(super) struct PreparedWingVisibility {
+    pub part: PartId,
+    pub index: usize,
+    pub visibility: crate::aerodynamics::wing::WingVisibility,
 }
 
 impl PhysicsWorld {
@@ -343,6 +350,23 @@ pub(super) fn wave_configured(
     })
 }
 
+pub(super) fn shielding_configured(
+    entry: &BodyEntry,
+    parts: &DensePool<ClusterPart>,
+    geometry: Option<&HashMap<PartId, PartGeometry>>,
+) -> bool {
+    configured(entry, geometry)
+        && entry.cluster.as_ref().is_some_and(|cluster| {
+            cluster.parts().iter().any(|id| {
+                parts.get(id.dense).is_some_and(|part| {
+                    part.aerodynamic_wings
+                        .iter()
+                        .any(|wing| wing.has_footprint())
+                })
+            })
+        })
+}
+
 pub(super) fn configured(
     entry: &BodyEntry,
     geometry: Option<&HashMap<PartId, PartGeometry>>,
@@ -436,7 +460,45 @@ pub(super) fn prepare(
     } else {
         None
     };
-    if pressure_wind.is_none() && wave_model.is_none() {
+    let mut wing_requests = Vec::new();
+    for &part_id in cluster.parts() {
+        let part = parts
+            .get(part_id.dense)
+            .filter(|p| p.body() == body_id)
+            .ok_or_else(error)?;
+        let local = part.local_transform();
+        for (index, wing) in part.aerodynamic_wings.iter().enumerate() {
+            if !wing.has_footprint() {
+                continue;
+            }
+            let transform = entry
+                .body
+                .state()
+                .transform()
+                .compose(&local)
+                .map_err(|_| error())?;
+            let point = transform.transform_point(wing.local_transform().translation());
+            let state = atmosphere
+                .state_at(point)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            if state.density() == 0.0 {
+                continue;
+            }
+            if wing_requests.len() >= 1_000_000 {
+                return Err(StepError::Aerodynamics {
+                    body_id,
+                    cause: AerodynamicsError::Wing(
+                        crate::aerodynamics::wing::WingError::ShieldingBudgetExceeded,
+                    ),
+                });
+            }
+            wing_requests
+                .try_reserve(1)
+                .map_err(|_| geometry_error(GeometryError::AllocationFailed))?;
+            wing_requests.push((part_id, index, wing, local));
+        }
+    }
+    if pressure_wind.is_none() && wave_model.is_none() && wing_requests.is_empty() {
         return Ok(None);
     }
     let caches = caches.get_or_insert_with(HashMap::new);
@@ -483,6 +545,7 @@ pub(super) fn prepare(
             entry,
             pressure_wind,
             wave_model,
+            &wing_requests,
             caches.get_mut(&body_id).ok_or_else(error)?,
         )
         .map(Some)
@@ -590,8 +653,15 @@ pub(super) fn prepare(
         cache: PreparedGeometryCache::default(),
         wave_cache: PreparedGeometryCache::default(),
     };
-    let prepared = evaluate(body_id, entry, pressure_wind, wave_model, &mut candidate)
-        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+    let prepared = evaluate(
+        body_id,
+        entry,
+        pressure_wind,
+        wave_model,
+        &wing_requests,
+        &mut candidate,
+    )
+    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
     caches.insert(body_id, candidate);
     Ok(Some(prepared))
 }
@@ -601,6 +671,12 @@ fn evaluate(
     entry: &BodyEntry,
     pressure_wind: Option<Vec3>,
     wave_model: Option<(PartId, &crate::aerodynamics::wave::VoxelWave, Transform)>,
+    wing_requests: &[(
+        PartId,
+        usize,
+        &crate::aerodynamics::wing::WingSurface,
+        Transform,
+    )],
     prepared: &mut AssemblyAerodynamics,
 ) -> Result<PreparedAssembly, AerodynamicsError> {
     let mut instances = Vec::new();
@@ -656,6 +732,46 @@ fn evaluate(
     } else {
         None
     };
+    let mut wing_visibility = Vec::new();
+    if !wing_requests.is_empty() {
+        let config = pressure_geometry_config(&prepared.collider_parts);
+        let geometry = prepared
+            .cache
+            .prepare_instances(
+                GeometryCacheKey {
+                    body: body_id,
+                    geometry_version: 0,
+                    config_version: 1,
+                },
+                &instances,
+                config,
+            )
+            .map_err(AerodynamicsError::Geometry)?;
+        wing_visibility
+            .try_reserve_exact(wing_requests.len())
+            .map_err(|_| AerodynamicsError::Geometry(GeometryError::AllocationFailed))?;
+        let mut remaining = 1_000_000_usize;
+        for &(part, index, wing, local) in wing_requests {
+            let visibility = wing
+                .volume_visibility(geometry, local, remaining)
+                .map_err(AerodynamicsError::Wing)?
+                .ok_or(AerodynamicsError::Wing(
+                    crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
+                ))?;
+            remaining =
+                remaining
+                    .checked_sub(visibility.samples)
+                    .ok_or(AerodynamicsError::Wing(
+                        crate::aerodynamics::wing::WingError::ShieldingBudgetExceeded,
+                    ))?;
+            wing_visibility.push(PreparedWingVisibility {
+                part,
+                index,
+                visibility,
+            });
+        }
+        wing_visibility.sort_unstable_by_key(|entry| (entry.part, entry.index));
+    }
     let patches = match pressure_wind {
         Some(wind) => Some(
             evaluate_pressure(
@@ -671,7 +787,26 @@ fn evaluate(
         ),
         None => None,
     };
-    Ok(PreparedAssembly { patches, wave })
+    Ok(PreparedAssembly {
+        patches,
+        wave,
+        wing_visibility,
+    })
+}
+
+fn pressure_geometry_config(collider_parts: &[PartId]) -> GeometryConfig {
+    GeometryConfig {
+        cell_size: 0.125,
+        max_cells: 1_048_576,
+        max_work: 100_000_000,
+        open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+        weld_tolerance: if collider_parts.is_empty() {
+            None
+        } else {
+            Some(1e-10)
+        },
+        max_patch_work: 100_000_000,
+    }
 }
 
 fn evaluate_pressure(
@@ -683,18 +818,7 @@ fn evaluate_pressure(
     wave_only_parts: &[PartId],
     cache: &mut PreparedGeometryCache,
 ) -> Result<PreparedSurfacePatches, GeometryError> {
-    let config = GeometryConfig {
-        cell_size: 0.125,
-        max_cells: 1_048_576,
-        max_work: 100_000_000,
-        open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
-        weld_tolerance: if collider_parts.is_empty() {
-            None
-        } else {
-            Some(1e-10)
-        },
-        max_patch_work: 100_000_000,
-    };
+    let config = pressure_geometry_config(collider_parts);
     let geometry = cache.prepare_instances(
         GeometryCacheKey {
             body: body_id,
@@ -1220,6 +1344,151 @@ mod tests {
             let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
             assert!(velocity.y < 680.0 && velocity.y > 0.0);
             assert!(velocity.x.abs() < 1e-12);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wing_footprint_is_shielded_by_assembly_volume() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{
+            AerodynamicsTask,
+            wing::{FiniteWing, WingSurface},
+        };
+        for sharded in [false, true] {
+            let mut gains = Vec::new();
+            for (size, offset) in [(4.0, 0.0), (1.0, 0.0), (1.0, 10.0)] {
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                    1.2,
+                    Vec3::ZERO,
+                )?));
+                let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+                let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+                body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0))?;
+                let id = world.add_body(body)?;
+                let part = world.enable_cluster(id)?;
+                let wing = WingSurface::new(
+                    FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+                    Transform::identity(),
+                    4.0,
+                )?
+                .with_rectangular_footprint(Vec3::ZERO, 2.0, 2.0)?;
+                world.set_part_aerodynamic_wings(part, vec![wing])?;
+                let mut collider = crate::collider::Collider::new(
+                    crate::shape::Shape::Cuboid(crate::shape::Cuboid::new(size, size, size)?),
+                    Transform::new(Vec3::Y * offset, kapitsa_math::Quat::IDENTITY)?,
+                );
+                collider.set_mode(crate::collider::CollisionMode::Sensor);
+                world.add_part_collider(part, collider)?;
+                world.set_part_wave_source_colliders(part, true)?;
+                AerodynamicsTask.execute(&world)?;
+                world.fill_step_shards(&mut [Vec::new()])?;
+                if sharded {
+                    world.step_with_shards(
+                        1e-4,
+                        &mut [Vec::new(), Vec::new()],
+                        &SequentialExecutor,
+                        1,
+                    )?;
+                } else {
+                    world.step(1e-4)?;
+                }
+                gains.push(world.body(id).ok_or("body")?.state().linear_velocity().z + 5.0);
+            }
+            let blocked = *gains.first().ok_or("blocked")?;
+            let partial = *gains.get(1).ok_or("partial")?;
+            let clear = *gains.get(2).ok_or("clear")?;
+            assert!(blocked.abs() < 1e-12, "{gains:?}");
+            assert!(partial > 0.0 && partial < clear, "{gains:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wing_shielding_tracks_collider_and_footprint_edits() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use crate::aerodynamics::wing::{FiniteWing, WingSurface};
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+            1.2,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0))?;
+        let id = world.add_body(body)?;
+        let part = world.enable_cluster(id)?;
+        let model = FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?;
+        let wing = |center| -> Result<WingSurface, crate::aerodynamics::wing::WingError> {
+            WingSurface::new(model, Transform::identity(), 4.0)?
+                .with_rectangular_footprint(center, 2.0, 2.0)
+        };
+        world.set_part_aerodynamic_wings(part, vec![wing(Vec3::ZERO)?])?;
+        let mut collider = crate::collider::Collider::new(
+            crate::shape::Shape::Cuboid(crate::shape::Cuboid::new(4.0, 4.0, 4.0)?),
+            Transform::identity(),
+        );
+        collider.set_mode(crate::collider::CollisionMode::Sensor);
+        let collider_id = world.add_part_collider(part, collider)?;
+        world.set_part_wave_source_colliders(part, true)?;
+        world.step(1e-4)?;
+        let blocked = world.body(id).ok_or("body")?.state().linear_velocity().z;
+        world.set_part_collider_transform(
+            part,
+            collider_id,
+            Transform::new(Vec3::Y * 10.0, kapitsa_math::Quat::IDENTITY)?,
+        )?;
+        world.step(1e-4)?;
+        let clear = world.body(id).ok_or("body")?.state().linear_velocity().z;
+        assert!(clear > blocked);
+        world.set_part_aerodynamic_wings(part, vec![wing(Vec3::Y * 10.0)?])?;
+        world.step(1e-4)?;
+        let blocked_again = world.body(id).ok_or("body")?.state().linear_velocity().z;
+        assert!((blocked_again - clear).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn wing_shielding_budget_failure_rolls_back_world() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{
+            AerodynamicsError,
+            wing::{FiniteWing, WingError, WingSurface},
+        };
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::ZERO,
+            )?));
+            let mut body = RigidBody::new_dynamic(
+                Transform::identity(),
+                MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?,
+            )?;
+            body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0))?;
+            let id = world.add_body(body)?;
+            let part = world.enable_cluster(id)?;
+            let wing = WingSurface::new(
+                FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+                Transform::identity(),
+                1e12,
+            )?
+            .with_rectangular_footprint(Vec3::ZERO, 1e6, 1e6)?;
+            world.set_part_aerodynamic_wings(part, vec![wing])?;
+            world.set_part_wave_source_mesh(part, Some(plate()?))?;
+            let before = world.body(id).ok_or("body")?.motion();
+            let result = if sharded {
+                world.step_with_shards(1e-4, &mut [Vec::new()], &SequentialExecutor, 1)
+            } else {
+                world.step(1e-4)
+            };
+            assert!(matches!(
+                result,
+                Err(StepError::Aerodynamics {
+                    cause: AerodynamicsError::Wing(WingError::ShieldingBudgetExceeded),
+                    ..
+                })
+            ));
+            assert_eq!(world.body(id).ok_or("body")?.motion(), before);
         }
         Ok(())
     }

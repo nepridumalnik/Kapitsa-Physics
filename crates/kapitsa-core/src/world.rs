@@ -131,6 +131,9 @@ mod aerodynamics {
                     world.mesh_sound_speed,
                     voxel_wave.as_ref(),
                     patches.as_ref().and_then(|prepared| prepared.wave.as_ref()),
+                    patches
+                        .as_ref()
+                        .map(|prepared| prepared.wing_visibility.as_slice()),
                 )?;
             }
             Ok(())
@@ -286,6 +289,7 @@ struct AerodynamicsBodyUpdate {
     mesh_patches: Option<crate::aerodynamics::geometry::PreparedSurfacePatches>,
     voxel_wave: Option<crate::aerodynamics::hull::HullSection>,
     assembly_wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
+    wing_visibility: Option<Vec<assembly_aerodynamics::PreparedWingVisibility>>,
 }
 
 const FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT: usize = 128;
@@ -1696,6 +1700,7 @@ impl PhysicsWorld {
         mesh_sound_speed: f64,
         voxel_wave: Option<&crate::aerodynamics::hull::HullSection>,
         assembly_wave: Option<&(PartId, crate::aerodynamics::hull::HullSection)>,
+        wing_visibility: Option<&[assembly_aerodynamics::PreparedWingVisibility]>,
     ) -> Result<(), StepError> {
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
@@ -1816,13 +1821,18 @@ impl PhysicsWorld {
             .into_iter()
             .flat_map(|cluster| cluster.parts())
             .map(|id| {
-                parts
-                    .get(id.dense)
-                    .filter(|part| id.world == body_id.world && part.body() == body_id)
-                    .ok_or_else(error)
+                (
+                    *id,
+                    parts
+                        .get(id.dense)
+                        .filter(|part| id.world == body_id.world && part.body() == body_id)
+                        .ok_or_else(error),
+                )
             });
         let mut evaluate_wing = |surface: &crate::aerodynamics::wing::WingSurface,
-                                 local: crate::transform::Transform|
+                                 local: crate::transform::Transform,
+                                 visibility: Option<crate::aerodynamics::wing::WingVisibility>,
+                                 visibility_required: bool|
          -> Result<(), StepError> {
             let transform = body
                 .state()
@@ -1841,6 +1851,14 @@ impl PhysicsWorld {
                 .state_at(point)
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             if atmosphere.density() != 0.0 {
+                if visibility_required && visibility.is_none() {
+                    return Err(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::Wing(
+                            crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
+                        ),
+                    });
+                }
                 let flow = crate::aerodynamics::pressure::PressureFlow {
                     atmosphere,
                     sound_speed: atmosphere.sound_speed().unwrap_or(mesh_sound_speed),
@@ -1849,24 +1867,49 @@ impl PhysicsWorld {
                     linear_velocity: body.state().linear_velocity(),
                     angular_velocity: body.state().angular_velocity(),
                 };
-                let wrench = surface
-                    .evaluate(flow)
-                    .map_err(|cause| StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::Wing(cause),
-                    })?;
+                let wrench =
+                    surface
+                        .evaluate_with_visibility(flow, visibility)
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Wing(cause),
+                        })?;
                 body.apply_force(wrench.force).map_err(|_| error())?;
                 body.apply_torque(wrench.moment).map_err(|_| error())?;
             }
             Ok(())
         };
         for surface in wings {
-            evaluate_wing(surface, crate::transform::Transform::identity())?;
+            evaluate_wing(
+                surface,
+                crate::transform::Transform::identity(),
+                None,
+                false,
+            )?;
         }
-        for part in part_wings {
+        for (part_id, part) in part_wings {
             let part = part?;
-            for surface in &part.aerodynamic_wings {
-                evaluate_wing(surface, part.local_transform())?;
+            for (index, surface) in part.aerodynamic_wings.iter().enumerate() {
+                let visibility = if surface.has_footprint() {
+                    wing_visibility
+                        .and_then(|values| {
+                            values
+                                .binary_search_by_key(&(part_id, index), |value| {
+                                    (value.part, value.index)
+                                })
+                                .ok()
+                                .and_then(|i| values.get(i))
+                        })
+                        .map(|value| value.visibility)
+                } else {
+                    None
+                };
+                evaluate_wing(
+                    surface,
+                    part.local_transform(),
+                    visibility,
+                    surface.has_footprint() && wing_visibility.is_some(),
+                )?;
             }
         }
         let part_hulls = cluster
@@ -2300,9 +2343,13 @@ impl PhysicsWorld {
                 &mut self.assembly_aerodynamics,
                 atmosphere,
             )?;
-            let (mut mesh_patches, assembly_wave) = match assembly_prepared {
-                Some(prepared) => (prepared.patches, prepared.wave),
-                None => (None, None),
+            let (mut mesh_patches, assembly_wave, wing_visibility) = match assembly_prepared {
+                Some(prepared) => (
+                    prepared.patches,
+                    prepared.wave,
+                    Some(prepared.wing_visibility),
+                ),
+                None => (None, None, None),
             };
             // Only the primary geometry samples the COM. Additional surfaces
             // still evaluate their own positions, including when the COM is in vacuum.
@@ -2463,6 +2510,7 @@ impl PhysicsWorld {
                 mesh_patches,
                 voxel_wave,
                 assembly_wave,
+                wing_visibility,
             });
         }
 
@@ -2494,6 +2542,7 @@ impl PhysicsWorld {
                                     self.mesh_sound_speed,
                                     update.voxel_wave.as_ref(),
                                     update.assembly_wave.as_ref(),
+                                    update.wing_visibility.as_deref(),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -3713,10 +3762,14 @@ impl PhysicsWorld {
                             };
                             let mut temporary_assembly = None;
                             let local_assembly = if staged.is_none()
-                                && assembly_aerodynamics::wave_configured(
+                                && (assembly_aerodynamics::wave_configured(
                                     entry,
                                     self.part_aerodynamic_geometry.as_ref(),
-                                ) {
+                                ) || assembly_aerodynamics::shielding_configured(
+                                    entry,
+                                    &self.parts,
+                                    self.part_aerodynamic_geometry.as_ref(),
+                                )) {
                                 assembly_aerodynamics::prepare(
                                     step.body_id,
                                     entry,
@@ -3758,6 +3811,15 @@ impl PhysicsWorld {
                                                     local_assembly
                                                         .as_ref()
                                                         .and_then(|prepared| prepared.wave.as_ref())
+                                                }),
+                                            staged
+                                                .and_then(|update| {
+                                                    update.wing_visibility.as_deref()
+                                                })
+                                                .or_else(|| {
+                                                    local_assembly.as_ref().map(|prepared| {
+                                                        prepared.wing_visibility.as_slice()
+                                                    })
                                                 }),
                                         )
                                     })

@@ -942,3 +942,59 @@ fn preflight_counts_triangle_bounds_and_enforces_budget() -> Result<(), Box<dyn 
     ));
     Ok(())
 }
+
+#[test]
+fn wing_volume_visibility_resolves_full_partial_and_clear_footprints()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::wing::{FiniteWing, WingError, WingSurface};
+    let mesh = cube();
+    let geometry = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125))?;
+    let model = FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.2)?;
+    let inside = WingSurface::new(model, Transform::identity(), 0.0625)?
+        .with_rectangular_footprint(Vec3::new(0.5, 0.5, 0.5), 0.25, 0.25)?;
+    let visibility = inside
+        .volume_visibility(&geometry, Transform::identity(), 1_000_000)?
+        .ok_or("visibility")?;
+    assert_eq!(visibility.fraction, 0.0);
+    let partial = WingSurface::new(model, Transform::identity(), 4.0)?.with_rectangular_footprint(
+        Vec3::new(0.0, 0.0, 0.5),
+        2.0,
+        2.0,
+    )?;
+    let visibility = partial
+        .volume_visibility(&geometry, Transform::identity(), 1_000_000)?
+        .ok_or("visibility")?;
+    assert!(visibility.fraction > 0.5 && visibility.fraction < 0.9);
+    assert!(visibility.offset.x < 0.0 && visibility.offset.y < 0.0);
+    let rotation = Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_2).ok_or("rotation")?;
+    let part_transform = Transform::new(Vec3::ZERO, rotation)?;
+    let rotated = partial
+        .volume_visibility(&geometry, part_transform, 1_000_000)?
+        .ok_or("visibility")?;
+    assert_eq!(rotated.fraction, visibility.fraction);
+    assert!((part_transform.transform_vector(rotated.offset) - visibility.offset).length() < 1e-12);
+    let flow = crate::aerodynamics::pressure::PressureFlow {
+        atmosphere: crate::aerodynamics::AtmosphericState::new(1.2, Vec3::ZERO)?,
+        sound_speed: 340.0,
+        transform: Transform::identity(),
+        center_of_mass: Vec3::ZERO,
+        linear_velocity: Vec3::new(50.0, 0.0, -5.0),
+        angular_velocity: Vec3::ZERO,
+    };
+    let full = partial.evaluate(flow)?;
+    let exposed = partial.evaluate_with_visibility(flow, Some(visibility))?;
+    assert!((exposed.force - full.force * visibility.fraction).length() < 1e-10);
+    assert!((exposed.moment - visibility.offset.cross(exposed.force)).length() < 1e-10);
+    assert!(matches!(
+        partial.volume_visibility(&geometry, Transform::identity(), 1),
+        Err(WingError::ShieldingBudgetExceeded)
+    ));
+    let outside = WingSurface::new(model, Transform::identity(), 0.0625)?
+        .with_rectangular_footprint(Vec3::new(3.0, 3.0, 0.5), 0.25, 0.25)?;
+    let visibility = outside
+        .volume_visibility(&geometry, Transform::identity(), 1_000_000)?
+        .ok_or("visibility")?;
+    assert_eq!(visibility.fraction, 1.0);
+    assert_eq!(visibility.offset, Vec3::ZERO);
+    Ok(())
+}

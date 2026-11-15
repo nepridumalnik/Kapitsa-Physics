@@ -154,6 +154,12 @@ pub enum WingError {
     InvalidFlow,
     UnsupportedFlow,
     ArithmeticOverflow,
+    /// Geometry sampling exceeded its bounded work budget.
+    ShieldingBudgetExceeded,
+    /// A configured geometry query did not produce a wing visibility result.
+    ShieldingNotPrepared,
+    /// The prepared voxel occupancy could not be queried reliably.
+    ShieldingGeometry(super::geometry::GeometryError),
 }
 
 impl std::fmt::Display for WingError {
@@ -161,7 +167,14 @@ impl std::fmt::Display for WingError {
         write!(f, "finite-wing evaluation failed: {self:?}")
     }
 }
-impl std::error::Error for WingError {}
+impl std::error::Error for WingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ShieldingGeometry(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Explicit parameters, not inferred from voxel geometry.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -206,6 +219,21 @@ pub struct WingSurface {
     control: Option<WingControl>,
     local_transform: crate::transform::Transform,
     planform_area: f64,
+    footprint: Option<WingFootprint>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WingFootprint {
+    center: kapitsa_math::Vec3,
+    chord: f64,
+    span: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WingVisibility {
+    pub(crate) fraction: f64,
+    pub(crate) offset: kapitsa_math::Vec3,
+    pub(crate) samples: usize,
 }
 
 impl WingSurface {
@@ -217,6 +245,125 @@ impl WingSurface {
     pub fn with_polar(mut self, polar: Arc<WingPolar>) -> Self {
         self.polar = Some(polar);
         self
+    }
+
+    /// Enables conservative voxel-volume shielding for an explicit rectangle.
+    ///
+    /// `center` is the rectangle center in wing-local metres, `chord` and
+    /// `span` are positive metres along local X and Y. Their product must equal
+    /// the planform area within floating-point roundoff. Geometry intersection
+    /// is approximated at voxel resolution; this does not model aerodynamic
+    /// wake, wing-wing interference or flow shadow behind an external blocker.
+    /// Without an explicit footprint the existing wing behavior is unchanged.
+    ///
+    /// ```
+    /// use kapitsa_core::{aerodynamics::wing::{FiniteWing, WingSurface}, transform::Transform};
+    /// use kapitsa_math::Vec3;
+    /// let wing = WingSurface::new(
+    ///     FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?, Transform::identity(), 4.0,
+    /// )?.with_rectangular_footprint(Vec3::ZERO, 2.0, 2.0)?;
+    /// # let _ = wing;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn with_rectangular_footprint(
+        mut self,
+        center: kapitsa_math::Vec3,
+        chord: f64,
+        span: f64,
+    ) -> Result<Self, WingError> {
+        if !center.is_finite()
+            || !chord.is_finite()
+            || chord <= 0.0
+            || !span.is_finite()
+            || span <= 0.0
+        {
+            return Err(WingError::InvalidParameters);
+        }
+        let area = chord * span;
+        if !area.is_finite()
+            || area == 0.0
+            || self.planform_area == 0.0
+            || (area - self.planform_area).abs()
+                > 64.0 * f64::EPSILON * area.max(self.planform_area)
+        {
+            return Err(WingError::InvalidParameters);
+        }
+        self.footprint = Some(WingFootprint {
+            center,
+            chord,
+            span,
+        });
+        Ok(self)
+    }
+
+    pub(crate) fn has_footprint(&self) -> bool {
+        self.footprint.is_some()
+    }
+
+    pub(crate) fn volume_visibility(
+        &self,
+        geometry: &super::geometry::PreparedGeometry,
+        part_to_body: crate::transform::Transform,
+        max_samples: usize,
+    ) -> Result<Option<WingVisibility>, WingError> {
+        use kapitsa_math::Vec3;
+        let Some(footprint) = self.footprint else {
+            return Ok(None);
+        };
+        let cells = |length: f64| {
+            let value = (length / geometry.cell_size()).ceil().max(1.0);
+            if !value.is_finite() || value > 1_000_000.0 {
+                return Err(WingError::ShieldingBudgetExceeded);
+            }
+            Ok(value as usize)
+        };
+        let nx = cells(footprint.chord)?;
+        let ny = cells(footprint.span)?;
+        let count = nx
+            .checked_mul(ny)
+            .filter(|count| *count <= max_samples.min(1_000_000))
+            .ok_or(WingError::ShieldingBudgetExceeded)?;
+        let transform = part_to_body
+            .compose(&self.local_transform)
+            .map_err(|_| WingError::ArithmeticOverflow)?;
+        let mut visible = 0_usize;
+        let mut mean = Vec3::ZERO;
+        for y in 0..ny {
+            for x in 0..nx {
+                let dx = ((x as f64 + 0.5) / nx as f64 - 0.5) * footprint.chord;
+                let dy = ((y as f64 + 0.5) / ny as f64 - 0.5) * footprint.span;
+                let point = footprint
+                    .center
+                    .checked_add(Vec3::new(dx, dy, 0.0))
+                    .ok_or(WingError::ArithmeticOverflow)?;
+                let body_point = transform.transform_point(point);
+                let occupied = geometry
+                    .occupied_at(body_point)
+                    .map_err(WingError::ShieldingGeometry)?;
+                if !occupied {
+                    visible += 1;
+                    mean = mean
+                        .checked_add(
+                            point
+                                .checked_sub(mean)
+                                .and_then(|v| v.checked_mul_scalar(1.0 / visible as f64))
+                                .ok_or(WingError::ArithmeticOverflow)?,
+                        )
+                        .ok_or(WingError::ArithmeticOverflow)?;
+                }
+            }
+        }
+        let offset = if visible == 0 || visible == count {
+            Vec3::ZERO
+        } else {
+            mean.checked_sub(footprint.center)
+                .ok_or(WingError::ArithmeticOverflow)?
+        };
+        Ok(Some(WingVisibility {
+            fraction: visible as f64 / count as f64,
+            offset,
+            samples: count,
+        }))
     }
 
     pub fn with_control(mut self, control: WingControl) -> Self {
@@ -253,6 +400,7 @@ impl WingSurface {
             control: None,
             local_transform,
             planform_area,
+            footprint: None,
         })
     }
 
@@ -262,6 +410,14 @@ impl WingSurface {
         &self,
         flow: super::pressure::PressureFlow,
     ) -> Result<super::pressure::PressureWrench, WingError> {
+        self.evaluate_with_visibility(flow, None)
+    }
+
+    pub(crate) fn evaluate_with_visibility(
+        &self,
+        flow: super::pressure::PressureFlow,
+        visibility: Option<WingVisibility>,
+    ) -> Result<super::pressure::PressureWrench, WingError> {
         if !flow.center_of_mass.is_finite()
             || !flow.linear_velocity.is_finite()
             || !flow.angular_velocity.is_finite()
@@ -270,7 +426,8 @@ impl WingSurface {
         {
             return Err(WingError::InvalidFlow);
         }
-        if flow.atmosphere.density() == 0.0 || self.planform_area == 0.0 {
+        let fraction = visibility.map_or(1.0, |value| value.fraction);
+        if flow.atmosphere.density() == 0.0 || self.planform_area == 0.0 || fraction == 0.0 {
             return Ok(super::pressure::PressureWrench {
                 force: kapitsa_math::Vec3::ZERO,
                 moment: kapitsa_math::Vec3::ZERO,
@@ -279,7 +436,7 @@ impl WingSurface {
         let overflow = WingError::ArithmeticOverflow;
         let arm = flow.transform.transform_vector(
             self.local_transform
-                .translation()
+                .transform_point(visibility.map_or(kapitsa_math::Vec3::ZERO, |value| value.offset))
                 .checked_sub(flow.center_of_mass)
                 .ok_or(overflow)?,
         );
@@ -305,7 +462,7 @@ impl WingSurface {
             wing_velocity,
             flow.atmosphere.density(),
             flow.sound_speed,
-            self.planform_area,
+            self.planform_area * fraction,
             |alpha, mach| self.coefficients(alpha, mach),
         )?;
         let force = flow

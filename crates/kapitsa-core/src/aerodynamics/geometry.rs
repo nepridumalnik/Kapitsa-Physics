@@ -873,6 +873,39 @@ impl PreparedGeometry {
     pub fn volume(&self) -> f64 {
         self.volume
     }
+    /// Returns whether a body-local point lies in an occupied voxel.
+    /// Grid occupancy is conservative and uses the configured open-mesh policy;
+    /// this query is not an exact point-in-mesh test.
+    pub fn occupied_at(&self, point: Vec3) -> Result<bool, GeometryError> {
+        if !point.is_finite() {
+            return Err(GeometryError::InvalidGeometry);
+        }
+        let upper = self.origin + vector(self.dimensions.map(|n| n as f64 * self.cell_size));
+        if !upper.is_finite() {
+            return Err(GeometryError::ArithmeticOverflow);
+        }
+        let point_components = components(point);
+        let lower_components = components(self.origin);
+        let upper_components = components(upper);
+        if (0..3).any(|axis| {
+            point_components[axis] < lower_components[axis]
+                || point_components[axis] >= upper_components[axis]
+        }) {
+            return Ok(false);
+        }
+        let relative = components((point - self.origin) / self.cell_size);
+        if relative.iter().any(|v| !v.is_finite() || *v < 0.0) {
+            return Err(GeometryError::ArithmeticOverflow);
+        }
+        let cell = relative.map(|v| v.floor() as usize);
+        if (0..3).any(|axis| cell[axis] >= self.dimensions[axis]) {
+            return Err(GeometryError::PrecisionLoss);
+        }
+        self.occupancy
+            .get(index(cell, self.dimensions))
+            .map(Option::is_some)
+            .ok_or(GeometryError::PrecisionLoss)
+    }
 
     /// Partitions triangles along projected blocker edges and depth planes.
     /// Coplanar overlap belongs to the first canonical triangle (owner first).

@@ -314,6 +314,29 @@ general high-supersonic drag model. The wing's configured maximum Mach and
 other model domains remain in force. The other drag-rise builders continue to
 reject flows above the correlation's upper ratio.
 
+### Voxel-volume shielding of explicit wings
+
+`WingSurface::with_rectangular_footprint(center, chord, span)` opts a part-owned
+wing into a conservative volume-occlusion approximation when its assembly has
+configured aerodynamic geometry. The rectangle is in wing-local coordinates;
+its area must match the wing planform area. The world samples the rectangle at
+the prepared geometry's 0.125 m cell scale and excludes points inside occupied
+voxels. It scales the wing load by the visible fraction and shifts the force
+application point by the visible centroid's displacement from the rectangle
+center. The original wing application point remains the atmospheric sampling
+point. Without a footprint or without assembly geometry, existing wing behavior
+is unchanged.
+
+At most 1,000,000 sample points are processed per body per step; exceeding the
+budget returns an error and rolls the step back. Solid meshes fill sealed
+interiors; open surface-only meshes represent only their voxelized surfaces.
+The caller must not include a wing's own footprint as solid hull geometry unless
+it should be shielded. Voxel resolution affects partial exposure. This model
+handles geometric volume enclosure only: it does not predict wake, flow shadow
+behind an external body, aerodynamic wing-wing interference, or a FAR-equivalent
+flow field. Caller-provided wing coefficients and the other aerodynamic models
+remain subject to their documented domains and double-counting constraints.
+
 ### Explicit wing polars and control deflection — UNVERIFIED
 
 `WingPolar::new(mach, angles, coefficients)` validates a rectangular grid:
