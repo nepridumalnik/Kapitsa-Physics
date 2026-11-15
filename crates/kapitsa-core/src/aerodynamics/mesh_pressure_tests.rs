@@ -162,6 +162,54 @@ fn potential_cylinder_accepts_tessellated_sides_and_rejects_caps() {
 }
 
 #[test]
+fn potential_collider_requires_both_sides_for_zero_drag() {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Cylinder, Shape, Sphere},
+    };
+    let state = PressureFlow {
+        linear_velocity: Vec3::X * 20.0,
+        ..flow()
+    };
+    for (shape, cylinder) in [
+        (Shape::Sphere(Sphere::new(1.0).unwrap()), false),
+        (
+            Shape::Cylinder(Cylinder::new(-Vec3::Z, Vec3::Z, 1.0).unwrap()),
+            true,
+        ),
+    ] {
+        let collider = Collider::new(shape, Transform::identity());
+        let mesh = collider_mesh(
+            [&collider],
+            ColliderTessellation::new(32, 17, 10_000).unwrap(),
+        )
+        .unwrap();
+        let mut complete = Vec3::ZERO;
+        let mut front = Vec3::ZERO;
+        for face in mesh.triangles() {
+            let [a, b, c] = face.map(|index| mesh.vertices()[index]);
+            let cross = (b - a).cross(c - a);
+            let patch = PressurePatch::new((a + b + c) / 3.0, cross, cross.length() * 0.5).unwrap();
+            if cylinder && patch.normal().dot(Vec3::Z).abs() > 0.5 {
+                continue;
+            }
+            let load = if cylinder {
+                patch.evaluate_potential_cylinder(state, Vec3::Z).unwrap()
+            } else {
+                patch.evaluate_potential_sphere(state).unwrap()
+            };
+            complete += load.force;
+            if patch.normal().x > 0.0 {
+                front += load.force;
+            }
+        }
+        assert!(complete.length() < 1e-8, "complete: {complete:?}");
+        assert!(front.length() > 1.0, "front: {front:?}");
+    }
+}
+
+#[test]
 fn collider_sphere_and_cylinder_converge_to_newtonian_integrals() {
     use crate::{
         aerodynamics::colliders::{ColliderTessellation, collider_mesh},
