@@ -751,6 +751,30 @@ impl OwnerPressureWorkspace {
         &self.published
     }
 
+    /// Replaces the scratch owner configuration without changing published data.
+    /// Invalid order or allocation failure leaves the published result intact and
+    /// invalidates any previously prepared result. Existing capacity is reused.
+    pub fn configure_pending(
+        &mut self,
+        owners: &[super::geometry::GeometryOwner],
+    ) -> Result<(), PressureError> {
+        self.prepared = false;
+        if owners.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(PressureError::InvalidPatch);
+        }
+        self.scratch.clear();
+        self.scratch
+            .try_reserve(owners.len())
+            .map_err(|_| PressureError::ArithmeticOverflow)?;
+        let zero = PressureWrench {
+            force: Vec3::ZERO,
+            moment: Vec3::ZERO,
+        };
+        self.scratch
+            .extend(owners.iter().map(|owner| (*owner, zero)));
+        Ok(())
+    }
+
     /// Staged owner wrenches, available only after a successful preparation.
     /// These have not yet been published and must be discarded on step failure.
     pub fn staged(&self) -> Option<&[(super::geometry::GeometryOwner, PressureWrench)]> {

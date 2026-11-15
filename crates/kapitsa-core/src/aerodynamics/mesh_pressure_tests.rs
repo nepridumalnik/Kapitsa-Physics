@@ -169,6 +169,24 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     );
     assert!(!workspace.commit());
     assert_eq!(workspace.published(), committed.as_slice());
+    workspace.configure_pending(&[GeometryOwner::Body])?;
+    assert_eq!(workspace.published(), committed.as_slice());
+    assert_eq!(
+        workspace.prepare(&patches, flow()),
+        Err(PressureError::InvalidPatch)
+    );
+    assert!(!workspace.commit());
+    assert_eq!(workspace.published(), committed.as_slice());
+    workspace.configure_pending(&owners)?;
+    workspace.prepare(&patches, flow())?;
+    workspace.rollback();
+    assert_eq!(workspace.published(), committed.as_slice());
+    workspace.configure_pending(&owners)?;
+    workspace.prepare(&patches, flow())?;
+    assert!(workspace.commit());
+    assert_eq!(workspace.published(), grouped.as_slice());
+    workspace.configure_pending(&[])?;
+    assert_eq!(workspace.published(), grouped.as_slice());
     assert_eq!(
         evaluate_prepared_mesh_owner(&patches, invalid, GeometryOwner::Part(part)),
         Err(PressureError::InvalidSoundSpeed)
