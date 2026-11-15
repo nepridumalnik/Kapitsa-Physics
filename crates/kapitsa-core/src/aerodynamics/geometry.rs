@@ -941,10 +941,19 @@ impl PreparedGeometry {
         max_work: usize,
         flow: impl Fn(Vec3) -> Result<Vec3, GeometryError>,
     ) -> Result<PreparedSurfacePatches, GeometryError> {
+        // Counting, selecting a reference and constructing relative instances
+        // all visit every instance, even when its mesh has no triangles.
+        check_surface_work(instances.len().checked_mul(4), max_work)?;
         let total = surface_triangle_count(instances)?;
         let preprocessing = total
             .checked_mul(16)
-            .and_then(|n| n.checked_mul(usize::BITS as usize - total.leading_zeros() as usize + 1));
+            .and_then(|n| n.checked_mul(usize::BITS as usize - total.leading_zeros() as usize + 1))
+            .and_then(|n| {
+                instances
+                    .len()
+                    .checked_mul(4)
+                    .and_then(|i| n.checked_add(i))
+            });
         check_surface_work(preprocessing, max_work)?;
         let work = preprocessing.ok_or(GeometryError::WorkBudgetExceeded)?;
         let Some(reference) = instances
@@ -1120,6 +1129,12 @@ impl PreparedGeometry {
                 if i == j {
                     continue;
                 }
+                // Shadow construction evaluates multiple adaptive orientation
+                // predicates even when the candidate produces no shadow.
+                work = work
+                    .checked_add(64)
+                    .ok_or(GeometryError::WorkBudgetExceeded)?;
+                check_surface_work(Some(work), max_work)?;
                 let blocker = &triangles[j];
                 let Some(shadow) = visibility::Shadow::new(triangle, blocker, i, j, upstream)?
                 else {
@@ -1191,6 +1206,12 @@ impl PreparedGeometry {
             let mut partition_fraction = 0.0;
             for polygon in pieces {
                 for k in 1..polygon.len().saturating_sub(1) {
+                    // Partition reconstruction and output remain work even
+                    // when there are no shadows to test against the centroid.
+                    work = work
+                        .checked_add(16)
+                        .ok_or(GeometryError::WorkBudgetExceeded)?;
+                    check_surface_work(Some(work), max_work)?;
                     let coordinates = [polygon[0], polygon[k], polygon[k + 1]];
                     let fraction = visibility::triangle_fraction(coordinates)?;
                     partition_fraction += fraction;

@@ -656,6 +656,24 @@ fn patch_budget_is_checked_before_transform_and_allocation() {
 }
 
 #[test]
+fn patch_budget_includes_unshadowed_partition_output() -> Result<(), Box<dyn std::error::Error>> {
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])?;
+    let instances = [instance(&mesh, Vec3::ZERO)];
+    let geometry = surface_geometry(&instances);
+    assert_eq!(
+        geometry.exposed_surface_patches(&instances, Vec3::X, 0.01, 100),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    assert_eq!(
+        geometry
+            .exposed_surface_patches(&instances, Vec3::X, 0.01, 1_000)?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn translated_rotated_source_instances_preserve_diagonal_visibility() {
     let mesh = cube();
     let base = [instance(&mesh, Vec3::ZERO)];
