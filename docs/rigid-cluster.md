@@ -95,10 +95,10 @@ are required for motion and force changes on clustered bodies.
 
 Manual weld removal is implemented; automatic weld fracture and an elastic graph
 load solver are **not implemented**. `WeldStrength::Breakable` stores validated
-thresholds but does not currently trigger fracture. In particular, part-owned
-aerodynamic loads are summed onto the cluster rigid body and are not retained as
-individual part wrenches for weld evaluation. Do not interpret the net cluster
-wrench as the force on any weld.
+thresholds but does not currently trigger fracture. Diagnostic snapshots retain
+some part-owned aerodynamic wrenches, but they are not a complete load ledger
+and are not used for weld evaluation. Do not interpret the net cluster wrench
+as the force on any weld.
 
 The simple `AerodynamicSurface` path applies a body-level timestep-dependent
 drag limit and a coupled lift correction after summing surfaces. The raw force
@@ -130,6 +130,18 @@ explicit mechanical model. Contact impulses must include their actual vector
 components and application points; XPBD position multipliers are not
 automatically physical impulses. Any eventual fracture policy must specify
 solver convergence and failure handling before removing welds.
+
+The velocity contact solver applies the normal and both tangent components at
+separate body-side contact positions: its pair impulse acts negatively on A
+and positively on B. Warm-start impulses are applied before iterative updates;
+the final accumulated contact components include that warm start. The positive
+normal-update sum used for impact detection is not a net impulse. Contact
+events instead expose a representative point and normal-impulse summary, not a
+complete vector impulse ledger. CCD has separate contact solves, potentially
+more than one per step, while the position solver applies separate corrections.
+Consequently a future transactional ledger must cover every applicable solve
+and preserve the relevant application positions; neither events nor the last
+manifold alone are sufficient to claim a complete weld balance.
 
 Runtime topology commands execute in existing FIFO order at step boundaries.
 Each structural command is atomic; no stronger batch atomicity is implied.
