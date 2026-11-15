@@ -1455,29 +1455,77 @@ impl PhysicsWorld {
     /// Commits a plan before any other world mutation. Batch insertion fails
     /// without mutation; subsequent operations rely on preparation invariants.
     fn commit_weld_split(&mut self, plan: PreparedWeldSplit) -> Result<Vec<BodyId>, ClusterError> {
+        let mut plans = Vec::new();
+        plans
+            .try_reserve_exact(1)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        plans.push(plan);
+        let mut results = self.commit_weld_splits(plans)?;
+        results.pop().ok_or(ClusterError::InvalidTopology)
+    }
+
+    /// Plans must refer to distinct clusters prepared against the same unchanged
+    /// world. All body entries are inserted in one rollback-capable pool batch.
+    fn commit_weld_splits(
+        &mut self,
+        mut plans: Vec<PreparedWeldSplit>,
+    ) -> Result<Vec<Vec<BodyId>>, ClusterError> {
+        let mut bodies = HashSet::new();
+        bodies
+            .try_reserve(plans.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let mut count = 0usize;
+        for plan in &plans {
+            if !bodies.insert(plan.body) {
+                return Err(ClusterError::InvalidTopology);
+            }
+            count = count
+                .checked_add(plan.entries.len())
+                .ok_or(ClusterError::StorageCapacityExceeded)?;
+        }
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(count)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let mut results = Vec::new();
+        results
+            .try_reserve_exact(plans.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for plan in &mut plans {
+            entries.append(&mut plan.entries);
+        }
+        let inserted = self
+            .bodies
+            .try_insert_many(entries)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let mut ids = inserted.into_iter();
+        for mut plan in plans {
+            plan.affected_bodies.push(plan.body);
+            for dense in ids.by_ref().take(plan.other_clusters.len()) {
+                plan.affected_bodies.push(BodyId {
+                    world: self.world_id,
+                    dense,
+                });
+            }
+            results.push(self.commit_inserted_weld_split(plan));
+        }
+        Ok(results)
+    }
+
+    /// Applies a validated plan after its new body entries have been inserted.
+    fn commit_inserted_weld_split(&mut self, plan: PreparedWeldSplit) -> Vec<BodyId> {
         let PreparedWeldSplit {
             body,
             removed_welds,
-            entries,
+            entries: _,
             prepared_bodies,
             part_rebinds,
             part_components,
             root_aerodynamics,
             root_cluster,
             other_clusters: clusters,
-            mut affected_bodies,
+            affected_bodies,
         } = plan;
-        let inserted = self
-            .bodies
-            .try_insert_many(entries)
-            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
-        affected_bodies.push(body);
-        for dense in inserted {
-            affected_bodies.push(BodyId {
-                world: self.world_id,
-                dense,
-            });
-        }
         let new_bodies = &affected_bodies[1..];
         let entry = self.bodies.get_mut(body.dense).unwrap();
         entry.body.set_primary_aerodynamics(Aerodynamics::None);
@@ -1540,7 +1588,7 @@ impl PhysicsWorld {
             }
         }
         self.synchronize_cluster_physics_state(&affected_bodies);
-        Ok(affected_bodies)
+        affected_bodies
     }
 
     /// Changes a part's mass while preserving the body's world-space velocity field.

@@ -1552,6 +1552,52 @@ fn invalid_merge_leaves_cluster_topology_unchanged() {
 }
 
 #[test]
+fn prepared_splits_commit_in_one_batch() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut roots = Vec::new();
+    let mut plans = Vec::new();
+    for _ in 0..2 {
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let root = world.enable_cluster(body)?;
+        let child = world.add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::IDENTITY,
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )?;
+        let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+        roots.push((body, child, weld));
+    }
+    for (body, _, weld) in &roots {
+        plans.push(world.prepare_weld_split(*body, &[*weld])?);
+    }
+    let results = world.commit_weld_splits(plans)?;
+    assert_eq!(results.len(), 2);
+    for (index, (body, child, weld)) in roots.iter().enumerate() {
+        assert_eq!(results[index].len(), 2);
+        assert_eq!(results[index][0], *body);
+        assert_eq!(world.part_body(*child), Some(results[index][1]));
+        assert!(world.weld(*weld).is_none());
+    }
+    assert_eq!(world.validate_clusters(), Ok(()));
+    Ok(())
+}
+
+#[test]
 fn split_preparation_uses_staged_motion_without_mutating_world()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut world = PhysicsWorld::new();
