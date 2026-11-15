@@ -86,6 +86,30 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, Spher
 mod tests {
     use super::*;
 
+    // Diagnostic comparison, not an accuracy acceptance test. Nagata et al.,
+    // JFM 904 A36 (2020), table 3, https://doi.org/10.1017/jfm.2020.629.
+    // DNS uses an adiabatic wall and Sutherland viscosity; this implementation
+    // uses a fixed viscosity exponent and omits rarefaction and wall heating.
+    // The two grids do not provide a complete DNS uncertainty estimate.
+    #[test]
+    fn compare_nagata_dns_grid_resolutions() {
+        for (re, mach, base, fine) in [
+            (300.0, 0.3, 0.6587, 0.6644),
+            (300.0, 2.0, 1.452, 1.458),
+            (500.0, 0.3, 0.5658, 0.5679),
+            (500.0, 2.0, 1.331, 1.336),
+            (750.0, 0.3, 0.5078, 0.5085),
+            (750.0, 2.0, 1.251, 1.254),
+        ] {
+            let predicted = continuum_drag_coefficient(mach, re).unwrap();
+            let relative_error = 100.0 * (predicted - fine) / fine;
+            println!(
+                "Re={re:.0} M={mach:.1} DNS={base:.4}/{fine:.4} model={predicted:.6} error={relative_error:+.2}%"
+            );
+            assert!(predicted.is_finite());
+        }
+    }
+
     #[test]
     fn continuum_branches_meet_at_mach_one() {
         for (re, expected) in [
