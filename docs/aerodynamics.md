@@ -385,7 +385,7 @@ behind an external body, aerodynamic wing-wing interference, or a FAR-equivalent
 flow field. Caller-provided wing coefficients and the other aerodynamic models
 remain subject to their documented domains and double-counting constraints.
 
-### Explicit wing polars and control deflection — UNVERIFIED
+### Explicit wing polars and control deflection
 
 `WingPolar::new(mach, angles, coefficients)` validates a rectangular grid:
 there must be at least two finite strictly increasing knots on each axis,
@@ -425,8 +425,9 @@ Stall denotes the loss of attached-flow lift behavior, not a prescribed universa
 curve. Control surfaces modify aerodynamic forces and moments; the incidence
 shift above is only a caller-calibrated approximation of those effects.
 
-This stage is **UNVERIFIED**: regression fixtures were added but not ignored;
-no tests, build, check, clippy or benchmarks were executed at the user's request.
+Regression tests cover interpolation, table validation and control-force
+conventions. These tests verify implementation contracts, not agreement with
+experimental polar or control-surface measurements.
 
 For a thin symmetric two-dimensional airfoil at small angle of attack, `c_l = 2 pi alpha`, with `alpha` in radians. More generally, `c_l = 2 pi (alpha - alpha_zero_lift)`.
 
