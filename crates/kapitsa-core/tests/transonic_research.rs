@@ -1486,6 +1486,96 @@ impl MixedGrid {
 }
 
 #[test]
+fn manufactured_axisymmetric_operator_and_integral_balance() {
+    // phi=x^3+r^4, M=0: L(phi)=6x+16r², with zero axis
+    // flux. The outer row and the first two axial rows are prescribed,
+    // not solved. This tests operator truncation, not solution convergence.
+    let mut previous_error = f64::INFINITY;
+    for n in [16_usize, 32, 64, 128] {
+        let h = 1.0 / n as f64;
+        let nx = n + 1;
+        let nr = n + 1;
+        let grid = MixedGrid {
+            phi: (0..nx)
+                .map(|i| {
+                    let x = i as f64 * h;
+                    (0..nr)
+                        .map(|k| {
+                            let r = (k as f64 + 0.5) * h;
+                            x.powi(3) + r.powi(4)
+                        })
+                        .collect()
+                })
+                .collect(),
+            axis_flux: vec![0.0; nx],
+            dx: h,
+            dr: h,
+            mach: 0.0,
+            gamma: 1.4,
+        };
+        let mut max_error = 0.0_f64;
+        for i in 2..nx - 1 {
+            for k in 0..nr - 1 {
+                let x = i as f64 * h;
+                let r = (k as f64 + 0.5) * h;
+                max_error = max_error.max((grid.residual(i, k) - (6.0 * x + 16.0 * r * r)).abs());
+            }
+        }
+        assert!(max_error < previous_error / 3.9, "n={n} error={max_error}");
+        println!("manufactured n={n} max_error={max_error:.9e}");
+        previous_error = max_error;
+    }
+
+    // Independent boundary-flux summation for a nonzero, varying axis flux
+    // and a general field: use precisely the rows updated by iterate().
+    let nx = 19_usize;
+    let nr = 13_usize;
+    let dx = 0.08;
+    let dr = 0.07;
+    let grid = MixedGrid {
+        phi: (0..nx)
+            .map(|i| {
+                (0..nr)
+                    .map(|k| {
+                        let x = i as f64 * dx;
+                        let r = (k as f64 + 0.5) * dr;
+                        0.03 * (x.sin() + x * r * r + r.cos())
+                    })
+                    .collect()
+            })
+            .collect(),
+        axis_flux: (0..nx).map(|i| 0.002 * (i as f64 * dx).cos()).collect(),
+        dx,
+        dr,
+        mach: 0.9,
+        gamma: 1.4,
+    };
+    let mut volume_sum = 0.0;
+    let mut boundary_sum = 0.0;
+    for i in 2..nx - 1 {
+        for k in 0..nr - 1 {
+            let r = (k as f64 + 0.5) * dr;
+            volume_sum += grid.residual(i, k) * r * dx * dr;
+        }
+        boundary_sum += dx
+            * ((nr - 1) as f64 * dr * (grid.phi[i][nr - 1] - grid.phi[i][nr - 2]) / dr
+                - grid.axis_flux[i]);
+    }
+    for k in 0..nr - 1 {
+        let r = (k as f64 + 0.5) * dr;
+        let slope = |j: usize| (grid.phi[j][k] - grid.phi[j - 1][k]) / dx;
+        let inlet = sonic_flux(slope(1), slope(2), grid.mach, grid.gamma);
+        let outlet = sonic_flux(slope(nx - 2), slope(nx - 1), grid.mach, grid.gamma);
+        boundary_sum += r * dr * (outlet - inlet);
+    }
+    let difference = (volume_sum - boundary_sum).abs();
+    assert!(difference < 1e-12 * (volume_sum.abs() + boundary_sum.abs()).max(1e-6));
+    println!(
+        "integral volume={volume_sum:.15e} boundary={boundary_sum:.15e} difference={difference:.3e}"
+    );
+}
+
+#[test]
 fn fixed_coordinate_interpolation_matches_linear_field() {
     for n in [9, 17, 33] {
         let h = 1.0 / (n - 1) as f64;
