@@ -808,6 +808,17 @@ been established here. The data are a prospective holdout only for a model not
 fitted to them, and this single subsonic freestream condition cannot validate
 continuation across Mach 1.
 
+Another candidate for a closed-body benchmark is Harris and Landrum's
+[NASA report](https://ntrs.nasa.gov/api/citations/19660003947/downloads/19660003947.pdf),
+which tests Haack–Adams bodies from Mach 0.6 to 4.0. Their zero-base-area case
+is a Sears–Haack body, and table III reports measured surface pressures. The
+authors derive wave drag from measurements and report agreement with slender
+body theory near Mach 1 for their tested configurations, but increasing
+overprediction at higher Mach numbers, especially for lower fineness ratios.
+Before using these measurements as a holdout, extract each model's dimensions,
+test conditions, pressure table and drag-reduction method from the report, and
+establish uncertainties. No numerical acceptance or validation is claimed here.
+
 ### Explicit slender-body wave drag
 
 `HullSection::with_wave_drag` accepts equally spaced samples of `dA/dx` in
