@@ -770,8 +770,13 @@ impl SolverWorkspace {
         }) {
             return Ok(false);
         }
+        // The reduction solves contacts both before and after aggregation.
+        // A manifold stores only one velocity impulse and one application
+        // point per side, so it cannot represent both solves faithfully.
+        // Until a multi-solve ledger exists, use the ordinary solver rather
+        // than publish an incomplete contact snapshot.
         if !manifolds.is_empty() {
-            self.solve(bodies, manifolds, config)?;
+            return Ok(false);
         }
 
         let topology_changed = self.reduced_fixed_tree_signature.len() != joints.len()

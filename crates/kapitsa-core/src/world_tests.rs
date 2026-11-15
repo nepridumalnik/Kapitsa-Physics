@@ -40,6 +40,70 @@ mod free_ball_tests;
 
 #[cfg(feature = "bench-internals")]
 #[test]
+fn fixed_tree_with_contact_falls_back_and_preserves_impulse_balance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    world.set_reduced_fixed_tree_for_bench(true);
+    let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let wall = world.add_collider(wall_body, collider(0.5))?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut bodies = Vec::new();
+    for x in [-1.1, -2.1] {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::X * 10.0)?;
+        let body = world.add_body(body)?;
+        let part = world.enable_cluster(body)?;
+        bodies.push((body, part));
+    }
+    let sphere = world.add_part_collider(bodies[0].1, collider(0.5))?;
+    let common = JointCommon::new(
+        JointFrame::new(Vec3::new(-0.5, 0.0, 0.0), Quat::IDENTITY),
+        JointFrame::new(Vec3::new(0.5, 0.0, 0.0), Quat::IDENTITY),
+    );
+    world.add_joint(
+        bodies[0].0,
+        bodies[1].0,
+        Joint::Fixed(FixedJoint::new(common)),
+    )?;
+    world.step(0.02)?;
+    assert_ne!(
+        world.collision_step_metrics().colored_schedule.rejection,
+        "reduced-fixed-tree"
+    );
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    let pair = CollisionPair::new(wall, sphere).ok_or("contact pair")?;
+    let impulses = world.contact_impulses();
+    assert_eq!(impulses.len(), 1);
+    let entry = &impulses[0];
+    assert_eq!(entry.pair, pair);
+    let contact_impulse = if pair.a == sphere {
+        assert_eq!(entry.parts[0], Some(bodies[0].1));
+        -entry.impulse_on_b
+    } else {
+        assert_eq!(entry.parts[1], Some(bodies[0].1));
+        entry.impulse_on_b
+    };
+    let mut change = Vec3::ZERO;
+    for (body, _) in bodies {
+        change += world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity()
+            - Vec3::X * 10.0;
+    }
+    assert!(
+        (contact_impulse - change).length() < 1e-9,
+        "published={contact_impulse:?}, total momentum change={change:?}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 fn colored_contact_impulses_match_each_body_momentum_change()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut world = PhysicsWorld::new();
