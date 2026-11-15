@@ -26,6 +26,28 @@ pub(crate) enum BalanceError {
     Physics(ClusterError),
 }
 
+/// Express a reaction's moment at a weld anchor rather than the common
+/// balance origin. Force and both points are world-space; the result is N·m.
+/// No strength decision is valid until the inputs and load ledger are complete.
+pub(crate) fn reaction_moment_at_anchor(
+    force: Vec3,
+    moment_at_origin: Vec3,
+    origin: Vec3,
+    anchor: Vec3,
+) -> Result<Vec3, BalanceError> {
+    if [force, moment_at_origin, origin, anchor]
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(BalanceError::Physics(ClusterError::InvalidMotion));
+    }
+    anchor
+        .checked_sub(origin)
+        .and_then(|offset| offset.checked_cross(force))
+        .and_then(|shift| moment_at_origin.checked_sub(shift))
+        .ok_or(BalanceError::Physics(ClusterError::ArithmeticOverflow))
+}
+
 /// Reaction exerted by each parent on its child, with moment about `origin`.
 /// Parents must precede children; the root is index zero. This ordering allows
 /// a linear reverse traversal without adjacency allocations. `force_tolerance`
@@ -154,6 +176,66 @@ mod tests {
         assert_eq!(solve(&parts, &[0, 2, 1]), Err(BalanceError::InvalidTree));
         parts[0].external_force = Vec3::ZERO;
         assert_eq!(solve(&parts, &[0, 0, 1]), Err(BalanceError::Unbalanced));
+        Ok(())
+    }
+
+    #[test]
+    fn offset_load_reaction_transforms_between_moment_origins()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        // Equal and opposite forces form a couple. The child is at (2, 0, 0).
+        // Its static cut reaction is -Y, with moment -2 Z about the origin.
+        let parts = [
+            PartBalanceInput {
+                mass,
+                pose: Transform::identity(),
+                external_force: -Vec3::Y,
+                external_moment: -Vec3::Z * 2.0,
+                loads_complete: true,
+            },
+            PartBalanceInput {
+                mass,
+                pose: Transform::new(Vec3::X * 2.0, Quat::IDENTITY)?,
+                external_force: Vec3::Y,
+                external_moment: Vec3::Z * 2.0,
+                loads_complete: true,
+            },
+        ];
+        let solve = |parts: &[PartBalanceInput], origin| {
+            tree_reactions(
+                parts,
+                &[0, 0],
+                Vec3::X,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                origin,
+                1e-12,
+                1e-12,
+            )
+        };
+        let about_zero = solve(&parts, Vec3::ZERO).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(about_zero[1], (-Vec3::Y, -Vec3::Z * 2.0));
+        assert_eq!(
+            reaction_moment_at_anchor(about_zero[1].0, about_zero[1].1, Vec3::ZERO, Vec3::X)
+                .map_err(|e| format!("{e:?}"))?,
+            -Vec3::Z
+        );
+        assert_eq!(
+            reaction_moment_at_anchor(
+                Vec3::X,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::new(f64::NAN, 0.0, 0.0)
+            ),
+            Err(BalanceError::Physics(ClusterError::InvalidMotion))
+        );
+        let mut shifted = parts;
+        for part in &mut shifted {
+            part.external_moment -= Vec3::X.cross(part.external_force);
+        }
+        let about_x = solve(&shifted, Vec3::X).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(about_x[1], (-Vec3::Y, -Vec3::Z));
         Ok(())
     }
 }
