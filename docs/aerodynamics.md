@@ -596,6 +596,11 @@ accommodation coefficient using the first point, so its simulation at that
 point is not an independent prediction. Moreover, these low-Re points are in
 a rarefied-flow regime, unlike the continuum Re = 10,000 benchmark; they must
 not be used to validate that correlation or a continuum no-slip model.
+Li et al.'s figure 5 attributes the first experimental value specifically to
+Bailey and Hiatt (1972), the same experimental source used by Karr. It is
+therefore not an independent dataset for testing Karr; the original individual
+measurement and its uncertainty have not been verified here. This attribution
+does not establish the provenance of the second point.
 
 For an additional transonic comparison, Usry and Wallace,
 [NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
