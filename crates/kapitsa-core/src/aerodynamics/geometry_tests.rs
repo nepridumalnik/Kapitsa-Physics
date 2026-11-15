@@ -177,6 +177,17 @@ fn sort_work_estimate_checks_power_of_two_boundaries_and_overflow() {
 }
 
 #[test]
+fn sort_work_estimate_is_monotone_for_grid_sized_inputs() {
+    const MAX_ENTRIES: usize = 65_536;
+    let mut previous = 0;
+    for len in 0..=MAX_ENTRIES {
+        let estimate = sort_work_estimate(len).unwrap();
+        assert!(estimate >= previous, "estimate decreased at {len}");
+        previous = estimate;
+    }
+}
+
+#[test]
 fn budgeted_sort_counts_comparisons_and_rejects_exhaustion() {
     let source = [4, 1, 3, 1, 2];
     let mut values = source;

@@ -309,6 +309,12 @@ impl TriangleGrid {
                         .ok_or(GeometryError::WorkBudgetExceeded)?,
                 )
                 .ok_or(GeometryError::WorkBudgetExceeded)?;
+            // The estimate is monotone in entry_count: once it exceeds the
+            // budget, later triangles cannot make this construction viable.
+            let partial_work = sort_work_estimate(entry_count)
+                .and_then(|work| work.checked_add(cell_count))
+                .and_then(|work| work.checked_add(scan_work));
+            check_surface_work(partial_work, max_work)?;
         }
         let build_work = sort_work_estimate(entry_count)
             .and_then(|work| work.checked_add(cell_count))
