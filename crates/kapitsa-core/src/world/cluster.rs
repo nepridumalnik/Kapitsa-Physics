@@ -48,7 +48,7 @@ impl PhysicsWorld {
     /// Prepare all breakable clusters from the active step's pending snapshots
     /// and final staged predictions. No topology or body state is changed.
     pub(super) fn prepare_pending_weld_splits(
-        &self,
+        &mut self,
         force_tolerance: f64,
         moment_tolerance: f64,
     ) -> Result<Vec<PreparedWeldSplit>, WeldSplitPreparationError> {
@@ -74,9 +74,26 @@ impl PhysicsWorld {
             }) {
                 continue;
             }
-            let candidates = self
-                .pending_weld_failure_candidates(state.body, force_tolerance, moment_tolerance)
-                .map_err(WeldSplitPreparationError::Balance)?;
+            let candidates = match self.pending_weld_failure_candidates(
+                state.body,
+                force_tolerance,
+                moment_tolerance,
+            ) {
+                Ok(candidates) => candidates,
+                Err(super::WeldBalanceError::IncompleteLoads)
+                    if self.error_policy == super::ErrorPolicy::Realtime =>
+                {
+                    self.pending_step_diagnostics.weld_incomplete_load_clusters = self
+                        .pending_step_diagnostics
+                        .weld_incomplete_load_clusters
+                        .checked_add(1)
+                        .ok_or(WeldSplitPreparationError::Cluster(
+                            ClusterError::StorageCapacityExceeded,
+                        ))?;
+                    continue;
+                }
+                Err(error) => return Err(WeldSplitPreparationError::Balance(error)),
+            };
             if candidates.is_empty() {
                 continue;
             }

@@ -171,8 +171,11 @@ This inventory describes the baseline, not implemented cluster behavior.
 tree-weld strength checks; it is disabled by default. Specify absolute force
 and moment equilibrium tolerances in N and N·m. The force and torque limits
 compare magnitudes at the child-side weld anchor; equality does not break a
-weld. A step with a breakable cluster fails before commit when its loads cannot
-be certified. Currently certification requires a dynamic cluster with no
+weld. Under `Strict`, a step with a breakable cluster fails before commit when
+its loads cannot be certified. Under `Realtime`, an incomplete load ledger skips
+automatic failure for that cluster and records it in `StepDiagnostics` after
+commit; no reaction is inferred. Other balance, topology, numerical and storage
+errors still fail the step. Currently certification requires a dynamic cluster with no
 accumulated body forces, only part-targeted persistent force sources,
 certified part-owned aerodynamic loads, and gravity sampled uniformly at the cluster center of mass, with
 no colliders on the cluster and no joints or chunks in the world. Gravity

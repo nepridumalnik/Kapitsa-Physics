@@ -4698,6 +4698,7 @@ fn step_diagnostics_publish_only_on_success() -> Result<(), super::StepError> {
     let mut world = PhysicsWorld::new();
     let clipped = StepDiagnostics {
         collision_ccd_limit_clipped_bodies: 2,
+        weld_incomplete_load_clusters: 0,
     };
     world.with_force_source_updates(|world| {
         world.pending_step_diagnostics = clipped;

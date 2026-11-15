@@ -306,6 +306,7 @@ fn automatic_failure_certifies_only_uncorrected_part_surfaces()
     use crate::joint::JointFrame;
     for sharded in [false, true] {
         let mut world = PhysicsWorld::new();
+        world.set_error_policy(super::ErrorPolicy::Strict);
         world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
         let mut rigid = RigidBody::new_dynamic(Transform::identity(), mass)?;
@@ -470,6 +471,7 @@ fn automatic_weld_failure_multiple_clusters_is_atomic_on_rejection()
     use crate::joint::JointFrame;
     for sharded in [false, true] {
         let mut world = PhysicsWorld::new();
+        world.set_error_policy(super::ErrorPolicy::Strict);
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
         let mut clusters = Vec::new();
         for _ in 0..2 {
@@ -562,6 +564,7 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
     use crate::shape::{Cuboid, Shape};
     for sharded in [false, true] {
         let mut world = PhysicsWorld::new();
+        world.set_error_policy(super::ErrorPolicy::Strict);
         let unrelated = world.add_body(RigidBody::new_static(Transform::identity()))?;
         world.add_collider(
             unrelated,
@@ -667,6 +670,66 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
                 < 1e-12
         );
         assert_eq!(world.validate_clusters(), Ok(()));
+    }
+    Ok(())
+}
+
+#[test]
+fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn std::error::Error>>
+{
+    use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
+    use crate::joint::JointFrame;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let root = world.enable_cluster(body)?;
+        let child = world.add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::IDENTITY,
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Breakable {
+                    max_force: Some(1.0),
+                    max_torque: None,
+                },
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )?;
+        let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+        world.add_force_source_for_part(child, Vec3::ZERO, Vec3::X * 10.0)?;
+        world.add_force_source(body, Vec3::ZERO, Vec3::X)?;
+        world
+            .set_automatic_weld_failure(Some((1e-9, 1e-9)))
+            .map_err(|e| format!("{e:?}"))?;
+        if sharded {
+            world.step_with_shards(
+                0.01,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )?;
+        } else {
+            world.step(0.01)?;
+        }
+        assert!(world.weld(weld).is_some());
+        assert_eq!(world.step_diagnostics().weld_incomplete_load_clusters, 1);
+        assert!(world.step(-1.0).is_err());
+        assert_eq!(world.step_diagnostics().weld_incomplete_load_clusters, 1);
+        assert!(matches!(
+            world.part_aerodynamic_weld_reactions(body, 1e-9, 1e-9),
+            Err(super::WeldBalanceError::IncompleteLoads)
+        ));
     }
     Ok(())
 }

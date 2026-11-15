@@ -681,8 +681,8 @@ fn swept_bounds_for_trajectory(
 
 /// Controls whether explicitly supported approximations may be used during a step.
 ///
-/// No automatic fallback models are currently available; unsupported regimes
-/// and critical errors remain errors under both policies.
+/// Unsupported aerodynamic regimes and critical errors remain errors under both
+/// policies. Realtime can skip uncertifiable automatic weld checks as documented.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ErrorPolicy {
     /// Allow documented, safe fallback models when available.
@@ -701,12 +701,15 @@ pub struct StepDiagnostics {
     /// Bodies whose motion was clipped by the collision subsystem after its
     /// configured CCD event limit was reached.
     pub collision_ccd_limit_clipped_bodies: usize,
+    /// Breakable clusters whose automatic weld checks were skipped because the
+    /// external load balance could not be certified.
+    pub weld_incomplete_load_clusters: usize,
 }
 
 impl StepDiagnostics {
     /// Whether any recorded approximation was applied.
     pub fn used_fallback(self) -> bool {
-        self.collision_ccd_limit_clipped_bodies != 0
+        self.collision_ccd_limit_clipped_bodies != 0 || self.weld_incomplete_load_clusters != 0
     }
 }
 
@@ -835,7 +838,8 @@ impl PhysicsWorld {
 
     /// Enable automatic weld failure for certified full steps using absolute
     /// equilibrium tolerances in N and N·m. `None` disables it (the default).
-    /// Unsupported load configurations make the full step fail before commit.
+    /// Incomplete loads skip fracture with diagnostics in `Realtime`; `Strict`
+    /// rejects them before commit. Other balance errors fail in both policies.
     pub fn set_automatic_weld_failure(
         &mut self,
         tolerances: Option<(f64, f64)>,
@@ -1371,9 +1375,11 @@ impl PhysicsWorld {
             error_policy: ErrorPolicy::Realtime,
             step_diagnostics: StepDiagnostics {
                 collision_ccd_limit_clipped_bodies: 0,
+                weld_incomplete_load_clusters: 0,
             },
             pending_step_diagnostics: StepDiagnostics {
                 collision_ccd_limit_clipped_bodies: 0,
+                weld_incomplete_load_clusters: 0,
             },
             body_revision: 0,
             automatic_weld_failure: None,
