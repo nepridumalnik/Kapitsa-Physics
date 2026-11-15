@@ -172,6 +172,14 @@ pub struct FiniteWing {
     zero_lift_angle: f64,
     max_attached_angle: f64,
     compressible_max_mach: Option<f64>,
+    drag_rise: Option<DragRise>,
+}
+
+/// Explicit parameters for an empirical wing compressibility drag increment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DragRise {
+    critical_mach: f64,
+    scale: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -354,6 +362,7 @@ impl FiniteWing {
             zero_lift_angle,
             max_attached_angle,
             compressible_max_mach: None,
+            drag_rise: None,
         })
     }
 
@@ -368,6 +377,32 @@ impl FiniteWing {
             return Err(WingError::InvalidParameters);
         }
         self.compressible_max_mach = Some(max_mach);
+        Ok(self)
+    }
+
+    /// Adds the empirical NDARC compressibility drag increment.
+    ///
+    /// `critical_mach` is dimensionless, finite, and in (0, 1); `scale` is a
+    /// finite nonnegative drag coefficient, referenced to the wing planform.
+    /// Both must be selected for the wing and lift conditions by the caller.
+    /// This option does not infer critical Mach from shape or lift. The
+    /// increment is zero below Mach/critical Mach = 0.7 and is supported up to
+    /// 1.1; outside the upper limit evaluation fails. The wing's configured
+    /// Mach and attached-flow limits still apply independently.
+    /// See NASA TP-2015-218751, Appendix 3, section 8-8.
+    pub fn with_drag_rise(mut self, critical_mach: f64, scale: f64) -> Result<Self, WingError> {
+        if !critical_mach.is_finite()
+            || critical_mach <= 0.0
+            || critical_mach >= 1.0
+            || !scale.is_finite()
+            || scale < 0.0
+        {
+            return Err(WingError::InvalidParameters);
+        }
+        self.drag_rise = (scale != 0.0).then_some(DragRise {
+            critical_mach,
+            scale,
+        });
         Ok(self)
     }
 
@@ -401,7 +436,19 @@ impl FiniteWing {
             PI * effective_aspect / (1.0 + beta * effective_aspect / 2.0)
         };
         let lift = slope * alpha;
-        let drag = self.profile_drag + (lift / effective_aspect) * (lift / PI);
+        let drag_rise = if let Some(model) = self.drag_rise {
+            let ratio = mach / model.critical_mach;
+            if ratio > 1.1 {
+                return Err(WingError::UnsupportedFlow);
+            }
+            let x = (ratio - 0.7).max(0.0);
+            let x2 = x * x;
+            let x4 = x2 * x2;
+            model.scale * (6.5 * x2 + 28.0 * x4 + 2870.0 * x4 * x4)
+        } else {
+            0.0
+        };
+        let drag = self.profile_drag + (lift / effective_aspect) * (lift / PI) + drag_rise;
         if effective_aspect == 0.0 || !lift.is_finite() || !drag.is_finite() {
             return Err(WingError::ArithmeticOverflow);
         }
@@ -597,6 +644,29 @@ mod tests {
         }
         let beyond = base.with_control(WingControl::new(0.2, 0.2, 3.0).unwrap());
         assert_eq!(beyond.evaluate(flow), Err(WingError::UnsupportedFlow));
+    }
+
+    #[test]
+    fn empirical_drag_rise_uses_configured_wing_data() -> Result<(), WingError> {
+        let base = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?.with_subsonic_compressibility(0.9)?;
+        let model = base.with_drag_rise(0.8, 0.0011)?;
+        let below = model.coefficients(0.0, 0.5)?;
+        assert_eq!(below, base.coefficients(0.0, 0.5)?);
+        let at_critical = model.coefficients(0.0, 0.8)?;
+        let x = 0.3_f64;
+        let expected = 0.0011 * (6.5 * x.powi(2) + 28.0 * x.powi(4) + 2870.0 * x.powi(8));
+        assert!((at_critical.drag - 0.02 - expected).abs() < 1e-12);
+        assert_eq!(
+            model.coefficients(0.0, 0.89),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert!(base.with_drag_rise(0.0, 0.001).is_err());
+        assert!(base.with_drag_rise(0.8, f64::NAN).is_err());
+        assert_eq!(
+            base.with_drag_rise(0.8, 0.0)?.coefficients(0.0, 0.89)?,
+            base.coefficients(0.0, 0.89)?
+        );
+        Ok(())
     }
 
     #[test]

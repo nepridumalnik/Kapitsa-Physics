@@ -282,6 +282,15 @@ wave drag, separation or stall. Profile drag remains caller-supplied. The
 incompressible default and its Mach 0.3 limit are unchanged. The underlying
 compressibility transformation for finite wings is discussed in [NACA TN 1854](https://ntrs.nasa.gov/api/citations/19930082527/downloads/19930082527.pdf).
 
+`FiniteWing::with_drag_rise(critical_mach, scale)` optionally adds the empirical
+compressibility drag increment described in [NASA TP-2015-218751, section 8-8](https://rotorcraft.arc.nasa.gov/Publications/files/Johnson_NASA%20TP-2015-218751-app3.pdf).
+The caller supplies both the critical Mach and the dimensionless coefficient
+scale for the wing and its lift conditions; neither is inferred from geometry.
+The correlation applies up to `M / critical_mach = 1.1`, while the wing's
+independent configured Mach and attached-flow limits also apply. Outside these
+limits the evaluator returns an error. This engineering correlation does not
+predict stall or replace validation against suitable aerodynamic data.
+
 ### Explicit wing polars and control deflection — UNVERIFIED
 
 `WingPolar::new(mach, angles, coefficients)` validates a rectangular grid:
