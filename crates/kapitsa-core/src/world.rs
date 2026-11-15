@@ -243,6 +243,18 @@ pub struct PartForceSourceWrench {
     pub moment: Vec3,
 }
 
+/// Gravity contribution attributed to a cluster part for the last full step.
+/// The acceleration is sampled at the cluster COM, as in the body model, and
+/// treated as uniform across the cluster. Vectors are world-space, force in N
+/// and moment in N·m about the cluster COM; gravity gradients are not modeled.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartGravityWrench {
+    pub body: BodyId,
+    pub part: PartId,
+    pub force: Vec3,
+    pub moment: Vec3,
+}
+
 impl ForceSource {
     /// Returns the dynamic body receiving this force.
     pub fn body(&self) -> BodyId {
@@ -464,6 +476,8 @@ pub struct PhysicsWorld {
     central_gravity: Option<CentralGravity>,
     gravity_fields: DensePool<Gravity>,
     gravity_body_updates: Vec<GravityBodyUpdate>,
+    part_gravity_published: Vec<PartGravityWrench>,
+    part_gravity_pending: Vec<PartGravityWrench>,
     atmosphere: Atmosphere,
     /// Sound speed used by the Newtonian mesh pressure model (m/s).
     /// The default is 340 m/s; callers should set this for their atmosphere.
@@ -528,6 +542,12 @@ impl PhysicsWorld {
         &self.part_force_source_published
     }
 
+    /// Per-part gravity attribution from the last successful full step. This
+    /// historical snapshot is not a weld reaction or a gravity-gradient model.
+    pub fn part_gravity_wrenches(&self) -> &[PartGravityWrench] {
+        &self.part_gravity_published
+    }
+
     /// Impact-pressure contribution from prepared mesh patches in the last
     /// successful full step. Forces are world-space newtons; moments are world
     /// N·m about the body's center of mass at evaluation time. This excludes
@@ -575,6 +595,8 @@ impl PhysicsWorld {
             central_gravity: None,
             gravity_fields: DensePool::new(),
             gravity_body_updates: Vec::new(),
+            part_gravity_published: Vec::new(),
+            part_gravity_pending: Vec::new(),
             atmosphere: Atmosphere::Vacuum,
             mesh_sound_speed: 340.0,
             aerodynamics_body_updates: Vec::new(),
@@ -1567,6 +1589,10 @@ impl PhysicsWorld {
             std::mem::swap(
                 &mut self.part_force_source_published,
                 &mut self.part_force_source_pending,
+            );
+            std::mem::swap(
+                &mut self.part_gravity_published,
+                &mut self.part_gravity_pending,
             );
             self.aerodynamics_body_updates.clear();
             self.clear_gravity_updates();
@@ -3068,6 +3094,7 @@ impl PhysicsWorld {
         workers: usize,
     ) -> Result<(), StepError> {
         self.gravity_body_updates.clear();
+        self.part_gravity_pending.clear();
         if self.central_gravity.is_none() && self.gravity_fields.is_empty() {
             return Ok(());
         }
@@ -3120,6 +3147,76 @@ impl PhysicsWorld {
         }
 
         for update in &self.gravity_body_updates {
+            let Some(entry) = self.bodies.get(update.id.dense) else {
+                continue;
+            };
+            let Some(cluster) = entry.cluster.as_ref() else {
+                continue;
+            };
+            let error = || StepError::Gravity {
+                body_id: update.id,
+                cause: GravityError::ArithmeticOverflow,
+            };
+            let transform = update.original.state().transform();
+            let center = update
+                .original
+                .world_center_of_mass()
+                .map_err(|_| error())?
+                .ok_or_else(error)?;
+            let mut acceleration = match gravity {
+                Some(field) => {
+                    field
+                        .acceleration_at(center)
+                        .map_err(|cause| StepError::Gravity {
+                            body_id: update.id,
+                            cause,
+                        })?
+                }
+                None => Vec3::ZERO,
+            };
+            for (_, field) in fields.iter() {
+                acceleration = acceleration
+                    .checked_add(field.acceleration_at(center).map_err(|cause| {
+                        StepError::Gravity {
+                            body_id: update.id,
+                            cause,
+                        }
+                    })?)
+                    .ok_or_else(error)?;
+            }
+            self.part_gravity_pending
+                .try_reserve(cluster.parts().len())
+                .map_err(|_| StepError::Gravity {
+                    body_id: update.id,
+                    cause: GravityError::StorageCapacityExceeded,
+                })?;
+            for &part_id in cluster.parts() {
+                let part = self
+                    .parts
+                    .get(part_id.dense)
+                    .filter(|part| part_id.world == self.world_id && part.body() == update.id)
+                    .ok_or_else(error)?;
+                let part_transform = transform
+                    .compose(&part.local_transform())
+                    .map_err(|_| error())?;
+                let part_center = part_transform.transform_point(part.mass().center_of_mass());
+                let force = acceleration
+                    .checked_mul_scalar(part.mass().mass())
+                    .ok_or_else(error)?;
+                let moment = part_center
+                    .checked_sub(center)
+                    .and_then(|arm| arm.checked_cross(force))
+                    .ok_or_else(error)?;
+                self.part_gravity_pending.push(PartGravityWrench {
+                    body: update.id,
+                    part: part_id,
+                    force,
+                    moment,
+                });
+            }
+        }
+
+        for update in &self.gravity_body_updates {
             if let Some(entry) = self
                 .bodies
                 .get_mut(update.id.dense)
@@ -3142,6 +3239,7 @@ impl PhysicsWorld {
             }
         }
         self.clear_gravity_updates();
+        self.part_gravity_pending.clear();
     }
 
     fn clear_gravity_updates(&mut self) {

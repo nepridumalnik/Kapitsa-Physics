@@ -949,6 +949,78 @@ fn part_force_source_snapshot_commits_only_after_full_step()
 }
 
 #[test]
+fn part_gravity_snapshot_balances_uniform_field_and_rolls_back()
+-> Result<(), Box<dyn std::error::Error>> {
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let root = world.enable_cluster(body)?;
+        let child = world.add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY)?,
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::new(Vec3::X, kapitsa_math::Quat::IDENTITY),
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )?;
+        let uniform = world.add_gravity(crate::gravity::UniformGravity::new(Vec3::Y * -10.0)?)?;
+        let step = |world: &mut PhysicsWorld| {
+            if sharded {
+                world.step_with_shards(
+                    1e-6,
+                    &mut [Vec::new(), Vec::new()],
+                    &super::super::tests::ScopedThreadExecutor,
+                    2,
+                )
+            } else {
+                world.step(1e-6)
+            }
+        };
+        step(&mut world)?;
+        let snapshot = world.part_gravity_wrenches().to_vec();
+        assert_eq!(snapshot.len(), 2);
+        let root_load = snapshot
+            .iter()
+            .find(|load| load.part == root)
+            .ok_or("root")?;
+        let child_load = snapshot
+            .iter()
+            .find(|load| load.part == child)
+            .ok_or("child")?;
+        assert_eq!(root_load.force, Vec3::Y * -10.0);
+        assert_eq!(child_load.force, Vec3::Y * -10.0);
+        assert_eq!(root_load.moment, Vec3::Z * 5.0);
+        assert_eq!(child_load.moment, Vec3::Z * -5.0);
+        let center = world
+            .body(body)
+            .ok_or("body")?
+            .motion()
+            .world_center_of_mass()?
+            .ok_or("center")?;
+        let bad = world.add_gravity(crate::gravity::CentralGravity::new(center, 1.0)?)?;
+        assert!(step(&mut world).is_err());
+        assert_eq!(world.part_gravity_wrenches(), snapshot.as_slice());
+        world.remove_gravity(bad).ok_or("gravity")?;
+        world.remove_gravity(uniform).ok_or("uniform gravity")?;
+        step(&mut world)?;
+        assert!(world.part_gravity_wrenches().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn removing_cluster_body_removes_owned_parts_and_welds() {
     let mut world = PhysicsWorld::new();
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
