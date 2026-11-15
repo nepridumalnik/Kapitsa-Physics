@@ -45,6 +45,23 @@ struct MixedGrid {
 }
 
 impl MixedGrid {
+    fn sample(&self, x: f64, radius: f64) -> Option<f64> {
+        let xi = x / self.dx;
+        let ri = radius / self.dr - 0.5;
+        if !xi.is_finite() || !ri.is_finite() || xi < 0.0 || ri < 0.0 {
+            return None;
+        }
+        let (i, k) = (xi.floor() as usize, ri.floor() as usize);
+        if i + 1 >= self.phi.len() || k + 1 >= self.phi[0].len() {
+            return None;
+        }
+        let (tx, tr) = (xi - i as f64, ri - k as f64);
+        Some(
+            (1.0 - tx) * ((1.0 - tr) * self.phi[i][k] + tr * self.phi[i][k + 1])
+                + tx * ((1.0 - tr) * self.phi[i + 1][k] + tr * self.phi[i + 1][k + 1]),
+        )
+    }
+
     fn iterate(&mut self, tolerance: f64, max_iterations: usize) -> Result<(usize, f64), f64> {
         let nx = self.phi.len();
         let nr = self.phi[0].len();
@@ -136,6 +153,72 @@ impl MixedGrid {
         let forward = (self.phi[i + 1][k] - self.phi[i][k]) / self.dx;
         -(coefficient(u).abs() + coefficient(forward).max(0.0)) / self.dx.powi(2)
             - (2 * k + 1) as f64 / ((k as f64 + 0.5) * self.dr.powi(2))
+    }
+}
+
+#[test]
+fn fixed_coordinate_interpolation_matches_linear_field() {
+    for n in [9, 17, 33] {
+        let h = 1.0 / (n - 1) as f64;
+        let grid = MixedGrid {
+            phi: (0..n)
+                .map(|i| {
+                    (0..n)
+                        .map(|k| 2.0 * i as f64 * h + 3.0 * (k as f64 + 0.5) * h)
+                        .collect()
+                })
+                .collect(),
+            axis_flux: vec![0.0; n],
+            dx: h,
+            dr: h,
+            mach: 0.9,
+            gamma: 1.4,
+        };
+        assert!((grid.sample(0.5, 0.125).unwrap() - 1.375).abs() < 1e-14);
+        assert!(grid.sample(0.1, 0.0).is_none());
+    }
+}
+
+#[test]
+fn fixed_coordinate_synthetic_diagnostic_matches_python() {
+    use std::f64::consts::PI;
+    // The actual outer radius differs across resolutions, as in the original
+    // cell-centred Python diagnostic; this is not an experimental comparison.
+    let cases = [
+        (17, 0.75, 9.16663017e-6, 0.0841829837),
+        (33, 0.75, -4.85319717e-5, 0.0878934802),
+        (17, 1.25, 0.000140893568, 0.0882105903),
+        (33, 1.25, -2.36133923e-6, 0.0922546393),
+    ];
+    for (n, outer, expected_phi, expected_velocity) in cases {
+        let h = 1.0 / (n - 1) as f64;
+        let nr = (outer / h + 0.5_f64).round_ties_even() as usize;
+        let mut source: Vec<_> = (0..n)
+            .map(|i| 0.01 * (2.0 * PI * i as f64 / (n - 1) as f64).sin())
+            .collect();
+        source[0] = 0.0;
+        source[n - 1] = 0.0;
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; n],
+            axis_flux: source,
+            dx: h,
+            dr: h,
+            mach: 0.9,
+            gamma: 1.4,
+        };
+        assert!(grid.iterate(1e-6, 5000).unwrap().1 <= 1e-6);
+        let phi = grid.sample(0.5, 0.125).unwrap();
+        let velocity = (grid.sample(0.5 + h, 0.125).unwrap()
+            - grid.sample(0.5 - h, 0.125).unwrap())
+            / (2.0 * h);
+        assert!(
+            (phi - expected_phi).abs() < 1e-9,
+            "n={n} outer={outer} phi={phi}"
+        );
+        assert!(
+            (velocity - expected_velocity).abs() < 1e-8,
+            "n={n} outer={outer} u={velocity}"
+        );
     }
 }
 
