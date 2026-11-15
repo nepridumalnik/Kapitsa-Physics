@@ -123,17 +123,10 @@ mod aerodynamics {
                     },
                     &mut body,
                     &world.parts,
-                    entry.cluster.as_ref(),
-                    None,
-                    patches
-                        .as_ref()
-                        .and_then(|prepared| prepared.patches.as_ref()),
-                    world.mesh_sound_speed,
-                    voxel_wave.as_ref(),
-                    patches.as_ref().and_then(|prepared| prepared.wave.as_ref()),
-                    patches
-                        .as_ref()
-                        .map(|prepared| prepared.wing_visibility.as_slice()),
+                    super::AerodynamicsInputs::new(world.mesh_sound_speed)
+                        .with_cluster(entry.cluster.as_ref())
+                        .with_assembly(patches.as_ref())
+                        .with_voxel_wave(voxel_wave.as_ref()),
                 )?;
             }
             Ok(())
@@ -286,10 +279,77 @@ struct AerodynamicsBodyUpdate {
     error: Option<StepError>,
     original: BodyMotion,
     prepared: BodyMotion,
+    loads: PreparedAerodynamicLoads,
+}
+
+struct PreparedAerodynamicLoads {
     mesh_patches: Option<crate::aerodynamics::geometry::PreparedSurfacePatches>,
     voxel_wave: Option<crate::aerodynamics::hull::HullSection>,
     assembly_wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
     wing_visibility: Option<Vec<assembly_aerodynamics::PreparedWingVisibility>>,
+}
+
+/// Borrowed inputs prepared before aerodynamic loads are evaluated.
+struct AerodynamicsInputs<'a> {
+    mesh_sound_speed: f64,
+    cluster: Option<&'a RigidCluster>,
+    dt: Option<f64>,
+    mesh_patches: Option<&'a crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    voxel_wave: Option<&'a crate::aerodynamics::hull::HullSection>,
+    assembly_wave: Option<&'a (PartId, crate::aerodynamics::hull::HullSection)>,
+    wing_visibility: Option<&'a [assembly_aerodynamics::PreparedWingVisibility]>,
+}
+
+impl<'a> AerodynamicsInputs<'a> {
+    fn new(mesh_sound_speed: f64) -> Self {
+        Self {
+            mesh_sound_speed,
+            cluster: None,
+            dt: None,
+            mesh_patches: None,
+            voxel_wave: None,
+            assembly_wave: None,
+            wing_visibility: None,
+        }
+    }
+
+    fn with_cluster(mut self, cluster: Option<&'a RigidCluster>) -> Self {
+        self.cluster = cluster;
+        self
+    }
+
+    fn with_timestep(mut self, dt: Option<f64>) -> Self {
+        self.dt = dt;
+        self
+    }
+
+    fn with_loads(mut self, loads: &'a PreparedAerodynamicLoads) -> Self {
+        self.mesh_patches = loads.mesh_patches.as_ref();
+        self.voxel_wave = loads.voxel_wave.as_ref();
+        self.assembly_wave = loads.assembly_wave.as_ref();
+        self.wing_visibility = loads.wing_visibility.as_deref();
+        self
+    }
+
+    fn with_assembly(
+        mut self,
+        assembly: Option<&'a assembly_aerodynamics::PreparedAssembly>,
+    ) -> Self {
+        if let Some(assembly) = assembly {
+            self.mesh_patches = assembly.patches.as_ref();
+            self.assembly_wave = assembly.wave.as_ref();
+            self.wing_visibility = Some(&assembly.wing_visibility);
+        }
+        self
+    }
+
+    fn with_voxel_wave(
+        mut self,
+        section: Option<&'a crate::aerodynamics::hull::HullSection>,
+    ) -> Self {
+        self.voxel_wave = section;
+        self
+    }
 }
 
 const FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT: usize = 128;
@@ -1686,7 +1746,6 @@ impl PhysicsWorld {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn apply_aerodynamics(
         atmosphere: Atmosphere,
         primary: &crate::aerodynamics::Aerodynamics,
@@ -1694,14 +1753,17 @@ impl PhysicsWorld {
         body_id: BodyId,
         body: &mut BodyMotion,
         parts: &DensePool<ClusterPart>,
-        cluster: Option<&RigidCluster>,
-        dt: Option<f64>,
-        mesh_patches: Option<&crate::aerodynamics::geometry::PreparedSurfacePatches>,
-        mesh_sound_speed: f64,
-        voxel_wave: Option<&crate::aerodynamics::hull::HullSection>,
-        assembly_wave: Option<&(PartId, crate::aerodynamics::hull::HullSection)>,
-        wing_visibility: Option<&[assembly_aerodynamics::PreparedWingVisibility]>,
+        inputs: AerodynamicsInputs<'_>,
     ) -> Result<(), StepError> {
+        let AerodynamicsInputs {
+            mesh_sound_speed,
+            cluster,
+            dt,
+            mesh_patches,
+            voxel_wave,
+            assembly_wave,
+            wing_visibility,
+        } = inputs;
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
         {
@@ -2507,10 +2569,12 @@ impl PhysicsWorld {
                 error: None,
                 original: entry.body.motion(),
                 prepared: entry.body.motion(),
-                mesh_patches,
-                voxel_wave,
-                assembly_wave,
-                wing_visibility,
+                loads: PreparedAerodynamicLoads {
+                    mesh_patches,
+                    voxel_wave,
+                    assembly_wave,
+                    wing_visibility,
+                },
             });
         }
 
@@ -2536,13 +2600,10 @@ impl PhysicsWorld {
                                     update.id,
                                     &mut update.prepared,
                                     &self.parts,
-                                    entry.cluster.as_ref(),
-                                    Some(dt),
-                                    update.mesh_patches.as_ref(),
-                                    self.mesh_sound_speed,
-                                    update.voxel_wave.as_ref(),
-                                    update.assembly_wave.as_ref(),
-                                    update.wing_visibility.as_deref(),
+                                    AerodynamicsInputs::new(self.mesh_sound_speed)
+                                        .with_cluster(entry.cluster.as_ref())
+                                        .with_timestep(Some(dt))
+                                        .with_loads(&update.loads),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -3785,6 +3846,16 @@ impl PhysicsWorld {
                             step.error = local_wave
                                 .and_then(|local_wave| {
                                     local_assembly.and_then(|local_assembly| {
+                                        let inputs = AerodynamicsInputs::new(self.mesh_sound_speed)
+                                            .with_cluster(entry.cluster.as_ref())
+                                            .with_timestep(dt);
+                                        let inputs = if let Some(update) = staged {
+                                            inputs.with_loads(&update.loads)
+                                        } else {
+                                            inputs
+                                                .with_assembly(local_assembly.as_ref())
+                                                .with_voxel_wave(local_wave.as_ref())
+                                        };
                                         Self::apply_aerodynamics(
                                             atmosphere,
                                             entry.body.aerodynamics(),
@@ -3792,35 +3863,7 @@ impl PhysicsWorld {
                                             step.body_id,
                                             &mut step.prepared,
                                             &self.parts,
-                                            entry.cluster.as_ref(),
-                                            dt,
-                                            staged
-                                                .and_then(|update| update.mesh_patches.as_ref())
-                                                .or_else(|| {
-                                                    local_assembly.as_ref().and_then(|prepared| {
-                                                        prepared.patches.as_ref()
-                                                    })
-                                                }),
-                                            self.mesh_sound_speed,
-                                            staged
-                                                .and_then(|update| update.voxel_wave.as_ref())
-                                                .or(local_wave.as_ref()),
-                                            staged
-                                                .and_then(|update| update.assembly_wave.as_ref())
-                                                .or_else(|| {
-                                                    local_assembly
-                                                        .as_ref()
-                                                        .and_then(|prepared| prepared.wave.as_ref())
-                                                }),
-                                            staged
-                                                .and_then(|update| {
-                                                    update.wing_visibility.as_deref()
-                                                })
-                                                .or_else(|| {
-                                                    local_assembly.as_ref().map(|prepared| {
-                                                        prepared.wing_visibility.as_slice()
-                                                    })
-                                                }),
+                                            inputs,
                                         )
                                     })
                                 })
