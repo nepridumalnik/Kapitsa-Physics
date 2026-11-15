@@ -544,6 +544,25 @@ would therefore be a comparison of correlations, not independent experimental
 validation. Neither source establishes that smoothing Karr's Mach 1 corner
 would preserve experimental accuracy.
 
+May and Witt's free-flight sphere measurements are another possible
+independent source: [J. Aeronautical Sciences 20 (1953), 635–638](https://doi.org/10.2514/8.2767).
+The secondary review by [Nagata et al.](https://doi.org/10.1017/jfm.2020.629)
+reports Mach 0.8–4.7 and diameter Reynolds numbers from 1.14 × 10³ to
+8.4 × 10⁶. These are separate overall ranges, not evidence that any particular
+Mach and Reynolds combination was measured. Individual points, measurement
+uncertainties and their suitability for comparison with the Re = 10,000
+correlation still need verification against the original experiment. A later
+review used May and Witt among its sources for the compiled NOLTR table, so
+that table is not a substitute for independently checking their measurements.
+
+As a reproducible comparison of the two published correlations, at diameter
+Re = 10,000 Karr predicts `Cd = 0.8042` at Mach 1.2, whereas Krumins table I
+lists `Cd = 0.927` at the same nominal conditions (difference `-0.1228`).
+This discrepancy is not an experimental error estimate: the tabulation is a
+compilation with limited support in this range and Karr's expression is a fit
+to another dataset. It does show that choosing either curve as a universal
+transonic sphere prediction without further validation would be unjustified.
+
 For an additional transonic comparison, Usry and Wallace,
 [NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
 forebody axial-force coefficients for a fin-stabilized supercritical body of
