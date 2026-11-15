@@ -714,6 +714,73 @@ pub fn evaluate_prepared_mesh_by_owner(
     Ok(totals.into_iter().collect())
 }
 
+/// Reusable transactional storage for owner-attributed impact-pressure wrenches.
+/// `evaluate` replaces published results only on success; errors preserve them.
+/// Owners are preconfigured and strictly sorted so patch lookup is O(log K).
+/// Once created, evaluation does not allocate. This workspace is not a complete
+/// part-load ledger and is not attached to a `PhysicsWorld` step.
+pub struct OwnerPressureWorkspace {
+    published: Vec<(super::geometry::GeometryOwner, PressureWrench)>,
+    scratch: Vec<(super::geometry::GeometryOwner, PressureWrench)>,
+}
+
+impl OwnerPressureWorkspace {
+    /// Returns `None` for unsorted or repeated owners.
+    pub fn new(owners: &[super::geometry::GeometryOwner]) -> Option<Self> {
+        if owners.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return None;
+        }
+        let zero = PressureWrench {
+            force: Vec3::ZERO,
+            moment: Vec3::ZERO,
+        };
+        let published = owners
+            .iter()
+            .map(|owner| (*owner, zero))
+            .collect::<Vec<_>>();
+        Some(Self {
+            scratch: published.clone(),
+            published,
+        })
+    }
+
+    /// Last successful complete result; initially all configured loads are zero.
+    pub fn published(&self) -> &[(super::geometry::GeometryOwner, PressureWrench)] {
+        &self.published
+    }
+
+    /// Evaluates every patch once; unconfigured owners are rejected.
+    pub fn evaluate(
+        &mut self,
+        patches: &PreparedSurfacePatches,
+        flow: PressureFlow,
+    ) -> Result<(), PressureError> {
+        let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
+        for (_, wrench) in &mut self.scratch {
+            *wrench = zero;
+        }
+        for patch in patches.iter() {
+            let index = self
+                .scratch
+                .binary_search_by_key(&patch.owner, |entry| entry.0)
+                .map_err(|_| PressureError::InvalidPatch)?;
+            let load =
+                PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
+            let total = &mut self.scratch[index].1;
+            total.force = total
+                .force
+                .checked_add(load.force)
+                .ok_or(PressureError::ArithmeticOverflow)?;
+            total.moment = total
+                .moment
+                .checked_add(load.moment)
+                .ok_or(PressureError::ArithmeticOverflow)?;
+        }
+        std::mem::swap(&mut self.published, &mut self.scratch);
+        Ok(())
+    }
+}
+
 /// Applies the supplied base Cp to every explicitly selected prepared patch.
 /// The set must represent actual exposed base surfaces, not windward impact
 /// patches; this function does not determine which surfaces are in a wake.

@@ -99,6 +99,18 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     let a = evaluate_prepared_mesh_owner(&patches, flow(), GeometryOwner::Body)?;
     let b = evaluate_prepared_mesh_owner(&patches, flow(), GeometryOwner::Part(part))?;
     let grouped = evaluate_prepared_mesh_by_owner(&patches, flow())?;
+    let owners = [GeometryOwner::Body, GeometryOwner::Part(part)];
+    let mut workspace = OwnerPressureWorkspace::new(&owners).ok_or("owners")?;
+    workspace.evaluate(&patches, flow())?;
+    assert_eq!(workspace.published(), grouped.as_slice());
+    let previous = workspace.published().to_vec();
+    let mut incomplete = OwnerPressureWorkspace::new(&[GeometryOwner::Body]).ok_or("owner")?;
+    assert_eq!(
+        incomplete.evaluate(&patches, flow()),
+        Err(PressureError::InvalidPatch)
+    );
+    assert_eq!(incomplete.published()[0].1.force, Vec3::ZERO);
+    assert!(OwnerPressureWorkspace::new(&[GeometryOwner::Body, GeometryOwner::Body]).is_none());
     let concurrent = std::thread::scope(|scope| {
         let first = scope.spawn(|| evaluate_prepared_mesh_by_owner(&patches, flow()));
         let second = scope.spawn(|| evaluate_prepared_mesh_by_owner(&patches, flow()));
@@ -121,6 +133,13 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
         sound_speed: 0.0,
         ..flow()
     };
+    assert_eq!(
+        workspace.evaluate(&patches, invalid),
+        Err(PressureError::InvalidSoundSpeed)
+    );
+    assert_eq!(workspace.published(), previous.as_slice());
+    workspace.evaluate(&patches, flow())?;
+    assert_eq!(workspace.published(), previous.as_slice());
     assert_eq!(
         evaluate_prepared_mesh_owner(&patches, invalid, GeometryOwner::Part(part)),
         Err(PressureError::InvalidSoundSpeed)
