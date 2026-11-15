@@ -505,6 +505,45 @@ measurement errors dependent on Mach and Reynolds number. These data are a
 candidate benchmark, not evidence of validation of the present models; any
 digitization must record figure, Reynolds number and uncertainty explicitly.
 
+Spearman and Braswell, [NASA TM-109016](https://ntrs.nasa.gov/citations/19940008699),
+provide another candidate sphere benchmark. Their figure 2 shows wind-tunnel
+drag versus Mach 0.60–1.20 for a 6-inch-diameter sphere at unit Reynolds
+number 3.0 million per foot, corresponding to a diameter Reynolds number of
+1.5 million. Drag is normalized by dynamic pressure and maximum frontal area;
+the reported coefficient accuracy is approximately 0.01 based on
+repeatability, not a complete bound on systematic error. The sphere had a
+sting-supported balance and a rear cutout; the drag was adjusted to correspond
+to free-stream static pressure over that cutout. The authors warn that tunnel
+wall shock reflections can affect measurements under some test conditions.
+Figure 2 requires traceable digitization with its own uncertainty before
+numerical comparison; it is not itself a validated model or a numerical test.
+
+Karr's [NASA CR-2765](https://ntrs.nasa.gov/citations/19770009537), chapter V,
+pages 53–55, offers a published empirical sphere correlation derived from
+Bailey and Hiatt's ballistic-range data. For a diameter Reynolds number of
+10,000, its continuum-limit approximation is `Cd = 0.403 - 0.142 M² +
+0.459 M⁴` for `0.1 < M <= 1` and `Cd = 0.92 + 0.166/M - 0.366/M²` for
+`M >= 1`. The expressions meet at `Cd = 0.720` at Mach 1, but have different
+slopes there. The report says the supersonic fit agrees with the experimental
+results to at least 5%; this is a fit claim, not a measurement uncertainty or
+a guarantee for other Reynolds numbers. The underlying flight measurements
+used approximately equal sphere and gas temperatures. This correlation is
+specific to spheres near the stated Reynolds number, not a general hull
+closure. Bailey and Hiatt's data cannot independently validate a model fitted
+to those same data; any implementation needs a separate benchmark and an
+explicit treatment of the derivative discontinuity.
+
+The Spearman–Braswell figure above is not a like-for-like validation of that
+correlation: its diameter Reynolds number is 150 times higher. Krumins'
+[NOLTR 72-34](https://ntrs.nasa.gov/citations/19720017345), table I, lists
+recommended sphere coefficients at Reynolds number 10,000, but they are a
+compiled drag table rather than individual independent measurements. The same
+report explicitly cautions that parts of its transonic and low-supersonic
+curves lack measurements or have contradictory data. Agreement with that table
+would therefore be a comparison of correlations, not independent experimental
+validation. Neither source establishes that smoothing Karr's Mach 1 corner
+would preserve experimental accuracy.
+
 For an additional transonic comparison, Usry and Wallace,
 [NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
 forebody axial-force coefficients for a fin-stabilized supercritical body of
