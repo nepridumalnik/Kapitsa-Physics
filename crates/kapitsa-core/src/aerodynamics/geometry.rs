@@ -1357,7 +1357,7 @@ impl PreparedGeometry {
                             .checked_add(1)
                             .ok_or(GeometryError::WorkBudgetExceeded)?;
                         check_surface_work(Some(work), max_work)?;
-                        if shadow.covers(centroid) {
+                        if shadow.covers(centroid)? {
                             blocked = true;
                             break;
                         }

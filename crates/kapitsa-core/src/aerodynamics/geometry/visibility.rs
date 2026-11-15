@@ -232,11 +232,13 @@ impl Shadow {
         Ok(Some(Self { planes, coplanar }))
     }
 
-    pub fn covers(&self, point: Vec3) -> bool {
-        self.planes[..3]
-            .iter()
-            .all(|plane| distance(*plane, point) >= 0.0)
-            && (self.coplanar || distance(self.planes[3], point) > 0.0)
+    pub fn covers(&self, point: Vec3) -> Result<bool, GeometryError> {
+        for plane in &self.planes[..3] {
+            if finite(distance(*plane, point))? < 0.0 {
+                return Ok(false);
+            }
+        }
+        Ok(self.coplanar || finite(distance(self.planes[3], point))? > 0.0)
     }
 }
 
@@ -335,6 +337,18 @@ pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, GeometryError>
 mod tests {
     use super::*;
     use crate::aerodynamics::geometry::GeometryOwner;
+
+    #[test]
+    fn shadow_coverage_rejects_nonfinite_distance() {
+        let shadow = Shadow {
+            planes: [[f64::MAX, -f64::MAX, 0.0]; 4],
+            coplanar: false,
+        };
+        assert_eq!(
+            shadow.covers(Vec3::X),
+            Err(GeometryError::ArithmeticOverflow)
+        );
+    }
 
     #[test]
     fn affine_distance_preserves_small_positive_value_through_cancellation() {
@@ -488,7 +502,10 @@ mod tests {
                                 direction,
                                 blocker.vertices,
                             )?;
-                            assert_eq!(shadow.as_ref().is_some_and(|s| s.covers(point)), expected);
+                            assert_eq!(
+                                shadow.as_ref().is_some_and(|s| s.covers(point).unwrap()),
+                                expected
+                            );
                         }
                     }
                 }
