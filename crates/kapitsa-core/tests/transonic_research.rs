@@ -415,6 +415,41 @@ fn mixed_residual_diagonal_matches_finite_difference() {
 }
 
 #[test]
+fn mixed_residual_distinguishes_prescribed_shock_orientations() {
+    for n in [32, 64, 128] {
+        let h = 1.0 / n as f64;
+        for (up, down, compression) in [(0.02, -0.02, true), (-0.02, 0.02, false)] {
+            let mut slopes = vec![up; n / 2];
+            if compression {
+                slopes.push(0.0);
+            }
+            slopes.extend(vec![down; n / 2]);
+            let mut values = vec![0.0];
+            for slope in slopes {
+                values.push(values.last().unwrap() + h * slope);
+            }
+            let nx = values.len();
+            let grid = MixedGrid {
+                phi: values.into_iter().map(|v| vec![v; 3]).collect(),
+                axis_flux: vec![0.0; nx],
+                dx: h,
+                dr: h,
+                mach: 1.0,
+                gamma: 1.4,
+            };
+            let norm = (2..nx - 1)
+                .map(|i| grid.residual(i, 1).abs())
+                .fold(0.0_f64, f64::max);
+            if compression {
+                assert!(norm < 1e-12);
+            } else {
+                assert!(norm > 1e-4);
+            }
+        }
+    }
+}
+
+#[test]
 fn mixed_residual_matches_smooth_subsonic_quadratic() {
     let (n, a, b, mach, gamma) = (32, 0.005, 0.007, 0.7_f64, 1.4);
     let h = 1.0 / n as f64;
