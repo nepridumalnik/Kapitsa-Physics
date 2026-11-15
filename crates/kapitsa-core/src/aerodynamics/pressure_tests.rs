@@ -1,6 +1,38 @@
 use super::*;
 use kapitsa_math::Quat;
 
+#[test]
+fn base_source_uniqueness_obeys_work_limit_and_triangle_permutations() {
+    use crate::{
+        aerodynamics::{AerodynamicsError, geometry::GeometryError},
+        shape::TriangleMesh,
+    };
+    let vertices = vec![Vec3::ZERO, Vec3::Y, Vec3::Z, Vec3::X];
+    let mesh = TriangleMesh::new(vertices.clone(), vec![[0, 1, 2], [0, 2, 3]]).unwrap();
+    let selected = [[vertices[2], vertices[1], vertices[0]]];
+    assert_eq!(
+        verify_unique_base_sources(&selected, &mesh, 1),
+        Err(AerodynamicsError::Geometry(
+            GeometryError::WorkBudgetExceeded
+        ))
+    );
+    assert_eq!(verify_unique_base_sources(&selected, &mesh, 2), Ok(()));
+    let absent = [[vertices[1], vertices[2], vertices[3]]];
+    assert_eq!(
+        verify_unique_base_sources(&absent, &mesh, 2),
+        Err(AerodynamicsError::Pressure(
+            PressureError::BaseNotFullyVisible
+        ))
+    );
+    let duplicate = TriangleMesh::new(vertices, vec![[0, 1, 2], [2, 1, 0]]).unwrap();
+    assert_eq!(
+        verify_unique_base_sources(&selected, &duplicate, 2),
+        Err(AerodynamicsError::Pressure(
+            PressureError::BaseNotFullyVisible
+        ))
+    );
+}
+
 fn flow() -> PressureFlow {
     PressureFlow {
         atmosphere: AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
