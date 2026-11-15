@@ -282,6 +282,10 @@ fn part_simple_surfaces_share_body_level_drag_limit() -> Result<(), Box<dyn std:
             assert_eq!(snapshot.len(), 1);
             let correction = snapshot[0];
             let raw = world.raw_simple_surface_wrenches().to_vec();
+            assert_eq!(
+                correction.check_part_attribution(&raw),
+                Err(SimpleSurfaceAttributionError::CorrectedAggregate)
+            );
             assert_eq!(raw.len(), if distributed { 2 } else { 1 });
             assert!(
                 raw.iter()
@@ -336,6 +340,55 @@ fn part_simple_surfaces_share_body_level_drag_limit() -> Result<(), Box<dyn std:
             assert!(world.simple_surface_corrections().is_empty());
             assert!(world.raw_simple_surface_wrenches().is_empty());
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn simple_surface_attribution_accepts_only_complete_uncorrected_part_loads()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{AerodynamicProperties, AerodynamicTarget};
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));
+        let mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY * 2.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 10.0)?;
+        let id = world.add_body(body)?;
+        let part = world.enable_cluster(id)?;
+        world.add_aerodynamic_surface_for_part(
+            part,
+            AerodynamicProperties::new(1.0, 1.0, Vec3::Y)?,
+        )?;
+        if sharded {
+            world.step_with_shards(
+                1e-6,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )?;
+        } else {
+            world.step(1e-6)?;
+        }
+        let correction = *world
+            .simple_surface_corrections()
+            .first()
+            .ok_or("correction")?;
+        let raw = world.raw_simple_surface_wrenches();
+        assert_eq!(correction.check_part_attribution(raw), Ok(()));
+        assert_eq!(raw[0].target, AerodynamicTarget::Part(part));
+        assert_eq!(raw[0].drag.force, Vec3::X * -60.0);
+        assert_eq!(raw[0].drag.moment, Vec3::Z * 60.0);
+        assert_eq!(
+            correction.check_part_attribution(&[]),
+            Err(SimpleSurfaceAttributionError::InconsistentSnapshot)
+        );
+        let mut body_target = raw.to_vec();
+        body_target[0].target = AerodynamicTarget::Body;
+        assert_eq!(
+            correction.check_part_attribution(&body_target),
+            Err(SimpleSurfaceAttributionError::BodyTarget)
+        );
     }
     Ok(())
 }

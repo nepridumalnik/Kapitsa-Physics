@@ -298,6 +298,68 @@ pub struct RawSimpleSurfaceWrench {
     pub lift: crate::aerodynamics::pressure::PressureWrench,
 }
 
+/// Why raw simple-surface loads cannot safely be used as applied part loads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimpleSurfaceAttributionError {
+    /// The aggregate timestep correction changes drag or lift.
+    CorrectedAggregate,
+    /// At least one recorded surface targets the body rather than a part.
+    BodyTarget,
+    /// Raw entries are absent, incomplete, or inconsistent with the aggregate.
+    InconsistentSnapshot,
+}
+
+impl SimpleSurfaceCorrection {
+    /// Checks whether this body's raw simple-surface snapshot can be used as
+    /// the applied per-part surface contributions, without allocating or
+    /// inventing a distribution of the body-level correction. This says
+    /// nothing about other forces, impulses, inertia, or weld equilibrium.
+    /// Exact equality is intentional: no nonzero correction is discarded.
+    pub fn check_part_attribution(
+        &self,
+        raw: &[RawSimpleSurfaceWrench],
+    ) -> Result<(), SimpleSurfaceAttributionError> {
+        if self.raw_drag != self.applied_drag || self.raw_lift != self.applied_lift {
+            return Err(SimpleSurfaceAttributionError::CorrectedAggregate);
+        }
+        if raw
+            .iter()
+            .any(|entry| entry.body == self.body && entry.target == AerodynamicTarget::Body)
+        {
+            return Err(SimpleSurfaceAttributionError::BodyTarget);
+        }
+        let mut drag_force = Vec3::ZERO;
+        let mut drag_moment = Vec3::ZERO;
+        let mut lift_force = Vec3::ZERO;
+        let mut lift_moment = Vec3::ZERO;
+        let mut found = false;
+        for entry in raw.iter().filter(|entry| entry.body == self.body) {
+            found = true;
+            drag_force = drag_force
+                .checked_add(entry.drag.force)
+                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
+            drag_moment = drag_moment
+                .checked_add(entry.drag.moment)
+                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
+            lift_force = lift_force
+                .checked_add(entry.lift.force)
+                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
+            lift_moment = lift_moment
+                .checked_add(entry.lift.moment)
+                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
+        }
+        if !found
+            || drag_force != self.raw_drag.force
+            || drag_moment != self.raw_drag.moment
+            || lift_force != self.raw_lift.force
+            || lift_moment != self.raw_lift.moment
+        {
+            return Err(SimpleSurfaceAttributionError::InconsistentSnapshot);
+        }
+        Ok(())
+    }
+}
+
 impl ForceSource {
     /// Returns the dynamic body receiving this force.
     pub fn body(&self) -> BodyId {

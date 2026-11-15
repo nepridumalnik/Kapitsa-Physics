@@ -107,7 +107,11 @@ from a particular surface is therefore not necessarily its applied force.
 body-level drag and lift wrenches after a successful full step. Their difference
 is not attributed to any part. `raw_simple_surface_wrenches` records the raw
 drag and lift of each body- or part-targeted surface before that correction;
-they are not the applied loads. A future weld ledger must adopt and document a
+they are not generally the applied loads. `check_part_attribution` accepts a
+complete part-only snapshot only when raw and applied aggregate wrenches match
+exactly; it rejects an unallocated correction rather than ignoring it. A
+missing aggregate, including cancelling loads, must likewise not be assumed
+attributable. A future weld ledger must adopt and document a
 physically justified allocation policy before using these corrected loads; it
 must not silently use uncorrected per-surface values as weld loads.
 
