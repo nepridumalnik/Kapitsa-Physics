@@ -461,6 +461,7 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
         assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
         assert!(world.weld(weld).is_some());
         world.remove_part_collider(own_collider)?;
+        world.add_gravity(crate::gravity::UniformGravity::new(Vec3::Y * -10.0)?)?;
         if sharded {
             world.step_with_shards(
                 0.01,
@@ -474,6 +475,11 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
         assert!(world.weld(weld).is_none());
         let child_body = world.part_body(child).ok_or("child")?;
         assert_ne!(child_body, body);
+        let reactions = world
+            .part_source_weld_reactions(body, 1e-10, 1e-10)
+            .map_err(|e| format!("{e:?}"))?;
+        assert!((reactions[0].force + Vec3::X * 5.0).length() < 1e-10);
+        assert_eq!(world.part_gravity_wrenches().len(), 2);
         assert!(
             (world
                 .body(child_body)

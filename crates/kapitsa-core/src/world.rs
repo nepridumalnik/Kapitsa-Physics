@@ -852,6 +852,7 @@ impl PhysicsWorld {
             &self.cluster_load_parts_pending,
             &self.cluster_load_welds_pending,
             &self.part_force_source_pending,
+            &self.part_gravity_pending,
         )?;
         Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_pending)
     }
@@ -902,8 +903,9 @@ impl PhysicsWorld {
     }
 
     /// Instantaneous reactions for clusters subject only to
-    /// part-targeted persistent forces. The cluster must have no colliders;
-    /// the world must have no joints, gravity, or aerodynamic loads on it.
+    /// part-targeted persistent forces and gravity sampled at the cluster COM.
+    /// The cluster must have no colliders; the world must have no joints or
+    /// chunks, and the cluster must have no aerodynamic loads.
     /// Results are diagnostics from the last successful full-step snapshot.
     pub fn part_source_weld_reactions(
         &self,
@@ -919,6 +921,7 @@ impl PhysicsWorld {
             &self.cluster_load_parts_published,
             &self.cluster_load_welds_published,
             &self.part_force_source_published,
+            &self.part_gravity_published,
         )
     }
 
@@ -931,6 +934,7 @@ impl PhysicsWorld {
         parts: &[ClusterLoadPart],
         snapshot_welds: &[ClusterLoadWeld],
         sources: &[PartForceSourceWrench],
+        gravity: &[PartGravityWrench],
     ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
         use crate::cluster::balance::{
             RecordedPartLoads, prepare_recorded_loads, prepare_tree, reaction_moment_at_anchor,
@@ -954,7 +958,7 @@ impl PhysicsWorld {
             &tree,
             RecordedPartLoads {
                 sources,
-                gravity: &[],
+                gravity,
                 hull: &[],
                 wings: &[],
             },
@@ -2184,10 +2188,8 @@ impl PhysicsWorld {
         self.cluster_load_welds_pending
             .try_reserve(self.welds.iter().count())
             .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
-        let no_world_load_paths = self.joints.iter().next().is_none()
-            && self.central_gravity.is_none()
-            && self.gravity_fields.iter().next().is_none()
-            && self.chunks.iter().next().is_none();
+        let no_world_load_paths =
+            self.joints.iter().next().is_none() && self.chunks.iter().next().is_none();
         for (dense, entry) in self.bodies.iter() {
             if let Some(cluster) = &entry.cluster {
                 let body = &entry.body;
@@ -2219,6 +2221,8 @@ impl PhysicsWorld {
                             .is_some_and(|geometry| geometry.contains_key(part_id))
                     });
                 let force_free_certified = part_sources_certified
+                    && self.central_gravity.is_none()
+                    && self.gravity_fields.is_empty()
                     && self.force_sources.iter().all(|(_, source)| {
                         !source.enabled
                             || source.body
