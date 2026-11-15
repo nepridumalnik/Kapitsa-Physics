@@ -808,6 +808,31 @@ been established here. The data are a prospective holdout only for a model not
 fitted to them, and this single subsonic freestream condition cannot validate
 continuation across Mach 1.
 
+#### Candidate nonlinear slender-body solver
+
+Bailey, [NASA TN D-6582](https://ntrs.nasa.gov/api/citations/19720004250/downloads/19720004250.pdf),
+describes an axisymmetric transonic small-disturbance potential solver for a
+pointed slender body, including subsonic, mixed and supersonic flow. It assumes
+steady inviscid flow and shocks weak enough for vorticity to be neglected; the
+paper notes that its irrotational shock approximation is reasonable when the
+upstream Mach component normal to the shock does not exceed 1.25. This is a
+limitation of the approximation, not an input-only guarantee. The nonlinear
+equation changes type locally; its shock jump condition, mixed
+finite-difference switching, axial source boundary and far-field boundaries
+must all be reproduced and checked before claiming a solver. A Mach-only blend
+of existing forces is not equivalent. The paper uses iterative relaxation and
+grid refinement; convergence and shock location must be checked independently.
+
+Its published comparison uses a parabolic-arc body of nominal fineness 10,
+truncated at x/l = 0.854 for a sting, at Reynolds number about 27 million;
+the pressure data were not corrected for tunnel walls. Its test data are
+therefore not interchangeable with Harris–Landrum's Haack–Adams shapes. Near
+Mach 1 the calculated aft shock lies significantly downstream of experiment;
+the paper discusses wall interference and viscous effects. The paper's plotted
+comparisons are not a transcribed independent dataset, and the measurement
+uncertainty has not been established here. No solver or experimental acceptance
+is claimed from identifying this candidate.
+
 Another candidate for a closed-body benchmark is Harris and Landrum's
 [NASA report](https://ntrs.nasa.gov/api/citations/19660003947/downloads/19660003947.pdf),
 which tests Haack–Adams bodies from Mach 0.6 to 3.95. Their theoretical
