@@ -656,6 +656,19 @@ independent Karr holdout; the high-Mach points also do not match Re = 10,000.
 The relationship to individual observations in the Goin–Lawrence article
 remains unverified.
 
+Sivier and Nicholls' primary wind-tunnel report
+([NASA CR-1392](https://ntrs.nasa.gov/citations/19690021231)) used magnetic
+suspension rather than ballistic flight, but its measurements cover Re 25–4000,
+not Re = 10,000. Section 3.2.1 reports smooth-sphere data at Mach 0.23
+approximately 8% above their standard curve at Re = 100 and 20% above
+it at Re = 4000; model jitter and 0.3–1.5% turbulence are discussed as
+possible influences, not established corrections. Its figure 18 uses
+cross-plotted curves rather than individual observations. Moreover,
+Bailey and Hiatt include Sivier in their comparison of low-speed data, so a
+different measurement technique alone does not establish an independent
+holdout for their faired curves. This report does not supply a validated
+transonic point at Re = 10,000.
+
 The newer GBK experiment by [Allofs et al.](https://doi.org/10.1007/s00348-022-03402-z)
 is independent of the historical fits, but is not a direct sphere `Cd`
 dataset. It measures particle size and velocity in a dust-laden nozzle flow;
