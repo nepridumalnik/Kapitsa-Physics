@@ -1465,13 +1465,22 @@ impl MixedGrid {
     }
 
     fn iterate(&mut self, tolerance: f64, max_iterations: usize) -> Result<(usize, f64), f64> {
+        self.iterate_with_forcing(tolerance, max_iterations, |_, _| 0.0)
+    }
+
+    fn iterate_with_forcing(
+        &mut self,
+        tolerance: f64,
+        max_iterations: usize,
+        forcing: impl Fn(usize, usize) -> f64,
+    ) -> Result<(usize, f64), f64> {
         let nx = self.phi.len();
         let nr = self.phi[0].len();
         for iteration in 0..=max_iterations {
             let mut norm: f64 = 0.0;
             for i in 2..nx - 1 {
                 for k in 0..nr - 1 {
-                    let residual = self.residual(i, k);
+                    let residual = self.residual(i, k) - forcing(i, k);
                     if !residual.is_finite() {
                         return Err(residual);
                     }
@@ -1487,7 +1496,7 @@ impl MixedGrid {
             for i in 2..nx - 1 {
                 for k in 0..nr - 1 {
                     let old = self.phi[i][k];
-                    let residual = self.residual(i, k);
+                    let residual = self.residual(i, k) - forcing(i, k);
                     let diagonal = self.diagonal(i, k);
                     if !diagonal.is_finite() || diagonal.abs() < 1e-14 {
                         return Err(diagonal);
@@ -1496,7 +1505,7 @@ impl MixedGrid {
                     let mut accepted = false;
                     for _ in 0..20 {
                         self.phi[i][k] = old + step;
-                        let trial = self.residual(i, k);
+                        let trial = self.residual(i, k) - forcing(i, k);
                         if trial.is_finite() && trial.abs() <= residual.abs() {
                             accepted = true;
                             break;
@@ -1556,6 +1565,69 @@ impl MixedGrid {
         -(coefficient(u).abs() + coefficient(forward).max(0.0)) / self.dx.powi(2)
             - (2 * k + 1) as f64 / ((k as f64 + 0.5) * self.dr.powi(2))
     }
+}
+
+#[test]
+#[ignore = "manufactured solution convergence diagnostic; run in release mode"]
+fn manufactured_smooth_solution_iteration_convergence() -> Result<(), String> {
+    // phi=A(x³+r⁴). The exact continuous forcing is
+    // (1-M²-M²(gamma+1)phi_x)phi_xx + 16 A r².
+    // Grid-dependent outer-centre and two left-row Dirichlet values are exact;
+    // the axis flux is zero. No body geometry or physical validation is implied.
+    const A: f64 = 0.01;
+    const MACH: f64 = 0.3;
+    const GAMMA: f64 = 1.4;
+    const TOLERANCE: f64 = 1e-10;
+    let exact = |x: f64, r: f64| A * (x.powi(3) + r.powi(4));
+    let mut previous = f64::INFINITY;
+    for n in [16_usize, 32, 64] {
+        let h = 1.0 / n as f64;
+        let mut grid = MixedGrid {
+            phi: (0..=n)
+                .map(|i| {
+                    (0..=n)
+                        .map(|k| {
+                            if i < 2 || i == n || k == n {
+                                exact(i as f64 * h, (k as f64 + 0.5) * h)
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+            axis_flux: vec![0.0; n + 1],
+            dx: h,
+            dr: h,
+            mach: MACH,
+            gamma: GAMMA,
+        };
+        let forcing = |i: usize, k: usize| {
+            let x = i as f64 * h;
+            let r = (k as f64 + 0.5) * h;
+            let lambda = 1.0 - MACH * MACH - MACH * MACH * (GAMMA + 1.0) * 3.0 * A * x * x;
+            lambda * 6.0 * A * x + 16.0 * A * r * r
+        };
+        let (iterations, residual) = grid
+            .iterate_with_forcing(TOLERANCE, 100_000, forcing)
+            .map_err(|value| format!("n={n} residual={value}"))?;
+        let mut error = 0.0_f64;
+        for i in 2..n {
+            for k in 0..n {
+                error =
+                    error.max((grid.phi[i][k] - exact(i as f64 * h, (k as f64 + 0.5) * h)).abs());
+            }
+        }
+        assert!(
+            error < previous / 2.0,
+            "n={n} error={error} previous={previous}"
+        );
+        println!(
+            "manufactured_solve n={n} dx={h:.9} max_error={error:.9e} iterations={iterations} residual={residual:.3e}"
+        );
+        previous = error;
+    }
+    Ok(())
 }
 
 #[test]
