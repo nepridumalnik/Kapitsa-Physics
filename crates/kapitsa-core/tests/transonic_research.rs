@@ -20,6 +20,41 @@ fn axial_flux(u: f64, mach: f64, gamma: f64) -> f64 {
 }
 
 #[test]
+fn murman_conservation_alone_admits_expansion_shocks() {
+    // Jameson, Transonic Flow Calculations, section 2.1, equations (18)-(23).
+    // This diagnostic does not claim entropy selection or a body solver.
+    let faces = |slopes: &[f64]| -> Vec<f64> {
+        slopes
+            .windows(2)
+            .map(|p| {
+                let switch =
+                    1.0 - 1.0_f64.powi(2) - 1.0_f64.powi(2) * 2.4 * (p[0] + p[1]) / 2.0 < 0.0;
+                if switch {
+                    axial_flux(p[0], 1.0, 1.4)
+                } else {
+                    axial_flux(p[1], 1.0, 1.4)
+                }
+            })
+            .collect()
+    };
+    let f = faces(&[-0.1, -0.04, 0.08, 0.12, -0.03, -0.1]);
+    let residual_sum: f64 = f.windows(2).map(|p| (p[1] - p[0]) / 0.1).sum();
+    assert!((residual_sum * 0.1 - (f[f.len() - 1] - f[0])).abs() < 1e-14);
+    for n in [32, 64, 128] {
+        for (left, right) in [(0.1, -0.1), (-0.1, 0.1)] {
+            let mut slopes = vec![left; n / 2];
+            slopes.extend(vec![right; n / 2]);
+            let f = faces(&slopes);
+            let norm = f
+                .windows(2)
+                .map(|p| ((p[1] - p[0]) * n as f64).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(norm < 1e-14);
+        }
+    }
+}
+
+#[test]
 fn normal_shock_flux_factorization_and_type_change() {
     for mach in [0.9_f64, 1.0, 1.1] {
         let gamma = 1.4;
