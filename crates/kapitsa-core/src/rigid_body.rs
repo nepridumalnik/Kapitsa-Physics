@@ -34,6 +34,10 @@ pub struct RigidBody {
     aerodynamics: crate::aerodynamics::Aerodynamics,
     pub(crate) aerodynamic_geometry_identity: Option<std::sync::Arc<()>>,
     pub(crate) aerodynamic_surfaces: Vec<crate::aerodynamics::AerodynamicSurface>,
+    pub(crate) base_pressure_patches: Vec<(
+        crate::aerodynamics::pressure::PressurePatch,
+        crate::aerodynamics::pressure::BasePressure,
+    )>,
 }
 
 impl RigidBody {
@@ -55,6 +59,7 @@ impl RigidBody {
             aerodynamics: crate::aerodynamics::Aerodynamics::None,
             aerodynamic_geometry_identity: None,
             aerodynamic_surfaces: Vec::new(),
+            base_pressure_patches: Vec::new(),
         }
     }
 
@@ -70,6 +75,7 @@ impl RigidBody {
         &mut self,
         aerodynamics: crate::aerodynamics::Aerodynamics,
     ) {
+        self.base_pressure_patches.clear();
         self.aerodynamic_geometry_identity = matches!(
             aerodynamics,
             crate::aerodynamics::Aerodynamics::Mesh(_)
@@ -88,6 +94,20 @@ impl RigidBody {
 
     pub fn aerodynamic_surfaces(&self) -> &[crate::aerodynamics::AerodynamicSurface] {
         &self.aerodynamic_surfaces
+    }
+
+    /// Replaces explicitly selected body-local base patches. The caller must
+    /// ensure they remain exposed and belong to the current Mesh/Colliders
+    /// geometry; no wake, overlap or shielding calculation is performed.
+    /// These loads are currently supported only on non-cluster Mesh/Colliders bodies.
+    pub fn set_base_pressure_patches(
+        &mut self,
+        patches: Vec<(
+            crate::aerodynamics::pressure::PressurePatch,
+            crate::aerodynamics::pressure::BasePressure,
+        )>,
+    ) {
+        self.base_pressure_patches = patches;
     }
 
     /// Copies only motion, mass, and force state; owned geometry is never cloned.

@@ -124,6 +124,7 @@ mod aerodynamics {
                     &mut body,
                     &world.parts,
                     super::AerodynamicsInputs::new(world.mesh_sound_speed)
+                        .with_base_pressure(&entry.body.base_pressure_patches)
                         .with_cluster(entry.cluster.as_ref())
                         .with_assembly(patches.as_ref())
                         .with_voxel_wave(voxel_wave.as_ref()),
@@ -298,6 +299,10 @@ struct AerodynamicsInputs<'a> {
     voxel_wave: Option<&'a crate::aerodynamics::hull::HullSection>,
     assembly_wave: Option<&'a (PartId, crate::aerodynamics::hull::HullSection)>,
     wing_visibility: Option<&'a [assembly_aerodynamics::PreparedWingVisibility]>,
+    base_pressure_patches: &'a [(
+        crate::aerodynamics::pressure::PressurePatch,
+        crate::aerodynamics::pressure::BasePressure,
+    )],
 }
 
 impl<'a> AerodynamicsInputs<'a> {
@@ -310,11 +315,23 @@ impl<'a> AerodynamicsInputs<'a> {
             voxel_wave: None,
             assembly_wave: None,
             wing_visibility: None,
+            base_pressure_patches: &[],
         }
     }
 
     fn with_cluster(mut self, cluster: Option<&'a RigidCluster>) -> Self {
         self.cluster = cluster;
+        self
+    }
+
+    fn with_base_pressure(
+        mut self,
+        patches: &'a [(
+            crate::aerodynamics::pressure::PressurePatch,
+            crate::aerodynamics::pressure::BasePressure,
+        )],
+    ) -> Self {
+        self.base_pressure_patches = patches;
         self
     }
 
@@ -1763,11 +1780,25 @@ impl PhysicsWorld {
             voxel_wave,
             assembly_wave,
             wing_visibility,
+            base_pressure_patches,
         } = inputs;
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
         {
             return Ok(());
+        }
+        if !base_pressure_patches.is_empty()
+            && (cluster.is_some()
+                || !matches!(
+                    primary,
+                    crate::aerodynamics::Aerodynamics::Mesh(_)
+                        | crate::aerodynamics::Aerodynamics::Colliders
+                ))
+        {
+            return Err(StepError::Aerodynamics {
+                body_id,
+                cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+            });
         }
         let error = || StepError::Aerodynamics {
             body_id,
@@ -1826,6 +1857,17 @@ impl PhysicsWorld {
                 })?;
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;
+            for &(patch, base) in base_pressure_patches {
+                let wrench =
+                    patch
+                        .evaluate_base(flow, base)
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                        })?;
+                body.apply_force(wrench.force).map_err(|_| error())?;
+                body.apply_torque(wrench.moment).map_err(|_| error())?;
+            }
         }
         let primary_hull: &[crate::aerodynamics::hull::HullSection] = match primary {
             crate::aerodynamics::Aerodynamics::Hull(sections) => sections,
@@ -2601,6 +2643,7 @@ impl PhysicsWorld {
                                     &mut update.prepared,
                                     &self.parts,
                                     AerodynamicsInputs::new(self.mesh_sound_speed)
+                                        .with_base_pressure(&entry.body.base_pressure_patches)
                                         .with_cluster(entry.cluster.as_ref())
                                         .with_timestep(Some(dt))
                                         .with_loads(&update.loads),
@@ -3847,6 +3890,7 @@ impl PhysicsWorld {
                                 .and_then(|local_wave| {
                                     local_assembly.and_then(|local_assembly| {
                                         let inputs = AerodynamicsInputs::new(self.mesh_sound_speed)
+                                            .with_base_pressure(&entry.body.base_pressure_patches)
                                             .with_cluster(entry.cluster.as_ref())
                                             .with_timestep(dt);
                                         let inputs = if let Some(update) = staged {

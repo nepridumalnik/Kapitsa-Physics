@@ -671,6 +671,81 @@ fn geometry_modes_preserve_mesh_in_vacuum_and_reject_air_atomically() {
 }
 
 #[test]
+fn explicit_base_pressure_affects_mesh_and_collider_steps_and_rolls_back_errors()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::pressure::{BasePressure, PressureError, PressurePatch},
+        collider::Collider,
+        shape::{Cuboid, Shape, TriangleMesh},
+    };
+    for mesh in [false, true] {
+        for sharded in [false, true] {
+            for invalid in [false, true] {
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                    0.001,
+                    Vec3::ZERO,
+                )?));
+                let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+                let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+                body.set_linear_velocity(Vec3::X * 2000.0)?;
+                body.set_aerodynamics(if mesh {
+                    Aerodynamics::Mesh(TriangleMesh::new(
+                        vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+                        vec![[0, 1, 2]],
+                    )?)
+                } else {
+                    Aerodynamics::Colliders
+                });
+                body.set_base_pressure_patches(vec![(
+                    PressurePatch::new(Vec3::Y, if invalid { Vec3::X } else { -Vec3::X }, 1.0)?,
+                    BasePressure::new(-0.4, 5.0, 10.0)?,
+                )]);
+                let id = world.add_body(body)?;
+                if !mesh {
+                    world.add_collider(
+                        id,
+                        Collider::new(
+                            Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                            Transform::identity(),
+                        ),
+                    )?;
+                }
+                let before = world.body(id).unwrap().motion();
+                let result = if sharded {
+                    world.step_with_shards(
+                        1e-5,
+                        &mut [Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )
+                } else {
+                    world.step(1e-5)
+                };
+                if invalid {
+                    assert!(matches!(
+                        result,
+                        Err(super::StepError::Aerodynamics {
+                            cause: crate::aerodynamics::AerodynamicsError::Pressure(
+                                PressureError::InvalidBaseOrientation
+                            ),
+                            ..
+                        })
+                    ));
+                    assert_eq!(world.body(id).unwrap().motion(), before);
+                } else {
+                    result?;
+                    let state = world.body(id).unwrap().state();
+                    assert!(state.linear_velocity().x < 2000.0);
+                    assert!(state.angular_velocity().z > 0.0);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn mesh_uses_atmosphere_sound_speed_in_world_paths() {
     use crate::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
     use crate::shape::TriangleMesh;
