@@ -224,6 +224,44 @@ mod tests {
     }
 
     #[test]
+    fn potential_cell_is_covariant_under_rigid_transform() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let section = HullSection::new(
+            Transform::new(Vec3::X * 2.0, Quat::IDENTITY)?,
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?
+        .with_potential(PotentialCell {
+            slope: -0.5,
+            width: 1.0,
+            max_incidence: 0.2,
+        });
+        let initial = flow(Vec3::new(10.0, 0.0, -1.0))?;
+        let reference = section.evaluate(initial)?;
+        let rotation = Quat::from_axis_angle(Vec3::Y, 0.7).ok_or("rotation")?;
+        let transform = Transform::new(Vec3::new(100.0, 200.0, -300.0), rotation)?;
+        let rotated_velocity = rotation
+            .rotate_vector(initial.linear_velocity)
+            .ok_or("velocity")?;
+        let result = section.evaluate(PressureFlow {
+            transform,
+            linear_velocity: rotated_velocity,
+            ..initial
+        })?;
+        let expected_force = rotation.rotate_vector(reference.force).ok_or("force")?;
+        let expected_moment = rotation.rotate_vector(reference.moment).ok_or("moment")?;
+        assert!((result.force - expected_force).length() < 1e-12);
+        assert!((result.moment - expected_moment).length() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
     fn potential_cell_preserves_representable_extreme_loads()
     -> Result<(), Box<dyn std::error::Error>> {
         for (slope, axial, cross, sound) in [
