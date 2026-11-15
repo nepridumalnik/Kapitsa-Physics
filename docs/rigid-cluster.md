@@ -187,14 +187,14 @@ surfaces, primary and geometry-based aerodynamics, and the other unsupported
 paths above. `part_aerodynamic_weld_reactions` also accepts part-owned wings;
 automatic failure uses the corresponding pending hull and wing snapshots.
 
-Part-targeted `AerodynamicSurface` loads are not yet certified for weld
-failure. A safe extension must use the same step's raw per-surface records and
-verify that the applied body-level drag and lift exactly equal their raw sums;
-it must reject body-targeted surfaces and any unattributed correction. The
+Part-targeted `AerodynamicSurface` loads are certified only when all configured
+surfaces have raw records from the same step, their sums match the recorded
+aggregate, and applied drag and lift exactly equal their raw values. Body-targeted
+surfaces and unattributed corrections are rejected. The
 evaluator now records an explicit zero correction when the aggregate force and
 moment vanish, including when individual loads cancel. An absent correction is
-still not a certificate of zero individual loads: vacuum and skipped paths
-require explicit handling rather than assuming each part's load is zero.
+still not a certificate of zero individual loads: vacuum and skipped surface
+records currently cause an explicit incomplete-load error.
 
 The reaction is evaluated at the start of the timestep, while the split uses
 the predicted end-of-step rigid velocity field. This is a discrete failure

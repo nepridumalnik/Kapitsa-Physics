@@ -299,6 +299,86 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
 }
 
 #[test]
+fn automatic_failure_certifies_only_uncorrected_part_surfaces()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::AerodynamicProperties;
+    use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
+    use crate::joint::JointFrame;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut rigid = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        rigid.set_linear_velocity(Vec3::X * 10.0)?;
+        let body = world.add_body(rigid)?;
+        let root = world.enable_cluster(body)?;
+        let child = world.add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::X * 10.0,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::IDENTITY,
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Breakable {
+                    max_force: Some(20.0),
+                    max_torque: None,
+                },
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )?;
+        let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+        world.add_aerodynamic_surface_for_part(
+            child,
+            AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO)?,
+        )?;
+        world
+            .set_automatic_weld_failure(Some((1e-9, 1e-9)))
+            .map_err(|e| format!("{e:?}"))?;
+        let step = |world: &mut PhysicsWorld, dt| {
+            if sharded {
+                world.step_with_shards(
+                    dt,
+                    &mut [Vec::new(), Vec::new()],
+                    &super::tests::ScopedThreadExecutor,
+                    2,
+                )
+            } else {
+                world.step(dt)
+            }
+        };
+        let before = *world.body(body).ok_or("body")?.state();
+        assert!(matches!(
+            step(&mut world, 1.0),
+            Err(StepError::WeldBalance(_))
+        ));
+        assert_eq!(*world.body(body).ok_or("body")?.state(), before);
+        assert!(world.weld(weld).is_some());
+        world.set_atmosphere(crate::aerodynamics::Atmosphere::Vacuum);
+        assert!(matches!(
+            step(&mut world, 1e-5),
+            Err(StepError::WeldBalance(_))
+        ));
+        assert!(world.weld(weld).is_some());
+        world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));
+        step(&mut world, 1e-5)?;
+        assert!(world.weld(weld).is_none());
+        let reactions = world
+            .part_aerodynamic_weld_reactions(body, 1e-9, 1e-9)
+            .map_err(|e| format!("{e:?}"))?;
+        assert!((reactions[0].force - Vec3::X * 30.0).length() < 1e-9);
+    }
+    Ok(())
+}
+
+#[test]
 fn automatic_weld_failure_uses_pending_part_hull_loads() -> Result<(), Box<dyn std::error::Error>> {
     use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
     use crate::joint::JointFrame;

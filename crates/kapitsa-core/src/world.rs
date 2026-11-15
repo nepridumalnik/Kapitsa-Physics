@@ -317,6 +317,8 @@ pub struct ClusterLoadState {
     pub(crate) part_sources_certified: bool,
     pub(crate) part_hull_certified: bool,
     pub(crate) part_wings_certified: bool,
+    pub(crate) part_surfaces_certified: bool,
+    pub(crate) part_surface_count: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -864,6 +866,7 @@ impl PhysicsWorld {
             &self.part_gravity_pending,
             &self.part_hull_pending,
             &self.part_wing_pending,
+            (&self.simple_surface_pending, &self.raw_simple_pending),
             WeldLoadMode::PartAerodynamics,
         )?;
         Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_pending)
@@ -936,6 +939,7 @@ impl PhysicsWorld {
             &self.part_gravity_published,
             &[],
             &[],
+            (&[], &[]),
             WeldLoadMode::Sources,
         )
     }
@@ -960,6 +964,7 @@ impl PhysicsWorld {
             &self.part_gravity_published,
             &self.part_hull_published,
             &[],
+            (&[], &[]),
             WeldLoadMode::Hull,
         )
     }
@@ -984,6 +989,7 @@ impl PhysicsWorld {
             &self.part_gravity_published,
             &self.part_hull_published,
             &self.part_wing_published,
+            (&self.simple_surface_published, &self.raw_simple_published),
             WeldLoadMode::PartAerodynamics,
         )
     }
@@ -1000,6 +1006,7 @@ impl PhysicsWorld {
         gravity: &[PartGravityWrench],
         hull: &[PartHullWrench],
         wings: &[PartWingWrench],
+        simple: (&[SimpleSurfaceCorrection], &[RawSimpleSurfaceWrench]),
         load_mode: WeldLoadMode,
     ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
         use crate::cluster::balance::{
@@ -1013,7 +1020,7 @@ impl PhysicsWorld {
         if !match load_mode {
             WeldLoadMode::Sources => state.part_sources_certified,
             WeldLoadMode::Hull => state.part_hull_certified,
-            WeldLoadMode::PartAerodynamics => state.part_wings_certified,
+            WeldLoadMode::PartAerodynamics => state.part_surfaces_certified,
         } {
             return Err(WeldBalanceError::IncompleteLoads);
         }
@@ -1035,6 +1042,41 @@ impl PhysicsWorld {
             center,
             origin,
         )?;
+        if matches!(load_mode, WeldLoadMode::PartAerodynamics) && state.part_surface_count > 0 {
+            let (corrections, raw) = simple;
+            let mut matching = corrections.iter().filter(|item| item.body == body);
+            let correction = matching.next().ok_or(WeldBalanceError::IncompleteLoads)?;
+            if matching.next().is_some()
+                || raw.iter().filter(|item| item.body == body).count() != state.part_surface_count
+                || correction.check_part_attribution(raw).is_err()
+            {
+                return Err(WeldBalanceError::IncompleteLoads);
+            }
+            let mut indices = HashMap::new();
+            indices
+                .try_reserve(tree.len())
+                .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+            for (index, part) in tree.iter().enumerate() {
+                indices.insert(part.part, index);
+            }
+            for load in raw.iter().filter(|item| item.body == body) {
+                let AerodynamicTarget::Part(part) = load.target else {
+                    return Err(WeldBalanceError::IncompleteLoads);
+                };
+                let input =
+                    &mut inputs[*indices.get(&part).ok_or(WeldBalanceError::InvalidTree)?];
+                for wrench in [load.drag, load.lift] {
+                    input.external_force = input
+                        .external_force
+                        .checked_add(wrench.force)
+                        .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                    input.external_moment = input
+                        .external_moment
+                        .checked_add(wrench.moment)
+                        .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                }
+            }
+        }
         let mut force = Vec3::ZERO;
         let mut moment = Vec3::ZERO;
         for input in &mut inputs {
@@ -2272,14 +2314,17 @@ impl PhysicsWorld {
                             }
                         || matches!(source.target, ForceTarget::Part(_))
                 });
-                let part_wings_certified = no_world_load_paths
+                let part_surfaces_certified = no_world_load_paths
                     && sources_certified
                     && entry.first_collider.is_none()
                     && body.physics().body_type() == BodyType::Dynamic
                     && body.forces().force() == Vec3::ZERO
                     && body.forces().torque() == Vec3::ZERO
                     && matches!(body.aerodynamics(), crate::aerodynamics::Aerodynamics::None)
-                    && body.aerodynamic_surfaces.is_empty()
+                    && body
+                        .aerodynamic_surfaces
+                        .iter()
+                        .all(|surface| matches!(surface.target(), AerodynamicTarget::Part(_)))
                     && body.base_pressure_patches.is_empty()
                     && body.potential_sphere.is_none()
                     && cluster.parts.iter().all(|part_id| {
@@ -2289,6 +2334,8 @@ impl PhysicsWorld {
                                 .as_ref()
                                 .is_some_and(|geometry| geometry.contains_key(part_id))
                     });
+                let part_wings_certified =
+                    part_surfaces_certified && body.aerodynamic_surfaces.is_empty();
                 let part_hull_certified = part_wings_certified
                     && cluster.parts.iter().all(|id| {
                         self.parts
@@ -2324,6 +2371,8 @@ impl PhysicsWorld {
                     part_sources_certified,
                     part_hull_certified,
                     part_wings_certified,
+                    part_surfaces_certified,
+                    part_surface_count: body.aerodynamic_surfaces.len(),
                 });
             }
         }
