@@ -791,6 +791,23 @@ not an isolated inviscid body wave-drag coefficient. A meaningful comparison
 therefore requires matching the fins, boundary layer and base subtraction as
 well as geometry and flight conditions; it cannot directly validate `wave_drag`.
 
+For future transonic surface-pressure validation, NASA's
+[axisymmetric bump case](https://tmbwg.github.io/turbmodels/axibump_val.html)
+provides [tabulated experimental Cp](https://tmbwg.github.io/turbmodels/Axi_Bump_validation/cp.exp.dat)
+from Bachalo and Johnson (1986, DOI 10.2514/3.9286). At freestream Mach 0.875,
+chord Reynolds number 2.763 million, a shock interacts with an approximately
+1 cm incoming turbulent boundary layer and produces separation. The circular
+arc has chord 20.32 cm and height 1.905 cm on a cylinder of diameter 15.24 cm;
+NASA notes uncertainty in the leading-edge fillet definition. For example,
+the source table gives Cp = -0.7824 at x/c = 0.6250 and -0.3256 at 0.6875.
+These are surface pressures, not integrated drag measurements: the cylinder,
+tunnel boundaries, incoming layer and separation must be represented. NASA
+also notes a shock-position shift of 0.01–0.015 chord between tunnels; this is
+not a complete measurement uncertainty. Per-point Cp uncertainties have not
+been established here. The data are a prospective holdout only for a model not
+fitted to them, and this single subsonic freestream condition cannot validate
+continuation across Mach 1.
+
 ### Explicit slender-body wave drag
 
 `HullSection::with_wave_drag` accepts equally spaced samples of `dA/dx` in
