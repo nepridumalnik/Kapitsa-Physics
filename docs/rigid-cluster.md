@@ -181,6 +181,11 @@ gradients across the cluster are not modeled. Colliders on other bodies are perm
 contact and CCD forces are not supported, not assumed absent from a diagnostic
 log. Low-level shard commits do not perform automatic weld failure.
 
+The separate diagnostic `part_hull_weld_reactions` also accepts part-owned
+`HullSection` loads from the same successful step. It rejects wings, simple
+surfaces, primary and geometry-based aerodynamics, and the other unsupported
+paths above. This diagnostic does not enable hull loads for automatic failure.
+
 The reaction is evaluated at the start of the timestep, while the split uses
 the predicted end-of-step rigid velocity field. This is a discrete failure
 policy, not an impact, fracture propagation, or within-step failure-time model.

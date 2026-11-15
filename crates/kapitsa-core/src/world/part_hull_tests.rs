@@ -147,6 +147,16 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
             world.step(DT)?;
         }
         let snapshot = world.part_hull_wrenches().to_vec();
+        let reactions = world
+            .part_hull_weld_reactions(id, 1e-9, 1e-9)
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(reactions.len(), 1);
+        let expected = if distributed {
+            Vec3::ZERO
+        } else {
+            Vec3::X * 30.0
+        };
+        assert!((reactions[0].force - expected).length() < 1e-9);
         let load_states = world.cluster_load_states().to_vec();
         let load_parts = world.cluster_load_parts().to_vec();
         let load_welds = world.cluster_load_welds().to_vec();

@@ -315,6 +315,7 @@ pub struct ClusterLoadState {
     // Conservative evaluation-time certificate; never inferred from diagnostics.
     pub(crate) force_free_certified: bool,
     pub(crate) part_sources_certified: bool,
+    pub(crate) part_hull_certified: bool,
 }
 
 /// Part mass and body-local pose at the same time as the load snapshots.
@@ -853,6 +854,8 @@ impl PhysicsWorld {
             &self.cluster_load_welds_pending,
             &self.part_force_source_pending,
             &self.part_gravity_pending,
+            &[],
+            false,
         )?;
         Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_pending)
     }
@@ -922,6 +925,31 @@ impl PhysicsWorld {
             &self.cluster_load_welds_published,
             &self.part_force_source_published,
             &self.part_gravity_published,
+            &[],
+            false,
+        )
+    }
+
+    /// Reactions including part-owned hull sections from the last full step.
+    /// Other aerodynamic models, surfaces, wings, contacts and joints remain
+    /// unsupported. Gravity uses the same COM sampling as the body model.
+    pub fn part_hull_weld_reactions(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+        Self::part_source_weld_reactions_from_snapshot(
+            body,
+            force_tolerance,
+            moment_tolerance,
+            &self.cluster_load_states_published,
+            &self.cluster_load_parts_published,
+            &self.cluster_load_welds_published,
+            &self.part_force_source_published,
+            &self.part_gravity_published,
+            &self.part_hull_published,
+            true,
         )
     }
 
@@ -935,6 +963,8 @@ impl PhysicsWorld {
         snapshot_welds: &[ClusterLoadWeld],
         sources: &[PartForceSourceWrench],
         gravity: &[PartGravityWrench],
+        hull: &[PartHullWrench],
+        allow_hull: bool,
     ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
         use crate::cluster::balance::{
             RecordedPartLoads, prepare_recorded_loads, prepare_tree, reaction_moment_at_anchor,
@@ -944,7 +974,11 @@ impl PhysicsWorld {
             .iter()
             .find(|state| state.body == body)
             .ok_or(WeldBalanceError::IncompleteLoads)?;
-        if !state.part_sources_certified {
+        if !(if allow_hull {
+            state.part_hull_certified
+        } else {
+            state.part_sources_certified
+        }) {
             return Err(WeldBalanceError::IncompleteLoads);
         }
         let tree = prepare_tree(state, parts, snapshot_welds)?;
@@ -959,7 +993,7 @@ impl PhysicsWorld {
             RecordedPartLoads {
                 sources,
                 gravity,
-                hull: &[],
+                hull,
                 wings: &[],
             },
             center,
@@ -2202,7 +2236,7 @@ impl PhysicsWorld {
                             }
                         || matches!(source.target, ForceTarget::Part(_))
                 });
-                let part_sources_certified = no_world_load_paths
+                let part_hull_certified = no_world_load_paths
                     && sources_certified
                     && entry.first_collider.is_none()
                     && body.physics().body_type() == BodyType::Dynamic
@@ -2213,12 +2247,19 @@ impl PhysicsWorld {
                     && body.base_pressure_patches.is_empty()
                     && body.potential_sphere.is_none()
                     && cluster.parts.iter().all(|part_id| {
-                        self.parts.get(part_id.dense).is_some_and(|part| {
-                            part.aerodynamic_hull.is_empty() && part.aerodynamic_wings.is_empty()
-                        }) && !self
-                            .part_aerodynamic_geometry
-                            .as_ref()
-                            .is_some_and(|geometry| geometry.contains_key(part_id))
+                        self.parts
+                            .get(part_id.dense)
+                            .is_some_and(|part| part.aerodynamic_wings.is_empty())
+                            && !self
+                                .part_aerodynamic_geometry
+                                .as_ref()
+                                .is_some_and(|geometry| geometry.contains_key(part_id))
+                    });
+                let part_sources_certified = part_hull_certified
+                    && cluster.parts.iter().all(|id| {
+                        self.parts
+                            .get(id.dense)
+                            .is_some_and(|part| part.aerodynamic_hull.is_empty())
                     });
                 let force_free_certified = part_sources_certified
                     && self.central_gravity.is_none()
@@ -2241,6 +2282,7 @@ impl PhysicsWorld {
                     mass: body.physics().mass(),
                     force_free_certified,
                     part_sources_certified,
+                    part_hull_certified,
                 });
             }
         }
