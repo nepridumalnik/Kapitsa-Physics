@@ -88,6 +88,33 @@ fn radial_face_difference_converges_for_logarithmic_line_source() {
 }
 
 #[test]
+fn radial_difference_off_face_converges_at_surface() {
+    // The diagnostic evaluates the difference between the two cell centres
+    // bracketing the surface. That difference is centred on their shared
+    // face, not on the surface; offset produces a first-order error.
+    const RADIUS: f64 = 0.05;
+    const SLOPE: f64 = 0.2;
+    const SOURCE: f64 = RADIUS * SLOPE;
+    const OFFSET_IN_CELLS: f64 = 0.25;
+    let mut previous_error = f64::INFINITY;
+    for cells_per_radius in [4_usize, 8, 16, 32] {
+        let dr = RADIUS / cells_per_radius as f64;
+        let face = RADIUS - OFFSET_IN_CELLS * dr;
+        let lower = SOURCE * ((face - 0.5 * dr) / RADIUS).ln();
+        let upper = SOURCE * ((face + 0.5 * dr) / RADIUS).ln();
+        let derivative = (upper - lower) / dr;
+        let surface_error = (derivative - SLOPE).abs();
+        let face_error = (derivative - SOURCE / face).abs();
+        assert!(surface_error < previous_error);
+        assert!(face_error < surface_error);
+        println!(
+            "cells_per_radius={cells_per_radius} surface_error={surface_error:.9} face_error={face_error:.9}"
+        );
+        previous_error = surface_error;
+    }
+}
+
+#[test]
 #[ignore = "extended-domain research diagnostic; run explicitly in release mode"]
 fn harris_extended_axial_domain_diagnostic() -> Result<(), String> {
     // Bailey TN D-6582, far-field boundaries: sonic/subsonic cases require
