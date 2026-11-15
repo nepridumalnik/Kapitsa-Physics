@@ -38,6 +38,77 @@ use crate::execution::{ExecutionError, StepExecutor};
 #[path = "world/free_ball_tests.rs"]
 mod free_ball_tests;
 
+#[test]
+fn persistent_friction_contact_impulse_matches_step_momentum_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    const DT: f64 = 0.01;
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.6, 0.6, 0.0, 1.0)?)?;
+    let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let wall = world.add_collider(
+        wall_body,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 20.0, 20.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    let mut body = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(-0.54, 0.0, 0.0), Quat::IDENTITY)?,
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?;
+    body.set_linear_velocity(Vec3::new(1.0, 3.0, 0.0))?;
+    let body = world.add_body(body)?;
+    let part = world.enable_cluster(body)?;
+    let sphere = world.add_part_collider(part, collider(0.5))?;
+    for collider in [wall, sphere] {
+        world.set_collider_material(collider, Some(material))?;
+    }
+    let force = Vec3::X * 100.0;
+    world.add_force_source_for_part(part, Vec3::ZERO, force)?;
+    for step in 0..3 {
+        let before = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity();
+        world.step(DT)?;
+        assert_eq!(world.contact_impulses_omitted_points(), 0);
+        let mut impulse = Vec3::ZERO;
+        let mut count = 0;
+        for entry in world.contact_impulses() {
+            if entry.pair.a == sphere {
+                assert_eq!(entry.parts[0], Some(part));
+                impulse -= entry.impulse_on_b;
+                count += 1;
+            } else if entry.pair.b == sphere {
+                assert_eq!(entry.parts[1], Some(part));
+                impulse += entry.impulse_on_b;
+                count += 1;
+            }
+        }
+        assert_eq!(count, 1, "step {step}");
+        let after = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity();
+        let applied_force = world
+            .part_force_source_wrenches()
+            .first()
+            .ok_or("force snapshot")?
+            .force;
+        assert!(
+            (impulse - (after - before - applied_force * DT)).length() < 1e-9,
+            "step {step}: impulse={impulse:?}, momentum change={:?}",
+            after - before - applied_force * DT
+        );
+        if step == 0 {
+            assert!(impulse.y < 0.0);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "bench-internals")]
 #[test]
 fn fixed_tree_with_contact_falls_back_and_preserves_impulse_balance()
