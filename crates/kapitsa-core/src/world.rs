@@ -3374,6 +3374,19 @@ impl PhysicsWorld {
                 .state_at(point)
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             if local_atmosphere.density() == 0.0 {
+                if let Some(entries) = raw_simple_surfaces.as_deref_mut() {
+                    entries.try_reserve(1).map_err(|_| error())?;
+                    let zero = crate::aerodynamics::pressure::PressureWrench {
+                        force: Vec3::ZERO,
+                        moment: Vec3::ZERO,
+                    };
+                    entries.push(RawSimpleSurfaceWrench {
+                        body: body_id,
+                        target: surface.target(),
+                        drag: zero,
+                        lift: zero,
+                    });
+                }
                 continue;
             }
             let offset = point.checked_sub(center).ok_or_else(error)?;

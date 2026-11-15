@@ -361,6 +361,19 @@ fn automatic_failure_certifies_only_uncorrected_part_surfaces()
         ));
         assert_eq!(*world.body(body).ok_or("body")?.state(), before);
         assert!(world.weld(weld).is_some());
+        let atmosphere = crate::aerodynamics::SphericalAtmosphere::builder()
+            .center(Vec3::X * 100.0)
+            .reference_radius(10.0)
+            .reference_density(1.2)
+            .height(10.0)
+            .profile(crate::aerodynamics::DensityProfile::Exponential { scale_height: 5.0 })
+            .build()?;
+        world.set_atmosphere(crate::aerodynamics::Atmosphere::Sphere(atmosphere));
+        step(&mut world, 1e-5)?;
+        let raw = world.raw_simple_surface_wrenches();
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].drag.force, Vec3::ZERO);
+        assert!(world.weld(weld).is_some());
         world.set_atmosphere(crate::aerodynamics::Atmosphere::Vacuum);
         step(&mut world, 1e-5)?;
         assert!(world.weld(weld).is_some());

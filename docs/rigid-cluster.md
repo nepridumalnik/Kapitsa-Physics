@@ -192,8 +192,10 @@ aggregate, and applied drag and lift exactly equal their raw values. Body-target
 surfaces and unattributed corrections are rejected. The
 evaluator now records an explicit zero correction when the aggregate force and
 moment vanish, including when individual loads cancel. An absent correction is
-still not a certificate of zero individual loads: skipped surface records in
-an atmosphere cause an explicit incomplete-load error. The explicit global
+still not a certificate of zero individual loads: missing surface records in
+an atmosphere cause an explicit incomplete-load error. Surfaces sampled at
+zero local density explicitly record zero force and moment after their target
+and position are validated. The explicit global
 `Atmosphere::Vacuum` configuration certifies zero aerodynamic loads without
 surface records, including part-owned aerodynamic geometry; this does not apply
 to locally zero-density samples. Collider and other load-path restrictions
