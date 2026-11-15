@@ -1044,6 +1044,12 @@ impl PreparedGeometry {
         mut work: usize,
         flow: impl Fn(Vec3) -> Result<Vec3, GeometryError>,
     ) -> Result<PreparedSurfacePatches, GeometryError> {
+        // Work units are conservative accounting weights, not instruction counts.
+        const SOURCE_WORK: usize = 48;
+        const SHADOW_WORK: usize = 64;
+        const CLIP_VERTEX_WORK: usize = 16;
+        const PARTITION_TRIANGLE_WORK: usize = 16;
+
         let mut triangles = Self::surface_triangles(instances, max_work)?;
         // Exact canonical vertex triples avoid centroid/area aliasing and
         // many-to-one epsilon matching. Winding remains in the source normal.
@@ -1078,7 +1084,7 @@ impl PreparedGeometry {
         for (i, triangle) in triangles.iter().enumerate() {
             let [a, b, c] = triangle.vertices;
             work = work
-                .checked_add(48)
+                .checked_add(SOURCE_WORK)
                 .ok_or(GeometryError::WorkBudgetExceeded)?;
             check_surface_work(Some(work), max_work)?;
             let velocities = [flow(a)?, flow(b)?, flow(c)?];
@@ -1142,7 +1148,7 @@ impl PreparedGeometry {
                 // Shadow construction evaluates multiple adaptive orientation
                 // predicates even when the candidate produces no shadow.
                 work = work
-                    .checked_add(64)
+                    .checked_add(SHADOW_WORK)
                     .ok_or(GeometryError::WorkBudgetExceeded)?;
                 check_surface_work(Some(work), max_work)?;
                 let blocker = &triangles[j];
@@ -1162,7 +1168,7 @@ impl PreparedGeometry {
                             .checked_add(
                                 polygon
                                     .len()
-                                    .checked_mul(16)
+                                    .checked_mul(CLIP_VERTEX_WORK)
                                     .ok_or(GeometryError::WorkBudgetExceeded)?,
                             )
                             .ok_or(GeometryError::WorkBudgetExceeded)?;
@@ -1219,7 +1225,7 @@ impl PreparedGeometry {
                     // Partition reconstruction and output remain work even
                     // when there are no shadows to test against the centroid.
                     work = work
-                        .checked_add(16)
+                        .checked_add(PARTITION_TRIANGLE_WORK)
                         .ok_or(GeometryError::WorkBudgetExceeded)?;
                     check_surface_work(Some(work), max_work)?;
                     let coordinates = [polygon[0], polygon[k], polygon[k + 1]];

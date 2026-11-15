@@ -189,6 +189,32 @@ fn triangle_grid_counts_empty_buckets_toward_query_budget() {
 }
 
 #[test]
+fn triangle_grid_charges_repeated_entries_even_when_deduplicated() {
+    const CELL_COUNT: usize = 3;
+    const QUERY_WORK: usize = CELL_COUNT * 2;
+    let grid = TriangleGrid {
+        origin: Vec3::ZERO,
+        cell_size: Vec3::ONE,
+        dimensions: [CELL_COUNT, 1, 1],
+        offsets: (0..=CELL_COUNT).collect(),
+        triangles: vec![0; CELL_COUNT],
+        build_work: 0,
+    };
+    let source = visibility_triangle(Vec3::ZERO, Vec3::Y * 0.1, Vec3::Z * 0.1);
+    let mut marks = [0];
+    assert_eq!(
+        grid.candidates(&source, Vec3::X, &mut marks, 1, QUERY_WORK - 1)
+            .unwrap_err(),
+        GeometryError::WorkBudgetExceeded
+    );
+    let (candidates, work) = grid
+        .candidates(&source, Vec3::X, &mut marks, 2, QUERY_WORK)
+        .unwrap();
+    assert_eq!(candidates, vec![0]);
+    assert_eq!(work, QUERY_WORK);
+}
+
+#[test]
 fn triangle_grid_rejects_query_after_work_limit_before_scanning_all_buckets() {
     let triangles = vec![
         visibility_triangle(Vec3::ZERO, Vec3::X * 0.2, Vec3::Y * 0.2),
