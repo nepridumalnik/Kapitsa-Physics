@@ -38,6 +38,79 @@ use crate::execution::{ExecutionError, StepExecutor};
 #[path = "world/free_ball_tests.rs"]
 mod free_ball_tests;
 
+#[test]
+fn repeated_ccd_pair_impulses_match_momentum_change() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    let mut walls = Vec::new();
+    for x in [0.0, 10.0] {
+        let body = world.add_body(RigidBody::new_static(Transform::new(
+            Vec3::new(x, 0.0, 0.0),
+            Quat::IDENTITY,
+        )?))?;
+        let collider = world.add_collider(
+            body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        world.set_collider_material(collider, Some(material))?;
+        walls.push(collider);
+    }
+    let mut moving = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY)?,
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?;
+    moving.set_linear_velocity(Vec3::new(-2000.0, 0.0, 0.0))?;
+    moving.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(moving)?;
+    let part = world.enable_cluster(body)?;
+    let sphere = world.add_part_collider(part, collider(0.5))?;
+    world.set_collider_material(sphere, Some(material))?;
+    world.step(0.012)?;
+    let pairs = [
+        CollisionPair::new(walls[0], sphere).ok_or("left pair")?,
+        CollisionPair::new(walls[1], sphere).ok_or("right pair")?,
+    ];
+    let impulses = world.contact_impulses();
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    assert_eq!(
+        impulses
+            .iter()
+            .filter(|e| e.ccd && e.pair == pairs[0])
+            .count(),
+        2,
+        "{impulses:?}"
+    );
+    assert_eq!(
+        impulses
+            .iter()
+            .filter(|e| e.ccd && e.pair == pairs[1])
+            .count(),
+        1,
+        "{impulses:?}"
+    );
+    let mut total = Vec3::ZERO;
+    for entry in impulses {
+        if entry.pair.a == sphere {
+            assert_eq!(entry.parts[0], Some(part));
+            total -= entry.impulse_on_b;
+        } else if entry.pair.b == sphere {
+            assert_eq!(entry.parts[1], Some(part));
+            total += entry.impulse_on_b;
+        }
+    }
+    let change = world
+        .body(body)
+        .ok_or(WorldError::InvalidBodyId)?
+        .state()
+        .linear_velocity()
+        - Vec3::new(-2000.0, 0.0, 0.0);
+    assert!((total - change).length() < 1e-7, "{total:?} != {change:?}");
+    Ok(())
+}
+
 #[cfg(feature = "bench-internals")]
 #[test]
 fn ccd_replay_publishes_each_accepted_impact_once() -> Result<(), Box<dyn std::error::Error>> {
