@@ -1257,20 +1257,41 @@ fn sonic_flux_is_consistent_on_smooth_branches() {
     assert!((sonic_flux(-0.1, -0.2, 1.0, 1.4) - axial_flux(-0.2, 1.0, 1.4)).abs() < 1e-14);
 }
 
+#[test]
+fn sonic_flux_consistent_across_mach_numbers() {
+    const GAMMA: f64 = 1.4;
+    // Eight rounding units relative to the evaluated flux scale, with an
+    // absolute floor for the exact zero state.
+    for mach in [0.0, 1e-7, 0.01, 0.3, 0.9, 1.0, 1.1] {
+        for u in [-0.1_f64, 0.0, 0.001, 0.1] {
+            let expected = axial_flux(u, mach, GAMMA);
+            let actual = sonic_flux(u, u, mach, GAMMA);
+            let tolerance = 8.0 * f64::EPSILON * expected.abs().max(1e-12);
+            assert!(actual.is_finite() && (actual - expected).abs() <= tolerance,
+                "mach={mach} u={u} actual={actual} expected={expected} tolerance={tolerance}");
+        }
+    }
+}
+
 fn sonic_flux(left: f64, right: f64, mach: f64, gamma: f64) -> f64 {
-    let sonic = (1.0 - mach * mach) / (mach * mach * (gamma + 1.0));
-    let peak = axial_flux(sonic, mach, gamma);
-    let upstream_loss = if left > sonic {
-        peak - axial_flux(left, mach, gamma)
+    let coefficient = mach * mach * (gamma + 1.0);
+    if coefficient == 0.0 {
+        return axial_flux(right, mach, gamma);
+    }
+    let sonic = (1.0 - mach * mach) / coefficient;
+    if left > sonic {
+        if right < sonic {
+            // Compute the loss directly instead of subtracting two nearly
+            // equal fluxes around the peak.
+            axial_flux(left, mach, gamma) - 0.5 * coefficient * (right - sonic).powi(2)
+        } else {
+            axial_flux(left, mach, gamma)
+        }
+    } else if right < sonic {
+        axial_flux(right, mach, gamma)
     } else {
-        0.0
-    };
-    let downstream_loss = if right < sonic {
-        peak - axial_flux(right, mach, gamma)
-    } else {
-        0.0
-    };
-    peak - upstream_loss - downstream_loss
+        axial_flux(sonic, mach, gamma)
+    }
 }
 
 struct MixedGrid {
