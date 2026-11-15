@@ -81,7 +81,10 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
     use crate::{
         cluster::{
             ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength,
-            balance::{BalanceError, PartBalanceInput, prepare_tree, tree_reactions},
+            balance::{
+                BalanceError, PartBalanceInput, RecordedPartLoads, prepare_recorded_loads,
+                prepare_tree, tree_reactions,
+            },
         },
         joint::JointFrame,
     };
@@ -173,6 +176,29 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
         assert_eq!(tree[1].mass, mass);
         assert_eq!(tree[1].pose, Transform::identity());
         assert!(!tree[1].incomplete_balance_input().loads_complete);
+        let recorded = prepare_recorded_loads(
+            &load_states[0],
+            &tree,
+            RecordedPartLoads {
+                sources: &[],
+                gravity: &[],
+                hull: &snapshot,
+                wings: &[],
+            },
+            Vec3::X,
+            Vec3::ZERO,
+        )
+        .map_err(|error| format!("loads: {error:?}"))?;
+        assert!(recorded.iter().all(|input| !input.loads_complete));
+        assert_eq!(
+            recorded[1].external_force,
+            if distributed {
+                Vec3::X * -30.0
+            } else {
+                Vec3::X * -60.0
+            }
+        );
+        assert_eq!(recorded[1].external_moment, Vec3::ZERO);
         assert!(matches!(
             prepare_tree(&load_states[0], &load_parts, &[]),
             Err(BalanceError::InvalidTree)

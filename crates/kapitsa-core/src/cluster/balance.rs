@@ -6,7 +6,10 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     mass::MassProperties,
     transform::Transform,
-    world::{ClusterLoadPart, ClusterLoadState, ClusterLoadWeld, PartId, WeldId},
+    world::{
+        ClusterLoadPart, ClusterLoadState, ClusterLoadWeld, PartForceSourceWrench,
+        PartGravityWrench, PartHullWrench, PartId, PartWingWrench, WeldId,
+    },
 };
 
 use super::{ClusterError, motion::part_momentum_rate};
@@ -20,6 +23,80 @@ pub(crate) struct PartBalanceInput {
     pub external_moment: Vec3,
     /// Caller must establish completeness, including all force and contact paths.
     pub loads_complete: bool,
+}
+
+/// Attributed force snapshots, all expressed about the evaluation-time body COM.
+/// Other force and impulse paths are deliberately not represented here.
+pub(crate) struct RecordedPartLoads<'a> {
+    pub sources: &'a [PartForceSourceWrench],
+    pub gravity: &'a [PartGravityWrench],
+    pub hull: &'a [PartHullWrench],
+    pub wings: &'a [PartWingWrench],
+}
+
+/// Accumulates recorded contributions about `origin` without certifying the
+/// ledger as complete. Slices must come from the same full-step snapshot.
+pub(crate) fn prepare_recorded_loads(
+    state: &ClusterLoadState,
+    tree: &[TreePart],
+    loads: RecordedPartLoads<'_>,
+    body_center: Vec3,
+    origin: Vec3,
+) -> Result<Vec<PartBalanceInput>, BalanceError> {
+    if !body_center.is_finite() || !origin.is_finite() {
+        return Err(BalanceError::Physics(ClusterError::InvalidMotion));
+    }
+    let capacity_error = || BalanceError::Physics(ClusterError::StorageCapacityExceeded);
+    let mut indices = HashMap::new();
+    indices
+        .try_reserve(tree.len())
+        .map_err(|_| capacity_error())?;
+    let mut inputs = Vec::new();
+    inputs
+        .try_reserve_exact(tree.len())
+        .map_err(|_| capacity_error())?;
+    for part in tree {
+        if indices.insert(part.part, inputs.len()).is_some() {
+            return Err(BalanceError::InvalidTree);
+        }
+        inputs.push(part.incomplete_balance_input());
+    }
+    let offset = body_center
+        .checked_sub(origin)
+        .ok_or(BalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+    let mut add = |part, force: Vec3, moment: Vec3| -> Result<(), BalanceError> {
+        let index = *indices.get(&part).ok_or(BalanceError::InvalidTree)?;
+        if !force.is_finite() || !moment.is_finite() {
+            return Err(BalanceError::Physics(ClusterError::InvalidMotion));
+        }
+        let shifted = offset
+            .checked_cross(force)
+            .and_then(|shift| moment.checked_add(shift))
+            .ok_or(BalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+        let input = &mut inputs[index];
+        input.external_force = input
+            .external_force
+            .checked_add(force)
+            .ok_or(BalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+        input.external_moment = input
+            .external_moment
+            .checked_add(shifted)
+            .ok_or(BalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+        Ok(())
+    };
+    for load in loads.sources.iter().filter(|load| load.body == state.body) {
+        add(load.part, load.force, load.moment)?;
+    }
+    for load in loads.gravity.iter().filter(|load| load.body == state.body) {
+        add(load.part, load.force, load.moment)?;
+    }
+    for load in loads.hull.iter().filter(|load| load.body == state.body) {
+        add(load.part, load.wrench.force, load.wrench.moment)?;
+    }
+    for load in loads.wings.iter().filter(|load| load.body == state.body) {
+        add(load.part, load.wrench.force, load.wrench.moment)?;
+    }
+    Ok(inputs)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
