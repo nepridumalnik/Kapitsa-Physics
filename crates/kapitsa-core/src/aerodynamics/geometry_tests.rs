@@ -1003,6 +1003,8 @@ fn unrelated_surface_preserves_partially_clipped_patch_area() {
     const EPSILON: f64 = 0.01;
     const SEPARATION: f64 = 4.0;
     const AREA_TOLERANCE: f64 = 1e-12;
+    // Two right triangles of area 1/2 overlap in a similar triangle of leg 3/4.
+    const EXPECTED_AREA: f64 = 1.0 - 0.5 * 0.75 * 0.75;
     let plate = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]]).unwrap();
     let base = [
         instance(&plate, Vec3::ZERO),
@@ -1019,7 +1021,8 @@ fn unrelated_surface_preserves_partially_clipped_patch_area() {
             .map(|patch| patch.area)
             .sum::<f64>()
     };
-    assert!((total_area(&base) - total_area(&extended)).abs() < AREA_TOLERANCE);
+    assert!((total_area(&base) - EXPECTED_AREA).abs() < AREA_TOLERANCE);
+    assert!((total_area(&extended) - EXPECTED_AREA).abs() < AREA_TOLERANCE);
 }
 
 #[test]
