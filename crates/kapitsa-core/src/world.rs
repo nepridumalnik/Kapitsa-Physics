@@ -766,13 +766,20 @@ impl PhysicsWorld {
         force_tolerance: f64,
         moment_tolerance: f64,
     ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
-        use crate::cluster::WeldStrength;
         let reactions = self.part_source_weld_reactions(body, force_tolerance, moment_tolerance)?;
+        Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_published)
+    }
+
+    fn weld_failure_candidates_from_reactions(
+        reactions: Vec<WeldReaction>,
+        snapshot_welds: &[ClusterLoadWeld],
+    ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
+        use crate::cluster::WeldStrength;
         let mut welds = HashMap::new();
         welds
-            .try_reserve(self.cluster_load_welds_published.len())
+            .try_reserve(snapshot_welds.len())
             .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
-        for weld in &self.cluster_load_welds_published {
+        for weld in snapshot_welds {
             if welds.insert(weld.weld, weld.value).is_some() {
                 return Err(WeldBalanceError::InvalidTree);
             }
@@ -809,6 +816,27 @@ impl PhysicsWorld {
         }
         Ok(candidates)
     }
+
+    /// Evaluate only data staged for the active full step, never a previously
+    /// published diagnostic. Call after persistent sources have been prepared.
+    #[allow(dead_code)]
+    fn pending_weld_failure_candidates(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
+        let reactions = Self::part_source_weld_reactions_from_snapshot(
+            body,
+            force_tolerance,
+            moment_tolerance,
+            &self.cluster_load_states_pending,
+            &self.cluster_load_parts_pending,
+            &self.cluster_load_welds_pending,
+            &self.part_force_source_pending,
+        )?;
+        Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_pending)
+    }
     /// Calculates instantaneous parent-on-child weld reactions from the last
     /// successful full-step snapshot. Currently only force-free
     /// clusters are supported. This diagnostic does not break welds. Tolerances
@@ -841,23 +869,39 @@ impl PhysicsWorld {
         force_tolerance: f64,
         moment_tolerance: f64,
     ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+        Self::part_source_weld_reactions_from_snapshot(
+            body,
+            force_tolerance,
+            moment_tolerance,
+            &self.cluster_load_states_published,
+            &self.cluster_load_parts_published,
+            &self.cluster_load_welds_published,
+            &self.part_force_source_published,
+        )
+    }
+
+    /// All slices must belong to the same evaluation-time transaction.
+    fn part_source_weld_reactions_from_snapshot(
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+        states: &[ClusterLoadState],
+        parts: &[ClusterLoadPart],
+        snapshot_welds: &[ClusterLoadWeld],
+        sources: &[PartForceSourceWrench],
+    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
         use crate::cluster::balance::{
             RecordedPartLoads, prepare_recorded_loads, prepare_tree, reaction_moment_at_anchor,
             tree_reactions,
         };
-        let state = self
-            .cluster_load_states_published
+        let state = states
             .iter()
             .find(|state| state.body == body)
             .ok_or(WeldBalanceError::IncompleteLoads)?;
         if !state.part_sources_certified {
             return Err(WeldBalanceError::IncompleteLoads);
         }
-        let tree = prepare_tree(
-            state,
-            &self.cluster_load_parts_published,
-            &self.cluster_load_welds_published,
-        )?;
+        let tree = prepare_tree(state, parts, snapshot_welds)?;
         let mass = state.mass.ok_or(WeldBalanceError::IncompleteLoads)?;
         let (center, inertia) =
             crate::cluster::motion::world_properties(mass, state.state.transform())
@@ -867,7 +911,7 @@ impl PhysicsWorld {
             state,
             &tree,
             RecordedPartLoads {
-                sources: &self.part_force_source_published,
+                sources,
                 gravity: &[],
                 hull: &[],
                 wings: &[],
@@ -920,9 +964,9 @@ impl PhysicsWorld {
             .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
         let mut welds = HashMap::new();
         welds
-            .try_reserve(self.cluster_load_welds_published.len())
+            .try_reserve(snapshot_welds.len())
             .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
-        for weld in &self.cluster_load_welds_published {
+        for weld in snapshot_welds {
             if welds.insert(weld.weld, weld.value).is_some() {
                 return Err(WeldBalanceError::InvalidTree);
             }
