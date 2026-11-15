@@ -34,6 +34,66 @@ fn harris_fixed_upstream_row_omits_nonzero_axis_source() {
     }
 }
 
+#[test]
+#[ignore = "extended-domain research diagnostic; run explicitly in release mode"]
+fn harris_extended_axial_domain_diagnostic() -> Result<(), String> {
+    // Bailey TN D-6582, far-field boundaries: sonic/subsonic cases require
+    // at least two body lengths fore and aft. This shorter finite domain is
+    // only a sensitivity experiment, not that far-field limit or a tunnel.
+    const EXTENSION: f64 = 0.5;
+    const OUTER: f64 = 1.25;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 40000;
+    for body_intervals in [16_usize, 32, 64] {
+        let dx = 1.0 / body_intervals as f64;
+        let nx = 2 * body_intervals + 1;
+        let nr = (OUTER / dx + 0.5).round_ties_even() as usize;
+        let dr = OUTER / (nr as f64 - 0.5);
+        let source: Vec<_> = (0..nx)
+            .map(|i| {
+                let x = i as f64 * dx - EXTENSION;
+                if (0.0..=1.0).contains(&x) {
+                    harris_geometry(x).2
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        assert_eq!(source[0], 0.0);
+        assert_eq!(source[1], 0.0);
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; nx],
+            axis_flux: source,
+            dx,
+            dr,
+            mach: 1.0,
+            gamma: 1.4,
+        };
+        let (iterations, residual) = grid
+            .iterate(TOLERANCE, MAX_ITERATIONS)
+            .map_err(|value| format!("body intervals {body_intervals}: residual {value}"))?;
+        println!("body_intervals={body_intervals} iterations={iterations} residual={residual:.3e}");
+        for &(x, measured) in harris_data::TABLE_III_A_MACH_100_AFT {
+            let index = (x + EXTENSION) / dx;
+            let i = index.floor() as usize;
+            let node_cp = |j: usize| {
+                let (radius, slope, _) = harris_geometry(j as f64 * dx - EXTENSION);
+                grid.surface_cp(j, radius, slope)
+            };
+            let (Some(left), Some(right)) = (node_cp(i), node_cp(i + 1)) else {
+                return Err(format!("unavailable pressure at x/l={x}"));
+            };
+            let t = index - i as f64;
+            let cp = (1.0 - t) * left + t * right;
+            println!(
+                "x/l={x:.3} cp={cp:.6} measured={measured:.3} delta={:+.6}",
+                cp - measured
+            );
+        }
+    }
+    Ok(())
+}
+
 fn axial_flux(u: f64, mach: f64, gamma: f64) -> f64 {
     (1.0 - mach * mach) * u - 0.5 * mach * mach * (gamma + 1.0) * u * u
 }
