@@ -997,6 +997,30 @@ fn patch_frame_conversion_is_reserved_before_return() {
 }
 
 #[test]
+fn unshadowed_patch_replacement_has_budget_boundary() {
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]]).unwrap();
+    let instances = [instance(&mesh, Vec3::ZERO)];
+    let geometry = surface_geometry(&instances);
+    let evaluate = |budget| geometry.surface_patches_with_flow(&instances, budget, |_| Ok(Vec3::X));
+    let mut low = 0;
+    let mut high = 10_000;
+    assert!(evaluate(high).is_ok());
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if evaluate(middle).is_ok() {
+            high = middle
+        } else {
+            low = middle
+        }
+    }
+    // Includes one unit for replacing the partition and one for frame conversion.
+    const REQUIRED_WORK: usize = 116;
+    assert_eq!(high, REQUIRED_WORK);
+    assert_eq!(evaluate(low), Err(GeometryError::WorkBudgetExceeded));
+    assert_eq!(evaluate(high).unwrap().len(), 1);
+}
+
+#[test]
 fn unrelated_surface_preserves_partially_clipped_patch_area() {
     const MAX_WORK: usize = 100_000;
     const EPSILON: f64 = 0.01;

@@ -1146,6 +1146,7 @@ impl PreparedGeometry {
         const CLIP_VERTEX_WORK: usize = 16;
         const POLYGON_VISIT_WORK: usize = 1;
         const PARTITION_TRIANGLE_WORK: usize = 16;
+        const REPLACEMENT_PATCH_WORK: usize = 1;
         // Reserve the outer frame's vertex, center and normal transformations.
         const PATCH_FRAME_WORK: usize = 1;
 
@@ -1388,6 +1389,8 @@ impl PreparedGeometry {
                 return Err(GeometryError::PrecisionLoss);
             }
             if !any_blocked && initial_fraction == 1.0 {
+                // Replacing the partition constructs an additional output patch.
+                charge_surface_work(&mut work, REPLACEMENT_PATCH_WORK, max_work)?;
                 patches.truncate(first_patch);
                 let [a, b, c] = triangle.vertices;
                 checked_push(
