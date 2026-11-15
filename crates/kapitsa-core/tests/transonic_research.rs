@@ -752,6 +752,18 @@ fn harris_subsonic_upstream_cutoff_boundaries() -> Result<(), String> {
     Ok(())
 }
 
+fn quadratic_axial_interpolation(left: f64, center: f64, right: f64, t: f64) -> f64 {
+    0.5 * t * (t - 1.0) * left + (1.0 - t * t) * center + 0.5 * t * (t + 1.0) * right
+}
+
+#[test]
+fn quadratic_axial_interpolation_reproduces_quadratic() {
+    for t in [0.0_f64, 0.2, 0.75, 1.0] {
+        let value = quadratic_axial_interpolation(6.0, 3.0, 4.0, t);
+        assert!((value - (2.0 * t * t - t + 3.0)).abs() < 1e-14);
+    }
+}
+
 #[test]
 #[ignore = "shifted-grid phase diagnostic; run in release mode"]
 fn harris_subsonic_shifted_grid_phase() -> Result<(), String> {
@@ -828,6 +840,27 @@ fn harris_subsonic_shifted_grid_phase() -> Result<(), String> {
                 .ok_or_else(|| {
                     format!("surface derivative unavailable: intervals={intervals} shift={shift}")
                 })?;
+            let cp_left = grid.surface_cp(i - 1, radius, slope).ok_or_else(|| {
+                format!("quadratic Cp unavailable: intervals={intervals} shift={shift}")
+            })?;
+            let cp_center = grid.surface_cp(i, radius, slope).ok_or_else(|| {
+                format!("quadratic Cp unavailable: intervals={intervals} shift={shift}")
+            })?;
+            let cp_right = grid.surface_cp(i + 1, radius, slope).ok_or_else(|| {
+                format!("quadratic Cp unavailable: intervals={intervals} shift={shift}")
+            })?;
+            let quadratic_cp = quadratic_axial_interpolation(cp_left, cp_center, cp_right, weight);
+            let radial = |j: usize| interpolated_radial_derivative(&grid.phi[j], dr, radius);
+            let quadratic_defect = match (radial(i - 1), radial(i), radial(i + 1)) {
+                (Some(left), Some(center), Some(right)) => {
+                    quadratic_axial_interpolation(left, center, right, weight) - slope
+                }
+                _ => {
+                    return Err(format!(
+                        "quadratic radial derivative unavailable: intervals={intervals} shift={shift}"
+                    ));
+                }
+            };
             let cutoff_index = (CUTOFF - origin) / dx;
             println!(
                 "intervals={intervals} shift={shift:.1} nose_average={nose_average} dx={dx:.9} dr={dr:.9} x_min={origin:.9} x_max={:.9} cutoff_phase={:+.6} bracket=[{:.9},{:.9}] cp={cp:.9} defect={defect:+.9} iterations={iterations} residual={residual:.3e}",
@@ -835,6 +868,11 @@ fn harris_subsonic_shifted_grid_phase() -> Result<(), String> {
                 cutoff_index - cutoff_index.round(),
                 origin + i as f64 * dx,
                 origin + (i + 1) as f64 * dx
+            );
+            println!(
+                "interpolation intervals={intervals} shift={shift:.1} nose_average={nose_average} quadratic_cp={quadratic_cp:.9} cp_delta={:+.9} quadratic_defect={quadratic_defect:+.9} defect_delta={:+.9}",
+                quadratic_cp - cp,
+                quadratic_defect - defect
             );
         }
     }
@@ -1267,8 +1305,10 @@ fn sonic_flux_consistent_across_mach_numbers() {
             let expected = axial_flux(u, mach, GAMMA);
             let actual = sonic_flux(u, u, mach, GAMMA);
             let tolerance = 8.0 * f64::EPSILON * expected.abs().max(1e-12);
-            assert!(actual.is_finite() && (actual - expected).abs() <= tolerance,
-                "mach={mach} u={u} actual={actual} expected={expected} tolerance={tolerance}");
+            assert!(
+                actual.is_finite() && (actual - expected).abs() <= tolerance,
+                "mach={mach} u={u} actual={actual} expected={expected} tolerance={tolerance}"
+            );
         }
     }
 }
