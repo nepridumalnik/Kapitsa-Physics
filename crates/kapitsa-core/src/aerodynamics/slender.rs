@@ -9,7 +9,7 @@ use kapitsa_math::{Quat, Vec3};
 use super::{
     geometry::{GeometrySection, PreparedGeometry},
     hull::{HullError, HullSection, scaled_product},
-    wave::area_slopes_from_sections,
+    wave::area_profile_from_sections,
 };
 use crate::transform::Transform;
 
@@ -18,6 +18,7 @@ pub(super) struct PotentialCell {
     slope: f64,
     width: f64,
     max_incidence: f64,
+    rotation_area: Option<f64>,
 }
 
 impl PotentialCell {
@@ -27,8 +28,9 @@ impl PotentialCell {
         axial_speed: f64,
         crossflow: Vec3,
         cross_speed: f64,
+        rotation_gradient: Vec3,
     ) -> Result<Vec3, HullError> {
-        if cross_speed == 0.0 {
+        if cross_speed == 0.0 && rotation_gradient == Vec3::ZERO {
             return Ok(Vec3::ZERO);
         }
         if axial_speed <= 0.0 || cross_speed.atan2(axial_speed) > self.max_incidence {
@@ -37,8 +39,8 @@ impl PotentialCell {
         // Positive body axis points toward the nose; the cited source uses a
         // downstream coordinate. Its area derivative therefore changes sign.
         // The aerodynamic load opposes crossflow on an expanding nose section.
-        let component = |value: f64| {
-            scaled_product(
+        let component = |value: f64, gradient: f64| {
+            let stationary = scaled_product(
                 &[
                     density,
                     axial_speed,
@@ -48,13 +50,34 @@ impl PotentialCell {
                 ],
                 1.0,
             )
-            .map(|magnitude| magnitude.copysign(value) * self.slope.signum())
+            .map(|magnitude| magnitude.copysign(value) * self.slope.signum())?;
+            let rotational = scaled_product(
+                &[
+                    density,
+                    axial_speed,
+                    self.rotation_area.unwrap_or(0.0),
+                    self.width,
+                    gradient.abs(),
+                ],
+                1.0,
+            )?
+            .copysign(gradient);
+            let result = stationary + rotational;
+            if result.is_finite() {
+                Ok(result)
+            } else {
+                Err(HullError::ArithmeticOverflow)
+            }
         };
         Ok(Vec3::new(
-            component(crossflow.x)?,
-            component(crossflow.y)?,
-            component(crossflow.z)?,
+            component(crossflow.x, rotation_gradient.x)?,
+            component(crossflow.y, rotation_gradient.y)?,
+            component(crossflow.z, rotation_gradient.z)?,
         ))
+    }
+
+    pub(super) fn allows_rotation(self) -> bool {
+        self.rotation_area.is_some()
     }
 }
 
@@ -96,6 +119,38 @@ pub fn hull_sections_from_voxels(
     )
 }
 
+/// Creates sections using the spatial quasi-steady approximation for rotation.
+///
+/// The arguments have the same meaning and restrictions as
+/// [`hull_sections_from_voxels`]. In addition to the steady term, this uses
+/// `rho * U * A * (omega cross axis) * dx`. It assumes locally small incidence,
+/// uniform flow and slow rigid rotation of a slender axisymmetric body. This
+/// spatial derivative omits added-mass and other unsteady acceleration terms;
+/// it is not a complete pitching or yawing model. The caller must validate the
+/// approximation for the intended motion.
+pub fn hull_sections_from_voxels_quasi_steady(
+    geometry: &PreparedGeometry,
+    axis: usize,
+    centerline: Vec3,
+    smoothing_radius: usize,
+    max_incidence: f64,
+) -> Result<Vec<HullSection>, HullError> {
+    let sections = geometry
+        .sections()
+        .get(axis)
+        .ok_or(HullError::InvalidParameters)?;
+    sections_from_areas_with_rotation(
+        sections,
+        geometry.origin(),
+        geometry.cell_size(),
+        axis,
+        centerline,
+        smoothing_radius,
+        max_incidence,
+        true,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sections_from_areas(
     sections: &[GeometrySection],
@@ -105,6 +160,29 @@ fn sections_from_areas(
     centerline: Vec3,
     smoothing_radius: usize,
     max_incidence: f64,
+) -> Result<Vec<HullSection>, HullError> {
+    sections_from_areas_with_rotation(
+        sections,
+        origin,
+        cell_size,
+        axis,
+        centerline,
+        smoothing_radius,
+        max_incidence,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sections_from_areas_with_rotation(
+    sections: &[GeometrySection],
+    origin: Vec3,
+    cell_size: f64,
+    axis: usize,
+    centerline: Vec3,
+    smoothing_radius: usize,
+    max_incidence: f64,
+    rotation: bool,
 ) -> Result<Vec<HullSection>, HullError> {
     if !origin.is_finite()
         || !centerline.is_finite()
@@ -120,7 +198,7 @@ fn sections_from_areas(
         2 => Vec3::Z,
         _ => return Err(HullError::InvalidParameters),
     };
-    let slopes = area_slopes_from_sections(sections, cell_size, smoothing_radius)
+    let (areas, slopes) = area_profile_from_sections(sections, cell_size, smoothing_radius)
         .map_err(HullError::Wave)?;
     let padding = smoothing_radius
         .checked_add(2)
@@ -129,8 +207,8 @@ fn sections_from_areas(
     result
         .try_reserve_exact(slopes.len())
         .map_err(|_| HullError::AllocationFailed)?;
-    for (index, slope) in slopes.into_iter().enumerate() {
-        if slope == 0.0 {
+    for (index, (area, slope)) in areas.into_iter().zip(slopes).enumerate() {
+        if slope == 0.0 && (!rotation || area == 0.0) {
             continue;
         }
         let offset = (index as f64 - padding as f64 + 0.5) * cell_size;
@@ -157,6 +235,7 @@ fn sections_from_areas(
             slope,
             width: cell_size,
             max_incidence,
+            rotation_area: rotation.then_some(area),
         }));
     }
     Ok(result)
@@ -221,6 +300,74 @@ mod tests {
     }
 
     #[test]
+    fn quasi_steady_rotation_converges_for_closed_body() -> Result<(), Box<dyn std::error::Error>> {
+        let mut errors = Vec::new();
+        for count in [16, 32, 64] {
+            let sections = sections_from_areas_with_rotation(
+                &sample_sections(count),
+                Vec3::ZERO,
+                1.0 / count as f64,
+                0,
+                Vec3::ZERO,
+                0,
+                0.2,
+                true,
+            )?;
+            let mut state = flow(Vec3::X * 10.0)?;
+            state.center_of_mass = Vec3::X * 0.25;
+            state.angular_velocity = Vec3::Y;
+            let mut force = Vec3::ZERO;
+            let mut moment = Vec3::ZERO;
+            for section in sections {
+                let wrench = section.evaluate(state)?;
+                force += wrench.force;
+                moment += wrench.moment;
+            }
+            assert!(force.length() < 1e-11, "{force:?}");
+            errors.push((moment.y + 10.0 / 24.0).abs());
+        }
+        assert!(errors[2] < errors[1] && errors[1] < errors[0], "{errors:?}");
+        assert!(errors[2] < 0.001, "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn quasi_steady_preserves_static_load_and_checks_domain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let input = sample_sections(16);
+        let steady = sections_from_areas(&input, Vec3::ZERO, 1.0 / 16.0, 0, Vec3::ZERO, 0, 0.2)?;
+        let rotating = sections_from_areas_with_rotation(
+            &input,
+            Vec3::ZERO,
+            1.0 / 16.0,
+            0,
+            Vec3::ZERO,
+            0,
+            0.2,
+            true,
+        )?;
+        let state = flow(Vec3::new(10.0, 0.0, -1.0))?;
+        let sum = |sections: &[HullSection]| -> Result<Vec3, HullError> {
+            let mut force = Vec3::ZERO;
+            for section in sections {
+                force = force
+                    .checked_add(section.evaluate(state)?.force)
+                    .ok_or(HullError::ArithmeticOverflow)?;
+            }
+            Ok(force)
+        };
+        assert!((sum(&steady)? - sum(&rotating)?).length() < 1e-12);
+        let section = rotating.first().ok_or("section")?;
+        let mut fast = flow(Vec3::X * 200.0)?;
+        fast.angular_velocity = Vec3::Y;
+        assert!(matches!(
+            section.evaluate(fast),
+            Err(HullError::UnsupportedMach)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn potential_cell_is_covariant_under_rigid_transform() -> Result<(), Box<dyn std::error::Error>>
     {
         let section = HullSection::new(
@@ -238,6 +385,7 @@ mod tests {
             slope: -0.5,
             width: 1.0,
             max_incidence: 0.2,
+            rotation_area: None,
         });
         let initial = flow(Vec3::new(10.0, 0.0, -1.0))?;
         let reference = section.evaluate(initial)?;
@@ -280,6 +428,7 @@ mod tests {
                 slope,
                 width: 0.1,
                 max_incidence: 0.2,
+                rotation_area: None,
             });
             let mut state = flow(Vec3::new(axial, 0.0, cross))?;
             state.sound_speed = sound;

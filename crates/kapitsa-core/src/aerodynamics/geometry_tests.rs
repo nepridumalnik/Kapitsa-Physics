@@ -1114,3 +1114,67 @@ fn voxel_slender_sections_apply_and_reject_rotation_in_world_steps()
     }
     Ok(())
 }
+
+#[test]
+fn quasi_steady_voxel_sections_advance_rotating_body() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            Aerodynamics, Atmosphere, DensityProfile, SphericalAtmosphere,
+            slender::hull_sections_from_voxels_quasi_steady,
+        },
+        execution::SequentialExecutor,
+        mass::MassProperties,
+        rigid_body::RigidBody,
+        world::PhysicsWorld,
+    };
+    use kapitsa_math::Mat3;
+    let mesh = cube();
+    let geometry = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125))?;
+    let sections =
+        hull_sections_from_voxels_quasi_steady(&geometry, 0, Vec3::new(0.0, 0.5, 0.5), 1, 0.2)?;
+    let mut expected = None;
+    for clustered in [false, true] {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(Atmosphere::Sphere(
+                SphericalAtmosphere::builder()
+                    .reference_radius(1_000_000.0)
+                    .reference_density(1.0)
+                    .height(1_000_000.0)
+                    .profile(DensityProfile::Exponential {
+                        scale_height: 1_000_000.0,
+                    })
+                    .build()?,
+            ));
+            let mass =
+                MassProperties::new(100.0, Vec3::new(0.5, 0.5, 0.5), Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 10.0)?;
+            body.set_angular_velocity(Vec3::Y * 0.01)?;
+            body.set_aerodynamics(Aerodynamics::Hull(sections.clone()));
+            let id = world.add_body(body)?;
+            if clustered {
+                world.enable_cluster(id)?;
+            }
+            for _ in 0..3 {
+                if sharded {
+                    world.step_with_shards(
+                        1e-4,
+                        &mut [Vec::new(), Vec::new()],
+                        &SequentialExecutor,
+                        1,
+                    )?;
+                } else {
+                    world.step(1e-4)?;
+                }
+            }
+            let motion = world.body(id).ok_or("body")?.motion();
+            if let Some(reference) = expected {
+                assert_eq!(motion, reference);
+            } else {
+                expected = Some(motion);
+            }
+        }
+    }
+    Ok(())
+}

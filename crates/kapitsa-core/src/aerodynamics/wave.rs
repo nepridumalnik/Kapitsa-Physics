@@ -135,6 +135,14 @@ pub fn area_slopes_from_sections(
     cell_size: f64,
     smoothing_radius: usize,
 ) -> Result<Vec<f64>, WaveDragError> {
+    Ok(area_profile_from_sections(sections, cell_size, smoothing_radius)?.1)
+}
+
+pub(super) fn area_profile_from_sections(
+    sections: &[super::geometry::GeometrySection],
+    cell_size: f64,
+    smoothing_radius: usize,
+) -> Result<(Vec<f64>, Vec<f64>), WaveDragError> {
     if sections.is_empty() || !cell_size.is_finite() || cell_size <= 0.0 {
         return Err(WaveDragError::InvalidInput);
     }
@@ -203,7 +211,7 @@ pub fn area_slopes_from_sections(
         slopes.push(slope.copysign(delta));
     }
     slopes.push(0.0);
-    Ok(slopes)
+    Ok((smoothed, slopes))
 }
 
 pub(super) fn prepare_voxel_wave_drag(

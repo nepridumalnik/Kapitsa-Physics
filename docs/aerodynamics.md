@@ -232,6 +232,15 @@ through the existing body or part hull APIs and are additive to other models.
 An analytic closed-body area fixture checks zero net normal force and moment
 convergence; it is not a validation for arbitrary voxelized vehicles.
 
+`slender::hull_sections_from_voxels_quasi_steady` additionally applies the
+spatial derivative of the local crossflow in the steady slender-body running
+load, [Barrowman equation 3-57](https://ntrs.nasa.gov/api/citations/20010047838/downloads/20010047838.pdf).
+For rigid rotation in uniform flow this adds `rho * U * A * (omega cross axis)
+* dx`. It is a quasi-steady approximation with the same small-incidence and
+Mach limits, not a complete unsteady model: acceleration and added-mass forces,
+wind gradients and separated flow are omitted. The caller must establish that
+rotation is slow enough for these omissions to be acceptable.
+
 ## Pressure loads
 
 `C_p = (p - p_infinity) / q`, so a patch of area `A` and outward normal `n` has excess-pressure force `F = -q C_p A n`.

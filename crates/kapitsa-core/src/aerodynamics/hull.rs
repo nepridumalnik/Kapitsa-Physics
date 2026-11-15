@@ -605,16 +605,32 @@ impl HullSection {
         let axial = axis.checked_mul_scalar(axial_speed).ok_or(overflow)?;
         let crossflow = velocity.checked_sub(axial).ok_or(overflow)?;
         let cross_speed = crossflow.checked_length().ok_or(overflow)?;
-        if self.potential.is_some() && flow.angular_velocity != Vec3::ZERO {
+        let rotation_gradient = if let Some(cell) = self.potential {
             let transverse_rotation = flow.angular_velocity.checked_cross(axis).ok_or(overflow)?;
-            if transverse_rotation != Vec3::ZERO || cross_speed != 0.0 {
+            if !cell.allows_rotation()
+                && flow.angular_velocity != Vec3::ZERO
+                && (transverse_rotation != Vec3::ZERO || cross_speed != 0.0)
+            {
                 return Err(HullError::UnsupportedSlenderRotation);
             }
-        }
+            if cell.allows_rotation() {
+                transverse_rotation
+            } else {
+                Vec3::ZERO
+            }
+        } else {
+            Vec3::ZERO
+        };
         if speed == 0.0 {
+            if rotation_gradient != Vec3::ZERO {
+                return Err(HullError::UnsupportedSlenderIncidence);
+            }
             return Ok(zero);
         }
-        if self.potential.is_some() && cross_speed != 0.0 && mach > 0.3 {
+        if self.potential.is_some()
+            && (cross_speed != 0.0 || rotation_gradient != Vec3::ZERO)
+            && mach > 0.3
+        {
             return Err(HullError::UnsupportedMach);
         }
         let density = flow.atmosphere.density();
@@ -706,7 +722,13 @@ impl HullSection {
             Vec3::ZERO
         };
         let potential_force = match self.potential {
-            Some(cell) => cell.force(density, axial_speed, crossflow, cross_speed)?,
+            Some(cell) => cell.force(
+                density,
+                axial_speed,
+                crossflow,
+                cross_speed,
+                rotation_gradient,
+            )?,
             None => Vec3::ZERO,
         };
         let force = axial_force
