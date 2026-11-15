@@ -106,11 +106,12 @@ pub struct PressurePatch {
     area: f64,
 }
 
-/// Converts a consistently wound closed indexed mesh into centroid patches.
+/// Converts a consistently wound closed mesh into centroid patches.
 ///
-/// Each indexed edge must occur exactly twice in opposite directions and all
-/// faces must be connected. This does not prove a sphere, convexity, absence of
-/// self-intersection, or uniqueness of geometrically coincident vertices. It is
+/// Exactly coincident vertices are identified, including signed zero; no tolerance
+/// welding is performed. Each resulting edge must occur exactly twice in opposite
+/// directions and all faces must be connected. This does not prove a sphere,
+/// convexity, or absence of self-intersection. It is
 /// not sufficient by itself to authorize a potential-flow model in a world step.
 pub fn closed_mesh_pressure_patches(
     mesh: &crate::shape::TriangleMesh,
@@ -118,10 +119,21 @@ pub fn closed_mesh_pressure_patches(
     use std::collections::BTreeMap;
 
     let faces = mesh.triangles();
+    let mut vertices = BTreeMap::new();
+    let mut indices = Vec::with_capacity(mesh.vertices().len());
+    for vertex in mesh.vertices() {
+        let key = [vertex.x, vertex.y, vertex.z].map(|v| if v == 0.0 { 0 } else { v.to_bits() });
+        let next = vertices.len();
+        indices.push(*vertices.entry(key).or_insert(next));
+    }
     let mut edges: BTreeMap<(usize, usize), Vec<(usize, bool)>> = BTreeMap::new();
     let mut patches = Vec::with_capacity(faces.len());
     for (index, &[a, b, c]) in faces.iter().enumerate() {
-        for (u, v) in [(a, b), (b, c), (c, a)] {
+        let [ia, ib, ic] = [a, b, c].map(|i| indices[i]);
+        if ia == ib || ib == ic || ic == ia {
+            return Err(PressureError::InvalidPatch);
+        }
+        for (u, v) in [(ia, ib), (ib, ic), (ic, ia)] {
             edges
                 .entry((u.min(v), u.max(v)))
                 .or_default()

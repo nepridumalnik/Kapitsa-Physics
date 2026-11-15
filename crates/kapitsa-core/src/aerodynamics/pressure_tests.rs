@@ -32,6 +32,35 @@ fn closed_mesh_preparation_rejects_open_reversed_and_disconnected_surfaces() {
 }
 
 #[test]
+fn closed_mesh_weld_is_exact_and_rejects_duplicate_faces() {
+    use crate::shape::TriangleMesh;
+    let points = [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z];
+    let faces = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+    let mut vertices = Vec::new();
+    let mut triangles = Vec::new();
+    for face in faces {
+        let start = vertices.len();
+        vertices.extend(face.map(|i| points[i]));
+        triangles.push([start, start + 1, start + 2]);
+    }
+    let mesh = TriangleMesh::new(vertices.clone(), triangles.clone()).unwrap();
+    assert_eq!(closed_mesh_pressure_patches(&mesh).unwrap().len(), 4);
+    vertices[0].x = f64::EPSILON;
+    let cracked = TriangleMesh::new(vertices.clone(), triangles.clone()).unwrap();
+    assert_eq!(
+        closed_mesh_pressure_patches(&cracked),
+        Err(PressureError::InvalidPatch)
+    );
+    vertices[0] = points[0];
+    triangles.push(triangles[0]);
+    let duplicate = TriangleMesh::new(vertices, triangles).unwrap();
+    assert_eq!(
+        closed_mesh_pressure_patches(&duplicate),
+        Err(PressureError::InvalidPatch)
+    );
+}
+
+#[test]
 fn base_source_uniqueness_obeys_work_limit_and_triangle_permutations() {
     use crate::{
         aerodynamics::{AerodynamicsError, geometry::GeometryError},

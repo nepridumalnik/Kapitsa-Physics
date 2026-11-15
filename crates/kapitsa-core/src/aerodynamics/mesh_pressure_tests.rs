@@ -210,7 +210,7 @@ fn potential_collider_requires_both_sides_for_zero_drag() {
 }
 
 #[test]
-fn closed_pressure_preparation_conservatively_rejects_collider_sphere_seams() {
+fn closed_pressure_preparation_accepts_exact_collider_sphere_seams() {
     use crate::{
         aerodynamics::colliders::{ColliderTessellation, collider_mesh},
         collider::Collider,
@@ -222,8 +222,8 @@ fn closed_pressure_preparation_conservatively_rejects_collider_sphere_seams() {
     );
     let mesh = collider_mesh([&collider], ColliderTessellation::new(16, 9, 1000).unwrap()).unwrap();
     assert_eq!(
-        closed_mesh_pressure_patches(&mesh),
-        Err(PressureError::InvalidPatch)
+        closed_mesh_pressure_patches(&mesh).unwrap().len(),
+        mesh.triangles().len()
     );
 }
 
