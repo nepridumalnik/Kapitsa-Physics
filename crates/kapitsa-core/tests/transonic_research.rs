@@ -19,6 +19,62 @@ fn axial_flux(u: f64, mach: f64, gamma: f64) -> f64 {
     (1.0 - mach * mach) * u - 0.5 * mach * mach * (gamma + 1.0) * u * u
 }
 
+fn scalar_godunov(left: f64, right: f64, mach: f64, gamma: f64) -> f64 {
+    let lf = axial_flux(left, mach, gamma);
+    let rf = axial_flux(right, mach, gamma);
+    if left <= right {
+        return lf.min(rf);
+    }
+    let sonic = (1.0 - mach.powi(2)) / (mach.powi(2) * (gamma + 1.0));
+    if right <= sonic && sonic <= left {
+        axial_flux(sonic, mach, gamma)
+    } else {
+        lf.max(rf)
+    }
+}
+
+#[test]
+fn scalar_godunov_conserves_but_selects_opposite_tsd_shock_orientation() {
+    for u in [-0.1, 0.0, 0.1] {
+        assert_eq!(scalar_godunov(u, u, 1.0, 1.4), axial_flux(u, 1.0, 1.4));
+    }
+    assert_eq!(
+        scalar_godunov(0.1, -0.1, 1.0, 1.4),
+        axial_flux(0.0, 1.0, 1.4)
+    );
+    assert_eq!(
+        scalar_godunov(-0.1, 0.1, 1.0, 1.4),
+        axial_flux(0.1, 1.0, 1.4)
+    );
+    for mach in [0.9_f64, 1.0, 1.1] {
+        let sonic = (1.0 - mach.powi(2)) / (mach.powi(2) * 2.4);
+        let (up, down) = (sonic + 0.02, sonic - 0.02);
+        let physical = axial_flux(up, mach, 1.4);
+        assert!((physical - axial_flux(down, mach, 1.4)).abs() < 1e-14);
+        assert!(scalar_godunov(up, down, mach, 1.4) > physical);
+        for n in [32, 64, 128] {
+            for (left, right, stationary) in [(down, up, true), (up, down, false)] {
+                let mut states = vec![left; n / 2 + 1];
+                states.extend(vec![right; n / 2 + 1]);
+                let flux: Vec<_> = states
+                    .windows(2)
+                    .map(|v| scalar_godunov(v[0], v[1], mach, 1.4))
+                    .collect();
+                let residual: Vec<_> = flux.windows(2).map(|v| v[1] - v[0]).collect();
+                assert!(
+                    (residual.iter().sum::<f64>() - (flux[flux.len() - 1] - flux[0])).abs() < 1e-14
+                );
+                let norm = residual.into_iter().map(f64::abs).fold(0.0_f64, f64::max);
+                if stationary {
+                    assert!(norm < 1e-14);
+                } else {
+                    assert!(norm > 0.0);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn murman_conservation_alone_admits_expansion_shocks() {
     // Jameson, Transonic Flow Calculations, section 2.1, equations (18)-(23).
