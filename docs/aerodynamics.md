@@ -694,6 +694,16 @@ article is subscription-only; consequently it has not been established that
 the paper provides suitable drag observations at all. Its flow visualization
 alone is not a quantitative drag validation of the Re = 10,000 curve.
 
+The later Bailey–Starr transonic measurements
+([AIAA Journal, 1976](https://doi.org/10.2514/3.7262)) are another candidate.
+Nagata et al.'s [2020 DNS paper](https://doi.org/10.1017/jfm.2020.629),
+figure 16, distinguishes Bailey–Starr data from Bailey–Hiatt data but plots
+drag increments for several Reynolds numbers collectively. This secondary
+figure does not establish an individual Bailey–Starr measurement at
+Re = 10,000, its uncertainty, or its independence from Karr's input data.
+The primary article was not accessible here; its individual conditions and
+data provenance must be checked before using it as a numerical holdout.
+
 The newer GBK experiment by [Allofs et al.](https://doi.org/10.1007/s00348-022-03402-z)
 is independent of the historical fits, but is not a direct sphere `Cd`
 dataset. It measures particle size and velocity in a dust-laden nozzle flow;
