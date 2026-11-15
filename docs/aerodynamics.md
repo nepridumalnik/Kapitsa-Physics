@@ -443,11 +443,11 @@ Voxel occupancy conservatively thickens geometry, and differentiation can
 amplify grid noise. Callers must check convergence under grid and smoothing
 refinement and establish that the shape and flow meet the slender axisymmetric
 assumptions. For a triangulated slender Sears?Haack shape, a focused fixture at
-cell sizes 0.05, 0.025 and 0.0125 m, with filter radii 1, 2 and 4 cells, produced
-wave drags approximately 0.0891, 0.0456 and 0.0323 N versus an analytic 0.0279 N
-at density 1 kg/m? and speed 2 m/s. The finest result is about 16% high. A finer
-0.00625 m preparation exceeded the existing work budget. This fixture does not
-establish convergence or accuracy for arbitrary voxelized vessels or wave loads.
+cell sizes 0.05, 0.025, 0.0125 and 0.00625 m, with filter radii 1, 2, 4 and 8
+cells, produced wave drags approximately 0.0891, 0.0456, 0.0323 and 0.0276 N
+versus an analytic 0.0279 N at density 1 kg/m? and speed 2 m/s. The finest result
+is about 1% low. This fixture does not establish convergence or accuracy for
+arbitrary voxelized vessels or wave loads.
 
 ## Numerical validation requirements
 

@@ -538,6 +538,27 @@ fn intersects(triangle: [Vec3; 3], center: Vec3, half: f64) -> Result<bool, Geom
     Ok(true)
 }
 
+// Bounds used both by the work preflight and the rasterization itself.
+fn triangle_grid_bounds(
+    triangle: [Vec3; 3],
+    origin: Vec3,
+    h: f64,
+    dimensions: [usize; 3],
+) -> ([usize; 3], [usize; 3]) {
+    let triangle_min = triangle
+        .iter()
+        .fold(Vec3::splat(f64::INFINITY), |min, &v| min.min(v));
+    let triangle_max = triangle
+        .iter()
+        .fold(Vec3::splat(f64::NEG_INFINITY), |max, &v| max.max(v));
+    let lower = components((triangle_min - origin) / h).map(|v| v.floor().max(0.0) as usize);
+    let upper = components((triangle_max - origin) / h).map(|v| v.ceil().max(0.0) as usize);
+    (
+        std::array::from_fn(|axis| lower[axis].min(dimensions[axis].saturating_sub(1))),
+        std::array::from_fn(|axis| upper[axis].min(dimensions[axis].saturating_sub(1))),
+    )
+}
+
 impl PreparedGeometry {
     pub fn prepare(
         instances: &[GeometryInstance<'_>],
@@ -633,18 +654,40 @@ impl PreparedGeometry {
         if count > config.max_cells {
             return Err(GeometryError::CellBudgetExceeded);
         }
-        let work = count
-            .checked_mul(
-                triangle_count
-                    .checked_add(instances.len().saturating_mul(8))
-                    .ok_or(GeometryError::WorkBudgetExceeded)?,
-            )
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
-        if work
-            .checked_add(vertex_count)
+        // Charge full-grid passes and the actual conservative triangle bounds.
+        // This pass happens before grid allocation and uses the same bounds as
+        // rasterization, so a rejected request cannot allocate a partial grid.
+        let mut work = count
+            .checked_mul(instances.len().saturating_mul(10).saturating_add(7))
+            .and_then(|n| n.checked_add(vertex_count))
             .and_then(|n| n.checked_add(preprocessing_work))
-            .is_none_or(|n| n > config.max_work)
-        {
+            .and_then(|n| n.checked_add(triangle_count.saturating_mul(10)))
+            .ok_or(GeometryError::WorkBudgetExceeded)?;
+        for instance in instances {
+            for &[a, b, c] in instance.mesh.triangles() {
+                let triangle = [a, b, c].map(|i| {
+                    instance
+                        .local_transform
+                        .transform_point(instance.mesh.vertices()[i])
+                });
+                let (lower, upper) = triangle_grid_bounds(triangle, origin, h, dimensions);
+                let cells = (0..3)
+                    .try_fold(1_usize, |n, axis| {
+                        upper[axis]
+                            .checked_sub(lower[axis])?
+                            .checked_add(1)
+                            .and_then(|width| n.checked_mul(width))
+                    })
+                    .ok_or(GeometryError::WorkBudgetExceeded)?;
+                work = work
+                    .checked_add(cells)
+                    .ok_or(GeometryError::WorkBudgetExceeded)?;
+                if work > config.max_work {
+                    return Err(GeometryError::WorkBudgetExceeded);
+                }
+            }
+        }
+        if work > config.max_work {
             return Err(GeometryError::WorkBudgetExceeded);
         }
         let upper = origin + vector(dimensions.map(|d| d as f64 * h));
@@ -675,26 +718,7 @@ impl PreparedGeometry {
                         .local_transform
                         .transform_point(instance.mesh.vertices()[i])
                 });
-                let triangle_min = triangle
-                    .iter()
-                    .fold(Vec3::splat(f64::INFINITY), |min, &v| min.min(v));
-                let triangle_max = triangle
-                    .iter()
-                    .fold(Vec3::splat(f64::NEG_INFINITY), |max, &v| max.max(v));
-                let lower = components((triangle_min - origin) / h)
-                    .map(|value| value.floor().max(0.0) as usize);
-                let upper = components((triangle_max - origin) / h)
-                    .map(|value| value.ceil().max(0.0) as usize);
-                let lower = [
-                    lower[0].min(dimensions[0].saturating_sub(1)),
-                    lower[1].min(dimensions[1].saturating_sub(1)),
-                    lower[2].min(dimensions[2].saturating_sub(1)),
-                ];
-                let upper = [
-                    upper[0].min(dimensions[0].saturating_sub(1)),
-                    upper[1].min(dimensions[1].saturating_sub(1)),
-                    upper[2].min(dimensions[2].saturating_sub(1)),
-                ];
+                let (lower, upper) = triangle_grid_bounds(triangle, origin, h, dimensions);
                 for z in lower[2]..=upper[2] {
                     for y in lower[1]..=upper[1] {
                         for x in lower[0]..=upper[0] {

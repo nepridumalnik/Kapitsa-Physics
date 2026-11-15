@@ -901,7 +901,7 @@ fn voxel_wave_drag_refines_on_slender_sears_haack_mesh() -> Result<(), Box<dyn s
     let volume = PI * 0.01 * 8.0 * 3.0 * PI / 128.0;
     let theoretical = 256.0 * volume * volume / PI;
     let mut measured = Vec::new();
-    for (h, radius) in [(0.05, 1), (0.025, 2), (0.0125, 4)] {
+    for (h, radius) in [(0.05, 1), (0.025, 2), (0.0125, 4), (0.00625, 8)] {
         let mut settings = config(h);
         settings.max_work = 100_000_000;
         settings.max_cells = 1_000_000;
@@ -914,8 +914,31 @@ fn voxel_wave_drag_refines_on_slender_sears_haack_mesh() -> Result<(), Box<dyn s
         .map(|value| (value - theoretical).abs())
         .collect();
     assert!(
-        errors[2] < errors[1] && errors[1] < errors[0] && errors[2] < theoretical * 0.2,
+        errors[3] < errors[2]
+            && errors[2] < errors[1]
+            && errors[1] < errors[0]
+            && errors[2] < theoretical * 0.2
+            && errors[3] < theoretical * 0.02,
         "expected={theoretical}, measured={measured:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn preflight_counts_triangle_bounds_and_enforces_budget() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mesh = cube();
+    let instances = [instance(&mesh, Vec3::ZERO)];
+    let mut settings = config(0.05);
+    settings.max_work = 200_000;
+    let bounded = PreparedGeometry::prepare(&instances, settings)?;
+    settings.max_work = 10_000_000;
+    let reference = PreparedGeometry::prepare(&instances, settings)?;
+    assert_eq!(bounded, reference);
+    settings.max_work = 100_000;
+    assert!(matches!(
+        PreparedGeometry::prepare(&instances, settings),
+        Err(GeometryError::WorkBudgetExceeded)
+    ));
     Ok(())
 }
