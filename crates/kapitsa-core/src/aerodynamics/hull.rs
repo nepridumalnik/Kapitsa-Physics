@@ -427,7 +427,7 @@ impl HullSection {
     pub fn with_wave_drag(mut self, area_slopes: &[f64]) -> Result<Self, HullError> {
         let factor =
             super::wave::wave_drag(area_slopes, 0.25, 2.0, 1.0).map_err(HullError::Wave)?;
-        self.wave_drag_factor = Some(factor);
+        self.wave_drag_factor = (factor != 0.0).then_some(factor);
         Ok(self)
     }
 
@@ -721,6 +721,27 @@ mod tests {
     }
     fn close(a: Vec3, b: Vec3) {
         assert!((a - b).length() < 1e-9, "{a:?} != {b:?}");
+    }
+
+    #[test]
+    fn zero_wave_distribution_does_not_restrict_other_loads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?
+        .with_wave_drag(&[0.0, 0.0, 0.0])?;
+        let result = section.evaluate(flow(Vec3::new(50.0, 1.0, 0.0)))?;
+        assert_eq!(result.force, Vec3::ZERO);
+        assert_eq!(result.moment, Vec3::ZERO);
+        Ok(())
     }
 
     #[test]
