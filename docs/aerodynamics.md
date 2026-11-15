@@ -310,6 +310,11 @@ actual angle and Mach, including any control incidence shift. No extrapolation,
 periodic interpolation or seam continuity is inferred: callers must supply
 consistent values at -pi and pi. This enables measured or otherwise justified
 full-angle data, not a predictive stall model or automatic fallback.
+Alternatively, `with_periodic_full_angle_polar` requires exact -pi and pi
+endpoints with identical endpoint coefficients at each Mach knot, and wraps
+effective incidence (including control shift) across the seam. This guarantees
+coefficient value continuity at the seam, not slope continuity or physical
+validity. Mach remains restricted to the supplied table.
 `WingSurface::with_spanwise_projection`
 optionally enables a bounded normal-flow independence approximation, using a
 caller-supplied maximum sideslip angle in radians. It evaluates Mach, dynamic

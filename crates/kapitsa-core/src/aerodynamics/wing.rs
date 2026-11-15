@@ -222,6 +222,7 @@ pub struct WingSurface {
     footprint: Option<WingFootprint>,
     spanwise_limit: Option<f64>,
     full_angle_polar: bool,
+    periodic_polar: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -246,6 +247,7 @@ impl WingSurface {
     /// Replaces the analytic coefficient source; clones share immutable data.
     pub fn with_polar(mut self, polar: Arc<WingPolar>) -> Self {
         self.polar = Some(polar);
+        self.periodic_polar = false;
         self
     }
 
@@ -264,6 +266,33 @@ impl WingSurface {
             return Err(WingError::InvalidParameters);
         }
         self.full_angle_polar = true;
+        Ok(self)
+    }
+
+    /// Enables periodic full-angle lookup for a closed polar supplied by the caller.
+    ///
+    /// The angular axis must start at -pi and end at pi, with exactly equal
+    /// lift and drag at both endpoints for every Mach row. Between knots the
+    /// ordinary polar interpolation applies; no aerodynamic data are invented.
+    /// Effective incidence, including any control shift, is wrapped by 2*pi.
+    /// Mach remains limited to the table domain. This checks value continuity,
+    /// not derivative continuity or physical validity of the supplied data.
+    pub fn with_periodic_full_angle_polar(mut self) -> Result<Self, WingError> {
+        let Some(polar) = &self.polar else {
+            return Err(WingError::InvalidParameters);
+        };
+        let count = polar.angles.len();
+        if polar.angles[0] != -PI
+            || polar.angles[count - 1] != PI
+            || polar
+                .coefficients
+                .chunks_exact(count)
+                .any(|row| row[0] != row[count - 1])
+        {
+            return Err(WingError::InvalidParameters);
+        }
+        self.full_angle_polar = true;
+        self.periodic_polar = true;
         Ok(self)
     }
 
@@ -425,6 +454,17 @@ impl WingSurface {
             return Err(WingError::ArithmeticOverflow);
         }
         match &self.polar {
+            Some(polar) if self.periodic_polar => {
+                let angle = effective % (2.0 * PI);
+                let angle = if angle > PI {
+                    angle - 2.0 * PI
+                } else if angle < -PI {
+                    angle + 2.0 * PI
+                } else {
+                    angle
+                };
+                polar.coefficients(angle, mach)
+            }
             Some(polar) => polar.coefficients(effective, mach),
             None => self.model.coefficients(effective, mach),
         }
@@ -447,6 +487,7 @@ impl WingSurface {
             footprint: None,
             spanwise_limit: None,
             full_angle_polar: false,
+            periodic_polar: false,
         })
     }
 
@@ -1297,6 +1338,52 @@ mod tests {
         let difference = wing_force_component(1e-300, 1.0, 1.0, (1.0, f64::MAX), (-1.0, next))?;
         let expected = 0.5 * 1e-300 * (f64::MAX - next);
         assert!((difference / expected - 1.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn periodic_polar_validates_seam_and_wraps_control_incidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let base = WingSurface::new(
+            FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+            crate::transform::Transform::identity(),
+            1.0,
+        )?;
+        let seam = WingCoefficients {
+            lift: 0.0,
+            drag: 1.0,
+        };
+        let middle = WingCoefficients {
+            lift: 0.0,
+            drag: 0.2,
+        };
+        let valid = Arc::new(WingPolar::new(
+            vec![0.0, 1.0],
+            vec![-PI, 0.0, PI],
+            vec![seam, middle, seam, seam, middle, seam],
+        )?);
+        let invalid = Arc::new(WingPolar::new(
+            vec![0.0, 1.0],
+            vec![-PI, 0.0, PI],
+            vec![seam, middle, middle, seam, middle, seam],
+        )?);
+        assert!(
+            base.clone()
+                .with_polar(invalid)
+                .with_periodic_full_angle_polar()
+                .is_err()
+        );
+        let surface = base
+            .with_polar(valid)
+            .with_periodic_full_angle_polar()?
+            .with_control(WingControl::new(0.1, 0.2, 1.0)?);
+        let a = surface.coefficients(PI - 0.05, 0.5)?;
+        let b = surface.coefficients(-PI - 0.05, 0.5)?;
+        assert!((a.drag - b.drag).abs() < 1e-14);
+        assert_eq!(
+            surface.coefficients(0.0, 2.0),
+            Err(WingError::UnsupportedFlow)
+        );
         Ok(())
     }
 
