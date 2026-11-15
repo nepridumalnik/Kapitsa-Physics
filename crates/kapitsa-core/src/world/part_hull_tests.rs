@@ -292,11 +292,39 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
 fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::cluster::balance::{BalanceError, prepare_force_free_inputs, prepare_tree};
+    use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
+    use crate::joint::JointFrame;
     let mut world = PhysicsWorld::new();
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
     let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
     let root = world.enable_cluster(body)?;
+    let child = world.add_cluster_part(
+        root,
+        ClusterPartDesc {
+            local_transform: Transform::identity(),
+            mass,
+            colliders: Vec::new(),
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        },
+        WeldDesc {
+            frame_a: JointFrame::IDENTITY,
+            frame_b: JointFrame::IDENTITY,
+            strength: WeldStrength::Unbreakable,
+            stiffness: WeldStiffness {
+                linear: 1.0,
+                angular: 1.0,
+            },
+        },
+    )?;
     world.step(0.01)?;
+    let reactions = world
+        .force_free_weld_reactions(body, 0.0, 0.0)
+        .map_err(|error| format!("{error:?}"))?;
+    assert_eq!(reactions.len(), 1);
+    assert_eq!(reactions[0].child, child);
+    assert_eq!(reactions[0].force, Vec3::ZERO);
+    assert_eq!(reactions[0].moment, Vec3::ZERO);
     let state = world.cluster_load_states()[0];
     let tree = prepare_tree(
         &state,
@@ -308,6 +336,10 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
     assert!(inputs[0].loads_complete);
     world.set_part_aerodynamic_hull(root, vec![section(Vec3::ZERO)])?;
     world.step(0.01)?;
+    assert!(matches!(
+        world.force_free_weld_reactions(body, 0.0, 0.0),
+        Err(BalanceError::IncompleteLoads)
+    ));
     let state = world.cluster_load_states()[0];
     assert!(matches!(
         prepare_force_free_inputs(&state, &tree),

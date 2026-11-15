@@ -200,6 +200,8 @@ use crate::{
     transform::Transform,
 };
 
+pub use crate::cluster::balance::{BalanceError as WeldBalanceError, WeldReaction};
+
 struct MeshAerodynamics {
     identity: Option<std::sync::Arc<()>>,
     cache: crate::aerodynamics::cache::PreparedGeometryCache,
@@ -743,6 +745,89 @@ impl BodyStep {
 }
 
 impl PhysicsWorld {
+    /// Calculates instantaneous parent-on-child weld reactions from the last
+    /// successful full-step snapshot. Currently only force-free, nonrotating
+    /// clusters are supported. This diagnostic does not break welds. Tolerances
+    /// are absolute, in N and N·m. Topology and loads come from the same step;
+    /// later world edits do not alter the snapshot.
+    pub fn force_free_weld_reactions(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+        use crate::cluster::balance::{
+            prepare_force_free_inputs, prepare_tree, reaction_moment_at_anchor, tree_reactions,
+        };
+        let state = self
+            .cluster_load_states_published
+            .iter()
+            .find(|state| state.body == body)
+            .ok_or(WeldBalanceError::IncompleteLoads)?;
+        if !state.force_free_certified || state.state.angular_velocity() != Vec3::ZERO {
+            return Err(WeldBalanceError::IncompleteLoads);
+        }
+        let tree = prepare_tree(
+            state,
+            &self.cluster_load_parts_published,
+            &self.cluster_load_welds_published,
+        )?;
+        let inputs = prepare_force_free_inputs(state, &tree)?;
+        let mut parents = Vec::new();
+        parents
+            .try_reserve_exact(tree.len())
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        parents.extend(tree.iter().map(|part| part.parent));
+        // For a force-free, nonrotating body all momentum derivatives are zero;
+        // their reference center is immaterial. Use the evaluation-time origin.
+        let origin = state.state.transform().translation();
+        let reactions = tree_reactions(
+            &inputs,
+            &parents,
+            origin,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            origin,
+            force_tolerance,
+            moment_tolerance,
+        )?;
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(tree.len().saturating_sub(1))
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        let mut welds = HashMap::new();
+        welds
+            .try_reserve(self.cluster_load_welds_published.len())
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        for weld in &self.cluster_load_welds_published {
+            if welds.insert(weld.weld, weld.value).is_some() {
+                return Err(WeldBalanceError::InvalidTree);
+            }
+        }
+        for (index, part) in tree.iter().enumerate().skip(1) {
+            let weld_id = part.weld.ok_or(WeldBalanceError::InvalidTree)?;
+            let weld = welds.get(&weld_id).ok_or(WeldBalanceError::InvalidTree)?;
+            let frame = if weld.part_a() == part.part {
+                weld.desc().frame_a
+            } else if weld.part_b() == part.part {
+                weld.desc().frame_b
+            } else {
+                return Err(WeldBalanceError::InvalidTree);
+            };
+            let anchor = part.pose.transform_point(frame.local_anchor);
+            let (force, moment) = reactions[index];
+            let moment = reaction_moment_at_anchor(force, moment, origin, anchor)?;
+            result.push(WeldReaction {
+                weld: weld_id,
+                child: part.part,
+                force,
+                moment,
+                anchor,
+            });
+        }
+        Ok(result)
+    }
     /// Cluster-body states from the beginning of the last successful full step.
     /// Low-level shard commits do not publish this diagnostic. Later topology
     /// edits can make its body IDs or current part transforms stale.

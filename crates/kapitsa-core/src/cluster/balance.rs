@@ -100,12 +100,22 @@ pub(crate) fn prepare_recorded_loads(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum BalanceError {
+pub enum BalanceError {
     IncompleteLoads,
     InvalidTree,
     InvalidTolerance,
     Unbalanced,
     Physics(ClusterError),
+}
+
+/// Parent-on-child reaction in world coordinates, at the child's weld anchor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeldReaction {
+    pub weld: WeldId,
+    pub child: PartId,
+    pub force: Vec3,
+    pub moment: Vec3,
+    pub anchor: Vec3,
 }
 
 /// Root-first topology from one evaluation-time snapshot. This establishes no
