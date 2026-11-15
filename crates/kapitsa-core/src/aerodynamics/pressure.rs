@@ -31,6 +31,43 @@ impl fmt::Display for PressureError {
 }
 impl std::error::Error for PressureError {}
 
+fn same_triangle(a: &[Vec3; 3], b: &[Vec3; 3]) -> bool {
+    (0..3).any(|shift| {
+        (0..3).all(|i| a[i] == b[(i + shift) % 3]) || (0..3).all(|i| a[i] == b[(shift + 3 - i) % 3])
+    })
+}
+
+/// Reject selected triangles that do not uniquely identify a source face.
+pub(crate) fn verify_unique_base_sources(
+    selected: &[[Vec3; 3]],
+    mesh: &crate::shape::TriangleMesh,
+    max_work: usize,
+) -> Result<(), super::AerodynamicsError> {
+    if selected
+        .len()
+        .checked_mul(mesh.triangles().len())
+        .is_none_or(|work| work > max_work)
+    {
+        return Err(super::AerodynamicsError::Geometry(
+            super::geometry::GeometryError::WorkBudgetExceeded,
+        ));
+    }
+    for triangle in selected {
+        if mesh
+            .triangles()
+            .iter()
+            .filter(|face| same_triangle(triangle, &face.map(|index| mesh.vertices()[index])))
+            .count()
+            != 1
+        {
+            return Err(super::AerodynamicsError::Pressure(
+                PressureError::BaseNotFullyVisible,
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Verifies that each selected source triangle appears unchanged exactly once
 /// in an exposure result. The caller must prepare `visible` from the complete
 /// current Mesh/Colliders geometry, in the direction from the base towards the
@@ -45,12 +82,6 @@ pub fn verify_full_base_visibility(
     selected: &[[Vec3; 3]],
     visible: &PreparedSurfacePatches,
 ) -> Result<(), PressureError> {
-    fn same_triangle(a: &[Vec3; 3], b: &[Vec3; 3]) -> bool {
-        (0..3).any(|shift| {
-            (0..3).all(|i| a[i] == b[(i + shift) % 3])
-                || (0..3).all(|i| a[i] == b[(shift + 3 - i) % 3])
-        })
-    }
     for (index, triangle) in selected.iter().enumerate() {
         if selected[..index]
             .iter()

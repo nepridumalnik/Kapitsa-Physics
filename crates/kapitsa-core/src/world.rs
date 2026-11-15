@@ -2661,6 +2661,12 @@ impl PhysicsWorld {
                     .as_deref()
                     .filter(|s| !s.is_empty())
                 {
+                    crate::aerodynamics::pressure::verify_unique_base_sources(
+                        selected,
+                        mesh,
+                        config.max_patch_work,
+                    )
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
                     let visible = geometry
                         .surface_patches_with_flow(
                             &[crate::aerodynamics::geometry::GeometryInstance {
