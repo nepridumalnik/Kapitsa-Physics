@@ -167,6 +167,24 @@ fn triangle_grid_candidates_are_conservative_for_axis_and_diagonal_sweeps() {
 }
 
 #[test]
+fn surface_work_charge_rejects_overflow_and_preserves_previous_value() {
+    let mut work = 4;
+    assert_eq!(charge_surface_work(&mut work, 1, 5), Ok(()));
+    assert_eq!(work, 5);
+    assert_eq!(
+        charge_surface_work(&mut work, 1, 5),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    assert_eq!(work, 5);
+    let mut overflow = usize::MAX;
+    assert_eq!(
+        charge_surface_work(&mut overflow, 1, usize::MAX),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    assert_eq!(overflow, usize::MAX);
+}
+
+#[test]
 fn triangle_grid_build_accounts_for_input_scans() {
     const TRIANGLE_COUNT: usize = 2;
     const SCAN_WORK: usize = TRIANGLE_COUNT * 3;

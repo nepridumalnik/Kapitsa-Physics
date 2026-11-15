@@ -164,6 +164,17 @@ fn check_surface_work(work: Option<usize>, max_work: usize) -> Result<(), Geomet
     Ok(())
 }
 
+fn charge_surface_work(
+    work: &mut usize,
+    amount: usize,
+    max_work: usize,
+) -> Result<(), GeometryError> {
+    let next = work.checked_add(amount);
+    check_surface_work(next, max_work)?;
+    *work = next.ok_or(GeometryError::WorkBudgetExceeded)?;
+    Ok(())
+}
+
 /// Temporary broad phase for visibility blockers. Each query is an axis-aligned
 /// conservative bound of the source triangle swept to the prepared geometry's
 /// bounds along the ray; it may return extra triangles, but never omits a hit.
@@ -1056,6 +1067,7 @@ impl PreparedGeometry {
         const SOURCE_WORK: usize = 48;
         const SHADOW_WORK: usize = 64;
         const CLIP_VERTEX_WORK: usize = 16;
+        const POLYGON_VISIT_WORK: usize = 1;
         const PARTITION_TRIANGLE_WORK: usize = 16;
 
         let mut triangles = Self::surface_triangles(instances, max_work)?;
@@ -1172,15 +1184,12 @@ impl PreparedGeometry {
                     }
                     let mut next = Vec::new();
                     for polygon in pieces {
-                        work = work
-                            .checked_add(
-                                polygon
-                                    .len()
-                                    .checked_mul(CLIP_VERTEX_WORK)
-                                    .ok_or(GeometryError::WorkBudgetExceeded)?,
-                            )
+                        let polygon_work = polygon
+                            .len()
+                            .checked_mul(CLIP_VERTEX_WORK)
+                            .and_then(|n| n.checked_add(POLYGON_VISIT_WORK))
                             .ok_or(GeometryError::WorkBudgetExceeded)?;
-                        check_surface_work(Some(work), max_work)?;
+                        charge_surface_work(&mut work, polygon_work, max_work)?;
                         let mut distances = Vec::new();
                         for point in &polygon {
                             let distance = visibility::distance(coefficients, *point);
@@ -1229,6 +1238,7 @@ impl PreparedGeometry {
             }
             let mut partition_fraction = 0.0;
             for polygon in pieces {
+                charge_surface_work(&mut work, POLYGON_VISIT_WORK, max_work)?;
                 for k in 1..polygon.len().saturating_sub(1) {
                     // Partition reconstruction and output remain work even
                     // when there are no shadows to test against the centroid.
