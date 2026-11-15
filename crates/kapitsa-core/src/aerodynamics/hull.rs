@@ -369,7 +369,7 @@ pub struct HullSection {
     skin_friction: Option<SkinFriction>,
     mach_curve: Option<MachCurve>,
     normal_curve: Option<NormalForceCurve>,
-    wave_drag_factor: Option<f64>,
+    wave_drag_factor: Option<super::wave::PreparedWaveDrag>,
     wave_mach_curve: Option<super::wave::WaveMachCurve>,
 }
 impl HullSection {
@@ -428,9 +428,8 @@ impl HullSection {
     /// limited to Mach > 1 and flow aligned with the section axis unless an
     /// explicit Mach multiplier curve supplies a different range.
     pub fn with_wave_drag(mut self, area_slopes: &[f64]) -> Result<Self, HullError> {
-        let factor =
-            super::wave::wave_drag(area_slopes, 0.25, 2.0, 1.0).map_err(HullError::Wave)?;
-        self.wave_drag_factor = (factor != 0.0).then_some(factor);
+        let factor = super::wave::prepare_wave_drag(area_slopes).map_err(HullError::Wave)?;
+        self.wave_drag_factor = (!factor.is_zero()).then_some(factor);
         Ok(self)
     }
 
@@ -607,11 +606,10 @@ impl HullSection {
                 }
                 {
                     let component = |v: f64| {
-                        scaled_product(
-                            &[density, axial_speed.abs(), factor, multiplier, v.abs()],
-                            1.0,
-                        )
-                        .map(|magnitude| -magnitude.copysign(v))
+                        factor
+                            .magnitude(density, axial_speed.abs(), multiplier, v.abs())
+                            .map(|magnitude| -magnitude.copysign(v))
+                            .map_err(|_| HullError::ArithmeticOverflow)
                     };
                     Vec3::new(
                         component(axial.x)?,
@@ -850,6 +848,54 @@ mod tests {
         let result = section.evaluate(flow(Vec3::new(50.0, 1.0, 0.0)))?;
         assert_eq!(result.force, Vec3::ZERO);
         assert_eq!(result.moment, Vec3::ZERO);
+        Ok(())
+    }
+
+    #[test]
+    fn wave_drag_keeps_representable_force_for_tiny_geometry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let slopes = [0.0, 1e-170, -1e-170, 0.0];
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?
+        .with_wave_drag(&slopes)?;
+        let expected = super::super::wave::wave_drag(&slopes, 1.2, 1e150, 340.0)?;
+        let result = section.evaluate(flow(Vec3::X * 1e150))?;
+        assert!(expected > 0.0);
+        assert!((result.force.x / -expected - 1.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn wave_drag_keeps_representable_force_for_large_geometry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let slopes = [0.0, 1e170, -1e170, 0.0];
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?
+        .with_wave_drag(&slopes)?;
+        let mut state = flow(Vec3::X * 1e-150);
+        state.sound_speed = 5e-151;
+        let expected = super::super::wave::wave_drag(&slopes, 1.2, 1e-150, 5e-151)?;
+        let result = section.evaluate(state)?;
+        assert!(expected > 0.0);
+        assert!((result.force.x / -expected - 1.0).abs() < 1e-12);
         Ok(())
     }
 

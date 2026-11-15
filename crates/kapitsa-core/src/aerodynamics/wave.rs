@@ -172,7 +172,7 @@ pub fn area_slopes_from_sections(
 
 /// Calculates wave drag in newtons from equally spaced samples of `dA/dx`.
 ///
-/// `density` is in kg/m³, `speed` in m/s, and `sound_speed` in m/s. The
+/// `density` is in kg/m?, `speed` in m/s, and `sound_speed` in m/s. The
 /// distribution must have at least three finite samples with zero endpoints.
 /// The body's length cancels when the source strength `dA/dx` is supplied.
 /// This formula assumes an axisymmetric slender body aligned with the flow,
@@ -186,29 +186,77 @@ pub fn wave_drag(
     speed: f64,
     sound_speed: f64,
 ) -> Result<f64, WaveDragError> {
-    if area_slopes.len() < 3
-        || !density.is_finite()
+    if !density.is_finite()
         || density < 0.0
         || !speed.is_finite()
         || speed < 0.0
         || !sound_speed.is_finite()
         || sound_speed <= 0.0
-        || area_slopes.iter().any(|value| !value.is_finite())
-        || area_slopes.first() != Some(&0.0)
-        || area_slopes.last() != Some(&0.0)
     {
         return Err(WaveDragError::InvalidInput);
     }
-    let intervals = area_slopes.len() - 1;
-    if intervals > 2048 {
-        return Err(WaveDragError::WorkLimitExceeded);
-    }
+    validate_slopes(area_slopes)?;
     if density == 0.0 || speed == 0.0 {
         return Ok(0.0);
     }
     if speed <= sound_speed {
         return Err(WaveDragError::UnsupportedMach);
     }
+    prepare_wave_drag(area_slopes)?.magnitude(density, speed, 1.0, speed)
+}
+
+fn validate_slopes(area_slopes: &[f64]) -> Result<(), WaveDragError> {
+    if area_slopes.len() < 3
+        || area_slopes.iter().any(|value| !value.is_finite())
+        || area_slopes.first() != Some(&0.0)
+        || area_slopes.last() != Some(&0.0)
+    {
+        return Err(WaveDragError::InvalidInput);
+    }
+    if area_slopes.len() - 1 > 2048 {
+        return Err(WaveDragError::WorkLimitExceeded);
+    }
+    Ok(())
+}
+
+/// Keeps area and the dimensionless integral separate to avoid prematurely
+/// underflowing or overflowing a squared geometry coefficient.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PreparedWaveDrag {
+    scale: f64,
+    integral: f64,
+}
+
+impl PreparedWaveDrag {
+    pub(super) fn is_zero(self) -> bool {
+        self.scale == 0.0 || self.integral == 0.0
+    }
+
+    pub(super) fn magnitude(
+        self,
+        density: f64,
+        speed: f64,
+        multiplier: f64,
+        component: f64,
+    ) -> Result<f64, WaveDragError> {
+        super::hull::scaled_product(
+            &[
+                density,
+                speed,
+                multiplier,
+                component,
+                self.scale,
+                self.scale,
+                self.integral,
+            ],
+            4.0 * PI,
+        )
+        .map_err(|_| WaveDragError::ArithmeticOverflow)
+    }
+}
+
+pub(super) fn prepare_wave_drag(area_slopes: &[f64]) -> Result<PreparedWaveDrag, WaveDragError> {
+    validate_slopes(area_slopes)?;
     // g''(x) = ln|x|. Coordinates are in interval widths; the constant
     // ln(h) cancels because the source strength vanishes at both ends.
     fn g(x: f64) -> f64 {
@@ -222,7 +270,10 @@ pub fn wave_drag(
         .iter()
         .fold(0.0_f64, |max, value| max.max(value.abs()));
     if scale == 0.0 {
-        return Ok(0.0);
+        return Ok(PreparedWaveDrag {
+            scale: 0.0,
+            integral: 0.0,
+        });
     }
     let mut integral = 0.0;
     let mut compensation = 0.0;
@@ -253,8 +304,10 @@ pub fn wave_drag(
     if integral > 0.0 {
         return Err(WaveDragError::PrecisionLoss);
     }
-    super::hull::scaled_product(&[density, speed, speed, scale, scale, -integral], 4.0 * PI)
-        .map_err(|_| WaveDragError::ArithmeticOverflow)
+    Ok(PreparedWaveDrag {
+        scale,
+        integral: -integral,
+    })
 }
 
 #[cfg(test)]
