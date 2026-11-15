@@ -1317,6 +1317,7 @@ fn part_collider_ownership_rejects_legacy_structural_edits() {
     let id = world
         .add_part_collider(part, collider)
         .expect("part collider");
+    assert_eq!(world.collider_part(id), Some(part));
     assert_eq!(
         world.cluster_part(part).map(ClusterPart::colliders),
         Some(&[id][..])
@@ -1344,6 +1345,7 @@ fn part_collider_ownership_rejects_legacy_structural_edits() {
     assert_eq!(world.validate_clusters(), Ok(()));
 
     assert!(world.remove_part_collider(id).is_ok());
+    assert_eq!(world.collider_part(id), None);
     assert_eq!(
         world.cluster_part(part).map(ClusterPart::colliders),
         Some(&[][..])

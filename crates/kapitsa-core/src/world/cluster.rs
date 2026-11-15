@@ -18,6 +18,17 @@ use crate::{
 };
 
 impl PhysicsWorld {
+    /// Returns the part owning a collider, or `None` for an unclustered body
+    /// or an invalid collider. Lookup scans the owning cluster's part and
+    /// collider lists; it does not cache ownership across topology changes.
+    pub fn collider_part(&self, collider: ColliderId) -> Option<PartId> {
+        let body = self.collider_body(collider)?;
+        self.cluster(body)?.parts().iter().copied().find(|part| {
+            self.cluster_part(*part)
+                .is_some_and(|entry| entry.colliders().contains(&collider))
+        })
+    }
+
     /// Adds a collider owned by a cluster part.
     pub fn add_part_collider(
         &mut self,
@@ -85,16 +96,9 @@ impl PhysicsWorld {
         id: ColliderId,
     ) -> Result<crate::collider::Collider, ClusterError> {
         let body = self.collider_body(id).ok_or(ClusterError::InvalidPartId)?;
+        self.cluster(body).ok_or(ClusterError::NotClustered)?;
         let part = self
-            .cluster(body)
-            .ok_or(ClusterError::NotClustered)?
-            .parts()
-            .iter()
-            .copied()
-            .find(|part| {
-                self.cluster_part(*part)
-                    .is_some_and(|entry| entry.colliders().contains(&id))
-            })
+            .collider_part(id)
             .ok_or(ClusterError::InvalidTopology)?;
         let collider = self
             .remove_collider_internal(id)
