@@ -684,6 +684,16 @@ construction, but their Re is roughly four times 10,000 and each fitted drag
 value spans changing conditions; they are not matched point validation for
 the Re = 10,000 curve or a measurement exactly at Mach 1.
 
+Nagata et al.'s later [free-flight experiment](https://doi.org/10.1007/s00193-019-00924-0)
+is another potentially relevant source: the publisher's abstract reports
+overall free-flight Mach 0.9–1.6 and Re 3,900–380,000 for spheres, with
+schlieren visualization of shocks and wakes. Those marginal ranges do not
+establish a particular joint Mach–Re condition. The accessible abstract gives
+neither individual drag coefficients nor their uncertainties, and the main
+article is subscription-only; consequently it has not been established that
+the paper provides suitable drag observations at all. Its flow visualization
+alone is not a quantitative drag validation of the Re = 10,000 curve.
+
 The newer GBK experiment by [Allofs et al.](https://doi.org/10.1007/s00348-022-03402-z)
 is independent of the historical fits, but is not a direct sphere `Cd`
 dataset. It measures particle size and velocity in a dust-laden nozzle flow;
