@@ -834,6 +834,27 @@ fn multiple_shadow_budget_exhaustion_never_returns_partial_patches() {
 }
 
 #[test]
+fn multiple_shadow_clipping_is_independent_of_instance_order() {
+    const MAX_WORK: usize = 100_000;
+    const EPSILON: f64 = 0.01;
+    let plate = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]]).unwrap();
+    let instances = [
+        instance(&plate, Vec3::ZERO),
+        instance(&plate, Vec3::X + Vec3::Y * 0.25),
+        instance(&plate, Vec3::X * 2.0 + Vec3::Z * 0.25),
+    ];
+    let geometry = surface_geometry(&instances);
+    let expected = geometry
+        .exposed_surface_patches(&instances, Vec3::X, EPSILON, MAX_WORK)
+        .unwrap();
+    let reversed = [instances[2], instances[1], instances[0]];
+    let result = geometry
+        .exposed_surface_patches(&reversed, Vec3::X, EPSILON, MAX_WORK)
+        .unwrap();
+    assert_eq!(result.as_slice(), expected.as_slice());
+}
+
+#[test]
 fn translated_rotated_source_instances_preserve_diagonal_visibility() {
     let mesh = cube();
     let base = [instance(&mesh, Vec3::ZERO)];
