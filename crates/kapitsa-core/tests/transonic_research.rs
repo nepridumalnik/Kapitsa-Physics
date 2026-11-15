@@ -352,6 +352,34 @@ fn harris_low_mach_profile_stopping_tolerance() -> Result<(), String> {
                     "stopping intervals={intervals} tolerance={tolerance:.0e} x={x:.3} cp={cp:?} change={change:?} stencil_crosses_cutoff={}",
                     left - dx < CUTOFF && left + 2.0 * dx >= CUTOFF
                 );
+                // Three nodes i-1,i,i+1 bracket x without extrapolation.
+                // Values use the local geometry at each node, exactly as the
+                // linear reconstruction above; reject nodes past the cutoff.
+                if tolerance == 1e-10 {
+                    let node = |j: usize| {
+                        let node_x = j as f64 * dx - EXTENSION;
+                        if node_x <= 0.0 || node_x >= CUTOFF {
+                            return None;
+                        }
+                        let (radius, slope, _) = harris_geometry(node_x);
+                        grid.surface_cp(j, radius, slope)
+                    };
+                    let quadratic = if i > 0 {
+                        match (node(i - 1), node(i), node(i + 1)) {
+                            (Some(a), Some(b), Some(c)) => {
+                                Some(quadratic_axial_interpolation(a, b, c, t))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let difference = quadratic.zip(cp).map(|(q, l)| q - l);
+                    println!(
+                        "reconstruction intervals={intervals} x={x:.3} linear={cp:?} quadratic={quadratic:?} difference={difference:?} quadratic_stencil_crosses_cutoff={}",
+                        left - 2.0 * dx < CUTOFF && left + 2.0 * dx >= CUTOFF
+                    );
+                }
                 previous[station] = cp;
             }
         }
