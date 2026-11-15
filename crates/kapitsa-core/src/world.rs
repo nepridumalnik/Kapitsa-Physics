@@ -2440,6 +2440,7 @@ impl PhysicsWorld {
 
         for (dense_id, entry) in self.bodies.iter_mut() {
             if (entry.body.aerodynamic_surfaces.is_empty()
+                && entry.body.base_pressure_patches.is_empty()
                 && !assembly_aerodynamics::wings_configured(entry, &self.parts)
                 && !assembly_aerodynamics::hull_configured(entry, &self.parts)
                 && matches!(
@@ -3937,6 +3938,7 @@ impl PhysicsWorld {
                             && !matches!(atmosphere, Atmosphere::Vacuum)
                             && let Some(entry) = self.bodies.get(step.body_id.dense)
                             && (!entry.body.aerodynamic_surfaces.is_empty()
+                                || !entry.body.base_pressure_patches.is_empty()
                                 || assembly_aerodynamics::wings_configured(entry, &self.parts)
                                 || assembly_aerodynamics::hull_configured(entry, &self.parts)
                                 || !matches!(

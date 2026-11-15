@@ -671,6 +671,47 @@ fn geometry_modes_preserve_mesh_in_vacuum_and_reject_air_atomically() {
 }
 
 #[test]
+fn base_pressure_without_primary_model_is_rejected_in_both_step_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{
+        AerodynamicsError,
+        pressure::{BasePressure, PressurePatch},
+    };
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            0.001,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 2000.0)?;
+        body.set_base_pressure_patches(vec![(
+            PressurePatch::new(Vec3::Y, -Vec3::X, 1.0)?,
+            BasePressure::new(-0.4, 5.0, 10.0)?,
+        )]);
+        let id = world.add_body(body)?;
+        let before = world.body(id).unwrap().motion();
+        let result = if sharded {
+            world.step_with_shards(
+                1e-5,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(1e-5)
+        };
+        assert!(
+            matches!(result, Err(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::UnsupportedModel }) if body_id == id),
+            "sharded={sharded}: {result:?}"
+        );
+        assert_eq!(world.body(id).unwrap().motion(), before);
+    }
+    Ok(())
+}
+
+#[test]
 fn unchecked_base_pressure_is_rejected_in_both_step_paths() -> Result<(), Box<dyn std::error::Error>>
 {
     use crate::{
