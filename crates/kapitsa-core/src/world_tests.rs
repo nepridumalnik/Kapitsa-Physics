@@ -156,63 +156,81 @@ fn ccd_clipping_flag_survives_local_replay() -> Result<(), Box<dyn std::error::E
 #[test]
 fn clipped_ccd_contact_snapshot_reports_unrecorded_velocity_change()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut world = PhysicsWorld::new();
-    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
-    for x in [0.0, 10.0] {
-        let wall = world.add_body(RigidBody::new_static(Transform::new(
-            Vec3::new(x, 0.0, 0.0),
-            Quat::IDENTITY,
-        )?))?;
-        let collider = world.add_collider(
-            wall,
-            Collider::new(
-                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
-                Transform::identity(),
-            ),
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+        for x in [0.0, 10.0] {
+            let wall = world.add_body(RigidBody::new_static(Transform::new(
+                Vec3::new(x, 0.0, 0.0),
+                Quat::IDENTITY,
+            )?))?;
+            let collider = world.add_collider(
+                wall,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+                    Transform::identity(),
+                ),
+            )?;
+            world.set_collider_material(collider, Some(material))?;
+        }
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY)?,
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
         )?;
-        world.set_collider_material(collider, Some(material))?;
+        body.set_linear_velocity(Vec3::X * -2000.0)?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body)?;
+        let part = world.enable_cluster(body)?;
+        let sphere = world.add_part_collider(part, collider(0.5))?;
+        world.set_collider_material(sphere, Some(material))?;
+        world.set_collision_config(crate::collision::CollisionConfig {
+            max_ccd_impacts: 1,
+            ccd_limit_policy: crate::collision::CcdLimitPolicy::ClipIsland,
+            ..world.collision_config()
+        })?;
+        let mut shards = vec![Vec::new(), Vec::new()];
+        if sharded {
+            world.step_with_shards(0.01, &mut shards, &crate::execution::SequentialExecutor, 1)?;
+        } else {
+            world.step(0.01)?;
+        }
+        assert!(world.contact_impulses_ccd_clipped());
+        let diagnostics = world.step_diagnostics();
+        assert!(diagnostics.used_fallback());
+        assert_eq!(diagnostics.collision_ccd_limit_clipped_bodies, 1);
+        assert_eq!(world.contact_impulses_omitted_points(), 0);
+        let total = world
+            .contact_impulses()
+            .iter()
+            .fold(Vec3::ZERO, |sum, entry| {
+                if entry.pair.a == sphere {
+                    sum - entry.impulse_on_b
+                } else if entry.pair.b == sphere {
+                    sum + entry.impulse_on_b
+                } else {
+                    sum
+                }
+            });
+        let velocity = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity();
+        assert_eq!(velocity, Vec3::ZERO);
+        assert!((total - (velocity + Vec3::X * 2000.0)).length() > 1.0);
+        assert!(world.step(-1.0).is_err());
+        assert!(world.contact_impulses_ccd_clipped());
+        assert_eq!(world.step_diagnostics(), diagnostics);
+        assert!(
+            world
+                .step_with_shards(0.01, &mut [], &crate::execution::SequentialExecutor, 1)
+                .is_err()
+        );
+        assert_eq!(world.step_diagnostics(), diagnostics);
+        world.step(0.001)?;
+        assert!(!world.contact_impulses_ccd_clipped());
+        assert!(!world.step_diagnostics().used_fallback());
     }
-    let mut body = RigidBody::new_dynamic(
-        Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY)?,
-        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
-    )?;
-    body.set_linear_velocity(Vec3::X * -2000.0)?;
-    body.set_ccd_mode(CcdMode::Continuous);
-    let body = world.add_body(body)?;
-    let part = world.enable_cluster(body)?;
-    let sphere = world.add_part_collider(part, collider(0.5))?;
-    world.set_collider_material(sphere, Some(material))?;
-    world.set_collision_config(crate::collision::CollisionConfig {
-        max_ccd_impacts: 1,
-        ccd_limit_policy: crate::collision::CcdLimitPolicy::ClipIsland,
-        ..world.collision_config()
-    })?;
-    world.step(0.01)?;
-    assert!(world.contact_impulses_ccd_clipped());
-    assert_eq!(world.contact_impulses_omitted_points(), 0);
-    let total = world
-        .contact_impulses()
-        .iter()
-        .fold(Vec3::ZERO, |sum, entry| {
-            if entry.pair.a == sphere {
-                sum - entry.impulse_on_b
-            } else if entry.pair.b == sphere {
-                sum + entry.impulse_on_b
-            } else {
-                sum
-            }
-        });
-    let velocity = world
-        .body(body)
-        .ok_or(WorldError::InvalidBodyId)?
-        .state()
-        .linear_velocity();
-    assert_eq!(velocity, Vec3::ZERO);
-    assert!((total - (velocity + Vec3::X * 2000.0)).length() > 1.0);
-    assert!(world.step(-1.0).is_err());
-    assert!(world.contact_impulses_ccd_clipped());
-    world.step(0.001)?;
-    assert!(!world.contact_impulses_ccd_clipped());
     Ok(())
 }
 
