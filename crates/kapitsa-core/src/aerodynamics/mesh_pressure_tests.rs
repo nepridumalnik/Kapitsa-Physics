@@ -228,6 +228,47 @@ fn closed_pressure_preparation_accepts_exact_collider_sphere_seams() {
 }
 
 #[test]
+fn spherical_mesh_preparation_checks_collider_radius_winding_and_budget() {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    let collider = Collider::new(
+        Shape::Sphere(Sphere::new(1.0).unwrap()),
+        Transform::identity(),
+    );
+    let mesh = collider_mesh([&collider], ColliderTessellation::new(16, 9, 1000).unwrap()).unwrap();
+    let budget = mesh.triangles().len() * mesh.vertices().len();
+    assert_eq!(
+        spherical_mesh_pressure_patches(&mesh, Vec3::ZERO, 1.0, 1e-12, budget)
+            .unwrap()
+            .len(),
+        mesh.triangles().len()
+    );
+    assert_eq!(
+        spherical_mesh_pressure_patches(&mesh, Vec3::ZERO, 1.0, 1e-12, budget - 1),
+        Err(PressureError::InvalidPatch)
+    );
+    assert_eq!(
+        spherical_mesh_pressure_patches(&mesh, Vec3::ZERO, 2.0, 1e-12, budget),
+        Err(PressureError::InvalidPatch)
+    );
+    let inverted = TriangleMesh::new(
+        mesh.vertices().to_vec(),
+        mesh.triangles()
+            .iter()
+            .map(|f| [f[0], f[2], f[1]])
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(
+        spherical_mesh_pressure_patches(&inverted, Vec3::ZERO, 1.0, 1e-12, budget),
+        Err(PressureError::InvalidPatch)
+    );
+}
+
+#[test]
 fn collider_sphere_and_cylinder_converge_to_newtonian_integrals() {
     use crate::{
         aerodynamics::colliders::{ColliderTessellation, collider_mesh},

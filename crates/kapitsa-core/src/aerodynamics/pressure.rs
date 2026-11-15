@@ -175,6 +175,77 @@ pub fn closed_mesh_pressure_patches(
     Ok(patches)
 }
 
+/// Checks necessary geometric conditions for an outward-wound convex polyhedral
+/// approximation of a sphere, returning its complete centroid patches. `center`
+/// and `radius` are body-local; `relative_tolerance` bounds radial error relative
+/// to the radius and must be finite and in [0, 1). `max_work` bounds the number
+/// of face/vertex convexity checks. Exact seam matching is still required.
+/// This does not establish adequate tessellation accuracy, isolation, flow
+/// conditions, experimental validity, or absence of interaction with other bodies.
+pub fn spherical_mesh_pressure_patches(
+    mesh: &crate::shape::TriangleMesh,
+    center: Vec3,
+    radius: f64,
+    relative_tolerance: f64,
+    max_work: usize,
+) -> Result<Vec<PressurePatch>, PressureError> {
+    if !center.is_finite()
+        || !radius.is_finite()
+        || radius <= 0.0
+        || !relative_tolerance.is_finite()
+        || !(0.0..1.0).contains(&relative_tolerance)
+    {
+        return Err(PressureError::InvalidPatch);
+    }
+    if mesh
+        .triangles()
+        .len()
+        .checked_mul(mesh.vertices().len())
+        .is_none_or(|n| n > max_work)
+    {
+        return Err(PressureError::InvalidPatch);
+    }
+    let tolerance = radius * relative_tolerance;
+    for vertex in mesh.vertices() {
+        let distance = vertex
+            .checked_sub(center)
+            .and_then(|v| v.checked_length())
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        if (distance - radius).abs() > tolerance {
+            return Err(PressureError::InvalidPatch);
+        }
+    }
+    let patches = closed_mesh_pressure_patches(mesh)?;
+    for patch in &patches {
+        let offset = patch
+            .center
+            .checked_sub(center)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        if patch
+            .normal
+            .checked_dot(offset)
+            .ok_or(PressureError::ArithmeticOverflow)?
+            <= 0.0
+        {
+            return Err(PressureError::InvalidPatch);
+        }
+        for vertex in mesh.vertices() {
+            let delta = vertex
+                .checked_sub(patch.center)
+                .ok_or(PressureError::ArithmeticOverflow)?;
+            if patch
+                .normal
+                .checked_dot(delta)
+                .ok_or(PressureError::ArithmeticOverflow)?
+                > tolerance
+            {
+                return Err(PressureError::InvalidPatch);
+            }
+        }
+    }
+    Ok(patches)
+}
+
 /// Net world-space force and moment about the current center of mass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PressureWrench {
