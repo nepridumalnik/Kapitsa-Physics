@@ -2395,8 +2395,14 @@ mod tests {
     }
     #[test]
     fn mesh_pressure_can_break_certified_tree_weld() -> Result<(), Box<dyn std::error::Error>> {
-        for sharded in [false, true] {
+        for (sharded, policy) in [
+            (false, super::super::ErrorPolicy::Realtime),
+            (true, super::super::ErrorPolicy::Realtime),
+            (false, super::super::ErrorPolicy::Strict),
+            (true, super::super::ErrorPolicy::Strict),
+        ] {
             let mut world = PhysicsWorld::new();
+            world.set_error_policy(policy);
             world.set_atmosphere(super::super::test_atmosphere(
                 crate::aerodynamics::AtmosphericState::new(0.001, Vec3::ZERO)?,
             ));
@@ -2451,6 +2457,31 @@ mod tests {
                 reactions
             );
             world.remove_gravity(bad_gravity).ok_or("gravity")?;
+            world.set_mesh_sound_speed(1000.0)?;
+            let before = *world.body(body).ok_or("body")?.state();
+            let unsupported = if sharded {
+                world.step_with_shards(1e-8, &mut [Vec::new(), Vec::new()], &SequentialExecutor, 1)
+            } else {
+                world.step(1e-8)
+            };
+            assert!(matches!(
+                unsupported,
+                Err(StepError::Aerodynamics {
+                    cause: AerodynamicsError::Pressure(
+                        crate::aerodynamics::pressure::PressureError::UnsupportedMach
+                    ),
+                    ..
+                })
+            ));
+            assert_eq!(*world.body(body).ok_or("body")?.state(), before);
+            assert_eq!(world.owner_mesh_pressure(body), Some(previous.as_slice()));
+            assert_eq!(
+                world
+                    .part_aerodynamic_weld_reactions(body, 1e-8, 1e-8)
+                    .map_err(|e| format!("{e:?}"))?,
+                reactions
+            );
+            world.set_mesh_sound_speed(340.0)?;
             world
                 .set_automatic_weld_failure(Some((1e-8, 1e-8)))
                 .map_err(|e| format!("{e:?}"))?;
