@@ -166,3 +166,19 @@ This inventory describes the baseline, not implemented cluster behavior.
 | `add_joint` (`crates/kapitsa-core/src/world.rs`) | Requires distinct live bodies and stores body endpoints. Part targets and suspension require changes to preparation and lifecycle while preserving the legacy entry point. |
 | Async commands and batch (`crates/kapitsa/src/runtime/asynchronous/marshalling/command.rs`, `client.rs`) | Commands delegate to core; body mutations and batch copyback use mutable body access. Both paths need migration. Existing `StepFailedAfterApply` means an applied change can outlive a failed step without a published snapshot; it is not a rollback guarantee. |
 | Rocket fixtures and consumers (`crates/kapitsa/src/runtime/modular_rocket_fixture.rs`, `examples/rocket-flight-viewer/src/flight.rs`) | Existing assemblies use separate bodies and joints; their fixed-joint baseline and existing behaviors must remain available. |
+# Automatic weld failure (restricted)
+
+`PhysicsWorld::set_automatic_weld_failure` opts full steps into instantaneous
+tree-weld strength checks; it is disabled by default. Specify absolute force
+and moment equilibrium tolerances in N and N·m. The force and torque limits
+compare magnitudes at the child-side weld anchor; equality does not break a
+weld. A step with a breakable cluster fails before commit when its loads cannot
+be certified. Currently certification requires a dynamic cluster with no
+accumulated body forces, no aerodynamic loads, and only part-targeted persistent
+force sources, in a world without colliders, joints, gravity or chunks. Thus
+contact and CCD forces are not supported, not assumed absent from a diagnostic
+log. Low-level shard commits do not perform automatic weld failure.
+
+The reaction is evaluated at the start of the timestep, while the split uses
+the predicted end-of-step rigid velocity field. This is a discrete failure
+policy, not an impact, fracture propagation, or within-step failure-time model.

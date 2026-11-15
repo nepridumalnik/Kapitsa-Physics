@@ -659,6 +659,7 @@ fn swept_bounds_for_trajectory(
 pub struct PhysicsWorld {
     world_id: u64,
     body_revision: u64,
+    automatic_weld_failure: Option<(f64, f64)>,
     bodies: DensePool<BodyEntry>,
     parts: DensePool<ClusterPart>,
     part_aerodynamic_geometry: Option<HashMap<PartId, assembly_aerodynamics::PartGeometry>>,
@@ -756,6 +757,21 @@ impl BodyStep {
 }
 
 impl PhysicsWorld {
+    /// Enable automatic weld failure for certified full steps using absolute
+    /// equilibrium tolerances in N and N·m. `None` disables it (the default).
+    /// Unsupported load configurations make the full step fail before commit.
+    pub fn set_automatic_weld_failure(
+        &mut self,
+        tolerances: Option<(f64, f64)>,
+    ) -> Result<(), WeldBalanceError> {
+        if tolerances.is_some_and(|(force, moment)| {
+            !force.is_finite() || force < 0.0 || !moment.is_finite() || moment < 0.0
+        }) {
+            return Err(WeldBalanceError::InvalidTolerance);
+        }
+        self.automatic_weld_failure = tolerances;
+        Ok(())
+    }
     /// Plans weld failures for the last certified part-source snapshot without
     /// changing the world. Both thresholds compare vector magnitudes; equality
     /// does not exceed a threshold. This historical plan is not authorization
@@ -836,6 +852,30 @@ impl PhysicsWorld {
             &self.part_force_source_pending,
         )?;
         Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_pending)
+    }
+
+    fn stage_automatic_weld_splits(
+        &mut self,
+    ) -> Result<Option<cluster::InsertedWeldSplits>, StepError> {
+        let Some((force, moment)) = self.automatic_weld_failure else {
+            return Ok(None);
+        };
+        let plans =
+            self.prepare_pending_weld_splits(force, moment)
+                .map_err(|error| match error {
+                    cluster::WeldSplitPreparationError::Balance(cause) => {
+                        StepError::WeldBalance(cause)
+                    }
+                    cluster::WeldSplitPreparationError::Cluster(cause) => {
+                        StepError::WeldSplit(cause)
+                    }
+                })?;
+        if plans.is_empty() {
+            return Ok(None);
+        }
+        self.insert_weld_split_bodies(plans)
+            .map(Some)
+            .map_err(StepError::WeldSplit)
     }
     /// Calculates instantaneous parent-on-child weld reactions from the last
     /// successful full-step snapshot. Currently only force-free
@@ -1102,6 +1142,7 @@ impl PhysicsWorld {
         Self {
             world_id: 0,
             body_revision: 0,
+            automatic_weld_failure: None,
             bodies: DensePool::new(),
             parts: DensePool::new(),
             part_aerodynamic_geometry: None,
@@ -2335,7 +2376,7 @@ impl PhysicsWorld {
                     }
                 })
                 .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
-            world.commit_step_shards_with_executor(shards, executor, worker_count)
+            world.commit_step_shards_inner(shards, executor, worker_count, true)
         })
     }
 
@@ -2398,10 +2439,20 @@ impl PhysicsWorld {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
+        let splits = match self.stage_automatic_weld_splits() {
+            Ok(splits) => splits,
+            Err(error) => {
+                self.collision_system.abort_step();
+                return Err(error);
+            }
+        };
 
         #[cfg(feature = "bench-internals")]
         let commit_started = Instant::now();
         self.commit_predicted_states();
+        if let Some(splits) = splits {
+            self.finish_weld_splits(splits);
+        }
         self.commit_joint_breaks();
         self.collision_system.commit_step();
         #[cfg(feature = "bench-internals")]
@@ -5235,6 +5286,16 @@ impl PhysicsWorld {
         executor: &E,
         worker_count: usize,
     ) -> Result<(), StepError> {
+        self.commit_step_shards_inner(shards, executor, worker_count, false)
+    }
+
+    fn commit_step_shards_inner<E: StepExecutor>(
+        &mut self,
+        shards: &[Vec<BodyStep>],
+        executor: &E,
+        worker_count: usize,
+        full_step: bool,
+    ) -> Result<(), StepError> {
         let mut steps = shards.iter().flatten();
         let mut step_dt = None;
         for (dense_id, entry) in self.bodies.iter() {
@@ -5306,10 +5367,26 @@ impl PhysicsWorld {
             self.rollback_aerodynamics_updates();
             return Err(StepError::Collision(error));
         }
+        let splits = if full_step {
+            match self.stage_automatic_weld_splits() {
+                Ok(splits) => splits,
+                Err(error) => {
+                    self.collision_system.abort_step();
+                    self.rollback_gravity_updates();
+                    self.rollback_aerodynamics_updates();
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
 
         #[cfg(feature = "bench-internals")]
         let commit_started = Instant::now();
         self.commit_predicted_states();
+        if let Some(splits) = splits {
+            self.finish_weld_splits(splits);
+        }
         self.commit_joint_breaks();
         self.collision_system.commit_step();
         self.clear_gravity_updates();

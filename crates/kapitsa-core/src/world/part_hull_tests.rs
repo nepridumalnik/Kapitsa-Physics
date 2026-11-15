@@ -289,6 +289,88 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
 }
 
 #[test]
+fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
+    use crate::joint::JointFrame;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let root = world.enable_cluster(body)?;
+        let child = world.add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::IDENTITY,
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Breakable {
+                    max_force: Some(4.0),
+                    max_torque: None,
+                },
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )?;
+        let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+        world.add_force_source_for_part(child, Vec3::ZERO, Vec3::X * 10.0)?;
+        world
+            .set_automatic_weld_failure(Some((1e-10, 1e-10)))
+            .map_err(|e| format!("{e:?}"))?;
+        world.set_part_aerodynamic_hull(root, vec![section(Vec3::ZERO)])?;
+        let before = *world.body(body).ok_or("body")?.state();
+        let rejected = if sharded {
+            world.step_with_shards(
+                0.01,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )
+        } else {
+            world.step(0.01)
+        };
+        assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+        assert_eq!(*world.body(body).ok_or("body")?.state(), before);
+        assert!(world.weld(weld).is_some());
+        world.set_part_aerodynamic_hull(root, Vec::new())?;
+        if sharded {
+            world.step_with_shards(
+                0.01,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )?;
+        } else {
+            world.step(0.01)?;
+        }
+        assert!(world.weld(weld).is_none());
+        let child_body = world.part_body(child).ok_or("child")?;
+        assert_ne!(child_body, body);
+        assert!(
+            (world
+                .body(child_body)
+                .ok_or("child body")?
+                .state()
+                .linear_velocity()
+                .x
+                - 0.05)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(world.validate_clusters(), Ok(()));
+    }
+    Ok(())
+}
+
+#[test]
 fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::cluster::balance::{BalanceError, prepare_force_free_inputs, prepare_tree};

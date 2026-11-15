@@ -99,7 +99,7 @@ pub(crate) fn prepare_recorded_loads(
     Ok(inputs)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BalanceError {
     IncompleteLoads,
     InvalidTree,

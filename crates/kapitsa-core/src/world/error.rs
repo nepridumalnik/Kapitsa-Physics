@@ -105,6 +105,10 @@ impl From<BodyError> for ForceSourceError {
 pub enum StepError {
     InvalidDeltaTime,
     InvalidStepResults,
+    /// Automatic weld failure could not certify or balance this step.
+    WeldBalance(super::WeldBalanceError),
+    /// Preparing or committing a weld split failed.
+    WeldSplit(ClusterError),
     Collision(CollisionError),
     BodyIntegration {
         body_id: BodyId,
@@ -131,6 +135,8 @@ impl fmt::Display for StepError {
             Self::InvalidStepResults => {
                 formatter.write_str("predicted body states do not match the world")
             }
+            Self::WeldBalance(error) => write!(formatter, "weld balance failed: {error:?}"),
+            Self::WeldSplit(error) => write!(formatter, "weld split failed: {error}"),
             Self::Collision(error) => write!(formatter, "collision step failed: {error}"),
             Self::BodyIntegration { body_id, cause } => {
                 write!(formatter, "integration failed for {body_id:?}: {cause}")
@@ -152,7 +158,8 @@ impl std::error::Error for StepError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Collision(error) => Some(error),
-            Self::InvalidDeltaTime | Self::InvalidStepResults => None,
+            Self::InvalidDeltaTime | Self::InvalidStepResults | Self::WeldBalance(_) => None,
+            Self::WeldSplit(error) => Some(error),
             Self::BodyIntegration { cause, .. } => Some(cause),
             Self::ForceSource { cause, .. } => Some(cause),
             Self::Gravity { cause, .. } => Some(cause),

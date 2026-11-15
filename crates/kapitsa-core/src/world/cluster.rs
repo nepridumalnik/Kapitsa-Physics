@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// Prepared against an unchanged world; commit must immediately follow it.
-struct PreparedWeldSplit {
+pub(super) struct PreparedWeldSplit {
     body: BodyId,
     removed_welds: Vec<WeldId>,
     entries: Vec<BodyEntry>,
@@ -33,14 +33,13 @@ struct PreparedWeldSplit {
 
 /// Inserted entries and plans; must be finalized without intervening fallible
 /// operations. This type is internal and cannot outlive the transaction.
-struct InsertedWeldSplits {
+pub(super) struct InsertedWeldSplits {
     plans: Vec<PreparedWeldSplit>,
     results: Vec<Vec<BodyId>>,
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
-enum WeldSplitPreparationError {
+pub(super) enum WeldSplitPreparationError {
     Balance(super::WeldBalanceError),
     Cluster(ClusterError),
 }
@@ -48,8 +47,7 @@ enum WeldSplitPreparationError {
 impl PhysicsWorld {
     /// Prepare all breakable clusters from the active step's pending snapshots
     /// and final staged predictions. No topology or body state is changed.
-    #[allow(dead_code)]
-    fn prepare_pending_weld_splits(
+    pub(super) fn prepare_pending_weld_splits(
         &self,
         force_tolerance: f64,
         moment_tolerance: f64,
@@ -1553,7 +1551,7 @@ impl PhysicsWorld {
         Ok(self.finish_weld_splits(staged))
     }
 
-    fn insert_weld_split_bodies(
+    pub(super) fn insert_weld_split_bodies(
         &mut self,
         mut plans: Vec<PreparedWeldSplit>,
     ) -> Result<InsertedWeldSplits, ClusterError> {
@@ -1598,7 +1596,7 @@ impl PhysicsWorld {
         Ok(InsertedWeldSplits { plans, results })
     }
 
-    fn finish_weld_splits(&mut self, staged: InsertedWeldSplits) -> Vec<Vec<BodyId>> {
+    pub(super) fn finish_weld_splits(&mut self, staged: InsertedWeldSplits) -> Vec<Vec<BodyId>> {
         let InsertedWeldSplits { plans, mut results } = staged;
         for plan in plans {
             results.push(self.commit_inserted_weld_split(plan));
