@@ -15,6 +15,8 @@ import math
 from bailey_prototype import iterate_mixed
 from bailey_surface_pressure import surface_cp
 
+STATIONS = (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875)
+
 
 def geometry(x):
     """Return dimensionless radius, slope and axis flux R*R' before cutoff."""
@@ -37,15 +39,23 @@ def run(n, outer):
     source = [geometry(i*h)[2] for i in range(n)]
     phi = [[0.0] * nr for _ in range(n)]
     history = iterate_mixed(phi, source, h, dr, 0.9, 1.4, 1e-6, 10000)
-    radius, slope, _ = geometry(0.5)
-    cp = surface_cp(phi, (n - 1)//2, h, dr, radius, slope)
-    return (nr - 0.5)*dr, len(history)-1, history[-1], cp
+    profile = []
+    for x in STATIONS:
+        radius, slope, _ = geometry(x)
+        try:
+            cp = surface_cp(phi, round(x / h), h, dr, radius, slope)
+        except ValueError:
+            cp = None  # No extrapolation when the surface is below the first center.
+        profile.append(cp)
+    return (nr - 0.5)*dr, len(history)-1, history[-1], profile
 
 
 if __name__ == "__main__":
     for n, outer in ((17, 0.75), (33, 0.75), (65, 0.75),
                      (17, 1.25), (33, 1.25), (65, 1.25)):
-        r, iterations, residual, cp = run(n, outer)
-        print(f"n={n} outer={r:.6f} iterations={iterations} residual={residual:.3g} Cp(x/l=0.5)={cp:.8f}")
+        r, iterations, residual, profile = run(n, outer)
+        values = " ".join("unavailable" if cp is None else f"{cp:.6f}" for cp in profile)
+        print(f"n={n} outer={r:.6f} iterations={iterations} residual={residual:.3g} Cp={values}")
+    print(f"Cp stations x/l={STATIONS}")
     print("Diagnostic only: tunnel, boundary layer, axial boundaries and sting unmatched.")
     print("Grid differences do not establish shock convergence or experimental validation.")
