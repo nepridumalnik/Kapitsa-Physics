@@ -525,6 +525,24 @@ fn harris_grid_profiles_and_fixed_radius_field_match_python() {
                 "n={n} outer={outer} x={x}: {cp}"
             );
         }
+        // Table III(a), nominal A_base/A_max=0, Mach 0.90. The theoretical
+        // 38.240-inch length normalizes x, not the truncated 36-inch model.
+        // Interpolate Cp between node locations; neither interpolation nor
+        // the printed measurement precision establishes uncertainty bounds.
+        for (x, measured) in [(0.497, -0.135), (0.681, -0.094), (0.785, -0.025)] {
+            let i = (x / dx).floor() as usize;
+            let node_cp = |j: usize| {
+                let (radius, slope, _) = harris_geometry(j as f64 * dx);
+                grid.surface_cp(j, radius, slope).unwrap()
+            };
+            let t = x / dx - i as f64;
+            let calculated = (1.0 - t) * node_cp(i) + t * node_cp(i + 1);
+            println!(
+                "n={n} outer={outer} x/l={x:.3} Cp_calc={calculated:.6} Cp_measured={measured:.3} difference={:+.6}",
+                calculated - measured
+            );
+            assert!(calculated.is_finite());
+        }
         let index = 0.125 / dr - 0.5;
         let k = index.floor() as usize;
         let w = index - k as f64;
