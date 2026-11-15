@@ -628,6 +628,19 @@ specific faired curve used by Karr must be checked. Chronological separation
 alone does not establish independence, and the original individual points and
 their matching Mach, Reynolds number and uncertainty remain to be verified.
 
+In particular, Bailey and Hiatt section 4.1 compares their subsonic data in
+figures 6a–j with Lawrence's earlier measurements at the same facility, citing
+AEDC-TR-67-218 (AD660545), and states that the curves were faired through all
+available data. This creates a specific provenance concern for using
+[Goin and Lawrence (1968)](https://doi.org/10.2514/3.4648) as a Karr holdout:
+the relationship between the individual points in that article and Lawrence's
+1967 report has not been established here. Krumins' review
+([NOLTR 72-34](https://ntrs.nasa.gov/citations/19720017345)) reports the
+article's air experiments over Mach 0.2–0.98 and uses them in its subsonic
+table; these overall ranges do not establish a measurement at any particular
+Mach and Reynolds pair or its uncertainty. The article itself has not been
+checked, so neither independence nor a matched validation point is claimed.
+
 The newer GBK experiment by [Allofs et al.](https://doi.org/10.1007/s00348-022-03402-z)
 is independent of the historical fits, but is not a direct sphere `Cd`
 dataset. It measures particle size and velocity in a dust-laden nozzle flow;
