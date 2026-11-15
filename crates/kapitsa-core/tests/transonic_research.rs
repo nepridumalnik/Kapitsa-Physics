@@ -18,6 +18,22 @@ fn harris_geometry(x: f64) -> (f64, f64, f64) {
     (radius, slope, radius * slope)
 }
 
+fn backward_derivative(previous_two: f64, previous: f64, current: f64, dx: f64) -> f64 {
+    (3.0 * current - 4.0 * previous + previous_two) / (2.0 * dx)
+}
+
+#[test]
+fn backward_derivative_is_second_order_on_smooth_field() {
+    const X: f64 = 0.9;
+    let mut previous_error = f64::INFINITY;
+    for dx in [0.1_f64, 0.05, 0.025] {
+        let derivative = backward_derivative((X - 2.0 * dx).exp(), (X - dx).exp(), X.exp(), dx);
+        let error = (derivative - X.exp()).abs();
+        assert!(error < previous_error / 3.5);
+        previous_error = error;
+    }
+}
+
 #[test]
 fn harris_fixed_upstream_row_omits_nonzero_axis_source() {
     // The mixed stencil starts at i=2, leaving i=1 fixed even though the
@@ -305,6 +321,39 @@ fn harris_subsonic_extended_domain_pressure_profile() -> Result<(), String> {
                     left_x - dx,
                     right_x + dx
                 );
+            }
+            if intervals >= 32 && x >= 0.9 {
+                let backward_cp = |j: usize| -> Option<f64> {
+                    let body_x = j as f64 * dx - EXTENSION;
+                    if j < 2 || body_x >= CUTOFF {
+                        return None;
+                    }
+                    let (radius, slope, _) = harris_geometry(body_x);
+                    let radial_index = radius / dr - 0.5;
+                    if radial_index < 0.0 || radial_index > (nr - 1) as f64 {
+                        return None;
+                    }
+                    let k = (radial_index.floor() as usize).min(nr - 2);
+                    let weight = radial_index - k as f64;
+                    let derivative = |radial: usize| {
+                        backward_derivative(
+                            grid.phi[j - 2][radial],
+                            grid.phi[j - 1][radial],
+                            grid.phi[j][radial],
+                            dx,
+                        )
+                    };
+                    let cp = -2.0 * ((1.0 - weight) * derivative(k) + weight * derivative(k + 1))
+                        - slope.powi(2);
+                    cp.is_finite().then_some(cp)
+                };
+                if let (Some(a), Some(b)) = (backward_cp(i), backward_cp(i + 1)) {
+                    let one_sided = (1.0 - t) * a + t * b;
+                    println!(
+                        "one-sided intervals={intervals} x/l={x:.3} central={cp:.6} backward={one_sided:.6} difference={:+.6}",
+                        one_sided - cp
+                    );
+                }
             }
             let difference = cp - measured;
             sum_squared += difference * difference;
