@@ -1043,7 +1043,10 @@ impl PreparedGeometry {
         for triangle in &mut triangles {
             triangle.vertices.sort_unstable_by(compare_vertex);
         }
-        triangles.sort_by(|a, b| {
+        // Equal keys describe identical prepared triangles. An unstable sort
+        // therefore preserves the canonical result without the infallible
+        // temporary allocation used by the standard library's stable sort.
+        triangles.sort_unstable_by(|a, b| {
             a.owner
                 .cmp(&b.owner)
                 .then_with(|| {
