@@ -65,6 +65,29 @@ fn harris_axis_source_matches_area_derivative_away_from_truncation() {
 }
 
 #[test]
+fn radial_face_difference_converges_for_logarithmic_line_source() {
+    // For locally constant q = R R', the axisymmetric line-source field
+    // phi = q ln(r/R) has phi_r(R) = R'. This verifies reconstruction only;
+    // axial variation and the nonlinear body boundary are not represented.
+    const RADIUS: f64 = 0.05;
+    const SLOPE: f64 = 0.2;
+    const SOURCE: f64 = RADIUS * SLOPE;
+    let mut previous_error = f64::INFINITY;
+    for cells_per_radius in [4_usize, 8, 16, 32] {
+        let dr = RADIUS / cells_per_radius as f64;
+        let lower_radius = RADIUS - 0.5 * dr;
+        let upper_radius = RADIUS + 0.5 * dr;
+        let lower = SOURCE * (lower_radius / RADIUS).ln();
+        let upper = SOURCE * (upper_radius / RADIUS).ln();
+        let derivative = (upper - lower) / dr;
+        let error = (derivative - SLOPE).abs();
+        assert!(error < previous_error);
+        println!("cells_per_radius={cells_per_radius} phi_r={derivative:.9} error={error:.9}");
+        previous_error = error;
+    }
+}
+
+#[test]
 #[ignore = "extended-domain research diagnostic; run explicitly in release mode"]
 fn harris_extended_axial_domain_diagnostic() -> Result<(), String> {
     // Bailey TN D-6582, far-field boundaries: sonic/subsonic cases require
