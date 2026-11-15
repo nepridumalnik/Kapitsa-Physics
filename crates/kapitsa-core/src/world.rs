@@ -299,6 +299,10 @@ pub struct ContactImpulse {
     /// Poses at the velocity solve, before position projection, when available.
     /// Presence does not certify a complete impulse ledger or event timing.
     pub velocity_transforms: Option<[Transform; 2]>,
+    /// Before and after solver states for an isolated discrete contact when
+    /// available. The outer array is before/after, the inner array is A/B.
+    /// Other load paths must still be checked before weld-balance use.
+    pub isolated_velocity_states: Option<[[BodyState; 2]; 2]>,
     pub impulse_on_b: Vec3,
     pub ccd: bool,
 }
@@ -2862,6 +2866,7 @@ impl PhysicsWorld {
                             parts,
                             points,
                             velocity_transforms: contact.velocity_transforms,
+                            isolated_velocity_states: contact.isolated_velocity_states,
                             impulse_on_b,
                             ccd,
                         });

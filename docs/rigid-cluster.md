@@ -234,6 +234,11 @@ accepted solver and CCD paths; zero omitted points alone is not sufficient.
 Each `ContactImpulse` additionally carries optional body transforms from its
 velocity solve, before positional correction. These are diagnostic witnesses,
 not a certificate of simultaneous impacts or complete velocity changes.
+For a single-point discrete solver island without joints, CCD solves or clipping,
+`isolated_velocity_states` also records before/after states when position
+projection did not change either pose. The record is committed with the contact
+snapshot and retained on failure. It does not by itself certify all physical
+load paths or enable fracture; CCD events are deliberately excluded.
 
 `cluster::impulse::tree_impulse_reactions` provides a separate fixed-pose,
 simultaneous impulse-balance primitive. The caller supplies a complete per-part

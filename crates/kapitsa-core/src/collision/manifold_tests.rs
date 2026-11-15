@@ -45,6 +45,7 @@ fn contact(feature_id: u64, penetration: f64, position: Vec3) -> ContactPoint {
         tangent_impulse: [0.0; 2],
         velocity_points: None,
         velocity_transforms: None,
+        isolated_velocity_states: None,
         velocity_impulse: None,
     }
 }

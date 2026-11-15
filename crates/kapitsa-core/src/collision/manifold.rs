@@ -1,4 +1,4 @@
-use crate::{collision::CollisionPair, transform::Transform};
+use crate::{collision::CollisionPair, rigid_body::BodyState, transform::Transform};
 use kapitsa_math::Vec3;
 
 use super::CollisionError;
@@ -20,6 +20,8 @@ pub(crate) struct ContactPoint {
     pub(crate) velocity_points: Option<[Vec3; 2]>,
     /// Body poses at the velocity solve, before positional projection.
     pub(crate) velocity_transforms: Option<[Transform; 2]>,
+    /// Complete before/after states for an isolated discrete solver event.
+    pub(crate) isolated_velocity_states: Option<[[BodyState; 2]; 2]>,
     /// Accumulated velocity impulse on B in world coordinates, when solved.
     pub(crate) velocity_impulse: Option<Vec3>,
 }
@@ -36,6 +38,7 @@ impl ContactPoint {
         tangent_impulse: [0.0; 2],
         velocity_points: None,
         velocity_transforms: None,
+        isolated_velocity_states: None,
         velocity_impulse: None,
     };
 
@@ -80,6 +83,7 @@ impl ContactPoint {
             tangent_impulse: [0.0; 2],
             velocity_points: None,
             velocity_transforms: None,
+            isolated_velocity_states: None,
             velocity_impulse: None,
         })
     }

@@ -749,7 +749,7 @@ fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
             let (position, speed, dt) = if ccd {
                 (-5.0, 1000.0, 0.01)
             } else {
-                (-1.1, 10.0, 0.02)
+                (-1.2, 10.0, 0.02)
             };
             let mut moving = RigidBody::new_dynamic(
                 Transform::new(Vec3::new(position, 0.0, 0.0), Quat::IDENTITY)?,
@@ -784,6 +784,16 @@ fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
                 };
                 assert_eq!(entry.parts[part_side], Some(part));
                 assert_eq!(entry.parts[1 - part_side], None);
+                if !ccd {
+                    let states = entry
+                        .isolated_velocity_states
+                        .ok_or("isolated velocity states")?;
+                    let delta = states[1][part_side].linear_velocity()
+                        - states[0][part_side].linear_velocity();
+                    assert!((delta * 2.0 - entry.impulse_on_b * sign).length() < 1e-10);
+                } else {
+                    assert!(entry.isolated_velocity_states.is_none());
+                }
                 impulse += entry.impulse_on_b * sign;
                 count += 1;
             }
@@ -803,6 +813,9 @@ fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
                 (impulse - momentum_change).length() < speed * 1e-10,
                 "impulse={impulse:?}, momentum change={momentum_change:?}, ccd={ccd}"
             );
+            let snapshot = world.contact_impulses().to_vec();
+            assert!(world.step(-1.0).is_err());
+            assert_eq!(world.contact_impulses(), snapshot);
         }
     }
     Ok(())
