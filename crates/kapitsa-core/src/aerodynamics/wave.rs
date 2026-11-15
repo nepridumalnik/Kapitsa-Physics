@@ -237,6 +237,10 @@ pub(super) fn prepare_voxel_wave_drag(
 /// This formula assumes an axisymmetric slender body aligned with the flow,
 /// linearized supersonic conditions, and zero source strength at both ends.
 /// It does not predict transonic drag rise, viscosity, separation or lift.
+/// The `speed > sound_speed` check is necessary but not sufficient for the
+/// linear approximation to be accurate: it does not establish a safe margin
+/// above Mach 1. NACA RM A56I07 reports poor agreement near transonic speeds:
+/// <https://ntrs.nasa.gov/api/citations/19660010455/downloads/19660010455.pdf>.
 /// Work is quadratic and limited to 2048 intervals. The caller must ensure
 /// the source describes a physically valid slender axisymmetric body.
 pub fn wave_drag(
