@@ -331,19 +331,25 @@ fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
 fn harris_low_mach_nose_source_reconstruction() -> Result<(), String> {
     const EXTENSION: f64 = 0.5;
     const OUTER: f64 = 1.25;
+    const CUTOFF: f64 = 36.0 / 38.240;
     const STATIONS: [f64; 4] = [0.016, 0.023, 0.035, 0.052];
     for intervals in [64_usize, 96, 128] {
         let dx = 1.0 / intervals as f64;
         let nx = 2 * intervals + 1;
         let nr = (OUTER / dx + 0.5).round() as usize;
         let dr = OUTER / (nr as f64 - 0.5);
-        for mode in ["point", "averaged"] {
+        for mode in ["point", "cutoff_cell", "averaged"] {
+            let cutoff_index = ((CUTOFF + EXTENSION) / dx).round() as usize;
+            let mut cutoff_cells = 0;
             let mut grid = MixedGrid {
                 phi: vec![vec![0.0; nr]; nx],
                 axis_flux: (0..nx)
                     .map(|i| {
                         let x = i as f64 * dx - EXTENSION;
-                        if mode == "averaged" {
+                        if mode == "averaged" || (mode == "cutoff_cell" && i == cutoff_index) {
+                            if mode == "cutoff_cell" {
+                                cutoff_cells += 1;
+                            }
                             harris_conservative_source(x, dx)
                         } else if (0.0..=1.0).contains(&x) {
                             harris_geometry(x).2
@@ -357,6 +363,11 @@ fn harris_low_mach_nose_source_reconstruction() -> Result<(), String> {
                 mach: 0.3,
                 gamma: 1.4,
             };
+            if mode == "cutoff_cell" {
+                let center = cutoff_index as f64 * dx - EXTENSION;
+                assert!(center - 0.5 * dx < CUTOFF && center + 0.5 * dx > CUTOFF);
+                assert_eq!(cutoff_cells, 1);
+            }
             let (iterations, residual) = grid
                 .iterate(1e-8, 100_000)
                 .map_err(|value| format!("intervals={intervals} mode={mode} residual={value}"))?;
