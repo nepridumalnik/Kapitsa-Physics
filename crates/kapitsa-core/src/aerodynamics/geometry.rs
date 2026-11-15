@@ -201,7 +201,7 @@ fn allocate_candidate_marks(
     allocated(count, 0u32)
 }
 
-/// In-place heapsort with a checked charge before each comparison.
+/// In-place heapsort with a checked charge before each comparison and swap.
 fn budgeted_sort<T>(
     values: &mut [T],
     work: &mut usize,
@@ -228,6 +228,7 @@ fn budgeted_sort<T>(
             if !compare(&values[root], &values[child]).is_lt() {
                 break;
             }
+            charge_surface_work(work, 1, max_work)?;
             values.swap(root, child);
             root = child;
         }
@@ -239,6 +240,7 @@ fn budgeted_sort<T>(
         sift(values, root, len, work, max_work, &compare)?;
     }
     for end in (1..len).rev() {
+        charge_surface_work(work, 1, max_work)?;
         values.swap(0, end);
         sift(values, 0, end, work, max_work, &compare)?;
     }

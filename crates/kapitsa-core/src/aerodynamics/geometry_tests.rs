@@ -188,6 +188,22 @@ fn sort_work_estimate_is_monotone_for_grid_sized_inputs() {
 }
 
 #[test]
+fn budgeted_sort_charges_swap_before_mutating_values() {
+    let mut values = [1, 2];
+    let mut work = 0;
+    assert_eq!(
+        budgeted_sort(&mut values, &mut work, 1, Ord::cmp),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    assert_eq!(values, [1, 2]);
+    assert_eq!(work, 1);
+    let mut work = 0;
+    budgeted_sort(&mut values, &mut work, 3, Ord::cmp).unwrap();
+    assert_eq!(values, [1, 2]);
+    assert_eq!(work, 3);
+}
+
+#[test]
 fn budgeted_sort_counts_comparisons_and_rejects_exhaustion() {
     let source = [4, 1, 3, 1, 2];
     let mut values = source;
