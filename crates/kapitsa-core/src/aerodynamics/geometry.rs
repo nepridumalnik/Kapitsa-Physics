@@ -1376,8 +1376,9 @@ impl PreparedGeometry {
                 }
             }
             // Splitting must conserve the source's unit barycentric area.
-            // Require conservation within gamma_n at the charged work scale.
-            // This is a partition consistency check, not a flow-model error bound.
+            // Heuristic consistency tolerance at the global charged-work scale.
+            // Unrelated preprocessing and previous sources contribute to work;
+            // this is not a proven numerical bound for the current partition.
             let roundoff = work as f64 * f64::EPSILON;
             let allowance = roundoff / (1.0 - roundoff);
             if !partition_fraction.is_finite()
