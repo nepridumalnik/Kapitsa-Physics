@@ -274,6 +274,19 @@ pub struct PartWingWrench {
     pub wrench: crate::aerodynamics::pressure::PressureWrench,
 }
 
+/// A recorded velocity-contact impulse. The impulse acts on B; A receives its
+/// negative. Points are world-space metres at velocity-solve time, impulse is
+/// in N·s. Static and kinematic sides do not receive a velocity change.
+/// This diagnostic is not a complete part-load ledger or weld reaction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactImpulse {
+    pub pair: crate::collision::CollisionPair,
+    pub parts: [Option<PartId>; 2],
+    pub points: [Vec3; 2],
+    pub impulse_on_b: Vec3,
+    pub ccd: bool,
+}
+
 /// Body-level simple-surface loads before and after the shared timestep
 /// corrections. World-space N and N·m about the body COM at evaluation time.
 /// These sums include both body- and part-targeted surfaces; their difference
@@ -632,6 +645,8 @@ pub struct PhysicsWorld {
     raw_simple_published: Vec<RawSimpleSurfaceWrench>,
     raw_simple_pending: Vec<RawSimpleSurfaceWrench>,
     raw_simple_buffers: Vec<Vec<RawSimpleSurfaceWrench>>,
+    contact_impulses_published: Vec<ContactImpulse>,
+    contact_impulses_pending: Vec<ContactImpulse>,
     part_hull_buffers: Vec<Vec<PartHullWrench>>,
     part_wing_buffers: Vec<Vec<PartWingWrench>>,
     owner_pressure: Option<HashMap<BodyId, crate::aerodynamics::pressure::OwnerPressureWorkspace>>,
@@ -685,6 +700,13 @@ impl BodyStep {
 }
 
 impl PhysicsWorld {
+    /// Recorded velocity-contact impulses from the last successful full step.
+    /// This is diagnostic data, not a complete contact or weld-load balance.
+    /// Low-level shard commits do not publish this snapshot.
+    pub fn contact_impulses(&self) -> &[ContactImpulse] {
+        &self.contact_impulses_published
+    }
+
     /// Part-targeted persistent-source contributions from the last successful
     /// full step. Entries preserve source iteration order and are not summed.
     /// They are a historical snapshot, including IDs of subsequently removed
@@ -784,6 +806,8 @@ impl PhysicsWorld {
             raw_simple_published: Vec::new(),
             raw_simple_pending: Vec::new(),
             raw_simple_buffers: Vec::new(),
+            contact_impulses_published: Vec::new(),
+            contact_impulses_pending: Vec::new(),
             part_hull_buffers: Vec::new(),
             part_wing_buffers: Vec::new(),
             owner_pressure: None,
@@ -1757,6 +1781,7 @@ impl PhysicsWorld {
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T, StepError>,
     ) -> Result<T, StepError> {
+        self.contact_impulses_pending.clear();
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
         if let Err((source_id, cause)) = self.prepare_force_source_updates() {
@@ -1787,6 +1812,10 @@ impl PhysicsWorld {
                 &mut self.simple_surface_pending,
             );
             std::mem::swap(&mut self.raw_simple_published, &mut self.raw_simple_pending);
+            std::mem::swap(
+                &mut self.contact_impulses_published,
+                &mut self.contact_impulses_pending,
+            );
             self.recycle_aerodynamics_updates();
             self.clear_gravity_updates();
             self.clear_force_source_updates();
@@ -1914,6 +1943,10 @@ impl PhysicsWorld {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
+        if let Err(error) = self.stage_contact_impulses() {
+            self.collision_system.abort_step();
+            return Err(StepError::Collision(error));
+        }
 
         #[cfg(feature = "bench-internals")]
         let commit_started = Instant::now();
@@ -1923,6 +1956,45 @@ impl PhysicsWorld {
         #[cfg(feature = "bench-internals")]
         self.collision_system
             .record_commit(commit_started.elapsed());
+        Ok(())
+    }
+
+    fn stage_contact_impulses(&mut self) -> Result<(), CollisionError> {
+        self.contact_impulses_pending.clear();
+        let context = &self.collision_system.context;
+        let count = context
+            .ccd_solved_manifolds
+            .iter()
+            .chain(&context.manifolds)
+            .try_fold(0usize, |count, manifold| count.checked_add(manifold.len()))
+            .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+        self.contact_impulses_pending
+            .try_reserve(count)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for (ccd, manifolds) in [
+            (true, &context.ccd_solved_manifolds),
+            (false, &context.manifolds),
+        ] {
+            for manifold in manifolds {
+                let parts = [
+                    self.collider_part(manifold.pair.a),
+                    self.collider_part(manifold.pair.b),
+                ];
+                for contact in manifold.points() {
+                    if let (Some(points), Some(impulse_on_b)) =
+                        (contact.velocity_points, contact.velocity_impulse)
+                    {
+                        self.contact_impulses_pending.push(ContactImpulse {
+                            pair: manifold.pair,
+                            parts,
+                            points,
+                            impulse_on_b,
+                            ccd,
+                        });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -4767,6 +4839,12 @@ impl PhysicsWorld {
             return Err(StepError::Collision(error));
         }
         if let Err(error) = self.prepare_joint_break_commit() {
+            self.collision_system.abort_step();
+            self.rollback_gravity_updates();
+            self.rollback_aerodynamics_updates();
+            return Err(StepError::Collision(error));
+        }
+        if let Err(error) = self.stage_contact_impulses() {
             self.collision_system.abort_step();
             self.rollback_gravity_updates();
             self.rollback_aerodynamics_updates();

@@ -3276,6 +3276,31 @@ fn independent_single_pair_ccd_islands_resolve_across_workers()
 }
 
 #[test]
+fn full_step_publishes_ccd_impulses_and_preserves_them_on_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    for parallel in [false, true] {
+        let mut world = independent_wall_ccd_world()?;
+        if parallel {
+            world.step_with_executor(0.01, &ScopedThreadExecutor, 2)?;
+        } else {
+            world.step(0.01)?;
+        }
+        let snapshot = world.contact_impulses().to_vec();
+        assert_eq!(snapshot.iter().filter(|entry| entry.ccd).count(), 128);
+        assert!(
+            snapshot
+                .iter()
+                .filter(|entry| entry.ccd)
+                .all(|entry| entry.impulse_on_b.length() > 0.0
+                    && entry.points.iter().all(|point| point.is_finite()))
+        );
+        assert!(world.step(-1.0).is_err());
+        assert_eq!(world.contact_impulses(), snapshot.as_slice());
+    }
+    Ok(())
+}
+
+#[test]
 fn seeded_independent_ccd_stress_matches_across_worker_counts()
 -> Result<(), Box<dyn std::error::Error>> {
     const SEED: u64 = 0x5eed_c0de_2026;
