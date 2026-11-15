@@ -704,6 +704,17 @@ time-series force standard deviation. The figure has not been digitized here,
 and those fit uncertainties do not constitute a complete error budget. These
 independent subsonic observations are not a matched transonic drag benchmark.
 
+The abstract of [Suzuki et al. (2005)](https://doi.org/10.1088/0957-0233/16/12/005)
+reports shock-tube measurements for spheres of diameter 0.3–5.57 mm and
+relative Re 1,000–100,000, with drag on average approximately 20% above a
+standard curve. This is a difference from a reference curve, not measurement
+uncertainty. The full primary article was not accessible; its abstract does
+not provide joint individual Mach, Re, Cd and uncertainty. Nagata et al.
+(2022), figure 14 discussion, use Mach 0.51 when comparing the Suzuki data
+with a model, but this secondary comparison does not establish the conditions
+or uncertainty of every original observation. No matched transonic holdout is
+claimed from these sources.
+
 The later Bailey–Starr transonic measurements
 ([AIAA Journal, 1976](https://doi.org/10.2514/3.7262)) are another candidate.
 Nagata et al.'s [2020 DNS paper](https://doi.org/10.1017/jfm.2020.629),
