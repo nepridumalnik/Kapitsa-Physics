@@ -31,6 +31,16 @@ def mixed_residual(phi, i, k, dx, dr, mach, gamma, axis_flux):
     return axial + radial
 
 
+def mixed_diagonal(phi, i, k, dx, dr, mach, gamma):
+    """Exact center derivative of mixed_residual, including the sonic limit."""
+    u = (phi[i][k] - phi[i - 1][k]) / dx
+    lam = 1 - mach**2 - mach**2 * (gamma + 1) * u
+    forward = (phi[i + 1][k] - phi[i][k]) / dx
+    forward_lam = 1 - mach**2 - mach**2 * (gamma + 1) * forward
+    radial_diagonal = (2 * k + 1) / ((k + 0.5) * dr**2)
+    return -(abs(lam) + max(forward_lam, 0.0)) / dx**2 - radial_diagonal
+
+
 class UnsupportedFlow(ValueError):
     pass
 
@@ -67,14 +77,7 @@ def iterate_mixed(phi, axis_flux, dx, dr, mach, gamma, tolerance, max_iterations
             for k in range(nr - 1):
                 old = phi[i][k]
                 f = mixed_residual(phi, i, k, dx, dr, mach, gamma, axis_flux)
-                # Central numerical Jacobian also handles the C1 sonic split.
-                delta = 1e-7 * max(1.0, abs(old))
-                phi[i][k] = old + delta
-                plus = mixed_residual(phi, i, k, dx, dr, mach, gamma, axis_flux)
-                phi[i][k] = old - delta
-                minus = mixed_residual(phi, i, k, dx, dr, mach, gamma, axis_flux)
-                phi[i][k] = old
-                derivative = (plus - minus) / (2 * delta)
+                derivative = mixed_diagonal(phi, i, k, dx, dr, mach, gamma)
                 if not math.isfinite(derivative) or abs(derivative) < 1e-14:
                     raise ArithmeticError("singular local Jacobian")
                 # Cap an update by local residual reduction, not a physical fit.

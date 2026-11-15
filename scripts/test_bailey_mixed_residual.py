@@ -2,10 +2,26 @@
 
 import unittest
 
-from bailey_prototype import mixed_residual
+from bailey_prototype import mixed_diagonal, mixed_residual
 
 
 class MixedResidualTests(unittest.TestCase):
+    def test_diagonal_matches_finite_difference_in_both_regimes(self):
+        h, mach, gamma = 0.1, 0.9, 1.4
+        sonic = (1 - mach**2) / (mach**2 * (gamma + 1))
+        for u in (sonic - 0.1, sonic, sonic + 0.1):
+            for k in (0, 1):
+                phi = [[0.0] * 3 for _ in range(5)]
+                phi[2][k] = h * u
+                eps = 1e-8
+                phi[2][k] += eps
+                plus = mixed_residual(phi, 2, k, h, h, mach, gamma, [0.0] * 5)
+                phi[2][k] -= 2 * eps
+                minus = mixed_residual(phi, 2, k, h, h, mach, gamma, [0.0] * 5)
+                phi[2][k] += eps
+                self.assertAlmostEqual((plus - minus) / (2 * eps),
+                                       mixed_diagonal(phi, 2, k, h, h, mach, gamma), delta=2e-5)
+
     def test_smooth_subsonic_matches_analytic_operator(self):
         # phi = a*x^2 + b*r^2: axial flux divergence is exact for a
         # quadratic potential in the subsonic region; radial term is 4*b.
