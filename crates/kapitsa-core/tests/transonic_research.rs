@@ -166,6 +166,81 @@ fn harris_iteration_reproduces_python_diagnostic() {
 }
 
 #[test]
+fn synthetic_mixed_iteration_without_prescribed_shock() {
+    use std::f64::consts::PI;
+    for n in [9, 17, 25] {
+        let h = 1.0 / (n - 1) as f64;
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; n]; n],
+            axis_flux: (0..n)
+                .map(|i| 0.01 * (2.0 * PI * i as f64 / (n - 1) as f64).sin())
+                .collect(),
+            dx: h,
+            dr: h,
+            mach: 0.9,
+            gamma: 1.4,
+        };
+        let (_, residual) = grid.iterate(1e-6, 3000).unwrap();
+        assert!(residual <= 1e-6);
+        let sonic = (1.0 - grid.mach.powi(2)) / (grid.mach.powi(2) * (grid.gamma + 1.0));
+        let velocity: Vec<_> = (2..n - 1)
+            .map(|i| (grid.phi[i + 1][1] - grid.phi[i - 1][1]) / (2.0 * h))
+            .collect();
+        let crossings: Vec<_> = velocity
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| pair[0] > sonic && pair[1] <= sonic)
+            .map(|(i, _)| (i + 2) as f64 * h)
+            .collect();
+        match n {
+            9 => assert!(crossings.is_empty()),
+            17 => assert_eq!(crossings, vec![0.5]),
+            25 => {
+                assert_eq!(crossings.len(), 1);
+                assert!((crossings[0] - 14.0 / 24.0).abs() < 1e-14);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn mixed_iteration_handles_subsonic_and_imposed_shock_profiles() {
+    use std::f64::consts::PI;
+    let n = 17;
+    let h = 1.0 / (n - 1) as f64;
+    let mut subsonic = MixedGrid {
+        phi: vec![vec![0.0; 9]; n],
+        axis_flux: (0..n)
+            .map(|i| 0.0001 * (2.0 * PI * i as f64 / (n - 1) as f64).sin())
+            .collect(),
+        dx: h,
+        dr: h,
+        mach: 0.7,
+        gamma: 1.4,
+    };
+    assert!(subsonic.iterate(1e-7, 3000).unwrap().1 <= 1e-7);
+    // Outer boundary imposes this profile; it does not predict shock location.
+    for n in [17, 33, 65] {
+        let h = 1.0 / (n - 1) as f64;
+        let mut grid = MixedGrid {
+            phi: (0..n)
+                .map(|i| {
+                    let x = i as f64 * h;
+                    vec![0.02 * x.min(0.5) - 0.02 * (x - 0.5).max(0.0); 4]
+                })
+                .collect(),
+            axis_flux: vec![0.0; n],
+            dx: h,
+            dr: h,
+            mach: 1.0,
+            gamma: 1.4,
+        };
+        assert!(grid.iterate(1e-8, 3000).unwrap().1 <= 1e-8);
+    }
+}
+
+#[test]
 fn harris_grid_profiles_and_fixed_radius_field_match_python() {
     // The sting and boundaries do not reproduce the experiment. These are
     // numerical regression values, not measurements or validation tolerances.
