@@ -628,6 +628,17 @@ specific faired curve used by Karr must be checked. Chronological separation
 alone does not establish independence, and the original individual points and
 their matching Mach, Reynolds number and uncertainty remain to be verified.
 
+The newer GBK experiment by [Allofs et al.](https://doi.org/10.1007/s00348-022-03402-z)
+is independent of the historical fits, but is not a direct sphere `Cd`
+dataset. It measures particle size and velocity in a dust-laden nozzle flow;
+the reported free-stream Mach 2.1 and unit Reynolds number 8.2 × 10⁷ m⁻¹
+are gas-flow conditions, not the particle-relative Mach and Reynolds numbers.
+[Palmer et al.](https://ntrs.nasa.gov/citations/20220007039) compare simulated
+particle velocities to these measurements and note possible nonsphericity and
+agglomeration. Inferring drag would require a trajectory and gas-flow model,
+including its uncertainty; the data are not a matched independent sphere-drag
+point for the Re = 10,000 transonic correlation.
+
 For an additional transonic comparison, Usry and Wallace,
 [NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
 forebody axial-force coefficients for a fin-stabilized supercritical body of
