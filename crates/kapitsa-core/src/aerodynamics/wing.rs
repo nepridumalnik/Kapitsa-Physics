@@ -171,6 +171,7 @@ pub struct FiniteWing {
     profile_drag: f64,
     zero_lift_angle: f64,
     max_attached_angle: f64,
+    compressible_max_mach: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -352,11 +353,27 @@ impl FiniteWing {
             profile_drag,
             zero_lift_angle,
             max_attached_angle,
+            compressible_max_mach: None,
         })
     }
 
-    /// Incompressible engineering policy: Mach <= 0.3, attached flow only.
-    /// Rejection outside that domain is intentional; no implicit stall clamp.
+    /// Enables a subsonic Prandtl-Glauert lifting-line approximation.
+    ///
+    /// `max_mach` must be finite and between 0 and 1, exclusive. The caller
+    /// must select a limit below the critical Mach for this wing and flow;
+    /// this approximation does not predict shock formation, wave drag or stall.
+    /// The default model remains incompressible with a Mach limit of 0.3.
+    pub fn with_subsonic_compressibility(mut self, max_mach: f64) -> Result<Self, WingError> {
+        if !max_mach.is_finite() || max_mach <= 0.0 || max_mach >= 1.0 {
+            return Err(WingError::InvalidParameters);
+        }
+        self.compressible_max_mach = Some(max_mach);
+        Ok(self)
+    }
+
+    /// The default incompressible model supports Mach <= 0.3. An optional
+    /// subsonic compressibility approximation uses its caller-specified limit.
+    /// Both require attached flow; there is no implicit stall clamp.
     pub fn coefficients(
         self,
         angle_of_attack: f64,
@@ -366,16 +383,22 @@ impl FiniteWing {
             return Err(WingError::InvalidFlow);
         }
         let alpha = angle_of_attack - self.zero_lift_angle;
-        if mach > 0.3 || alpha.abs() > self.max_attached_angle {
+        if mach > self.compressible_max_mach.unwrap_or(0.3) || alpha.abs() > self.max_attached_angle
+        {
             return Err(WingError::UnsupportedFlow);
         }
         let effective_aspect = self.efficiency * self.aspect_ratio;
+        let beta = if self.compressible_max_mach.is_some() {
+            (1.0 - mach * mach).sqrt()
+        } else {
+            1.0
+        };
         // Algebraically equivalent form without overflowing pi*e*AR, or
         // underflowing the slope by first dividing 2*pi by a tiny denominator.
         let slope = if effective_aspect >= 2.0 {
-            2.0 * PI / (1.0 + 2.0 / effective_aspect)
+            2.0 * PI / (beta + 2.0 / effective_aspect)
         } else {
-            PI * effective_aspect / (1.0 + effective_aspect / 2.0)
+            PI * effective_aspect / (1.0 + beta * effective_aspect / 2.0)
         };
         let lift = slope * alpha;
         let drag = self.profile_drag + (lift / effective_aspect) * (lift / PI);
@@ -574,6 +597,39 @@ mod tests {
         }
         let beyond = base.with_control(WingControl::new(0.2, 0.2, 3.0).unwrap());
         assert_eq!(beyond.evaluate(flow), Err(WingError::UnsupportedFlow));
+    }
+
+    #[test]
+    fn compressible_lifting_line_has_explicit_domain() -> Result<(), WingError> {
+        let base = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?;
+        let corrected = base.with_subsonic_compressibility(0.7)?;
+        let alpha = 0.1;
+        let low = base.coefficients(alpha, 0.0)?;
+        let corrected_low = corrected.coefficients(alpha, 0.0)?;
+        assert_eq!(low, corrected_low);
+        let coefficients = corrected.coefficients(alpha, 0.6)?;
+        let beta = (1.0_f64 - 0.6_f64.powi(2)).sqrt();
+        let expected_lift = 2.0 * PI * alpha / (beta + 2.0 / (0.8 * 8.0));
+        assert!((coefficients.lift - expected_lift).abs() < 1e-12);
+        assert!(coefficients.lift > low.lift);
+        assert!(corrected.coefficients(alpha, 0.7).is_ok());
+        assert_eq!(
+            corrected.coefficients(alpha, 0.7001),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert_eq!(
+            base.coefficients(alpha, 0.6),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert_eq!(
+            base.with_subsonic_compressibility(1.0),
+            Err(WingError::InvalidParameters)
+        );
+        assert_eq!(
+            base.with_subsonic_compressibility(f64::NAN),
+            Err(WingError::InvalidParameters)
+        );
+        Ok(())
     }
 
     #[test]

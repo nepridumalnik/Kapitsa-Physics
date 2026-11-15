@@ -267,11 +267,20 @@ for attached incompressible flow. It uses a thin-airfoil slope of `2 pi`, the
 finite-span slope `a = a0 / (1 + a0 / (pi e AR))`, and induced drag
 `CL² / (pi e AR)`, plus caller-specified profile drag. Aspect ratio, span
 efficiency, zero-lift angle and attached-flow angle limit are explicit inputs.
-Mach above 0.3 or angles beyond that limit return `UnsupportedFlow`; no stall
+By default, Mach above 0.3 or angles beyond that limit return `UnsupportedFlow`; no stall
 or compressibility continuation is implied. `WingSurface` uses this primitive
 for the world loads described above; it does not replace `Simple` lift or infer
 wings from meshes. The finite-span slope relation is the classical lifting-line
 approximation, not a FAR code port.
+
+`FiniteWing::with_subsonic_compressibility(max_mach)` optionally uses a
+Prandtl-Glauert lifting-line approximation, with slope
+`2 pi / (sqrt(1 - M?) + 2/(e AR))`. The caller must choose a maximum Mach
+strictly below 1 and below the wing's critical Mach. This approximation is
+for small-disturbance attached subsonic flow; it does not predict shock onset,
+wave drag, separation or stall. Profile drag remains caller-supplied. The
+incompressible default and its Mach 0.3 limit are unchanged. The underlying
+compressibility transformation for finite wings is discussed in [NACA TN 1854](https://ntrs.nasa.gov/api/citations/19930082527/downloads/19930082527.pdf).
 
 ### Explicit wing polars and control deflection — UNVERIFIED
 
