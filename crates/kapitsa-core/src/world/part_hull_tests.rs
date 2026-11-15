@@ -756,7 +756,9 @@ fn collider_cluster_fractures_in_contact_free_step() -> Result<(), Box<dyn std::
 fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn std::error::Error>>
 {
     use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
+    use crate::collider::Collider;
     use crate::joint::JointFrame;
+    use crate::shape::{Cuboid, Shape};
     for sharded in [false, true] {
         let mut world = PhysicsWorld::new();
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
@@ -786,7 +788,7 @@ fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn
         )?;
         let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
         world.add_force_source_for_part(child, Vec3::ZERO, Vec3::X * 10.0)?;
-        world.add_force_source(body, Vec3::ZERO, Vec3::X)?;
+        let unsupported = world.add_force_source(body, Vec3::ZERO, Vec3::X)?;
         world
             .set_automatic_weld_failure(Some((1e-9, 1e-9)))
             .map_err(|e| format!("{e:?}"))?;
@@ -802,12 +804,40 @@ fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn
         }
         assert!(world.weld(weld).is_some());
         assert_eq!(world.step_diagnostics().weld_incomplete_load_clusters, 1);
+        assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 0);
         assert!(world.step(-1.0).is_err());
         assert_eq!(world.step_diagnostics().weld_incomplete_load_clusters, 1);
         assert!(matches!(
             world.part_aerodynamic_weld_reactions(body, 1e-9, 1e-9),
             Err(super::WeldBalanceError::IncompleteLoads)
         ));
+        world.remove_force_source(unsupported)?;
+        let obstacle = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        for target in [body, obstacle] {
+            let collider = Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            );
+            if target == body {
+                world.add_part_collider(root, collider)?;
+            } else {
+                world.add_collider(target, collider)?;
+            }
+        }
+        if sharded {
+            world.step_with_shards(
+                0.01,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )?;
+        } else {
+            world.step(0.01)?;
+        }
+        assert!(world.weld(weld).is_some());
+        assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
+        assert!(world.step(-1.0).is_err());
+        assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
     }
     Ok(())
 }

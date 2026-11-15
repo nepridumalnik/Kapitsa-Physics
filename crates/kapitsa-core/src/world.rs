@@ -318,6 +318,7 @@ pub struct ClusterLoadState {
     pub(crate) part_hull_certified: bool,
     pub(crate) part_wings_certified: bool,
     pub(crate) part_surfaces_certified: bool,
+    pub(crate) collision_loads_uncertified: bool,
     pub(crate) part_surface_count: usize,
     pub(crate) vacuum: bool,
     pub(crate) part_geometry: bool,
@@ -325,6 +326,7 @@ pub struct ClusterLoadState {
 
 impl ClusterLoadState {
     fn invalidate_collision_loads(&mut self) {
+        self.collision_loads_uncertified = true;
         self.force_free_certified = false;
         self.part_sources_certified = false;
         self.part_hull_certified = false;
@@ -714,6 +716,9 @@ pub struct StepDiagnostics {
     /// Breakable clusters whose automatic weld checks were skipped because the
     /// external load balance could not be certified.
     pub weld_incomplete_load_clusters: usize,
+    /// Subset of skipped clusters affected by a contact, CCD clipping, or
+    /// unresolved collision ownership. Other incomplete paths may also exist.
+    pub weld_collision_load_clusters: usize,
 }
 
 impl StepDiagnostics {
@@ -1387,10 +1392,12 @@ impl PhysicsWorld {
             step_diagnostics: StepDiagnostics {
                 collision_ccd_limit_clipped_bodies: 0,
                 weld_incomplete_load_clusters: 0,
+                weld_collision_load_clusters: 0,
             },
             pending_step_diagnostics: StepDiagnostics {
                 collision_ccd_limit_clipped_bodies: 0,
                 weld_incomplete_load_clusters: 0,
+                weld_collision_load_clusters: 0,
             },
             body_revision: 0,
             automatic_weld_failure: None,
@@ -2529,6 +2536,7 @@ impl PhysicsWorld {
                     part_hull_certified,
                     part_wings_certified,
                     part_surfaces_certified,
+                    collision_loads_uncertified: false,
                     part_surface_count: body.aerodynamic_surfaces.len(),
                     vacuum: matches!(self.atmosphere, Atmosphere::Vacuum),
                     part_geometry: has_pressure_geometry,

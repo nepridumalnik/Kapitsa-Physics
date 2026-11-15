@@ -90,6 +90,15 @@ impl PhysicsWorld {
                         .ok_or(WeldSplitPreparationError::Cluster(
                             ClusterError::StorageCapacityExceeded,
                         ))?;
+                    if state.collision_loads_uncertified {
+                        self.pending_step_diagnostics.weld_collision_load_clusters = self
+                            .pending_step_diagnostics
+                            .weld_collision_load_clusters
+                            .checked_add(1)
+                            .ok_or(WeldSplitPreparationError::Cluster(
+                                ClusterError::StorageCapacityExceeded,
+                            ))?;
+                    }
                     continue;
                 }
                 Err(error) => return Err(WeldSplitPreparationError::Balance(error)),
