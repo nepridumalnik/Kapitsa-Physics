@@ -269,6 +269,11 @@ cases but does not guarantee the exact sign: residual calculations are rounded
 and extreme values may underflow. Adaptive orientation predicates alone do not
 guarantee correct clipping classification or intersection construction.
 
+Even an exact equality of the total partition area and the original area is
+only a necessary consistency check: overlap and missing coverage can cancel.
+A regression with a duplicated half-triangle and a missing half demonstrates
+this limitation. Proving a partition requires additional geometric invariants.
+
 `kapitsa::aerodynamics::pressure::evaluate_prepared_mesh(&PreparedSurfacePatches, PressureFlow)` evaluates each prepared physical patch through `PressurePatch` and returns the checked sum of world-space force and COM moment. It allocates nothing, mutates nothing and returns an error (not a partial wrench) if any patch evaluation or accumulation fails. A single explicit atmospheric state and sound speed are used for the whole set; no atmosphere sampling or per-owner load distribution occurs. Empty sets return zero after motion and sound-speed validation. The existing patch force convention and Mach >= 5 policy are preserved, without a new pressure closure.
 
 Preparation is direction-dependent. The public uniform-direction primitive uses a body-local upstream direction. World preparation instead evaluates `v_COM - wind(COM) + omega ? (centroid - COM)` in the body frame for each original source triangle and prepares that triangle's visibility in its own upstream direction. A zero local velocity contributes no patch; stationary geometry in still air therefore remains at rest. Pure rotation can produce loads even with zero COM velocity. Pressure evaluation uses each surviving fragment's own centroid velocity.

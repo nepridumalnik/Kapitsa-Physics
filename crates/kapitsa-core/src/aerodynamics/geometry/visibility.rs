@@ -362,6 +362,20 @@ mod tests {
     use crate::aerodynamics::geometry::GeometryOwner;
 
     #[test]
+    fn equal_area_sum_does_not_prove_partition_coverage() {
+        // The left half is counted twice and the right half is missing.
+        // All coordinates and fractions are exactly representable.
+        let half = [Vec3::ZERO, Vec3::Y, Vec3::X * 0.5];
+        let mut sum = AreaSum::default();
+        sum.add(triangle_fraction(half).unwrap());
+        sum.add(triangle_fraction(half).unwrap());
+        assert_eq!(
+            sum.value(),
+            triangle_fraction([Vec3::ZERO, Vec3::X, Vec3::Y]).unwrap()
+        );
+    }
+
+    #[test]
     fn crossing_fraction_rejects_underflow_but_accepts_representable_fraction() {
         let smallest = f64::from_bits(1);
         assert_eq!(crossing_fraction(smallest, -1.0), Ok(smallest));
