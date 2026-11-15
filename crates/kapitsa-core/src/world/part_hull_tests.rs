@@ -365,6 +365,47 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
 }
 
 #[test]
+fn rotating_force_free_cluster_has_centripetal_weld_reaction()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
+    use crate::joint::JointFrame;
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut rigid = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    rigid.set_angular_velocity(Vec3::Z)?;
+    let body = world.add_body(rigid)?;
+    let root = world.enable_cluster(body)?;
+    let child = world.add_cluster_part(
+        root,
+        ClusterPartDesc {
+            local_transform: Transform::new(Vec3::X * 2.0, Quat::IDENTITY)?,
+            mass,
+            colliders: Vec::new(),
+            linear_velocity: Vec3::Y * 2.0,
+            angular_velocity: Vec3::Z,
+        },
+        WeldDesc {
+            frame_a: JointFrame::new(Vec3::X * 2.0, Quat::IDENTITY),
+            frame_b: JointFrame::IDENTITY,
+            strength: WeldStrength::Unbreakable,
+            stiffness: WeldStiffness {
+                linear: 1.0,
+                angular: 1.0,
+            },
+        },
+    )?;
+    world.step(1e-4)?;
+    let reactions = world
+        .force_free_weld_reactions(body, 1e-10, 1e-10)
+        .map_err(|error| format!("{error:?}"))?;
+    assert_eq!(reactions.len(), 1);
+    assert_eq!(reactions[0].child, child);
+    assert!((reactions[0].force + Vec3::X).length() < 1e-10);
+    assert!(reactions[0].moment.length() < 1e-10);
+    Ok(())
+}
+
+#[test]
 fn part_hull_snapshot_preserves_offset_moment() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = PhysicsWorld::new();
     world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));

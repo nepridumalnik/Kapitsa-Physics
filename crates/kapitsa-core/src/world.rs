@@ -748,7 +748,7 @@ impl BodyStep {
 
 impl PhysicsWorld {
     /// Calculates instantaneous parent-on-child weld reactions from the last
-    /// successful full-step snapshot. Currently only force-free, nonrotating
+    /// successful full-step snapshot. Currently only force-free
     /// clusters are supported. This diagnostic does not break welds. Tolerances
     /// are absolute, in N and N·m. Topology and loads come from the same step;
     /// later world edits do not alter the snapshot.
@@ -769,7 +769,7 @@ impl PhysicsWorld {
         self.part_source_weld_reactions(body, force_tolerance, moment_tolerance)
     }
 
-    /// Instantaneous reactions for nonrotating clusters subject only to
+    /// Instantaneous reactions for clusters subject only to
     /// part-targeted persistent forces. Requires a collision- and joint-free
     /// world with no gravity or aerodynamic loads at evaluation time.
     /// Results are diagnostics from the last successful full-step snapshot.
@@ -788,7 +788,7 @@ impl PhysicsWorld {
             .iter()
             .find(|state| state.body == body)
             .ok_or(WeldBalanceError::IncompleteLoads)?;
-        if !state.part_sources_certified || state.state.angular_velocity() != Vec3::ZERO {
+        if !state.part_sources_certified {
             return Err(WeldBalanceError::IncompleteLoads);
         }
         let tree = prepare_tree(
@@ -827,8 +827,14 @@ impl PhysicsWorld {
         let acceleration = force
             .checked_mul_scalar(1.0 / mass.mass())
             .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+        let omega = state.state.angular_velocity();
+        let effective_moment = inertia
+            .checked_mul_vector(omega)
+            .and_then(|angular_momentum| omega.checked_cross(angular_momentum))
+            .and_then(|gyroscopic| moment.checked_sub(gyroscopic))
+            .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
         let alpha = inertia
-            .solve_spd(moment)
+            .solve_spd(effective_moment)
             .map_err(|_| WeldBalanceError::Physics(ClusterError::InvalidMotion))?;
         let mut parents = Vec::new();
         parents
@@ -840,7 +846,7 @@ impl PhysicsWorld {
             &parents,
             center,
             acceleration,
-            Vec3::ZERO,
+            omega,
             alpha,
             origin,
             force_tolerance,
