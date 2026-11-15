@@ -286,6 +286,39 @@ fn accumulated_contact_vector_matches_velocity_change_with_warm_start()
 }
 
 #[test]
+fn velocity_contact_points_precede_position_correction() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut bodies, mut manifolds) = ball_on_plane(-Vec3::Y * 2.0);
+    let contact = manifolds[0].manifold.point(0).ok_or("contact")?;
+    let before_a = bodies[0]
+        .body()
+        .state()
+        .transform()
+        .transform_point(contact.local_a);
+    let before_b = bodies[1]
+        .body()
+        .state()
+        .transform()
+        .transform_point(contact.local_b);
+    let mut solver = SolverWorkspace::default();
+    solver.solve(
+        &mut bodies,
+        &mut manifolds,
+        super::CollisionConfig::default(),
+    )?;
+    let prepared = solver.points.first().ok_or("velocity point")?;
+    assert_eq!(prepared.position_a, before_a);
+    assert_eq!(prepared.position_b, before_b);
+    let solved_contact = manifolds[0].manifold.point(0).ok_or("solved contact")?;
+    let after_b = bodies[1]
+        .body()
+        .state()
+        .transform()
+        .transform_point(solved_contact.local_b);
+    assert!((after_b - before_b).length() > 0.0);
+    Ok(())
+}
+
+#[test]
 fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
     fn solve(warm_start: bool) -> (f64, f64) {
         let pair = pair();
