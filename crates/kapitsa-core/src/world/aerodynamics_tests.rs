@@ -1146,6 +1146,67 @@ fn selected_base_rejects_blocked_geometry_without_changing_motion()
 }
 
 #[test]
+fn base_visibility_is_rechecked_after_flow_reversal() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            AerodynamicsError,
+            pressure::{BasePressure, PressureError},
+        },
+        shape::TriangleMesh,
+    };
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            0.001,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 2000.0)?;
+        body.set_aerodynamics(Aerodynamics::Mesh(TriangleMesh::new(
+            vec![Vec3::ZERO, Vec3::Z, Vec3::Y],
+            vec![[0, 1, 2]],
+        )?));
+        body.set_mesh_base_triangles(&[0], BasePressure::new(-0.4, 5.0, 10.0)?)?;
+        let id = world.add_body(body)?;
+        if sharded {
+            world.step_with_shards(
+                1e-5,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(1e-5)?;
+        }
+        world
+            .body_mut(id)
+            .unwrap()
+            .set_linear_velocity(-Vec3::X * 2000.0)?;
+        let before = world.body(id).unwrap().motion();
+        let result = if sharded {
+            world.step_with_shards(
+                1e-5,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(1e-5)
+        };
+        assert!(matches!(
+            result,
+            Err(super::StepError::Aerodynamics {
+                cause: AerodynamicsError::Pressure(PressureError::BaseNotFullyVisible),
+                ..
+            })
+        ));
+        assert_eq!(world.body(id).unwrap().motion(), before);
+    }
+    Ok(())
+}
+
+#[test]
 fn preflight_rejects_unchecked_base_pressure_without_mutating_world()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
