@@ -667,6 +667,16 @@ agglomeration. Inferring drag would require a trajectory and gas-flow model,
 including its uncertainty; the data are not a matched independent sphere-drag
 point for the Re = 10,000 transonic correlation.
 
+A later independent experiment, [Figliola, Schmidt and Lee (2022)](https://doi.org/10.3390/app12136622),
+derives microsphere drag coefficients from measured flight trajectories in air
+at 760 and 76 Torr. Its reported overall range is Mach 0.3–2.2 and Re 5–300,
+with sphere diameters 3.7–7.6 µm. These are overall ranges, not matched
+conditions for a particular observation. Although the experiment postdates
+Karr and crosses the transonic regime, its Reynolds numbers do not match the
+Re = 10,000 correlation; the authors also report rarefaction effects. The
+article's abstract does not provide individual matched points or their drag
+uncertainties, so no numerical validation is asserted from this comparison.
+
 For an additional transonic comparison, Usry and Wallace,
 [NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
 forebody axial-force coefficients for a fin-stabilized supercritical body of
