@@ -287,6 +287,44 @@ fn accumulated_contact_vector_matches_velocity_change_with_warm_start()
 }
 
 #[test]
+fn ccd_solver_returns_velocity_impulse_and_application_points()
+-> Result<(), Box<dyn std::error::Error>> {
+    let initial = Vec3::new(2.0, -1.0, 0.5);
+    let (bodies, mut manifolds) = ball_on_plane(initial);
+    let material = SolverMaterial {
+        restitution: 0.5,
+        static_friction: 0.6,
+        dynamic_friction: 0.5,
+    };
+    let contact = manifolds[0].manifold.point(0).ok_or("contact")?;
+    let point_a = bodies[0]
+        .state()
+        .transform()
+        .transform_point(contact.local_a);
+    let point_b = bodies[1]
+        .state()
+        .transform()
+        .transform_point(contact.local_b);
+    let manifold = manifolds.remove(0).manifold;
+    let (_, solved, output) = crate::collision::CollisionSystem::solve_ccd_contact_with_workspace(
+        &mut SolverWorkspace::default(),
+        *bodies[0].body(),
+        bodies[0].state(),
+        *bodies[1].body(),
+        bodies[1].state(),
+        manifold,
+        material,
+        super::CollisionConfig::default(),
+    )?;
+    let contact = output.point(0).ok_or("solved contact")?;
+    assert_eq!(contact.velocity_points, Some([point_a, point_b]));
+    let impulse = contact.velocity_impulse.ok_or("velocity impulse")?;
+    assert!((solved.linear_velocity() - initial - impulse).length() < 1e-12);
+    assert!(impulse.x.abs() > 0.0 && impulse.y > 0.0);
+    Ok(())
+}
+
+#[test]
 fn velocity_contact_points_precede_position_correction() -> Result<(), Box<dyn std::error::Error>> {
     let (mut bodies, mut manifolds) = ball_on_plane(-Vec3::Y * 2.0);
     let contact = manifolds[0].manifold.point(0).ok_or("contact")?;
