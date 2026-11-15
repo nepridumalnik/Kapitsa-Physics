@@ -223,8 +223,9 @@ with signs converted to the body-relative velocity convention used here.
 The caller selects the axis, centerline, smoothing radius and small-incidence
 limit and must establish that the geometry is slender and axisymmetric and that
 flow is steady and spatially uniform. Local Mach above 0.3, reverse flow at
-nonzero incidence, incidence outside the selected limit, and any nonzero body
-angular velocity are rejected. No pitch damping, wind-gradient derivative,
+nonzero incidence, incidence outside the selected limit, and body rotation are
+rejected, except for axial spin with exactly aligned local flow. For that
+axisymmetric case the normal load remains zero; this does not model roll drag. No pitch damping, wind-gradient derivative,
 separation, wave drag or transonic continuation is inferred. The sections are a
 snapshot and must be regenerated when geometry changes. They can be configured
 through the existing body or part hull APIs and are additive to other models.

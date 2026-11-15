@@ -27,11 +27,7 @@ impl PotentialCell {
         axial_speed: f64,
         crossflow: Vec3,
         cross_speed: f64,
-        angular_velocity: Vec3,
     ) -> Result<Vec3, HullError> {
-        if angular_velocity != Vec3::ZERO {
-            return Err(HullError::UnsupportedSlenderRotation);
-        }
         if cross_speed == 0.0 {
             return Ok(Vec3::ZERO);
         }
@@ -70,7 +66,8 @@ impl PotentialCell {
 /// `max_incidence` is the caller-selected small-angle limit in radians, strictly
 /// between zero and pi/2. Geometry and filter convergence must be established
 /// by the caller. The model assumes a slender axisymmetric body, uniform steady
-/// flow and no angular velocity; local Mach must not exceed 0.3. It does not
+/// flow and no angular velocity, except pure axial spin in aligned flow;
+/// local Mach must not exceed 0.3. It does not
 /// determine viscous resistance or wave drag. Source and return sections use
 /// stable body-local coordinates, independent of center of mass.
 ///
@@ -326,6 +323,15 @@ mod tests {
             section.evaluate(rotating),
             Err(HullError::UnsupportedSlenderRotation)
         ));
+        rotating.angular_velocity = Vec3::X;
+        assert_eq!(section.evaluate(rotating)?.force, Vec3::ZERO);
+        rotating.linear_velocity = Vec3::new(10.0, 0.0, 1.0);
+        assert!(matches!(
+            section.evaluate(rotating),
+            Err(HullError::UnsupportedSlenderRotation)
+        ));
+        rotating.linear_velocity = Vec3::ZERO;
+        assert_eq!(section.evaluate(rotating)?.force, Vec3::ZERO);
         assert_eq!(section.evaluate(flow(Vec3::X * 200.0)?)?.force, Vec3::ZERO);
         Ok(())
     }
