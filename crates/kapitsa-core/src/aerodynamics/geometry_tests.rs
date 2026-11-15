@@ -863,3 +863,59 @@ fn voxel_sections_configure_wave_drag_with_checked_axis() -> Result<(), Box<dyn 
     assert!((result.force.x + expected).abs() < expected * 1e-12);
     Ok(())
 }
+
+#[test]
+fn voxel_wave_drag_refines_on_slender_sears_haack_mesh() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::wave::{area_slopes_from_sections, wave_drag};
+    use std::f64::consts::PI;
+    let axial = 48_usize;
+    let radial = 32_usize;
+    let mut vertices = vec![Vec3::ZERO];
+    for i in 1..axial {
+        let x = i as f64 / axial as f64;
+        let radius = 0.1 * (4.0 * x * (1.0 - x)).powf(0.75);
+        for j in 0..radial {
+            let angle = 2.0 * PI * j as f64 / radial as f64;
+            vertices.push(Vec3::new(x, radius * angle.cos(), radius * angle.sin()));
+        }
+    }
+    let tail = vertices.len();
+    vertices.push(Vec3::X);
+    let mut triangles = Vec::new();
+    for j in 0..radial {
+        let next = (j + 1) % radial;
+        triangles.push([0, 1 + next, 1 + j]);
+        for i in 0..axial - 2 {
+            let a = 1 + i * radial + j;
+            let b = 1 + i * radial + next;
+            let c = a + radial;
+            let d = b + radial;
+            triangles.push([a, b, c]);
+            triangles.push([b, d, c]);
+        }
+        let a = 1 + (axial - 2) * radial + j;
+        let b = 1 + (axial - 2) * radial + next;
+        triangles.push([a, b, tail]);
+    }
+    let mesh = TriangleMesh::new(vertices, triangles)?;
+    let volume = PI * 0.01 * 8.0 * 3.0 * PI / 128.0;
+    let theoretical = 256.0 * volume * volume / PI;
+    let mut measured = Vec::new();
+    for (h, radius) in [(0.05, 1), (0.025, 2), (0.0125, 4)] {
+        let mut settings = config(h);
+        settings.max_work = 100_000_000;
+        settings.max_cells = 1_000_000;
+        let geometry = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], settings)?;
+        let slopes = area_slopes_from_sections(&geometry.sections()[0], h, radius)?;
+        measured.push(wave_drag(&slopes, 1.0, 2.0, 1.0)?);
+    }
+    let errors: Vec<_> = measured
+        .iter()
+        .map(|value| (value - theoretical).abs())
+        .collect();
+    assert!(
+        errors[2] < errors[1] && errors[1] < errors[0] && errors[2] < theoretical * 0.2,
+        "expected={theoretical}, measured={measured:?}"
+    );
+    Ok(())
+}
