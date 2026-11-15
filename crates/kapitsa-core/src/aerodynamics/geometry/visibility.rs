@@ -115,7 +115,21 @@ fn normalize(values: [f64; 3]) -> Result<[f64; 3], GeometryError> {
 }
 
 pub(super) fn distance(values: [f64; 3], point: Vec3) -> f64 {
-    (values[1] - values[0]).mul_add(point.x, (values[2] - values[0]).mul_add(point.y, values[0]))
+    // Evaluate the barycentric form with compensated products and sums.
+    // This reduces cancellation but does not establish an exact sign bound.
+    let x = values[1] - values[0];
+    let y = values[2] - values[0];
+    let xp = x * point.x;
+    let yp = y * point.y;
+    let xr = x.mul_add(point.x, -xp);
+    let yr = y.mul_add(point.y, -yp);
+    let sum = values[0] + xp;
+    let v = sum - values[0];
+    let residual = (values[0] - (sum - v)) + (xp - v);
+    let result = sum + yp;
+    let v = result - sum;
+    let residual = residual + ((sum - (result - v)) + (yp - v));
+    result + (residual + xr + yr)
 }
 
 impl Shadow {
@@ -319,14 +333,11 @@ mod tests {
     use crate::aerodynamics::geometry::GeometryOwner;
 
     #[test]
-    // Diagnostic of the current limitation, not a desired classification.
-    fn affine_distance_can_round_a_positive_value_to_zero() {
-        // Exact affine value is 2 * offset, although the nested evaluation
-        // first rounds -1 + 2 * offset to -1.
+    fn affine_distance_preserves_small_positive_value_through_cancellation() {
+        // Exact affine value is 2 * offset.
         const OFFSET: f64 = 1.0 / ((1u64 << 55) as f64);
         let point = Vec3::new(0.5, OFFSET, 0.0);
-        assert_eq!(distance([-1.0, 1.0, 1.0], point), 0.0);
-        assert!(2.0 * point.y > 0.0);
+        assert_eq!(distance([-1.0, 1.0, 1.0], point), 2.0 * OFFSET);
     }
 
     #[test]
