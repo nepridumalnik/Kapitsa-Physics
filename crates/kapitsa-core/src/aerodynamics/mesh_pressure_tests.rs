@@ -126,6 +126,42 @@ fn potential_sphere_collider_front_patches_follow_analytic_cp() {
 }
 
 #[test]
+fn potential_cylinder_accepts_tessellated_sides_and_rejects_caps() {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Cylinder, Shape},
+    };
+    let collider = Collider::new(
+        Shape::Cylinder(Cylinder::new(-Vec3::Z, Vec3::Z, 1.0).unwrap()),
+        Transform::identity(),
+    );
+    let mesh = collider_mesh([&collider], ColliderTessellation::new(16, 8, 1000).unwrap()).unwrap();
+    let state = PressureFlow {
+        linear_velocity: Vec3::X * 20.0,
+        ..flow()
+    };
+    let mut sides = 0;
+    let mut caps = 0;
+    for face in mesh.triangles() {
+        let [a, b, c] = face.map(|index| mesh.vertices()[index]);
+        let cross = (b - a).cross(c - a);
+        let patch = PressurePatch::new((a + b + c) / 3.0, cross, cross.length() * 0.5).unwrap();
+        if patch.normal().dot(Vec3::Z).abs() > 0.5 {
+            assert_eq!(
+                patch.evaluate_potential_cylinder(state, Vec3::Z),
+                Err(PressureError::InvalidPatch)
+            );
+            caps += 1;
+        } else {
+            assert!(patch.evaluate_potential_cylinder(state, Vec3::Z).is_ok());
+            sides += 1;
+        }
+    }
+    assert!(sides > 0 && caps > 0);
+}
+
+#[test]
 fn collider_sphere_and_cylinder_converge_to_newtonian_integrals() {
     use crate::{
         aerodynamics::colliders::{ColliderTessellation, collider_mesh},

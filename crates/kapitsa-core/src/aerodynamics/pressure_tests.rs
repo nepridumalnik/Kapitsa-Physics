@@ -115,6 +115,68 @@ fn potential_sphere_matches_inviscid_stagnation_and_equator() {
 }
 
 #[test]
+fn potential_cylinder_restricts_geometry_and_motion() {
+    let state = PressureFlow {
+        linear_velocity: Vec3::X * 20.0,
+        ..flow()
+    };
+    let front = PressurePatch::new(Vec3::X, Vec3::X, 1.0).unwrap();
+    let side = PressurePatch::new(Vec3::Y, Vec3::Y, 1.0).unwrap();
+    let cap = PressurePatch::new(Vec3::Z, Vec3::Z, 1.0).unwrap();
+    assert_eq!(
+        front
+            .evaluate_potential_cylinder(state, Vec3::Z)
+            .unwrap()
+            .force,
+        -Vec3::X * 200.0
+    );
+    assert_eq!(
+        side.evaluate_potential_cylinder(state, Vec3::Z)
+            .unwrap()
+            .force,
+        Vec3::Y * 600.0
+    );
+    assert_eq!(
+        cap.evaluate_potential_cylinder(state, Vec3::Z),
+        Err(PressureError::InvalidPatch)
+    );
+    assert_eq!(
+        front.evaluate_potential_cylinder(state, Vec3::ZERO),
+        Err(PressureError::InvalidPatch)
+    );
+    assert_eq!(
+        front.evaluate_potential_cylinder(
+            PressureFlow {
+                linear_velocity: Vec3::new(10.0, 0.0, 1.0),
+                ..state
+            },
+            Vec3::Z
+        ),
+        Err(PressureError::InvalidMotion)
+    );
+    assert_eq!(
+        front.evaluate_potential_cylinder(
+            PressureFlow {
+                angular_velocity: Vec3::Z,
+                ..state
+            },
+            Vec3::Z
+        ),
+        Err(PressureError::InvalidMotion)
+    );
+    assert_eq!(
+        front.evaluate_potential_cylinder(
+            PressureFlow {
+                linear_velocity: Vec3::X * 20.01,
+                ..state
+            },
+            Vec3::Z
+        ),
+        Err(PressureError::UnsupportedMach)
+    );
+}
+
+#[test]
 fn explicit_base_pressure_has_correct_force_moment_and_domain() {
     let base = BasePressure::new(-0.4, 5.0, 10.0).unwrap();
     let patch = PressurePatch::new(Vec3::Y, -Vec3::X, 2.0).unwrap();

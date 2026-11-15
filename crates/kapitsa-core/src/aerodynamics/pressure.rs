@@ -151,6 +151,10 @@ pub struct SurfacePressure {
 const POTENTIAL_FLOW_MAX_MACH: f64 = 0.2;
 /// Squared surface-speed ratio at the equator of an ideal sphere.
 const SPHERE_EQUATORIAL_SPEED_RATIO_SQUARED: f64 = 2.25;
+/// Squared surface-speed ratio at the side of an ideal circular cylinder.
+const CYLINDER_SIDE_SPEED_RATIO_SQUARED: f64 = 4.0;
+/// Dimensionless tolerance for checking perpendicular unit vectors.
+const POTENTIAL_CYLINDER_ORTHOGONALITY_TOLERANCE: f64 = 1e-10;
 
 impl SurfacePressure {
     pub fn new(cp: f64, min_mach: f64, max_mach: f64) -> Result<Self, PressureError> {
@@ -257,6 +261,65 @@ impl PressurePatch {
             .ok_or(PressureError::ArithmeticOverflow)?
             .clamp(-1.0, 1.0);
         let cp = 1.0 - SPHERE_EQUATORIAL_SPEED_RATIO_SQUARED * (1.0 - cosine * cosine);
+        self.evaluate_surface(
+            flow,
+            SurfacePressure::new(cp, 0.0, POTENTIAL_FLOW_MAX_MACH)?,
+        )
+    }
+
+    /// Inviscid incompressible potential flow around an infinitely long circular
+    /// cylinder. `axis` and this side patch's normal are body-local. The caller
+    /// must establish that the patch belongs to the lateral surface of an isolated
+    /// cylinder; end caps, finite-length effects, separation and wake are excluded.
+    /// Only crossflow and zero angular velocity are supported. Mach <= 0.2 is an
+    /// approximation policy, not an experimental accuracy guarantee. Cp equals
+    /// 1 - 4 sin²(theta), with theta measured from a stagnation point.
+    pub fn evaluate_potential_cylinder(
+        &self,
+        flow: PressureFlow,
+        axis: Vec3,
+    ) -> Result<PressureWrench, PressureError> {
+        let axis = axis.try_normalize().ok_or(PressureError::InvalidPatch)?;
+        if self
+            .normal
+            .checked_dot(axis)
+            .ok_or(PressureError::ArithmeticOverflow)?
+            .abs()
+            > POTENTIAL_CYLINDER_ORTHOGONALITY_TOLERANCE
+        {
+            return Err(PressureError::InvalidPatch);
+        }
+        if flow.angular_velocity != Vec3::ZERO {
+            return Err(PressureError::InvalidMotion);
+        }
+        let zero = SurfacePressure::new(0.0, 0.0, POTENTIAL_FLOW_MAX_MACH)?;
+        let zero_load = self.evaluate_surface(flow, zero)?;
+        let relative = flow
+            .linear_velocity
+            .checked_sub(flow.atmosphere.wind_velocity())
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        let speed = relative
+            .checked_length()
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        if speed == 0.0 || self.area == 0.0 || flow.atmosphere.density() == 0.0 {
+            return Ok(zero_load);
+        }
+        let direction = relative / speed;
+        let world_axis = flow.transform.transform_vector(axis);
+        if world_axis
+            .checked_dot(direction)
+            .ok_or(PressureError::ArithmeticOverflow)?
+            .abs()
+            > POTENTIAL_CYLINDER_ORTHOGONALITY_TOLERANCE
+        {
+            return Err(PressureError::InvalidMotion);
+        }
+        let normal = flow.transform.transform_vector(self.normal);
+        let cosine = normal
+            .checked_dot(direction)
+            .ok_or(PressureError::ArithmeticOverflow)?
+            .clamp(-1.0, 1.0);
+        let cp = 1.0 - CYLINDER_SIDE_SPEED_RATIO_SQUARED * (1.0 - cosine * cosine);
         self.evaluate_surface(
             flow,
             SurfacePressure::new(cp, 0.0, POTENTIAL_FLOW_MAX_MACH)?,
