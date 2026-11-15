@@ -831,13 +831,20 @@ impl PreparedGeometry {
     }
 
     /// Transforms source triangles with a checked allocation and work ceiling.
-    /// Each triangle costs four units (three vertices and one normal/area).
+    /// Each instance costs one unit and each triangle costs four units
+    /// (three vertices and one normal/area).
     pub fn surface_triangles(
         instances: &[GeometryInstance<'_>],
         max_work: usize,
     ) -> Result<Vec<SurfaceTriangle>, GeometryError> {
+        check_surface_work(Some(instances.len()), max_work)?;
         let total = surface_triangle_count(instances)?;
-        check_surface_work(total.checked_mul(4), max_work)?;
+        check_surface_work(
+            total
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(instances.len())),
+            max_work,
+        )?;
         let mut triangles = Vec::new();
         triangles
             .try_reserve_exact(total)

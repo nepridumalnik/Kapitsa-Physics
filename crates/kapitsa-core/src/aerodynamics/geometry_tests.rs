@@ -656,6 +656,23 @@ fn patch_budget_is_checked_before_transform_and_allocation() {
 }
 
 #[test]
+fn surface_triangle_budget_includes_instance_visits() {
+    let mesh = cube();
+    let instances = [instance(&mesh, Vec3::ZERO), instance(&mesh, Vec3::X)];
+    let work = 2 + 4 * 2 * 12;
+    assert_eq!(
+        PreparedGeometry::surface_triangles(&instances, work - 1),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    assert_eq!(
+        PreparedGeometry::surface_triangles(&instances, work)
+            .unwrap()
+            .len(),
+        24
+    );
+}
+
+#[test]
 fn patch_budget_includes_unshadowed_partition_output() -> Result<(), Box<dyn std::error::Error>> {
     let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])?;
     let instances = [instance(&mesh, Vec3::ZERO)];
