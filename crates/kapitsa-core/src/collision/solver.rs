@@ -140,6 +140,16 @@ impl SolverPoint {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static NONZERO_CONTACT_WARM_STARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_nonzero_contact_warm_starts() -> usize {
+    NONZERO_CONTACT_WARM_STARTS.with(|count| count.replace(0))
+}
+
 enum ColoredConstraintKind {
     Contact(SolverManifold),
     Joint(JointConstraint),
@@ -2712,6 +2722,10 @@ impl SolverWorkspace {
                 point.position_b,
                 impulse,
             )?;
+            #[cfg(test)]
+            if impulse != Vec3::ZERO {
+                NONZERO_CONTACT_WARM_STARTS.with(|count| count.set(count.get() + 1));
+            }
         }
         Ok(())
     }

@@ -56,7 +56,7 @@ fn persistent_friction_contact_impulse_matches_step_momentum_change()
         Transform::new(Vec3::new(-0.54, 0.0, 0.0), Quat::IDENTITY)?,
         MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
     )?;
-    body.set_linear_velocity(Vec3::new(1.0, 3.0, 0.0))?;
+    body.set_linear_velocity(Vec3::new(1.0, 0.01, 0.0))?;
     let body = world.add_body(body)?;
     let part = world.enable_cluster(body)?;
     let sphere = world.add_part_collider(part, collider(0.5))?;
@@ -65,13 +65,21 @@ fn persistent_friction_contact_impulse_matches_step_momentum_change()
     }
     let force = Vec3::X * 100.0;
     world.add_force_source_for_part(part, Vec3::ZERO, force)?;
+    let mut warm_starts = 0;
     for step in 0..3 {
         let before = world
             .body(body)
             .ok_or(WorldError::InvalidBodyId)?
             .state()
             .linear_velocity();
+        crate::collision::solver::take_nonzero_contact_warm_starts();
         world.step(DT)?;
+        let applied_warm_starts = crate::collision::solver::take_nonzero_contact_warm_starts();
+        if step == 0 {
+            assert_eq!(applied_warm_starts, 0);
+        } else {
+            warm_starts += applied_warm_starts;
+        }
         assert_eq!(world.contact_impulses_omitted_points(), 0);
         let mut impulse = Vec3::ZERO;
         let mut count = 0;
@@ -106,6 +114,7 @@ fn persistent_friction_contact_impulse_matches_step_momentum_change()
             assert!(impulse.y < 0.0);
         }
     }
+    assert!(warm_starts > 0, "no nonzero cached impulse was applied");
     Ok(())
 }
 
