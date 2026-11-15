@@ -92,6 +92,16 @@ fn prepared_cube_has_opposing_drag_and_symmetric_com_moment() {
     close(result.force, -Vec3::X * 1_000_000.0);
     close(result.moment, Vec3::ZERO);
     assert!(result.force.dot(state.linear_velocity) < 0.0);
+
+    // A closed component fully inside the hull must not add pressure loads.
+    let mut vertices = mesh.vertices().to_vec();
+    vertices.extend(mesh.vertices().iter().map(|&v| v * 0.5 + Vec3::splat(0.25)));
+    let mut triangles = mesh.triangles().to_vec();
+    triangles.extend(mesh.triangles().iter().map(|t| t.map(|index| index + 8)));
+    let nested = TriangleMesh::new(vertices, triangles).unwrap();
+    let nested_result = evaluate_prepared_mesh(&prepare(&nested, Vec3::X), state).unwrap();
+    close(nested_result.force, result.force);
+    close(nested_result.moment, result.moment);
 }
 
 #[test]

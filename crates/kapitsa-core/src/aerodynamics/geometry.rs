@@ -170,6 +170,7 @@ struct TriangleGrid {
     dimensions: [usize; 3],
     offsets: Vec<usize>,
     triangles: Vec<usize>,
+    build_work: usize,
 }
 
 impl TriangleGrid {
@@ -191,13 +192,13 @@ impl TriangleGrid {
         let extent = max - min;
         let target = (triangles.len() as f64).cbrt().ceil().clamp(1.0, 16.0) as usize;
         let dimensions = components(extent).map(|value| if value == 0.0 { 1 } else { target });
-        let cell_size = components(extent).map(|value| {
+        let cell_size = vector(components(extent).map(|value| {
             if value == 0.0 {
                 1.0
             } else {
                 value / target as f64
             }
-        });
+        }));
         let cell_count = dimensions
             .into_iter()
             .try_fold(1usize, |n, d| n.checked_mul(d))
@@ -237,8 +238,10 @@ impl TriangleGrid {
                 )
                 .ok_or(GeometryError::WorkBudgetExceeded)?;
         }
+        let sort_factor = usize::BITS as usize - entry_count.leading_zeros() as usize + 1;
         let build_work = entry_count
-            .checked_add(cell_count)
+            .checked_mul(sort_factor)
+            .and_then(|work| work.checked_add(cell_count))
             .ok_or(GeometryError::WorkBudgetExceeded)?;
         check_surface_work(Some(build_work), max_work)?;
         let mut entries = Vec::new();
@@ -292,6 +295,7 @@ impl TriangleGrid {
             dimensions,
             offsets,
             triangles,
+            build_work,
         })
     }
 
@@ -318,15 +322,17 @@ impl TriangleGrid {
             components(source_max).map(|value| if value.is_finite() { value } else { f64::NAN });
         let mut swept_min = lower;
         let mut swept_max = upper;
+        let direction = components(direction);
+        let global_max = components(global_max);
+        let origin = components(self.origin);
         for axis in 0..3 {
             if direction[axis] > 0.0 {
                 swept_max[axis] = global_max[axis];
             }
             if direction[axis] < 0.0 {
-                swept_min[axis] = self.origin[axis];
+                swept_min[axis] = origin[axis];
             }
         }
-        let origin = components(self.origin);
         let cell_size = components(self.cell_size);
         let to_cell = |point: [f64; 3]| -> Result<[usize; 3], GeometryError> {
             if !point.iter().all(|value| value.is_finite()) {
@@ -349,6 +355,10 @@ impl TriangleGrid {
         for z in lower[2]..=upper[2] {
             for y in lower[1]..=upper[1] {
                 for x in lower[0]..=upper[0] {
+                    query_work = query_work
+                        .checked_add(1)
+                        .ok_or(GeometryError::WorkBudgetExceeded)?;
+                    check_surface_work(Some(query_work), max_work)?;
                     let range = index([x, y, z], self.dimensions);
                     for &triangle in &self.triangles[self.offsets[range]..self.offsets[range + 1]] {
                         query_work = query_work
@@ -876,7 +886,7 @@ impl PreparedGeometry {
             .checked_mul(16)
             .and_then(|n| n.checked_mul(usize::BITS as usize - total.leading_zeros() as usize + 1));
         check_surface_work(preprocessing, max_work)?;
-        let mut work = preprocessing.ok_or(GeometryError::WorkBudgetExceeded)?;
+        let work = preprocessing.ok_or(GeometryError::WorkBudgetExceeded)?;
         let Some(reference) = instances
             .iter()
             .min_by(|a, b| {
@@ -980,7 +990,7 @@ impl PreparedGeometry {
         });
         let grid = TriangleGrid::build(&triangles, max_work.saturating_sub(work))?;
         work = work
-            .checked_add(grid.triangles.len())
+            .checked_add(grid.build_work)
             .ok_or(GeometryError::WorkBudgetExceeded)?;
         check_surface_work(Some(work), max_work)?;
         let mut marks = allocated(triangles.len(), 0u32)?;

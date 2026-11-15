@@ -521,6 +521,45 @@ fn wind_accelerates_a_stationary_body() {
 }
 
 #[test]
+fn altitude_wind_profile_changes_world_drag() {
+    use crate::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(Atmosphere::Sphere(
+        SphericalAtmosphere::builder()
+            .reference_radius(100.0)
+            .reference_density(1.0)
+            .height(100.0)
+            .profile(DensityProfile::Exponential {
+                scale_height: 1000.0,
+            })
+            .wind_at_top(Vec3::X * 10.0)
+            .build()
+            .unwrap(),
+    ));
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+    let mut ids = Vec::new();
+    for altitude in [100.0, 150.0] {
+        let transform = Transform::new(Vec3::Y * altitude, kapitsa_math::Quat::IDENTITY).unwrap();
+        let id = world
+            .add_body(RigidBody::new_dynamic(transform, mass).unwrap())
+            .unwrap();
+        world
+            .set_aerodynamics(
+                id,
+                Aerodynamics::Simple(AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO).unwrap()),
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    world.step(0.1).unwrap();
+    assert_eq!(
+        world.body(ids[0]).unwrap().state().linear_velocity(),
+        Vec3::ZERO
+    );
+    assert!(world.body(ids[1]).unwrap().state().linear_velocity().x > 0.0);
+}
+
+#[test]
 fn rotating_body_experiences_drag_at_an_offset() {
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
     let mut rigid_body = RigidBody::new_dynamic(Transform::identity(), mass).unwrap();
@@ -627,6 +666,51 @@ fn geometry_modes_preserve_mesh_in_vacuum_and_reject_air_atomically() {
                 );
                 assert_eq!(world.body(id).unwrap().motion(), before);
             }
+        }
+    }
+}
+
+#[test]
+fn mesh_uses_atmosphere_sound_speed_in_world_paths() {
+    use crate::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
+    use crate::shape::TriangleMesh;
+    for sharded in [false, true] {
+        for cluster in [false, true] {
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).unwrap();
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass).unwrap();
+            body.set_linear_velocity(Vec3::X * 100.0).unwrap();
+            body.set_aerodynamics(Aerodynamics::Mesh(
+                TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]]).unwrap(),
+            ));
+            let mut world = PhysicsWorld::new();
+            let id = world.add_body(body).unwrap();
+            if cluster {
+                world.enable_cluster(id).unwrap();
+            }
+            world.set_atmosphere(Atmosphere::Sphere(
+                SphericalAtmosphere::builder()
+                    .reference_radius(100.0)
+                    .reference_density(1.0)
+                    .height(100.0)
+                    .profile(DensityProfile::Exponential {
+                        scale_height: 100.0,
+                    })
+                    .sound_speed_profile(10.0, 20.0)
+                    .build()
+                    .unwrap(),
+            ));
+            let result = if sharded {
+                world.step_with_shards(
+                    0.001,
+                    &mut vec![Vec::new(); 2],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+            } else {
+                world.step(0.001)
+            };
+            assert!(result.is_ok(), "{result:?}");
+            assert!(world.body(id).unwrap().state().linear_velocity().x < 100.0);
         }
     }
 }
@@ -1402,7 +1486,9 @@ fn collider_pressure_cache_invalidation_and_sharded_parity()
                 .cache
                 .last_prepared()
                 .ok_or("prepared")?
-                .1 as *const _;
+                .1
+                .occupancy()
+                .as_ptr();
             let unrelated = world.add_body(RigidBody::new_static(Transform::identity()))?;
             world.set_aerodynamics(unrelated, Aerodynamics::None)?;
             let current_transform = world.body(id).ok_or("body")?.state().transform();
@@ -1439,7 +1525,9 @@ fn collider_pressure_cache_invalidation_and_sharded_parity()
                     .cache
                     .last_prepared()
                     .ok_or("prepared")?
-                    .1 as *const _
+                    .1
+                    .occupancy()
+                    .as_ptr()
             );
             let previous_identity = world
                 .bodies

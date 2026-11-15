@@ -42,7 +42,7 @@ References for geometric concepts: [Voxel](https://en.wikipedia.org/wiki/Voxel),
 
 ## World Mesh and Colliders integration
 
-Non-cluster dynamic bodies support `Aerodynamics::Mesh` and `Aerodynamics::Colliders` through `PreparedGeometryCache`, direction-dependent exposed physical patches, and the pressure evaluator. The current pressure policy requires Mach >= 5 and samples primary atmosphere at the COM. `PhysicsWorld::set_mesh_sound_speed` and `SimulationBuilder::mesh_sound_speed` configure a finite positive uniform sound speed in m/s; callers must match their atmospheric medium. The compatibility default remains 340 m/s and is not inferred from density. Both Tokio and Rayon builders apply the configured value before service start. Additional explicit surfaces sample their own positions even when the COM is outside the atmosphere. Existing cluster bodies use explicit per-part geometry configuration. Converting a body with Mesh or Colliders into a cluster transfers its primary geometry model to the root part.
+Non-cluster dynamic bodies support `Aerodynamics::Mesh` and `Aerodynamics::Colliders` through `PreparedGeometryCache`, direction-dependent exposed physical patches, and the pressure evaluator. The current pressure policy requires Mach >= 5 and samples primary atmosphere at the COM. An optional atmospheric sound-speed profile supplies local values; otherwise `PhysicsWorld::set_mesh_sound_speed` and `SimulationBuilder::mesh_sound_speed` configure the uniform fallback in m/s. The fallback defaults to 340 m/s and is not inferred from density. Both Tokio and Rayon builders apply it before service start. Additional explicit surfaces sample their own positions even when the COM is outside the atmosphere. Existing cluster bodies use explicit per-part geometry configuration. Converting a body with Mesh or Colliders into a cluster transfers its primary geometry model to the root part.
 
 Each geometry-bearing primary configuration has a private shared identity token. Replacing a model or the whole `RigidBody` changes identity; world motion, COM edits and edits to other bodies do not. Prepared world entries compare identity before use and discard both the cache and collider-derived mesh on mismatch. The token remains alive in the cached entry, preventing allocator-address ABA. Collider topology and tessellation mutations retain their explicit per-body invalidation. Global motion `body_revision` is no longer used as geometry identity.
 
@@ -62,11 +62,15 @@ One body-wide `ColliderTessellation` applies to collider parts, including its ag
 
 A preparation entry compares instance membership, mesh identity and part-local transforms. Changed unions are prepared in temporary entries and published only on success. Failed preparation does not apply partial forces. Collider transforms are already body-local after conversion and are not applied twice. When collider sources are present, the existing 1e-10 positional welding tolerance is used for closure checks across all instances; it does not move pressure vertices, change source normals or offset shadow rays. Geometry failures retain their `GeometryError` through `AerodynamicsError::Geometry` and its error source.
 
-Part pressure currently retains Mach >= 5, explicit uniform sound speed, COM atmosphere sampling and centroid rotational-flow quadrature. Vacuum skips preparation. Tests cover ordinary/sharded paths, mixed Mesh/Colliders assemblies, merge/split, overlap ownership, triangle budgets, configuration replacement, preparation errors, cleanup, and runtime commands on Tokio/Rayon. General physical equivalence to FAR is not established; the explicit subsonic hull and wing models below do not supply transonic hull physics.
+Part pressure currently retains Mach >= 5, COM atmosphere sampling and centroid rotational-flow quadrature. Vacuum skips preparation. Tests cover ordinary/sharded paths, mixed Mesh/Colliders assemblies, merge/split, overlap ownership, triangle budgets, configuration replacement, preparation errors, cleanup, and runtime commands on Tokio/Rayon. General physical equivalence to FAR is not established; the explicit subsonic hull and wing models below do not supply transonic hull physics.
 
 ## Conventions
 
 Use SI units. Let `v = v_COM + omega × (x - x_COM) - wind(x)` be the body's velocity relative to the atmosphere at a force application point. The incoming fluid velocity is `-v`. Surface normals point outwards. Forces and torques are accumulated in world coordinates; geometry is prepared in body-local coordinates, independent of the center of mass.
+
+Spherical atmospheres optionally interpolate world-space wind linearly with altitude between the reference radius and outer radius using `wind` and `wind_at_top`; values outside this interval clamp to the nearest endpoint. The default is constant wind. Explicit surfaces sample their own locations; mesh pressure samples wind at the COM for the whole mesh. The simple-surface timestep limiter also uses COM wind, so a wind gradient across a body is an approximation there. This profile does not model time variation or atmospheric rotation.
+
+`sound_speed_profile(reference, top)` optionally interpolates positive sound speeds over the same altitude interval, clamped at both ends. Hull and wing loads sample it locally; mesh pressure uses the COM sample. This is an input profile, not a temperature or gas-composition model.
 
 For distributed loads, `F = sum(F_i)` and `tau_COM = sum((x_i - x_COM) × F_i)`. A force and a torque are the authoritative output; a unique center of pressure need not exist.
 
@@ -90,7 +94,7 @@ crossflow and wetted areas, axial and crossflow drag coefficients, and optional
 areas and coefficients finite and nonnegative. Section origins are load points
 in the stable body frame, not offsets from COM. Every point samples its own
 atmosphere; point velocity includes `omega × r` and local wind. Sound speed uses
-the world's existing explicit uniform setting. Cluster conversion moves primary Hull
+the local atmospheric profile when configured, otherwise the world fallback. Cluster conversion moves primary Hull
 sections to the identity root part. `set_part_aerodynamic_hull(part, sections)` and
 `part_aerodynamic_hull(part)` configure/query sections in a stable part-local frame.
 They are stored with the part, alongside explicit wings, and follow its ownership
@@ -227,7 +231,7 @@ For nonzero density, patch area and relative speed, Mach below 5 returns `Unsupp
 
 `PreparedGeometry::surface_triangles(instances, max_work)` transforms source triangles while preserving physical normals. `exposed_surface_patches` partitions windward triangles along the projected edges and depth planes of candidate blockers, then tests the resulting polygon triangles upstream. Coplanar overlap is assigned once, in canonical owner/vertex order. Fully visible source triangles retain their original centroid sampling. Partially visible polygons are triangulated for area and first-moment integration under uniform pressure.
 
-The shadow construction uses adaptive orientation predicates from the MIT/Apache-2.0 `robust` crate. Clipping is performed in the source triangle's affine domain, with an area-partition consistency check. Unsupported predicate ranges and inconsistent partitions return `PrecisionLoss`. Constructed intersections still use floating-point arithmetic; this is not an exact computational-geometry kernel. `epsilon` remains an API compatibility parameter and never offsets rays or ignores nearby blockers. The work budget checks the quadratic preflight, a preprocessing estimate, clipping vertex visits and final shadow tests. Exceeding it rejects the result, rather than returning partial loads. Vector growth uses fallible reservation. A complete bound for every intermediate operation still requires audit before this preparation can be accepted as production-complete.
+The shadow construction uses adaptive orientation predicates from the MIT/Apache-2.0 `robust` crate. Clipping is performed in the source triangle's affine domain, with an area-partition consistency check. Unsupported predicate ranges and inconsistent partitions return `PrecisionLoss`. Constructed intersections still use floating-point arithmetic; this is not an exact computational-geometry kernel. `epsilon` remains an API compatibility parameter and never offsets rays or ignores nearby blockers. The work budget checks the quadratic preflight, a preprocessing estimate, grid construction and sorting estimates, visited grid cells and entries, clipping vertex visits and final shadow tests. Exceeding it rejects the result, rather than returning partial loads. Vector growth uses fallible reservation. A complete bound for every intermediate operation still requires audit before this preparation can be accepted as production-complete.
 
 `kapitsa::aerodynamics::pressure::evaluate_prepared_mesh(&PreparedSurfacePatches, PressureFlow)` evaluates each prepared physical patch through `PressurePatch` and returns the checked sum of world-space force and COM moment. It allocates nothing, mutates nothing and returns an error (not a partial wrench) if any patch evaluation or accumulation fails. A single explicit atmospheric state and sound speed are used for the whole set; no atmosphere sampling or per-owner load distribution occurs. Empty sets return zero after motion and sound-speed validation. The existing patch force convention and Mach >= 5 policy are preserved, without a new pressure closure.
 
@@ -252,7 +256,7 @@ this model for a body's primary loads in ordinary and sharded world steps.
 `Aerodynamics::Wings(Vec<WingSurface>)` evaluates multiple explicitly placed
 wings; an empty list contributes no loads. Each wing samples its own atmosphere.
 Atmosphere is sampled at the wing application point; sound speed uses the
-world's explicit uniform setting. Errors retain `AerodynamicsError::Wing`
+local profile when configured, otherwise the world fallback. Errors retain `AerodynamicsError::Wing`
 and step rollback semantics. Cluster conversion transfers primary wings into
 root-part ownership; part-local application points remain stable as COM changes.
 The wing does not exclude geometry from hull loads, and timestep convergence

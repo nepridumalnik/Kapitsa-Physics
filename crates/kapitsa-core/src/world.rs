@@ -1716,7 +1716,7 @@ impl PhysicsWorld {
             let patches = mesh_patches.ok_or_else(error)?;
             let flow = crate::aerodynamics::pressure::PressureFlow {
                 atmosphere: primary_atmosphere,
-                sound_speed: mesh_sound_speed,
+                sound_speed: primary_atmosphere.sound_speed().unwrap_or(mesh_sound_speed),
                 transform: body.state().transform(),
                 center_of_mass: body
                     .state()
@@ -1748,7 +1748,7 @@ impl PhysicsWorld {
                 let wrench = section
                     .evaluate(crate::aerodynamics::pressure::PressureFlow {
                         atmosphere: state,
-                        sound_speed: mesh_sound_speed,
+                        sound_speed: state.sound_speed().unwrap_or(mesh_sound_speed),
                         transform,
                         center_of_mass: body.physics().mass().ok_or_else(error)?.center_of_mass(),
                         linear_velocity: body.state().linear_velocity(),
@@ -1799,7 +1799,7 @@ impl PhysicsWorld {
             if atmosphere.density() != 0.0 {
                 let flow = crate::aerodynamics::pressure::PressureFlow {
                     atmosphere,
-                    sound_speed: mesh_sound_speed,
+                    sound_speed: atmosphere.sound_speed().unwrap_or(mesh_sound_speed),
                     transform,
                     center_of_mass: local_center,
                     linear_velocity: body.state().linear_velocity(),
@@ -1856,7 +1856,7 @@ impl PhysicsWorld {
                 let wrench = section
                     .evaluate(crate::aerodynamics::pressure::PressureFlow {
                         atmosphere: state,
-                        sound_speed: mesh_sound_speed,
+                        sound_speed: state.sound_speed().unwrap_or(mesh_sound_speed),
                         transform: part_transform,
                         center_of_mass: part_com,
                         linear_velocity: body.state().linear_velocity(),
@@ -1940,6 +1940,10 @@ impl PhysicsWorld {
         {
             return Ok(());
         }
+        let center_wind = atmosphere
+            .state_at(center)
+            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?
+            .wind_velocity();
         let mut scale = 1.0_f64;
         if let Some(dt) = dt {
             let mass = body.physics().mass().ok_or_else(error)?;
@@ -1958,7 +1962,7 @@ impl PhysicsWorld {
             let relative_velocity = body
                 .state()
                 .linear_velocity()
-                .checked_sub(atmosphere.wind_velocity())
+                .checked_sub(center_wind)
                 .ok_or_else(error)?;
             let power = relative_velocity
                 .checked_dot(drag)
@@ -2021,7 +2025,7 @@ impl PhysicsWorld {
             let relative_velocity = body
                 .state()
                 .linear_velocity()
-                .checked_sub(atmosphere.wind_velocity())
+                .checked_sub(center_wind)
                 .and_then(|velocity| {
                     drag.checked_mul_scalar(scale * dt / mass.mass())
                         .and_then(|change| velocity.checked_add(change))

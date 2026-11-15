@@ -23,13 +23,6 @@ impl Atmosphere {
             Self::Sphere(sphere) => sphere.state_at(point),
         }
     }
-
-    pub(crate) fn wind_velocity(self) -> Vec3 {
-        match self {
-            Self::Vacuum => Vec3::ZERO,
-            Self::Sphere(sphere) => sphere.wind,
-        }
-    }
 }
 
 /// Density decay above the reference radius; heights are in metres.
@@ -42,7 +35,7 @@ pub enum DensityProfile {
     },
 }
 
-/// A spherical density field with constant wind, configured with
+/// A spherical density field with constant or altitude-dependent wind, configured with
 /// [`SphericalAtmosphere::builder`]. Distances are measured from its world-space centre.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SphericalAtmosphere {
@@ -54,6 +47,8 @@ pub struct SphericalAtmosphere {
     profile: DensityProfile,
     smooth_edge: Option<f64>,
     wind: Vec3,
+    wind_at_top: Option<Vec3>,
+    sound_speed_profile: Option<(f64, f64)>,
 }
 
 impl SphericalAtmosphere {
@@ -73,10 +68,20 @@ impl SphericalAtmosphere {
             .checked_sub(self.center)
             .and_then(|v| v.checked_length())
             .ok_or(AerodynamicsError::ArithmeticOverflow)?;
-        if distance >= self.outer_radius {
-            return AtmosphericState::new(0.0, self.wind);
-        }
         let altitude = (distance - self.reference_radius).max(0.0);
+        let t = (altitude / self.height).clamp(0.0, 1.0);
+        let wind = match self.wind_at_top {
+            Some(top) => self.wind * (1.0 - t) + top * t,
+            None => self.wind,
+        };
+        let sound_speed = self
+            .sound_speed_profile
+            .map(|(bottom, top)| (bottom * (1.0 - t) + top * t).max(bottom.min(top)));
+        if distance >= self.outer_radius {
+            let mut state = AtmosphericState::new(0.0, wind)?;
+            state.sound_speed = sound_speed;
+            return Ok(state);
+        }
         let factor = match self.profile {
             DensityProfile::Exponential { scale_height } => (-altitude / scale_height).exp(),
         };
@@ -87,7 +92,9 @@ impl SphericalAtmosphere {
             }
             None => 1.0,
         };
-        AtmosphericState::new(self.reference_density * factor * edge, self.wind)
+        let mut state = AtmosphericState::new(self.reference_density * factor * edge, wind)?;
+        state.sound_speed = sound_speed;
+        Ok(state)
     }
 
     /// World-space centre in metres.
@@ -161,6 +168,8 @@ pub struct SphericalAtmosphereBuilder {
     profile: Option<DensityProfile>,
     smooth_edge: Option<f64>,
     wind: Vec3,
+    wind_at_top: Option<Vec3>,
+    sound_speed_profile: Option<(f64, f64)>,
 }
 
 impl SphericalAtmosphereBuilder {
@@ -210,6 +219,18 @@ impl SphericalAtmosphereBuilder {
         self
     }
 
+    /// Linearly interpolate wind from `wind` at the reference radius to this value at the outer radius.
+    pub fn wind_at_top(mut self, value: Vec3) -> Self {
+        self.wind_at_top = Some(value);
+        self
+    }
+
+    /// Linearly interpolated speeds of sound at the reference and outer radii, in m/s.
+    pub fn sound_speed_profile(mut self, reference: f64, top: f64) -> Self {
+        self.sound_speed_profile = Some((reference, top));
+        self
+    }
+
     /// Validates all settings and constructs the atmosphere.
     ///
     /// # Errors
@@ -229,6 +250,14 @@ impl SphericalAtmosphereBuilder {
             return Err(invalid("center must be finite"));
         }
         AtmosphericState::new(reference_density, self.wind)?;
+        if let Some(wind) = self.wind_at_top {
+            AtmosphericState::new(0.0, wind)?;
+        }
+        if let Some((reference, top)) = self.sound_speed_profile
+            && (!reference.is_finite() || reference <= 0.0 || !top.is_finite() || top <= 0.0)
+        {
+            return Err(invalid("sound speeds must be finite and positive"));
+        }
         if !reference_radius.is_finite() || reference_radius < 0.0 {
             return Err(invalid("reference radius must be finite and non-negative"));
         }
@@ -266,6 +295,8 @@ impl SphericalAtmosphereBuilder {
             profile,
             smooth_edge: self.smooth_edge,
             wind: self.wind,
+            wind_at_top: self.wind_at_top,
+            sound_speed_profile: self.sound_speed_profile,
         })
     }
 }
@@ -283,6 +314,8 @@ pub(crate) fn test_atmosphere(state: AtmosphericState) -> Atmosphere {
         },
         smooth_edge: None,
         wind: state.wind_velocity(),
+        wind_at_top: None,
+        sound_speed_profile: None,
     })
 }
 
@@ -297,6 +330,66 @@ mod tests {
             .reference_density(2.0)
             .height(50.0)
             .profile(DensityProfile::Exponential { scale_height: 10.0 })
+    }
+
+    #[test]
+    fn sound_speed_profile_interpolates_and_validates() {
+        let sphere = builder().sound_speed_profile(340.0, 240.0).build().unwrap();
+        assert_eq!(
+            sphere.state_at(Vec3::X * 110.0).unwrap().sound_speed(),
+            Some(340.0)
+        );
+        assert_eq!(
+            sphere.state_at(Vec3::X * 135.0).unwrap().sound_speed(),
+            Some(290.0)
+        );
+        assert_eq!(
+            sphere.state_at(Vec3::X * 170.0).unwrap().sound_speed(),
+            Some(240.0)
+        );
+        assert_eq!(
+            builder()
+                .build()
+                .unwrap()
+                .state_at(Vec3::ZERO)
+                .unwrap()
+                .sound_speed(),
+            None
+        );
+        assert!(builder().sound_speed_profile(0.0, 300.0).build().is_err());
+        assert!(
+            builder()
+                .sound_speed_profile(300.0, f64::NAN)
+                .build()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn wind_interpolates_with_altitude_and_clamps_at_bounds() {
+        let sphere = builder()
+            .wind(Vec3::X * 10.0)
+            .wind_at_top(Vec3::Y * 20.0)
+            .build()
+            .unwrap();
+        assert_eq!(
+            sphere.state_at(Vec3::X * 110.0).unwrap().wind_velocity(),
+            Vec3::X * 10.0
+        );
+        assert_eq!(
+            sphere.state_at(Vec3::X * 135.0).unwrap().wind_velocity(),
+            Vec3::new(5.0, 10.0, 0.0)
+        );
+        assert_eq!(
+            sphere.state_at(Vec3::X * 170.0).unwrap().wind_velocity(),
+            Vec3::Y * 20.0
+        );
+        assert!(
+            builder()
+                .wind_at_top(Vec3::X * f64::INFINITY)
+                .build()
+                .is_err()
+        );
     }
 
     #[test]
