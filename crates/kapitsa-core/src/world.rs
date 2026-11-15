@@ -287,6 +287,17 @@ pub struct ContactImpulse {
     pub ccd: bool,
 }
 
+/// State of a cluster body at the beginning of the last successful full step.
+/// This is the evaluation-time state for the corresponding force snapshots;
+/// it is not a certificate that all loads are attributed to parts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusterLoadState {
+    /// Cluster body identified at force-evaluation time.
+    pub body: BodyId,
+    /// World-space pose and velocities before integration.
+    pub state: BodyState,
+}
+
 /// Body-level simple-surface loads before and after the shared timestep
 /// corrections. World-space N and N·m about the body COM at evaluation time.
 /// These sums include both body- and part-targeted surfaces; their difference
@@ -651,6 +662,8 @@ pub struct PhysicsWorld {
     contact_impulses_omitted_pending: usize,
     contact_ccd_clipped_published: bool,
     contact_ccd_clipped_pending: bool,
+    cluster_load_states_published: Vec<ClusterLoadState>,
+    cluster_load_states_pending: Vec<ClusterLoadState>,
     part_hull_buffers: Vec<Vec<PartHullWrench>>,
     part_wing_buffers: Vec<Vec<PartWingWrench>>,
     owner_pressure: Option<HashMap<BodyId, crate::aerodynamics::pressure::OwnerPressureWorkspace>>,
@@ -704,6 +717,13 @@ impl BodyStep {
 }
 
 impl PhysicsWorld {
+    /// Cluster-body states from the beginning of the last successful full step.
+    /// Low-level shard commits do not publish this diagnostic. Later topology
+    /// edits can make its body IDs or current part transforms stale.
+    pub fn cluster_load_states(&self) -> &[ClusterLoadState] {
+        &self.cluster_load_states_published
+    }
+
     /// Recorded velocity-contact impulses from the last successful full step.
     /// This is diagnostic data, not a complete contact or weld-load balance.
     /// Low-level shard commits do not publish this snapshot.
@@ -831,6 +851,8 @@ impl PhysicsWorld {
             contact_impulses_omitted_pending: 0,
             contact_ccd_clipped_published: false,
             contact_ccd_clipped_pending: false,
+            cluster_load_states_published: Vec::new(),
+            cluster_load_states_pending: Vec::new(),
             part_hull_buffers: Vec::new(),
             part_wing_buffers: Vec::new(),
             owner_pressure: None,
@@ -1809,6 +1831,26 @@ impl PhysicsWorld {
         self.contact_ccd_clipped_pending = false;
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
+        self.cluster_load_states_pending.clear();
+        let cluster_count = self
+            .bodies
+            .iter()
+            .filter(|(_, entry)| entry.cluster.is_some())
+            .count();
+        self.cluster_load_states_pending
+            .try_reserve(cluster_count)
+            .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+        for (dense, entry) in self.bodies.iter() {
+            if entry.cluster.is_some() {
+                self.cluster_load_states_pending.push(ClusterLoadState {
+                    body: BodyId {
+                        world: self.world_id,
+                        dense,
+                    },
+                    state: *entry.body.state(),
+                });
+            }
+        }
         if let Err((source_id, cause)) = self.prepare_force_source_updates() {
             return Err(StepError::ForceSource { source_id, cause });
         }
@@ -1848,6 +1890,10 @@ impl PhysicsWorld {
             std::mem::swap(
                 &mut self.contact_ccd_clipped_published,
                 &mut self.contact_ccd_clipped_pending,
+            );
+            std::mem::swap(
+                &mut self.cluster_load_states_published,
+                &mut self.cluster_load_states_pending,
             );
             self.recycle_aerodynamics_updates();
             self.clear_gravity_updates();
