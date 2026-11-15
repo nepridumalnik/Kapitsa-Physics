@@ -174,6 +174,7 @@ fn sort_work_estimate(len: usize) -> Option<usize> {
 // Includes surface_triangles' four units per triangle; this is a reservation,
 // not an additional allowance for the same preparation work.
 const TRIANGLE_PREPARATION_WORK: usize = 16;
+const SURFACE_TRIANGLE_WORK: usize = 4;
 
 fn grid_build_work_estimate(entries: usize, cells: usize, scans: usize) -> Option<usize> {
     // Initialize both buffers and scan counts to construct prefix offsets.
@@ -937,7 +938,7 @@ impl PreparedGeometry {
         let total = surface_triangle_count(instances)?;
         check_surface_work(
             total
-                .checked_mul(4)
+                .checked_mul(SURFACE_TRIANGLE_WORK)
                 .and_then(|n| n.checked_add(instances.len())),
             max_work,
         )?;

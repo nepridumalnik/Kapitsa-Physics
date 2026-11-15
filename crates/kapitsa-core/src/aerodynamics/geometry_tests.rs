@@ -179,7 +179,6 @@ fn sort_work_estimate_checks_power_of_two_boundaries_and_overflow() {
 #[test]
 fn triangle_preprocessing_reserves_surface_transform_work() {
     const MAX_TRIANGLES: usize = 65_536;
-    const SURFACE_TRIANGLE_WORK: usize = 4;
     for count in 0..=MAX_TRIANGLES {
         let reserved = sort_work_estimate(count)
             .unwrap()
