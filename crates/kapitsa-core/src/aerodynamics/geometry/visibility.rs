@@ -295,6 +295,16 @@ mod tests {
     use crate::aerodynamics::geometry::GeometryOwner;
 
     #[test]
+    fn windward_clipping_rejects_normalization_that_erases_positive_velocity() {
+        let smallest = f64::from_bits(1);
+        let velocities = [Vec3::X * smallest, Vec3::X * -f64::MAX, Vec3::ZERO];
+        assert_eq!(
+            windward_triangle(Vec3::X, velocities),
+            Err(GeometryError::PrecisionLoss)
+        );
+    }
+
+    #[test]
     fn thin_triangle_fraction_preserves_small_representable_area() {
         // This offset is exactly representable in binary64.
         const HEIGHT: f64 = 1.0 / ((1u64 << 40) as f64);
