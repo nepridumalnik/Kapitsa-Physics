@@ -192,6 +192,15 @@ fn charge_surface_work(
     Ok(())
 }
 
+fn allocate_candidate_marks(
+    count: usize,
+    work: &mut usize,
+    max_work: usize,
+) -> Result<Vec<u32>, GeometryError> {
+    charge_surface_work(work, count, max_work)?;
+    allocated(count, 0u32)
+}
+
 /// In-place heapsort with a checked charge before each comparison.
 fn budgeted_sort<T>(
     values: &mut [T],
@@ -1161,7 +1170,7 @@ impl PreparedGeometry {
             .checked_add(grid.build_work)
             .ok_or(GeometryError::WorkBudgetExceeded)?;
         check_surface_work(Some(work), max_work)?;
-        let mut marks = allocated(triangles.len(), 0u32)?;
+        let mut marks = allocate_candidate_marks(triangles.len(), &mut work, max_work)?;
         let mut stamp = 0u32;
         let mut patches: Vec<PreparedSurfacePatch> = Vec::new();
         for (i, triangle) in triangles.iter().enumerate() {

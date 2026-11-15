@@ -287,6 +287,23 @@ fn surface_work_enforces_hard_ceiling_even_with_larger_caller_budget() {
 }
 
 #[test]
+fn candidate_mark_allocation_requires_work_budget_up_front() {
+    const MARK_COUNT: usize = 4;
+    const INITIAL_WORK: usize = 3;
+    let mut work = INITIAL_WORK;
+    assert_eq!(
+        allocate_candidate_marks(MARK_COUNT, &mut work, INITIAL_WORK + MARK_COUNT - 1),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    assert_eq!(work, INITIAL_WORK);
+    assert_eq!(
+        allocate_candidate_marks(MARK_COUNT, &mut work, INITIAL_WORK + MARK_COUNT).unwrap(),
+        vec![0; MARK_COUNT]
+    );
+    assert_eq!(work, INITIAL_WORK + MARK_COUNT);
+}
+
+#[test]
 fn grid_build_estimate_reserves_both_cell_buffers_and_index_copy() {
     const ENTRIES: usize = 4;
     const CELLS: usize = 3;
