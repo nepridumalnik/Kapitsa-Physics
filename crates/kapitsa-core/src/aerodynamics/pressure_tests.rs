@@ -45,6 +45,44 @@ fn flow() -> PressureFlow {
 }
 
 #[test]
+fn signed_surface_cp_applies_pressure_suction_moment_and_mach_bounds() {
+    let patch = PressurePatch::new(Vec3::Y, Vec3::X, 2.0).unwrap();
+    let subsonic = PressureFlow {
+        linear_velocity: Vec3::X * 50.0,
+        ..flow()
+    };
+    for (cp, expected) in [(0.4, -1000.0), (-0.4, 1000.0), (0.0, 0.0)] {
+        let load = patch
+            .evaluate_surface(subsonic, SurfacePressure::new(cp, 0.5, 0.5).unwrap())
+            .unwrap();
+        assert_eq!(load.force, Vec3::X * expected);
+        assert_eq!(load.moment, Vec3::Z * -expected);
+    }
+    assert_eq!(
+        patch.evaluate_surface(subsonic, SurfacePressure::new(1.0, 0.0, 0.49).unwrap()),
+        Err(PressureError::UnsupportedMach)
+    );
+    assert_eq!(
+        SurfacePressure::new(f64::NAN, 0.0, 1.0),
+        Err(PressureError::InvalidCoefficient)
+    );
+}
+
+#[test]
+fn signed_surface_cp_uses_local_rotation_velocity() {
+    let patch = PressurePatch::new(Vec3::Y, Vec3::X, 2.0).unwrap();
+    let pressure = SurfacePressure::new(-0.4, 0.0, 1.0).unwrap();
+    let rotating = PressureFlow {
+        linear_velocity: Vec3::X * 50.0,
+        angular_velocity: Vec3::Z * 10.0,
+        ..flow()
+    };
+    let load = patch.evaluate_surface(rotating, pressure).unwrap();
+    assert_eq!(load.force, Vec3::X * 640.0);
+    assert_eq!(load.moment, -Vec3::Z * 640.0);
+}
+
+#[test]
 fn explicit_base_pressure_has_correct_force_moment_and_domain() {
     let base = BasePressure::new(-0.4, 5.0, 10.0).unwrap();
     let patch = PressurePatch::new(Vec3::Y, -Vec3::X, 2.0).unwrap();

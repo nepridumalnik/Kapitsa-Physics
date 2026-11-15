@@ -62,6 +62,40 @@ fn close(actual: Vec3, expected: Vec3) {
 }
 
 #[test]
+fn signed_cp_on_prepared_mesh_sums_force_and_moment() {
+    let patches = plate();
+    let state = PressureFlow {
+        linear_velocity: Vec3::X * 50.0,
+        ..flow()
+    };
+    for cp in [-0.4, 0.4] {
+        let pressure = SurfacePressure::new(cp, 0.0, 0.5).unwrap();
+        let total = evaluate_prepared_surface(&patches, state, pressure).unwrap();
+        let mut force = Vec3::ZERO;
+        let mut moment = Vec3::ZERO;
+        for face in patches.iter() {
+            let load = PressurePatch::new(face.center, face.normal, face.area)
+                .unwrap()
+                .evaluate_surface(state, pressure)
+                .unwrap();
+            force += load.force;
+            moment += load.moment;
+        }
+        close(total.force, force);
+        close(total.moment, moment);
+        assert!(total.force.x * cp < 0.0);
+    }
+    assert_eq!(
+        evaluate_prepared_surface(
+            &patches,
+            state,
+            SurfacePressure::new(1.0, 0.0, 0.49).unwrap()
+        ),
+        Err(PressureError::UnsupportedMach)
+    );
+}
+
+#[test]
 fn collider_sphere_and_cylinder_converge_to_newtonian_integrals() {
     use crate::{
         aerodynamics::colliders::{ColliderTessellation, collider_mesh},

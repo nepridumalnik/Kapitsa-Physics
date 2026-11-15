@@ -137,6 +137,39 @@ pub struct BasePressure {
     max_mach: f64,
 }
 
+/// Explicit signed Cp and inclusive local Mach domain, not a predictive model.
+/// The caller is responsible for choosing an applicable coefficient and surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfacePressure {
+    cp: f64,
+    min_mach: f64,
+    max_mach: f64,
+}
+
+impl SurfacePressure {
+    pub fn new(cp: f64, min_mach: f64, max_mach: f64) -> Result<Self, PressureError> {
+        if !cp.is_finite()
+            || !min_mach.is_finite()
+            || min_mach < 0.0
+            || !max_mach.is_finite()
+            || max_mach < min_mach
+        {
+            return Err(PressureError::InvalidCoefficient);
+        }
+        Ok(Self {
+            cp,
+            min_mach,
+            max_mach,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExplicitPressure {
+    Base(BasePressure),
+    Surface(SurfacePressure),
+}
+
 impl BasePressure {
     pub fn new(cp: f64, min_mach: f64, max_mach: f64) -> Result<Self, PressureError> {
         if !cp.is_finite()
@@ -197,13 +230,23 @@ impl PressurePatch {
         flow: PressureFlow,
         base: BasePressure,
     ) -> Result<PressureWrench, PressureError> {
-        self.evaluate_inner(flow, Some(base))
+        self.evaluate_inner(flow, Some(ExplicitPressure::Base(base)))
+    }
+
+    /// Applies a supplied signed Cp without inferring exposure or wake physics.
+    /// Pressure acts along the inward normal for positive Cp and outward for negative Cp.
+    pub fn evaluate_surface(
+        &self,
+        flow: PressureFlow,
+        pressure: SurfacePressure,
+    ) -> Result<PressureWrench, PressureError> {
+        self.evaluate_inner(flow, Some(ExplicitPressure::Surface(pressure)))
     }
 
     fn evaluate_inner(
         &self,
         flow: PressureFlow,
-        base: Option<BasePressure>,
+        explicit: Option<ExplicitPressure>,
     ) -> Result<PressureWrench, PressureError> {
         if !flow.center_of_mass.is_finite()
             || !flow.linear_velocity.is_finite()
@@ -245,27 +288,40 @@ impl PressurePatch {
         if !mach.is_finite() {
             return Err(overflow);
         }
-        if base.map_or(mach < 5.0, |b| mach < b.min_mach || mach > b.max_mach) {
+        let domain = match explicit {
+            Some(ExplicitPressure::Base(b)) => Some((b.min_mach, b.max_mach)),
+            Some(ExplicitPressure::Surface(p)) => Some((p.min_mach, p.max_mach)),
+            None => None,
+        };
+        if domain.map_or(mach < 5.0, |(min, max)| mach < min || mach > max) {
             return Err(PressureError::UnsupportedMach);
         }
-        if let Some(base) = base {
-            let alignment = normal.checked_dot(relative / speed).ok_or(overflow)?;
-            if alignment > 0.0 {
-                return Err(PressureError::InvalidBaseOrientation);
-            }
+        if let Some(explicit) = explicit {
+            let cp = match explicit {
+                ExplicitPressure::Base(base) => {
+                    let alignment = normal.checked_dot(relative / speed).ok_or(overflow)?;
+                    if alignment > 0.0 {
+                        return Err(PressureError::InvalidBaseOrientation);
+                    }
+                    -base.cp_magnitude
+                }
+                ExplicitPressure::Surface(pressure) => pressure.cp,
+            };
             let magnitude = super::hull::scaled_product(
                 &[
                     0.5,
                     flow.atmosphere.density(),
                     speed,
                     speed,
-                    base.cp_magnitude,
+                    cp.abs(),
                     self.area,
                 ],
                 1.0,
             )
             .map_err(|_| overflow)?;
-            let force = normal.checked_mul_scalar(magnitude).ok_or(overflow)?;
+            let force = normal
+                .checked_mul_scalar(-magnitude.copysign(cp))
+                .ok_or(overflow)?;
             let moment = arm.checked_cross(force).ok_or(overflow)?;
             return Ok(PressureWrench { force, moment });
         }
@@ -330,19 +386,31 @@ pub fn evaluate_prepared_base(
     flow: PressureFlow,
     base: BasePressure,
 ) -> Result<PressureWrench, PressureError> {
-    evaluate_prepared(patches, flow, Some(base))
+    evaluate_prepared(patches, flow, Some(ExplicitPressure::Base(base)))
+}
+
+/// Applies an explicitly supplied signed Cp to selected mesh- or collider-derived
+/// patches. This does not predict Cp, determine exposure, or model a wake. A
+/// single-direction exposure set generally omits suction on other surfaces.
+/// No world integration or per-owner load distribution occurs.
+pub fn evaluate_prepared_surface(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+    pressure: SurfacePressure,
+) -> Result<PressureWrench, PressureError> {
+    evaluate_prepared(patches, flow, Some(ExplicitPressure::Surface(pressure)))
 }
 
 fn evaluate_prepared(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
-    base: Option<BasePressure>,
+    explicit: Option<ExplicitPressure>,
 ) -> Result<PressureWrench, PressureError> {
     // Validate even an empty set, using the same rules as patch evaluation.
     let mut total = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
     for patch in patches.iter() {
         let load = PressurePatch::new(patch.center, patch.normal, patch.area)?
-            .evaluate_inner(flow, base)?;
+            .evaluate_inner(flow, explicit)?;
         total.force = total
             .force
             .checked_add(load.force)
