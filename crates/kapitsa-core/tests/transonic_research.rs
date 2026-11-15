@@ -241,6 +241,8 @@ fn harris_subsonic_extended_domain_pressure_profile() -> Result<(), String> {
     const GAMMA: f64 = 1.4;
     const TOLERANCE: f64 = 1e-6;
     const MAX_ITERATIONS: usize = 60000;
+    const CUTOFF: f64 = 36.0 / 38.240;
+    let mut profiles = Vec::new();
     for intervals in [16_usize, 32, 64] {
         let dx = 1.0 / intervals as f64;
         let nx = 5 * intervals + 1;
@@ -272,7 +274,8 @@ fn harris_subsonic_extended_domain_pressure_profile() -> Result<(), String> {
         );
         let mut count = 0_usize;
         let mut sum_squared = 0.0;
-        for &(x, measured) in harris_data::TABLE_III_A_MACH_090 {
+        let mut profile = vec![None; harris_data::TABLE_III_A_MACH_090.len()];
+        for (station, &(x, measured)) in harris_data::TABLE_III_A_MACH_090.iter().enumerate() {
             let index = (x + EXTENSION) / dx;
             let i = index.floor() as usize;
             let node_cp = |j: usize| {
@@ -288,6 +291,21 @@ fn harris_subsonic_extended_domain_pressure_profile() -> Result<(), String> {
             };
             let t = index - i as f64;
             let cp = (1.0 - t) * left + t * right;
+            profile[station] = Some(cp);
+            let left_x = i as f64 * dx - EXTENSION;
+            let right_x = left_x + dx;
+            if left_x < CUTOFF && right_x >= CUTOFF {
+                println!(
+                    "cutoff crossing: intervals={intervals} x/l={x:.3} bracket=[{left_x:.6},{right_x:.6}] left_cp={left:.6} right_cp={right:.6} interpolated={cp:.6}"
+                );
+            }
+            if left_x - dx < CUTOFF && right_x + dx >= CUTOFF {
+                println!(
+                    "cutoff derivative stencil: intervals={intervals} x/l={x:.3} node_bracket=[{left_x:.6},{right_x:.6}] derivative_span=[{:.6},{:.6}] cp={cp:.6}",
+                    left_x - dx,
+                    right_x + dx
+                );
+            }
             let difference = cp - measured;
             sum_squared += difference * difference;
             count += 1;
@@ -302,6 +320,37 @@ fn harris_subsonic_extended_domain_pressure_profile() -> Result<(), String> {
             "intervals={intervals} available={count}/{} rmse={:.6}",
             harris_data::TABLE_III_A_MACH_090.len(),
             (sum_squared / count as f64).sqrt()
+        );
+        profiles.push((intervals, profile));
+    }
+    let common: Vec<_> = (0..harris_data::TABLE_III_A_MACH_090.len())
+        .filter(|&i| profiles.iter().all(|(_, profile)| profile[i].is_some()))
+        .collect();
+    if common.is_empty() {
+        return Err("no common stations".to_string());
+    }
+    println!("common station count={}", common.len());
+    for (intervals, profile) in &profiles {
+        let mut squared = 0.0;
+        for &i in &common {
+            let cp = profile[i].ok_or_else(|| format!("missing common station {i}"))?;
+            squared += (cp - harris_data::TABLE_III_A_MACH_090[i].1).powi(2);
+        }
+        println!(
+            "common intervals={intervals} rmse={:.9}",
+            (squared / common.len() as f64).sqrt()
+        );
+    }
+    for pair in profiles.windows(2) {
+        let mut max_difference = 0.0_f64;
+        for &i in &common {
+            let left = pair[0].1[i].ok_or_else(|| format!("missing station {i}"))?;
+            let right = pair[1].1[i].ok_or_else(|| format!("missing station {i}"))?;
+            max_difference = max_difference.max((right - left).abs());
+        }
+        println!(
+            "common grid difference {} -> {} max_abs={max_difference:.9}",
+            pair[0].0, pair[1].0
         );
     }
     Ok(())
