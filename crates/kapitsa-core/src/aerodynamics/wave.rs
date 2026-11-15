@@ -106,11 +106,13 @@ impl WaveMachCurve {
                 return Ok(y1);
             }
             if mach > x0 && mach < x1 {
-                let t = (mach - x0) / (x1 - x0);
+                let span = x1 - x0;
+                let t = (mach - x0) / span;
+                let remaining = (x1 - mach) / span;
                 return Ok(if y0 <= y1 {
                     y0 + t * (y1 - y0)
                 } else {
-                    y1 + (1.0 - t) * (y0 - y1)
+                    y1 + remaining * (y0 - y1)
                 });
             }
         }
@@ -371,6 +373,12 @@ pub(super) fn prepare_wave_drag(area_slopes: &[f64]) -> Result<PreparedWaveDrag,
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wave_mach_curve_preserves_weight_near_right_endpoint() {
+        let curve = super::WaveMachCurve::new(vec![(0.0, 1.0), (3.0, 0.0)]).unwrap();
+        let mach = f64::from_bits(3.0_f64.to_bits() - 1);
+        assert_eq!(curve.multiplier(mach).unwrap(), (3.0 - mach) / 3.0);
+    }
     use super::{WaveDragError, WaveMachCurve, area_slopes_from_sections, wave_drag};
     use crate::aerodynamics::geometry::GeometrySection;
     use std::f64::consts::PI;

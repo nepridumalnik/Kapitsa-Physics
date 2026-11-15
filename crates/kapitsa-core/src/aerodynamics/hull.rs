@@ -159,14 +159,16 @@ impl MachCurve {
                 return Ok((b.axial_cd, b.crossflow_cd));
             }
             if mach > a.mach && mach < b.mach {
-                let t = (mach - a.mach) / (b.mach - a.mach);
+                let span = b.mach - a.mach;
+                let t = (mach - a.mach) / span;
+                let remaining = (b.mach - mach) / span;
                 // Interpolate from the smaller coefficient to avoid overflowing
                 // an otherwise representable convex combination near f64::MAX.
                 let interpolate = |x: f64, y: f64| {
                     if x <= y {
                         x + t * (y - x)
                     } else {
-                        y + (1.0 - t) * (x - y)
+                        y + remaining * (x - y)
                     }
                 };
                 return Ok((
@@ -1259,6 +1261,26 @@ mod tests {
                 assert!((side.1 - center.1).abs() <= 4.0 * f64::EPSILON);
             }
         }
+    }
+
+    #[test]
+    fn mach_curve_preserves_weight_near_right_endpoint() {
+        let curve = MachCurve::new(vec![
+            MachKnot {
+                mach: 0.0,
+                axial_cd: 1.0,
+                crossflow_cd: 1.0,
+            },
+            MachKnot {
+                mach: 3.0,
+                axial_cd: 0.0,
+                crossflow_cd: 0.0,
+            },
+        ])
+        .unwrap();
+        let mach = f64::from_bits(3.0_f64.to_bits() - 1);
+        let expected = (3.0 - mach) / 3.0;
+        assert_eq!(curve.coefficients(mach).unwrap(), (expected, expected));
     }
 
     #[test]
