@@ -1993,6 +1993,67 @@ fn hull_world_parity_and_cluster_transfer_preserve_model() {
 }
 
 #[test]
+fn data_driven_hull_steps_continuously_across_mach_one() {
+    use crate::aerodynamics::hull::{MachCurve, MachKnot};
+    // Synthetic coefficients test dispatch and continuity only, not physics.
+    let curve = MachCurve::new(vec![
+        MachKnot {
+            mach: 0.8,
+            axial_cd: 0.2,
+            crossflow_cd: 0.0,
+        },
+        MachKnot {
+            mach: 1.0,
+            axial_cd: 0.4,
+            crossflow_cd: 0.0,
+        },
+        MachKnot {
+            mach: 1.2,
+            axial_cd: 0.5,
+            crossflow_cd: 0.0,
+        },
+    ])
+    .unwrap();
+    for sharded in [false, true] {
+        let mut speeds = Vec::new();
+        for mach in [0.999_999, 1.0, 1.000_001] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::test_atmosphere(
+                AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
+            ));
+            let mut body = RigidBody::new_dynamic(
+                Transform::identity(),
+                MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0).unwrap(),
+            )
+            .unwrap();
+            let initial = 340.0 * mach;
+            body.set_linear_velocity(Vec3::X * initial).unwrap();
+            body.set_aerodynamics(Aerodynamics::Hull(vec![
+                hull_section(Vec3::ZERO).with_mach_curve(curve.clone()),
+            ]));
+            let id = world.add_body(body).unwrap();
+            if sharded {
+                world
+                    .step_with_shards(
+                        1e-5,
+                        &mut [Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )
+                    .unwrap();
+            } else {
+                world.step(1e-5).unwrap();
+            }
+            let final_speed = world.body(id).unwrap().state().linear_velocity().x;
+            assert!(final_speed < initial);
+            speeds.push(initial - final_speed);
+        }
+        assert!((speeds[0] - speeds[1]).abs() < 1e-6);
+        assert!((speeds[2] - speeds[1]).abs() < 1e-6);
+    }
+}
+
+#[test]
 fn data_driven_hull_body_part_dispatch_and_range_failure_rollback() {
     use crate::aerodynamics::{
         AerodynamicsError,
