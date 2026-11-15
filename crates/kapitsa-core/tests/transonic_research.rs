@@ -186,6 +186,37 @@ fn surface_pressure_uses_fixed_radius_derivative() {
 }
 
 #[test]
+fn surface_pressure_converges_on_smooth_field_and_rejects_invalid_values() {
+    let mut errors = Vec::new();
+    for n in [16, 32, 64] {
+        let h = 1.0 / n as f64;
+        let mut grid = MixedGrid {
+            phi: (0..=n)
+                .map(|i| {
+                    (0..n)
+                        .map(|k| (i as f64 * h).sin() * ((k as f64 + 0.5) * h).exp())
+                        .collect()
+                })
+                .collect(),
+            axis_flux: vec![0.0; n + 1],
+            dx: h,
+            dr: h,
+            mach: 0.9,
+            gamma: 1.4,
+        };
+        let expected = -2.0 * 0.5_f64.cos() * 0.25_f64.exp() - 0.01;
+        let cp = grid.surface_cp(n / 2, 0.25, 0.1).unwrap();
+        errors.push((cp - expected).abs());
+        assert_eq!(grid.surface_cp(n / 2, 0.0, 0.1), None);
+        assert_eq!(grid.surface_cp(n / 2, f64::NAN, 0.1), None);
+        grid.phi[n / 2 + 1][n / 4 - 1] = f64::INFINITY;
+        assert_eq!(grid.surface_cp(n / 2, 0.25, 0.1), None);
+    }
+    assert!(errors[0] / errors[1] > 3.8);
+    assert!(errors[1] / errors[2] > 3.8);
+}
+
+#[test]
 fn mixed_residual_diagonal_matches_finite_difference() {
     let (dx, mach, gamma) = (0.1, 0.9_f64, 1.4);
     let sonic = (1.0 - mach.powi(2)) / (mach.powi(2) * (gamma + 1.0));
