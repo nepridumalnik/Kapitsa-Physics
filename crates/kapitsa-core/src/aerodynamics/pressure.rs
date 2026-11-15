@@ -687,6 +687,33 @@ pub fn evaluate_prepared_mesh_owner(
     Ok(total)
 }
 
+/// Evaluates impact-pressure wrenches for all represented owners in one patch
+/// traversal. Results are sorted by owner; moments are about the common body
+/// center of mass and all vectors are in world coordinates. This is only the
+/// impact-pressure contribution, not a complete part or weld load. An error
+/// rejects the entire result. Work is O(P log K), storage O(K), for P patches
+/// and K represented owners. This allocates and is not a steady-state buffer.
+pub fn evaluate_prepared_mesh_by_owner(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+) -> Result<Vec<(super::geometry::GeometryOwner, PressureWrench)>, PressureError> {
+    let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
+    let mut totals = std::collections::BTreeMap::new();
+    for patch in patches.iter() {
+        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
+        let total: &mut PressureWrench = totals.entry(patch.owner).or_insert(zero);
+        total.force = total
+            .force
+            .checked_add(load.force)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        total.moment = total
+            .moment
+            .checked_add(load.moment)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+    }
+    Ok(totals.into_iter().collect())
+}
+
 /// Applies the supplied base Cp to every explicitly selected prepared patch.
 /// The set must represent actual exposed base surfaces, not windward impact
 /// patches; this function does not determine which surfaces are in a wake.

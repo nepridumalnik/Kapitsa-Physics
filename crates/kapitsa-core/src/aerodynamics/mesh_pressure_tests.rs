@@ -98,6 +98,21 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     let total = evaluate_prepared_mesh(&patches, flow())?;
     let a = evaluate_prepared_mesh_owner(&patches, flow(), GeometryOwner::Body)?;
     let b = evaluate_prepared_mesh_owner(&patches, flow(), GeometryOwner::Part(part))?;
+    let grouped = evaluate_prepared_mesh_by_owner(&patches, flow())?;
+    let concurrent = std::thread::scope(|scope| {
+        let first = scope.spawn(|| evaluate_prepared_mesh_by_owner(&patches, flow()));
+        let second = scope.spawn(|| evaluate_prepared_mesh_by_owner(&patches, flow()));
+        (first.join(), second.join())
+    });
+    assert_eq!(concurrent.0.map_err(|_| "first worker panicked")??, grouped);
+    assert_eq!(
+        concurrent.1.map_err(|_| "second worker panicked")??,
+        grouped
+    );
+    assert_eq!(
+        grouped,
+        vec![(GeometryOwner::Body, a), (GeometryOwner::Part(part), b)]
+    );
     close(a.force + b.force, total.force);
     close(a.moment + b.moment, total.moment);
     assert!(a.force.length() > 0.0 && b.force.length() > 0.0);
@@ -109,6 +124,18 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     assert_eq!(
         evaluate_prepared_mesh_owner(&patches, invalid, GeometryOwner::Part(part)),
         Err(PressureError::InvalidSoundSpeed)
+    );
+    assert_eq!(
+        evaluate_prepared_mesh_by_owner(&patches, invalid),
+        Err(PressureError::InvalidSoundSpeed)
+    );
+    let unsupported = PressureFlow {
+        linear_velocity: Vec3::X * 100.0,
+        ..flow()
+    };
+    assert_eq!(
+        evaluate_prepared_mesh_by_owner(&patches, unsupported),
+        Err(PressureError::UnsupportedMach)
     );
     Ok(())
 }
