@@ -715,6 +715,17 @@ with a model, but this secondary comparison does not establish the conditions
 or uncertainty of every original observation. No matched transonic holdout is
 claimed from these sources.
 
+[Bordoloi, Martinez and Prestridge (2017)](https://www.osti.gov/servlets/purl/1369203)
+report independently measured shock-accelerated nylon microparticle trajectories.
+Their table 1 distinguishes incident shock Mach 1.2–1.4 from particle-relative
+Mach, whose reported ranges are 0.002–0.3, 0.004–0.4 and 0.04–0.5 for the
+three cases. The corresponding particle Reynolds ranges are 0.31–25.8,
+0.4–42.3 and 4.8–56.4, respectively. These ranges describe evolving particle
+conditions, not individual matched observations. The authors report strongly
+time-dependent drag and discuss unsteady contributions. Thus neither the
+particle Mach nor Re matches the intended transonic Re = 10,000 comparison;
+no quantitative validation or transferable uncertainty is claimed.
+
 The later Bailey–Starr transonic measurements
 ([AIAA Journal, 1976](https://doi.org/10.2514/3.7262)) are another candidate.
 Nagata et al.'s [2020 DNS paper](https://doi.org/10.1017/jfm.2020.629),
