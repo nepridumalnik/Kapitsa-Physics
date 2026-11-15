@@ -35,35 +35,9 @@ const DATA: &[(f64, f64)] = &[
 // The theoretical body is truncated for a sting; tunnel interference and
 // measurement uncertainty have not been quantified here. Rounded x/l values
 // are reported as printed and are not automatically grid-aligned.
-const TABLE_III_A_MACH_090: &[(f64, f64)] = &[
-    (0.010, 0.453),
-    (0.016, 0.398),
-    (0.023, 0.328),
-    (0.035, 0.235),
-    (0.052, 0.191),
-    (0.078, 0.119),
-    (0.105, 0.064),
-    (0.131, 0.030),
-    (0.157, 0.001),
-    (0.183, -0.033),
-    (0.235, -0.061),
-    (0.288, -0.095),
-    (0.340, -0.111),
-    (0.392, -0.133),
-    (0.444, -0.134),
-    (0.497, -0.135),
-    (0.549, -0.129),
-    (0.628, -0.115),
-    (0.681, -0.094),
-    (0.733, -0.062),
-    (0.785, -0.025),
-    (0.838, 0.017),
-    (0.864, 0.060),
-    (0.890, 0.112),
-    (0.917, 0.175),
-    (0.927, 0.202),
-    (0.937, 0.229),
-];
+#[path = "support/harris_data.rs"]
+mod harris_data;
+use harris_data::TABLE_III_A_MACH_090;
 
 #[test]
 fn measured_mach_090_stations_are_ordered_and_identified() {

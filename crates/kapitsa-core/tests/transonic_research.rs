@@ -2,6 +2,9 @@
 //! Geometry: Harris and Landrum, https://ntrs.nasa.gov/api/citations/19660003947/downloads/19660003947.pdf
 //! TSD flux: Bailey, https://ntrs.nasa.gov/api/citations/19720004250/downloads/19720004250.pdf
 
+#[path = "support/harris_data.rs"]
+mod harris_data;
+
 fn harris_geometry(x: f64) -> (f64, f64, f64) {
     const CUTOFF: f64 = 36.0 / 38.240;
     const FINENESS: f64 = 7.0;
@@ -529,20 +532,38 @@ fn harris_grid_profiles_and_fixed_radius_field_match_python() {
         // 38.240-inch length normalizes x, not the truncated 36-inch model.
         // Interpolate Cp between node locations; neither interpolation nor
         // the printed measurement precision establishes uncertainty bounds.
-        for (x, measured) in [(0.497, -0.135), (0.681, -0.094), (0.785, -0.025)] {
+        let mut count = 0;
+        let mut sum_squared = 0.0;
+        let mut max_error = 0.0_f64;
+        for &(x, measured) in harris_data::TABLE_III_A_MACH_090 {
             let i = (x / dx).floor() as usize;
+            if i == 0 || i + 2 >= n {
+                continue;
+            }
             let node_cp = |j: usize| {
                 let (radius, slope, _) = harris_geometry(j as f64 * dx);
-                grid.surface_cp(j, radius, slope).unwrap()
+                grid.surface_cp(j, radius, slope)
+            };
+            let (Some(left), Some(right)) = (node_cp(i), node_cp(i + 1)) else {
+                continue;
             };
             let t = x / dx - i as f64;
-            let calculated = (1.0 - t) * node_cp(i) + t * node_cp(i + 1);
+            let calculated = (1.0 - t) * left + t * right;
+            let difference = calculated - measured;
             println!(
-                "n={n} outer={outer} x/l={x:.3} Cp_calc={calculated:.6} Cp_measured={measured:.3} difference={:+.6}",
-                calculated - measured
+                "n={n} outer={outer} x/l={x:.3} Cp_calc={calculated:.6} Cp_measured={measured:.3} difference={difference:+.6}"
             );
             assert!(calculated.is_finite());
+            count += 1;
+            sum_squared += difference * difference;
+            max_error = max_error.max(difference.abs());
         }
+        assert!(count > 0);
+        println!(
+            "n={n} outer={outer} compared={count}/{} rmse={:.6} max_abs={max_error:.6}",
+            harris_data::TABLE_III_A_MACH_090.len(),
+            (sum_squared / count as f64).sqrt()
+        );
         let index = 0.125 / dr - 0.5;
         let k = index.floor() as usize;
         let w = index - k as f64;
