@@ -278,37 +278,43 @@ impl NormalForceCurve {
             .find_map(|i| {
                 let a = self.knots[i * self.angle_count].mach;
                 let b = self.knots[(i + 1) * self.angle_count].mach;
-                (mach >= a && mach <= b).then_some((i, (mach - a) / (b - a)))
+                (mach >= a && mach <= b).then_some((i, (mach - a) / (b - a), (b - mach) / (b - a)))
             })
             .ok_or(HullError::UnsupportedMach)?;
         let j = (0..self.angle_count - 1)
             .find_map(|j| {
                 let a = self.knots[j].angle_of_attack;
                 let b = self.knots[j + 1].angle_of_attack;
-                (alpha >= a && alpha <= b).then_some((j, (alpha - a) / (b - a)))
+                (alpha >= a && alpha <= b).then_some((
+                    j,
+                    (alpha - a) / (b - a),
+                    (b - alpha) / (b - a),
+                ))
             })
             .ok_or(HullError::UnsupportedMach)?;
         // Opposite-sign differences can overflow even for a finite convex result.
-        let lerp = |x: f64, y: f64, t: f64| {
+        let lerp = |x: f64, y: f64, t: f64, remaining: f64| {
             if x.is_sign_negative() != y.is_sign_negative() {
-                (1.0 - t) * x + t * y
+                remaining * x + t * y
             } else if x <= y {
                 x + t * (y - x)
             } else {
-                y + (1.0 - t) * (x - y)
+                y + remaining * (x - y)
             }
         };
         let a = lerp(
             self.knots[m.0 * self.angle_count + j.0].normal_cn,
             self.knots[m.0 * self.angle_count + j.0 + 1].normal_cn,
             j.1,
+            j.2,
         );
         let b = lerp(
             self.knots[(m.0 + 1) * self.angle_count + j.0].normal_cn,
             self.knots[(m.0 + 1) * self.angle_count + j.0 + 1].normal_cn,
             j.1,
+            j.2,
         );
-        Ok(lerp(a, b, m.1))
+        Ok(lerp(a, b, m.1, m.2))
     }
 }
 
@@ -1045,6 +1051,38 @@ mod tests {
     }
 
     // Synthetic axisymmetric fixtures, not measured aerodynamic data.
+    #[test]
+    fn normal_curve_preserves_weights_near_both_right_endpoints() {
+        let curve = NormalForceCurve::new(
+            1.0,
+            [0.0, 3.0]
+                .into_iter()
+                .flat_map(|mach| {
+                    [0.0, 3.0]
+                        .into_iter()
+                        .map(move |angle_of_attack| NormalForceKnot {
+                            mach,
+                            angle_of_attack,
+                            normal_cn: if mach == 0.0 && angle_of_attack == 0.0 {
+                                1.0
+                            } else {
+                                0.0
+                            },
+                        })
+                })
+                .collect(),
+        )
+        .unwrap();
+        let right = f64::from_bits(3.0_f64.to_bits() - 1);
+        let remaining = (3.0 - right) / 3.0;
+        assert_eq!(curve.coefficient(right, 0.0).unwrap(), remaining);
+        assert_eq!(curve.coefficient(0.0, right).unwrap(), remaining);
+        assert_eq!(
+            curve.coefficient(right, right).unwrap(),
+            remaining * remaining
+        );
+    }
+
     fn normal_curve(cn: f64) -> NormalForceCurve {
         NormalForceCurve::new(
             2.0,
