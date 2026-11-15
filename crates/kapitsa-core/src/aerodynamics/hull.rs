@@ -1083,6 +1083,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normal_curve_signed_extremes_remain_finite_near_right_endpoints() {
+        for varying_mach in [false, true] {
+            let curve = NormalForceCurve::new(
+                1.0,
+                [0.0, 3.0]
+                    .into_iter()
+                    .flat_map(|mach| {
+                        [0.0, 3.0].into_iter().map(move |angle_of_attack| {
+                            let coordinate = if varying_mach { mach } else { angle_of_attack };
+                            NormalForceKnot {
+                                mach,
+                                angle_of_attack,
+                                normal_cn: if coordinate == 0.0 {
+                                    -f64::MAX
+                                } else {
+                                    f64::MAX
+                                },
+                            }
+                        })
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let right = f64::from_bits(3.0_f64.to_bits() - 1);
+            let (mach, alpha) = if varying_mach {
+                (right, 0.0)
+            } else {
+                (0.0, right)
+            };
+            let value = curve.coefficient(mach, alpha).unwrap();
+            let remaining = (3.0 - right) / 3.0;
+            let expected = -remaining * f64::MAX + ((right / 3.0) * f64::MAX);
+            assert!(value.is_finite());
+            assert_eq!(value, expected);
+        }
+    }
+
     fn normal_curve(cn: f64) -> NormalForceCurve {
         NormalForceCurve::new(
             2.0,
