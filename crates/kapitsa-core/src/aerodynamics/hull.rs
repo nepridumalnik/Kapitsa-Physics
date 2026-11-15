@@ -370,6 +370,7 @@ pub struct HullSection {
     mach_curve: Option<MachCurve>,
     normal_curve: Option<NormalForceCurve>,
     wave_drag_factor: Option<f64>,
+    wave_mach_curve: Option<super::wave::WaveMachCurve>,
 }
 impl HullSection {
     /// Length must be positive; areas and coefficients must be nonnegative.
@@ -415,6 +416,7 @@ impl HullSection {
             mach_curve: None,
             normal_curve: None,
             wave_drag_factor: None,
+            wave_mach_curve: None,
         })
     }
 
@@ -423,12 +425,23 @@ impl HullSection {
     /// values must be zero. The force acts at this section's origin. This model
     /// does not infer geometry or a center of pressure. Other configured drag is
     /// additive, so callers must avoid counting wave drag twice. Evaluation is
-    /// limited to Mach > 1 and flow aligned with the section axis.
+    /// limited to Mach > 1 and flow aligned with the section axis unless an
+    /// explicit Mach multiplier curve supplies a different range.
     pub fn with_wave_drag(mut self, area_slopes: &[f64]) -> Result<Self, HullError> {
         let factor =
             super::wave::wave_drag(area_slopes, 0.25, 2.0, 1.0).map_err(HullError::Wave)?;
         self.wave_drag_factor = (factor != 0.0).then_some(factor);
         Ok(self)
+    }
+
+    /// Attach caller-supplied Mach multipliers to the wave-drag factor.
+    ///
+    /// The curve applies only when wave drag has also been configured. It can
+    /// represent a transition only when backed by suitable data; no universal
+    /// transition is inferred. The curve's domain is enforced without fallback.
+    pub fn with_wave_mach_curve(mut self, curve: super::wave::WaveMachCurve) -> Self {
+        self.wave_mach_curve = Some(curve);
+        self
     }
 
     /// Replace constant Cd values with explicit caller data, without changing geometry.
@@ -540,13 +553,32 @@ impl HullSection {
         let cross_speed = crossflow.checked_length().ok_or(overflow)?;
         let density = flow.atmosphere.density();
         let wave_force = if let Some(factor) = self.wave_drag_factor {
-            if mach <= 1.0 {
-                return Err(HullError::UnsupportedMach);
+            let multiplier = match &self.wave_mach_curve {
+                Some(curve) => curve.multiplier(mach).map_err(HullError::Wave)?,
+                None if mach > 1.0 => 1.0,
+                None => return Err(HullError::UnsupportedMach),
+            };
+            if multiplier == 0.0 {
+                Vec3::ZERO
+            } else {
+                if cross_speed > speed * (64.0 * f64::EPSILON) {
+                    return Err(HullError::UnsupportedWaveIncidence);
+                }
+                {
+                    let component = |v: f64| {
+                        scaled_product(
+                            &[density, axial_speed.abs(), factor, multiplier, v.abs()],
+                            1.0,
+                        )
+                        .map(|magnitude| -magnitude.copysign(v))
+                    };
+                    Vec3::new(
+                        component(axial.x)?,
+                        component(axial.y)?,
+                        component(axial.z)?,
+                    )
+                }
             }
-            if cross_speed > speed * (64.0 * f64::EPSILON) {
-                return Err(HullError::UnsupportedWaveIncidence);
-            }
-            resistance(axial, axial_speed.abs(), density, factor, 2.0)?
         } else {
             Vec3::ZERO
         };
@@ -721,6 +753,42 @@ mod tests {
     }
     fn close(a: Vec3, b: Vec3) {
         assert!((a - b).length() < 1e-9, "{a:?} != {b:?}");
+    }
+
+    #[test]
+    fn wave_mach_curve_uses_explicit_transition_without_extrapolation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::wave::{WaveDragError, WaveMachCurve};
+        let curve = WaveMachCurve::new(vec![(0.8, 0.0), (1.0, 0.5), (1.2, 1.0)])?;
+        assert!((curve.multiplier(0.9)? - 0.25).abs() < 1e-12);
+        assert_eq!(curve.multiplier(1.3), Err(WaveDragError::UnsupportedMach));
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?
+        .with_wave_drag(&[0.0, 1.0, -1.0, 0.0])?
+        .with_wave_mach_curve(curve);
+        assert_eq!(
+            section
+                .evaluate(flow(Vec3::new(0.8 * 340.0, 0.0, 0.0)))?
+                .force,
+            Vec3::ZERO
+        );
+        let at_one = section.evaluate(flow(Vec3::X * 340.0))?;
+        let reference = super::super::wave::wave_drag(&[0.0, 1.0, -1.0, 0.0], 1.2, 680.0, 340.0)?;
+        assert!((at_one.force.x + reference / 8.0).abs() < reference * 1e-12);
+        assert!(matches!(
+            section.evaluate(flow(Vec3::X * 500.0)),
+            Err(HullError::Wave(WaveDragError::UnsupportedMach))
+        ));
+        Ok(())
     }
 
     #[test]

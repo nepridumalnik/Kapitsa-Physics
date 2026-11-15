@@ -381,7 +381,12 @@ supersonic flow aligned with the section axis and an axisymmetric slender body.
 The caller is responsible for ensuring the supplied distribution is physically
 valid and for avoiding double counting with other hull or mesh loads. This is
 not a transonic transition model or a geometry-derived configuration.
-Nonzero density and speed outside the stated flow domain produce an error.
+By default nonzero density and speed outside the stated flow domain produce an
+error. `WaveMachCurve` optionally supplies explicit dimensionless multipliers as
+piecewise-linear Mach data; its domain is inclusive and never extrapolated. A
+zero multiplier contributes no wave force, and nonzero multipliers still require
+aligned flow. This is a data-driven transition, not a predictive transonic
+closure; the caller must establish the applicability of the supplied data.
 
 ## Numerical validation requirements
 

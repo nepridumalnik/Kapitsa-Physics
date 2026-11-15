@@ -8,7 +8,7 @@
 //! See NACA TN 3478, equations (1) and (2):
 //! <https://ntrs.nasa.gov/api/citations/19930084271/downloads/19930084271.pdf>.
 
-use std::f64::consts::PI;
+use std::{f64::consts::PI, sync::Arc};
 
 /// Errors in the input or numerical evaluation of wave drag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +26,60 @@ impl std::fmt::Display for WaveDragError {
     }
 }
 impl std::error::Error for WaveDragError {}
+
+/// A caller-supplied multiplier for the slender-body wave-drag factor.
+///
+/// Values are dimensionless and must come from data or a separately validated
+/// model. They do not make the slender-body approximation valid for other shapes
+/// or nonzero incidence. The domain is inclusive and never extrapolated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaveMachCurve {
+    knots: Arc<[(f64, f64)]>,
+}
+
+impl WaveMachCurve {
+    /// Creates a curve from at least two strictly increasing `(Mach, multiplier)`
+    /// pairs. Both values must be finite and nonnegative.
+    pub fn new(knots: Vec<(f64, f64)>) -> Result<Self, WaveDragError> {
+        if knots.len() < 2
+            || knots.iter().any(|(mach, factor)| {
+                !mach.is_finite() || *mach < 0.0 || !factor.is_finite() || *factor < 0.0
+            })
+            || knots.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(WaveDragError::InvalidInput);
+        }
+        Ok(Self {
+            knots: knots.into(),
+        })
+    }
+
+    /// Returns the linearly interpolated multiplier, without extrapolation.
+    pub fn multiplier(&self, mach: f64) -> Result<f64, WaveDragError> {
+        if !mach.is_finite() || mach < 0.0 {
+            return Err(WaveDragError::InvalidInput);
+        }
+        for pair in self.knots.windows(2) {
+            let (x0, y0) = pair[0];
+            let (x1, y1) = pair[1];
+            if mach == x0 {
+                return Ok(y0);
+            }
+            if mach == x1 {
+                return Ok(y1);
+            }
+            if mach > x0 && mach < x1 {
+                let t = (mach - x0) / (x1 - x0);
+                return Ok(if y0 <= y1 {
+                    y0 + t * (y1 - y0)
+                } else {
+                    y1 + (1.0 - t) * (y0 - y1)
+                });
+            }
+        }
+        Err(WaveDragError::UnsupportedMach)
+    }
+}
 
 /// Calculates wave drag in newtons from equally spaced samples of `dA/dx`.
 ///
@@ -116,8 +170,21 @@ pub fn wave_drag(
 
 #[cfg(test)]
 mod tests {
-    use super::{WaveDragError, wave_drag};
+    use super::{WaveDragError, WaveMachCurve, wave_drag};
     use std::f64::consts::PI;
+
+    #[test]
+    fn mach_curve_validates_data_and_endpoints() -> Result<(), WaveDragError> {
+        assert!(WaveMachCurve::new(vec![(0.0, 0.0)]).is_err());
+        assert!(WaveMachCurve::new(vec![(0.0, 1.0), (0.0, 2.0)]).is_err());
+        assert!(WaveMachCurve::new(vec![(0.0, 1.0), (1.0, f64::NAN)]).is_err());
+        let curve = WaveMachCurve::new(vec![(0.0, f64::MAX), (1.0, 0.0)])?;
+        assert_eq!(curve.multiplier(0.0)?, f64::MAX);
+        assert_eq!(curve.multiplier(1.0)?, 0.0);
+        assert_eq!(curve.multiplier(0.5)?, f64::MAX * 0.5);
+        assert_eq!(curve.multiplier(2.0), Err(WaveDragError::UnsupportedMach));
+        Ok(())
+    }
 
     #[test]
     fn sears_haack_converges() -> Result<(), WaveDragError> {
