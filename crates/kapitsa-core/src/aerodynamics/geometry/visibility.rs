@@ -98,14 +98,15 @@ fn finite(value: f64) -> Result<f64, GeometryError> {
     }
 }
 
-// Called only for strictly opposite signs. Reject a nonzero ratio rounded to
-// zero; rounding to the other endpoint needs a separate geometric analysis.
+// Called only for strictly opposite signs. Check the smaller edge ratio so
+// underflow detection is independent of endpoint order. A ratio can still
+// round to one; rejecting that requires separate geometric analysis.
 pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, GeometryError> {
     let denominator = finite(a - b)?;
-    let fraction = finite(a / denominator)?;
-    if fraction == 0.0 {
+    if (a.abs().min(b.abs()) / denominator.abs()) == 0.0 {
         return Err(GeometryError::PrecisionLoss);
     }
+    let fraction = finite(a / denominator)?;
     Ok(fraction)
 }
 
@@ -368,6 +369,11 @@ mod tests {
             crossing_fraction(smallest, -2.0),
             Err(GeometryError::PrecisionLoss)
         );
+        assert_eq!(
+            crossing_fraction(-2.0, smallest),
+            Err(GeometryError::PrecisionLoss)
+        );
+        assert_eq!(crossing_fraction(-1.0, smallest), Ok(1.0));
         assert_eq!(crossing_fraction(1.0, -1.0), Ok(0.5));
     }
 
