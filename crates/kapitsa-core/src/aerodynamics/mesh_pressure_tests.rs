@@ -210,6 +210,24 @@ fn potential_collider_requires_both_sides_for_zero_drag() {
 }
 
 #[test]
+fn closed_pressure_preparation_conservatively_rejects_collider_sphere_seams() {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    let collider = Collider::new(
+        Shape::Sphere(Sphere::new(1.0).unwrap()),
+        Transform::identity(),
+    );
+    let mesh = collider_mesh([&collider], ColliderTessellation::new(16, 9, 1000).unwrap()).unwrap();
+    assert_eq!(
+        closed_mesh_pressure_patches(&mesh),
+        Err(PressureError::InvalidPatch)
+    );
+}
+
+#[test]
 fn collider_sphere_and_cylinder_converge_to_newtonian_integrals() {
     use crate::{
         aerodynamics::colliders::{ColliderTessellation, collider_mesh},

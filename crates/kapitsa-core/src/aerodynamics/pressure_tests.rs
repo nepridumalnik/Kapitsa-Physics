@@ -2,6 +2,36 @@ use super::*;
 use kapitsa_math::Quat;
 
 #[test]
+fn closed_mesh_preparation_rejects_open_reversed_and_disconnected_surfaces() {
+    use crate::shape::TriangleMesh;
+    let vertices = vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z];
+    let faces = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+    let mesh = TriangleMesh::new(vertices.clone(), faces.clone()).unwrap();
+    assert_eq!(closed_mesh_pressure_patches(&mesh).unwrap().len(), 4);
+    let open = TriangleMesh::new(vertices.clone(), faces[..3].to_vec()).unwrap();
+    assert_eq!(
+        closed_mesh_pressure_patches(&open),
+        Err(PressureError::InvalidPatch)
+    );
+    let mut reversed = faces.clone();
+    reversed[0].swap(0, 1);
+    let reversed = TriangleMesh::new(vertices.clone(), reversed).unwrap();
+    assert_eq!(
+        closed_mesh_pressure_patches(&reversed),
+        Err(PressureError::InvalidPatch)
+    );
+    let mut all_vertices = vertices.clone();
+    all_vertices.extend(vertices.iter().map(|v| *v + Vec3::ONE * 3.0));
+    let mut all_faces = faces.clone();
+    all_faces.extend(faces.iter().map(|f| f.map(|i| i + 4)));
+    let disconnected = TriangleMesh::new(all_vertices, all_faces).unwrap();
+    assert_eq!(
+        closed_mesh_pressure_patches(&disconnected),
+        Err(PressureError::InvalidPatch)
+    );
+}
+
+#[test]
 fn base_source_uniqueness_obeys_work_limit_and_triangle_permutations() {
     use crate::{
         aerodynamics::{AerodynamicsError, geometry::GeometryError},

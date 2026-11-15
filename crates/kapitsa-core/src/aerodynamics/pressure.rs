@@ -106,6 +106,63 @@ pub struct PressurePatch {
     area: f64,
 }
 
+/// Converts a consistently wound closed indexed mesh into centroid patches.
+///
+/// Each indexed edge must occur exactly twice in opposite directions and all
+/// faces must be connected. This does not prove a sphere, convexity, absence of
+/// self-intersection, or uniqueness of geometrically coincident vertices. It is
+/// not sufficient by itself to authorize a potential-flow model in a world step.
+pub fn closed_mesh_pressure_patches(
+    mesh: &crate::shape::TriangleMesh,
+) -> Result<Vec<PressurePatch>, PressureError> {
+    use std::collections::BTreeMap;
+
+    let faces = mesh.triangles();
+    let mut edges: BTreeMap<(usize, usize), Vec<(usize, bool)>> = BTreeMap::new();
+    let mut patches = Vec::with_capacity(faces.len());
+    for (index, &[a, b, c]) in faces.iter().enumerate() {
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            edges
+                .entry((u.min(v), u.max(v)))
+                .or_default()
+                .push((index, u < v));
+        }
+        let [a, b, c] = [a, b, c].map(|i| mesh.vertices()[i]);
+        let cross = b
+            .checked_sub(a)
+            .and_then(|u| c.checked_sub(a).and_then(|v| u.checked_cross(v)))
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        let length = cross
+            .checked_length()
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        let center = a / 3.0 + b / 3.0 + c / 3.0;
+        patches.push(PressurePatch::new(center, cross, length * 0.5)?);
+    }
+    let mut neighbors = vec![Vec::new(); faces.len()];
+    for edge in edges.values() {
+        if edge.len() != 2 || edge[0].1 == edge[1].1 {
+            return Err(PressureError::InvalidPatch);
+        }
+        neighbors[edge[0].0].push(edge[1].0);
+        neighbors[edge[1].0].push(edge[0].0);
+    }
+    let mut visited = vec![false; faces.len()];
+    let mut stack = vec![0];
+    visited[0] = true;
+    while let Some(face) = stack.pop() {
+        for &neighbor in &neighbors[face] {
+            if !visited[neighbor] {
+                visited[neighbor] = true;
+                stack.push(neighbor);
+            }
+        }
+    }
+    if visited.iter().any(|seen| !seen) {
+        return Err(PressureError::InvalidPatch);
+    }
+    Ok(patches)
+}
+
 /// Net world-space force and moment about the current center of mass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PressureWrench {
