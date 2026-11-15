@@ -287,6 +287,17 @@ pub struct SimpleSurfaceCorrection {
     pub applied_lift: crate::aerodynamics::pressure::PressureWrench,
 }
 
+/// Uncorrected simple-surface force and torque, in world N and N·m about
+/// the owning body's evaluation-time COM. This is not an applied part load:
+/// aggregate timestep corrections are reported separately at body level.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RawSimpleSurfaceWrench {
+    pub body: BodyId,
+    pub target: AerodynamicTarget,
+    pub drag: crate::aerodynamics::pressure::PressureWrench,
+    pub lift: crate::aerodynamics::pressure::PressureWrench,
+}
+
 impl ForceSource {
     /// Returns the dynamic body receiving this force.
     pub fn body(&self) -> BodyId {
@@ -351,6 +362,7 @@ struct AerodynamicsBodyUpdate {
     part_hull_wrenches: Vec<PartHullWrench>,
     part_wing_wrenches: Vec<PartWingWrench>,
     simple_surface_correction: Option<SimpleSurfaceCorrection>,
+    raw_simple_surfaces: Vec<RawSimpleSurfaceWrench>,
 }
 
 struct PreparedAerodynamicLoads {
@@ -378,6 +390,7 @@ struct AerodynamicsInputs<'a> {
     part_hull_wrenches: Option<&'a mut Vec<PartHullWrench>>,
     part_wing_wrenches: Option<&'a mut Vec<PartWingWrench>>,
     simple_surface_correction: Option<&'a mut Option<SimpleSurfaceCorrection>>,
+    raw_simple_surfaces: Option<&'a mut Vec<RawSimpleSurfaceWrench>>,
 }
 
 impl<'a> AerodynamicsInputs<'a> {
@@ -395,6 +408,7 @@ impl<'a> AerodynamicsInputs<'a> {
             part_hull_wrenches: None,
             part_wing_wrenches: None,
             simple_surface_correction: None,
+            raw_simple_surfaces: None,
         }
     }
 
@@ -418,6 +432,11 @@ impl<'a> AerodynamicsInputs<'a> {
         correction: &'a mut Option<SimpleSurfaceCorrection>,
     ) -> Self {
         self.simple_surface_correction = Some(correction);
+        self
+    }
+
+    fn with_raw_simple_surfaces(mut self, entries: &'a mut Vec<RawSimpleSurfaceWrench>) -> Self {
+        self.raw_simple_surfaces = Some(entries);
         self
     }
 
@@ -548,6 +567,9 @@ pub struct PhysicsWorld {
     part_wing_pending: Vec<PartWingWrench>,
     simple_surface_published: Vec<SimpleSurfaceCorrection>,
     simple_surface_pending: Vec<SimpleSurfaceCorrection>,
+    raw_simple_published: Vec<RawSimpleSurfaceWrench>,
+    raw_simple_pending: Vec<RawSimpleSurfaceWrench>,
+    raw_simple_buffers: Vec<Vec<RawSimpleSurfaceWrench>>,
     part_hull_buffers: Vec<Vec<PartHullWrench>>,
     part_wing_buffers: Vec<Vec<PartWingWrench>>,
     owner_pressure: Option<HashMap<BodyId, crate::aerodynamics::pressure::OwnerPressureWorkspace>>,
@@ -632,6 +654,13 @@ impl PhysicsWorld {
         &self.simple_surface_published
     }
 
+    /// Raw simple-surface wrenches from the last successful full step. Body
+    /// and part targets are included; zero-density surfaces are omitted.
+    /// These are before the shared correction and are not applied part loads.
+    pub fn raw_simple_surface_wrenches(&self) -> &[RawSimpleSurfaceWrench] {
+        &self.raw_simple_published
+    }
+
     /// Impact-pressure contribution from prepared mesh patches in the last
     /// successful full step. Forces are world-space newtons; moments are world
     /// N·m about the body's center of mass at evaluation time. This excludes
@@ -690,6 +719,9 @@ impl PhysicsWorld {
             part_wing_pending: Vec::new(),
             simple_surface_published: Vec::new(),
             simple_surface_pending: Vec::new(),
+            raw_simple_published: Vec::new(),
+            raw_simple_pending: Vec::new(),
+            raw_simple_buffers: Vec::new(),
             part_hull_buffers: Vec::new(),
             part_wing_buffers: Vec::new(),
             owner_pressure: None,
@@ -1692,6 +1724,7 @@ impl PhysicsWorld {
                 &mut self.simple_surface_published,
                 &mut self.simple_surface_pending,
             );
+            std::mem::swap(&mut self.raw_simple_published, &mut self.raw_simple_pending);
             self.recycle_aerodynamics_updates();
             self.clear_gravity_updates();
             self.clear_force_source_updates();
@@ -2059,6 +2092,7 @@ impl PhysicsWorld {
             mut part_hull_wrenches,
             mut part_wing_wrenches,
             simple_surface_correction,
+            mut raw_simple_surfaces,
         } = inputs;
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
@@ -2423,15 +2457,30 @@ impl PhysicsWorld {
                 )
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             drag = drag.checked_add(surface_drag).ok_or_else(error)?;
-            drag_torque = offset
-                .checked_cross(surface_drag)
-                .and_then(|torque| drag_torque.checked_add(torque))
+            let surface_drag_torque = offset.checked_cross(surface_drag).ok_or_else(error)?;
+            drag_torque = drag_torque
+                .checked_add(surface_drag_torque)
                 .ok_or_else(error)?;
             lift_force = lift_force.checked_add(lift).ok_or_else(error)?;
-            lift_torque = offset
-                .checked_cross(lift)
-                .and_then(|torque| lift_torque.checked_add(torque))
+            let surface_lift_torque = offset.checked_cross(lift).ok_or_else(error)?;
+            lift_torque = lift_torque
+                .checked_add(surface_lift_torque)
                 .ok_or_else(error)?;
+            if let Some(entries) = raw_simple_surfaces.as_deref_mut() {
+                entries.try_reserve(1).map_err(|_| error())?;
+                entries.push(RawSimpleSurfaceWrench {
+                    body: body_id,
+                    target: surface.target(),
+                    drag: crate::aerodynamics::pressure::PressureWrench {
+                        force: surface_drag,
+                        moment: surface_drag_torque,
+                    },
+                    lift: crate::aerodynamics::pressure::PressureWrench {
+                        force: lift,
+                        moment: surface_lift_torque,
+                    },
+                });
+            }
         }
         if drag == Vec3::ZERO
             && drag_torque == Vec3::ZERO
@@ -2713,6 +2762,7 @@ impl PhysicsWorld {
         self.part_hull_pending.clear();
         self.part_wing_pending.clear();
         self.simple_surface_pending.clear();
+        self.raw_simple_pending.clear();
         let atmosphere = self.atmosphere;
         if matches!(atmosphere, Atmosphere::Vacuum) {
             return Ok(());
@@ -3035,6 +3085,7 @@ impl PhysicsWorld {
                 part_hull_wrenches: self.part_hull_buffers.pop().unwrap_or_default(),
                 part_wing_wrenches: self.part_wing_buffers.pop().unwrap_or_default(),
                 simple_surface_correction: None,
+                raw_simple_surfaces: self.raw_simple_buffers.pop().unwrap_or_default(),
                 loads: PreparedAerodynamicLoads {
                     mesh_patches,
                     sphere_patches,
@@ -3076,7 +3127,8 @@ impl PhysicsWorld {
                                         .with_part_wing_wrenches(&mut update.part_wing_wrenches)
                                         .with_simple_surface_correction(
                                             &mut update.simple_surface_correction,
-                                        ),
+                                        )
+                                        .with_raw_simple_surfaces(&mut update.raw_simple_surfaces),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -3119,6 +3171,14 @@ impl PhysicsWorld {
                 })?;
                 self.simple_surface_pending.push(correction);
             }
+            self.raw_simple_pending
+                .try_reserve(update.raw_simple_surfaces.len())
+                .map_err(|_| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                })?;
+            self.raw_simple_pending
+                .extend_from_slice(&update.raw_simple_surfaces);
         }
 
         // This diagnostic pass never applies forces; the solver path above is
@@ -3219,12 +3279,16 @@ impl PhysicsWorld {
         for mut update in self.aerodynamics_body_updates.drain(..) {
             update.part_hull_wrenches.clear();
             update.part_wing_wrenches.clear();
+            update.raw_simple_surfaces.clear();
             // If the pool cannot grow, dropping scratch buffers is safe.
             if self.part_hull_buffers.try_reserve(1).is_ok() {
                 self.part_hull_buffers.push(update.part_hull_wrenches);
             }
             if self.part_wing_buffers.try_reserve(1).is_ok() {
                 self.part_wing_buffers.push(update.part_wing_wrenches);
+            }
+            if self.raw_simple_buffers.try_reserve(1).is_ok() {
+                self.raw_simple_buffers.push(update.raw_simple_surfaces);
             }
         }
     }

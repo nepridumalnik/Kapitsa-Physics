@@ -105,7 +105,9 @@ drag limit and a coupled lift correction after summing surfaces. The raw force
 from a particular surface is therefore not necessarily its applied force.
 `PhysicsWorld::simple_surface_corrections` publishes the raw and applied
 body-level drag and lift wrenches after a successful full step. Their difference
-is not attributed to any part. A future weld ledger must adopt and document a
+is not attributed to any part. `raw_simple_surface_wrenches` records the raw
+drag and lift of each body- or part-targeted surface before that correction;
+they are not the applied loads. A future weld ledger must adopt and document a
 physically justified allocation policy before using these corrected loads; it
 must not silently use uncorrected per-surface values as weld loads.
 

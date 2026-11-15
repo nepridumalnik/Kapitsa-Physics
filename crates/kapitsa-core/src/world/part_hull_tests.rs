@@ -281,6 +281,27 @@ fn part_simple_surfaces_share_body_level_drag_limit() -> Result<(), Box<dyn std:
             let snapshot = world.simple_surface_corrections().to_vec();
             assert_eq!(snapshot.len(), 1);
             let correction = snapshot[0];
+            let raw = world.raw_simple_surface_wrenches().to_vec();
+            assert_eq!(raw.len(), if distributed { 2 } else { 1 });
+            assert!(
+                raw.iter()
+                    .all(|entry| entry.body == id && entry.drag.force == Vec3::X * -60.0)
+            );
+            assert!(
+                raw.iter().any(
+                    |entry| entry.target == crate::aerodynamics::AerodynamicTarget::Part(child)
+                )
+            );
+            if distributed {
+                assert!(raw.iter().any(
+                    |entry| entry.target == crate::aerodynamics::AerodynamicTarget::Part(root)
+                ));
+            }
+            assert_eq!(
+                raw.iter()
+                    .fold(Vec3::ZERO, |sum, entry| sum + entry.drag.force),
+                correction.raw_drag.force
+            );
             assert_eq!(correction.body, id);
             let expected_raw = if distributed { -120.0 } else { -60.0 };
             assert!((correction.raw_drag.force.x - expected_raw).abs() < 1e-12);
@@ -308,10 +329,12 @@ fn part_simple_surfaces_share_body_level_drag_limit() -> Result<(), Box<dyn std:
             };
             assert!(failed.is_err());
             assert_eq!(world.simple_surface_corrections(), snapshot.as_slice());
+            assert_eq!(world.raw_simple_surface_wrenches(), raw.as_slice());
             world.remove_gravity(bad).ok_or("gravity")?;
             world.set_atmosphere(crate::aerodynamics::Atmosphere::Vacuum);
             world.step(1.0)?;
             assert!(world.simple_surface_corrections().is_empty());
+            assert!(world.raw_simple_surface_wrenches().is_empty());
         }
     }
     Ok(())
