@@ -167,6 +167,30 @@ fn triangle_grid_candidates_are_conservative_for_axis_and_diagonal_sweeps() {
 }
 
 #[test]
+fn triangle_grid_build_accounts_for_input_scans() {
+    const TRIANGLE_COUNT: usize = 2;
+    const SCAN_WORK: usize = TRIANGLE_COUNT * 3;
+    let triangle = visibility_triangle(Vec3::ZERO, Vec3::Y, Vec3::Z);
+    let triangles = [triangle; TRIANGLE_COUNT];
+    assert!(matches!(
+        TriangleGrid::build(&triangles, SCAN_WORK - 1),
+        Err(GeometryError::WorkBudgetExceeded)
+    ));
+    let required = TriangleGrid::build(&triangles, 10_000).unwrap().build_work;
+    assert!(required > SCAN_WORK);
+    assert!(matches!(
+        TriangleGrid::build(&triangles, required - 1),
+        Err(GeometryError::WorkBudgetExceeded)
+    ));
+    assert_eq!(
+        TriangleGrid::build(&triangles, required)
+            .unwrap()
+            .build_work,
+        required
+    );
+}
+
+#[test]
 fn triangle_grid_counts_empty_buckets_toward_query_budget() {
     let grid = TriangleGrid {
         origin: Vec3::ZERO,

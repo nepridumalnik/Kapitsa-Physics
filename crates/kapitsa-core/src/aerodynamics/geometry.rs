@@ -181,6 +181,13 @@ impl TriangleGrid {
         if triangles.is_empty() {
             return Err(GeometryError::EmptyGeometry);
         }
+        // Bounds, entry counting and entry construction each scan the input.
+        const TRIANGLE_SCAN_WORK: usize = 3;
+        let scan_work = triangles
+            .len()
+            .checked_mul(TRIANGLE_SCAN_WORK)
+            .ok_or(GeometryError::WorkBudgetExceeded)?;
+        check_surface_work(Some(scan_work), max_work)?;
         let mut min = Vec3::splat(f64::INFINITY);
         let mut max = Vec3::splat(f64::NEG_INFINITY);
         for triangle in triangles {
@@ -245,6 +252,7 @@ impl TriangleGrid {
         let build_work = entry_count
             .checked_mul(sort_factor)
             .and_then(|work| work.checked_add(cell_count))
+            .and_then(|work| work.checked_add(scan_work))
             .ok_or(GeometryError::WorkBudgetExceeded)?;
         check_surface_work(Some(build_work), max_work)?;
         let mut entries = Vec::new();
