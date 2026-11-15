@@ -171,8 +171,15 @@ pub struct FiniteWing {
     profile_drag: f64,
     zero_lift_angle: f64,
     max_attached_angle: f64,
-    compressible_max_mach: Option<f64>,
+    compressibility: Compressibility,
     drag_rise: Option<DragRise>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Compressibility {
+    Incompressible,
+    Subsonic { max_mach: f64 },
+    Ndarc { divergence_mach: f64, max_mach: f64 },
 }
 
 /// Explicit parameters for an empirical wing compressibility drag increment.
@@ -362,7 +369,7 @@ impl FiniteWing {
             profile_drag,
             zero_lift_angle,
             max_attached_angle,
-            compressible_max_mach: None,
+            compressibility: Compressibility::Incompressible,
             drag_rise: None,
         })
     }
@@ -377,7 +384,36 @@ impl FiniteWing {
         if !max_mach.is_finite() || max_mach <= 0.0 || max_mach >= 1.0 {
             return Err(WingError::InvalidParameters);
         }
-        self.compressible_max_mach = Some(max_mach);
+        self.compressibility = Compressibility::Subsonic { max_mach };
+        Ok(self)
+    }
+
+    /// Enables the empirical NDARC lift-slope correction through Mach 1.
+    ///
+    /// `divergence_mach` must be in (0, 0.9), and `max_mach` must be finite
+    /// and at least 1. Both are dimensionless, caller-selected calibration
+    /// limits. This is an engineering approximation, not a shock or stall
+    /// solver. It multiplies the incompressible finite-wing lift slope by the
+    /// piecewise factor in NASA TP-2015-218751, Appendix 3, section 8-8.
+    /// It replaces the optional subsonic Prandtl-Glauert lifting-line model.
+    /// The independent attached-flow and drag-rise domains still apply.
+    pub fn with_ndarc_lift_correction(
+        mut self,
+        divergence_mach: f64,
+        max_mach: f64,
+    ) -> Result<Self, WingError> {
+        if !divergence_mach.is_finite()
+            || divergence_mach <= 0.0
+            || divergence_mach >= 0.9
+            || !max_mach.is_finite()
+            || max_mach < 1.0
+        {
+            return Err(WingError::InvalidParameters);
+        }
+        self.compressibility = Compressibility::Ndarc {
+            divergence_mach,
+            max_mach,
+        };
         Ok(self)
     }
 
@@ -435,9 +471,9 @@ impl FiniteWing {
         Ok(wing)
     }
 
-    /// The default incompressible model supports Mach <= 0.3. An optional
-    /// subsonic compressibility approximation uses its caller-specified limit.
-    /// Both require attached flow; there is no implicit stall clamp.
+    /// The default incompressible model supports Mach <= 0.3. Optional
+    /// compressibility models use their caller-specified Mach limits. All
+    /// models require attached flow; there is no implicit stall clamp.
     pub fn coefficients(
         self,
         angle_of_attack: f64,
@@ -447,15 +483,19 @@ impl FiniteWing {
             return Err(WingError::InvalidFlow);
         }
         let alpha = angle_of_attack - self.zero_lift_angle;
-        if mach > self.compressible_max_mach.unwrap_or(0.3) || alpha.abs() > self.max_attached_angle
-        {
+        let max_mach = match self.compressibility {
+            Compressibility::Incompressible => 0.3,
+            Compressibility::Subsonic { max_mach } | Compressibility::Ndarc { max_mach, .. } => {
+                max_mach
+            }
+        };
+        if mach > max_mach || alpha.abs() > self.max_attached_angle {
             return Err(WingError::UnsupportedFlow);
         }
         let effective_aspect = self.efficiency * self.aspect_ratio;
-        let beta = if self.compressible_max_mach.is_some() {
-            (1.0 - mach * mach).sqrt()
-        } else {
-            1.0
+        let beta = match self.compressibility {
+            Compressibility::Subsonic { .. } => (1.0 - mach * mach).sqrt(),
+            _ => 1.0,
         };
         // Algebraically equivalent form without overflowing pi*e*AR, or
         // underflowing the slope by first dividing 2*pi by a tiny denominator.
@@ -464,7 +504,24 @@ impl FiniteWing {
         } else {
             PI * effective_aspect / (1.0 + beta * effective_aspect / 2.0)
         };
-        let lift = slope * alpha;
+        let lift_factor = match self.compressibility {
+            Compressibility::Ndarc {
+                divergence_mach, ..
+            } if mach < divergence_mach => 1.0 / (1.0 - mach * mach).sqrt(),
+            Compressibility::Ndarc {
+                divergence_mach, ..
+            } if mach < 1.0 => {
+                let decay = (1.0 - mach)
+                    / ((1.0 - divergence_mach) * (1.0 - divergence_mach * divergence_mach).sqrt());
+                if mach <= divergence_mach + 0.1 {
+                    decay
+                } else {
+                    decay + (mach - divergence_mach - 0.1) / (0.9 - divergence_mach)
+                }
+            }
+            _ => 1.0,
+        };
+        let lift = (slope * alpha) * lift_factor;
         if effective_aspect == 0.0 || !lift.is_finite() {
             return Err(WingError::ArithmeticOverflow);
         }
@@ -734,6 +791,28 @@ mod tests {
             base.with_drag_rise(0.8, 0.0)?.coefficients(0.0, 0.89)?,
             base.coefficients(0.0, 0.89)?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn ndarc_lift_correction_is_continuous_at_regime_boundaries() -> Result<(), WingError> {
+        let base = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?;
+        let model = base.with_ndarc_lift_correction(0.75, 1.2)?;
+        let baseline = base.coefficients(0.1, 0.0)?.lift;
+        for boundary in [0.75, 0.85, 1.0] {
+            let left = model.coefficients(0.1, boundary - 1e-8)?.lift;
+            let right = model.coefficients(0.1, boundary + 1e-8)?.lift;
+            assert!((left - right).abs() < 1e-6);
+        }
+        let subsonic = model.coefficients(0.1, 0.5)?.lift;
+        assert!((subsonic - baseline / (1.0_f64 - 0.5_f64.powi(2)).sqrt()).abs() < 1e-12);
+        assert!((model.coefficients(0.1, 1.1)?.lift - baseline).abs() < 1e-12);
+        assert_eq!(
+            model.coefficients(0.1, 1.21),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert!(base.with_ndarc_lift_correction(0.9, 1.2).is_err());
+        assert!(base.with_ndarc_lift_correction(0.75, 0.99).is_err());
         Ok(())
     }
 

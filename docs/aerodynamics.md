@@ -282,6 +282,16 @@ wave drag, separation or stall. Profile drag remains caller-supplied. The
 incompressible default and its Mach 0.3 limit are unchanged. The underlying
 compressibility transformation for finite wings is discussed in [NACA TN 1854](https://ntrs.nasa.gov/api/citations/19930082527/downloads/19930082527.pdf).
 
+`FiniteWing::with_ndarc_lift_correction(divergence_mach, max_mach)` offers a
+separate empirical lift-slope approximation from [NASA TP-2015-218751, section
+8-8](https://rotorcraft.arc.nasa.gov/Publications/files/Johnson_NASA%20TP-2015-218751-app3.pdf).
+It uses a piecewise correction through Mach 1 and replaces the optional
+Prandtl-Glauert lifting-line approximation. Both parameters must be selected
+for the intended configuration; the model does not infer shock onset or stall.
+Its Mach limit, the attached-flow limit and any drag-rise correlation's domain
+remain independent. The supersonic branch is an engineering approximation, not
+a validated general supersonic wing model.
+
 `FiniteWing::with_drag_rise(critical_mach, scale)` optionally adds the empirical
 compressibility drag increment described in [NASA TP-2015-218751, section 8-8](https://rotorcraft.arc.nasa.gov/Publications/files/Johnson_NASA%20TP-2015-218751-app3.pdf).
 The caller supplies both the critical Mach and the dimensionless coefficient
