@@ -205,11 +205,31 @@ world integration). Products use binary exponent scaling so intermediate
 pressure or Reynolds numerators need not fit when the complete result does;
 truly nonfinite loads still fail rather than being clamped or discarded.
 
-This is empirical sectional resistance, **not potential-flow normal force or
+The empirical sectional resistance alone is **not potential-flow normal force or
 lift**, predictive transonic continuation, area-rule wave drag, interference,
 shielding, separation prediction or FAR equivalence. Geometry/voxel preparation does not
-infer hull coefficients or automatically generate these sections. Explicit
+infer these empirical hull coefficients or automatically generate these resistance sections. Explicit
 wings are separate; callers must avoid counting a physical contribution twice.
+
+### Steady slender-body normal loads
+
+`slender::hull_sections_from_voxels` creates explicit distributed hull sections
+from the filtered axial area distribution of a prepared geometry union. It uses
+the steady, small-incidence incompressible relation `dF_normal = rho * U *
+(dA/dx) * v_cross * dx`, with the positive body axis directed toward the nose.
+This is the body term of [Barrowman, equation 3-59](https://ntrs.nasa.gov/api/citations/20010047838/downloads/20010047838.pdf),
+with signs converted to the body-relative velocity convention used here.
+
+The caller selects the axis, centerline, smoothing radius and small-incidence
+limit and must establish that the geometry is slender and axisymmetric and that
+flow is steady and spatially uniform. Local Mach above 0.3, reverse flow at
+nonzero incidence, incidence outside the selected limit, and any nonzero body
+angular velocity are rejected. No pitch damping, wind-gradient derivative,
+separation, wave drag or transonic continuation is inferred. The sections are a
+snapshot and must be regenerated when geometry changes. They can be configured
+through the existing body or part hull APIs and are additive to other models.
+An analytic closed-body area fixture checks zero net normal force and moment
+convergence; it is not a validation for arbitrary voxelized vehicles.
 
 ## Pressure loads
 

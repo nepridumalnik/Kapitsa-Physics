@@ -1019,3 +1019,80 @@ fn wing_volume_visibility_resolves_full_partial_and_clear_footprints()
     assert_eq!(visibility.offset, Vec3::ZERO);
     Ok(())
 }
+
+#[test]
+fn voxel_slender_sections_apply_and_reject_rotation_in_world_steps()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            Aerodynamics, AerodynamicsError, AerodynamicsTask, Atmosphere, DensityProfile,
+            SphericalAtmosphere, hull::HullError, slender::hull_sections_from_voxels,
+        },
+        execution::SequentialExecutor,
+        mass::MassProperties,
+        rigid_body::RigidBody,
+        world::{PhysicsWorld, StepError},
+    };
+    use kapitsa_math::Mat3;
+    let mesh = cube();
+    let geometry = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125))?;
+    let sections = hull_sections_from_voxels(&geometry, 0, Vec3::new(0.0, 0.5, 0.5), 1, 0.2)?;
+    assert!(!sections.is_empty());
+    let mut expected = None;
+    for clustered in [false, true] {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(Atmosphere::Sphere(
+                SphericalAtmosphere::builder()
+                    .reference_radius(1_000_000.0)
+                    .reference_density(1.0)
+                    .height(1_000_000.0)
+                    .profile(DensityProfile::Exponential {
+                        scale_height: 1_000_000.0,
+                    })
+                    .build()?,
+            ));
+            let mass =
+                MassProperties::new(100.0, Vec3::new(0.5, 0.5, 0.5), Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::new(10.0, 0.0, -1.0))?;
+            body.set_aerodynamics(Aerodynamics::Hull(sections.clone()));
+            let id = world.add_body(body)?;
+            if clustered {
+                world.enable_cluster(id)?;
+            }
+            AerodynamicsTask.execute(&world)?;
+            if sharded {
+                world.step_with_shards(
+                    1e-4,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(1e-4)?;
+            }
+            let motion = world.body(id).ok_or("body")?.motion();
+            assert!(motion.state().angular_velocity().length() > 0.0);
+            if let Some(reference) = expected {
+                assert_eq!(motion, reference);
+            } else {
+                expected = Some(motion);
+            }
+            let failed = if sharded {
+                world.step_with_shards(1e-4, &mut [Vec::new()], &SequentialExecutor, 1)
+            } else {
+                world.step(1e-4)
+            };
+            assert!(matches!(
+                failed,
+                Err(StepError::Aerodynamics {
+                    cause: AerodynamicsError::Hull(HullError::UnsupportedSlenderRotation),
+                    ..
+                })
+            ));
+            assert_eq!(world.body(id).ok_or("body")?.motion(), motion);
+        }
+    }
+    Ok(())
+}

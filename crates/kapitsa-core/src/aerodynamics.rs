@@ -6,6 +6,7 @@ pub mod colliders;
 pub mod geometry;
 pub mod hull;
 pub mod pressure;
+pub mod slender;
 pub mod wave;
 pub mod wing;
 pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};

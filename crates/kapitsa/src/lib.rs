@@ -13,7 +13,7 @@ pub mod aerodynamics {
         AerodynamicForce, AerodynamicProperties, AerodynamicSurface, AerodynamicTarget,
         Aerodynamics, AerodynamicsError, AerodynamicsTask, Atmosphere, AtmosphericState,
         ColliderTessellation, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder,
-        cache, colliders, geometry, hull, pressure, wave, wing,
+        cache, colliders, geometry, hull, pressure, slender, wave, wing,
     };
 }
 

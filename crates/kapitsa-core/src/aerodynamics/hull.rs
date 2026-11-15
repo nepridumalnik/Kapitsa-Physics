@@ -82,6 +82,11 @@ pub enum HullError {
     UnsupportedReynolds,
     /// The configured incompressible flat-plate correlation has no compressible closure.
     UnsupportedSkinFrictionMach,
+    /// The slender-body normal-load model requires forward small-incidence flow.
+    UnsupportedSlenderIncidence,
+    /// This steady slender-body model does not include rotational derivatives.
+    UnsupportedSlenderRotation,
+    AllocationFailed,
     /// The wave drag approximation requires flow aligned with the body axis.
     UnsupportedWaveIncidence,
     /// The wave drag distribution could not be evaluated.
@@ -371,6 +376,7 @@ pub struct HullSection {
     skin_friction: Option<SkinFriction>,
     mach_curve: Option<MachCurve>,
     normal_curve: Option<NormalForceCurve>,
+    potential: Option<super::slender::PotentialCell>,
     wave_drag_factor: Option<super::wave::PreparedWaveDrag>,
     wave_mach_curve: Option<super::wave::WaveMachCurve>,
 }
@@ -417,9 +423,15 @@ impl HullSection {
             skin_friction,
             mach_curve: None,
             normal_curve: None,
+            potential: None,
             wave_drag_factor: None,
             wave_mach_curve: None,
         })
+    }
+
+    pub(super) fn with_potential(mut self, cell: super::slender::PotentialCell) -> Self {
+        self.potential = Some(cell);
+        self
     }
 
     /// Add zero-incidence supersonic wave drag for a slender axisymmetric body.
@@ -547,6 +559,7 @@ impl HullSection {
             || !drag_enabled
                 && self.normal_curve.is_none()
                 && self.wave_drag_factor.is_none()
+                && self.potential.is_none()
                 && (self.wetted_area == 0.0 || self.skin_friction.is_none())
         {
             return Ok(zero);
@@ -585,6 +598,9 @@ impl HullSection {
         if mach > 0.3 && self.wetted_area != 0.0 && self.skin_friction.is_some() {
             return Err(HullError::UnsupportedSkinFrictionMach);
         }
+        if self.potential.is_some() && flow.angular_velocity != Vec3::ZERO {
+            return Err(HullError::UnsupportedSlenderRotation);
+        }
         if speed == 0.0 {
             return Ok(zero);
         }
@@ -595,6 +611,9 @@ impl HullSection {
         let axial = axis.checked_mul_scalar(axial_speed).ok_or(overflow)?;
         let crossflow = velocity.checked_sub(axial).ok_or(overflow)?;
         let cross_speed = crossflow.checked_length().ok_or(overflow)?;
+        if self.potential.is_some() && cross_speed != 0.0 && mach > 0.3 {
+            return Err(HullError::UnsupportedMach);
+        }
         let density = flow.atmosphere.density();
         let wave_force = if let Some(factor) = self.wave_drag_factor {
             let multiplier = match &self.wave_mach_curve {
@@ -683,10 +702,21 @@ impl HullSection {
         } else {
             Vec3::ZERO
         };
+        let potential_force = match self.potential {
+            Some(cell) => cell.force(
+                density,
+                axial_speed,
+                crossflow,
+                cross_speed,
+                flow.angular_velocity,
+            )?,
+            None => Vec3::ZERO,
+        };
         let force = axial_force
             .checked_add(cross_force)
             .and_then(|f| f.checked_add(normal_force))
             .and_then(|f| f.checked_add(wave_force))
+            .and_then(|f| f.checked_add(potential_force))
             .ok_or(overflow)?;
         let moment = arm.checked_cross(force).ok_or(overflow)?;
         Ok(PressureWrench { force, moment })
