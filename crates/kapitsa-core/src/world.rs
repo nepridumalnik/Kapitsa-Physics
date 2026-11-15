@@ -902,8 +902,8 @@ impl PhysicsWorld {
     }
 
     /// Instantaneous reactions for clusters subject only to
-    /// part-targeted persistent forces. Requires a collision- and joint-free
-    /// world with no gravity or aerodynamic loads at evaluation time.
+    /// part-targeted persistent forces. The cluster must have no colliders;
+    /// the world must have no joints, gravity, or aerodynamic loads on it.
     /// Results are diagnostics from the last successful full-step snapshot.
     pub fn part_source_weld_reactions(
         &self,
@@ -2184,8 +2184,7 @@ impl PhysicsWorld {
         self.cluster_load_welds_pending
             .try_reserve(self.welds.iter().count())
             .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
-        let no_world_load_paths = self.colliders.iter().next().is_none()
-            && self.joints.iter().next().is_none()
+        let no_world_load_paths = self.joints.iter().next().is_none()
             && self.central_gravity.is_none()
             && self.gravity_fields.iter().next().is_none()
             && self.chunks.iter().next().is_none();
@@ -2203,6 +2202,7 @@ impl PhysicsWorld {
                 });
                 let part_sources_certified = no_world_load_paths
                     && sources_certified
+                    && entry.first_collider.is_none()
                     && body.physics().body_type() == BodyType::Dynamic
                     && body.forces().force() == Vec3::ZERO
                     && body.forces().torque() == Vec3::ZERO

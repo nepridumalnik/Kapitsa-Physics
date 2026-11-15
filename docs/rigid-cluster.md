@@ -175,7 +175,8 @@ compare magnitudes at the child-side weld anchor; equality does not break a
 weld. A step with a breakable cluster fails before commit when its loads cannot
 be certified. Currently certification requires a dynamic cluster with no
 accumulated body forces, no aerodynamic loads, and only part-targeted persistent
-force sources, in a world without colliders, joints, gravity or chunks. Thus
+force sources, with no colliders on the cluster and no joints, gravity or chunks
+in the world. Colliders on other bodies are permitted. Thus
 contact and CCD forces are not supported, not assumed absent from a diagnostic
 log. Low-level shard commits do not perform automatic weld failure.
 

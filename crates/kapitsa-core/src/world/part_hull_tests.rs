@@ -382,9 +382,19 @@ fn automatic_weld_failure_multiple_clusters_is_atomic_on_rejection()
 fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
+    use crate::collider::Collider;
     use crate::joint::JointFrame;
+    use crate::shape::{Cuboid, Shape};
     for sharded in [false, true] {
         let mut world = PhysicsWorld::new();
+        let unrelated = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        world.add_collider(
+            unrelated,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            ),
+        )?;
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
         let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
         let root = world.enable_cluster(body)?;
@@ -431,6 +441,26 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
         assert_eq!(*world.body(body).ok_or("body")?.state(), before);
         assert!(world.weld(weld).is_some());
         world.set_part_aerodynamic_hull(root, Vec::new())?;
+        let own_collider = world.add_part_collider(
+            root,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        let rejected = if sharded {
+            world.step_with_shards(
+                0.01,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )
+        } else {
+            world.step(0.01)
+        };
+        assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+        assert!(world.weld(weld).is_some());
+        world.remove_part_collider(own_collider)?;
         if sharded {
             world.step_with_shards(
                 0.01,
