@@ -79,7 +79,10 @@ fn part_hull_accessor_and_late_failure_preserve_configuration() {
 fn equal_net_drag_on_tree_can_imply_different_internal_loads()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
-        cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength},
+        cluster::{
+            ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength,
+            balance::{BalanceError, PartBalanceInput, tree_reactions},
+        },
         joint::JointFrame,
     };
     const DT: f64 = 1e-4;
@@ -158,6 +161,44 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
         let state = world.body(id).ok_or("cluster body")?.state();
         assert!((state.linear_velocity().x - (10.0 - 30.0 * DT)).abs() < 1e-12);
         assert!(state.angular_velocity().length() < 1e-12);
+        // This tightly controlled fixture has only part hull loads, no
+        // contacts, gravity, joints, or other force sources. The snapshots
+        // are evaluated at the initial pose, which is identity here.
+        let mut inputs = [PartBalanceInput {
+            mass,
+            pose: Transform::identity(),
+            external_force: Vec3::ZERO,
+            external_moment: Vec3::ZERO,
+            loads_complete: true,
+        }; 2];
+        for load in &snapshot {
+            let index = if load.part == root { 0 } else { 1 };
+            inputs[index].external_force += load.wrench.force;
+            inputs[index].external_moment += load.wrench.moment;
+        }
+        let balance = |inputs: &[PartBalanceInput]| {
+            tree_reactions(
+                inputs,
+                &[0, 0],
+                Vec3::ZERO,
+                Vec3::X * -30.0,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                1e-10,
+                1e-10,
+            )
+        };
+        let reactions = balance(&inputs).map_err(|error| format!("balance: {error:?}"))?;
+        let expected = if distributed {
+            Vec3::ZERO
+        } else {
+            Vec3::X * 30.0
+        };
+        assert!((reactions[1].0 - expected).length() < 1e-10);
+        assert!(reactions[1].1.length() < 1e-10);
+        inputs[1].loads_complete = false;
+        assert_eq!(balance(&inputs), Err(BalanceError::IncompleteLoads));
         velocities.push(state.linear_velocity());
         let center = world
             .body(id)
@@ -181,9 +222,7 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
         world.remove_gravity(bad).ok_or("gravity")?;
     }
     assert!((velocities[0] - velocities[1]).length() < 1e-12);
-    // By Newton's law, each 1 kg part accelerates at -30 m/s². The cut
-    // reaction is 30 N when drag is all on the child, but zero when each
-    // part receives 30 N. The current implementation does not evaluate it.
+    // Equal total drag can nevertheless produce different cut reactions.
     Ok(())
 }
 
