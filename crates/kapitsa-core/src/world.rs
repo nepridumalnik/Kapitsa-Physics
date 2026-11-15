@@ -854,8 +854,8 @@ impl PhysicsWorld {
             &self.cluster_load_welds_pending,
             &self.part_force_source_pending,
             &self.part_gravity_pending,
-            &[],
-            false,
+            &self.part_hull_pending,
+            true,
         )?;
         Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_pending)
     }
