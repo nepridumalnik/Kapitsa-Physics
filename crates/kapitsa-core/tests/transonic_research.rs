@@ -621,6 +621,79 @@ fn harris_subsonic_surface_impermeability_diagnostic() -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "equation-type diagnostic; run in release mode"]
+fn harris_subsonic_equation_type_diagnostic() -> Result<(), String> {
+    // Classify the backward axial face slopes used by the numerical flux,
+    // including points inside the idealized body: this is not a flow map.
+    const EXTENSION: f64 = 0.5;
+    const OUTER: f64 = 1.25;
+    const GAMMA: f64 = 1.4;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 60_000;
+    for mach in [0.3_f64, 0.9] {
+        for intervals in [32_usize, 64, 96] {
+            let dx = 1.0 / intervals as f64;
+            let nx = 2 * intervals + 1;
+            let nr = (OUTER / dx + 0.5).round() as usize;
+            let dr = OUTER / (nr as f64 - 0.5);
+            let mut grid = MixedGrid {
+                phi: vec![vec![0.0; nr]; nx],
+                axis_flux: (0..nx)
+                    .map(|i| harris_conservative_source(i as f64 * dx - EXTENSION, dx))
+                    .collect(),
+                dx,
+                dr,
+                mach,
+                gamma: GAMMA,
+            };
+            let (iterations, residual) = grid
+                .iterate(TOLERANCE, MAX_ITERATIONS)
+                .map_err(|value| format!("mach={mach} intervals={intervals} residual={value}"))?;
+            let mut minimum = f64::INFINITY;
+            let mut min_location = (0.0, 0.0);
+            let mut negative = 0_usize;
+            let mut count = 0_usize;
+            let mut transitions = 0_usize;
+            for k in 0..nr - 1 {
+                let r = (k as f64 + 0.5) * dr;
+                let mut previous: Option<(f64, bool)> = None;
+                for i in 2..nx - 1 {
+                    let x = (i as f64 - 0.5) * dx - EXTENSION;
+                    let u = (grid.phi[i][k] - grid.phi[i - 1][k]) / dx;
+                    let lambda = 1.0 - mach * mach - mach * mach * (GAMMA + 1.0) * u;
+                    if !lambda.is_finite() {
+                        return Err(format!("non-finite lambda at mach={mach} x={x} r={r}"));
+                    }
+                    if lambda < minimum {
+                        minimum = lambda;
+                        min_location = (x, r);
+                    }
+                    let hyperbolic = lambda < 0.0;
+                    negative += usize::from(hyperbolic);
+                    count += 1;
+                    if let Some((previous_x, previous_hyperbolic)) = previous {
+                        if previous_hyperbolic != hyperbolic {
+                            transitions += 1;
+                            println!(
+                                "transition mach={mach} intervals={intervals} r={r:.9} x_bracket=[{previous_x:.9},{x:.9}] from_hyperbolic={previous_hyperbolic}"
+                            );
+                        }
+                    }
+                    previous = Some((x, hyperbolic));
+                }
+            }
+            println!(
+                "type mach={mach} intervals={intervals} dx={dx:.9} dr={dr:.9} min_lambda={minimum:.9} min_x={:.9} min_r={:.9} negative={negative}/{count} fraction={:.9} transitions={transitions} iterations={iterations} residual={residual:.3e}",
+                min_location.0,
+                min_location.1,
+                negative as f64 / count as f64
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "source discretization sensitivity diagnostic; run in release mode"]
 fn harris_subsonic_cutoff_source_discretization() -> Result<(), String> {
     // Fixed finite domain and identical initial conditions; averaging changes
