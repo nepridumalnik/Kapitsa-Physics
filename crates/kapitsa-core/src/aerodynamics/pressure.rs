@@ -137,11 +137,21 @@ impl PressurePatch {
         if incidence == 0.0 {
             return Ok(zero);
         }
-        let q = (0.5 * flow.atmosphere.density() * speed) * speed;
-        let magnitude = q * (2.0 * incidence * incidence) * self.area;
-        if !q.is_finite() || !magnitude.is_finite() {
-            return Err(overflow);
-        }
+        // The factors 1/2 in dynamic pressure and 2 in Newtonian Cp cancel.
+        // Scale the complete product so an unrepresentable intermediate pressure
+        // does not reject a representable force on a small patch.
+        let magnitude = super::hull::scaled_product(
+            &[
+                flow.atmosphere.density(),
+                speed,
+                speed,
+                incidence,
+                incidence,
+                self.area,
+            ],
+            1.0,
+        )
+        .map_err(|_| overflow)?;
         let force = normal.checked_mul_scalar(-magnitude).ok_or(overflow)?;
         let moment = arm.checked_cross(force).ok_or(overflow)?;
         Ok(PressureWrench { force, moment })

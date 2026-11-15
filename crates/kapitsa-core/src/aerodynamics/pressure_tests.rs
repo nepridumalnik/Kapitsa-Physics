@@ -24,6 +24,18 @@ fn normal_plate_matches_analytic_pressure_and_offset_moment() {
 }
 
 #[test]
+fn small_patch_preserves_force_when_dynamic_pressure_overflows() {
+    let patch = PressurePatch::new(Vec3::ZERO, Vec3::X, 1e-200).unwrap();
+    let load = patch
+        .evaluate(PressureFlow {
+            atmosphere: AtmosphericState::new(1e200, Vec3::ZERO).unwrap(),
+            ..flow()
+        })
+        .unwrap();
+    assert!((load.force.x + 1e6).abs() < 1e-8);
+}
+
+#[test]
 fn grazing_leeward_and_oblique_patch_loads() {
     for normal in [Vec3::Y, -Vec3::X] {
         let p = PressurePatch::new(Vec3::ZERO, normal, 1.0).unwrap();
