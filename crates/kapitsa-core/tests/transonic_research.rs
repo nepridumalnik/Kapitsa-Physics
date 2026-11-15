@@ -497,6 +497,70 @@ fn harris_subsonic_axial_boundary_sensitivity() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+#[ignore = "independent axial-boundary diagnostic; run in release mode"]
+fn harris_subsonic_independent_axial_boundaries() -> Result<(), String> {
+    const BODY_INTERVALS: usize = 32;
+    const RADIAL_CELLS: usize = 97;
+    const FIXED_EXTENSION: usize = 3 * BODY_INTERVALS;
+    const MACH: f64 = 0.9;
+    const GAMMA: f64 = 1.4;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 40000;
+    const STATIONS: [f64; 5] = [0.25, 0.375, 0.5, 0.625, 0.75];
+    let dx = 1.0 / BODY_INTERVALS as f64;
+    for move_upstream in [true, false] {
+        for moving_extension in [16_usize, 32, 64, 96] {
+            let (upstream, downstream) = if move_upstream {
+                (moving_extension, FIXED_EXTENSION)
+            } else {
+                (FIXED_EXTENSION, moving_extension)
+            };
+            let nx = upstream + BODY_INTERVALS + downstream + 1;
+            let source = (0..nx)
+                .map(|i| {
+                    let x = (i as f64 - upstream as f64) * dx;
+                    if (0.0..=1.0).contains(&x) {
+                        harris_geometry(x).2
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let mut grid = MixedGrid {
+                phi: vec![vec![0.0; RADIAL_CELLS]; nx],
+                axis_flux: source,
+                dx,
+                dr: dx,
+                mach: MACH,
+                gamma: GAMMA,
+            };
+            let (iterations, residual) =
+                grid.iterate(TOLERANCE, MAX_ITERATIONS).map_err(|value| {
+                    format!("upstream={upstream} downstream={downstream}: residual={value}")
+                })?;
+            println!(
+                "upstream={:.3} downstream={:.3} iterations={iterations} residual={residual:.3e}",
+                upstream as f64 * dx,
+                downstream as f64 * dx
+            );
+            for x in STATIONS {
+                let i = upstream + (x / dx).round() as usize;
+                let (radius, slope, _) = harris_geometry(x);
+                let cp = grid
+                    .surface_cp(i, radius, slope)
+                    .ok_or_else(|| format!("unavailable Cp at x/l={x}"))?;
+                println!(
+                    "upstream={:.3} downstream={:.3} x/l={x:.3} cp={cp:.9}",
+                    upstream as f64 * dx,
+                    downstream as f64 * dx
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn axial_flux(u: f64, mach: f64, gamma: f64) -> f64 {
     (1.0 - mach * mach) * u - 0.5 * mach * mach * (gamma + 1.0) * u * u
 }
