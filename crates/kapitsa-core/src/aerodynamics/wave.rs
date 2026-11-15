@@ -231,7 +231,7 @@ pub(super) fn prepare_voxel_wave_drag(
 
 /// Calculates wave drag in newtons from equally spaced samples of `dA/dx`.
 ///
-/// `density` is in kg/m?, `speed` in m/s, and `sound_speed` in m/s. The
+/// `density` is in kg/m³, `speed` in m/s, and `sound_speed` in m/s. The
 /// distribution must have at least three finite samples with zero endpoints.
 /// The body's length cancels when the source strength `dA/dx` is supplied.
 /// This formula assumes an axisymmetric slender body aligned with the flow,
@@ -382,6 +382,19 @@ mod tests {
     use super::{WaveDragError, WaveMachCurve, area_slopes_from_sections, wave_drag};
     use crate::aerodynamics::geometry::GeometrySection;
     use std::f64::consts::PI;
+
+    #[test]
+    fn triangular_source_has_analytic_wave_integral() -> Result<(), WaveDragError> {
+        // For piecewise-linear dA/dx = [0, 1, 0], the double integral of
+        // A''(x) A''(y) ln|x-y| equals -4 ln(2). This checks the singular
+        // diagonal and off-diagonal terms without a discretization limit.
+        let expected = 2.0 * 9.0 * std::f64::consts::LN_2 / PI;
+        for sound_speed in [0.5, 1.0, 2.0] {
+            let drag = wave_drag(&[0.0, 1.0, 0.0], 2.0, 3.0, sound_speed)?;
+            assert!((drag - expected).abs() < 1e-12, "{drag} != {expected}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn section_wave_drag_converges_for_smooth_slender_body() -> Result<(), WaveDragError> {
