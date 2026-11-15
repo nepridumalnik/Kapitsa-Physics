@@ -780,6 +780,33 @@ pub(super) fn decompose_positive(mut value: f64) -> (f64, i32) {
     (mantissa, exponent)
 }
 
+/// Returns `(a * b + c * d)` as a signed mantissa and a base-two exponent.
+/// Inputs must be finite. Delaying scaling preserves representable results
+/// when the individual products would overflow or underflow.
+pub(super) fn signed_product_sum(a: f64, b: f64, c: f64, d: f64) -> Option<(f64, i32)> {
+    fn term(a: f64, b: f64) -> Option<(f64, i32)> {
+        if a == 0.0 || b == 0.0 {
+            return None;
+        }
+        let (a_mantissa, a_exponent) = decompose_positive(a.abs());
+        let (b_mantissa, b_exponent) = decompose_positive(b.abs());
+        Some((
+            (a_mantissa * b_mantissa).copysign(a.signum() * b.signum()),
+            a_exponent + b_exponent,
+        ))
+    }
+    let first = term(a, b);
+    let second = term(c, d);
+    let exponent = match (first, second) {
+        (None, None) => return None,
+        (Some((_, exponent)), None) | (None, Some((_, exponent))) => exponent,
+        (Some((_, a)), Some((_, b))) => a.max(b),
+    };
+    let sum = first.map_or(0.0, |(m, e)| m * 2.0_f64.powi(e - exponent))
+        + second.map_or(0.0, |(m, e)| m * 2.0_f64.powi(e - exponent));
+    (sum != 0.0).then_some((sum, exponent))
+}
+
 pub(super) fn scaled_product(factors: &[f64], divisor: f64) -> Result<f64, HullError> {
     scaled_product_with_exponent(factors, divisor, 0)
 }

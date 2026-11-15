@@ -897,26 +897,10 @@ fn wing_force_component(
     lift: (f64, f64),
     drag: (f64, f64),
 ) -> Result<f64, WingError> {
-    fn term((axis, coefficient): (f64, f64)) -> Option<(f64, i32)> {
-        if axis == 0.0 || coefficient == 0.0 {
-            return None;
-        }
-        let (a, ea) = super::hull::decompose_positive(axis.abs());
-        let (b, eb) = super::hull::decompose_positive(coefficient.abs());
-        Some(((a * b).copysign(axis * coefficient.signum()), ea + eb))
-    }
-    let first = term(lift);
-    let second = term(drag);
-    let exponent = match (first, second) {
-        (None, None) => return Ok(0.0),
-        (Some((_, e)), None) | (None, Some((_, e))) => e,
-        (Some((_, a)), Some((_, b))) => a.max(b),
-    };
-    let value = first.map_or(0.0, |(m, e)| m * 2.0_f64.powi(e - exponent))
-        + second.map_or(0.0, |(m, e)| m * 2.0_f64.powi(e - exponent));
-    if value == 0.0 {
+    let Some((value, exponent)) = super::hull::signed_product_sum(lift.0, lift.1, drag.0, drag.1)
+    else {
         return Ok(0.0);
-    }
+    };
     super::hull::scaled_product_with_exponent(
         &[0.5, density, speed, speed, area, value.abs()],
         1.0,

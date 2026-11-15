@@ -8,7 +8,9 @@ use kapitsa_math::{Quat, Vec3};
 
 use super::{
     geometry::{GeometrySection, PreparedGeometry},
-    hull::{HullError, HullSection, scaled_product},
+    hull::{
+        HullError, HullSection, scaled_product, scaled_product_with_exponent, signed_product_sum,
+    },
     wave::area_profile_from_sections,
 };
 use crate::transform::Transform;
@@ -40,6 +42,7 @@ impl PotentialCell {
         // downstream coordinate. Its area derivative therefore changes sign.
         // The aerodynamic load opposes crossflow on an expanding nose section.
         let component = |value: f64, gradient: f64| {
+            let area = self.rotation_area.unwrap_or(0.0);
             let stationary = scaled_product(
                 &[
                     density,
@@ -50,24 +53,31 @@ impl PotentialCell {
                 ],
                 1.0,
             )
-            .map(|magnitude| magnitude.copysign(value) * self.slope.signum())?;
+            .map(|magnitude| magnitude.copysign(value) * self.slope.signum());
             let rotational = scaled_product(
-                &[
-                    density,
-                    axial_speed,
-                    self.rotation_area.unwrap_or(0.0),
-                    self.width,
-                    gradient.abs(),
-                ],
+                &[density, axial_speed, area, self.width, gradient.abs()],
                 1.0,
-            )?
-            .copysign(gradient);
-            let result = stationary + rotational;
-            if result.is_finite() {
-                Ok(result)
-            } else {
-                Err(HullError::ArithmeticOverflow)
+            )
+            .map(|magnitude| magnitude.copysign(gradient));
+            if let (Ok(first), Ok(second)) = (stationary, rotational) {
+                let sum = first + second;
+                if sum.is_finite()
+                    && !(first == 0.0 && self.slope != 0.0 && value != 0.0)
+                    && !(second == 0.0 && area != 0.0 && gradient != 0.0)
+                {
+                    return Ok(sum);
+                }
             }
+            let Some((sum, exponent)) = signed_product_sum(self.slope, value, area, gradient)
+            else {
+                return Ok(0.0);
+            };
+            scaled_product_with_exponent(
+                &[density, axial_speed, self.width, sum.abs()],
+                1.0,
+                exponent,
+            )
+            .map(|magnitude| magnitude.copysign(sum))
         };
         Ok(Vec3::new(
             component(crossflow.x, rotation_gradient.x)?,
@@ -437,6 +447,19 @@ mod tests {
             assert!(expected > 0.0);
             assert!((force.z / -expected - 1.0).abs() < 1e-12);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn quasi_steady_cancellation_precedes_force_scaling() -> Result<(), HullError> {
+        let cell = PotentialCell {
+            slope: 1e200,
+            width: 1.0,
+            max_incidence: 0.2,
+            rotation_area: Some(1e200),
+        };
+        let force = cell.force(1e-91, 1e101, Vec3::Z * 1e100, 1e100, Vec3::Z * -1e100)?;
+        assert_eq!(force, Vec3::ZERO);
         Ok(())
     }
 
