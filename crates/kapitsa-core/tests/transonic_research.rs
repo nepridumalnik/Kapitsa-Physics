@@ -398,7 +398,7 @@ fn harris_low_mach_conservative_profile_and_balance() -> Result<(), String> {
     const GAMMA: f64 = 1.4;
     const CUTOFF: f64 = 36.0 / 38.240;
     let mut profiles = Vec::new();
-    for intervals in [16_usize, 32, 64, 96] {
+    for intervals in [16_usize, 32, 64, 96, 128] {
         let dx = 1.0 / intervals as f64;
         let nx = 2 * intervals + 1;
         let nr = (OUTER / dx + 0.5).round() as usize;
