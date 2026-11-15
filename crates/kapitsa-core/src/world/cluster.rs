@@ -17,6 +17,20 @@ use crate::{
     transform::Transform,
 };
 
+/// Prepared against an unchanged world; commit must immediately follow it.
+struct PreparedWeldSplit {
+    body: BodyId,
+    removed_welds: Vec<WeldId>,
+    entries: Vec<BodyEntry>,
+    prepared_bodies: Vec<BodyMotion>,
+    part_rebinds: Vec<(usize, PartId, Vec<(ColliderId, Transform)>)>,
+    part_components: HashMap<PartId, usize>,
+    root_aerodynamics: Vec<AerodynamicSurface>,
+    root_cluster: RigidCluster,
+    other_clusters: std::vec::IntoIter<RigidCluster>,
+    affected_bodies: Vec<BodyId>,
+}
+
 impl PhysicsWorld {
     /// Returns the part owning a collider, or `None` for an unclustered body
     /// or an invalid collider. Lookup scans the owning cluster's part and
@@ -1155,6 +1169,17 @@ impl PhysicsWorld {
         body: BodyId,
         removed_welds: &[WeldId],
     ) -> Result<Vec<BodyId>, ClusterError> {
+        let prepared = self.prepare_weld_split(body, removed_welds)?;
+        self.commit_weld_split(prepared)
+    }
+
+    /// Performs all geometry, topology, and motion preparation without
+    /// changing world state. The result is valid only for this exact world.
+    fn prepare_weld_split(
+        &self,
+        body: BodyId,
+        removed_welds: &[WeldId],
+    ) -> Result<PreparedWeldSplit, ClusterError> {
         let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
         let original_root = cluster.root();
         let removed_set = removed_welds.iter().copied().collect::<HashSet<_>>();
@@ -1395,21 +1420,57 @@ impl PhysicsWorld {
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let mut clusters = prepared_clusters.into_iter();
         let root_cluster = clusters.next().ok_or(ClusterError::InvalidTopology)?;
-        let new_bodies = self
+        let mut removed = Vec::new();
+        removed
+            .try_reserve_exact(removed_welds.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        removed.extend_from_slice(removed_welds);
+        Ok(PreparedWeldSplit {
+            body,
+            removed_welds: removed,
+            entries,
+            prepared_bodies,
+            part_rebinds,
+            part_components,
+            root_aerodynamics,
+            root_cluster,
+            other_clusters: clusters,
+            affected_bodies,
+        })
+    }
+
+    /// Commits a plan before any other world mutation. Batch insertion fails
+    /// without mutation; subsequent operations rely on preparation invariants.
+    fn commit_weld_split(&mut self, plan: PreparedWeldSplit) -> Result<Vec<BodyId>, ClusterError> {
+        let PreparedWeldSplit {
+            body,
+            removed_welds,
+            entries,
+            prepared_bodies,
+            part_rebinds,
+            part_components,
+            root_aerodynamics,
+            root_cluster,
+            other_clusters: clusters,
+            mut affected_bodies,
+        } = plan;
+        let inserted = self
             .bodies
             .try_insert_many(entries)
-            .map_err(|_| ClusterError::StorageCapacityExceeded)?
-            .into_iter()
-            .map(|dense| BodyId {
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        affected_bodies.push(body);
+        for dense in inserted {
+            affected_bodies.push(BodyId {
                 world: self.world_id,
                 dense,
-            })
-            .collect::<Vec<_>>();
+            });
+        }
+        let new_bodies = &affected_bodies[1..];
         let entry = self.bodies.get_mut(body.dense).unwrap();
         entry.body.set_primary_aerodynamics(Aerodynamics::None);
         entry.body.aerodynamic_surfaces = root_aerodynamics;
 
-        for &weld in removed_welds {
+        for weld in removed_welds {
             self.welds
                 .remove(weld.dense)
                 .expect("weld must be validated before split commit");
@@ -1465,8 +1526,6 @@ impl PhysicsWorld {
                 source.body = target_body(index);
             }
         }
-        affected_bodies.push(body);
-        affected_bodies.extend(new_bodies.iter().copied());
         self.synchronize_cluster_physics_state(&affected_bodies);
         Ok(affected_bodies)
     }
