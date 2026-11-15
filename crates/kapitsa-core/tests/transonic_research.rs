@@ -501,6 +501,7 @@ fn harris_grid_profiles_and_fixed_radius_field_match_python() {
             0.047047,
         ),
     ];
+    let mut comparisons = Vec::new();
     for (n, outer, expected, expected_peak) in cases {
         let dx = 1.0 / (n - 1) as f64;
         let nr = (outer / dx + 0.5_f64).round_ties_even() as usize;
@@ -535,7 +536,8 @@ fn harris_grid_profiles_and_fixed_radius_field_match_python() {
         let mut count = 0;
         let mut sum_squared = 0.0;
         let mut max_error = 0.0_f64;
-        for &(x, measured) in harris_data::TABLE_III_A_MACH_090 {
+        let mut errors = vec![None; harris_data::TABLE_III_A_MACH_090.len()];
+        for (station, &(x, measured)) in harris_data::TABLE_III_A_MACH_090.iter().enumerate() {
             let i = (x / dx).floor() as usize;
             if i == 0 || i + 2 >= n {
                 continue;
@@ -550,6 +552,7 @@ fn harris_grid_profiles_and_fixed_radius_field_match_python() {
             let t = x / dx - i as f64;
             let calculated = (1.0 - t) * left + t * right;
             let difference = calculated - measured;
+            errors[station] = Some(difference);
             println!(
                 "n={n} outer={outer} x/l={x:.3} Cp_calc={calculated:.6} Cp_measured={measured:.3} difference={difference:+.6}"
             );
@@ -564,6 +567,7 @@ fn harris_grid_profiles_and_fixed_radius_field_match_python() {
             harris_data::TABLE_III_A_MACH_090.len(),
             (sum_squared / count as f64).sqrt()
         );
+        comparisons.push((n, outer, errors));
         let index = 0.125 / dr - 0.5;
         let k = index.floor() as usize;
         let w = index - k as f64;
@@ -577,6 +581,29 @@ fn harris_grid_profiles_and_fixed_radius_field_match_python() {
         assert!((peak - expected_peak).abs() < 1e-6);
         let sonic = (1.0 - grid.mach.powi(2)) / (grid.mach.powi(2) * (grid.gamma + 1.0));
         assert!(slopes.windows(2).all(|u| !(u[0] > sonic && u[1] <= sonic)));
+    }
+    let common: Vec<_> = (0..harris_data::TABLE_III_A_MACH_090.len())
+        .filter(|&i| comparisons.iter().all(|(_, _, errors)| errors[i].is_some()))
+        .collect();
+    assert!(!common.is_empty());
+    println!(
+        "common stations: {:?}",
+        common
+            .iter()
+            .map(|&i| harris_data::TABLE_III_A_MACH_090[i].0)
+            .collect::<Vec<_>>()
+    );
+    for (n, outer, errors) in &comparisons {
+        let squared: f64 = common.iter().map(|&i| errors[i].unwrap().powi(2)).sum();
+        let max = common
+            .iter()
+            .map(|&i| errors[i].unwrap().abs())
+            .fold(0.0_f64, f64::max);
+        println!(
+            "common n={n} outer={outer} count={} rmse={:.6} max_abs={max:.6}",
+            common.len(),
+            (squared / common.len() as f64).sqrt()
+        );
     }
 }
 
