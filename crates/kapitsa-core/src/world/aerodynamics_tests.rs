@@ -671,10 +671,10 @@ fn geometry_modes_preserve_mesh_in_vacuum_and_reject_air_atomically() {
 }
 
 #[test]
-fn explicit_base_pressure_affects_mesh_and_collider_steps_and_rolls_back_errors()
--> Result<(), Box<dyn std::error::Error>> {
+fn unchecked_base_pressure_is_rejected_in_both_step_paths() -> Result<(), Box<dyn std::error::Error>>
+{
     use crate::{
-        aerodynamics::pressure::{BasePressure, PressureError, PressurePatch},
+        aerodynamics::pressure::{BasePressure, PressurePatch},
         collider::Collider,
         shape::{Cuboid, Shape, TriangleMesh},
     };
@@ -691,7 +691,11 @@ fn explicit_base_pressure_affects_mesh_and_collider_steps_and_rolls_back_errors(
                 body.set_linear_velocity(Vec3::X * 2000.0)?;
                 body.set_aerodynamics(if mesh {
                     Aerodynamics::Mesh(TriangleMesh::new(
-                        vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+                        vec![
+                            Vec3::new(0.0, 0.0, -1.0),
+                            Vec3::new(0.0, 0.0, 2.0),
+                            Vec3::new(0.0, 3.0, -1.0),
+                        ],
                         vec![[0, 1, 2]],
                     )?)
                 } else {
@@ -722,23 +726,14 @@ fn explicit_base_pressure_affects_mesh_and_collider_steps_and_rolls_back_errors(
                 } else {
                     world.step(1e-5)
                 };
-                if invalid {
-                    assert!(matches!(
-                        result,
-                        Err(super::StepError::Aerodynamics {
-                            cause: crate::aerodynamics::AerodynamicsError::Pressure(
-                                PressureError::InvalidBaseOrientation
-                            ),
-                            ..
-                        })
-                    ));
-                    assert_eq!(world.body(id).unwrap().motion(), before);
-                } else {
-                    result?;
-                    let state = world.body(id).unwrap().state();
-                    assert!(state.linear_velocity().x < 2000.0);
-                    assert!(state.angular_velocity().z > 0.0);
-                }
+                assert!(matches!(
+                    result,
+                    Err(super::StepError::Aerodynamics {
+                        cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                        ..
+                    })
+                ));
+                assert_eq!(world.body(id).unwrap().motion(), before);
             }
         }
     }
@@ -749,7 +744,7 @@ fn explicit_base_pressure_affects_mesh_and_collider_steps_and_rolls_back_errors(
 fn base_pressure_load_delta_and_configuration_lifecycle() -> Result<(), Box<dyn std::error::Error>>
 {
     use crate::{
-        aerodynamics::pressure::{BasePressure, PressurePatch},
+        aerodynamics::pressure::BasePressure,
         collider::Collider,
         shape::{Cuboid, Shape, TriangleMesh},
     };
@@ -767,34 +762,48 @@ fn base_pressure_load_delta_and_configuration_lifecycle() -> Result<(), Box<dyn 
                 body.set_linear_velocity(Vec3::X * 2000.0)?;
                 body.set_aerodynamics(if mesh_mode {
                     Aerodynamics::Mesh(TriangleMesh::new(
-                        vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+                        vec![
+                            Vec3::new(0.0, 0.0, -1.0),
+                            Vec3::new(0.0, 0.0, 2.0),
+                            Vec3::new(0.0, 3.0, -1.0),
+                        ],
                         vec![[0, 1, 2]],
                     )?)
                 } else {
                     Aerodynamics::Colliders
                 });
                 let id = world.add_body(body)?;
-                if !mesh_mode {
-                    world.add_collider(
+                let collider = if !mesh_mode {
+                    Some(world.add_collider(
                         id,
                         Collider::new(
                             Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
-                            Transform::identity(),
+                            Transform::new(Vec3::Y, kapitsa_math::Quat::IDENTITY)?,
                         ),
-                    )?;
-                }
+                    )?)
+                } else {
+                    None
+                };
                 if enabled {
-                    world.body_mut(id).unwrap().set_base_pressure_patches(vec![(
-                        PressurePatch::new(Vec3::Y, -Vec3::X, 1.0)?,
-                        BasePressure::new(-0.4, 5.0, 10.0)?,
-                    )]);
+                    let base = BasePressure::new(-0.4, 5.0, 10.0)?;
+                    if let Some(collider) = collider {
+                        world.set_collider_base_triangles(id, collider, &[2, 3], base)?;
+                    } else {
+                        world
+                            .body_mut(id)
+                            .unwrap()
+                            .set_mesh_base_triangles(&[0], base)?;
+                    }
                     let before = world.body(id).unwrap().motion();
                     assert!(matches!(
                         world.enable_cluster(id),
                         Err(super::ClusterError::UnsupportedGeometry)
                     ));
                     assert_eq!(world.body(id).unwrap().motion(), before);
-                    assert_eq!(world.body(id).unwrap().base_pressure_patches().len(), 1);
+                    assert_eq!(
+                        world.body(id).unwrap().base_pressure_patches().len(),
+                        if mesh_mode { 1 } else { 2 }
+                    );
                     assert!(world.cluster(id).is_none());
                 }
                 if sharded {
@@ -813,13 +822,20 @@ fn base_pressure_load_delta_and_configuration_lifecycle() -> Result<(), Box<dyn 
                     assert!(world.body(id).unwrap().base_pressure_patches().is_empty());
                 }
             }
-            // q=2000 Pa; Cp=-0.4 and area=1 yield 800 N at y=1 m.
+            // Collider base area is 1 m²; mesh triangle area is 4.5 m².
             let linear_delta =
                 motions[1].state().linear_velocity() - motions[0].state().linear_velocity();
             let angular_delta =
                 motions[1].state().angular_velocity() - motions[0].state().angular_velocity();
-            assert!((linear_delta.x + 8e-5).abs() < 1e-10, "{linear_delta:?}");
-            assert!((angular_delta.z - 8e-5).abs() < 1e-10, "{angular_delta:?}");
+            let expected = if mesh_mode { 3.6e-4 } else { 8e-5 };
+            assert!(
+                (linear_delta.x + expected).abs() < 1e-10,
+                "{linear_delta:?}"
+            );
+            assert!(
+                (angular_delta.z - expected).abs() < 1e-10,
+                "{angular_delta:?}"
+            );
         }
     }
     Ok(())
@@ -1179,7 +1195,7 @@ fn preflight_rejects_unchecked_base_pressure_without_mutating_world()
 fn base_pressure_outside_mach_domain_rolls_back_world_step()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
-        aerodynamics::pressure::{BasePressure, PressureError, PressurePatch},
+        aerodynamics::pressure::{BasePressure, PressureError},
         collider::Collider,
         shape::{Cuboid, Shape, TriangleMesh},
     };
@@ -1195,27 +1211,33 @@ fn base_pressure_outside_mach_domain_rolls_back_world_step()
             body.set_linear_velocity(Vec3::X * 2000.0)?;
             body.set_aerodynamics(if mesh {
                 Aerodynamics::Mesh(TriangleMesh::new(
-                    vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+                    vec![Vec3::ZERO, Vec3::Z, Vec3::Y],
                     vec![[0, 1, 2]],
                 )?)
             } else {
                 Aerodynamics::Colliders
             });
             let id = world.add_body(body)?;
-            if !mesh {
-                world.add_collider(
+            let collider = if !mesh {
+                Some(world.add_collider(
                     id,
                     Collider::new(
                         Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
                         Transform::identity(),
                     ),
-                )?;
+                )?)
+            } else {
+                None
+            };
+            let base = BasePressure::new(-0.4, 0.0, 5.0)?;
+            if let Some(collider) = collider {
+                world.set_collider_base_triangles(id, collider, &[2, 3], base)?;
+            } else {
+                world
+                    .body_mut(id)
+                    .unwrap()
+                    .set_mesh_base_triangles(&[0], base)?;
             }
-            let patch = PressurePatch::new(Vec3::Y, -Vec3::X, 1.0)?;
-            world.body_mut(id).unwrap().set_base_pressure_patches(vec![
-                (patch, BasePressure::new(-0.4, 5.0, 10.0)?),
-                (patch, BasePressure::new(-0.4, 0.0, 5.0)?),
-            ]);
             let before = world.body(id).unwrap().motion();
             let result = if sharded {
                 world.step_with_shards(

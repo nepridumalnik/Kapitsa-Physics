@@ -2573,6 +2573,14 @@ impl PhysicsWorld {
                 _ => None,
             };
             if let (Some(mesh), Some(primary_atmosphere)) = (mesh, primary_atmosphere) {
+                if !entry.body.base_pressure_patches.is_empty()
+                    && entry.body.base_pressure_triangles.is_none()
+                {
+                    return Err(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                    });
+                }
                 let config = entry
                     .mesh_aerodynamics
                     .as_ref()

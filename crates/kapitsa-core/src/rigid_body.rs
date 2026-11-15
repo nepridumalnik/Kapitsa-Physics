@@ -100,8 +100,9 @@ impl RigidBody {
     }
 
     /// Replaces explicitly selected body-local base patches. The caller must
-    /// ensure they remain exposed and belong to the current Mesh/Colliders
-    /// geometry; no wake, overlap or shielding calculation is performed.
+    /// No wake, overlap or shielding calculation is performed. Nonempty
+    /// configurations set by this method are rejected by world steps; use the
+    /// index-based mesh or collider selection APIs for simulation instead.
     /// These loads are currently supported only on non-cluster Mesh/Colliders bodies;
     /// cluster conversion rejects nonempty configurations without changing the body.
     /// For Colliders, adding or removing a collider, requesting mutable access,
