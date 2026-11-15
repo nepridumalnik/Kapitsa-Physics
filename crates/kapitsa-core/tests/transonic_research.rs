@@ -35,6 +35,36 @@ fn harris_fixed_upstream_row_omits_nonzero_axis_source() {
 }
 
 #[test]
+fn harris_axis_source_matches_area_derivative_away_from_truncation() {
+    // For the slender-body source R R' = (R²)'/2. At the cutoff the
+    // cylindrical continuation is continuous in radius but not in slope;
+    // the pointwise value there is the downstream one-sided convention.
+    const CUTOFF: f64 = 36.0 / 38.240;
+    const DIFFERENCE_STEP: f64 = 1e-6;
+    const DERIVATIVE_TOLERANCE: f64 = 1e-8;
+    for x in [0.1, 0.5, 0.9, 0.95] {
+        let (radius, slope, source) = harris_geometry(x);
+        let previous = harris_geometry(x - DIFFERENCE_STEP).0;
+        let next = harris_geometry(x + DIFFERENCE_STEP).0;
+        let area_derivative = (next * next - previous * previous) / (4.0 * DIFFERENCE_STEP);
+        assert!((source - radius * slope).abs() < DERIVATIVE_TOLERANCE);
+        assert!((source - area_derivative).abs() < DERIVATIVE_TOLERANCE);
+    }
+    let upstream = harris_geometry(CUTOFF - DIFFERENCE_STEP);
+    let cutoff = harris_geometry(CUTOFF);
+    let downstream = harris_geometry(CUTOFF + DIFFERENCE_STEP);
+    assert!(upstream.2 < 0.0);
+    assert_eq!(cutoff.1, 0.0);
+    assert_eq!(cutoff.2, 0.0);
+    assert_eq!(downstream.0, cutoff.0);
+    assert_eq!(downstream.2, 0.0);
+    println!(
+        "cutoff={CUTOFF:.9} radius={:.9} upstream_source={:.9} downstream_source={:.9}",
+        cutoff.0, upstream.2, downstream.2
+    );
+}
+
+#[test]
 #[ignore = "extended-domain research diagnostic; run explicitly in release mode"]
 fn harris_extended_axial_domain_diagnostic() -> Result<(), String> {
     // Bailey TN D-6582, far-field boundaries: sonic/subsonic cases require
