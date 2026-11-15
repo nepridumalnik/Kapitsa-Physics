@@ -40,6 +40,60 @@ fn advance(world: &mut PhysicsWorld, sharded: bool) -> Result<(), StepError> {
 }
 
 #[test]
+fn part_wing_snapshot_sums_force_and_moment_and_reuses_buffers()
+-> Result<(), Box<dyn std::error::Error>> {
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let atmosphere = AtmosphericState::new(1.2, Vec3::ZERO)?;
+        world.set_atmosphere(test_atmosphere(atmosphere));
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::new(50.0, 0.0, -3.0))?;
+        let id = world.add_body(body)?;
+        let part = world.enable_cluster(id)?;
+        let first = wing(Transform::new(Vec3::Y, Quat::IDENTITY)?)?;
+        let second = wing(Transform::new(-Vec3::Y, Quat::IDENTITY)?)?;
+        let flow = crate::aerodynamics::pressure::PressureFlow {
+            atmosphere,
+            sound_speed: world.mesh_sound_speed,
+            transform: Transform::identity(),
+            center_of_mass: Vec3::ZERO,
+            linear_velocity: Vec3::new(50.0, 0.0, -3.0),
+            angular_velocity: Vec3::ZERO,
+        };
+        let a = first.evaluate(flow)?;
+        let b = second.evaluate(flow)?;
+        world.set_part_aerodynamic_wings(part, vec![first, second])?;
+        advance(&mut world, sharded)?;
+        let loads = world.part_wing_wrenches();
+        assert_eq!(loads.len(), 2);
+        assert_eq!(loads[0].wrench, a);
+        assert_eq!(loads[1].wrench, b);
+        let sum = loads[0].wrench.force + loads[1].wrench.force;
+        let moment = loads[0].wrench.moment + loads[1].wrench.moment;
+        assert!(moment.length() < 1e-12);
+        let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
+        assert!((velocity - (flow.linear_velocity + sum * (1e-5 / 100.0))).length() < 1e-12);
+        let capacity = world
+            .part_wing_buffers
+            .first()
+            .ok_or("wing buffer")?
+            .capacity();
+        assert!(capacity >= 2);
+        advance(&mut world, sharded)?;
+        assert!(
+            world
+                .part_wing_buffers
+                .first()
+                .ok_or("reused wing buffer")?
+                .capacity()
+                >= capacity
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn part_wings_match_body_wings_after_mass_merge_split_and_root_deletion()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut reference = None;
@@ -260,8 +314,23 @@ fn part_wings_sample_application_point_with_rotated_part_and_com_in_vacuum()
         })?;
         let before = body.state().linear_velocity();
         advance(&mut world, sharded)?;
+        let snapshot = world.part_wing_wrenches().to_vec();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].part, root);
+        assert_eq!(snapshot[0].body, id);
+        assert_eq!(snapshot[0].wrench, wrench);
         let actual = world.body(id).ok_or("body")?.state().linear_velocity();
         assert!((actual - (before + wrench.force * (1e-5 / 110.0))).length() < 1e-12);
+        let center = world
+            .body(id)
+            .ok_or("body")?
+            .motion()
+            .world_center_of_mass()?
+            .ok_or("center")?;
+        let bad = world.add_gravity(crate::gravity::CentralGravity::new(center, 1.0)?)?;
+        assert!(advance(&mut world, sharded).is_err());
+        assert_eq!(world.part_wing_wrenches(), snapshot.as_slice());
+        world.remove_gravity(bad).ok_or("gravity")?;
         if let Some(previous) = reference {
             assert_eq!(actual, previous);
         } else {

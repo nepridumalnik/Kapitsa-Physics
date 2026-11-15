@@ -265,6 +265,15 @@ pub struct PartHullWrench {
     pub wrench: crate::aerodynamics::pressure::PressureWrench,
 }
 
+/// One part-owned wing's world-space force (N) and moment (N·m) about
+/// the body COM at evaluation time. Not a complete part or weld load.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartWingWrench {
+    pub body: BodyId,
+    pub part: PartId,
+    pub wrench: crate::aerodynamics::pressure::PressureWrench,
+}
+
 impl ForceSource {
     /// Returns the dynamic body receiving this force.
     pub fn body(&self) -> BodyId {
@@ -327,6 +336,7 @@ struct AerodynamicsBodyUpdate {
     prepared: BodyMotion,
     loads: PreparedAerodynamicLoads,
     part_hull_wrenches: Vec<PartHullWrench>,
+    part_wing_wrenches: Vec<PartWingWrench>,
 }
 
 struct PreparedAerodynamicLoads {
@@ -352,6 +362,7 @@ struct AerodynamicsInputs<'a> {
         crate::aerodynamics::pressure::BasePressure,
     )],
     part_hull_wrenches: Option<&'a mut Vec<PartHullWrench>>,
+    part_wing_wrenches: Option<&'a mut Vec<PartWingWrench>>,
 }
 
 impl<'a> AerodynamicsInputs<'a> {
@@ -367,6 +378,7 @@ impl<'a> AerodynamicsInputs<'a> {
             wing_visibility: None,
             base_pressure_patches: &[],
             part_hull_wrenches: None,
+            part_wing_wrenches: None,
         }
     }
 
@@ -377,6 +389,11 @@ impl<'a> AerodynamicsInputs<'a> {
 
     fn with_part_hull_wrenches(mut self, wrenches: &'a mut Vec<PartHullWrench>) -> Self {
         self.part_hull_wrenches = Some(wrenches);
+        self
+    }
+
+    fn with_part_wing_wrenches(mut self, wrenches: &'a mut Vec<PartWingWrench>) -> Self {
+        self.part_wing_wrenches = Some(wrenches);
         self
     }
 
@@ -503,6 +520,10 @@ pub struct PhysicsWorld {
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
     part_hull_published: Vec<PartHullWrench>,
     part_hull_pending: Vec<PartHullWrench>,
+    part_wing_published: Vec<PartWingWrench>,
+    part_wing_pending: Vec<PartWingWrench>,
+    part_hull_buffers: Vec<Vec<PartHullWrench>>,
+    part_wing_buffers: Vec<Vec<PartWingWrench>>,
     owner_pressure: Option<HashMap<BodyId, crate::aerodynamics::pressure::OwnerPressureWorkspace>>,
     owner_pressure_owners: Vec<crate::aerodynamics::geometry::GeometryOwner>,
     materials: MaterialStorage,
@@ -574,6 +595,12 @@ impl PhysicsWorld {
         &self.part_hull_published
     }
 
+    /// Part wing contributions from the last successful full step, excluding
+    /// hulls, mesh pressure and all non-aerodynamic loads.
+    pub fn part_wing_wrenches(&self) -> &[PartWingWrench] {
+        &self.part_wing_published
+    }
+
     /// Impact-pressure contribution from prepared mesh patches in the last
     /// successful full step. Forces are world-space newtons; moments are world
     /// N·m about the body's center of mass at evaluation time. This excludes
@@ -628,6 +655,10 @@ impl PhysicsWorld {
             aerodynamics_body_updates: Vec::new(),
             part_hull_published: Vec::new(),
             part_hull_pending: Vec::new(),
+            part_wing_published: Vec::new(),
+            part_wing_pending: Vec::new(),
+            part_hull_buffers: Vec::new(),
+            part_wing_buffers: Vec::new(),
             owner_pressure: None,
             owner_pressure_owners: Vec::new(),
             materials: MaterialStorage::new(),
@@ -1623,7 +1654,8 @@ impl PhysicsWorld {
                 &mut self.part_gravity_pending,
             );
             std::mem::swap(&mut self.part_hull_published, &mut self.part_hull_pending);
-            self.aerodynamics_body_updates.clear();
+            std::mem::swap(&mut self.part_wing_published, &mut self.part_wing_pending);
+            self.recycle_aerodynamics_updates();
             self.clear_gravity_updates();
             self.clear_force_source_updates();
         }
@@ -1988,6 +2020,7 @@ impl PhysicsWorld {
             wing_visibility,
             base_pressure_patches,
             mut part_hull_wrenches,
+            mut part_wing_wrenches,
         } = inputs;
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
@@ -2149,7 +2182,8 @@ impl PhysicsWorld {
         let mut evaluate_wing = |surface: &crate::aerodynamics::wing::WingSurface,
                                  local: crate::transform::Transform,
                                  visibility: Option<crate::aerodynamics::wing::WingVisibility>,
-                                 visibility_required: bool|
+                                 visibility_required: bool,
+                                 owner: Option<PartId>|
          -> Result<(), StepError> {
             let transform = body
                 .state()
@@ -2193,6 +2227,14 @@ impl PhysicsWorld {
                         })?;
                 body.apply_force(wrench.force).map_err(|_| error())?;
                 body.apply_torque(wrench.moment).map_err(|_| error())?;
+                if let (Some(part), Some(wrenches)) = (owner, part_wing_wrenches.as_deref_mut()) {
+                    wrenches.try_reserve(1).map_err(|_| error())?;
+                    wrenches.push(PartWingWrench {
+                        body: body_id,
+                        part,
+                        wrench,
+                    });
+                }
             }
             Ok(())
         };
@@ -2202,6 +2244,7 @@ impl PhysicsWorld {
                 crate::transform::Transform::identity(),
                 None,
                 false,
+                None,
             )?;
         }
         for (part_id, part) in part_wings {
@@ -2226,6 +2269,7 @@ impl PhysicsWorld {
                     part.local_transform(),
                     visibility,
                     surface.has_footprint() && wing_visibility.is_some(),
+                    Some(part_id),
                 )?;
             }
         }
@@ -2592,8 +2636,9 @@ impl PhysicsWorld {
         workers: usize,
         dt: f64,
     ) -> Result<(), StepError> {
-        self.aerodynamics_body_updates.clear();
+        self.recycle_aerodynamics_updates();
         self.part_hull_pending.clear();
+        self.part_wing_pending.clear();
         let atmosphere = self.atmosphere;
         if matches!(atmosphere, Atmosphere::Vacuum) {
             return Ok(());
@@ -2621,7 +2666,6 @@ impl PhysicsWorld {
                 dense: dense_id,
             };
             if self.aerodynamics_body_updates.try_reserve(1).is_err() {
-                self.aerodynamics_body_updates.clear();
                 return Err(StepError::Aerodynamics {
                     body_id,
                     cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
@@ -2914,7 +2958,8 @@ impl PhysicsWorld {
                 error: None,
                 original: entry.body.motion(),
                 prepared: entry.body.motion(),
-                part_hull_wrenches: Vec::new(),
+                part_hull_wrenches: self.part_hull_buffers.pop().unwrap_or_default(),
+                part_wing_wrenches: self.part_wing_buffers.pop().unwrap_or_default(),
                 loads: PreparedAerodynamicLoads {
                     mesh_patches,
                     sphere_patches,
@@ -2952,7 +2997,8 @@ impl PhysicsWorld {
                                         .with_cluster(entry.cluster.as_ref())
                                         .with_timestep(Some(dt))
                                         .with_loads(&update.loads)
-                                        .with_part_hull_wrenches(&mut update.part_hull_wrenches),
+                                        .with_part_hull_wrenches(&mut update.part_hull_wrenches)
+                                        .with_part_wing_wrenches(&mut update.part_wing_wrenches),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -2966,7 +3012,6 @@ impl PhysicsWorld {
             .iter()
             .find_map(|update| update.error)
         {
-            self.aerodynamics_body_updates.clear();
             return Err(error);
         }
 
@@ -2979,6 +3024,14 @@ impl PhysicsWorld {
                 })?;
             self.part_hull_pending
                 .extend_from_slice(&update.part_hull_wrenches);
+            self.part_wing_pending
+                .try_reserve(update.part_wing_wrenches.len())
+                .map_err(|_| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                })?;
+            self.part_wing_pending
+                .extend_from_slice(&update.part_wing_wrenches);
         }
 
         // This diagnostic pass never applies forces; the solver path above is
@@ -3072,7 +3125,21 @@ impl PhysicsWorld {
                 entry.body.set_motion(update.original);
             }
         }
-        self.aerodynamics_body_updates.clear();
+        self.recycle_aerodynamics_updates();
+    }
+
+    fn recycle_aerodynamics_updates(&mut self) {
+        for mut update in self.aerodynamics_body_updates.drain(..) {
+            update.part_hull_wrenches.clear();
+            update.part_wing_wrenches.clear();
+            // If the pool cannot grow, dropping scratch buffers is safe.
+            if self.part_hull_buffers.try_reserve(1).is_ok() {
+                self.part_hull_buffers.push(update.part_hull_wrenches);
+            }
+            if self.part_wing_buffers.try_reserve(1).is_ok() {
+                self.part_wing_buffers.push(update.part_wing_wrenches);
+            }
+        }
     }
 
     fn gravity_force_for_body(
