@@ -94,6 +94,62 @@ fn harris_extended_axial_domain_diagnostic() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+#[ignore = "fixed-domain grid-refinement research diagnostic; run in release mode"]
+fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
+    // Same finite domain and boundary conditions on every grid; this is not
+    // a tunnel model or a physical validation. All lengths use body length.
+    const AXIAL_EXTENSION: f64 = 0.5;
+    const RADIAL_BOUNDARY: f64 = 1.25;
+    const MACH: f64 = 0.9;
+    const GAMMA: f64 = 1.4;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 40000;
+    const STATIONS: [f64; 5] = [0.25, 0.375, 0.5, 0.625, 0.75];
+
+    for intervals in [16_usize, 32, 64] {
+        let dx = 1.0 / intervals as f64;
+        let nx = 2 * intervals + 1;
+        let nr = (RADIAL_BOUNDARY / dx + 0.5).round_ties_even() as usize;
+        // The outer Dirichlet cell centre is fixed while dr approaches dx.
+        let dr = RADIAL_BOUNDARY / (nr as f64 - 0.5);
+        let source: Vec<_> = (0..nx)
+            .map(|i| {
+                let x = i as f64 * dx - AXIAL_EXTENSION;
+                if (0.0..=1.0).contains(&x) {
+                    harris_geometry(x).2
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        assert_eq!((source[0], source[1]), (0.0, 0.0));
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; nx],
+            axis_flux: source,
+            dx,
+            dr,
+            mach: MACH,
+            gamma: GAMMA,
+        };
+        let (iterations, residual) = grid
+            .iterate(TOLERANCE, MAX_ITERATIONS)
+            .map_err(|value| format!("intervals={intervals}: residual={value}"))?;
+        println!(
+            "intervals={intervals} dx={dx:.8} dr={dr:.8} iterations={iterations} residual={residual:.3e}"
+        );
+        for x in STATIONS {
+            let i = ((x + AXIAL_EXTENSION) / dx).round() as usize;
+            let (radius, slope, _) = harris_geometry(x);
+            let cp = grid
+                .surface_cp(i, radius, slope)
+                .ok_or_else(|| format!("unavailable Cp at x/l={x}, intervals={intervals}"))?;
+            println!("intervals={intervals} x/l={x:.3} cp={cp:.9}");
+        }
+    }
+    Ok(())
+}
+
 fn axial_flux(u: f64, mach: f64, gamma: f64) -> f64 {
     (1.0 - mach * mach) * u - 0.5 * mach * mach * (gamma + 1.0) * u * u
 }
