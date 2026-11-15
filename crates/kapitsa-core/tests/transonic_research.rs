@@ -466,7 +466,7 @@ fn transition_width_uses_face_coordinates_and_rejects_increasing_profiles() {
 fn harris_mach_one_field_transition_diagnostic() {
     // Zero Dirichlet boundaries and the simplified sting do not match the
     // experiment. A descending sonic crossing is not proof of a shock.
-    for (n, outer) in [
+    harris_mach_one_cases(&[
         (17, 0.75_f64),
         (33, 0.75),
         (49, 0.75),
@@ -479,7 +479,17 @@ fn harris_mach_one_field_transition_diagnostic() {
         (33, 1.25),
         (49, 1.25),
         (65, 1.25),
-    ] {
+    ]);
+}
+
+#[test]
+#[ignore = "expensive fine-grid research diagnostic; run explicitly in release mode"]
+fn harris_mach_one_fine_grid_diagnostic() {
+    harris_mach_one_cases(&[(97, 1.25)]);
+}
+
+fn harris_mach_one_cases(cases: &[(usize, f64)]) {
+    for &(n, outer) in cases {
         let dx = 1.0 / (n - 1) as f64;
         let nr = (outer / dx + 0.5).round_ties_even() as usize;
         let dr = outer / (nr as f64 - 0.5);
@@ -491,7 +501,9 @@ fn harris_mach_one_field_transition_diagnostic() {
             mach: 1.0,
             gamma: 1.4,
         };
-        match grid.iterate(1e-6, 15000) {
+        const RESIDUAL_TOLERANCE: f64 = 1e-6;
+        const MAX_ITERATIONS: usize = 40000;
+        match grid.iterate(RESIDUAL_TOLERANCE, MAX_ITERATIONS) {
             Ok((iterations, residual)) => {
                 for radius in [0.0625, 0.125, 0.25] {
                     let index = radius / dr - 0.5;
