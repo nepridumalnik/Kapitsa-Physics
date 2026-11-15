@@ -182,3 +182,10 @@ log. Low-level shard commits do not perform automatic weld failure.
 The reaction is evaluated at the start of the timestep, while the split uses
 the predicted end-of-step rigid velocity field. This is a discrete failure
 policy, not an impact, fracture propagation, or within-step failure-time model.
+
+The contact snapshot records velocity-solver impulses, including warm-start and
+friction, but a discrete impulse is not an instantaneous force at the start of
+the step. CCD impacts can occur at different times and `ClipIsland` may alter
+velocity without a physical impulse. Contact-enabled weld failure therefore
+also needs a specified impulse-to-strength policy and a complete account of all
+accepted solver and CCD paths; zero omitted points alone is not sufficient.

@@ -1579,10 +1579,16 @@ impl PhysicsWorld {
         for plan in &mut plans {
             entries.append(&mut plan.entries);
         }
-        let inserted = self
-            .bodies
-            .try_insert_many(entries)
-            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        #[cfg(test)]
+        let inserted = if let Some(fail_after) = self.weld_split_fail_after.take() {
+            self.bodies
+                .try_insert_many_failing_after(entries, fail_after)
+        } else {
+            self.bodies.try_insert_many(entries)
+        };
+        #[cfg(not(test))]
+        let inserted = self.bodies.try_insert_many(entries);
+        let inserted = inserted.map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let mut ids = inserted.into_iter();
         for plan in &mut plans {
             plan.affected_bodies.push(plan.body);

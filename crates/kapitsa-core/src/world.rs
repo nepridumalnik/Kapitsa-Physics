@@ -660,6 +660,8 @@ pub struct PhysicsWorld {
     world_id: u64,
     body_revision: u64,
     automatic_weld_failure: Option<(f64, f64)>,
+    #[cfg(test)]
+    weld_split_fail_after: Option<usize>,
     bodies: DensePool<BodyEntry>,
     parts: DensePool<ClusterPart>,
     part_aerodynamic_geometry: Option<HashMap<PartId, assembly_aerodynamics::PartGeometry>>,
@@ -1143,6 +1145,8 @@ impl PhysicsWorld {
             world_id: 0,
             body_revision: 0,
             automatic_weld_failure: None,
+            #[cfg(test)]
+            weld_split_fail_after: None,
             bodies: DensePool::new(),
             parts: DensePool::new(),
             part_aerodynamic_geometry: None,

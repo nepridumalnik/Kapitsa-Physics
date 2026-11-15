@@ -353,6 +353,20 @@ fn automatic_weld_failure_multiple_clusters_is_atomic_on_rejection()
             assert!(world.weld(*weld).is_some());
         }
         world.set_part_aerodynamic_hull(clusters[1].1, Vec::new())?;
+        world.weld_split_fail_after = Some(1);
+        assert!(matches!(
+            step(&mut world),
+            Err(StepError::WeldSplit(ClusterError::StorageCapacityExceeded))
+        ));
+        assert_eq!(world.body_count(), 2);
+        for (body, _, child, weld) in &clusters {
+            assert_eq!(
+                world.body(*body).ok_or("body")?.state().linear_velocity(),
+                Vec3::ZERO
+            );
+            assert_eq!(world.part_body(*child), Some(*body));
+            assert!(world.weld(*weld).is_some());
+        }
         step(&mut world)?;
         assert_eq!(world.body_count(), 4);
         for (body, _, child, weld) in &clusters {
