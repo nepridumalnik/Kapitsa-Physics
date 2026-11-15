@@ -413,20 +413,31 @@ fn synthetic_mixed_iteration_without_prescribed_shock() {
 
 // Linear threshold positions for a decreasing profile, restricted to a
 // fixed physical window. This diagnostic does not assert a physical shock.
-fn transition_width(values: &[f64], dx: f64, start: usize, end: usize) -> Option<(f64, f64, f64)> {
-    if start >= end || end >= values.len() || dx <= 0.0 {
+fn transition_width(values: &[f64], dx: f64, start: f64, end: f64) -> Option<(f64, f64, f64)> {
+    if start >= end || dx <= 0.0 || values.len() < 2 {
         return None;
     }
-    let drop = values[start] - values[end];
+    let interpolate = |x: f64| {
+        let index = x / dx - 0.5;
+        if !index.is_finite() || index < 0.0 || index > (values.len() - 1) as f64 {
+            return None;
+        }
+        let i = (index.floor() as usize).min(values.len() - 2);
+        let t = index - i as f64;
+        Some((1.0 - t) * values[i] + t * values[i + 1])
+    };
+    let (first, last) = (interpolate(start)?, interpolate(end)?);
+    let drop = first - last;
     if !drop.is_finite() || drop <= 0.0 {
         return None;
     }
     let position = |fraction: f64| {
-        let threshold = values[start] - fraction * drop;
-        (start..end).find_map(|i| {
+        let threshold = first - fraction * drop;
+        (0..values.len() - 1).find_map(|i| {
             let (a, b) = (values[i], values[i + 1]);
             if a >= threshold && b < threshold {
-                Some((i as f64 + 0.5 + (a - threshold) / (a - b)) * dx)
+                let x = (i as f64 + 0.5 + (a - threshold) / (a - b)) * dx;
+                (start..=end).contains(&x).then_some(x)
             } else {
                 None
             }
@@ -439,11 +450,16 @@ fn transition_width(values: &[f64], dx: f64, start: usize, end: usize) -> Option
 
 #[test]
 fn transition_width_uses_face_coordinates_and_rejects_increasing_profiles() {
-    let (x10, x90, drop) = transition_width(&[1.0, 1.0, 0.0, 0.0], 0.1, 0, 3).unwrap();
+    let (x10, x90, drop) = transition_width(&[1.0, 1.0, 0.0, 0.0], 0.1, 0.05, 0.35).unwrap();
     assert!((x10 - 0.16).abs() < 1e-14);
     assert!((x90 - 0.24).abs() < 1e-14);
     assert_eq!(drop, 1.0);
-    assert!(transition_width(&[0.0, 1.0], 0.1, 0, 1).is_none());
+    let (x10, x90, drop) = transition_width(&[1.0, 1.0, 0.0, 0.0], 0.1, 0.175, 0.225).unwrap();
+    assert!((drop - 0.5).abs() < 1e-14);
+    assert!((x10 - 0.18).abs() < 1e-14);
+    assert!((x90 - 0.22).abs() < 1e-14);
+    assert!(transition_width(&[0.0, 1.0], 0.1, 0.05, 0.15).is_none());
+    assert!(transition_width(&[1.0, 0.0], 0.1, 0.0, 0.15).is_none());
 }
 
 #[test]
@@ -481,9 +497,7 @@ fn harris_mach_one_field_transition_diagnostic() {
                         .map(|row| (1.0 - weight) * row[k] + weight * row[k + 1])
                         .collect();
                     let velocity: Vec<_> = values.windows(2).map(|v| (v[1] - v[0]) / dx).collect();
-                    let start = (0.6875 / dx) as usize;
-                    let end = (0.875 / dx) as usize;
-                    let (x10, x90, drop) = transition_width(&velocity, dx, start, end)
+                    let (x10, x90, drop) = transition_width(&velocity, dx, 0.6875, 0.875)
                         .expect("fixed-window transition must be measurable");
                     println!(
                         "  indicator n={n} outer={outer} r={radius} x10={x10:.6} x90={x90:.6} width={:.6} drop={drop:.6}",
