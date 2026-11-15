@@ -587,6 +587,16 @@ These pairs measure sensitivity to the two grids used, not total numerical
 uncertainty. They cover subsonic and supersonic conditions, not Mach 1, and
 are neither experimental observations nor validation at Re = 10,000.
 
+A different regime is represented by the experimental values reproduced in
+tables 3 and 4 of [Li et al.](https://doi.org/10.7638/kqdlxxb-2021.0051):
+`(Re, Mach, Cd) = (19.4, 1.195, 2.303)` and `(18.6, 1.164, 2.381)`.
+These are secondary transcriptions, not yet checked against the original
+measurements or their uncertainty. The paper adjusts its gas-surface
+accommodation coefficient using the first point, so its simulation at that
+point is not an independent prediction. Moreover, these low-Re points are in
+a rarefied-flow regime, unlike the continuum Re = 10,000 benchmark; they must
+not be used to validate that correlation or a continuum no-slip model.
+
 For an additional transonic comparison, Usry and Wallace,
 [NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
 forebody axial-force coefficients for a fin-stabilized supercritical body of
