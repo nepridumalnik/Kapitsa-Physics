@@ -230,11 +230,50 @@ fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
     Ok(())
 }
 
+fn interpolated_radial_derivative(values: &[f64], dr: f64, radius: f64) -> Option<f64> {
+    if values.len() < 3 || !dr.is_finite() || dr <= 0.0 || !radius.is_finite() {
+        return None;
+    }
+    let index = radius / dr - 1.0;
+    if index < 0.0 || index > (values.len() - 2) as f64 {
+        return None;
+    }
+    let j = (index.floor() as usize).min(values.len() - 3);
+    let weight = index - j as f64;
+    let left = (values[j + 1] - values[j]) / dr;
+    let right = (values[j + 2] - values[j + 1]) / dr;
+    let result = (1.0 - weight) * left + weight * right;
+    result.is_finite().then_some(result)
+}
+
+#[test]
+fn interpolated_radial_derivative_tracks_off_face_surface() -> Result<(), String> {
+    const RADIUS: f64 = 0.05;
+    const SLOPE: f64 = 0.2;
+    const SOURCE: f64 = RADIUS * SLOPE;
+    let mut previous_error = f64::INFINITY;
+    for cells in [4_usize, 8, 16, 32] {
+        let dr = RADIUS / (cells as f64 + 0.25);
+        let values: Vec<_> = (0..cells + 3)
+            .map(|k| SOURCE * (((k as f64 + 0.5) * dr) / RADIUS).ln())
+            .collect();
+        let derivative = interpolated_radial_derivative(&values, dr, RADIUS)
+            .ok_or_else(|| format!("surface is not bracketed: cells={cells}"))?;
+        let error = (derivative - SLOPE).abs();
+        assert!(error < previous_error);
+        println!("cells={cells} error={error:.9}");
+        previous_error = error;
+    }
+    assert!(interpolated_radial_derivative(&[0.0, 1.0, 2.0], 1.0, 0.5).is_none());
+    assert!(interpolated_radial_derivative(&[0.0, 1.0, 2.0], 0.0, 1.0).is_none());
+    Ok(())
+}
+
 #[test]
 #[ignore = "surface-condition research diagnostic; run in release mode"]
 fn harris_subsonic_surface_impermeability_diagnostic() -> Result<(), String> {
     // Evaluate the linear slender-body condition phi_r = R' at the physical
-    // surface using adjacent radial cell centres. No radial extrapolation and
+    // surface by interpolating face derivatives. No radial extrapolation and
     // no claim that the singular axis-source approximation enforces it there.
     const EXTENSION: f64 = 0.5;
     const OUTER: f64 = 1.25;
@@ -272,15 +311,13 @@ fn harris_subsonic_surface_impermeability_diagnostic() -> Result<(), String> {
         for x in STATIONS {
             let i = ((x + EXTENSION) / dx).round() as usize;
             let (radius, slope, _) = harris_geometry(x);
-            let radial_index = radius / dr - 0.5;
-            if radial_index < 0.0 || radial_index >= (nr - 1) as f64 {
+            let Some(radial_velocity) = interpolated_radial_derivative(&grid.phi[i], dr, radius)
+            else {
                 println!(
-                    "intervals={intervals} x/l={x:.4} unavailable: surface outside cell-centre range"
+                    "intervals={intervals} x/l={x:.4} unavailable: surface outside interpolable face range"
                 );
                 continue;
-            }
-            let k = radial_index.floor() as usize;
-            let radial_velocity = (grid.phi[i][k + 1] - grid.phi[i][k]) / dr;
+            };
             println!(
                 "intervals={intervals} x/l={x:.4} radius={radius:.6} slope={slope:.6} phi_r={radial_velocity:.6} defect={:+.6} residual={residual:.3e}",
                 radial_velocity - slope
