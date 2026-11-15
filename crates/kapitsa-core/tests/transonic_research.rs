@@ -45,6 +45,71 @@ struct MixedGrid {
 }
 
 impl MixedGrid {
+    fn iterate(&mut self, tolerance: f64, max_iterations: usize) -> Result<(usize, f64), f64> {
+        let nx = self.phi.len();
+        let nr = self.phi[0].len();
+        for iteration in 0..=max_iterations {
+            let mut norm: f64 = 0.0;
+            for i in 2..nx - 1 {
+                for k in 0..nr - 1 {
+                    let residual = self.residual(i, k);
+                    if !residual.is_finite() {
+                        return Err(residual);
+                    }
+                    norm = norm.max(residual.abs());
+                }
+            }
+            if norm <= tolerance {
+                return Ok((iteration, norm));
+            }
+            if iteration == max_iterations {
+                return Err(norm);
+            }
+            for i in 2..nx - 1 {
+                for k in 0..nr - 1 {
+                    let old = self.phi[i][k];
+                    let residual = self.residual(i, k);
+                    let diagonal = self.diagonal(i, k);
+                    if !diagonal.is_finite() || diagonal.abs() < 1e-14 {
+                        return Err(diagonal);
+                    }
+                    let mut step = -residual / diagonal;
+                    let mut accepted = false;
+                    for _ in 0..20 {
+                        self.phi[i][k] = old + step;
+                        let trial = self.residual(i, k);
+                        if trial.is_finite() && trial.abs() <= residual.abs() {
+                            accepted = true;
+                            break;
+                        }
+                        step *= 0.5;
+                    }
+                    if !accepted {
+                        self.phi[i][k] = old;
+                    }
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    fn surface_cp(&self, i: usize, radius: f64, slope: f64) -> Option<f64> {
+        if i == 0 || i + 1 >= self.phi.len() || !radius.is_finite() || !slope.is_finite() {
+            return None;
+        }
+        let nr = self.phi[0].len();
+        let index = radius / self.dr - 0.5;
+        if !(0.0..=(nr - 1) as f64).contains(&index) {
+            return None;
+        }
+        let k = (index.floor() as usize).min(nr - 2);
+        let weight = index - k as f64;
+        let low = (self.phi[i + 1][k] - self.phi[i - 1][k]) / (2.0 * self.dx);
+        let high = (self.phi[i + 1][k + 1] - self.phi[i - 1][k + 1]) / (2.0 * self.dx);
+        let cp = -2.0 * ((1.0 - weight) * low + weight * high) - slope.powi(2);
+        cp.is_finite().then_some(cp)
+    }
+
     fn residual(&self, i: usize, k: usize) -> f64 {
         let u0 = (self.phi[i - 1][k] - self.phi[i - 2][k]) / self.dx;
         let u1 = (self.phi[i][k] - self.phi[i - 1][k]) / self.dx;
@@ -72,6 +137,52 @@ impl MixedGrid {
         -(coefficient(u).abs() + coefficient(forward).max(0.0)) / self.dx.powi(2)
             - (2 * k + 1) as f64 / ((k as f64 + 0.5) * self.dr.powi(2))
     }
+}
+
+#[test]
+fn harris_iteration_reproduces_python_diagnostic() {
+    let (n, outer) = (17, 0.75);
+    let dx = 1.0 / (n - 1) as f64;
+    let nr = (outer / dx + 0.5_f64).round_ties_even() as usize;
+    let dr = outer / (nr as f64 - 0.5);
+    let mut grid = MixedGrid {
+        phi: vec![vec![0.0; nr]; n],
+        axis_flux: (0..n).map(|i| harris_geometry(i as f64 * dx).2).collect(),
+        dx,
+        dr,
+        mach: 0.9,
+        gamma: 1.4,
+    };
+    assert!(grid.iterate(1e-12, 1).is_err());
+    // Restart from the same zero field used by the Python diagnostic.
+    grid.phi = vec![vec![0.0; nr]; n];
+    let (iterations, residual) = grid.iterate(1e-6, 10000).unwrap();
+    let (radius, slope, _) = harris_geometry(0.5);
+    let cp = grid.surface_cp((n - 1) / 2, radius, slope).unwrap();
+    assert_eq!(iterations, 226);
+    assert!(residual <= 1e-6);
+    assert!((cp - (-0.12484869)).abs() < 1e-8, "Cp={cp}");
+    assert_eq!(grid.surface_cp(8, 0.0, 0.0), None);
+}
+
+#[test]
+fn surface_pressure_uses_fixed_radius_derivative() {
+    let h = 0.1;
+    let grid = MixedGrid {
+        phi: (0..9)
+            .map(|i| {
+                (0..8)
+                    .map(|k| i as f64 * h * (k as f64 + 0.5) * h)
+                    .collect()
+            })
+            .collect(),
+        axis_flux: vec![0.0; 9],
+        dx: h,
+        dr: h,
+        mach: 0.9,
+        gamma: 1.4,
+    };
+    assert!((grid.surface_cp(4, 0.25, 0.2).unwrap() + 0.54).abs() < 1e-14);
 }
 
 #[test]
