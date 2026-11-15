@@ -889,6 +889,21 @@ fn collider_edits_clear_only_collider_based_base_patches() -> Result<(), Box<dyn
                 usize::from(mesh_mode)
             );
         }
+        world
+            .body_mut(id)
+            .unwrap()
+            .set_base_pressure_patches(vec![patch]);
+        world
+            .set_collider_tessellation(id, crate::aerodynamics::ColliderTessellation::default())?;
+        assert_eq!(world.body(id).unwrap().base_pressure_patches().len(), 1);
+        world.set_collider_tessellation(
+            id,
+            crate::aerodynamics::ColliderTessellation::new(12, 6, 1024)?,
+        )?;
+        assert_eq!(
+            world.body(id).unwrap().base_pressure_patches().len(),
+            usize::from(mesh_mode)
+        );
         // A stale, deliberately windward patch would fail the step if retained.
         if !mesh_mode {
             world.body_mut(id).unwrap().set_base_pressure_patches(vec![(
@@ -897,6 +912,73 @@ fn collider_edits_clear_only_collider_based_base_patches() -> Result<(), Box<dyn
             )]);
             world.add_collider(id, make_collider())?;
             world.step(1e-5)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn base_pressure_outside_mach_domain_rolls_back_world_step()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::pressure::{BasePressure, PressureError, PressurePatch},
+        collider::Collider,
+        shape::{Cuboid, Shape, TriangleMesh},
+    };
+    for mesh in [false, true] {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                0.001,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 2000.0)?;
+            body.set_aerodynamics(if mesh {
+                Aerodynamics::Mesh(TriangleMesh::new(
+                    vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+                    vec![[0, 1, 2]],
+                )?)
+            } else {
+                Aerodynamics::Colliders
+            });
+            let id = world.add_body(body)?;
+            if !mesh {
+                world.add_collider(
+                    id,
+                    Collider::new(
+                        Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                        Transform::identity(),
+                    ),
+                )?;
+            }
+            let patch = PressurePatch::new(Vec3::Y, -Vec3::X, 1.0)?;
+            world.body_mut(id).unwrap().set_base_pressure_patches(vec![
+                (patch, BasePressure::new(-0.4, 5.0, 10.0)?),
+                (patch, BasePressure::new(-0.4, 0.0, 5.0)?),
+            ]);
+            let before = world.body(id).unwrap().motion();
+            let result = if sharded {
+                world.step_with_shards(
+                    1e-5,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+            } else {
+                world.step(1e-5)
+            };
+            assert!(matches!(
+                result,
+                Err(super::StepError::Aerodynamics {
+                    cause: crate::aerodynamics::AerodynamicsError::Pressure(
+                        PressureError::UnsupportedMach
+                    ),
+                    ..
+                })
+            ));
+            assert_eq!(world.body(id).unwrap().motion(), before);
         }
     }
     Ok(())

@@ -906,6 +906,7 @@ impl PhysicsWorld {
             entry.collider_tessellation = config;
             entry.collider_aerodynamic_mesh = None;
             entry.mesh_aerodynamics = None;
+            entry.body.invalidate_collider_base_patches();
             if let Some(caches) = &mut self.assembly_aerodynamics {
                 caches.remove(&body);
             }

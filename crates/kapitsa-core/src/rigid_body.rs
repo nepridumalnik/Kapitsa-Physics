@@ -101,8 +101,8 @@ impl RigidBody {
     /// geometry; no wake, overlap or shielding calculation is performed.
     /// These loads are currently supported only on non-cluster Mesh/Colliders bodies;
     /// cluster conversion rejects nonempty configurations without changing the body.
-    /// For Colliders, adding or removing a collider or requesting mutable access
-    /// clears the patches; configure them after editing colliders.
+    /// For Colliders, adding or removing a collider, requesting mutable access,
+    /// or changing tessellation clears patches; configure them after such edits.
     pub fn set_base_pressure_patches(
         &mut self,
         patches: Vec<(
