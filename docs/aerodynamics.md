@@ -563,6 +563,30 @@ compilation with limited support in this range and Karr's expression is a fit
 to another dataset. It does show that choosing either curve as a universal
 transonic sphere prediction without further validation would be unjustified.
 
+For a separate low-Reynolds-number numerical check, Nagata et al.'s
+[DNS study](https://doi.org/10.1017/jfm.2020.629), appendix B, reports a
+time-step refinement at Mach 0.3 and diameter Re = 750: time-averaged sphere
+`Cd = 0.5085` with the baseline time step and `0.5099` with half that step.
+Their calculation uses a stationary adiabatic sphere with a no-slip boundary
+condition in air. The difference is a time-discretization sensitivity for
+that calculation, not a full uncertainty estimate or an experiment. It cannot
+validate the Re = 10,000 correlation without a Reynolds-dependent model, and
+one subsonic point cannot validate transonic behavior.
+
+The same study's table 3 provides a spatial-grid sensitivity check; each cell
+below gives the baseline / fine-grid time-averaged `Cd` for the stated
+diameter Reynolds and free-stream Mach numbers:
+
+| Re | Mach 0.3 | Mach 2.0 |
+| --- | --- | --- |
+| 300 | 0.6587 / 0.6644 | 1.452 / 1.458 |
+| 500 | 0.5658 / 0.5679 | 1.331 / 1.336 |
+| 750 | 0.5078 / 0.5085 | 1.251 / 1.254 |
+
+These pairs measure sensitivity to the two grids used, not total numerical
+uncertainty. They cover subsonic and supersonic conditions, not Mach 1, and
+are neither experimental observations nor validation at Re = 10,000.
+
 For an additional transonic comparison, Usry and Wallace,
 [NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
 forebody axial-force coefficients for a fin-stabilized supercritical body of
