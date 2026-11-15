@@ -182,6 +182,50 @@ fn charge_surface_work(
     Ok(())
 }
 
+/// In-place heapsort with a checked charge before each comparison.
+fn budgeted_sort<T>(
+    values: &mut [T],
+    work: &mut usize,
+    max_work: usize,
+    compare: impl Fn(&T, &T) -> std::cmp::Ordering,
+) -> Result<(), GeometryError> {
+    fn sift<T>(
+        values: &mut [T],
+        mut root: usize,
+        end: usize,
+        work: &mut usize,
+        max_work: usize,
+        compare: &impl Fn(&T, &T) -> std::cmp::Ordering,
+    ) -> Result<(), GeometryError> {
+        while root < end / 2 {
+            let mut child = root * 2 + 1;
+            if child + 1 < end {
+                charge_surface_work(work, 1, max_work)?;
+                if compare(&values[child], &values[child + 1]).is_lt() {
+                    child += 1;
+                }
+            }
+            charge_surface_work(work, 1, max_work)?;
+            if !compare(&values[root], &values[child]).is_lt() {
+                break;
+            }
+            values.swap(root, child);
+            root = child;
+        }
+        Ok(())
+    }
+
+    let len = values.len();
+    for root in (0..len / 2).rev() {
+        sift(values, root, len, work, max_work, &compare)?;
+    }
+    for end in (1..len).rev() {
+        values.swap(0, end);
+        sift(values, 0, end, work, max_work, &compare)?;
+    }
+    Ok(())
+}
+
 /// Temporary broad phase for visibility blockers. Each query is an axis-aligned
 /// conservative bound of the source triangle swept to the prepared geometry's
 /// bounds along the ray; it may return extra triangles, but never omits a hit.
@@ -307,7 +351,8 @@ impl TriangleGrid {
                 .checked_add(count)
                 .ok_or(GeometryError::WorkBudgetExceeded)?;
         }
-        entries.sort_unstable();
+        let mut sort_work = build_work;
+        budgeted_sort(&mut entries, &mut sort_work, max_work, Ord::cmp)?;
         let mut indexed_triangles = Vec::new();
         indexed_triangles
             .try_reserve_exact(entries.len())
@@ -322,7 +367,7 @@ impl TriangleGrid {
             dimensions,
             offsets,
             triangles,
-            build_work,
+            build_work: sort_work,
         })
     }
 
@@ -1081,10 +1126,9 @@ impl PreparedGeometry {
         for triangle in &mut triangles {
             triangle.vertices.sort_unstable_by(compare_vertex);
         }
-        // Equal keys describe identical prepared triangles. An unstable sort
-        // therefore preserves the canonical result without the infallible
-        // temporary allocation used by the standard library's stable sort.
-        triangles.sort_unstable_by(|a, b| {
+        // Equal keys describe identical prepared triangles. Sorting is in-place
+        // and comparison work is charged before each comparator invocation.
+        budgeted_sort(&mut triangles, &mut work, max_work, |a, b| {
             a.owner
                 .cmp(&b.owner)
                 .then_with(|| {
@@ -1097,7 +1141,7 @@ impl PreparedGeometry {
                 })
                 .then_with(|| compare_vertex(&a.normal, &b.normal))
                 .then_with(|| a.area.total_cmp(&b.area))
-        });
+        })?;
         let grid = TriangleGrid::build(&triangles, max_work.saturating_sub(work))?;
         work = work
             .checked_add(grid.build_work)

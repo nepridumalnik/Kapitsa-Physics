@@ -177,6 +177,27 @@ fn sort_work_estimate_checks_power_of_two_boundaries_and_overflow() {
 }
 
 #[test]
+fn budgeted_sort_counts_comparisons_and_rejects_exhaustion() {
+    let source = [4, 1, 3, 1, 2];
+    let mut values = source;
+    let mut work = 0;
+    budgeted_sort(&mut values, &mut work, 1_000, Ord::cmp).unwrap();
+    assert_eq!(values, [1, 1, 2, 3, 4]);
+    assert!(work > 0);
+    let required = work;
+    let mut values = source;
+    let mut work = 0;
+    assert_eq!(
+        budgeted_sort(&mut values, &mut work, required - 1, Ord::cmp),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    let mut values = source;
+    let mut work = 0;
+    budgeted_sort(&mut values, &mut work, required, Ord::cmp).unwrap();
+    assert_eq!(values, [1, 1, 2, 3, 4]);
+}
+
+#[test]
 fn surface_work_charge_rejects_overflow_and_preserves_previous_value() {
     let mut work = 4;
     assert_eq!(charge_surface_work(&mut work, 1, 5), Ok(()));
