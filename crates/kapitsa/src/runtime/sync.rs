@@ -114,7 +114,10 @@ mod tests {
         assert_eq!(simulation.metrics().active_workers, 1);
         assert_eq!(simulation.metrics().rayon_pool_size, None);
         assert_eq!(stats.step_diagnostics, expected.step_diagnostics());
-        assert_eq!(simulation.metrics().step_diagnostics, stats.step_diagnostics);
+        assert_eq!(
+            simulation.metrics().step_diagnostics,
+            stats.step_diagnostics
+        );
     }
 
     #[test]

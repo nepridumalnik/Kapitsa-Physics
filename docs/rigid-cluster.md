@@ -178,10 +178,12 @@ commit; no reaction is inferred. Other balance, topology, numerical and storage
 errors still fail the step. Currently certification requires a dynamic cluster with no
 accumulated body forces, only part-targeted persistent force sources,
 certified part-owned aerodynamic loads, and gravity sampled uniformly at the cluster center of mass, with
-no colliders on the cluster and no joints or chunks in the world. Gravity
-gradients across the cluster are not modeled. Colliders on other bodies are permitted. Thus
-contact and CCD forces are not supported, not assumed absent from a diagnostic
-log. Low-level shard commits do not perform automatic weld failure.
+no joints or chunks in the world. Gravity gradients across the cluster are not
+modeled. A cluster may have colliders if the entire collision step has no
+discrete or solved CCD contact manifolds and no CCD clipping. This conservative
+world-wide restriction also rejects unrelated contacts; it does not infer absence
+of contact from an empty impulse log. Contact and CCD forces remain unsupported.
+Low-level shard commits do not perform automatic weld failure.
 
 The separate diagnostic `part_hull_weld_reactions` also accepts part-owned
 `HullSection` loads from the same successful step. It rejects wings, simple
@@ -211,8 +213,8 @@ owner must be a part in the certified tree. The owner wrenches are evaluated
 about the assembly COM and incorporated into the pending weld balance. Missing
 staging is rejected, including when COM density is zero. Part-owned voxel wave
 loads use the existing part hull wrench snapshot; mesh wave-source geometry is
-geometry-only. Collider geometry, contacts, joints and other unsupported paths
-remain excluded.
+geometry-only. Contacting collider geometry, joints and other unsupported paths
+remain excluded as described above.
 This certifies attribution of the implemented Mach >= 5 impact approximation,
 not experimental accuracy of the pressure model.
 

@@ -2439,7 +2439,6 @@ impl PhysicsWorld {
                 });
                 let part_surfaces_certified = no_world_load_paths
                     && sources_certified
-                    && entry.first_collider.is_none()
                     && body.physics().body_type() == BodyType::Dynamic
                     && body.forces().force() == Vec3::ZERO
                     && body.forces().torque() == Vec3::ZERO
@@ -2764,6 +2763,27 @@ impl PhysicsWorld {
             .pending_step_diagnostics
             .collision_ccd_limit_clipped_bodies
             != 0;
+        // Collider-bearing clusters are certified only if the whole collision
+        // step was contact-free. A manifold can alter motion even when no
+        // velocity impulse was recorded; CCD clipping also changes motion.
+        if self.contact_ccd_clipped_pending
+            || !context.ccd_solved_manifolds.is_empty()
+            || !context.manifolds.is_empty()
+        {
+            for state in &mut self.cluster_load_states_pending {
+                if self
+                    .bodies
+                    .get(state.body.dense)
+                    .is_some_and(|entry| entry.first_collider.is_some())
+                {
+                    state.force_free_certified = false;
+                    state.part_sources_certified = false;
+                    state.part_hull_certified = false;
+                    state.part_wings_certified = false;
+                    state.part_surfaces_certified = false;
+                }
+            }
+        }
         let count = context
             .ccd_solved_manifolds
             .iter()

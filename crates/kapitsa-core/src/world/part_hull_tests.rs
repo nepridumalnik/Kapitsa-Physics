@@ -675,6 +675,69 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
 }
 
 #[test]
+fn collider_cluster_fractures_in_contact_free_step() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
+    use crate::collider::Collider;
+    use crate::joint::JointFrame;
+    use crate::shape::{Cuboid, Shape};
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_error_policy(super::ErrorPolicy::Strict);
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let root = world.enable_cluster(body)?;
+        world.add_part_collider(
+            root,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        let child = world.add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::IDENTITY,
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Breakable {
+                    max_force: Some(4.0),
+                    max_torque: None,
+                },
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )?;
+        let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+        world.add_force_source_for_part(child, Vec3::ZERO, Vec3::X * 10.0)?;
+        world
+            .set_automatic_weld_failure(Some((1e-10, 1e-10)))
+            .map_err(|e| format!("{e:?}"))?;
+        if sharded {
+            world.step_with_shards(
+                0.01,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )?;
+        } else {
+            world.step(0.01)?;
+        }
+        assert!(world.weld(weld).is_none());
+        assert_eq!(world.step_diagnostics().weld_incomplete_load_clusters, 0);
+        assert_eq!(world.validate_clusters(), Ok(()));
+    }
+    Ok(())
+}
+
+#[test]
 fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn std::error::Error>>
 {
     use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
