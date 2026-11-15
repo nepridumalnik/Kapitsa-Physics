@@ -477,6 +477,25 @@ fn harris_mach_one_field_transition_diagnostic() {
                     })
                     .collect();
                 println!("  surface Cp samples: {pressures:?}");
+                for &(x, measured) in harris_data::TABLE_III_A_MACH_100_AFT {
+                    let i = (x / dx).floor() as usize;
+                    let node_cp = |j: usize| {
+                        let (radius, slope, _) = harris_geometry(j as f64 * dx);
+                        grid.surface_cp(j, radius, slope)
+                    };
+                    if let (Some(left), Some(right)) = (node_cp(i), node_cp(i + 1)) {
+                        let t = x / dx - i as f64;
+                        let calculated = (1.0 - t) * left + t * right;
+                        println!(
+                            "  Mach1 n={n} outer={outer} x={x:.3} measured={measured:.3} calculated={calculated:.6} delta={:+.6}",
+                            calculated - measured
+                        );
+                    } else {
+                        println!(
+                            "  Mach1 n={n} outer={outer} x={x:.3} unavailable without extrapolation"
+                        );
+                    }
+                }
             }
             Err(residual) => panic!("n={n} did not converge: residual={residual:.3e}"),
         }

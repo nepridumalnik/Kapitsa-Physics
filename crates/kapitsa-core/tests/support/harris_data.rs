@@ -29,3 +29,13 @@ pub const TABLE_III_A_MACH_090: &[(f64, f64)] = &[
     (0.927, 0.202),
     (0.937, 0.229),
 ];
+
+/// Mach 1.00, table III(a), stations around the measured aft pressure recovery.
+#[allow(dead_code)]
+pub const TABLE_III_A_MACH_100_AFT: &[(f64, f64)] = &[
+    (0.681, -0.217),
+    (0.733, -0.211),
+    (0.785, -0.189),
+    (0.838, 0.078),
+    (0.864, 0.144),
+];
