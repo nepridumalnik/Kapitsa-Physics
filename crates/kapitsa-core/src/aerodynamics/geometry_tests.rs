@@ -195,6 +195,27 @@ fn surface_work_charge_rejects_overflow_and_preserves_previous_value() {
 }
 
 #[test]
+fn surface_work_enforces_hard_ceiling_even_with_larger_caller_budget() {
+    const HARD_LIMIT: usize = 100_000_000;
+    let mut work = HARD_LIMIT - 1;
+    assert_eq!(charge_surface_work(&mut work, 1, usize::MAX), Ok(()));
+    assert_eq!(work, HARD_LIMIT);
+    assert_eq!(
+        charge_surface_work(&mut work, 1, usize::MAX),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    assert_eq!(work, HARD_LIMIT);
+    assert_eq!(
+        check_surface_work(Some(0), 0),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    assert_eq!(
+        check_surface_work(None, usize::MAX),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+}
+
+#[test]
 fn triangle_grid_build_accounts_for_input_scans() {
     const TRIANGLE_COUNT: usize = 2;
     const SCAN_WORK: usize = TRIANGLE_COUNT * 3;
