@@ -83,6 +83,38 @@ fn signed_surface_cp_uses_local_rotation_velocity() {
 }
 
 #[test]
+fn potential_sphere_matches_inviscid_stagnation_and_equator() {
+    let state = PressureFlow {
+        linear_velocity: Vec3::X * 20.0,
+        ..flow()
+    };
+    let front = PressurePatch::new(Vec3::X, Vec3::X, 1.0).unwrap();
+    let side = PressurePatch::new(Vec3::Y, Vec3::Y, 1.0).unwrap();
+    assert_eq!(
+        front.evaluate_potential_sphere(state).unwrap().force,
+        -Vec3::X * 200.0
+    );
+    assert_eq!(
+        side.evaluate_potential_sphere(state).unwrap().force,
+        Vec3::Y * 250.0
+    );
+    assert_eq!(
+        front.evaluate_potential_sphere(PressureFlow {
+            linear_velocity: Vec3::X * 20.01,
+            ..state
+        }),
+        Err(PressureError::UnsupportedMach)
+    );
+    assert_eq!(
+        side.evaluate_potential_sphere(PressureFlow {
+            angular_velocity: Vec3::Z,
+            ..state
+        }),
+        Err(PressureError::InvalidMotion)
+    );
+}
+
+#[test]
 fn explicit_base_pressure_has_correct_force_moment_and_domain() {
     let base = BasePressure::new(-0.4, 5.0, 10.0).unwrap();
     let patch = PressurePatch::new(Vec3::Y, -Vec3::X, 2.0).unwrap();

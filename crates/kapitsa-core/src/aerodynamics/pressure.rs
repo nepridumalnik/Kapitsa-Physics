@@ -146,6 +146,12 @@ pub struct SurfacePressure {
     max_mach: f64,
 }
 
+/// Maximum Mach accepted by the incompressible potential-flow approximation.
+/// This conservative policy is not an experimental accuracy guarantee.
+const POTENTIAL_FLOW_MAX_MACH: f64 = 0.2;
+/// Squared surface-speed ratio at the equator of an ideal sphere.
+const SPHERE_EQUATORIAL_SPEED_RATIO_SQUARED: f64 = 2.25;
+
 impl SurfacePressure {
     pub fn new(cp: f64, min_mach: f64, max_mach: f64) -> Result<Self, PressureError> {
         if !cp.is_finite()
@@ -212,6 +218,49 @@ impl PressurePatch {
     }
     pub fn area(&self) -> f64 {
         self.area
+    }
+
+    /// Potential-flow pressure on a stationary, isolated sphere in uniform flow.
+    ///
+    /// The caller must supply a sphere surface normal; arbitrary geometry,
+    /// separation, viscosity, wake, compressibility and rotation are not modeled.
+    /// Cp = 1 - (9/4) sin²(theta), with theta from the upstream stagnation point.
+    /// See Barlow, Rae and Pope, *Low-Speed Wind Tunnel Testing*, 3rd ed., §4.3:
+    /// <https://web.pdx.edu/~d4eb/chrome/J._B._Barlow,_W._H._Rae,_Jr,_A._Pope_Low_Speed_Wind_Tunnel_Testing.pdf>.
+    /// The Mach <= 0.2 policy is an approximation, not a validation claim.
+    pub fn evaluate_potential_sphere(
+        &self,
+        flow: PressureFlow,
+    ) -> Result<PressureWrench, PressureError> {
+        if flow.angular_velocity != Vec3::ZERO {
+            return Err(PressureError::InvalidMotion);
+        }
+        // Reuse the ordinary checks even for a zero-speed or zero-area patch.
+        let zero = SurfacePressure::new(0.0, 0.0, POTENTIAL_FLOW_MAX_MACH)?;
+        self.evaluate_surface(flow, zero)?;
+        let relative = flow
+            .linear_velocity
+            .checked_sub(flow.atmosphere.wind_velocity())
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        let speed = relative
+            .checked_length()
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        if speed == 0.0 || self.area == 0.0 || flow.atmosphere.density() == 0.0 {
+            return Ok(PressureWrench {
+                force: Vec3::ZERO,
+                moment: Vec3::ZERO,
+            });
+        }
+        let normal = flow.transform.transform_vector(self.normal);
+        let cosine = normal
+            .checked_dot(relative / speed)
+            .ok_or(PressureError::ArithmeticOverflow)?
+            .clamp(-1.0, 1.0);
+        let cp = 1.0 - SPHERE_EQUATORIAL_SPEED_RATIO_SQUARED * (1.0 - cosine * cosine);
+        self.evaluate_surface(
+            flow,
+            SurfacePressure::new(cp, 0.0, POTENTIAL_FLOW_MAX_MACH)?,
+        )
     }
 
     /// Evaluates a centroid load sample; supply atmosphere sampled at this patch.

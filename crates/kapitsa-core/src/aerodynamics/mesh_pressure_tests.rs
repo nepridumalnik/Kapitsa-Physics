@@ -96,6 +96,36 @@ fn signed_cp_on_prepared_mesh_sums_force_and_moment() {
 }
 
 #[test]
+fn potential_sphere_collider_front_patches_follow_analytic_cp() {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    let collider = Collider::new(
+        Shape::Sphere(Sphere::new(1.0).unwrap()),
+        Transform::identity(),
+    );
+    let mesh = collider_mesh([&collider], ColliderTessellation::new(16, 9, 1000).unwrap()).unwrap();
+    let patches = prepare_with_budget(&mesh, Vec3::X, 1_000_000);
+    let state = PressureFlow {
+        linear_velocity: Vec3::X * 20.0,
+        ..flow()
+    };
+    assert!(patches.iter().count() > 1);
+    for face in patches.iter() {
+        let patch = PressurePatch::new(face.center, face.normal, face.area).unwrap();
+        let cp = 1.0 - 2.25 * (1.0 - patch.normal().x.powi(2));
+        let expected = patch
+            .evaluate_surface(state, SurfacePressure::new(cp, 0.0, 0.2).unwrap())
+            .unwrap();
+        let actual = patch.evaluate_potential_sphere(state).unwrap();
+        close(actual.force, expected.force);
+        close(actual.moment, expected.moment);
+    }
+}
+
+#[test]
 fn collider_sphere_and_cylinder_converge_to_newtonian_integrals() {
     use crate::{
         aerodynamics::colliders::{ColliderTessellation, collider_mesh},
