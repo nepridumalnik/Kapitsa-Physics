@@ -98,6 +98,17 @@ fn finite(value: f64) -> Result<f64, GeometryError> {
     }
 }
 
+// Called only for strictly opposite signs. Reject a nonzero ratio rounded to
+// zero; rounding to the other endpoint needs a separate geometric analysis.
+pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, GeometryError> {
+    let denominator = finite(a - b)?;
+    let fraction = finite(a / denominator)?;
+    if fraction == 0.0 {
+        return Err(GeometryError::PrecisionLoss);
+    }
+    Ok(fraction)
+}
+
 fn normalize(values: [f64; 3]) -> Result<[f64; 3], GeometryError> {
     let maximum = values.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     if maximum == 0.0 {
@@ -280,7 +291,8 @@ pub(super) fn windward_triangle(
             super::checked_push(&mut positive, vertices[index])?;
         }
         if (a > 0.0 && b < 0.0) || (a < 0.0 && b > 0.0) {
-            let point = vertices[index] + (vertices[next] - vertices[index]) * (a / (a - b));
+            let point =
+                vertices[index] + (vertices[next] - vertices[index]) * crossing_fraction(a, b)?;
             if !point.is_finite() {
                 return Err(GeometryError::ArithmeticOverflow);
             }
@@ -347,6 +359,17 @@ pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, GeometryError>
 mod tests {
     use super::*;
     use crate::aerodynamics::geometry::GeometryOwner;
+
+    #[test]
+    fn crossing_fraction_rejects_underflow_but_accepts_representable_fraction() {
+        let smallest = f64::from_bits(1);
+        assert_eq!(crossing_fraction(smallest, -1.0), Ok(smallest));
+        assert_eq!(
+            crossing_fraction(smallest, -2.0),
+            Err(GeometryError::PrecisionLoss)
+        );
+        assert_eq!(crossing_fraction(1.0, -1.0), Ok(0.5));
+    }
 
     #[test]
     fn dyadic_strip_partition_preserves_exact_unit_fraction() {

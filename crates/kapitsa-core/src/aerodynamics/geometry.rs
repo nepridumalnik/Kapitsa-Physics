@@ -1298,12 +1298,8 @@ impl PreparedGeometry {
                                 checked_push(&mut negative, polygon[k])?;
                             }
                             if (d > 0.0 && e < 0.0) || (d < 0.0 && e > 0.0) {
-                                let denominator = d - e;
-                                if !denominator.is_finite() {
-                                    return Err(GeometryError::ArithmeticOverflow);
-                                }
-                                let point =
-                                    polygon[k] + (polygon[n] - polygon[k]) * (d / denominator);
+                                let fraction = visibility::crossing_fraction(d, e)?;
+                                let point = polygon[k] + (polygon[n] - polygon[k]) * fraction;
                                 if !point.is_finite() {
                                     return Err(GeometryError::ArithmeticOverflow);
                                 }
