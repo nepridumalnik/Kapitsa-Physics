@@ -591,6 +591,77 @@ fn harris_subsonic_surface_impermeability_diagnostic() -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "source discretization sensitivity diagnostic; run in release mode"]
+fn harris_subsonic_cutoff_source_discretization() -> Result<(), String> {
+    // Fixed finite domain and identical initial conditions; averaging changes
+    // source discretization only, not the geometry or physical closure.
+    const EXTENSION: f64 = 0.5;
+    const OUTER: f64 = 1.25;
+    const CUTOFF: f64 = 36.0 / 38.240;
+    const MACH: f64 = 0.9;
+    const GAMMA: f64 = 1.4;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 60000;
+    const STATIONS: [f64; 2] = [0.875, 0.9375];
+    for intervals in [32_usize, 64, 96] {
+        let dx = 1.0 / intervals as f64;
+        let nx = 2 * intervals + 1;
+        let nr = (OUTER / dx + 0.5).round_ties_even() as usize;
+        let dr = OUTER / (nr as f64 - 0.5);
+        for averaged in [false, true] {
+            let source = (0..nx)
+                .map(|i| {
+                    let x = i as f64 * dx - EXTENSION;
+                    if averaged {
+                        let radius_at = |position: f64| {
+                            if position <= 0.0 {
+                                0.0
+                            } else {
+                                harris_geometry(position).0
+                            }
+                        };
+                        let left = radius_at(x - 0.5 * dx);
+                        let right = radius_at(x + 0.5 * dx);
+                        (right * right - left * left) / (2.0 * dx)
+                    } else if (0.0..=1.0).contains(&x) {
+                        harris_geometry(x).2
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let mut grid = MixedGrid {
+                phi: vec![vec![0.0; nr]; nx],
+                axis_flux: source,
+                dx,
+                dr,
+                mach: MACH,
+                gamma: GAMMA,
+            };
+            let (iterations, residual) =
+                grid.iterate(TOLERANCE, MAX_ITERATIONS).map_err(|value| {
+                    format!("intervals={intervals} averaged={averaged}: residual={value}")
+                })?;
+            println!(
+                "intervals={intervals} averaged={averaged} cutoff_phase={:.6} iterations={iterations} residual={residual:.3e}",
+                CUTOFF / dx - (CUTOFF / dx).round()
+            );
+            for x in STATIONS {
+                let i = ((x + EXTENSION) / dx).round() as usize;
+                let (radius, slope, _) = harris_geometry(x);
+                let cp = grid.surface_cp(i, radius, slope);
+                let defect = interpolated_radial_derivative(&grid.phi[i], dr, radius)
+                    .map(|radial_velocity| radial_velocity - slope);
+                println!(
+                    "intervals={intervals} averaged={averaged} x/l={x:.4} cp={cp:?} linear_surface_defect={defect:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "boundary sensitivity research diagnostic; run in release mode"]
 fn harris_subsonic_radial_boundary_sensitivity() -> Result<(), String> {
     // Hold the entire mesh spacing and axial domain fixed; only the location
