@@ -641,6 +641,21 @@ table; these overall ranges do not establish a measurement at any particular
 Mach and Reynolds pair or its uncertainty. The article itself has not been
 checked, so neither independence nor a matched validation point is claimed.
 
+Lawrence's primary [1967 report](https://archive.org/details/DTIC_AD0660545)
+is available; its [table I scan](https://archive.org/download/DTIC_AD0660545/page/n16.jpg)
+lists individual free-flight measurements. For example, shots 3 and 4 give
+`(Mach, Re, Cd) = (0.594, 10100, 0.453)` and `(0.473, 10200, 0.439)`;
+near Mach 1, shots 53 and 41 instead give `(0.989, 921, 0.969)` and
+`(0.978, 919, 0.940)`. The report describes precision metal spheres and
+estimates total drag-coefficient errors within ±2% from its error appraisal
+and data consistency, without giving a statistical confidence level. Its
+figure 4 and table show that its measurements near Re = 10,000 only extend
+to Mach 0.594. These points are valuable primary observations, but the report
+was incorporated in Bailey and Hiatt's faired data and is therefore not an
+independent Karr holdout; the high-Mach points also do not match Re = 10,000.
+The relationship to individual observations in the Goin–Lawrence article
+remains unverified.
+
 The newer GBK experiment by [Allofs et al.](https://doi.org/10.1007/s00348-022-03402-z)
 is independent of the historical fits, but is not a direct sphere `Cd`
 dataset. It measures particle size and velocity in a dust-laden nozzle flow;
