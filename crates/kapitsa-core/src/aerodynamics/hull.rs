@@ -605,7 +605,7 @@ fn resistance(
 // Products/quotients here have finite nonnegative factors and a positive divisor.
 // Keep binary exponents separate so neither large nor tiny intermediate products
 // lose a representable result. Unlike logarithms, power-of-two scaling is exact.
-fn scaled_product(factors: &[f64], divisor: f64) -> Result<f64, HullError> {
+pub(super) fn scaled_product(factors: &[f64], divisor: f64) -> Result<f64, HullError> {
     fn split(mut value: f64) -> (f64, i32) {
         let mut adjustment = 0;
         if value < f64::MIN_POSITIVE {

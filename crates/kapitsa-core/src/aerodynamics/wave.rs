@@ -63,7 +63,7 @@ pub fn wave_drag(
     if density == 0.0 || speed == 0.0 {
         return Ok(0.0);
     }
-    if speed / sound_speed <= 1.0 {
+    if speed <= sound_speed {
         return Err(WaveDragError::UnsupportedMach);
     }
     // g''(x) = ln|x|. Coordinates are in interval widths; the constant
@@ -75,28 +75,43 @@ pub fn wave_drag(
             x * x * (0.5 * x.abs().ln() - 0.75)
         }
     }
+    let scale = area_slopes
+        .iter()
+        .fold(0.0_f64, |max, value| max.max(value.abs()));
+    if scale == 0.0 {
+        return Ok(0.0);
+    }
     let mut integral = 0.0;
+    let mut compensation = 0.0;
     for (i, pair_i) in area_slopes.windows(2).enumerate() {
-        let di = pair_i[1] - pair_i[0];
+        let di = pair_i[1] / scale - pair_i[0] / scale;
         for (j, pair_j) in area_slopes.windows(2).enumerate() {
-            let dj = pair_j[1] - pair_j[0];
+            let dj = pair_j[1] / scale - pair_j[0] / scale;
             let k = i.abs_diff(j) as f64;
             let kernel = if k == 0.0 {
                 -1.5
+            } else if k >= 16.0 {
+                // The direct second difference loses precision at large k.
+                let t = 1.0 / (k * k);
+                k.ln() - t * (1.0 / 12.0 + t * (1.0 / 60.0 + t / 168.0))
             } else {
                 g(k + 1.0) + g(k - 1.0) - 2.0 * g(k)
             };
-            integral += di * dj * kernel;
+            let term = di * dj * kernel;
+            let corrected = term - compensation;
+            let next = integral + corrected;
+            compensation = (next - integral) - corrected;
+            integral = next;
         }
     }
-    let drag = -density * speed * speed * integral / (4.0 * PI);
-    if !drag.is_finite() || !integral.is_finite() {
+    if !integral.is_finite() {
         return Err(WaveDragError::ArithmeticOverflow);
     }
-    if drag < 0.0 {
+    if integral > 0.0 {
         return Err(WaveDragError::PrecisionLoss);
     }
-    Ok(drag)
+    super::hull::scaled_product(&[density, speed, speed, scale, scale, -integral], 4.0 * PI)
+        .map_err(|_| WaveDragError::ArithmeticOverflow)
 }
 
 #[cfg(test)]
@@ -119,6 +134,16 @@ mod tests {
         }
         assert!(errors[2] < errors[1] && errors[1] < errors[0], "{errors:?}");
         assert!(errors[2] < expected * 4.0 * 0.01, "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn scaling_preserves_representable_extremes() -> Result<(), WaveDragError> {
+        let reference = wave_drag(&[0.0, 1.0, -1.0, 0.0], 1.0, 2.0, 1.0)?;
+        let extreme = wave_drag(&[0.0, 1e200, -1e200, 0.0], 1e-300, 2e-50, 1e-50)?;
+        assert!((extreme / reference - 1.0).abs() < 1e-12);
+        let reflected = wave_drag(&[0.0, -1.0, 1.0, 0.0], 1.0, 2.0, 1.0)?;
+        assert_eq!(reference, reflected);
         Ok(())
     }
 
