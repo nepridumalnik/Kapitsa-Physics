@@ -31,6 +31,13 @@ struct PreparedWeldSplit {
     affected_bodies: Vec<BodyId>,
 }
 
+/// Inserted entries and plans; must be finalized without intervening fallible
+/// operations. This type is internal and cannot outlive the transaction.
+struct InsertedWeldSplits {
+    plans: Vec<PreparedWeldSplit>,
+    results: Vec<Vec<BodyId>>,
+}
+
 impl PhysicsWorld {
     /// Returns the part owning a collider, or `None` for an unclustered body
     /// or an invalid collider. Lookup scans the owning cluster's part and
@@ -1468,8 +1475,16 @@ impl PhysicsWorld {
     /// world. All body entries are inserted in one rollback-capable pool batch.
     fn commit_weld_splits(
         &mut self,
-        mut plans: Vec<PreparedWeldSplit>,
+        plans: Vec<PreparedWeldSplit>,
     ) -> Result<Vec<Vec<BodyId>>, ClusterError> {
+        let staged = self.insert_weld_split_bodies(plans)?;
+        Ok(self.finish_weld_splits(staged))
+    }
+
+    fn insert_weld_split_bodies(
+        &mut self,
+        mut plans: Vec<PreparedWeldSplit>,
+    ) -> Result<InsertedWeldSplits, ClusterError> {
         let mut bodies = HashSet::new();
         bodies
             .try_reserve(plans.len())
@@ -1499,7 +1514,7 @@ impl PhysicsWorld {
             .try_insert_many(entries)
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let mut ids = inserted.into_iter();
-        for mut plan in plans {
+        for plan in &mut plans {
             plan.affected_bodies.push(plan.body);
             for dense in ids.by_ref().take(plan.other_clusters.len()) {
                 plan.affected_bodies.push(BodyId {
@@ -1507,9 +1522,16 @@ impl PhysicsWorld {
                     dense,
                 });
             }
+        }
+        Ok(InsertedWeldSplits { plans, results })
+    }
+
+    fn finish_weld_splits(&mut self, staged: InsertedWeldSplits) -> Vec<Vec<BodyId>> {
+        let InsertedWeldSplits { plans, mut results } = staged;
+        for plan in plans {
             results.push(self.commit_inserted_weld_split(plan));
         }
-        Ok(results)
+        results
     }
 
     /// Applies a validated plan after its new body entries have been inserted.
