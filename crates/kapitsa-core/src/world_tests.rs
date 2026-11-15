@@ -39,6 +39,75 @@ use crate::execution::{ExecutionError, StepExecutor};
 mod free_ball_tests;
 
 #[test]
+fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
+-> Result<(), Box<dyn std::error::Error>> {
+    for ccd in [false, true] {
+        for wall_first in [false, true] {
+            let mut world = PhysicsWorld::new();
+            let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+            let (position, speed, dt) = if ccd {
+                (-5.0, 1000.0, 0.01)
+            } else {
+                (-1.1, 10.0, 0.02)
+            };
+            let mut moving = RigidBody::new_dynamic(
+                Transform::new(Vec3::new(position, 0.0, 0.0), Quat::IDENTITY)?,
+                MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY)?,
+            )?;
+            moving.set_linear_velocity(Vec3::new(speed, 0.0, 0.0))?;
+            if ccd {
+                moving.set_ccd_mode(CcdMode::Continuous);
+            }
+            let body = world.add_body(moving)?;
+            let part = world.enable_cluster(body)?;
+            let (wall_collider, part_collider) = if wall_first {
+                let wall_collider = world.add_collider(wall, collider(0.5))?;
+                (wall_collider, world.add_part_collider(part, collider(0.5))?)
+            } else {
+                let part_collider = world.add_part_collider(part, collider(0.5))?;
+                (world.add_collider(wall, collider(0.5))?, part_collider)
+            };
+
+            world.step(dt)?;
+            let mut impulse = Vec3::ZERO;
+            let mut count = 0;
+            for entry in world.contact_impulses() {
+                assert_eq!(entry.ccd, ccd);
+                let (part_side, sign) = if entry.pair.a == part_collider {
+                    assert_eq!(entry.pair.b, wall_collider);
+                    (0, -1.0)
+                } else {
+                    assert_eq!(entry.pair.a, wall_collider);
+                    assert_eq!(entry.pair.b, part_collider);
+                    (1, 1.0)
+                };
+                assert_eq!(entry.parts[part_side], Some(part));
+                assert_eq!(entry.parts[1 - part_side], None);
+                impulse += entry.impulse_on_b * sign;
+                count += 1;
+            }
+            assert!(
+                count > 0,
+                "missing contact impulse: ccd={ccd}, wall_first={wall_first}"
+            );
+            assert_eq!(world.contact_impulses_omitted_points(), 0);
+            let final_velocity = world
+                .body(body)
+                .ok_or(WorldError::InvalidBodyId)?
+                .state()
+                .linear_velocity();
+            let momentum_change = (final_velocity - Vec3::new(speed, 0.0, 0.0)) * 2.0;
+            assert!(impulse.x < 0.0);
+            assert!(
+                (impulse - momentum_change).length() < speed * 1e-10,
+                "impulse={impulse:?}, momentum change={momentum_change:?}, ccd={ccd}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn replay_discards_only_affected_ccd_solves() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = PhysicsWorld::new();
     let mut colliders = Vec::new();
