@@ -1263,9 +1263,12 @@ impl PreparedGeometry {
                             .ok_or(GeometryError::WorkBudgetExceeded)?;
                         charge_surface_work(&mut work, polygon_work, max_work)?;
                         let mut distances = Vec::new();
+                        distances
+                            .try_reserve_exact(polygon.len())
+                            .map_err(|_| GeometryError::AllocationFailed)?;
                         for point in &polygon {
                             let distance = visibility::distance(coefficients, *point);
-                            checked_push(&mut distances, distance)?;
+                            distances.push(distance);
                         }
                         if !distances.iter().all(|d| d.is_finite()) {
                             return Err(GeometryError::ArithmeticOverflow);
