@@ -669,6 +669,21 @@ different measurement technique alone does not establish an independent
 holdout for their faired curves. This report does not supply a validated
 transonic point at Re = 10,000.
 
+An independent later shock-tube experiment by
+[Wagner et al.](https://www.osti.gov/servlets/purl/1107528) tracks 1 mm
+stainless-steel spheres in shock-induced air flow. Its table 2 reports, for
+example, run 167: relative Mach 0.99–0.91, diameter Re 43,300–40,000,
+and fitted constant `Cd = 0.83` over 0.1–0.8 ms. The reported mean for the
+nominal post-shock Mach 0.99 group is `Cd = 0.83 ± 0.05`, a 95% Student-t
+confidence interval; it is not a full systematic-uncertainty budget. The
+authors fit a constant drag coefficient to each velocity trajectory, and
+state that the measurement cannot resolve small variation across its time
+interval. They estimate acceleration parameter below 0.0003 and expect small
+unsteadiness effects. These later measurements are independent of Karr's
+construction, but their Re is roughly four times 10,000 and each fitted drag
+value spans changing conditions; they are not matched point validation for
+the Re = 10,000 curve or a measurement exactly at Mach 1.
+
 The newer GBK experiment by [Allofs et al.](https://doi.org/10.1007/s00348-022-03402-z)
 is independent of the historical fits, but is not a direct sphere `Cd`
 dataset. It measures particle size and velocity in a dust-laden nozzle flow;
