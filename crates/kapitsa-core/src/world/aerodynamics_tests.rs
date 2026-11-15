@@ -1851,3 +1851,77 @@ fn wave_drag_is_applied_to_body_and_cluster() -> Result<(), Box<dyn std::error::
     }
     Ok(())
 }
+
+#[test]
+fn wave_transition_world_and_rollback() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{
+        AerodynamicsError,
+        hull::{HullError, HullSection},
+        wave::{WaveDragError, WaveMachCurve},
+    };
+    for clustered in [false, true] {
+        for sharded in [false, true] {
+            for (speed, in_range) in [(340.0, true), (510.0, false)] {
+                let section = HullSection::new(
+                    Transform::identity(),
+                    Vec3::X,
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    None,
+                )?
+                .with_wave_drag(&[0.0, 1.0, -1.0, 0.0])?
+                .with_wave_mach_curve(WaveMachCurve::new(vec![
+                    (0.8, 0.0),
+                    (1.0, 0.5),
+                    (1.2, 1.0),
+                ])?);
+                let mut body = RigidBody::new_dynamic(
+                    Transform::identity(),
+                    MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY)?,
+                )?;
+                body.set_linear_velocity(Vec3::X * speed)?;
+                body.set_aerodynamics(Aerodynamics::Hull(vec![section]));
+                let mut world = PhysicsWorld::new();
+                let id = world.add_body(body)?;
+                if clustered {
+                    world.enable_cluster(id)?;
+                }
+                world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                    1.2,
+                    Vec3::ZERO,
+                )?));
+                let before = world.body(id).ok_or("body")?.motion();
+                let result = if sharded {
+                    world.step_with_shards(
+                        1e-4,
+                        &mut [Vec::new(), Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )
+                } else {
+                    world.step(1e-4)
+                };
+                if in_range {
+                    result?;
+                    assert!(world.body(id).ok_or("body")?.state().linear_velocity().x < speed);
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(crate::world::StepError::Aerodynamics {
+                            cause: AerodynamicsError::Hull(HullError::Wave(
+                                WaveDragError::UnsupportedMach
+                            )),
+                            ..
+                        })
+                    ));
+                    assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+                }
+            }
+        }
+    }
+    Ok(())
+}
