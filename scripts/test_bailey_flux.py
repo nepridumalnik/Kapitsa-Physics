@@ -30,6 +30,26 @@ class ConservativeFluxTests(unittest.TestCase):
             self.assertAlmostEqual(sum(residual), fluxes[-1] - fluxes[0])
             self.assertLess(max(map(abs, residual)), 1e-15)
 
+    def test_scalar_entropy_selection_rejects_physical_tsd_shock_orientation(self):
+        # Bailey's physical normal shock has lambda<0 upstream and lambda>0
+        # downstream: u decreases across the shock. The scalar pseudo-time
+        # Godunov flux instead inserts the sonic flux for this orientation.
+        # Consequently it must not be used as a spatial TSD shock scheme.
+        for mach in (0.9, 1.0, 1.1):
+            gamma = 1.4
+            sonic = (1 - mach**2) / (mach**2 * (gamma + 1))
+            upstream, downstream = sonic + 0.02, sonic - 0.02
+            physical = physical_flux(upstream, mach, gamma)
+            self.assertAlmostEqual(physical, physical_flux(downstream, mach, gamma))
+            self.assertGreater(godunov_flux(upstream, downstream, mach, gamma), physical)
+            for n in (32, 64, 128):
+                states = [upstream] * (n // 2) + [downstream] * (n // 2)
+                edges = [states[0], *states, states[-1]]
+                fluxes = [godunov_flux(a, b, mach, gamma) for a, b in zip(edges, edges[1:])]
+                residual = [fluxes[i + 1] - fluxes[i] for i in range(n)]
+                self.assertGreater(max(map(abs, residual)), 0.0)
+                self.assertAlmostEqual(sum(residual), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
