@@ -685,10 +685,14 @@ fn harris_subsonic_upstream_cutoff_boundaries() -> Result<(), String> {
         let dr = OUTER / (base_nr as f64 - 0.5);
         let extra_x = (0.5 / dx).round() as usize;
         let extra_r = (0.75 / dr).round() as usize;
+        let farther_x = (1.5 / dx).round() as usize;
+        let farther_r = (1.75 / dr).round() as usize;
         for (label, added_x, added_r) in [
             ("baseline", 0, 0),
             ("axial", extra_x, 0),
+            ("axial_far", farther_x, 0),
             ("radial", 0, extra_r),
+            ("radial_far", 0, farther_r),
         ] {
             let nx = axial_intervals + 1 + 2 * added_x;
             let nr = base_nr + added_r;
