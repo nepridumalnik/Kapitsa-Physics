@@ -35,6 +35,96 @@ fn sonic_flux(left: f64, right: f64, mach: f64, gamma: f64) -> f64 {
     peak - upstream_loss - downstream_loss
 }
 
+struct MixedGrid {
+    phi: Vec<Vec<f64>>,
+    axis_flux: Vec<f64>,
+    dx: f64,
+    dr: f64,
+    mach: f64,
+    gamma: f64,
+}
+
+impl MixedGrid {
+    fn residual(&self, i: usize, k: usize) -> f64 {
+        let u0 = (self.phi[i - 1][k] - self.phi[i - 2][k]) / self.dx;
+        let u1 = (self.phi[i][k] - self.phi[i - 1][k]) / self.dx;
+        let u2 = (self.phi[i + 1][k] - self.phi[i][k]) / self.dx;
+        let axial = (sonic_flux(u1, u2, self.mach, self.gamma)
+            - sonic_flux(u0, u1, self.mach, self.gamma))
+            / self.dx;
+        let r = (k as f64 + 0.5) * self.dr;
+        let lower = k as f64 * self.dr / (r * self.dr.powi(2));
+        let upper = (k + 1) as f64 * self.dr / (r * self.dr.powi(2));
+        let p = self.phi[i][k];
+        let radial = if k == 0 {
+            -self.axis_flux[i] / (r * self.dr)
+        } else {
+            lower * (self.phi[i][k - 1] - p)
+        };
+        axial + radial + upper * (self.phi[i][k + 1] - p)
+    }
+
+    fn diagonal(&self, i: usize, k: usize) -> f64 {
+        let coefficient =
+            |u: f64| 1.0 - self.mach.powi(2) - self.mach.powi(2) * (self.gamma + 1.0) * u;
+        let u = (self.phi[i][k] - self.phi[i - 1][k]) / self.dx;
+        let forward = (self.phi[i + 1][k] - self.phi[i][k]) / self.dx;
+        -(coefficient(u).abs() + coefficient(forward).max(0.0)) / self.dx.powi(2)
+            - (2 * k + 1) as f64 / ((k as f64 + 0.5) * self.dr.powi(2))
+    }
+}
+
+#[test]
+fn mixed_residual_diagonal_matches_finite_difference() {
+    let (dx, mach, gamma) = (0.1, 0.9_f64, 1.4);
+    let sonic = (1.0 - mach.powi(2)) / (mach.powi(2) * (gamma + 1.0));
+    for u in [sonic - 0.1, sonic, sonic + 0.1] {
+        for k in 0..2 {
+            let mut grid = MixedGrid {
+                phi: vec![vec![0.0; 3]; 5],
+                axis_flux: vec![0.0; 5],
+                dx,
+                dr: dx,
+                mach,
+                gamma,
+            };
+            grid.phi[2][k] = dx * u;
+            let eps = 1e-8;
+            grid.phi[2][k] += eps;
+            let plus = grid.residual(2, k);
+            grid.phi[2][k] -= 2.0 * eps;
+            let minus = grid.residual(2, k);
+            grid.phi[2][k] += eps;
+            assert!(((plus - minus) / (2.0 * eps) - grid.diagonal(2, k)).abs() < 2e-5);
+        }
+    }
+}
+
+#[test]
+fn mixed_residual_matches_smooth_subsonic_quadratic() {
+    let (n, a, b, mach, gamma) = (32, 0.005, 0.007, 0.7_f64, 1.4);
+    let h = 1.0 / n as f64;
+    let grid = MixedGrid {
+        phi: (0..=n)
+            .map(|i| {
+                (0..n)
+                    .map(|k| a * (i as f64 * h).powi(2) + b * ((k as f64 + 0.5) * h).powi(2))
+                    .collect()
+            })
+            .collect(),
+        axis_flux: vec![0.0; n + 1],
+        dx: h,
+        dr: h,
+        mach,
+        gamma,
+    };
+    let i = n / 2;
+    let expected =
+        (1.0 - mach.powi(2) - mach.powi(2) * (gamma + 1.0) * 2.0 * a * i as f64 * h) * 2.0 * a
+            + 4.0 * b;
+    assert!((grid.residual(i, n / 4) - expected).abs() < 1e-11);
+}
+
 #[test]
 fn harris_geometry_and_source_match_derivative() {
     let (radius, slope, flux) = harris_geometry(0.5);
