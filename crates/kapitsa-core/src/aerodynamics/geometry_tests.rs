@@ -998,6 +998,31 @@ fn patch_frame_conversion_is_reserved_before_return() {
 }
 
 #[test]
+fn unrelated_surface_preserves_partially_clipped_patch_area() {
+    const MAX_WORK: usize = 100_000;
+    const EPSILON: f64 = 0.01;
+    const SEPARATION: f64 = 4.0;
+    const AREA_TOLERANCE: f64 = 1e-12;
+    let plate = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]]).unwrap();
+    let base = [
+        instance(&plate, Vec3::ZERO),
+        instance(&plate, Vec3::X + Vec3::Y * 0.25),
+    ];
+    let extended = [base[0], base[1], instance(&plate, Vec3::Y * SEPARATION)];
+    let geometry = surface_geometry(&base);
+    let total_area = |instances: &[GeometryInstance<'_>]| {
+        geometry
+            .exposed_surface_patches(instances, Vec3::X, EPSILON, MAX_WORK)
+            .unwrap()
+            .iter()
+            .filter(|patch| patch.center.y < SEPARATION / 2.0)
+            .map(|patch| patch.area)
+            .sum::<f64>()
+    };
+    assert!((total_area(&base) - total_area(&extended)).abs() < AREA_TOLERANCE);
+}
+
+#[test]
 fn partially_clipped_patches_respect_exact_budget_boundary() {
     const MAX_WORK: usize = 100_000;
     const EPSILON: f64 = 0.01;
