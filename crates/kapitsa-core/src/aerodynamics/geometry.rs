@@ -171,6 +171,16 @@ fn sort_work_estimate(len: usize) -> Option<usize> {
     len.checked_mul(factor)
 }
 
+fn grid_build_work_estimate(entries: usize, cells: usize, scans: usize) -> Option<usize> {
+    // Both counts and offsets are initialized; offsets has one extra element.
+    const CELL_BUFFER_COUNT: usize = 2;
+    sort_work_estimate(entries)?
+        .checked_add(entries)? // Copy sorted entries into the final index.
+        .checked_add(cells.checked_mul(CELL_BUFFER_COUNT)?)?
+        .checked_add(1)?
+        .checked_add(scans)
+}
+
 fn charge_surface_work(
     work: &mut usize,
     amount: usize,
@@ -311,14 +321,10 @@ impl TriangleGrid {
                 .ok_or(GeometryError::WorkBudgetExceeded)?;
             // The estimate is monotone in entry_count: once it exceeds the
             // budget, later triangles cannot make this construction viable.
-            let partial_work = sort_work_estimate(entry_count)
-                .and_then(|work| work.checked_add(cell_count))
-                .and_then(|work| work.checked_add(scan_work));
+            let partial_work = grid_build_work_estimate(entry_count, cell_count, scan_work);
             check_surface_work(partial_work, max_work)?;
         }
-        let build_work = sort_work_estimate(entry_count)
-            .and_then(|work| work.checked_add(cell_count))
-            .and_then(|work| work.checked_add(scan_work))
+        let build_work = grid_build_work_estimate(entry_count, cell_count, scan_work)
             .ok_or(GeometryError::WorkBudgetExceeded)?;
         check_surface_work(Some(build_work), max_work)?;
         let mut entries = Vec::new();

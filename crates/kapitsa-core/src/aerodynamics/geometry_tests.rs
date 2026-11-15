@@ -287,6 +287,21 @@ fn surface_work_enforces_hard_ceiling_even_with_larger_caller_budget() {
 }
 
 #[test]
+fn grid_build_estimate_reserves_both_cell_buffers_and_index_copy() {
+    const ENTRIES: usize = 4;
+    const CELLS: usize = 3;
+    const SCANS: usize = 6;
+    let expected = sort_work_estimate(ENTRIES).unwrap() + ENTRIES + 2 * CELLS + 1 + SCANS;
+    assert_eq!(
+        grid_build_work_estimate(ENTRIES, CELLS, SCANS),
+        Some(expected)
+    );
+    assert_eq!(grid_build_work_estimate(0, usize::MAX, 0), None);
+    assert_eq!(grid_build_work_estimate(usize::MAX, 0, 0), None);
+    assert_eq!(grid_build_work_estimate(0, 0, usize::MAX), None);
+}
+
+#[test]
 fn triangle_grid_build_accounts_for_input_scans() {
     const TRIANGLE_COUNT: usize = 2;
     const SCAN_WORK: usize = TRIANGLE_COUNT * 3;
