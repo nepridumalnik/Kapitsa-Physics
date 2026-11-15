@@ -38,6 +38,50 @@ use crate::execution::{ExecutionError, StepExecutor};
 #[path = "world/free_ball_tests.rs"]
 mod free_ball_tests;
 
+#[cfg(feature = "bench-internals")]
+#[test]
+fn ccd_clipping_flag_survives_local_replay() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    for x in [0.0, 18.0] {
+        let wall = world.add_body(RigidBody::new_static(Transform::new(
+            Vec3::new(x, 0.0, 0.0),
+            Quat::IDENTITY,
+        )?))?;
+        let collider = world.add_collider(
+            wall,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        world.set_collider_material(collider, Some(material))?;
+    }
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    for (x, velocity) in [(13.0, 2000.0), (5.0, -2000.0)] {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::X * velocity)?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body)?;
+        let part = world.enable_cluster(body)?;
+        let collider = world.add_part_collider(part, collider(0.5))?;
+        world.set_collider_material(collider, Some(material))?;
+    }
+    world.set_collision_config(crate::collision::CollisionConfig {
+        max_ccd_impacts: 2,
+        ccd_limit_policy: crate::collision::CcdLimitPolicy::ClipIsland,
+        ..world.collision_config()
+    })?;
+    world.step(0.025)?;
+    assert!(world.collision_step_metrics().ccd_local_replay_count > 0);
+    assert!(world.collision_step_metrics().ccd_clipped_body_count > 0);
+    assert!(world.contact_impulses_ccd_clipped());
+    Ok(())
+}
+
 #[test]
 fn clipped_ccd_contact_snapshot_reports_unrecorded_velocity_change()
 -> Result<(), Box<dyn std::error::Error>> {
