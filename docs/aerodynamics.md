@@ -169,10 +169,11 @@ fully disabled loads skip all coefficient-domain checks. Outside a sampled table
 domain evaluation fails with `UnsupportedMach` (also used for incidence range).
 The caller must supply measured/CFD coefficients using this axisymmetric
 incidence, force-sign and full-speed reference-pressure convention; a signed
-planar lift table cannot be used unchanged. This incidence/domain correction and
-its regression fixtures are source-only and unverified: tests, builds, checks,
-Clippy and benchmarks were not run, as requested. No automatic lift, transonic closure,
-or Newtonian/wing model is supplied. The same [drag equation](https://en.wikipedia.org/wiki/Drag_equation),
+planar lift table cannot be used unchanged. Regression tests cover incidence,
+domain handling and interpolation, including numerical extremes; these are checks
+of the implementation, not independent physical validation. No automatic lift or
+predictive transonic closure is supplied by this hull table. The separate Newtonian
+pressure and wing models have their own documented applicability limits. The same [drag equation](https://en.wikipedia.org/wiki/Drag_equation),
 [Mach number](https://en.wikipedia.org/wiki/Mach_number), and [angle of attack](https://en.wikipedia.org/wiki/Angle_of_attack)
 references define quantities, not coefficient data. Supply measured or
 CFD data consistent with the sectional reference areas and component-speed
