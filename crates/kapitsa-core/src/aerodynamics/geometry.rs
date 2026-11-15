@@ -1298,11 +1298,8 @@ impl PreparedGeometry {
                                 checked_push(&mut negative, polygon[k])?;
                             }
                             if (d > 0.0 && e < 0.0) || (d < 0.0 && e > 0.0) {
-                                let fraction = visibility::crossing_fraction(d, e)?;
-                                let point = polygon[k] + (polygon[n] - polygon[k]) * fraction;
-                                if !point.is_finite() {
-                                    return Err(GeometryError::ArithmeticOverflow);
-                                }
+                                let point =
+                                    visibility::crossing_point(polygon[k], polygon[n], d, e)?;
                                 checked_push(&mut positive, point)?;
                                 checked_push(&mut negative, point)?;
                             }

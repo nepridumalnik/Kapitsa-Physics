@@ -110,6 +110,20 @@ pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, GeometryError> {
     Ok(fraction)
 }
 
+pub(super) fn crossing_point(a: Vec3, b: Vec3, da: f64, db: f64) -> Result<Vec3, GeometryError> {
+    let (near, far, d_near, d_far) = if da.abs() < db.abs() || (da.abs() == db.abs() && da > 0.0) {
+        (a, b, da, db)
+    } else {
+        (b, a, db, da)
+    };
+    let fraction = crossing_fraction(d_near, d_far)?;
+    let point = near + (far - near) * fraction;
+    if !point.is_finite() {
+        return Err(GeometryError::ArithmeticOverflow);
+    }
+    Ok(point)
+}
+
 fn normalize(values: [f64; 3]) -> Result<[f64; 3], GeometryError> {
     let maximum = values.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     if maximum == 0.0 {
@@ -292,11 +306,7 @@ pub(super) fn windward_triangle(
             super::checked_push(&mut positive, vertices[index])?;
         }
         if (a > 0.0 && b < 0.0) || (a < 0.0 && b > 0.0) {
-            let point =
-                vertices[index] + (vertices[next] - vertices[index]) * crossing_fraction(a, b)?;
-            if !point.is_finite() {
-                return Err(GeometryError::ArithmeticOverflow);
-            }
+            let point = crossing_point(vertices[index], vertices[next], a, b)?;
             super::checked_push(&mut positive, point)?;
         }
     }
@@ -360,6 +370,21 @@ pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, GeometryError>
 mod tests {
     use super::*;
     use crate::aerodynamics::geometry::GeometryOwner;
+
+    #[test]
+    fn crossing_uses_near_endpoint_independent_of_edge_direction() {
+        let small = f64::EPSILON / 4.0;
+        let a = Vec3::ZERO;
+        let b = Vec3::X;
+        let forward = crossing_point(a, b, -1.0, small).unwrap();
+        let reverse = crossing_point(b, a, small, -1.0).unwrap();
+        assert_eq!(forward, reverse);
+        assert_eq!(forward, b + (a - b) * small);
+        assert_eq!(
+            crossing_point(a, b, 1.0, -1.0),
+            crossing_point(b, a, -1.0, 1.0)
+        );
+    }
 
     #[test]
     fn equal_area_sum_does_not_prove_partition_coverage() {
