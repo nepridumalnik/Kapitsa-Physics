@@ -231,3 +231,13 @@ the step. CCD impacts can occur at different times and `ClipIsland` may alter
 velocity without a physical impulse. Contact-enabled weld failure therefore
 also needs a specified impulse-to-strength policy and a complete account of all
 accepted solver and CCD paths; zero omitted points alone is not sufficient.
+
+`cluster::impulse::tree_impulse_reactions` provides a separate fixed-pose,
+simultaneous impulse-balance primitive. The caller supplies a complete per-part
+external ledger and the corresponding changes of assembly COM and angular
+velocities; it checks total momentum balance and returns parent-on-child impulse
+reactions. Its tolerances are in N·s and N·m·s, not N or N·m. It does not
+certify contact snapshots or process sequential CCD impacts, and is not yet
+connected to automatic weld fracture. `ImpulseStrength` supplies separate
+linear and angular impulse limits; angular reactions must first be shifted to
+the weld anchor. It does not derive impulse limits from force limits.

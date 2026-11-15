@@ -2,6 +2,7 @@
 
 #[allow(dead_code)]
 pub(crate) mod balance;
+pub mod impulse;
 pub(crate) mod mass;
 #[allow(dead_code)]
 pub(crate) mod motion;
