@@ -941,6 +941,66 @@ mod tests {
     }
 
     #[test]
+    fn ladson_fixed_transition_polar_reproduces_measured_stall_points()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Ladson, NASA TM-4074 (1988), Table IX, R = 5.95e6, M = 0.15:
+        // https://ntrs.nasa.gov/citations/19880019495
+        // NACA 0012 section, chord 0.601 m; No. 80 carborundum strips
+        // at 5% chord on both surfaces, with tunnel-boundary corrections.
+        // The report's table heading says "80-W", but its test description and
+        // NASA's curated data identify this as 80 grit, not the 60-W wraparound.
+        // These are section coefficients, not a finite-wing or rocket model.
+        let degrees: [f64; 4] = [16.30, 17.13, 18.02, 19.08];
+        let measured = [
+            WingCoefficients {
+                lift: 1.5739,
+                drag: 0.02218,
+            },
+            WingCoefficients {
+                lift: 1.6116,
+                drag: 0.02560,
+            },
+            WingCoefficients {
+                lift: 0.9967,
+                drag: 0.18785,
+            },
+            WingCoefficients {
+                lift: 1.1358,
+                drag: 0.27292,
+            },
+        ];
+        // WingPolar requires two Mach knots. The second, duplicated row is a
+        // structural fixture only: it supplies no evidence at another Mach.
+        let polar = WingPolar::new(
+            vec![0.15, 0.16],
+            degrees.iter().map(|a| a.to_radians()).collect(),
+            measured.iter().chain(measured.iter()).copied().collect(),
+        )?;
+        for (angle, expected) in degrees.into_iter().zip(measured) {
+            let actual = polar.coefficients(angle.to_radians(), 0.15)?;
+            assert!((actual.lift - expected.lift).abs() < 1e-12);
+            assert!((actual.drag - expected.drag).abs() < 1e-12);
+        }
+        let mid = polar.coefficients(((17.13_f64 + 18.02) * 0.5).to_radians(), 0.15)?;
+        assert!((mid.lift - (1.6116 + 0.9967) * 0.5).abs() < 1e-12);
+        assert!((mid.drag - (0.02560 + 0.18785) * 0.5).abs() < 1e-12);
+        assert!(measured[2].lift < measured[1].lift && measured[2].drag > measured[1].drag);
+        assert_eq!(
+            polar.coefficients(16.29_f64.to_radians(), 0.15),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert_eq!(
+            polar.coefficients(19.09_f64.to_radians(), 0.15),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert_eq!(
+            polar.coefficients(17.13_f64.to_radians(), 0.14),
+            Err(WingError::UnsupportedFlow)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn supplied_polar_interpolates_transonic_and_poststall_values_only() {
         let p = polar();
         let c = p.coefficients(0.1, 1.0).unwrap();

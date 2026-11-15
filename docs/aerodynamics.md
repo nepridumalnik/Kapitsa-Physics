@@ -422,7 +422,10 @@ Bilinear interpolation includes boundary knots; outside either supplied axis
 returns `UnsupportedFlow`, never clamping or extrapolating. Transonic drag rise
 or poststall lift reduction is represented only if the caller supplies such
 values. Table support is not prediction of those phenomena. There is no default
-poststall dataset; test numbers are synthetic regression fixtures, not source data.
+poststall dataset. A `WingPolar` lookup regression uses section data from Ladson,
+NASA TM-4074, table IX, at Mach 0.15 and Reynolds number 5.95 million; it tests
+interpolation only, not their applicability to a finite wing. Its duplicated
+second Mach row satisfies the API's grid requirement and is not measured data.
 
 `surface.with_control(WingControl::new(deflection, max_deflection, effectiveness)?)`
 adds `effectiveness * deflection` to physical AoA for coefficient lookup only.
