@@ -1925,3 +1925,46 @@ fn wave_transition_world_and_rollback() -> Result<(), Box<dyn std::error::Error>
     }
     Ok(())
 }
+
+#[test]
+fn ndarc_wing_crosses_mach_one_in_world_steps() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::wing::{FiniteWing, WingSurface};
+    for clustered in [false, true] {
+        for sharded in [false, true] {
+            for speed in [339.0, 340.0, 341.0] {
+                let model = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?
+                    .with_ndarc_lift_correction(0.75, 1.2)?
+                    .with_ndarc_drag_rise(0.8, 0.2, 0.0011)?;
+                let wing = WingSurface::new(model, Transform::identity(), 1.0)?;
+                let mut body = RigidBody::new_dynamic(
+                    Transform::identity(),
+                    MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY)?,
+                )?;
+                body.set_linear_velocity(Vec3::X * speed)?;
+                body.set_aerodynamics(Aerodynamics::Wing(wing));
+                let mut world = PhysicsWorld::new();
+                let id = world.add_body(body)?;
+                if clustered {
+                    world.enable_cluster(id)?;
+                }
+                world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                    1.2,
+                    Vec3::ZERO,
+                )?));
+                if sharded {
+                    world.step_with_shards(
+                        1e-5,
+                        &mut [Vec::new(), Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )?;
+                } else {
+                    world.step(1e-5)?;
+                }
+                let result = world.body(id).ok_or("body")?.state().linear_velocity();
+                assert!(result.x < speed && result.x > 0.0);
+            }
+        }
+    }
+    Ok(())
+}

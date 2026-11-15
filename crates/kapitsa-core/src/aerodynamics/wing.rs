@@ -188,6 +188,7 @@ struct DragRise {
     critical_mach: f64,
     lift_sensitivity: f64,
     scale: f64,
+    hold_above_limit: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -440,6 +441,7 @@ impl FiniteWing {
             critical_mach,
             lift_sensitivity: 0.0,
             scale,
+            hold_above_limit: false,
         });
         Ok(self)
     }
@@ -467,6 +469,29 @@ impl FiniteWing {
         let mut wing = self.with_drag_rise(zero_lift_critical_mach, scale)?;
         if let Some(ref mut model) = wing.drag_rise {
             model.lift_sensitivity = lift_sensitivity;
+        }
+        Ok(wing)
+    }
+
+    /// Adds the NDARC drag-rise correlation with its upper saturation policy.
+    ///
+    /// Parameters and lift-coefficient limits match
+    /// `with_lift_dependent_drag_rise`. Unlike that method, this explicitly
+    /// holds the drag increment constant above Mach/critical Mach = 1.1,
+    /// following the bounded-ratio convention of NASA TP-2015-218751,
+    /// Appendix 3, section 8-8. The wing's independent Mach limit still
+    /// applies. This plateau is an engineering approximation, not a general
+    /// prediction of high-supersonic drag.
+    pub fn with_ndarc_drag_rise(
+        self,
+        zero_lift_critical_mach: f64,
+        lift_sensitivity: f64,
+        scale: f64,
+    ) -> Result<Self, WingError> {
+        let mut wing =
+            self.with_lift_dependent_drag_rise(zero_lift_critical_mach, lift_sensitivity, scale)?;
+        if let Some(ref mut model) = wing.drag_rise {
+            model.hold_above_limit = true;
         }
         Ok(wing)
     }
@@ -539,10 +564,10 @@ impl FiniteWing {
                 return Err(WingError::ArithmeticOverflow);
             }
             let ratio = mach / critical_mach;
-            if ratio > 1.1 {
+            if ratio > 1.1 && !model.hold_above_limit {
                 return Err(WingError::UnsupportedFlow);
             }
-            let x = (ratio - 0.7).max(0.0);
+            let x = (ratio.min(1.1) - 0.7).max(0.0);
             let x2 = x * x;
             let x4 = x2 * x2;
             model.scale * (6.5 * x2 + 28.0 * x4 + 2870.0 * x4 * x4)
@@ -790,6 +815,28 @@ mod tests {
         assert_eq!(
             base.with_drag_rise(0.8, 0.0)?.coefficients(0.0, 0.89)?,
             base.coefficients(0.0, 0.89)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ndarc_drag_rise_has_explicit_upper_plateau() -> Result<(), WingError> {
+        let base =
+            FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?.with_ndarc_lift_correction(0.75, 1.2)?;
+        let model = base.with_ndarc_drag_rise(0.8, 0.2, 0.0011)?;
+        let before = model.coefficients(0.0, 0.88)?.drag;
+        let after = model.coefficients(0.0, 1.1)?.drag;
+        assert!((before - after).abs() < 1e-12);
+        let lower = model.coefficients(0.0, 0.87)?.drag;
+        assert!(lower < before);
+        let rejecting = base.with_lift_dependent_drag_rise(0.8, 0.2, 0.0011)?;
+        assert_eq!(
+            rejecting.coefficients(0.0, 1.1),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert_eq!(
+            model.coefficients(0.0, 1.21),
+            Err(WingError::UnsupportedFlow)
         );
         Ok(())
     }

@@ -307,6 +307,13 @@ correlation's `M_critical = M_critical_zero - sensitivity *
 Mach, sensitivity and drag scale. With nonzero sensitivity, the correlation
 rejects lift coefficients outside [0, 1]; it does not clamp or extrapolate.
 
+`FiniteWing::with_ndarc_drag_rise` explicitly selects the bounded-ratio policy
+of the NASA correlation: above `M / M_critical = 1.1` the increment is held at
+its upper-bound value. This plateau is an engineering approximation, not a
+general high-supersonic drag model. The wing's configured maximum Mach and
+other model domains remain in force. The other drag-rise builders continue to
+reject flows above the correlation's upper ratio.
+
 ### Explicit wing polars and control deflection — UNVERIFIED
 
 `WingPolar::new(mach, angles, coefficients)` validates a rectangular grid:
