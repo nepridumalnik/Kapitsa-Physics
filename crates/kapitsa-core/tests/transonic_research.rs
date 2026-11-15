@@ -515,8 +515,9 @@ fn harris_low_mach_conservative_profile_and_balance() -> Result<(), String> {
                 let backward = backward_cp(i)
                     .zip(backward_cp(i + 1))
                     .map(|(a, b)| (1.0 - t) * a + t * b);
+                let difference = backward.zip(cp).map(|(b, c)| b - c);
                 println!(
-                    "reconstruction intervals={intervals} x={x:.3} central={cp:?} backward={backward:?}"
+                    "reconstruction intervals={intervals} x={x:.3} central={cp:?} backward={backward:?} difference={difference:?}"
                 );
             }
             profile.push(cp);
@@ -558,6 +559,21 @@ fn harris_low_mach_conservative_profile_and_balance() -> Result<(), String> {
             "fine_common count={} max_delta={max_delta:.9} max_x={max_x:.3}",
             fine_common.len()
         );
+    }
+    let grids = [16_usize, 32, 64, 96, 128];
+    for (i, &(x, _)) in harris_data::TABLE_III_A_MACH_090.iter().enumerate() {
+        if x <= 0.078 || x >= 0.89 {
+            for p in 2..profiles.len() - 1 {
+                let a = profiles[p][i];
+                let b = profiles[p + 1][i];
+                let delta = a.zip(b).map(|(left, right)| right - left);
+                println!(
+                    "edge_grid x={x:.3} from={} to={} cp_from={a:?} cp_to={b:?} delta={delta:?}",
+                    grids[p],
+                    grids[p + 1]
+                );
+            }
+        }
     }
     Ok(())
 }
