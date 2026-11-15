@@ -151,6 +151,27 @@ fn small_patch_preserves_force_when_dynamic_pressure_overflows() {
 }
 
 #[test]
+fn base_pressure_scales_extreme_factors_and_includes_both_mach_endpoints() {
+    let patch = PressurePatch::new(Vec3::Y, -Vec3::X, 1e-200).unwrap();
+    let base = BasePressure::new(-0.4, 5.0, 10.0).unwrap();
+    for speed in [500.0, 1000.0] {
+        let load = patch
+            .evaluate_base(
+                PressureFlow {
+                    atmosphere: AtmosphericState::new(1e200, Vec3::ZERO).unwrap(),
+                    linear_velocity: Vec3::X * speed,
+                    ..flow()
+                },
+                base,
+            )
+            .unwrap();
+        let expected = 0.5 * 0.4 * speed * speed;
+        assert!((load.force.x + expected).abs() < expected * 1e-14);
+        assert!((load.moment.z - expected).abs() < expected * 1e-14);
+    }
+}
+
+#[test]
 fn grazing_leeward_and_oblique_patch_loads() {
     for normal in [Vec3::Y, -Vec3::X] {
         let p = PressurePatch::new(Vec3::ZERO, normal, 1.0).unwrap();
