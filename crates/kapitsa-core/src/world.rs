@@ -4590,6 +4590,9 @@ impl PhysicsWorld {
             self.force_sources.remove(source.dense)?;
         }
         let removed = self.bodies.remove(id.dense).map(|entry| entry.body)?;
+        if let Some(workspaces) = &mut self.owner_pressure {
+            workspaces.remove(&id);
+        }
         if let Some(cluster) = cluster {
             for weld in cluster.welds {
                 self.welds.remove(weld.dense);

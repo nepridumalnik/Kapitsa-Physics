@@ -2516,4 +2516,93 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn owner_pressure_survives_failed_owner_change_and_body_removal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::tests::ScopedThreadExecutor;
+        use crate::cluster::ClusterPartDesc;
+
+        for mode in 0..3 {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                0.001,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 2000.0)?;
+            let id = world.add_body(body)?;
+            let root = world.enable_cluster(id)?;
+            let child = world.add_cluster_part(
+                root,
+                ClusterPartDesc {
+                    local_transform: Transform::identity(),
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * 2000.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                weld(),
+            )?;
+            world.set_part_aerodynamic_mesh(root, Some(plate()?))?;
+            // A second aerodynamic body ensures the executor has multiple work chunks.
+            let mut other = RigidBody::new_dynamic(
+                Transform::new(Vec3::Y * 10.0, kapitsa_math::Quat::IDENTITY)?,
+                mass,
+            )?;
+            other.set_linear_velocity(Vec3::X * 2000.0)?;
+            let other_id = world.add_body(other)?;
+            let other_part = world.enable_cluster(other_id)?;
+            world.set_part_aerodynamic_mesh(other_part, Some(plate()?))?;
+            let step = |world: &mut PhysicsWorld| match mode {
+                0 => world.step(1e-8),
+                1 => world.step_with_executor(1e-8, &ScopedThreadExecutor, 2),
+                _ => world.step_with_shards(
+                    1e-8,
+                    &mut [Vec::new(), Vec::new()],
+                    &ScopedThreadExecutor,
+                    2,
+                ),
+            };
+            step(&mut world)?;
+            let previous = world
+                .owner_mesh_pressure(id)
+                .ok_or("initial pressure")?
+                .to_vec();
+            assert_eq!(previous.len(), 1);
+            assert_eq!(previous[0].0, GeometryOwner::Part(root));
+            assert!(world.owner_mesh_pressure(other_id).is_some());
+            world.set_part_aerodynamic_mesh(root, None)?;
+            world.set_part_aerodynamic_mesh(child, Some(plate()?))?;
+            let center = world
+                .body(id)
+                .ok_or("body")?
+                .motion()
+                .world_center_of_mass()?
+                .ok_or("center")?;
+            let bad = world.add_gravity(crate::gravity::CentralGravity::new(center, 1.0)?)?;
+            assert!(step(&mut world).is_err());
+            assert_eq!(world.owner_mesh_pressure(id), Some(previous.as_slice()));
+            world.remove_gravity(bad).ok_or("gravity")?;
+            step(&mut world)?;
+            let current = world.owner_mesh_pressure(id).ok_or("updated pressure")?;
+            assert_eq!(current.len(), 1);
+            assert_eq!(current[0].0, GeometryOwner::Part(child));
+            assert!(current[0].1.force.length() > 0.0);
+            world.remove_body(id).ok_or("removed body")?;
+            assert!(world.owner_mesh_pressure(id).is_none());
+            assert!(
+                !world
+                    .owner_pressure
+                    .as_ref()
+                    .ok_or("pressure storage")?
+                    .contains_key(&id)
+            );
+            step(&mut world)?;
+            assert!(world.owner_mesh_pressure(id).is_none());
+            assert!(world.owner_mesh_pressure(other_id).is_some());
+        }
+        Ok(())
+    }
 }

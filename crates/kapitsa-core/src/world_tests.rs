@@ -108,7 +108,7 @@ fn clear_joint_metric_timings(mut metrics: JointSolverMetrics) -> JointSolverMet
     metrics
 }
 
-struct ScopedThreadExecutor;
+pub(super) struct ScopedThreadExecutor;
 
 impl StepExecutor for ScopedThreadExecutor {
     fn for_each_chunk_mut<T, F>(
