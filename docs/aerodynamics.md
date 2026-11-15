@@ -341,6 +341,13 @@ general high-supersonic drag model. The wing's configured maximum Mach and
 other model domains remain in force. The other drag-rise builders continue to
 reject flows above the correlation's upper ratio.
 
+Wing force components use a normal-range fast path and an exponent-scaled
+fallback when intermediate pressure or coefficient products are not safely
+representable. The fallback keeps representable complete components even when
+an intermediate product overflows or underflows; genuinely nonrepresentable
+forces still return an error. This does not eliminate other motion, transform,
+coefficient-domain or integration limits.
+
 ### Voxel-volume shielding of explicit wings
 
 `WingSurface::with_rectangular_footprint(center, chord, span)` opts a part-owned

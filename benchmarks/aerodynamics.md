@@ -173,3 +173,14 @@ before caching measured medians of 232.12 us/step for one enclosed wing and
 it continues evaluating wing forces, so its timings are not directly comparable
 to fully shielded wings that contribute no force. These measurements are not a
 performance guarantee or an accuracy validation.
+
+## Wing force scaling fallback
+
+The permanent `aerodynamics` benchmark was rerun locally after adding
+exponent-scaled wing-force components. For the 32-wing workload, the scaled-only
+implementation measured a 9,767 ns/operation median. Adding a guarded ordinary
+range fast path reduced the median to 6,780 ns/operation; the two-wing medians
+were 608 ns and 431 ns respectively. Both runs used seven samples on the same
+machine and sequential execution. Untimed checks in the benchmark passed. The
+extreme-value fallback is covered separately by unit tests and is not measured
+by this ordinary-flight workload. These timings are observations, not thresholds.

@@ -797,9 +797,10 @@ fn planar_force(
         return Err(WingError::UnsupportedFlow);
     }
     let velocity = Vec3::new(relative_velocity.x, 0.0, relative_velocity.z);
-    let speed = velocity
-        .checked_length()
-        .ok_or(WingError::ArithmeticOverflow)?;
+    let speed = velocity.x.hypot(velocity.z);
+    if !speed.is_finite() || speed == 0.0 {
+        return Err(WingError::ArithmeticOverflow);
+    }
     match spanwise_limit {
         Some(limit) if relative_velocity.y.abs().atan2(speed) > limit => {
             return Err(WingError::UnsupportedFlow);
@@ -813,12 +814,116 @@ fn planar_force(
     let c = coefficients(alpha, speed / sound_speed)?;
     let direction = velocity / speed;
     let lift_direction = Vec3::new(-direction.z, 0.0, direction.x);
-    let scale = (0.5 * density * speed) * speed * planform_area;
-    let force = (lift_direction * c.lift - direction * c.drag) * scale;
-    if !scale.is_finite() || !force.is_finite() {
+    if !c.lift.is_finite() || !c.drag.is_finite() || c.drag < 0.0 {
         return Err(WingError::ArithmeticOverflow);
     }
-    Ok(force)
+    if let Some(force) =
+        ordinary_wing_force(density, speed, planform_area, c, direction, lift_direction)
+    {
+        return Ok(force);
+    }
+    let component = |lift_axis: f64, drag_axis: f64| {
+        wing_force_component(
+            density,
+            speed,
+            planform_area,
+            (lift_axis, c.lift),
+            (-drag_axis, c.drag),
+        )
+    };
+    Ok(Vec3::new(
+        component(lift_direction.x, direction.x)?,
+        0.0,
+        component(lift_direction.z, direction.z)?,
+    ))
+}
+
+// The normal-range path avoids exponent decomposition in ordinary flight. If
+// an intermediate is subnormal, zero through underflow, nonfinite or a
+// cancellation, use the scaled path instead.
+fn ordinary_wing_force(
+    density: f64,
+    speed: f64,
+    area: f64,
+    coefficients: WingCoefficients,
+    direction: kapitsa_math::Vec3,
+    lift_direction: kapitsa_math::Vec3,
+) -> Option<kapitsa_math::Vec3> {
+    let half_density = density * 0.5;
+    let pressure_speed = half_density * speed;
+    let pressure = pressure_speed * speed;
+    let scale = pressure * area;
+    if ![half_density, pressure_speed, pressure, scale]
+        .iter()
+        .all(|value| value.is_normal())
+    {
+        return None;
+    }
+    let component = |lift_axis: f64, drag_axis: f64| {
+        let lift = lift_axis * coefficients.lift;
+        let drag = drag_axis * coefficients.drag;
+        if (lift_axis != 0.0 && coefficients.lift != 0.0 && !lift.is_normal())
+            || (drag_axis != 0.0 && coefficients.drag != 0.0 && !drag.is_normal())
+        {
+            return None;
+        }
+        let coefficient = lift - drag;
+        if !coefficient.is_finite()
+            || coefficient.is_subnormal()
+            || (coefficient == 0.0 && (lift != 0.0 || drag != 0.0))
+        {
+            return None;
+        }
+        let force = coefficient * scale;
+        if !force.is_finite() || (coefficient != 0.0 && !force.is_normal()) {
+            return None;
+        }
+        Some(force)
+    };
+    Some(kapitsa_math::Vec3::new(
+        component(lift_direction.x, direction.x)?,
+        0.0,
+        component(lift_direction.z, direction.z)?,
+    ))
+}
+
+// Form the signed sum in exponent-scaled form before applying dynamic pressure.
+// This preserves a small representable component even if q or either product
+// alone would overflow or underflow.
+fn wing_force_component(
+    density: f64,
+    speed: f64,
+    area: f64,
+    lift: (f64, f64),
+    drag: (f64, f64),
+) -> Result<f64, WingError> {
+    fn term((axis, coefficient): (f64, f64)) -> Option<(f64, i32)> {
+        if axis == 0.0 || coefficient == 0.0 {
+            return None;
+        }
+        let (a, ea) = super::hull::decompose_positive(axis.abs());
+        let (b, eb) = super::hull::decompose_positive(coefficient.abs());
+        Some(((a * b).copysign(axis * coefficient.signum()), ea + eb))
+    }
+    let first = term(lift);
+    let second = term(drag);
+    let exponent = match (first, second) {
+        (None, None) => return Ok(0.0),
+        (Some((_, e)), None) | (None, Some((_, e))) => e,
+        (Some((_, a)), Some((_, b))) => a.max(b),
+    };
+    let value = first.map_or(0.0, |(m, e)| m * 2.0_f64.powi(e - exponent))
+        + second.map_or(0.0, |(m, e)| m * 2.0_f64.powi(e - exponent));
+    if value == 0.0 {
+        return Ok(0.0);
+    }
+    super::hull::scaled_product_with_exponent(
+        &[0.5, density, speed, speed, area, value.abs()],
+        1.0,
+        exponent,
+    )
+    .map(|magnitude| magnitude.copysign(value))
+    .map_err(|_| WingError::ArithmeticOverflow)
 }
 
 #[cfg(test)]
@@ -1055,6 +1160,73 @@ mod tests {
         );
         assert!(base.with_ndarc_lift_correction(0.9, 1.2).is_err());
         assert!(base.with_ndarc_lift_correction(0.75, 0.99).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_wing_force_matches_scaled_calculation() -> Result<(), Box<dyn std::error::Error>> {
+        use kapitsa_math::Vec3;
+        let model = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.3)?;
+        let mut checked = 0;
+        for i in -20..=20 {
+            let angle = i as f64 * 0.01;
+            let coefficients = model.coefficients(angle, 0.2)?;
+            let direction = Vec3::new(angle.cos(), 0.0, -angle.sin());
+            let lift_direction = Vec3::new(-direction.z, 0.0, direction.x);
+            let ordinary =
+                ordinary_wing_force(1.2, 68.0, 4.0, coefficients, direction, lift_direction);
+            let Some(ordinary) = ordinary else {
+                continue;
+            };
+            checked += 1;
+            let x = wing_force_component(
+                1.2,
+                68.0,
+                4.0,
+                (lift_direction.x, coefficients.lift),
+                (-direction.x, coefficients.drag),
+            )?;
+            let z = wing_force_component(
+                1.2,
+                68.0,
+                4.0,
+                (lift_direction.z, coefficients.lift),
+                (-direction.z, coefficients.drag),
+            )?;
+            let scaled = Vec3::new(x, 0.0, z);
+            assert!(
+                (ordinary - scaled).length() < 1e-10,
+                "ordinary={ordinary:?}, scaled={scaled:?}"
+            );
+        }
+        assert!(checked >= 39);
+        Ok(())
+    }
+
+    #[test]
+    fn wing_force_preserves_representable_extreme_loads() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use kapitsa_math::Vec3;
+        let wing = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?;
+        let reference = wing.force(Vec3::new(1.0, 0.0, -0.1), 1.0, 10.0, 1.0)?;
+        for (speed, density, area, scale) in
+            [(1e200, 1e-50, 1e-200, 1e150), (1e-200, 1e200, 1e200, 1.0)]
+        {
+            let result = wing.force(
+                Vec3::new(speed, 0.0, -0.1 * speed),
+                density,
+                10.0 * speed,
+                area,
+            )?;
+            assert!((result.x / (reference.x * scale) - 1.0).abs() < 1e-12);
+            assert!((result.z / (reference.z * scale) - 1.0).abs() < 1e-12);
+        }
+        let restored = wing_force_component(1e200, 1e100, 1.0, (1e-200, 1e-200), (0.0, 0.0))?;
+        assert!((restored - 0.5).abs() < 1e-12);
+        let next = f64::from_bits(f64::MAX.to_bits() - 1);
+        let difference = wing_force_component(1e-300, 1.0, 1.0, (1.0, f64::MAX), (-1.0, next))?;
+        let expected = 0.5 * 1e-300 * (f64::MAX - next);
+        assert!((difference / expected - 1.0).abs() < 1e-12);
         Ok(())
     }
 

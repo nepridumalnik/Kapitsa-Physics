@@ -749,27 +749,35 @@ fn resistance(
 // Products/quotients here have finite nonnegative factors and a positive divisor.
 // Keep binary exponents separate so neither large nor tiny intermediate products
 // lose a representable result. Unlike logarithms, power-of-two scaling is exact.
-pub(super) fn scaled_product(factors: &[f64], divisor: f64) -> Result<f64, HullError> {
-    fn split(mut value: f64) -> (f64, i32) {
-        let mut adjustment = 0;
-        if value < f64::MIN_POSITIVE {
-            value *= 2.0_f64.powi(54);
-            adjustment = -54;
-        }
-        let bits = value.to_bits();
-        let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023 + adjustment;
-        let mantissa = f64::from_bits((bits & ((1_u64 << 52) - 1)) | (1023_u64 << 52));
-        (mantissa, exponent)
+pub(super) fn decompose_positive(mut value: f64) -> (f64, i32) {
+    let mut adjustment = 0;
+    if value < f64::MIN_POSITIVE {
+        value *= 2.0_f64.powi(54);
+        adjustment = -54;
     }
+    let bits = value.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023 + adjustment;
+    let mantissa = f64::from_bits((bits & ((1_u64 << 52) - 1)) | (1023_u64 << 52));
+    (mantissa, exponent)
+}
 
+pub(super) fn scaled_product(factors: &[f64], divisor: f64) -> Result<f64, HullError> {
+    scaled_product_with_exponent(factors, divisor, 0)
+}
+
+pub(super) fn scaled_product_with_exponent(
+    factors: &[f64],
+    divisor: f64,
+    exponent_offset: i32,
+) -> Result<f64, HullError> {
     if factors.contains(&0.0) {
         return Ok(0.0);
     }
-    let (denominator, denominator_exponent) = split(divisor);
+    let (denominator, denominator_exponent) = decompose_positive(divisor);
     let mut mantissa = 1.0 / denominator;
-    let mut exponent = -denominator_exponent;
+    let mut exponent = exponent_offset - denominator_exponent;
     for &factor in factors {
-        let (fraction, power) = split(factor);
+        let (fraction, power) = decompose_positive(factor);
         mantissa *= fraction;
         exponent += power;
         if mantissa >= 2.0 {
