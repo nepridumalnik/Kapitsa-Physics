@@ -21,12 +21,22 @@ use crate::{
 pub(super) enum PartGeometry {
     Mesh(Arc<TriangleMesh>),
     Colliders,
+    Wave(Box<crate::aerodynamics::wave::VoxelWave>),
+    WaveSourceMesh(Arc<TriangleMesh>),
+    WaveSourceColliders,
 }
 
 pub(super) struct AssemblyAerodynamics {
     sources: Vec<(PartId, Arc<TriangleMesh>, Transform)>,
     cache: PreparedGeometryCache,
     collider_parts: Vec<PartId>,
+    wave_only_parts: Vec<PartId>,
+    wave_cache: PreparedGeometryCache,
+}
+
+pub(super) struct PreparedAssembly {
+    pub patches: Option<PreparedSurfacePatches>,
+    pub wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
 }
 
 impl PhysicsWorld {
@@ -133,7 +143,13 @@ impl PhysicsWorld {
             .cluster_part(part)
             .ok_or(ClusterError::InvalidPartId)?
             .body();
-        if self.part_uses_aerodynamic_colliders(part) == enabled {
+        let pressure_colliders = matches!(
+            self.part_aerodynamic_geometry
+                .as_ref()
+                .and_then(|g| g.get(&part)),
+            Some(PartGeometry::Colliders)
+        );
+        if pressure_colliders == enabled {
             return Ok(());
         }
         if enabled {
@@ -154,6 +170,123 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    fn replace_part_wave_geometry(
+        &mut self,
+        part: PartId,
+        value: Option<PartGeometry>,
+    ) -> Result<(), ClusterError> {
+        let body = self
+            .cluster_part(part)
+            .ok_or(ClusterError::InvalidPartId)?
+            .body();
+        if let Some(value) = value {
+            let geometry = self
+                .part_aerodynamic_geometry
+                .get_or_insert_with(HashMap::new);
+            geometry
+                .try_reserve(1)
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+            geometry.insert(part, value);
+        } else if let Some(geometry) = &mut self.part_aerodynamic_geometry {
+            geometry.remove(&part);
+        }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
+        }
+        self.invalidate_body_edit(body);
+        Ok(())
+    }
+
+    /// Sets the assembly's voxel wave model at a stable part-local application point.
+    /// Only one part per rigid assembly may own this model. Geometry-only source
+    /// parts participate in its voxel union. Pressure surfaces remain additive;
+    /// select each contribution once to avoid double counting. `None` removes
+    /// only an existing wave model from this part.
+    pub fn set_part_voxel_wave(
+        &mut self,
+        part: PartId,
+        model: Option<crate::aerodynamics::wave::VoxelWave>,
+    ) -> Result<(), ClusterError> {
+        let body = self
+            .cluster_part(part)
+            .ok_or(ClusterError::InvalidPartId)?
+            .body();
+        if model.is_some() {
+            let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+            if cluster.parts().iter().any(|other| {
+                *other != part
+                    && matches!(
+                        self.part_aerodynamic_geometry
+                            .as_ref()
+                            .and_then(|g| g.get(other)),
+                        Some(PartGeometry::Wave(_))
+                    )
+            }) {
+                return Err(ClusterError::UnsupportedGeometry);
+            }
+        } else if !matches!(
+            self.part_aerodynamic_geometry
+                .as_ref()
+                .and_then(|g| g.get(&part)),
+            Some(PartGeometry::Wave(_))
+        ) {
+            return Ok(());
+        }
+        self.replace_part_wave_geometry(
+            part,
+            model.map(|model| PartGeometry::Wave(Box::new(model))),
+        )
+    }
+
+    /// Sets a part-local mesh used as geometry in an assembly wave union only.
+    /// It does not independently produce Newtonian pressure loads. `None`
+    /// removes only a wave-source mesh from this part.
+    pub fn set_part_wave_source_mesh(
+        &mut self,
+        part: PartId,
+        mesh: Option<TriangleMesh>,
+    ) -> Result<(), ClusterError> {
+        if self.cluster_part(part).is_none() {
+            return Err(ClusterError::InvalidPartId);
+        }
+        if mesh.is_none()
+            && !matches!(
+                self.part_aerodynamic_geometry
+                    .as_ref()
+                    .and_then(|g| g.get(&part)),
+                Some(PartGeometry::WaveSourceMesh(_))
+            )
+        {
+            return Ok(());
+        }
+        self.replace_part_wave_geometry(
+            part,
+            mesh.map(|mesh| PartGeometry::WaveSourceMesh(Arc::new(mesh))),
+        )
+    }
+
+    /// Selects part-owned colliders as geometry-only input to the wave union.
+    /// `false` removes only this mode; it leaves other geometry selections intact.
+    pub fn set_part_wave_source_colliders(
+        &mut self,
+        part: PartId,
+        enabled: bool,
+    ) -> Result<(), ClusterError> {
+        if self.cluster_part(part).is_none() {
+            return Err(ClusterError::InvalidPartId);
+        }
+        let current = matches!(
+            self.part_aerodynamic_geometry
+                .as_ref()
+                .and_then(|g| g.get(&part)),
+            Some(PartGeometry::WaveSourceColliders)
+        );
+        if current == enabled {
+            return Ok(());
+        }
+        self.replace_part_wave_geometry(part, enabled.then_some(PartGeometry::WaveSourceColliders))
+    }
+
     /// Returns whether actual colliders define this part's geometry.
     pub fn part_uses_aerodynamic_colliders(&self, part: PartId) -> bool {
         self.cluster_part(part).is_some()
@@ -161,7 +294,7 @@ impl PhysicsWorld {
                 self.part_aerodynamic_geometry
                     .as_ref()
                     .and_then(|g| g.get(&part)),
-                Some(PartGeometry::Colliders)
+                Some(PartGeometry::Colliders | PartGeometry::WaveSourceColliders)
             )
     }
 
@@ -169,8 +302,9 @@ impl PhysicsWorld {
     pub fn part_aerodynamic_mesh(&self, part: PartId) -> Option<&TriangleMesh> {
         self.cluster_part(part)?;
         match self.part_aerodynamic_geometry.as_ref()?.get(&part)? {
-            PartGeometry::Mesh(mesh) => Some(mesh),
-            PartGeometry::Colliders => None,
+            PartGeometry::Mesh(mesh) | PartGeometry::WaveSourceMesh(mesh) => Some(mesh),
+            PartGeometry::Wave(model) => Some(&model.mesh),
+            PartGeometry::Colliders | PartGeometry::WaveSourceColliders => None,
         }
     }
 }
@@ -195,6 +329,20 @@ pub(super) fn hull_configured(entry: &BodyEntry, parts: &DensePool<ClusterPart>)
     })
 }
 
+pub(super) fn wave_configured(
+    entry: &BodyEntry,
+    geometry: Option<&HashMap<PartId, PartGeometry>>,
+) -> bool {
+    entry.cluster.as_ref().is_some_and(|cluster| {
+        cluster.parts().iter().any(|part| {
+            matches!(
+                geometry.and_then(|items| items.get(part)),
+                Some(PartGeometry::Wave(_))
+            )
+        })
+    })
+}
+
 pub(super) fn configured(
     entry: &BodyEntry,
     geometry: Option<&HashMap<PartId, PartGeometry>>,
@@ -215,7 +363,7 @@ pub(super) fn prepare(
     colliders: &DensePool<super::ColliderEntry>,
     caches: &mut Option<HashMap<BodyId, AssemblyAerodynamics>>,
     atmosphere: Atmosphere,
-) -> Result<Option<PreparedSurfacePatches>, StepError> {
+) -> Result<Option<PreparedAssembly>, StepError> {
     let error = || StepError::Aerodynamics {
         body_id,
         cause: AerodynamicsError::ArithmeticOverflow,
@@ -230,21 +378,65 @@ pub(super) fn prepare(
     let Some(cluster) = &entry.cluster else {
         return Ok(None);
     };
+    if entry.body.physics().body_type() != crate::rigid_body::BodyType::Dynamic {
+        return Ok(None);
+    }
     if cluster.parts().len() > 100_000_000 {
         return Err(geometry_error(GeometryError::WorkBudgetExceeded));
     }
     if !configured(entry, Some(geometry)) {
         return Ok(None);
     }
-    let center = entry
-        .body
-        .world_center_of_mass()
-        .map_err(|_| error())?
-        .ok_or_else(error)?;
-    let state = atmosphere
-        .state_at(center)
-        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
-    if state.density() == 0.0 {
+    let mut wave_model = None;
+    let mut pressure_enabled = false;
+    for &part in cluster.parts() {
+        match geometry.get(&part) {
+            Some(PartGeometry::Wave(model)) => {
+                if wave_model.replace((part, model.as_ref())).is_some() {
+                    return Err(StepError::Aerodynamics {
+                        body_id,
+                        cause: AerodynamicsError::UnsupportedModel,
+                    });
+                }
+            }
+            Some(PartGeometry::Mesh(_) | PartGeometry::Colliders) => pressure_enabled = true,
+            _ => {}
+        }
+    }
+    let pressure_wind = if pressure_enabled {
+        let center = entry
+            .body
+            .world_center_of_mass()
+            .map_err(|_| error())?
+            .ok_or_else(error)?;
+        let state = atmosphere
+            .state_at(center)
+            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+        (state.density() != 0.0).then_some(state.wind_velocity())
+    } else {
+        None
+    };
+    let wave_model = if let Some((part, model)) = wave_model {
+        let local = parts
+            .get(part.dense)
+            .filter(|p| p.body() == body_id)
+            .ok_or_else(error)?
+            .local_transform();
+        let transform = entry
+            .body
+            .state()
+            .transform()
+            .compose(&local)
+            .map_err(|_| error())?;
+        let point = transform.transform_point(model.section.local_transform().translation());
+        let state = atmosphere
+            .state_at(point)
+            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+        (state.density() != 0.0).then_some((part, model, local))
+    } else {
+        None
+    };
+    if pressure_wind.is_none() && wave_model.is_none() {
         return Ok(None);
     }
     let caches = caches.get_or_insert_with(HashMap::new);
@@ -262,10 +454,24 @@ pub(super) fn prepare(
                     && match geometry.get(part) {
                         Some(PartGeometry::Mesh(current)) => {
                             cached.collider_parts.binary_search(part).is_err()
+                                && cached.wave_only_parts.binary_search(part).is_err()
                                 && Arc::ptr_eq(mesh, current)
+                        }
+                        Some(PartGeometry::WaveSourceMesh(current)) => {
+                            cached.wave_only_parts.binary_search(part).is_ok()
+                                && Arc::ptr_eq(mesh, current)
+                        }
+                        Some(PartGeometry::Wave(model)) => {
+                            cached.wave_only_parts.binary_search(part).is_ok()
+                                && Arc::ptr_eq(mesh, &model.mesh)
                         }
                         Some(PartGeometry::Colliders) => {
                             cached.collider_parts.binary_search(part).is_ok()
+                                && cached.wave_only_parts.binary_search(part).is_err()
+                        }
+                        Some(PartGeometry::WaveSourceColliders) => {
+                            cached.collider_parts.binary_search(part).is_ok()
+                                && cached.wave_only_parts.binary_search(part).is_ok()
                         }
                         None => false,
                     }
@@ -275,23 +481,36 @@ pub(super) fn prepare(
         return evaluate(
             body_id,
             entry,
-            state.wind_velocity(),
+            pressure_wind,
+            wave_model,
             caches.get_mut(&body_id).ok_or_else(error)?,
         )
         .map(Some)
-        .map_err(|cause| StepError::Aerodynamics {
-            body_id,
-            cause: AerodynamicsError::Geometry(cause),
-        });
+        .map_err(|cause| StepError::Aerodynamics { body_id, cause });
     }
     let mut sources = Vec::new();
     let mut collider_parts = Vec::new();
+    let mut wave_only_parts = Vec::new();
     let mut triangle_count = 0usize;
     let mut collider_triangle_count = 0usize;
     for &part in cluster.parts() {
+        if matches!(
+            geometry.get(&part),
+            Some(
+                PartGeometry::Wave(_)
+                    | PartGeometry::WaveSourceMesh(_)
+                    | PartGeometry::WaveSourceColliders
+            )
+        ) {
+            wave_only_parts
+                .try_reserve(1)
+                .map_err(|_| geometry_error(GeometryError::AllocationFailed))?;
+            wave_only_parts.push(part);
+        }
         let mesh = match geometry.get(&part) {
-            Some(PartGeometry::Mesh(mesh)) => mesh.clone(),
-            Some(PartGeometry::Colliders) => {
+            Some(PartGeometry::Mesh(mesh) | PartGeometry::WaveSourceMesh(mesh)) => mesh.clone(),
+            Some(PartGeometry::Wave(model)) => Arc::clone(&model.mesh),
+            Some(PartGeometry::Colliders | PartGeometry::WaveSourceColliders) => {
                 let owner = parts
                     .get(part.dense)
                     .filter(|p| p.body() == body_id)
@@ -340,10 +559,11 @@ pub(super) fn prepare(
         triangle_count = triangle_count
             .checked_add(mesh.triangles().len())
             .ok_or_else(error)?;
-        if triangle_count
-            .checked_mul(triangle_count)
-            .and_then(|pairs| pairs.checked_mul(128))
-            .is_none_or(|work| work > 100_000_000)
+        if pressure_wind.is_some()
+            && triangle_count
+                .checked_mul(triangle_count)
+                .and_then(|pairs| pairs.checked_mul(128))
+                .is_none_or(|work| work > 100_000_000)
         {
             return Err(geometry_error(GeometryError::WorkBudgetExceeded));
         }
@@ -359,35 +579,34 @@ pub(super) fn prepare(
     }
     sources.sort_unstable_by_key(|source| source.0);
     collider_parts.sort_unstable();
+    wave_only_parts.sort_unstable();
     caches
         .try_reserve(1)
         .map_err(|_| geometry_error(GeometryError::AllocationFailed))?;
     let mut candidate = AssemblyAerodynamics {
         sources,
         collider_parts,
+        wave_only_parts,
         cache: PreparedGeometryCache::default(),
+        wave_cache: PreparedGeometryCache::default(),
     };
-    let patches =
-        evaluate(body_id, entry, state.wind_velocity(), &mut candidate).map_err(|cause| {
-            StepError::Aerodynamics {
-                body_id,
-                cause: AerodynamicsError::Geometry(cause),
-            }
-        })?;
+    let prepared = evaluate(body_id, entry, pressure_wind, wave_model, &mut candidate)
+        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
     caches.insert(body_id, candidate);
-    Ok(Some(patches))
+    Ok(Some(prepared))
 }
 
 fn evaluate(
     body_id: BodyId,
     entry: &BodyEntry,
-    wind: Vec3,
+    pressure_wind: Option<Vec3>,
+    wave_model: Option<(PartId, &crate::aerodynamics::wave::VoxelWave, Transform)>,
     prepared: &mut AssemblyAerodynamics,
-) -> Result<PreparedSurfacePatches, GeometryError> {
+) -> Result<PreparedAssembly, AerodynamicsError> {
     let mut instances = Vec::new();
     instances
         .try_reserve(prepared.sources.len())
-        .map_err(|_| GeometryError::AllocationFailed)?;
+        .map_err(|_| AerodynamicsError::Geometry(GeometryError::AllocationFailed))?;
     for (part, mesh, local_transform) in &prepared.sources {
         instances.push(GeometryInstance {
             mesh,
@@ -399,25 +618,90 @@ fn evaluate(
             owner: GeometryOwner::Part(*part),
         });
     }
+    let wave = if let Some((part, model, local)) = wave_model {
+        let inverse = local
+            .inverse()
+            .map_err(|_| AerodynamicsError::Geometry(GeometryError::ArithmeticOverflow))?;
+        let mut wave_instances = Vec::new();
+        wave_instances
+            .try_reserve(instances.len())
+            .map_err(|_| AerodynamicsError::Geometry(GeometryError::AllocationFailed))?;
+        for instance in &instances {
+            let local_transform = inverse
+                .compose(&instance.local_transform)
+                .map_err(|_| AerodynamicsError::Geometry(GeometryError::ArithmeticOverflow))?;
+            wave_instances.push(GeometryInstance {
+                mesh: instance.mesh,
+                local_transform,
+                owner: instance.owner,
+            });
+        }
+        prepared
+            .wave_cache
+            .prepare_instances(
+                GeometryCacheKey {
+                    body: body_id,
+                    geometry_version: 0,
+                    config_version: 1,
+                },
+                &wave_instances,
+                model.geometry_config,
+            )
+            .map_err(AerodynamicsError::Geometry)?;
+        let section = prepared
+            .wave_cache
+            .configure_voxel_wave_drag(model.section.clone(), model.axis, model.smoothing_radius)
+            .map_err(AerodynamicsError::Hull)?;
+        Some((part, section))
+    } else {
+        None
+    };
+    let patches = match pressure_wind {
+        Some(wind) => Some(
+            evaluate_pressure(
+                body_id,
+                entry,
+                wind,
+                &instances,
+                &prepared.collider_parts,
+                &prepared.wave_only_parts,
+                &mut prepared.cache,
+            )
+            .map_err(AerodynamicsError::Geometry)?,
+        ),
+        None => None,
+    };
+    Ok(PreparedAssembly { patches, wave })
+}
+
+fn evaluate_pressure(
+    body_id: BodyId,
+    entry: &BodyEntry,
+    wind: Vec3,
+    instances: &[GeometryInstance<'_>],
+    collider_parts: &[PartId],
+    wave_only_parts: &[PartId],
+    cache: &mut PreparedGeometryCache,
+) -> Result<PreparedSurfacePatches, GeometryError> {
     let config = GeometryConfig {
         cell_size: 0.125,
         max_cells: 1_048_576,
         max_work: 100_000_000,
         open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
-        weld_tolerance: if prepared.collider_parts.is_empty() {
+        weld_tolerance: if collider_parts.is_empty() {
             None
         } else {
             Some(1e-10)
         },
         max_patch_work: 100_000_000,
     };
-    let geometry = prepared.cache.prepare_instances(
+    let geometry = cache.prepare_instances(
         GeometryCacheKey {
             body: body_id,
             geometry_version: 0,
             config_version: 1,
         },
-        &instances,
+        instances,
         config,
     )?;
     let inverse = entry
@@ -440,13 +724,19 @@ fn evaluate(
         .mass()
         .ok_or(GeometryError::InvalidGeometry)?
         .center_of_mass();
-    geometry.surface_patches_with_flow(&instances, config.max_patch_work, |point| {
-        point
-            .checked_sub(center)
-            .and_then(|arm| omega.checked_cross(arm))
-            .and_then(|rotation| velocity.checked_add(rotation))
-            .ok_or(GeometryError::ArithmeticOverflow)
-    })
+    let mut patches =
+        geometry.surface_patches_with_flow(instances, config.max_patch_work, |point| {
+            point
+                .checked_sub(center)
+                .and_then(|arm| omega.checked_cross(arm))
+                .and_then(|rotation| velocity.checked_add(rotation))
+                .ok_or(GeometryError::ArithmeticOverflow)
+        })?;
+    patches.retain(|patch| match patch.owner {
+        GeometryOwner::Part(part) => wave_only_parts.binary_search(&part).is_err(),
+        GeometryOwner::Body => true,
+    });
+    Ok(patches)
 }
 
 #[cfg(test)]
@@ -484,6 +774,596 @@ mod tests {
             ],
             vec![[0, 1, 2], [1, 3, 2]],
         )
+    }
+
+    fn wave_model() -> Result<crate::aerodynamics::wave::VoxelWave, Box<dyn std::error::Error>> {
+        let section = crate::aerodynamics::hull::HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?;
+        Ok(crate::aerodynamics::wave::VoxelWave::new(
+            plate()?,
+            section,
+            0,
+            1,
+            GeometryConfig {
+                cell_size: 0.25,
+                max_cells: 100_000,
+                max_work: 10_000_000,
+                max_patch_work: 1_000_000,
+                open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+                weld_tolerance: None,
+            },
+        )?)
+    }
+
+    #[test]
+    fn voxel_wave_transfers_to_cluster_and_matches_standalone()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{Aerodynamics, AerodynamicsTask};
+        let mut velocities = Vec::new();
+        for clustered in [false, true] {
+            for sharded in [false, true] {
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                    1.2,
+                    Vec3::ZERO,
+                )?));
+                let mut body = RigidBody::new_dynamic(
+                    Transform::identity(),
+                    MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?,
+                )?;
+                body.set_linear_velocity(Vec3::X * 680.0)?;
+                body.set_aerodynamics(Aerodynamics::VoxelWave(wave_model()?));
+                let id = world.add_body(body)?;
+                if clustered {
+                    let part = world.enable_cluster(id)?;
+                    assert!(matches!(
+                        world
+                            .part_aerodynamic_geometry
+                            .as_ref()
+                            .and_then(|g| g.get(&part)),
+                        Some(PartGeometry::Wave(_))
+                    ));
+                }
+                AerodynamicsTask.execute(&world)?;
+                world.fill_step_shards(&mut [Vec::new()])?;
+                if sharded {
+                    world.step_with_shards(
+                        1e-6,
+                        &mut [Vec::new(), Vec::new()],
+                        &SequentialExecutor,
+                        1,
+                    )?;
+                } else {
+                    world.step(1e-6)?;
+                }
+                let speed = world.body(id).ok_or("body")?.state().linear_velocity().x;
+                assert!(speed < 680.0 && speed > 0.0);
+                velocities.push(speed);
+            }
+        }
+        assert!(
+            velocities.windows(2).all(|pair| pair[0] == pair[1]),
+            "{velocities:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_wave_rebuilds_for_source_changes_and_rejects_conflicting_merge()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::Aerodynamics;
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+            1.2,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut first = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        first.set_linear_velocity(Vec3::X * 680.0)?;
+        first.set_aerodynamics(Aerodynamics::VoxelWave(wave_model()?));
+        let id = world.add_body(first)?;
+        let root = world.enable_cluster(id)?;
+        let part = world.add_cluster_part(
+            root,
+            crate::cluster::ClusterPartDesc {
+                local_transform: Transform::new(Vec3::X * 2.0, kapitsa_math::Quat::IDENTITY)?,
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::X * 680.0,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::new(Vec3::X * 2.0, kapitsa_math::Quat::IDENTITY),
+                ..weld()
+            },
+        )?;
+        world.set_part_wave_source_mesh(part, Some(plate()?))?;
+        world.step(1e-6)?;
+        let cache = world
+            .assembly_aerodynamics
+            .as_mut()
+            .and_then(|c| c.get_mut(&id))
+            .ok_or("assembly cache")?;
+        let model = match world
+            .part_aerodynamic_geometry
+            .as_ref()
+            .and_then(|g| g.get(&root))
+        {
+            Some(PartGeometry::Wave(model)) => model,
+            _ => return Err("wave model missing".into()),
+        };
+        let first_section = cache.wave_cache.configure_voxel_wave_drag(
+            model.section.clone(),
+            model.axis,
+            model.smoothing_radius,
+        )?;
+        let old_volume = cache.wave_cache.get().ok_or("prepared wave")?.volume();
+        let changed_mesh = TriangleMesh::new(
+            vec![
+                Vec3::new(0.0, -1.0, -1.0),
+                Vec3::new(0.0, 1.0, -1.0),
+                Vec3::new(0.0, -1.0, 1.0),
+            ],
+            vec![[0, 1, 2]],
+        )?;
+        world.set_part_wave_source_mesh(part, Some(changed_mesh))?;
+        world.step(1e-6)?;
+        let cache = world
+            .assembly_aerodynamics
+            .as_mut()
+            .and_then(|c| c.get_mut(&id))
+            .ok_or("assembly cache")?;
+        let model = match world
+            .part_aerodynamic_geometry
+            .as_ref()
+            .and_then(|g| g.get(&root))
+        {
+            Some(PartGeometry::Wave(model)) => model,
+            _ => return Err("wave model missing".into()),
+        };
+        let second_section = cache.wave_cache.configure_voxel_wave_drag(
+            model.section.clone(),
+            model.axis,
+            model.smoothing_radius,
+        )?;
+        assert_ne!(first_section, second_section);
+        assert_ne!(
+            old_volume,
+            cache.wave_cache.get().ok_or("prepared wave")?.volume()
+        );
+        let mut other = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        other.set_linear_velocity(world.body(id).ok_or("body")?.state().linear_velocity())?;
+        other.set_aerodynamics(Aerodynamics::VoxelWave(wave_model()?));
+        let other_id = world.add_body(other)?;
+        world.enable_cluster(other_id)?;
+        let before = world.body(id).ok_or("body")?.motion();
+        assert_eq!(
+            world.merge_clusters(id, other_id, weld()),
+            Err(ClusterError::UnsupportedGeometry)
+        );
+        assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+        assert!(world.body(other_id).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_wave_samples_application_point_when_com_is_outside_atmosphere()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{
+            Aerodynamics, DensityProfile, SphericalAtmosphere, hull::HullSection, wave::VoxelWave,
+        };
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(Atmosphere::Sphere(
+                SphericalAtmosphere::builder()
+                    .reference_radius(5.0)
+                    .reference_density(1.0)
+                    .height(5.0)
+                    .profile(DensityProfile::Exponential { scale_height: 1.0 })
+                    .build()?,
+            ));
+            let section = HullSection::new(
+                Transform::new(Vec3::X * -20.0, kapitsa_math::Quat::IDENTITY)?,
+                Vec3::X,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                None,
+            )?;
+            let wave = VoxelWave::new(
+                plate()?,
+                section,
+                0,
+                1,
+                GeometryConfig {
+                    cell_size: 0.25,
+                    max_cells: 100_000,
+                    max_work: 10_000_000,
+                    max_patch_work: 1_000_000,
+                    open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+                    weld_tolerance: None,
+                },
+            )?;
+            let mut body = RigidBody::new_dynamic(
+                Transform::new(Vec3::X * 20.0, kapitsa_math::Quat::IDENTITY)?,
+                MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?,
+            )?;
+            body.set_linear_velocity(Vec3::X * 680.0)?;
+            body.set_aerodynamics(Aerodynamics::VoxelWave(wave));
+            let id = world.add_body(body)?;
+            world.enable_cluster(id)?;
+            if sharded {
+                world.step_with_shards(
+                    1e-8,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(1e-8)?;
+            }
+            assert!(world.body(id).ok_or("body")?.state().linear_velocity().x < 680.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn collider_wave_source_rebuilds_after_transform_and_rolls_back_when_empty()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::Aerodynamics;
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+            1.2,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 680.0)?;
+        body.set_aerodynamics(Aerodynamics::VoxelWave(wave_model()?));
+        let id = world.add_body(body)?;
+        let root = world.enable_cluster(id)?;
+        let part = world.add_cluster_part(
+            root,
+            crate::cluster::ClusterPartDesc {
+                local_transform: Transform::new(Vec3::X * 2.0, kapitsa_math::Quat::IDENTITY)?,
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::X * 680.0,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::new(Vec3::X * 2.0, kapitsa_math::Quat::IDENTITY),
+                ..weld()
+            },
+        )?;
+        let mut collider = crate::collider::Collider::new(
+            crate::shape::Shape::Cuboid(crate::shape::Cuboid::new(1.0, 1.0, 1.0)?),
+            Transform::identity(),
+        );
+        collider.set_mode(crate::collider::CollisionMode::Sensor);
+        let collider_id = world.add_part_collider(part, collider)?;
+        world.set_part_wave_source_colliders(part, true)?;
+        assert!(world.part_uses_aerodynamic_colliders(part));
+        world.step(1e-7)?;
+        let cache = world
+            .assembly_aerodynamics
+            .as_mut()
+            .and_then(|c| c.get_mut(&id))
+            .ok_or("cache")?;
+        let model = match world
+            .part_aerodynamic_geometry
+            .as_ref()
+            .and_then(|g| g.get(&root))
+        {
+            Some(PartGeometry::Wave(model)) => model,
+            _ => return Err("model".into()),
+        };
+        let before_section = cache.wave_cache.configure_voxel_wave_drag(
+            model.section.clone(),
+            model.axis,
+            model.smoothing_radius,
+        )?;
+        world.set_part_collider_transform(
+            part,
+            collider_id,
+            Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY)?,
+        )?;
+        world.step(1e-7)?;
+        let cache = world
+            .assembly_aerodynamics
+            .as_mut()
+            .and_then(|c| c.get_mut(&id))
+            .ok_or("cache")?;
+        let model = match world
+            .part_aerodynamic_geometry
+            .as_ref()
+            .and_then(|g| g.get(&root))
+        {
+            Some(PartGeometry::Wave(model)) => model,
+            _ => return Err("model".into()),
+        };
+        let after_section = cache.wave_cache.configure_voxel_wave_drag(
+            model.section.clone(),
+            model.axis,
+            model.smoothing_radius,
+        )?;
+        assert_ne!(before_section, after_section);
+        world.remove_part_collider(collider_id)?;
+        let before_motion = world.body(id).ok_or("body")?.motion();
+        assert!(matches!(
+            world.step(1e-7),
+            Err(StepError::Aerodynamics {
+                cause: AerodynamicsError::UnsupportedModel,
+                ..
+            })
+        ));
+        assert_eq!(world.body(id).ok_or("body")?.motion(), before_motion);
+        Ok(())
+    }
+
+    #[test]
+    fn changed_wave_source_error_rolls_back_and_recovers() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use crate::aerodynamics::Aerodynamics;
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 680.0)?;
+            body.set_aerodynamics(Aerodynamics::VoxelWave(wave_model()?));
+            let id = world.add_body(body)?;
+            let root = world.enable_cluster(id)?;
+            let source = world.add_cluster_part(
+                root,
+                crate::cluster::ClusterPartDesc {
+                    local_transform: Transform::new(Vec3::X * 2.0, kapitsa_math::Quat::IDENTITY)?,
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * 680.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    frame_a: JointFrame::new(Vec3::X * 2.0, kapitsa_math::Quat::IDENTITY),
+                    ..weld()
+                },
+            )?;
+            world.set_part_wave_source_mesh(source, Some(plate()?))?;
+            world.step(1e-7)?;
+            let huge = TriangleMesh::new(
+                vec![Vec3::ZERO, Vec3::X * 1e8, Vec3::Y * 1e8],
+                vec![[0, 1, 2]],
+            )?;
+            world.set_part_wave_source_mesh(source, Some(huge))?;
+            let before = world.body(id).ok_or("body")?.motion();
+            let result = if sharded {
+                world.step_with_shards(1e-7, &mut [Vec::new()], &SequentialExecutor, 1)
+            } else {
+                world.step(1e-7)
+            };
+            assert!(matches!(
+                result,
+                Err(StepError::Aerodynamics {
+                    cause: AerodynamicsError::Geometry(GeometryError::CellBudgetExceeded),
+                    ..
+                })
+            ));
+            assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+            world.set_part_wave_source_mesh(source, Some(plate()?))?;
+            world.step(1e-7)?;
+            assert!(
+                world.body(id).ok_or("body")?.state().linear_velocity().x
+                    < before.state().linear_velocity().x
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_wave_uses_rotated_owner_frame() -> Result<(), Box<dyn std::error::Error>> {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::Y * 680.0)?;
+            let id = world.add_body(body)?;
+            let root = world.enable_cluster(id)?;
+            let rotation =
+                kapitsa_math::Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_2)
+                    .ok_or("rotation")?;
+            let local = Transform::new(Vec3::ZERO, rotation)?;
+            let part = world.add_cluster_part(
+                root,
+                crate::cluster::ClusterPartDesc {
+                    local_transform: local,
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::Y * 680.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    frame_a: JointFrame::new(Vec3::ZERO, rotation),
+                    ..weld()
+                },
+            )?;
+            world.set_part_voxel_wave(part, Some(wave_model()?))?;
+            super::super::AerodynamicsTask.execute(&world)?;
+            if sharded {
+                world.step_with_shards(
+                    1e-6,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(1e-6)?;
+            }
+            let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
+            assert!(velocity.y < 680.0 && velocity.y > 0.0);
+            assert!(velocity.x.abs() < 1e-12);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_pressure_and_wave_geometry_have_distinct_load_owners()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::Aerodynamics;
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                0.001,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 2000.0)?;
+            body.set_aerodynamics(Aerodynamics::VoxelWave(wave_model()?));
+            let id = world.add_body(body)?;
+            let root = world.enable_cluster(id)?;
+            let pressure_part = world.add_cluster_part(
+                root,
+                crate::cluster::ClusterPartDesc {
+                    local_transform: Transform::new(Vec3::Y * 2.0, kapitsa_math::Quat::IDENTITY)?,
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * 2000.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    frame_a: JointFrame::new(Vec3::Y * 2.0, kapitsa_math::Quat::IDENTITY),
+                    ..weld()
+                },
+            )?;
+            world.set_part_aerodynamic_mesh(pressure_part, Some(plate()?))?;
+            let entry = world.bodies.get(id.dense).ok_or("body")?;
+            let prepared = prepare(
+                id,
+                entry,
+                &world.parts,
+                world.part_aerodynamic_geometry.as_ref(),
+                &world.colliders,
+                &mut world.assembly_aerodynamics,
+                world.atmosphere,
+            )?
+            .ok_or("assembly")?;
+            let patches = prepared.patches.ok_or("pressure patches")?;
+            assert!(!patches.is_empty());
+            assert!(
+                patches
+                    .iter()
+                    .all(|patch| patch.owner == GeometryOwner::Part(pressure_part))
+            );
+            assert_eq!(prepared.wave.as_ref().map(|(part, _)| *part), Some(root));
+            super::super::AerodynamicsTask.execute(&world)?;
+            world.fill_step_shards(&mut [Vec::new()])?;
+            if sharded {
+                world.step_with_shards(
+                    1e-7,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(1e-7)?;
+            }
+            assert!(world.body(id).ok_or("body")?.state().linear_velocity().x < 2000.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wave_model_follows_owner_through_split() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::Aerodynamics;
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+            1.2,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 680.0)?;
+        body.set_aerodynamics(Aerodynamics::VoxelWave(wave_model()?));
+        let id = world.add_body(body)?;
+        let root = world.enable_cluster(id)?;
+        let source = world.add_cluster_part(
+            root,
+            crate::cluster::ClusterPartDesc {
+                local_transform: Transform::new(Vec3::X * 2.0, kapitsa_math::Quat::IDENTITY)?,
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::X * 680.0,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::new(Vec3::X * 2.0, kapitsa_math::Quat::IDENTITY),
+                ..weld()
+            },
+        )?;
+        world.set_part_wave_source_mesh(source, Some(plate()?))?;
+        world.step(1e-7)?;
+        let weld_id = *world
+            .cluster(id)
+            .ok_or("cluster")?
+            .welds()
+            .first()
+            .ok_or("weld")?;
+        let split = world.break_weld(weld_id)?;
+        assert_eq!(split.len(), 2);
+        let wave_body = world.cluster_part(root).ok_or("root")?.body();
+        let source_body = world.cluster_part(source).ok_or("source")?.body();
+        assert_ne!(wave_body, source_body);
+        let before_wave = world
+            .body(wave_body)
+            .ok_or("wave body")?
+            .state()
+            .linear_velocity()
+            .x;
+        let before_source = world
+            .body(source_body)
+            .ok_or("source body")?
+            .state()
+            .linear_velocity()
+            .x;
+        world.step(1e-7)?;
+        assert!(
+            world
+                .body(wave_body)
+                .ok_or("wave body")?
+                .state()
+                .linear_velocity()
+                .x
+                < before_wave
+        );
+        assert_eq!(
+            world
+                .body(source_body)
+                .ok_or("source body")?
+                .state()
+                .linear_velocity()
+                .x,
+            before_source
+        );
+        Ok(())
     }
 
     #[test]
@@ -1021,6 +1901,8 @@ mod tests {
                     &mut world.assembly_aerodynamics,
                     world.atmosphere,
                 )?
+                .ok_or("prepared assembly")?
+                .patches
                 .ok_or("patches")?;
                 assert!(patches.iter().all(|p| p.owner == GeometryOwner::Part(part)));
                 let wrench = crate::aerodynamics::pressure::evaluate_prepared_mesh(

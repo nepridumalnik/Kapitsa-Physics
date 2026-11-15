@@ -530,3 +530,139 @@ async fn part_wings_and_hull_replace_clear_and_follow_queue_while_paused()
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn voxel_wave_commands_work_in_both_runtime_executors()
+-> Result<(), Box<dyn std::error::Error>> {
+    use kapitsa::aerodynamics::{
+        Atmosphere, DensityProfile, SphericalAtmosphere,
+        geometry::{GeometryConfig, OpenMeshPolicy},
+        hull::HullSection,
+        wave::VoxelWave,
+    };
+    fn mesh() -> Result<kapitsa::shape::TriangleMesh, kapitsa::shape::ShapeError> {
+        kapitsa::shape::TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])
+    }
+    fn model() -> Result<VoxelWave, Box<dyn std::error::Error>> {
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?;
+        Ok(VoxelWave::new(
+            mesh()?,
+            section,
+            0,
+            1,
+            GeometryConfig {
+                cell_size: 0.25,
+                max_cells: 100_000,
+                max_work: 1_000_000,
+                max_patch_work: 1_000_000,
+                open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+                weld_tolerance: None,
+            },
+        )?)
+    }
+    for rayon_executor in [false, true] {
+        let atmosphere = Atmosphere::Sphere(
+            SphericalAtmosphere::builder()
+                .reference_radius(1_000_000.0)
+                .reference_density(0.001)
+                .height(1_000_000.0)
+                .profile(DensityProfile::Exponential {
+                    scale_height: 1_000_000.0,
+                })
+                .build()?,
+        );
+        let builder = Simulation::builder()
+            .max_workers(2)
+            .atmosphere(atmosphere)
+            .mesh_sound_speed(100.0);
+        let mut simulation = if rayon_executor {
+            builder.spawn_on_rayon(std::sync::Arc::new(
+                rayon::ThreadPoolBuilder::new().num_threads(2).build()?,
+            ))?
+        } else {
+            builder.spawn_on_tokio(&tokio::runtime::Handle::current())?
+        };
+        simulation.pause()?;
+        let mut client = simulation.client();
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 680.0)?;
+        let id = client.add_body(body).await?;
+        let root = client.enable_cluster(id).await?;
+        let source = client
+            .add_cluster_part(
+                root,
+                ClusterPartDesc {
+                    local_transform: Transform::identity(),
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * 680.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                weld(),
+            )
+            .await?;
+        client.set_part_voxel_wave(root, Some(model()?)).await?;
+        assert!(matches!(
+            client.set_part_voxel_wave(source, Some(model()?)).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::UnsupportedGeometry
+            ))
+        ));
+        client
+            .add_part_collider(
+                source,
+                Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+            )
+            .await?;
+        client.set_part_wave_source_colliders(source, true).await?;
+        client
+            .set_part_wave_source_mesh(source, Some(mesh()?))
+            .await?;
+        simulation.resume()?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let snapshot = client.next_snapshot().await?;
+                if let Some(body) = snapshot.body(id)
+                    && body.linear_velocity().x < 680.0
+                {
+                    break;
+                }
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        simulation.pause()?;
+        client.remove_body(id).await?;
+        assert!(matches!(
+            client.set_part_voxel_wave(root, None).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::InvalidPartId
+            ))
+        ));
+        assert!(matches!(
+            client.set_part_wave_source_mesh(source, None).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::InvalidPartId
+            ))
+        ));
+        assert!(matches!(
+            client.set_part_wave_source_colliders(source, false).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::InvalidPartId
+            ))
+        ));
+        simulation.stop().await?;
+    }
+    Ok(())
+}

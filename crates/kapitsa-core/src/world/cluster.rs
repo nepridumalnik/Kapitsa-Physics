@@ -143,9 +143,6 @@ impl PhysicsWorld {
         if body_entry.cluster.is_some() {
             return Err(ClusterError::AlreadyClustered);
         }
-        if matches!(body_entry.body.aerodynamics(), Aerodynamics::VoxelWave(_)) {
-            return Err(ClusterError::UnsupportedGeometry);
-        }
         let mut root_hull = Vec::new();
         if let Aerodynamics::Hull(sections) = body_entry.body.aerodynamics() {
             root_hull
@@ -160,6 +157,7 @@ impl PhysicsWorld {
         }
         let mesh_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::Mesh(_));
         let collider_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::Colliders);
+        let wave_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::VoxelWave(_));
         if body_entry.body.physics().body_type() == BodyType::Dynamic
             && body_entry.body.physics().mass() != Some(mass)
         {
@@ -183,7 +181,7 @@ impl PhysicsWorld {
         self.parts
             .try_reserve_insertions(1)
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
-        if mesh_mode || collider_mode {
+        if mesh_mode || collider_mode || wave_mode {
             self.part_aerodynamic_geometry
                 .get_or_insert_with(HashMap::new)
                 .try_reserve(1)
@@ -223,6 +221,15 @@ impl PhysicsWorld {
                     .insert(
                         part,
                         super::assembly_aerodynamics::PartGeometry::Mesh(std::sync::Arc::new(mesh)),
+                    );
+                entry.mesh_aerodynamics = None;
+            }
+            Aerodynamics::VoxelWave(model) => {
+                self.part_aerodynamic_geometry
+                    .get_or_insert_with(HashMap::new)
+                    .insert(
+                        part,
+                        super::assembly_aerodynamics::PartGeometry::Wave(Box::new(model)),
                     );
                 entry.mesh_aerodynamics = None;
             }
@@ -737,6 +744,19 @@ impl PhysicsWorld {
         weld_desc.validate()?;
         let first_cluster = self.cluster(first).ok_or(ClusterError::NotClustered)?;
         let second_cluster = self.cluster(second).ok_or(ClusterError::NotClustered)?;
+        let has_wave = |cluster: &RigidCluster| {
+            cluster.parts().iter().any(|part| {
+                matches!(
+                    self.part_aerodynamic_geometry
+                        .as_ref()
+                        .and_then(|geometry| geometry.get(part)),
+                    Some(super::assembly_aerodynamics::PartGeometry::Wave(_))
+                )
+            })
+        };
+        if has_wave(first_cluster) && has_wave(second_cluster) {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
         let first_tessellation = self
             .bodies
             .get(first.dense)

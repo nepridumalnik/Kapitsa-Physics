@@ -116,6 +116,9 @@ impl PreparedSurfacePatches {
     pub fn is_empty(&self) -> bool {
         self.patches.is_empty()
     }
+    pub(crate) fn retain(&mut self, keep: impl FnMut(&PreparedSurfacePatch) -> bool) {
+        self.patches.retain(keep);
+    }
 }
 
 /// Immutable union geometry. World motion and COM changes do not affect it.

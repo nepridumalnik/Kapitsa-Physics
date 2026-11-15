@@ -100,6 +100,21 @@ pub enum PhysicsCommand {
         part: PartId,
         enabled: bool,
     },
+    /// Selects the assembly wave model owned by this part.
+    SetPartVoxelWave {
+        part: PartId,
+        model: Option<kapitsa_core::aerodynamics::wave::VoxelWave>,
+    },
+    /// Selects a mesh as geometry-only input to the assembly wave union.
+    SetPartWaveSourceMesh {
+        part: PartId,
+        mesh: Option<kapitsa_core::shape::TriangleMesh>,
+    },
+    /// Selects part colliders as geometry-only input to the wave union.
+    SetPartWaveSourceColliders {
+        part: PartId,
+        enabled: bool,
+    },
     /// Changes an owned collider's transform in the part-local frame.
     SetPartColliderTransform {
         part: PartId,
@@ -936,6 +951,9 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::SetPartAerodynamicHull { .. }
         | PhysicsCommand::SetPartAerodynamicMesh { .. }
         | PhysicsCommand::SetPartAerodynamicColliders { .. }
+        | PhysicsCommand::SetPartVoxelWave { .. }
+        | PhysicsCommand::SetPartWaveSourceMesh { .. }
+        | PhysicsCommand::SetPartWaveSourceColliders { .. }
         | PhysicsCommand::SetPartColliderTransform { .. }
         | PhysicsCommand::SetColliderTessellation { .. }
         | PhysicsCommand::RemovePartCollider { .. }
@@ -1012,6 +1030,9 @@ fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result
         | PhysicsCommand::SetPartAerodynamicHull { .. }
         | PhysicsCommand::SetPartAerodynamicMesh { .. }
         | PhysicsCommand::SetPartAerodynamicColliders { .. }
+        | PhysicsCommand::SetPartVoxelWave { .. }
+        | PhysicsCommand::SetPartWaveSourceMesh { .. }
+        | PhysicsCommand::SetPartWaveSourceColliders { .. }
         | PhysicsCommand::SetPartColliderTransform { .. }
         | PhysicsCommand::SetColliderTessellation { .. }
         | PhysicsCommand::RemovePartCollider { .. }
@@ -1116,6 +1137,18 @@ pub(crate) fn apply_command(
         }
         PhysicsCommand::SetPartAerodynamicColliders { part, enabled } => {
             world.set_part_aerodynamic_colliders(part, enabled)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartVoxelWave { part, model } => {
+            world.set_part_voxel_wave(part, model)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartWaveSourceMesh { part, mesh } => {
+            world.set_part_wave_source_mesh(part, mesh)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartWaveSourceColliders { part, enabled } => {
+            world.set_part_wave_source_colliders(part, enabled)?;
             PhysicsCommandResult::Done
         }
         PhysicsCommand::SetPartColliderTransform {

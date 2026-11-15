@@ -36,7 +36,7 @@ impl std::error::Error for WaveDragError {}
 /// resulting force are approximate; validate resolution and force convergence.
 /// The model currently represents wave drag, not complete hull aerodynamics.
 pub struct VoxelWave {
-    pub(crate) mesh: crate::shape::TriangleMesh,
+    pub(crate) mesh: Arc<crate::shape::TriangleMesh>,
     pub(crate) section: super::hull::HullSection,
     pub(crate) axis: usize,
     pub(crate) smoothing_radius: usize,
@@ -55,7 +55,7 @@ impl VoxelWave {
     ) -> Result<Self, super::hull::HullError> {
         section.validate_voxel_axis(axis)?;
         Ok(Self {
-            mesh,
+            mesh: Arc::new(mesh),
             section,
             axis,
             smoothing_radius,

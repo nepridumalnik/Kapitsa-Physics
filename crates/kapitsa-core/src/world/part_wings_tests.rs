@@ -119,6 +119,7 @@ fn part_wings_match_body_wings_after_mass_merge_split_and_root_deletion()
             None,
             world.mesh_sound_speed,
             None,
+            None,
         )?;
         PhysicsWorld::apply_aerodynamics(
             world.atmosphere(),
@@ -131,6 +132,7 @@ fn part_wings_match_body_wings_after_mass_merge_split_and_root_deletion()
             None,
             None,
             world.mesh_sound_speed,
+            None,
             None,
         )?;
         assert!((actual_loads.forces().force() - expected_loads.forces().force()).length() < 1e-12);

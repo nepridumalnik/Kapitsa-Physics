@@ -275,7 +275,7 @@ approximation, not a FAR code port.
 
 `FiniteWing::with_subsonic_compressibility(max_mach)` optionally uses a
 Prandtl-Glauert lifting-line approximation, with slope
-`2 pi / (sqrt(1 - M?) + 2/(e AR))`. The caller must choose a maximum Mach
+`2 pi / (sqrt(1 - M^2) + 2/(e AR))`. The caller must choose a maximum Mach
 strictly below 1 and below the wing's critical Mach. This approximation is
 for small-disturbance attached subsonic flow; it does not predict shock onset,
 wave drag, separation or stall. Profile drag remains caller-supplied. The
@@ -303,7 +303,7 @@ predict stall or replace validation against suitable aerodynamic data.
 
 `FiniteWing::with_lift_dependent_drag_rise` additionally uses the same NASA
 correlation's `M_critical = M_critical_zero - sensitivity *
-(0.03 CL + 0.19 CL? + 0.78 CL?)`. The caller supplies the zero-lift critical
+(0.03 CL + 0.19 CL^2 + 0.78 CL^3)`. The caller supplies the zero-lift critical
 Mach, sensitivity and drag scale. With nonzero sensitivity, the correlation
 rejects lift coefficients outside [0, 1]; it does not clamp or extrapolate.
 
@@ -446,22 +446,39 @@ After a request changes, it refuses to configure a section until the matching
 geometry has been prepared. The returned section is a snapshot: it is not
 updated automatically when the world or assembly changes.
 
-`Aerodynamics::VoxelWave(VoxelWave::new(...))` provides an opt-in standalone
-body mode that prepares and caches this wave configuration automatically during
-world steps. Replacing the body's model changes geometry identity and triggers
+`Aerodynamics::VoxelWave(VoxelWave::new(...))` provides an opt-in body mode
+that prepares and caches the wave configuration automatically during world
+steps. Replacing the body's model changes geometry identity and triggers
 preparation of the replacement. Vacuum skips preparation; failures return an
 error without applying a partial step. This mode supplies only the configured
-section loads and does not activate mesh-pressure loads. Cluster conversion is
-currently rejected explicitly and assembly automatic preparation is not yet
-implemented.
+section loads and does not activate mesh-pressure loads.
+
+Cluster conversion transfers the model to the root part. Alternatively,
+`set_part_voxel_wave` selects one model owned by a part; `set_part_wave_source_mesh`
+and `set_part_wave_source_colliders` select geometry-only inputs on other parts.
+The union is prepared in the model owner's local frame, so a rotated owner is
+supported. Geometry, collider, and topology changes invalidate preparation;
+ordinary motion and COM edits do not. Splitting preserves the mode on its owner.
+A merge of two clusters that both own a wave model is rejected before mutation;
+remove or reconcile one model before merging. Source-only pieces detached from
+the model do not produce wave or pressure loads by themselves.
+
+Pressure-mode meshes and colliders remain additive. They participate in the
+wave geometry union and can also produce Newtonian pressure loads; configure
+contributions carefully to avoid counting the same physical effect twice.
+Wave-model and geometry-only source surfaces do not produce separate Newtonian
+pressure loads, but can shield pressure surfaces. Wave and pressure sample the
+atmosphere independently at the wave application point and assembly COM,
+respectively. These modes, including the corresponding `PhysicsClient` setters,
+are not evidence of general FAR-equivalent hull or wing physics.
 
 Voxel occupancy conservatively thickens geometry, and differentiation can
 amplify grid noise. Callers must check convergence under grid and smoothing
 refinement and establish that the shape and flow meet the slender axisymmetric
-assumptions. For a triangulated slender Sears?Haack shape, a focused fixture at
+assumptions. For a triangulated slender Sears-Haack shape, a focused fixture at
 cell sizes 0.05, 0.025, 0.0125 and 0.00625 m, with filter radii 1, 2, 4 and 8
 cells, produced wave drags approximately 0.0891, 0.0456, 0.0323 and 0.0276 N
-versus an analytic 0.0279 N at density 1 kg/m? and speed 2 m/s. The finest result
+versus an analytic 0.0279 N at density 1 kg/m^3 and speed 2 m/s. The finest result
 is about 1% low. This fixture does not establish convergence or accuracy for
 arbitrary voxelized vessels or wave loads.
 

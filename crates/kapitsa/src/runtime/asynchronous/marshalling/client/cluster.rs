@@ -163,6 +163,43 @@ impl PhysicsClient {
                 .await?,
         )
     }
+    /// Replaces the part-owned assembly wave model. The command is applied in
+    /// queue order and is not supported in atomic motion batches.
+    pub async fn set_part_voxel_wave(
+        &self,
+        part: PartId,
+        model: Option<kapitsa_core::aerodynamics::wave::VoxelWave>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartVoxelWave { part, model })
+                .await?,
+        )
+    }
+
+    /// Sets a part-local mesh used only as geometry for the assembly wave model.
+    pub async fn set_part_wave_source_mesh(
+        &self,
+        part: PartId,
+        mesh: Option<kapitsa_core::shape::TriangleMesh>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartWaveSourceMesh { part, mesh })
+                .await?,
+        )
+    }
+
+    /// Selects part-owned colliders as geometry-only inputs to the wave model.
+    pub async fn set_part_wave_source_colliders(
+        &self,
+        part: PartId,
+        enabled: bool,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartWaveSourceColliders { part, enabled })
+                .await?,
+        )
+    }
+
     /// Changes the collider transform in its owner's part-local frame (metres).
     pub async fn set_part_collider_transform(
         &self,

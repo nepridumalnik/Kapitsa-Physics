@@ -262,7 +262,7 @@ body.set_aerodynamics(Aerodynamics::Simple(AerodynamicProperties::new(
 )?));
 ```
 
-`Aerodynamics::None` is the default. `Mesh(TriangleMesh)` owns its mesh by value and `Colliders` selects attached collision geometry. These modes prepare geometry for pressure evaluation during world stepping. The current Newtonian pressure model requires Mach >= 5 and a sound speed supplied by the atmosphere or world fallback; it is not a FAR-equivalent model. See [physical formulas and their limits](docs/aerodynamics.md).
+`Aerodynamics::None` is the default. `Mesh(TriangleMesh)` owns its mesh by value and `Colliders` selects attached collision geometry. These modes prepare geometry for pressure evaluation during world stepping. The current Newtonian pressure model requires Mach >= 5 and a sound speed supplied by the atmosphere or world fallback; it is not a FAR-equivalent model. `VoxelWave` optionally derives a bounded, slender-body wave model from voxel sections and supports part-owned assembly geometry; it has narrower assumptions and is not a complete FAR-equivalent solver. See [physical formulas and their limits](docs/aerodynamics.md).
 
 `RigidBody` is no longer `Copy` or `Clone`. Its `motion()` method returns a compact `BodyMotion` snapshot containing motion, mass, accumulated forces and CCD mode, but not aerodynamic configuration or geometry. Physics staging and runtime command batches copy only this snapshot; they do not clone meshes.
 

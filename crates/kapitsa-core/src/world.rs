@@ -125,9 +125,12 @@ mod aerodynamics {
                     &world.parts,
                     entry.cluster.as_ref(),
                     None,
-                    patches.as_ref(),
+                    patches
+                        .as_ref()
+                        .and_then(|prepared| prepared.patches.as_ref()),
                     world.mesh_sound_speed,
                     voxel_wave.as_ref(),
+                    patches.as_ref().and_then(|prepared| prepared.wave.as_ref()),
                 )?;
             }
             Ok(())
@@ -282,6 +285,7 @@ struct AerodynamicsBodyUpdate {
     prepared: BodyMotion,
     mesh_patches: Option<crate::aerodynamics::geometry::PreparedSurfacePatches>,
     voxel_wave: Option<crate::aerodynamics::hull::HullSection>,
+    assembly_wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
 }
 
 const FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT: usize = 128;
@@ -1691,6 +1695,7 @@ impl PhysicsWorld {
         mesh_patches: Option<&crate::aerodynamics::geometry::PreparedSurfacePatches>,
         mesh_sound_speed: f64,
         voxel_wave: Option<&crate::aerodynamics::hull::HullSection>,
+        assembly_wave: Option<&(PartId, crate::aerodynamics::hull::HullSection)>,
     ) -> Result<(), StepError> {
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
@@ -1868,12 +1873,15 @@ impl PhysicsWorld {
             .into_iter()
             .flat_map(|cluster| cluster.parts())
             .map(|id| {
-                parts
-                    .get(id.dense)
-                    .filter(|part| id.world == body_id.world && part.body() == body_id)
-                    .ok_or_else(error)
+                (
+                    *id,
+                    parts
+                        .get(id.dense)
+                        .filter(|part| id.world == body_id.world && part.body() == body_id)
+                        .ok_or_else(error),
+                )
             });
-        for part in part_hulls {
+        for (part_id, part) in part_hulls {
             let part = part?;
             let part_transform = body
                 .state()
@@ -1884,7 +1892,10 @@ impl PhysicsWorld {
                 .inverse()
                 .map_err(|_| error())?
                 .transform_point(center);
-            for section in &part.aerodynamic_hull {
+            let derived = assembly_wave
+                .filter(|(owner, _)| *owner == part_id)
+                .map(|(_, section)| section);
+            for section in part.aerodynamic_hull.iter().chain(derived) {
                 let point = part_transform.transform_point(section.local_transform().translation());
                 if !point.is_finite() {
                     return Err(error());
@@ -2280,7 +2291,7 @@ impl PhysicsWorld {
             } else {
                 None
             };
-            let mut mesh_patches = assembly_aerodynamics::prepare(
+            let assembly_prepared = assembly_aerodynamics::prepare(
                 body_id,
                 entry,
                 &self.parts,
@@ -2289,6 +2300,10 @@ impl PhysicsWorld {
                 &mut self.assembly_aerodynamics,
                 atmosphere,
             )?;
+            let (mut mesh_patches, assembly_wave) = match assembly_prepared {
+                Some(prepared) => (prepared.patches, prepared.wave),
+                None => (None, None),
+            };
             // Only the primary geometry samples the COM. Additional surfaces
             // still evaluate their own positions, including when the COM is in vacuum.
             let primary_atmosphere = if matches!(
@@ -2447,6 +2462,7 @@ impl PhysicsWorld {
                 prepared: entry.body.motion(),
                 mesh_patches,
                 voxel_wave,
+                assembly_wave,
             });
         }
 
@@ -2477,6 +2493,7 @@ impl PhysicsWorld {
                                     update.mesh_patches.as_ref(),
                                     self.mesh_sound_speed,
                                     update.voxel_wave.as_ref(),
+                                    update.assembly_wave.as_ref(),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -3694,26 +3711,56 @@ impl PhysicsWorld {
                             } else {
                                 Ok(None)
                             };
+                            let mut temporary_assembly = None;
+                            let local_assembly = if staged.is_none()
+                                && assembly_aerodynamics::wave_configured(
+                                    entry,
+                                    self.part_aerodynamic_geometry.as_ref(),
+                                ) {
+                                assembly_aerodynamics::prepare(
+                                    step.body_id,
+                                    entry,
+                                    &self.parts,
+                                    self.part_aerodynamic_geometry.as_ref(),
+                                    &self.colliders,
+                                    &mut temporary_assembly,
+                                    atmosphere,
+                                )
+                            } else {
+                                Ok(None)
+                            };
                             step.error = local_wave
                                 .and_then(|local_wave| {
-                                    Self::apply_aerodynamics(
-                                        atmosphere,
-                                        entry.body.aerodynamics(),
-                                        &entry.body.aerodynamic_surfaces,
-                                        step.body_id,
-                                        &mut step.prepared,
-                                        &self.parts,
-                                        entry.cluster.as_ref(),
-                                        dt,
-                                        self.aerodynamics_body_updates
-                                            .iter()
-                                            .find(|update| update.id == step.body_id)
-                                            .and_then(|update| update.mesh_patches.as_ref()),
-                                        self.mesh_sound_speed,
-                                        staged
-                                            .and_then(|update| update.voxel_wave.as_ref())
-                                            .or(local_wave.as_ref()),
-                                    )
+                                    local_assembly.and_then(|local_assembly| {
+                                        Self::apply_aerodynamics(
+                                            atmosphere,
+                                            entry.body.aerodynamics(),
+                                            &entry.body.aerodynamic_surfaces,
+                                            step.body_id,
+                                            &mut step.prepared,
+                                            &self.parts,
+                                            entry.cluster.as_ref(),
+                                            dt,
+                                            staged
+                                                .and_then(|update| update.mesh_patches.as_ref())
+                                                .or_else(|| {
+                                                    local_assembly.as_ref().and_then(|prepared| {
+                                                        prepared.patches.as_ref()
+                                                    })
+                                                }),
+                                            self.mesh_sound_speed,
+                                            staged
+                                                .and_then(|update| update.voxel_wave.as_ref())
+                                                .or(local_wave.as_ref()),
+                                            staged
+                                                .and_then(|update| update.assembly_wave.as_ref())
+                                                .or_else(|| {
+                                                    local_assembly
+                                                        .as_ref()
+                                                        .and_then(|prepared| prepared.wave.as_ref())
+                                                }),
+                                        )
+                                    })
                                 })
                                 .err();
                         }
