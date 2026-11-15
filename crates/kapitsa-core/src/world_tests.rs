@@ -39,6 +39,88 @@ use crate::execution::{ExecutionError, StepExecutor};
 mod free_ball_tests;
 
 #[test]
+fn off_center_part_contact_impulse_matches_linear_and_angular_momentum()
+-> Result<(), Box<dyn std::error::Error>> {
+    {
+        let ccd = false;
+        let mut world = PhysicsWorld::new();
+        let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 0.0, 1.0)?)?;
+        let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        let wall = world.add_collider(
+            wall_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 10.0, 10.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        let (x, speed, dt) = if ccd {
+            (-5.0, 1000.0, 0.01)
+        } else {
+            (-0.65, 10.0, 0.02)
+        };
+        let mut moving = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY)?,
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?;
+        moving.set_linear_velocity(Vec3::X * speed)?;
+        if ccd {
+            moving.set_ccd_mode(CcdMode::Continuous);
+        }
+        let body = world.add_body(moving)?;
+        let part = world.enable_cluster(body)?;
+        let sphere = world.add_part_collider(
+            part,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5)?),
+                Transform::new(Vec3::Y * 0.4, Quat::IDENTITY)?,
+            ),
+        )?;
+        for collider in [wall, sphere] {
+            world.set_collider_material(collider, Some(material))?;
+        }
+        world.step(dt)?;
+        assert_eq!(world.contact_impulses_omitted_points(), 0);
+        let mut linear = Vec3::ZERO;
+        let mut angular = Vec3::ZERO;
+        let mut count = 0;
+        for entry in world.contact_impulses() {
+            let (side, impulse) = if entry.pair.a == sphere {
+                (0, -entry.impulse_on_b)
+            } else if entry.pair.b == sphere {
+                (1, entry.impulse_on_b)
+            } else {
+                continue;
+            };
+            assert_eq!(entry.parts[side], Some(part));
+            if ccd && !entry.ccd && entry.impulse_on_b == Vec3::ZERO {
+                continue;
+            }
+            assert_eq!(entry.ccd, ccd);
+            linear += impulse;
+            // Motion is initially translational along X, so any point on the
+            // body's X-axis gives the same moment for this normal impulse.
+            angular += entry.points[side].cross(impulse);
+            count += 1;
+        }
+        assert_eq!(
+            count,
+            1,
+            "ccd={ccd}, entries={:?}",
+            world.contact_impulses()
+        );
+        let state = world.body(body).ok_or(WorldError::InvalidBodyId)?.state();
+        assert!((linear - (state.linear_velocity() - Vec3::X * speed)).length() < speed * 1e-10);
+        assert!(angular.z > 0.0);
+        assert!(
+            (angular - state.angular_velocity()).length() < speed * 1e-10,
+            "angular impulse={angular:?}, angular velocity={:?}",
+            state.angular_velocity()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn persistent_friction_contact_impulse_matches_step_momentum_change()
 -> Result<(), Box<dyn std::error::Error>> {
     const DT: f64 = 0.01;
