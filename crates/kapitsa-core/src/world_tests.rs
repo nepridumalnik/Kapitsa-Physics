@@ -38,6 +38,82 @@ use crate::execution::{ExecutionError, StepExecutor};
 #[path = "world/free_ball_tests.rs"]
 mod free_ball_tests;
 
+#[cfg(feature = "bench-internals")]
+#[test]
+fn ccd_replay_publishes_each_accepted_impact_once() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let wall = world.add_collider(
+        wall_body,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut bodies = Vec::new();
+    for (position, velocity) in [
+        (Vec3::new(5.0, 0.0, 0.0), -2000.0),
+        (Vec3::new(13.0, 0.0, 0.0), 0.0),
+        (Vec3::new(5.0, 1.25, 0.0), -2000.0),
+    ] {
+        let mut body = RigidBody::new_dynamic(Transform::new(position, Quat::IDENTITY)?, mass)?;
+        body.set_linear_velocity(Vec3::X * velocity)?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let id = world.add_body(body)?;
+        let part = world.enable_cluster(id)?;
+        let collider = world.add_part_collider(part, collider(0.5))?;
+        bodies.push((id, part, collider, Vec3::X * velocity));
+    }
+    for collider in [wall, bodies[0].2, bodies[1].2, bodies[2].2] {
+        world.set_collider_material(collider, Some(material))?;
+    }
+    world.step(0.01)?;
+    assert!(world.collision_step_metrics().ccd_local_replay_count > 0);
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    let expected_pairs = [
+        CollisionPair::new(wall, bodies[0].2).ok_or("wall pair")?,
+        CollisionPair::new(bodies[0].2, bodies[1].2).ok_or("dynamic pair")?,
+        CollisionPair::new(wall, bodies[2].2).ok_or("independent pair")?,
+    ];
+    let impulses = world.contact_impulses();
+    for pair in expected_pairs {
+        assert_eq!(
+            impulses
+                .iter()
+                .filter(|entry| entry.ccd && entry.pair == pair)
+                .count(),
+            1,
+            "expected exactly one accepted CCD impulse for {pair:?}: {impulses:?}"
+        );
+    }
+    assert_eq!(impulses.iter().filter(|entry| entry.ccd).count(), 3);
+    for (id, part, collider, initial_velocity) in bodies {
+        let mut total = Vec3::ZERO;
+        for entry in impulses {
+            if entry.pair.a == collider {
+                assert_eq!(entry.parts[0], Some(part));
+                total -= entry.impulse_on_b;
+            } else if entry.pair.b == collider {
+                assert_eq!(entry.parts[1], Some(part));
+                total += entry.impulse_on_b;
+            }
+        }
+        let change = world
+            .body(id)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity()
+            - initial_velocity;
+        assert!(
+            (total - change).length() < 1e-7,
+            "impulse={total:?}, momentum change={change:?}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
 -> Result<(), Box<dyn std::error::Error>> {
