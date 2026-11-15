@@ -181,6 +181,66 @@ fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "surface-condition research diagnostic; run in release mode"]
+fn harris_subsonic_surface_impermeability_diagnostic() -> Result<(), String> {
+    // Evaluate the linear slender-body condition phi_r = R' at the physical
+    // surface using adjacent radial cell centres. No radial extrapolation and
+    // no claim that the singular axis-source approximation enforces it there.
+    const EXTENSION: f64 = 0.5;
+    const OUTER: f64 = 1.25;
+    const MACH: f64 = 0.9;
+    const GAMMA: f64 = 1.4;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 40000;
+    const STATIONS: [f64; 5] = [0.125, 0.25, 0.625, 0.875, 0.9375];
+    for intervals in [16_usize, 32, 64] {
+        let dx = 1.0 / intervals as f64;
+        let nx = 2 * intervals + 1;
+        let nr = (OUTER / dx + 0.5).round_ties_even() as usize;
+        let dr = OUTER / (nr as f64 - 0.5);
+        let source = (0..nx)
+            .map(|i| {
+                let x = i as f64 * dx - EXTENSION;
+                if (0.0..=1.0).contains(&x) {
+                    harris_geometry(x).2
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; nx],
+            axis_flux: source,
+            dx,
+            dr,
+            mach: MACH,
+            gamma: GAMMA,
+        };
+        let (_, residual) = grid
+            .iterate(TOLERANCE, MAX_ITERATIONS)
+            .map_err(|value| format!("intervals={intervals}: residual={value}"))?;
+        for x in STATIONS {
+            let i = ((x + EXTENSION) / dx).round() as usize;
+            let (radius, slope, _) = harris_geometry(x);
+            let radial_index = radius / dr - 0.5;
+            if radial_index < 0.0 || radial_index >= (nr - 1) as f64 {
+                println!(
+                    "intervals={intervals} x/l={x:.4} unavailable: surface outside cell-centre range"
+                );
+                continue;
+            }
+            let k = radial_index.floor() as usize;
+            let radial_velocity = (grid.phi[i][k + 1] - grid.phi[i][k]) / dr;
+            println!(
+                "intervals={intervals} x/l={x:.4} radius={radius:.6} slope={slope:.6} phi_r={radial_velocity:.6} defect={:+.6} residual={residual:.3e}",
+                radial_velocity - slope
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "boundary sensitivity research diagnostic; run in release mode"]
 fn harris_subsonic_radial_boundary_sensitivity() -> Result<(), String> {
     // Hold the entire mesh spacing and axial domain fixed; only the location
