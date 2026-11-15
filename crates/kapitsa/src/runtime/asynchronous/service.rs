@@ -167,6 +167,13 @@ pub struct SimulationBuilder {
 }
 
 impl SimulationBuilder {
+    /// Replaces the simulation settings while preserving atmosphere and sound speed.
+    /// The configuration is validated when the simulation is spawned.
+    pub fn config(mut self, config: SimulationConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     /// Configures the atmosphere before the simulation starts. Defaults to vacuum.
     ///
     /// ```no_run
@@ -1239,6 +1246,49 @@ mod tests {
             assert_eq!(runner.world()?.atmosphere(), atmosphere);
             assert_eq!(runner.world()?.mesh_sound_speed(), 295.0);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builder_config_preserves_atmosphere_and_rejects_invalid_settings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use kapitsa_core::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
+        let atmosphere = Atmosphere::Sphere(
+            SphericalAtmosphere::builder()
+                .reference_radius(100.0)
+                .reference_density(1.0)
+                .height(20.0)
+                .profile(DensityProfile::Exponential { scale_height: 10.0 })
+                .build()?,
+        );
+        let config = super::SimulationConfig {
+            tick_rate: 77,
+            max_catch_up_steps: 1,
+            ..Default::default()
+        };
+        let builder = super::Simulation::builder()
+            .atmosphere(atmosphere)
+            .config(config);
+        assert_eq!(builder.atmosphere, atmosphere);
+        assert_eq!(builder.config.tick_rate, 77);
+        assert_eq!(builder.config.max_catch_up_steps, 1);
+        let mut simulation = builder.spawn_on_tokio(&tokio::runtime::Handle::current())?;
+        simulation.stop().await?;
+        let runner = simulation
+            .simulation
+            .as_ref()
+            .ok_or("missing stopped simulation")?;
+        assert_eq!(runner.world()?.atmosphere(), atmosphere);
+        let invalid = super::SimulationConfig {
+            tick_rate: 0,
+            ..Default::default()
+        };
+        assert!(
+            super::Simulation::builder()
+                .config(invalid)
+                .spawn_on_tokio(&tokio::runtime::Handle::current())
+                .is_err()
+        );
         Ok(())
     }
 
