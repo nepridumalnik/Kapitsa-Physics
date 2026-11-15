@@ -608,11 +608,16 @@ fn harris_subsonic_cutoff_source_discretization() -> Result<(), String> {
         let nx = 2 * intervals + 1;
         let nr = (OUTER / dx + 0.5).round_ties_even() as usize;
         let dr = OUTER / (nr as f64 - 0.5);
-        for averaged in [false, true] {
+        for mode in ["point", "cutoff_cell", "all_cells"] {
+            let mut changed_cells = 0;
             let source = (0..nx)
                 .map(|i| {
                     let x = i as f64 * dx - EXTENSION;
-                    if averaged {
+                    let crosses_cutoff = x - 0.5 * dx < CUTOFF && x + 0.5 * dx > CUTOFF;
+                    if mode == "all_cells" || (mode == "cutoff_cell" && crosses_cutoff) {
+                        if mode == "cutoff_cell" {
+                            changed_cells += 1;
+                        }
                         let radius_at = |position: f64| {
                             if position <= 0.0 {
                                 0.0
@@ -630,6 +635,9 @@ fn harris_subsonic_cutoff_source_discretization() -> Result<(), String> {
                     }
                 })
                 .collect();
+            if mode == "cutoff_cell" {
+                assert_eq!(changed_cells, 1);
+            }
             let mut grid = MixedGrid {
                 phi: vec![vec![0.0; nr]; nx],
                 axis_flux: source,
@@ -638,12 +646,11 @@ fn harris_subsonic_cutoff_source_discretization() -> Result<(), String> {
                 mach: MACH,
                 gamma: GAMMA,
             };
-            let (iterations, residual) =
-                grid.iterate(TOLERANCE, MAX_ITERATIONS).map_err(|value| {
-                    format!("intervals={intervals} averaged={averaged}: residual={value}")
-                })?;
+            let (iterations, residual) = grid
+                .iterate(TOLERANCE, MAX_ITERATIONS)
+                .map_err(|value| format!("intervals={intervals} mode={mode}: residual={value}"))?;
             println!(
-                "intervals={intervals} averaged={averaged} cutoff_phase={:.6} iterations={iterations} residual={residual:.3e}",
+                "intervals={intervals} mode={mode} cutoff_phase={:.6} iterations={iterations} residual={residual:.3e}",
                 CUTOFF / dx - (CUTOFF / dx).round()
             );
             for x in STATIONS {
@@ -653,7 +660,7 @@ fn harris_subsonic_cutoff_source_discretization() -> Result<(), String> {
                 let defect = interpolated_radial_derivative(&grid.phi[i], dr, radius)
                     .map(|radial_velocity| radial_velocity - slope);
                 println!(
-                    "intervals={intervals} averaged={averaged} x/l={x:.4} cp={cp:?} linear_surface_defect={defect:?}"
+                    "intervals={intervals} mode={mode} x/l={x:.4} cp={cp:?} linear_surface_defect={defect:?}"
                 );
             }
         }
