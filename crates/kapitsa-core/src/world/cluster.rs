@@ -1308,8 +1308,39 @@ impl PhysicsWorld {
                 part_components.insert(part, index);
             }
         }
+        // Build every component's final topology before inserting any bodies or
+        // removing welds. No fallible topology allocation belongs in commit.
+        let mut component_welds = Vec::new();
+        component_welds
+            .try_reserve_exact(components.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        component_welds.resize_with(components.len(), Vec::new);
+        for &weld_id in &remaining_welds {
+            let weld = self.weld(weld_id).ok_or(ClusterError::InvalidTopology)?;
+            let index = *part_components
+                .get(&weld.part_a())
+                .ok_or(ClusterError::InvalidTopology)?;
+            if part_components.get(&weld.part_b()) != Some(&index) {
+                return Err(ClusterError::InvalidTopology);
+            }
+            component_welds[index]
+                .try_reserve(1)
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+            component_welds[index].push(weld_id);
+        }
+        let mut prepared_clusters = Vec::new();
+        prepared_clusters
+            .try_reserve_exact(components.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for (index, (parts, welds)) in components.into_iter().zip(component_welds).enumerate() {
+            let root = if index == 0 { original_root } else { parts[0] };
+            prepared_clusters.push(RigidCluster { root, parts, welds });
+        }
+        if prepared_clusters.is_empty() {
+            return Err(ClusterError::InvalidTopology);
+        }
         let original_aerodynamics = self.cluster_aerodynamic_surfaces(body)?;
-        let mut component_aerodynamics = vec![Vec::new(); components.len()];
+        let mut component_aerodynamics = vec![Vec::new(); prepared_clusters.len()];
         for surface in original_aerodynamics {
             let (index, surface) = match surface.target() {
                 AerodynamicTarget::Body => (
@@ -1358,6 +1389,12 @@ impl PhysicsWorld {
                 }
             })
             .collect::<Vec<_>>();
+        let mut affected_bodies = Vec::new();
+        affected_bodies
+            .try_reserve_exact(prepared_clusters.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let mut clusters = prepared_clusters.into_iter();
+        let root_cluster = clusters.next().ok_or(ClusterError::InvalidTopology)?;
         let new_bodies = self
             .bodies
             .try_insert_many(entries)
@@ -1387,91 +1424,51 @@ impl PhysicsWorld {
                 self.rebind_collider_prepared(collider, target_body, local_transform);
             }
         }
-        let root_component = &components[0];
-        let root_welds = remaining_welds
-            .iter()
-            .copied()
-            .filter(|weld_id| {
-                self.weld(*weld_id).is_some_and(|weld| {
-                    root_component.contains(&weld.part_a())
-                        && root_component.contains(&weld.part_b())
-                })
-            })
-            .collect::<Vec<_>>();
-        let root = original_root;
         let entry = self
             .bodies
             .get_mut(body.dense)
             .expect("root body must exist during split commit");
         entry.body.set_motion(prepared_bodies[0]);
-        entry.cluster = Some(RigidCluster {
-            root,
-            parts: root_component.clone(),
-            welds: root_welds,
-        });
-        for (component_index, component) in components.iter().enumerate().skip(1) {
+        entry.cluster = Some(root_cluster);
+        for (component_index, cluster) in clusters.enumerate() {
+            let component_index = component_index + 1;
             let target_body = new_bodies[component_index - 1];
-            let welds = remaining_welds
-                .iter()
-                .copied()
-                .filter(|weld_id| {
-                    self.weld(*weld_id).is_some_and(|weld| {
-                        component.contains(&weld.part_a()) && component.contains(&weld.part_b())
-                    })
-                })
-                .collect::<Vec<_>>();
             let entry = self
                 .bodies
                 .get_mut(target_body.dense)
                 .expect("split body must exist during commit");
-            entry.cluster = Some(RigidCluster {
-                root: component[0],
-                parts: component.clone(),
-                welds,
-            });
+            entry.cluster = Some(cluster);
         }
-        let part_body = components
-            .iter()
-            .enumerate()
-            .flat_map(|(component_index, component)| {
-                let target_body = if component_index == 0 {
-                    body
-                } else {
-                    new_bodies[component_index - 1]
-                };
-                component
-                    .iter()
-                    .copied()
-                    .map(move |part| (part, target_body))
-            })
-            .collect::<HashMap<_, _>>();
+        let target_body = |index: usize| {
+            if index == 0 {
+                body
+            } else {
+                new_bodies[index - 1]
+            }
+        };
         for entry in self.joints.iter_mut().map(|(_, entry)| entry) {
             if let JointTarget::Part(part) = entry.target_a
-                && let Some(&target_body) = part_body.get(&part)
+                && let Some(&index) = part_components.get(&part)
             {
-                entry.body_a = target_body;
+                entry.body_a = target_body(index);
             }
             if let JointTarget::Part(part) = entry.target_b
-                && let Some(&target_body) = part_body.get(&part)
+                && let Some(&index) = part_components.get(&part)
             {
-                entry.body_b = target_body;
+                entry.body_b = target_body(index);
             }
         }
         for (_, source) in self.force_sources.iter_mut() {
             if let ForceTarget::Part(part) = source.target
-                && let Some(&target_body) = part_body.get(&part)
+                && let Some(&index) = part_components.get(&part)
             {
-                source.body = target_body;
+                source.body = target_body(index);
             }
         }
-        let mut affected_bodies = Vec::with_capacity(new_bodies.len() + 1);
         affected_bodies.push(body);
         affected_bodies.extend(new_bodies.iter().copied());
         self.synchronize_cluster_physics_state(&affected_bodies);
-        let mut result = Vec::with_capacity(new_bodies.len() + 1);
-        result.push(body);
-        result.extend(new_bodies);
-        Ok(result)
+        Ok(affected_bodies)
     }
 
     /// Changes a part's mass while preserving the body's world-space velocity field.
