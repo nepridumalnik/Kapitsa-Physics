@@ -1274,7 +1274,7 @@ impl PreparedGeometry {
                             .try_reserve_exact(polygon.len())
                             .map_err(|_| GeometryError::AllocationFailed)?;
                         for point in &polygon {
-                            let distance = visibility::distance(coefficients, *point);
+                            let distance = visibility::distance(coefficients, *point)?;
                             distances.push(distance);
                         }
                         if !distances.iter().all(|d| d.is_finite()) {

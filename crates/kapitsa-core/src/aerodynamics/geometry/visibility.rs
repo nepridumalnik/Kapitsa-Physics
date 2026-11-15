@@ -114,7 +114,7 @@ fn normalize(values: [f64; 3]) -> Result<[f64; 3], GeometryError> {
     Ok(scaled)
 }
 
-pub(super) fn distance(values: [f64; 3], point: Vec3) -> f64 {
+pub(super) fn distance(values: [f64; 3], point: Vec3) -> Result<f64, GeometryError> {
     // Evaluate the barycentric form with compensated products and sums.
     // This reduces cancellation but does not establish an exact sign bound.
     let x = values[1] - values[0];
@@ -125,6 +125,9 @@ pub(super) fn distance(values: [f64; 3], point: Vec3) -> f64 {
     let y_error = (values[2] - (y - y_virtual)) - (values[0] + y_virtual);
     let xp = x * point.x;
     let yp = y * point.y;
+    if (x != 0.0 && point.x != 0.0 && xp == 0.0) || (y != 0.0 && point.y != 0.0 && yp == 0.0) {
+        return Err(GeometryError::PrecisionLoss);
+    }
     let xr = x.mul_add(point.x, -xp);
     let yr = y.mul_add(point.y, -yp);
     let sum = values[0] + xp;
@@ -133,7 +136,7 @@ pub(super) fn distance(values: [f64; 3], point: Vec3) -> f64 {
     let result = sum + yp;
     let v = result - sum;
     let residual = residual + ((sum - (result - v)) + (yp - v));
-    result + (residual + xr + yr + x_error * point.x + y_error * point.y)
+    finite(result + (residual + xr + yr + x_error * point.x + y_error * point.y))
 }
 
 impl Shadow {
@@ -234,11 +237,11 @@ impl Shadow {
 
     pub fn covers(&self, point: Vec3) -> Result<bool, GeometryError> {
         for plane in &self.planes[..3] {
-            if finite(distance(*plane, point))? < 0.0 {
+            if distance(*plane, point)? < 0.0 {
                 return Ok(false);
             }
         }
-        Ok(self.coplanar || finite(distance(self.planes[3], point))? > 0.0)
+        Ok(self.coplanar || distance(self.planes[3], point)? > 0.0)
     }
 }
 
@@ -339,6 +342,20 @@ mod tests {
     use crate::aerodynamics::geometry::GeometryOwner;
 
     #[test]
+    fn affine_distance_rejects_product_underflow() {
+        let smallest = f64::from_bits(1);
+        assert_eq!(
+            distance([0.0, smallest, 0.0], Vec3::X * 0.5),
+            Err(GeometryError::PrecisionLoss)
+        );
+        assert_eq!(
+            distance([0.0, 0.0, smallest], Vec3::Y * 0.5),
+            Err(GeometryError::PrecisionLoss)
+        );
+        assert_eq!(distance([0.0, smallest, 0.0], Vec3::X), Ok(smallest));
+    }
+
+    #[test]
     fn shadow_coverage_rejects_nonfinite_distance() {
         let shadow = Shadow {
             planes: [[f64::MAX, -f64::MAX, 0.0]; 4],
@@ -355,7 +372,7 @@ mod tests {
         // Exact affine value is 2 * offset.
         const OFFSET: f64 = 1.0 / ((1u64 << 55) as f64);
         let point = Vec3::new(0.5, OFFSET, 0.0);
-        assert_eq!(distance([-1.0, 1.0, 1.0], point), 2.0 * OFFSET);
+        assert_eq!(distance([-1.0, 1.0, 1.0], point), Ok(2.0 * OFFSET));
     }
 
     #[test]
@@ -363,8 +380,8 @@ mod tests {
         // At vertex 1 the exact barycentric value is values[1], even
         // when subtracting values[0] rounds away that small value.
         const SMALL: f64 = 1.0 / ((1u64 << 54) as f64);
-        assert_eq!(distance([1.0, SMALL, 0.0], Vec3::X), SMALL);
-        assert_eq!(distance([1.0, 0.0, SMALL], Vec3::Y), SMALL);
+        assert_eq!(distance([1.0, SMALL, 0.0], Vec3::X), Ok(SMALL));
+        assert_eq!(distance([1.0, 0.0, SMALL], Vec3::Y), Ok(SMALL));
     }
 
     #[test]
