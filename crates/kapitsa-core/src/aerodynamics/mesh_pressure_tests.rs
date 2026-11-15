@@ -19,6 +19,14 @@ fn flow() -> PressureFlow {
 }
 
 fn prepare(mesh: &TriangleMesh, direction: Vec3) -> PreparedSurfacePatches {
+    prepare_with_budget(mesh, direction, 100_000)
+}
+
+fn prepare_with_budget(
+    mesh: &TriangleMesh,
+    direction: Vec3,
+    budget: usize,
+) -> PreparedSurfacePatches {
     let instances = [GeometryInstance {
         mesh,
         local_transform: Transform::identity(),
@@ -32,12 +40,12 @@ fn prepare(mesh: &TriangleMesh, direction: Vec3) -> PreparedSurfacePatches {
             max_work: 10_000_000,
             open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
             weld_tolerance: None,
-            max_patch_work: 100_000,
+            max_patch_work: budget,
         },
     )
     .unwrap();
     geometry
-        .exposed_surface_patches(&instances, direction, 1e-6, 100_000)
+        .exposed_surface_patches(&instances, direction, 1e-6, budget)
         .unwrap()
 }
 
@@ -51,6 +59,49 @@ fn close(actual: Vec3, expected: Vec3) {
         (actual - expected).length() < 1e-8,
         "{actual:?} != {expected:?}"
     );
+}
+
+#[test]
+fn collider_sphere_and_cylinder_converge_to_newtonian_integrals() {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Cylinder, Shape, Sphere},
+    };
+    use std::f64::consts::PI;
+
+    // Cp = 2 cos²(theta): Cd = 1 for a sphere and 4/3 for a
+    // cross-flow cylinder, using frontal projected area as reference.
+    // These are model integrals, not experimental validation.
+    for (shape, area, expected_cd) in [
+        (Shape::Sphere(Sphere::new(1.0).unwrap()), PI, 1.0),
+        (
+            Shape::Cylinder(Cylinder::new(-Vec3::Z, Vec3::Z, 1.0).unwrap()),
+            4.0,
+            4.0 / 3.0,
+        ),
+    ] {
+        let collider = Collider::new(shape, Transform::identity());
+        let mut previous_error = f64::INFINITY;
+        for segments in [8, 16, 32] {
+            let mesh = collider_mesh(
+                [&collider],
+                ColliderTessellation::new(segments, segments / 2 + 1, 16_384).unwrap(),
+            )
+            .unwrap();
+            let load =
+                evaluate_prepared_mesh(&prepare_with_budget(&mesh, Vec3::X, 20_000_000), flow())
+                    .unwrap();
+            let cd = -load.force.x / (500_000.0 * area);
+            let error = (cd - expected_cd).abs();
+            assert!(
+                error < previous_error,
+                "segments={segments}, Cd={cd}, previous error={previous_error}"
+            );
+            previous_error = error;
+        }
+        assert!(previous_error < 0.03, "final error={previous_error}");
+    }
 }
 
 #[test]
