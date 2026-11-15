@@ -753,6 +753,76 @@ fn harris_subsonic_upstream_cutoff_boundaries() -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "shifted-grid phase diagnostic; run in release mode"]
+fn harris_subsonic_shifted_grid_phase() -> Result<(), String> {
+    // A uniform shift retains dx and the physical body, but necessarily moves
+    // both axial Dirichlet nodes and the nose phase; this is not a pure cutoff
+    // perturbation or a comparison at exactly identical axial boundaries.
+    const EXTENSION: f64 = 0.5;
+    const OUTER: f64 = 1.25;
+    const STATION: f64 = 0.9;
+    const CUTOFF: f64 = 36.0 / 38.240;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 100_000;
+    for intervals in [64_usize, 96] {
+        let dx = 1.0 / intervals as f64;
+        let nx = 2 * intervals + 1;
+        let nr = (OUTER / dx + 0.5).round() as usize;
+        let dr = OUTER / (nr as f64 - 0.5);
+        for shift in [0.0_f64, 0.5] {
+            let origin = -EXTENSION + shift * dx;
+            let source = (0..nx)
+                .map(|i| {
+                    let x = origin + i as f64 * dx;
+                    if (0.0..=1.0).contains(&x) {
+                        harris_geometry(x).2
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let mut grid = MixedGrid {
+                phi: vec![vec![0.0; nr]; nx],
+                axis_flux: source,
+                dx,
+                dr,
+                mach: 0.9,
+                gamma: 1.4,
+            };
+            let (iterations, residual) =
+                grid.iterate(TOLERANCE, MAX_ITERATIONS).map_err(|value| {
+                    format!("intervals={intervals} shift={shift}: residual={value}")
+                })?;
+            let index = (STATION - origin) / dx;
+            let i = index.floor() as usize;
+            let weight = index - i as f64;
+            assert!(origin + (i + 2) as f64 * dx < CUTOFF);
+            let (radius, slope, _) = harris_geometry(STATION);
+            let cp = grid
+                .surface_cp(i, radius, slope)
+                .zip(grid.surface_cp(i + 1, radius, slope))
+                .map(|(a, b)| (1.0 - weight) * a + weight * b)
+                .ok_or_else(|| format!("Cp unavailable: intervals={intervals} shift={shift}"))?;
+            let defect = interpolated_radial_derivative(&grid.phi[i], dr, radius)
+                .zip(interpolated_radial_derivative(&grid.phi[i + 1], dr, radius))
+                .map(|(a, b)| (1.0 - weight) * a + weight * b - slope)
+                .ok_or_else(|| {
+                    format!("surface derivative unavailable: intervals={intervals} shift={shift}")
+                })?;
+            let cutoff_index = (CUTOFF - origin) / dx;
+            println!(
+                "intervals={intervals} shift={shift:.1} dx={dx:.9} dr={dr:.9} x_min={origin:.9} x_max={:.9} cutoff_phase={:+.6} bracket=[{:.9},{:.9}] cp={cp:.9} defect={defect:+.9} iterations={iterations} residual={residual:.3e}",
+                origin + (nx - 1) as f64 * dx,
+                cutoff_index - cutoff_index.round(),
+                origin + i as f64 * dx,
+                origin + (i + 1) as f64 * dx
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "fixed-boundary cutoff phase diagnostic; run in release mode"]
 fn harris_subsonic_upstream_cutoff_phase() -> Result<(), String> {
     // Adjacent axial interval counts change both phase and spacing slightly,
