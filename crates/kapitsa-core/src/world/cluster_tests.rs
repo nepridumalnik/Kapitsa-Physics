@@ -1552,6 +1552,58 @@ fn invalid_merge_leaves_cluster_topology_unchanged() {
 }
 
 #[test]
+fn split_preparation_uses_staged_motion_without_mutating_world()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+    let root = world.enable_cluster(body)?;
+    let child = world.add_cluster_part(
+        root,
+        ClusterPartDesc {
+            local_transform: Transform::identity(),
+            mass,
+            colliders: Vec::new(),
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        },
+        WeldDesc {
+            frame_a: JointFrame::IDENTITY,
+            frame_b: JointFrame::IDENTITY,
+            strength: WeldStrength::Unbreakable,
+            stiffness: WeldStiffness {
+                linear: 1.0,
+                angular: 1.0,
+            },
+        },
+    )?;
+    let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+    let mut motion = world.body(body).ok_or("body")?.motion();
+    motion.set_linear_velocity(Vec3::X * 3.0)?;
+    let plan = world.prepare_weld_split_for_motion(body, &[weld], motion)?;
+    assert_eq!(
+        world.body(body).ok_or("body")?.state().linear_velocity(),
+        Vec3::ZERO
+    );
+    assert_eq!(world.part_body(child), Some(body));
+    assert!(world.weld(weld).is_some());
+    let bodies = world.commit_weld_split(plan)?;
+    assert_eq!(bodies.len(), 2);
+    for id in bodies {
+        assert_eq!(
+            world
+                .body(id)
+                .ok_or("split body")?
+                .state()
+                .linear_velocity(),
+            Vec3::X * 3.0
+        );
+    }
+    assert_eq!(world.validate_clusters(), Ok(()));
+    Ok(())
+}
+
+#[test]
 fn breaking_weld_splits_chain_and_rebinds_part_targets() {
     let mut world = PhysicsWorld::new();
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");

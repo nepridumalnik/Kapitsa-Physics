@@ -1180,6 +1180,20 @@ impl PhysicsWorld {
         body: BodyId,
         removed_welds: &[WeldId],
     ) -> Result<PreparedWeldSplit, ClusterError> {
+        let motion = self.body(body).ok_or(ClusterError::InvalidBodyId)?.motion();
+        self.prepare_weld_split_for_motion(body, removed_welds, motion)
+    }
+
+    /// Prepare from the motion to be committed, which may be a staged end-of-step
+    /// motion rather than the current one. The caller must supply motion for the
+    /// same body and must not mutate topology between preparation and commit.
+    #[allow(dead_code)]
+    fn prepare_weld_split_for_motion(
+        &self,
+        body: BodyId,
+        removed_welds: &[WeldId],
+        original: BodyMotion,
+    ) -> Result<PreparedWeldSplit, ClusterError> {
         let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
         let original_root = cluster.root();
         let removed_set = removed_welds.iter().copied().collect::<HashSet<_>>();
@@ -1243,7 +1257,6 @@ impl PhysicsWorld {
             .ok_or(ClusterError::InvalidTopology)?;
         components.swap(0, root_index);
 
-        let original = self.body(body).ok_or(ClusterError::InvalidBodyId)?.motion();
         let mut prepared_bodies = Vec::new();
         prepared_bodies
             .try_reserve(components.len())
