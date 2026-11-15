@@ -801,6 +801,39 @@ fn partially_clipped_patches_respect_exact_budget_boundary() {
 }
 
 #[test]
+fn multiple_shadow_budget_exhaustion_never_returns_partial_patches() {
+    const MAX_WORK: usize = 100_000;
+    const EPSILON: f64 = 0.01;
+    let plate = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]]).unwrap();
+    let instances = [
+        instance(&plate, Vec3::ZERO),
+        instance(&plate, Vec3::X + Vec3::Y * 0.25),
+        instance(&plate, Vec3::X * 2.0 + Vec3::Z * 0.25),
+    ];
+    let geometry = surface_geometry(&instances);
+    let evaluate = |budget| geometry.exposed_surface_patches(&instances, Vec3::X, EPSILON, budget);
+    let expected = evaluate(MAX_WORK).unwrap();
+    assert!(expected.len() > instances.len());
+    let (mut low, mut high) = (0, MAX_WORK);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        match evaluate(middle) {
+            Ok(result) => {
+                assert_eq!(result.as_slice(), expected.as_slice());
+                high = middle;
+            }
+            Err(GeometryError::WorkBudgetExceeded) => low = middle,
+            Err(error) => panic!("unexpected error: {error:?}"),
+        }
+    }
+    assert!(matches!(
+        evaluate(low),
+        Err(GeometryError::WorkBudgetExceeded)
+    ));
+    assert_eq!(evaluate(high).unwrap().as_slice(), expected.as_slice());
+}
+
+#[test]
 fn translated_rotated_source_instances_preserve_diagonal_visibility() {
     let mesh = cube();
     let base = [instance(&mesh, Vec3::ZERO)];
