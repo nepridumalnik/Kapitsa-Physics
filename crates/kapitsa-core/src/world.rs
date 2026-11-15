@@ -666,9 +666,23 @@ fn swept_bounds_for_trajectory(
     crate::collision::swept_bounds_motion(local_bounds, &motion)
 }
 
+/// Controls whether explicitly supported approximations may be used during a step.
+///
+/// No automatic fallback models are currently available; unsupported regimes
+/// and critical errors remain errors under both policies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ErrorPolicy {
+    /// Allow documented, safe fallback models when available.
+    #[default]
+    Realtime,
+    /// Reject unsupported regimes without automatic approximations.
+    Strict,
+}
+
 /// Owns rigid bodies and colliders and assigns IDs scoped to this world instance.
 pub struct PhysicsWorld {
     world_id: u64,
+    error_policy: ErrorPolicy,
     body_revision: u64,
     automatic_weld_failure: Option<(f64, f64)>,
     #[cfg(test)]
@@ -770,6 +784,16 @@ impl BodyStep {
 }
 
 impl PhysicsWorld {
+    /// Returns the policy used for full physics steps.
+    pub fn error_policy(&self) -> ErrorPolicy {
+        self.error_policy
+    }
+
+    /// Selects the policy used for subsequent steps.
+    pub fn set_error_policy(&mut self, policy: ErrorPolicy) {
+        self.error_policy = policy;
+    }
+
     /// Enable automatic weld failure for certified full steps using absolute
     /// equilibrium tolerances in N and N·m. `None` disables it (the default).
     /// Unsupported load configurations make the full step fail before commit.
@@ -1259,6 +1283,7 @@ impl PhysicsWorld {
     pub const fn new() -> Self {
         Self {
             world_id: 0,
+            error_policy: ErrorPolicy::Realtime,
             body_revision: 0,
             automatic_weld_failure: None,
             #[cfg(test)]

@@ -44,6 +44,7 @@ impl<E: StepExecutor> StepEngine<E> {
         mut executor: E,
     ) -> Self {
         executor.set_parallelism(1);
+        world.set_error_policy(config.error_policy);
         if let Some(gravity) = config.central_gravity {
             world.set_central_gravity(Some(gravity));
         }
@@ -264,6 +265,27 @@ mod tests {
         SimulationConfig,
         executor::{RayonExecutor, RayonPool},
     };
+
+    #[test]
+    fn error_policy_configures_world() -> Result<(), Box<dyn std::error::Error>> {
+        use kapitsa_core::{execution::SequentialExecutor, world::ErrorPolicy};
+
+        let mut world = PhysicsWorld::new();
+        assert_eq!(world.error_policy(), ErrorPolicy::Realtime);
+        world.set_error_policy(ErrorPolicy::Strict);
+        assert_eq!(world.error_policy(), ErrorPolicy::Strict);
+        let config = SimulationConfig {
+            error_policy: ErrorPolicy::Strict,
+            ..SimulationConfig::default()
+        };
+        let engine = StepEngine::new(world, config, SequentialExecutor)?;
+        assert_eq!(engine.world().error_policy(), ErrorPolicy::Strict);
+        assert_eq!(
+            SimulationConfig::default().error_policy,
+            ErrorPolicy::Realtime
+        );
+        Ok(())
+    }
 
     struct CountingExecutor {
         inner: RayonExecutor,

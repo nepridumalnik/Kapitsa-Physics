@@ -10,7 +10,7 @@ use std::{
 use kapitsa_core::{
     aerodynamics::Atmosphere,
     collision::CollisionError,
-    world::{PhysicsWorld, StepError},
+    world::{ErrorPolicy, PhysicsWorld, StepError},
 };
 use tokio::{
     runtime::Handle,
@@ -167,6 +167,12 @@ pub struct SimulationBuilder {
 }
 
 impl SimulationBuilder {
+    /// Selects the error policy for the simulation's physics world.
+    pub fn error_policy(mut self, policy: ErrorPolicy) -> Self {
+        self.config.error_policy = policy;
+        self
+    }
+
     /// Replaces the simulation settings while preserving atmosphere and sound speed.
     /// The configuration is validated when the simulation is spawned.
     pub fn config(mut self, config: SimulationConfig) -> Self {

@@ -4,13 +4,15 @@ use crate::runtime::constants::{
 };
 use std::time::Duration;
 
-use kapitsa_core::gravity::CentralGravity;
+use kapitsa_core::{gravity::CentralGravity, world::ErrorPolicy};
 
 use super::planner::{WorkerConfig, WorkerConfigError};
 
 /// Shared timestep and batching settings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimulationConfig {
+    /// Policy for explicitly supported approximations during physics steps.
+    pub error_policy: ErrorPolicy,
     pub tick_rate: u32,
     pub max_catch_up_steps: usize,
     pub time_step_policy: TimeStepPolicy,
@@ -23,6 +25,7 @@ pub struct SimulationConfig {
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
+            error_policy: ErrorPolicy::default(),
             tick_rate: DEFAULT_TICK_RATE,
             max_catch_up_steps: DEFAULT_MAX_CATCH_UP_STEPS,
             time_step_policy: TimeStepPolicy::Fixed,
