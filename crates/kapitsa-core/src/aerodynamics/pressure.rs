@@ -751,6 +751,35 @@ impl OwnerPressureWorkspace {
         &self.published
     }
 
+    /// Staged owner wrenches, available only after a successful preparation.
+    /// These have not yet been published and must be discarded on step failure.
+    pub fn staged(&self) -> Option<&[(super::geometry::GeometryOwner, PressureWrench)]> {
+        self.prepared.then_some(&self.scratch)
+    }
+
+    /// Sums staged owner wrenches about their shared COM, rejecting overflow.
+    /// `None` means that there is no successfully staged result.
+    pub fn staged_total(&self) -> Result<Option<PressureWrench>, PressureError> {
+        let Some(staged) = self.staged() else {
+            return Ok(None);
+        };
+        let mut total = PressureWrench {
+            force: Vec3::ZERO,
+            moment: Vec3::ZERO,
+        };
+        for (_, wrench) in staged {
+            total.force = total
+                .force
+                .checked_add(wrench.force)
+                .ok_or(PressureError::ArithmeticOverflow)?;
+            total.moment = total
+                .moment
+                .checked_add(wrench.moment)
+                .ok_or(PressureError::ArithmeticOverflow)?;
+        }
+        Ok(Some(total))
+    }
+
     /// Evaluates every patch once; unconfigured owners are rejected.
     pub fn evaluate(
         &mut self,
