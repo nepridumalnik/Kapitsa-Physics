@@ -278,6 +278,40 @@ fn part_simple_surfaces_share_body_level_drag_limit() -> Result<(), Box<dyn std:
             let state = world.body(id).ok_or("body")?.state();
             assert!(state.linear_velocity().length() < 1e-12);
             assert!(state.angular_velocity().length() < 1e-12);
+            let snapshot = world.simple_surface_corrections().to_vec();
+            assert_eq!(snapshot.len(), 1);
+            let correction = snapshot[0];
+            assert_eq!(correction.body, id);
+            let expected_raw = if distributed { -120.0 } else { -60.0 };
+            assert!((correction.raw_drag.force.x - expected_raw).abs() < 1e-12);
+            assert!((correction.applied_drag.force.x + 20.0).abs() < 1e-12);
+            assert_eq!(correction.raw_drag.moment, Vec3::ZERO);
+            assert_eq!(correction.applied_drag.moment, Vec3::ZERO);
+            assert_eq!(correction.raw_lift.force, Vec3::ZERO);
+            assert_eq!(correction.applied_lift.force, Vec3::ZERO);
+            let center = world
+                .body(id)
+                .ok_or("body")?
+                .motion()
+                .world_center_of_mass()?
+                .ok_or("center")?;
+            let bad = world.add_gravity(crate::gravity::CentralGravity::new(center, 1.0)?)?;
+            let failed = if sharded {
+                world.step_with_shards(
+                    1.0,
+                    &mut [Vec::new(), Vec::new()],
+                    &super::tests::ScopedThreadExecutor,
+                    2,
+                )
+            } else {
+                world.step(1.0)
+            };
+            assert!(failed.is_err());
+            assert_eq!(world.simple_surface_corrections(), snapshot.as_slice());
+            world.remove_gravity(bad).ok_or("gravity")?;
+            world.set_atmosphere(crate::aerodynamics::Atmosphere::Vacuum);
+            world.step(1.0)?;
+            assert!(world.simple_surface_corrections().is_empty());
         }
     }
     Ok(())

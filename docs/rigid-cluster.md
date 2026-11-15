@@ -103,10 +103,11 @@ wrench as the force on any weld.
 The simple `AerodynamicSurface` path applies a body-level timestep-dependent
 drag limit and a coupled lift correction after summing surfaces. The raw force
 from a particular surface is therefore not necessarily its applied force.
-Attribution of the shared correction to parts is not currently defined; a
-future load ledger must represent that correction explicitly or adopt and
-document a physically justified allocation policy. It must not silently use
-the uncorrected per-surface values as weld loads.
+`PhysicsWorld::simple_surface_corrections` publishes the raw and applied
+body-level drag and lift wrenches after a successful full step. Their difference
+is not attributed to any part. A future weld ledger must adopt and document a
+physically justified allocation policy before using these corrected loads; it
+must not silently use uncorrected per-surface values as weld loads.
 
 For separate rigid bodies joined by a breakable `Joint`, the existing velocity
 constraint solver evaluates its reaction from accumulated impulses, including
