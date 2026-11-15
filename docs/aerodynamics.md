@@ -505,6 +505,21 @@ measurement errors dependent on Mach and Reynolds number. These data are a
 candidate benchmark, not evidence of validation of the present models; any
 digitization must record figure, Reynolds number and uncertainty explicitly.
 
+For an additional transonic comparison, Usry and Wallace,
+[NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
+forebody axial-force coefficients for a fin-stabilized supercritical body of
+revolution. The reference area is based on maximum diameter; the base drag is
+excluded, while the fins contribute. Flight data span Mach 0.85–1.05 and
+length-based Reynolds number 11.5–19.4 million. The report gives approximately
+0.111 below Mach 0.96 and, in table IV, 0.191 at Mach 1 with standard deviation
+0.002. At Mach 1 it gives Reynolds number 16.29 million (standard deviation
+0.06 million) and a nonzero flight trim angle. Figure 12 contains the remaining
+curve; these two values alone do not determine its shape. Wind-tunnel values
+differ, including an approximately 0.103 low-Mach level; tunnel-wall and sting
+effects, Reynolds number and transition conditions complicate comparisons.
+This is neither a Sears–Haack body nor a sphere, and using its values as table
+knots would be fitting input data, not independent model validation.
+
 ### Explicit slender-body wave drag
 
 `HullSection::with_wave_drag` accepts equally spaced samples of `dA/dx` in
