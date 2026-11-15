@@ -20,6 +20,7 @@ pub enum PressureError {
     InvalidSoundSpeed,
     InvalidCoefficient,
     InvalidBaseOrientation,
+    BaseNotFullyVisible,
     UnsupportedMach,
     ArithmeticOverflow,
 }
@@ -29,6 +30,42 @@ impl fmt::Display for PressureError {
     }
 }
 impl std::error::Error for PressureError {}
+
+/// Verifies that each selected source triangle appears unchanged exactly once
+/// in an exposure result. The caller must prepare `visible` from the complete
+/// current Mesh/Colliders geometry, in the direction from the base towards the
+/// region being checked, and repeat this check whenever geometry or direction
+/// changes. This is a geometric line-of-sight check, not a wake model.
+///
+/// Partial fragments, absent faces, duplicated selections and multiple matching
+/// output faces are rejected. Coincident input faces may already be deduplicated
+/// by geometry preparation and cannot be distinguished by this check. Exact vertex equality is deliberate: rounding or clipping may
+/// conservatively reject a visible face rather than certify a blocked one.
+pub fn verify_full_base_visibility(
+    selected: &[[Vec3; 3]],
+    visible: &PreparedSurfacePatches,
+) -> Result<(), PressureError> {
+    fn same_triangle(a: &[Vec3; 3], b: &[Vec3; 3]) -> bool {
+        (0..3).any(|shift| {
+            (0..3).all(|i| a[i] == b[(i + shift) % 3])
+                || (0..3).all(|i| a[i] == b[(shift + 3 - i) % 3])
+        })
+    }
+    for (index, triangle) in selected.iter().enumerate() {
+        if selected[..index]
+            .iter()
+            .any(|other| same_triangle(triangle, other))
+            || visible
+                .iter()
+                .filter(|patch| same_triangle(triangle, &patch.vertices))
+                .count()
+                != 1
+        {
+            return Err(PressureError::BaseNotFullyVisible);
+        }
+    }
+    Ok(())
+}
 
 /// Physical patch in a stable body-local frame, independent of center of mass.
 #[derive(Clone, Copy, Debug, PartialEq)]

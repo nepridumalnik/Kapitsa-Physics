@@ -487,6 +487,75 @@ fn regression_half_shield_and_coplanar_overlap() -> Result<(), Box<dyn std::erro
     close(wrench.moment, Vec3::new(0.0, -250_000.0, 375_000.0));
     Ok(())
 }
+
+#[test]
+fn full_base_visibility_rejects_full_and_partial_blockers_for_mesh_and_colliders()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Shape, Triangle},
+    };
+    let vertices = [Vec3::ZERO, Vec3::Y, Vec3::Z];
+    for collider_mode in [false, true] {
+        let mesh = if collider_mode {
+            let collider = Collider::new(
+                Shape::Triangle(Triangle::new(vertices[0], vertices[1], vertices[2])?),
+                Transform::identity(),
+            );
+            collider_mesh([&collider], ColliderTessellation::default())?
+        } else {
+            TriangleMesh::new(vertices.to_vec(), vec![[0, 1, 2]])?
+        };
+        let selected = [mesh.triangles()[0].map(|i| mesh.vertices()[i])];
+        let visible = prepare(&mesh, Vec3::X);
+        assert_eq!(
+            verify_full_base_visibility(&selected, &visible),
+            Ok(()),
+            "selected={selected:?}, visible={:?}",
+            visible.as_slice()
+        );
+        assert_eq!(
+            verify_full_base_visibility(&[selected[0], selected[0]], &visible),
+            Err(PressureError::BaseNotFullyVisible)
+        );
+        for width in [0.5, 1.0] {
+            let shield = TriangleMesh::new(
+                vec![Vec3::X, Vec3::X + Vec3::Y * width, Vec3::X + Vec3::Z],
+                vec![[0, 2, 1]],
+            )?;
+            let instances = [
+                GeometryInstance {
+                    mesh: &mesh,
+                    local_transform: Transform::identity(),
+                    owner: GeometryOwner::Body,
+                },
+                GeometryInstance {
+                    mesh: &shield,
+                    local_transform: Transform::identity(),
+                    owner: GeometryOwner::Body,
+                },
+            ];
+            let geometry = PreparedGeometry::prepare(
+                &instances,
+                GeometryConfig {
+                    cell_size: 0.25,
+                    max_cells: 100_000,
+                    max_work: 10_000_000,
+                    open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+                    weld_tolerance: None,
+                    max_patch_work: 100_000,
+                },
+            )?;
+            let visible = geometry.exposed_surface_patches(&instances, Vec3::X, 1e-6, 100_000)?;
+            assert_eq!(
+                verify_full_base_visibility(&selected, &visible),
+                Err(PressureError::BaseNotFullyVisible)
+            );
+        }
+    }
+    Ok(())
+}
 #[test]
 fn regression_coplanar_overlap_different_triangulation() -> Result<(), Box<dyn std::error::Error>> {
     let first = TriangleMesh::new(
