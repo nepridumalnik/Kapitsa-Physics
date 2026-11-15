@@ -179,10 +179,11 @@ errors still fail the step. Currently certification requires a dynamic cluster w
 accumulated body forces, only part-targeted persistent force sources,
 certified part-owned aerodynamic loads, and gravity sampled uniformly at the cluster center of mass, with
 no joints or chunks in the world. Gravity gradients across the cluster are not
-modeled. A cluster may have colliders if the entire collision step has no
-discrete or solved CCD contact manifolds and no CCD clipping. This conservative
-world-wide restriction also rejects unrelated contacts; it does not infer absence
-of contact from an empty impulse log. Contact and CCD forces remain unsupported.
+modeled. A cluster may have colliders if it has no discrete or solved CCD
+contact manifolds and no CCD clipping during the step. Contacts on unrelated
+bodies do not invalidate it. If manifold ownership cannot be resolved, all
+cluster certificates are rejected. Absence of contact is not inferred from an
+empty impulse log. Contact and CCD forces remain unsupported.
 Low-level shard commits do not perform automatic weld failure.
 
 The separate diagnostic `part_hull_weld_reactions` also accepts part-owned

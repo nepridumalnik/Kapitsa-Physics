@@ -684,6 +684,18 @@ fn collider_cluster_fractures_in_contact_free_step() -> Result<(), Box<dyn std::
         let mut world = PhysicsWorld::new();
         world.set_error_policy(super::ErrorPolicy::Strict);
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let remote_pose = Transform::new(Vec3::X * 20.0, Quat::IDENTITY)?;
+        let remote_static = world.add_body(RigidBody::new_static(remote_pose))?;
+        let remote_dynamic = world.add_body(RigidBody::new_dynamic(remote_pose, mass)?)?;
+        for remote in [remote_static, remote_dynamic] {
+            world.add_collider(
+                remote,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                    Transform::identity(),
+                ),
+            )?;
+        }
         let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
         let root = world.enable_cluster(body)?;
         world.add_part_collider(
@@ -731,6 +743,9 @@ fn collider_cluster_fractures_in_contact_free_step() -> Result<(), Box<dyn std::
             world.step(0.01)?;
         }
         assert!(world.weld(weld).is_none());
+        assert!(
+            !world.contact_impulses().is_empty() || world.contact_impulses_omitted_points() > 0
+        );
         assert_eq!(world.step_diagnostics().weld_incomplete_load_clusters, 0);
         assert_eq!(world.validate_clusters(), Ok(()));
     }

@@ -323,6 +323,16 @@ pub struct ClusterLoadState {
     pub(crate) part_geometry: bool,
 }
 
+impl ClusterLoadState {
+    fn invalidate_collision_loads(&mut self) {
+        self.force_free_certified = false;
+        self.part_sources_certified = false;
+        self.part_hull_certified = false;
+        self.part_wings_certified = false;
+        self.part_surfaces_certified = false;
+    }
+}
+
 #[derive(Clone, Copy)]
 enum WeldLoadMode {
     Sources,
@@ -763,6 +773,7 @@ pub struct PhysicsWorld {
     contact_ccd_clipped_pending: bool,
     cluster_load_states_published: Vec<ClusterLoadState>,
     cluster_load_states_pending: Vec<ClusterLoadState>,
+    cluster_load_indices: Option<HashMap<BodyId, usize>>,
     cluster_load_parts_published: Vec<ClusterLoadPart>,
     cluster_load_parts_pending: Vec<ClusterLoadPart>,
     cluster_load_welds_published: Vec<ClusterLoadWeld>,
@@ -1423,6 +1434,7 @@ impl PhysicsWorld {
             contact_ccd_clipped_pending: false,
             cluster_load_states_published: Vec::new(),
             cluster_load_states_pending: Vec::new(),
+            cluster_load_indices: None,
             cluster_load_parts_published: Vec::new(),
             cluster_load_parts_pending: Vec::new(),
             cluster_load_welds_published: Vec::new(),
@@ -2763,25 +2775,53 @@ impl PhysicsWorld {
             .pending_step_diagnostics
             .collision_ccd_limit_clipped_bodies
             != 0;
-        // Collider-bearing clusters are certified only if the whole collision
-        // step was contact-free. A manifold can alter motion even when no
-        // velocity impulse was recorded; CCD clipping also changes motion.
-        if self.contact_ccd_clipped_pending
-            || !context.ccd_solved_manifolds.is_empty()
-            || !context.manifolds.is_empty()
+        // A manifold can change motion without a recorded velocity impulse.
+        // Mark its owners and every clipped CCD body, independently of the
+        // impulse snapshot. Unknown ownership conservatively invalidates all.
+        let indices = self.cluster_load_indices.get_or_insert_with(HashMap::new);
+        indices.clear();
+        indices
+            .try_reserve(self.cluster_load_states_pending.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for (index, state) in self.cluster_load_states_pending.iter().enumerate() {
+            indices.insert(state.body, index);
+        }
+        let mut unknown = context.ccd_clipped_bodies.len() != context.predicted_states.len()
+            && !context.ccd_clipped_bodies.is_empty();
+        for (clipped, (body, _)) in context
+            .ccd_clipped_bodies
+            .iter()
+            .zip(&context.predicted_states)
         {
-            for state in &mut self.cluster_load_states_pending {
-                if self
-                    .bodies
-                    .get(state.body.dense)
-                    .is_some_and(|entry| entry.first_collider.is_some())
-                {
-                    state.force_free_certified = false;
-                    state.part_sources_certified = false;
-                    state.part_hull_certified = false;
-                    state.part_wings_certified = false;
-                    state.part_surfaces_certified = false;
+            if *clipped {
+                if let Some(&index) = indices.get(body) {
+                    self.cluster_load_states_pending[index].invalidate_collision_loads();
                 }
+            }
+        }
+        for manifold in context
+            .ccd_solved_manifolds
+            .iter()
+            .chain(&context.manifolds)
+        {
+            for collider in [manifold.pair.a, manifold.pair.b] {
+                if let Some(body) = self
+                    .colliders
+                    .get(collider.dense)
+                    .filter(|_| collider.world == self.world_id)
+                    .map(|entry| entry.body)
+                {
+                    if let Some(&index) = indices.get(&body) {
+                        self.cluster_load_states_pending[index].invalidate_collision_loads();
+                    }
+                } else {
+                    unknown = true;
+                }
+            }
+        }
+        if unknown {
+            for state in &mut self.cluster_load_states_pending {
+                state.invalidate_collision_loads();
             }
         }
         let count = context
