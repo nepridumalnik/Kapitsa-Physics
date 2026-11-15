@@ -18,6 +18,7 @@ pub enum PressureError {
     InvalidPatch,
     InvalidMotion,
     InvalidSoundSpeed,
+    InvalidCoefficient,
     UnsupportedMach,
     ArithmeticOverflow,
 }
@@ -54,6 +55,38 @@ pub struct PressureFlow {
     pub angular_velocity: Vec3,
 }
 
+/// Caller-supplied constant base pressure coefficient and inclusive Mach domain.
+///
+/// `cp` is excess pressure relative to freestream divided by dynamic pressure;
+/// it must be nonpositive. This is not a wake model or a surface classifier:
+/// the caller must select actual exposed base patches and provide data suitable
+/// for the geometry and flow, including Reynolds number and incidence.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BasePressure {
+    cp_magnitude: f64,
+    min_mach: f64,
+    max_mach: f64,
+}
+
+impl BasePressure {
+    pub fn new(cp: f64, min_mach: f64, max_mach: f64) -> Result<Self, PressureError> {
+        if !cp.is_finite()
+            || cp > 0.0
+            || !min_mach.is_finite()
+            || min_mach < 0.0
+            || !max_mach.is_finite()
+            || max_mach < min_mach
+        {
+            return Err(PressureError::InvalidCoefficient);
+        }
+        Ok(Self {
+            cp_magnitude: -cp,
+            min_mach,
+            max_mach,
+        })
+    }
+}
+
 impl PressurePatch {
     pub fn new(center: Vec3, outward_normal: Vec3, area: f64) -> Result<Self, PressureError> {
         if !center.is_finite() || !area.is_finite() || area < 0.0 {
@@ -83,6 +116,25 @@ impl PressurePatch {
     /// COM is body-local; velocities, force and moment are world-space.
     /// No allocation, geometry preparation or body mutation occurs here.
     pub fn evaluate(&self, flow: PressureFlow) -> Result<PressureWrench, PressureError> {
+        self.evaluate_inner(flow, None)
+    }
+
+    /// Applies a caller-supplied constant base Cp to this explicitly selected
+    /// physical patch. Force acts outward for negative Cp. No automatic base
+    /// detection, shielding, or wake interaction is performed.
+    pub fn evaluate_base(
+        &self,
+        flow: PressureFlow,
+        base: BasePressure,
+    ) -> Result<PressureWrench, PressureError> {
+        self.evaluate_inner(flow, Some(base))
+    }
+
+    fn evaluate_inner(
+        &self,
+        flow: PressureFlow,
+        base: Option<BasePressure>,
+    ) -> Result<PressureWrench, PressureError> {
         if !flow.center_of_mass.is_finite()
             || !flow.linear_velocity.is_finite()
             || !flow.angular_velocity.is_finite()
@@ -123,8 +175,25 @@ impl PressurePatch {
         if !mach.is_finite() {
             return Err(overflow);
         }
-        if mach < 5.0 {
+        if base.map_or(mach < 5.0, |b| mach < b.min_mach || mach > b.max_mach) {
             return Err(PressureError::UnsupportedMach);
+        }
+        if let Some(base) = base {
+            let magnitude = super::hull::scaled_product(
+                &[
+                    0.5,
+                    flow.atmosphere.density(),
+                    speed,
+                    speed,
+                    base.cp_magnitude,
+                    self.area,
+                ],
+                1.0,
+            )
+            .map_err(|_| overflow)?;
+            let force = normal.checked_mul_scalar(magnitude).ok_or(overflow)?;
+            let moment = arm.checked_cross(force).ok_or(overflow)?;
+            return Ok(PressureWrench { force, moment });
         }
         // `relative` is the body velocity through the fluid, pointing from the
         // oncoming fluid toward the body.  Windward patches have outward normals
@@ -175,10 +244,31 @@ pub fn evaluate_prepared_mesh(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
 ) -> Result<PressureWrench, PressureError> {
+    evaluate_prepared(patches, flow, None)
+}
+
+/// Applies the supplied base Cp to every explicitly selected prepared patch.
+/// The set must represent actual exposed base surfaces, not windward impact
+/// patches; this function does not determine which surfaces are in a wake.
+/// It is independent of whether the patches originated from a mesh or collider.
+pub fn evaluate_prepared_base(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+    base: BasePressure,
+) -> Result<PressureWrench, PressureError> {
+    evaluate_prepared(patches, flow, Some(base))
+}
+
+fn evaluate_prepared(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+    base: Option<BasePressure>,
+) -> Result<PressureWrench, PressureError> {
     // Validate even an empty set, using the same rules as patch evaluation.
     let mut total = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
     for patch in patches.iter() {
-        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
+        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?
+            .evaluate_inner(flow, base)?;
         total.force = total
             .force
             .checked_add(load.force)

@@ -105,6 +105,37 @@ fn collider_sphere_and_cylinder_converge_to_newtonian_integrals() {
 }
 
 #[test]
+fn collider_cylinder_explicit_base_pressure_matches_polygon_area() {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Cylinder, Shape},
+    };
+    let segments = 16;
+    let collider = Collider::new(
+        Shape::Cylinder(Cylinder::new(-Vec3::X, Vec3::X, 1.0).unwrap()),
+        Transform::identity(),
+    );
+    let mesh = collider_mesh(
+        [&collider],
+        ColliderTessellation::new(segments, 8, 1000).unwrap(),
+    )
+    .unwrap();
+    // The aft-facing cap is selected explicitly by reversing the exposure direction.
+    // This works for this isolated convex cylinder, not arbitrary wake geometry.
+    let patches = prepare_with_budget(&mesh, -Vec3::X, 1_000_000);
+    let result = evaluate_prepared_base(
+        &patches,
+        flow(),
+        BasePressure::new(-0.4, 5.0, 10.0).unwrap(),
+    )
+    .unwrap();
+    let polygon_area = segments as f64 * (std::f64::consts::TAU / segments as f64).sin() / 2.0;
+    assert!((result.force.x + 500_000.0 * 0.4 * polygon_area).abs() < 1e-7);
+    assert!(result.moment.length() < 1e-7);
+}
+
+#[test]
 fn prepared_cube_has_opposing_drag_and_symmetric_com_moment() {
     let mesh = TriangleMesh::new(
         vec![

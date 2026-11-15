@@ -13,6 +13,69 @@ fn flow() -> PressureFlow {
 }
 
 #[test]
+fn explicit_base_pressure_has_correct_force_moment_and_domain() {
+    let base = BasePressure::new(-0.4, 5.0, 10.0).unwrap();
+    let patch = PressurePatch::new(Vec3::Y, -Vec3::X, 2.0).unwrap();
+    let load = patch.evaluate_base(flow(), base).unwrap();
+    assert_eq!(load.force, -Vec3::X * 400_000.0);
+    assert_eq!(load.moment, Vec3::Z * 400_000.0);
+    assert!(
+        patch
+            .evaluate_base(
+                PressureFlow {
+                    linear_velocity: Vec3::X * 500.0,
+                    ..flow()
+                },
+                base
+            )
+            .is_ok()
+    );
+    assert_eq!(
+        patch.evaluate_base(
+            PressureFlow {
+                linear_velocity: Vec3::X * 499.0,
+                ..flow()
+            },
+            base
+        ),
+        Err(PressureError::UnsupportedMach)
+    );
+    assert_eq!(
+        patch.evaluate_base(
+            PressureFlow {
+                linear_velocity: Vec3::X * 1001.0,
+                ..flow()
+            },
+            base
+        ),
+        Err(PressureError::UnsupportedMach)
+    );
+    assert_eq!(
+        patch
+            .evaluate_base(flow(), BasePressure::new(0.0, 0.0, 20.0).unwrap())
+            .unwrap()
+            .force,
+        Vec3::ZERO
+    );
+}
+
+#[test]
+fn base_pressure_rejects_invalid_coefficients_and_domains() {
+    for (cp, min, max) in [
+        (0.1, 0.0, 1.0),
+        (f64::NAN, 0.0, 1.0),
+        (-0.1, -1.0, 1.0),
+        (-0.1, 2.0, 1.0),
+        (-0.1, 0.0, f64::INFINITY),
+    ] {
+        assert_eq!(
+            BasePressure::new(cp, min, max),
+            Err(PressureError::InvalidCoefficient)
+        );
+    }
+}
+
+#[test]
 fn normal_plate_matches_analytic_pressure_and_offset_moment() {
     let p = PressurePatch::new(Vec3::Y, Vec3::X, 2.0).unwrap();
     let w = p.evaluate(flow()).unwrap();
