@@ -179,6 +179,7 @@ impl PreparedGeometryCache {
             return false;
         }
         self.cached = Some(prepared);
+        self.wave = None;
         true
     }
 
@@ -388,6 +389,36 @@ mod tests {
         let fresh = cache.wave.as_ref().ok_or("wave cache")?;
         assert!(!Arc::ptr_eq(&fresh.incarnation, &identity));
         assert_ne!(fresh.factor, factor);
+        Ok(())
+    }
+
+    #[test]
+    fn publishing_geometry_clears_derived_wave_even_for_same_ticket()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::hull::HullSection;
+        let mut cache = PreparedGeometryCache::default();
+        let identity = key();
+        let original = mesh();
+        let changed = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y * 2.0], vec![[0, 1, 2]])?;
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?;
+        cache.prepare(identity, &original, config())?;
+        cache.configure_voxel_wave_drag(section.clone(), 0, 1)?;
+        let old_factor = cache.wave.as_ref().ok_or("wave cache")?.factor;
+        let replacement = cache.request(identity, config()).prepare(&changed)?;
+        assert!(cache.publish(replacement));
+        assert!(cache.wave.is_none());
+        cache.configure_voxel_wave_drag(section, 0, 1)?;
+        assert_ne!(cache.wave.as_ref().ok_or("wave cache")?.factor, old_factor);
         Ok(())
     }
 
