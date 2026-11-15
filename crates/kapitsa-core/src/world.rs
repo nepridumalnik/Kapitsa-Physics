@@ -560,6 +560,51 @@ impl PhysicsWorld {
         self.mesh_sound_speed
     }
 
+    /// Selects triangles from one attached collider's current tessellation.
+    /// Indices use `collider_mesh([collider], body's tessellation)` ordering.
+    /// The caller must establish outward winding, full exposure and base/wake
+    /// applicability; no overlap or shielding check is performed. Replacing or
+    /// mutating colliders or tessellation clears the resulting configuration.
+    /// Errors leave the previous selection unchanged.
+    pub fn set_collider_base_triangles(
+        &mut self,
+        body: BodyId,
+        collider: ColliderId,
+        indices: &[usize],
+        base: crate::aerodynamics::pressure::BasePressure,
+    ) -> Result<(), crate::aerodynamics::AerodynamicsError> {
+        use crate::aerodynamics::{Aerodynamics, AerodynamicsError};
+        if body.world != self.world_id || collider.world != self.world_id {
+            return Err(AerodynamicsError::UnsupportedModel);
+        }
+        let entry = self
+            .bodies
+            .get(body.dense)
+            .ok_or(AerodynamicsError::UnsupportedModel)?;
+        if entry.cluster.is_some() || !matches!(entry.body.aerodynamics(), Aerodynamics::Colliders)
+        {
+            return Err(AerodynamicsError::UnsupportedModel);
+        }
+        let source = self
+            .colliders
+            .get(collider.dense)
+            .filter(|entry| entry.body == body && entry.chunk.is_none())
+            .ok_or(AerodynamicsError::UnsupportedModel)?;
+        let mesh = crate::aerodynamics::colliders::collider_mesh(
+            [&source.collider],
+            entry.collider_tessellation,
+        )?;
+        let patches = RigidBody::base_triangles_from_mesh(&mesh, indices, base)
+            .map_err(AerodynamicsError::Pressure)?;
+        self.bodies
+            .get_mut(body.dense)
+            .ok_or(AerodynamicsError::UnsupportedModel)?
+            .body
+            .set_base_pressure_patches(patches);
+        self.body_revision = self.body_revision.wrapping_add(1);
+        Ok(())
+    }
+
     pub fn aerodynamics(&self, id: BodyId) -> Option<&crate::aerodynamics::Aerodynamics> {
         self.body(id).map(RigidBody::aerodynamics)
     }

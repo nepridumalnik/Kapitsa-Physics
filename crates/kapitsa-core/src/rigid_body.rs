@@ -133,13 +133,30 @@ impl RigidBody {
         indices: &[usize],
         base: crate::aerodynamics::pressure::BasePressure,
     ) -> Result<(), crate::aerodynamics::pressure::PressureError> {
-        use crate::aerodynamics::{
-            Aerodynamics,
-            pressure::{PressureError, PressurePatch},
-        };
+        use crate::aerodynamics::{Aerodynamics, pressure::PressureError};
         let Aerodynamics::Mesh(mesh) = &self.aerodynamics else {
             return Err(PressureError::InvalidPatch);
         };
+        let patches = Self::base_triangles_from_mesh(mesh, indices, base)?;
+        self.base_pressure_patches = patches;
+        Ok(())
+    }
+
+    pub(crate) fn base_triangles_from_mesh(
+        mesh: &crate::shape::TriangleMesh,
+        indices: &[usize],
+        base: crate::aerodynamics::pressure::BasePressure,
+    ) -> Result<
+        Vec<(
+            crate::aerodynamics::pressure::PressurePatch,
+            crate::aerodynamics::pressure::BasePressure,
+        )>,
+        crate::aerodynamics::pressure::PressureError,
+    > {
+        use crate::aerodynamics::pressure::{PressureError, PressurePatch};
+        if indices.len() > mesh.triangles().len() {
+            return Err(PressureError::InvalidPatch);
+        }
         let mut sorted = indices.to_vec();
         sorted.sort_unstable();
         if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -162,8 +179,7 @@ impl RigidBody {
             let center = a / 3.0 + b / 3.0 + c / 3.0;
             patches.push((PressurePatch::new(center, cross, length * 0.5)?, base));
         }
-        self.base_pressure_patches = patches;
-        Ok(())
+        Ok(patches)
     }
 
     pub(crate) fn invalidate_collider_base_patches(&mut self) {

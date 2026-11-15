@@ -972,6 +972,72 @@ fn mesh_base_triangle_selection_validates_indices_and_applies_load()
 }
 
 #[test]
+fn collider_base_triangle_selection_uses_owned_geometry_and_invalidates()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            AerodynamicsError,
+            pressure::{BasePressure, PressureError},
+        },
+        collider::Collider,
+        shape::{Cuboid, Shape},
+    };
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            0.001,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 2000.0)?;
+        body.set_aerodynamics(Aerodynamics::Colliders);
+        let id = world.add_body(body)?;
+        let collider = world.add_collider(
+            id,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        let base = BasePressure::new(-0.4, 5.0, 10.0)?;
+        world.set_collider_base_triangles(id, collider, &[2, 3], base)?;
+        let patches = world.body(id).unwrap().base_pressure_patches().to_vec();
+        assert_eq!(patches.len(), 2);
+        assert!(
+            patches
+                .iter()
+                .all(|(p, _)| p.normal() == -Vec3::X && p.area() == 0.5)
+        );
+        assert_eq!(
+            world.set_collider_base_triangles(id, collider, &[2, 2], base),
+            Err(AerodynamicsError::Pressure(PressureError::InvalidPatch))
+        );
+        assert_eq!(
+            world.set_collider_base_triangles(id, collider, &[12], base),
+            Err(AerodynamicsError::Pressure(PressureError::InvalidPatch))
+        );
+        assert_eq!(world.body(id).unwrap().base_pressure_patches(), patches);
+        if sharded {
+            world.step_with_shards(
+                1e-5,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(1e-5)?;
+        }
+        assert!(
+            (world.body(id).unwrap().state().linear_velocity().x - (2000.0 - 0.00048)).abs() < 1e-9
+        );
+        world.collider_mut(collider).unwrap();
+        assert!(world.body(id).unwrap().base_pressure_patches().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn base_pressure_outside_mach_domain_rolls_back_world_step()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
