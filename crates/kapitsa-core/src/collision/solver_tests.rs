@@ -276,6 +276,7 @@ fn accumulated_contact_vector_matches_velocity_change_with_warm_start()
         let impulse = contact.normal * contact.normal_impulse
             + tangent_a * contact.tangent_impulse[0]
             + tangent_b * contact.tangent_impulse[1];
+        assert_eq!(contact.velocity_impulse, Some(impulse));
         assert!(contact.normal_impulse > 0.0);
         assert!(contact.tangent_impulse[0].hypot(contact.tangent_impulse[1]) > 0.0);
         let state = bodies[1].body().state();

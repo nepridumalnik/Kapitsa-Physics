@@ -18,6 +18,8 @@ pub(crate) struct ContactPoint {
     /// World-space application points prepared for the velocity solve, not
     /// points reconstructed after position correction. Absent until recorded.
     pub(crate) velocity_points: Option<[Vec3; 2]>,
+    /// Accumulated velocity impulse on B in world coordinates, when solved.
+    pub(crate) velocity_impulse: Option<Vec3>,
 }
 
 impl ContactPoint {
@@ -31,6 +33,7 @@ impl ContactPoint {
         normal_impulse_increase_sum: 0.0,
         tangent_impulse: [0.0; 2],
         velocity_points: None,
+        velocity_impulse: None,
     };
 
     pub(crate) fn from_world(
@@ -73,6 +76,7 @@ impl ContactPoint {
             normal_impulse_increase_sum: 0.0,
             tangent_impulse: [0.0; 2],
             velocity_points: None,
+            velocity_impulse: None,
         })
     }
 }

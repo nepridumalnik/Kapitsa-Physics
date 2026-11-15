@@ -120,6 +120,26 @@ struct SolverPoint {
     restitution_target: f64,
 }
 
+impl SolverPoint {
+    /// Reconstructs the accumulated world-space impulse on body B, including
+    /// warm-start and both tangent components. Body A receives its negative.
+    fn accumulated_impulse(self, contact: ContactPoint) -> Result<Vec3, CollisionError> {
+        self.normal
+            .checked_mul_scalar(contact.normal_impulse)
+            .and_then(|normal| {
+                self.tangent_a
+                    .checked_mul_scalar(contact.tangent_impulse[0])
+                    .and_then(|tangent| normal.checked_add(tangent))
+            })
+            .and_then(|impulse| {
+                self.tangent_b
+                    .checked_mul_scalar(contact.tangent_impulse[1])
+                    .and_then(|tangent| impulse.checked_add(tangent))
+            })
+            .ok_or(CollisionError::ArithmeticOverflow)
+    }
+}
+
 enum ColoredConstraintKind {
     Contact(SolverManifold),
     Joint(JointConstraint),
@@ -1103,6 +1123,7 @@ impl SolverWorkspace {
                         solved_point.normal_impulse_increase_sum;
                     source_point.tangent_impulse = solved_point.tangent_impulse;
                     source_point.velocity_points = solved_point.velocity_points;
+                    source_point.velocity_impulse = solved_point.velocity_impulse;
                 }
             }
         }
@@ -2677,9 +2698,7 @@ impl SolverWorkspace {
     ) -> Result<(), CollisionError> {
         for point in points.iter().copied() {
             let contact = contact_at(manifolds, point)?;
-            let impulse = point.normal * contact.normal_impulse
-                + point.tangent_a * contact.tangent_impulse[0]
-                + point.tangent_b * contact.tangent_impulse[1];
+            let impulse = point.accumulated_impulse(*contact)?;
             apply_pair_impulse(
                 bodies,
                 point.body_a,
@@ -2786,6 +2805,8 @@ impl SolverWorkspace {
                 )?;
             }
             contact_mut(manifolds, point)?.tangent_impulse = tangent_impulse;
+            let impulse = point.accumulated_impulse(*contact_at(manifolds, point)?)?;
+            contact_mut(manifolds, point)?.velocity_impulse = Some(impulse);
         }
         Ok(())
     }
