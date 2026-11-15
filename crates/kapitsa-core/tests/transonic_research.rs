@@ -18,6 +18,22 @@ fn harris_geometry(x: f64) -> (f64, f64, f64) {
     (radius, slope, radius * slope)
 }
 
+#[test]
+fn harris_fixed_upstream_row_omits_nonzero_axis_source() {
+    // The mixed stencil starts at i=2, leaving i=1 fixed even though the
+    // Harris body source at that station is nonzero. This diagnostic does not
+    // establish a suitable upstream boundary condition or an error bound.
+    for n in [17, 33, 65, 97] {
+        let dx = 1.0 / (n - 1) as f64;
+        let source = harris_geometry(dx).2;
+        let integrated_source = source * dx;
+        assert!(source.is_finite() && source > 0.0);
+        println!(
+            "n={n} fixed_row_x={dx:.6} omitted_axis_flux={source:.9} source_times_dx={integrated_source:.9}"
+        );
+    }
+}
+
 fn axial_flux(u: f64, mach: f64, gamma: f64) -> f64 {
     (1.0 - mach * mach) * u - 0.5 * mach * mach * (gamma + 1.0) * u * u
 }
