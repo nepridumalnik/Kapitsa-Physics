@@ -722,6 +722,7 @@ pub fn evaluate_prepared_mesh_by_owner(
 pub struct OwnerPressureWorkspace {
     published: Vec<(super::geometry::GeometryOwner, PressureWrench)>,
     scratch: Vec<(super::geometry::GeometryOwner, PressureWrench)>,
+    prepared: bool,
 }
 
 impl OwnerPressureWorkspace {
@@ -741,6 +742,7 @@ impl OwnerPressureWorkspace {
         Some(Self {
             scratch: published.clone(),
             published,
+            prepared: false,
         })
     }
 
@@ -755,6 +757,19 @@ impl OwnerPressureWorkspace {
         patches: &PreparedSurfacePatches,
         flow: PressureFlow,
     ) -> Result<(), PressureError> {
+        self.prepare(patches, flow)?;
+        self.commit();
+        Ok(())
+    }
+
+    /// Stages a result without publishing it. A failed preparation invalidates
+    /// any earlier staged result while preserving the last published result.
+    pub fn prepare(
+        &mut self,
+        patches: &PreparedSurfacePatches,
+        flow: PressureFlow,
+    ) -> Result<(), PressureError> {
+        self.prepared = false;
         let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
         for (_, wrench) in &mut self.scratch {
             *wrench = zero;
@@ -776,8 +791,23 @@ impl OwnerPressureWorkspace {
                 .checked_add(load.moment)
                 .ok_or(PressureError::ArithmeticOverflow)?;
         }
-        std::mem::swap(&mut self.published, &mut self.scratch);
+        self.prepared = true;
         Ok(())
+    }
+
+    /// Publishes a successfully staged result once; returns whether one existed.
+    pub fn commit(&mut self) -> bool {
+        if !self.prepared {
+            return false;
+        }
+        std::mem::swap(&mut self.published, &mut self.scratch);
+        self.prepared = false;
+        true
+    }
+
+    /// Discards a staged result without affecting the published result.
+    pub fn rollback(&mut self) {
+        self.prepared = false;
     }
 }
 

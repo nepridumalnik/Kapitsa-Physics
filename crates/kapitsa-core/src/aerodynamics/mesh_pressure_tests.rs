@@ -140,6 +140,27 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     assert_eq!(workspace.published(), previous.as_slice());
     workspace.evaluate(&patches, flow())?;
     assert_eq!(workspace.published(), previous.as_slice());
+    let faster = PressureFlow {
+        linear_velocity: Vec3::X * 1200.0,
+        ..flow()
+    };
+    workspace.prepare(&patches, faster)?;
+    assert_eq!(workspace.published(), previous.as_slice());
+    workspace.rollback();
+    assert!(!workspace.commit());
+    assert_eq!(workspace.published(), previous.as_slice());
+    workspace.prepare(&patches, faster)?;
+    assert!(workspace.commit());
+    assert!(!workspace.commit());
+    assert_ne!(workspace.published(), previous.as_slice());
+    let committed = workspace.published().to_vec();
+    workspace.prepare(&patches, flow())?;
+    assert_eq!(
+        workspace.prepare(&patches, invalid),
+        Err(PressureError::InvalidSoundSpeed)
+    );
+    assert!(!workspace.commit());
+    assert_eq!(workspace.published(), committed.as_slice());
     assert_eq!(
         evaluate_prepared_mesh_owner(&patches, invalid, GeometryOwner::Part(part)),
         Err(PressureError::InvalidSoundSpeed)
