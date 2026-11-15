@@ -295,6 +295,20 @@ mod tests {
     use crate::aerodynamics::geometry::GeometryOwner;
 
     #[test]
+    fn windward_triangle_clips_affine_sign_change_to_analytic_area() {
+        const EXPECTED_FRACTION: f64 = 0.25;
+        const TOLERANCE: f64 = 1e-14;
+        for positive in 0..3 {
+            let mut velocities = [-Vec3::X; 3];
+            velocities[positive] = Vec3::X;
+            let polygon = windward_triangle(Vec3::X, velocities).unwrap().unwrap();
+            assert_eq!(polygon.len(), 3);
+            let fraction = polygon_fraction(&polygon).unwrap();
+            assert!((fraction - EXPECTED_FRACTION).abs() < TOLERANCE);
+        }
+    }
+
+    #[test]
     fn windward_triangle_never_exceeds_four_vertices_for_all_sign_patterns() {
         const VALUES: [f64; 3] = [-1.0, 0.0, 1.0];
         const MAX_VERTICES: usize = 4;
