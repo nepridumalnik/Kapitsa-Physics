@@ -302,8 +302,10 @@ pub struct ClusterLoadState {
     pub root: PartId,
     /// World-space pose and velocities before integration.
     pub state: BodyState,
+    pub(crate) mass: Option<MassProperties>,
     // Conservative evaluation-time certificate; never inferred from diagnostics.
     pub(crate) force_free_certified: bool,
+    pub(crate) part_sources_certified: bool,
 }
 
 /// Part mass and body-local pose at the same time as the load snapshots.
@@ -756,15 +758,37 @@ impl PhysicsWorld {
         force_tolerance: f64,
         moment_tolerance: f64,
     ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+        let state = self
+            .cluster_load_states_published
+            .iter()
+            .find(|state| state.body == body)
+            .ok_or(WeldBalanceError::IncompleteLoads)?;
+        if !state.force_free_certified {
+            return Err(WeldBalanceError::IncompleteLoads);
+        }
+        self.part_source_weld_reactions(body, force_tolerance, moment_tolerance)
+    }
+
+    /// Instantaneous reactions for nonrotating clusters subject only to
+    /// part-targeted persistent forces. Requires a collision- and joint-free
+    /// world with no gravity or aerodynamic loads at evaluation time.
+    /// Results are diagnostics from the last successful full-step snapshot.
+    pub fn part_source_weld_reactions(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
         use crate::cluster::balance::{
-            prepare_force_free_inputs, prepare_tree, reaction_moment_at_anchor, tree_reactions,
+            RecordedPartLoads, prepare_recorded_loads, prepare_tree, reaction_moment_at_anchor,
+            tree_reactions,
         };
         let state = self
             .cluster_load_states_published
             .iter()
             .find(|state| state.body == body)
             .ok_or(WeldBalanceError::IncompleteLoads)?;
-        if !state.force_free_certified || state.state.angular_velocity() != Vec3::ZERO {
+        if !state.part_sources_certified || state.state.angular_velocity() != Vec3::ZERO {
             return Err(WeldBalanceError::IncompleteLoads);
         }
         let tree = prepare_tree(
@@ -772,22 +796,52 @@ impl PhysicsWorld {
             &self.cluster_load_parts_published,
             &self.cluster_load_welds_published,
         )?;
-        let inputs = prepare_force_free_inputs(state, &tree)?;
+        let mass = state.mass.ok_or(WeldBalanceError::IncompleteLoads)?;
+        let (center, inertia) =
+            crate::cluster::motion::world_properties(mass, state.state.transform())
+                .map_err(WeldBalanceError::Physics)?;
+        let origin = center;
+        let mut inputs = prepare_recorded_loads(
+            state,
+            &tree,
+            RecordedPartLoads {
+                sources: &self.part_force_source_published,
+                gravity: &[],
+                hull: &[],
+                wings: &[],
+            },
+            center,
+            origin,
+        )?;
+        let mut force = Vec3::ZERO;
+        let mut moment = Vec3::ZERO;
+        for input in &mut inputs {
+            force = force
+                .checked_add(input.external_force)
+                .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+            moment = moment
+                .checked_add(input.external_moment)
+                .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+            input.loads_complete = true;
+        }
+        let acceleration = force
+            .checked_mul_scalar(1.0 / mass.mass())
+            .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+        let alpha = inertia
+            .solve_spd(moment)
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::InvalidMotion))?;
         let mut parents = Vec::new();
         parents
             .try_reserve_exact(tree.len())
             .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
         parents.extend(tree.iter().map(|part| part.parent));
-        // For a force-free, nonrotating body all momentum derivatives are zero;
-        // their reference center is immaterial. Use the evaluation-time origin.
-        let origin = state.state.transform().translation();
         let reactions = tree_reactions(
             &inputs,
             &parents,
-            origin,
+            center,
+            acceleration,
             Vec3::ZERO,
-            Vec3::ZERO,
-            Vec3::ZERO,
+            alpha,
             origin,
             force_tolerance,
             moment_tolerance,
@@ -1975,14 +2029,23 @@ impl PhysicsWorld {
             .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
         let no_world_load_paths = self.colliders.iter().next().is_none()
             && self.joints.iter().next().is_none()
-            && self.force_sources.iter().next().is_none()
             && self.central_gravity.is_none()
             && self.gravity_fields.iter().next().is_none()
             && self.chunks.iter().next().is_none();
         for (dense, entry) in self.bodies.iter() {
             if let Some(cluster) = &entry.cluster {
                 let body = &entry.body;
-                let force_free_certified = no_world_load_paths
+                let sources_certified = self.force_sources.iter().all(|(_, source)| {
+                    !source.enabled
+                        || source.body
+                            != BodyId {
+                                world: self.world_id,
+                                dense,
+                            }
+                        || matches!(source.target, ForceTarget::Part(_))
+                });
+                let part_sources_certified = no_world_load_paths
+                    && sources_certified
                     && body.physics().body_type() == BodyType::Dynamic
                     && body.forces().force() == Vec3::ZERO
                     && body.forces().torque() == Vec3::ZERO
@@ -1998,6 +2061,15 @@ impl PhysicsWorld {
                             .as_ref()
                             .is_some_and(|geometry| geometry.contains_key(part_id))
                     });
+                let force_free_certified = part_sources_certified
+                    && self.force_sources.iter().all(|(_, source)| {
+                        !source.enabled
+                            || source.body
+                                != BodyId {
+                                    world: self.world_id,
+                                    dense,
+                                }
+                    });
                 self.cluster_load_states_pending.push(ClusterLoadState {
                     body: BodyId {
                         world: self.world_id,
@@ -2005,7 +2077,9 @@ impl PhysicsWorld {
                     },
                     root: cluster.root,
                     state: *entry.body.state(),
+                    mass: body.physics().mass(),
                     force_free_certified,
+                    part_sources_certified,
                 });
             }
         }

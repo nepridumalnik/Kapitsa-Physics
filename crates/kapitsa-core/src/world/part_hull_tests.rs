@@ -325,6 +325,16 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
     assert_eq!(reactions[0].child, child);
     assert_eq!(reactions[0].force, Vec3::ZERO);
     assert_eq!(reactions[0].moment, Vec3::ZERO);
+    world.add_force_source_for_part(child, Vec3::ZERO, Vec3::X * 10.0)?;
+    world.step(0.01)?;
+    let reactions = world
+        .part_source_weld_reactions(body, 1e-12, 1e-12)
+        .map_err(|error| format!("{error:?}"))?;
+    assert_eq!(reactions[0].force, -Vec3::X * 5.0);
+    assert!(matches!(
+        world.force_free_weld_reactions(body, 1e-12, 1e-12),
+        Err(BalanceError::IncompleteLoads)
+    ));
     let state = world.cluster_load_states()[0];
     let tree = prepare_tree(
         &state,
@@ -332,12 +342,18 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
         world.cluster_load_welds(),
     )
     .map_err(|error| format!("{error:?}"))?;
-    let inputs = prepare_force_free_inputs(&state, &tree).map_err(|error| format!("{error:?}"))?;
-    assert!(inputs[0].loads_complete);
+    assert!(matches!(
+        prepare_force_free_inputs(&state, &tree),
+        Err(BalanceError::IncompleteLoads)
+    ));
     world.set_part_aerodynamic_hull(root, vec![section(Vec3::ZERO)])?;
     world.step(0.01)?;
     assert!(matches!(
         world.force_free_weld_reactions(body, 0.0, 0.0),
+        Err(BalanceError::IncompleteLoads)
+    ));
+    assert!(matches!(
+        world.part_source_weld_reactions(body, 1e-12, 1e-12),
         Err(BalanceError::IncompleteLoads)
     ));
     let state = world.cluster_load_states()[0];
