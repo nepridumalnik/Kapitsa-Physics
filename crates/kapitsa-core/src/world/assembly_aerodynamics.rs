@@ -984,6 +984,61 @@ mod tests {
     }
 
     #[test]
+    fn part_wave_load_breaks_certified_weld() -> Result<(), Box<dyn std::error::Error>> {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let mut rigid = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            rigid.set_linear_velocity(Vec3::X * 680.0)?;
+            let body = world.add_body(rigid)?;
+            let root = world.enable_cluster(body)?;
+            let child = world.add_cluster_part(
+                root,
+                crate::cluster::ClusterPartDesc {
+                    local_transform: Transform::identity(),
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * 680.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    strength: WeldStrength::Breakable {
+                        max_force: Some(1.0),
+                        max_torque: None,
+                    },
+                    ..weld()
+                },
+            )?;
+            world.set_part_voxel_wave(child, Some(wave_model()?))?;
+            world.step(1e-7)?;
+            let reactions = world
+                .part_aerodynamic_weld_reactions(body, 1e-8, 1e-8)
+                .map_err(|e| format!("{e:?}"))?;
+            assert!(reactions[0].force.x > 1.0);
+            world
+                .set_automatic_weld_failure(Some((1e-8, 1e-8)))
+                .map_err(|e| format!("{e:?}"))?;
+            if sharded {
+                world.step_with_shards(
+                    1e-7,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(1e-7)?;
+            }
+            assert!(world.cluster(body).ok_or("cluster")?.welds().is_empty());
+            assert_ne!(world.cluster_part(child).ok_or("part")?.body(), body);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn voxel_wave_transfers_to_cluster_and_matches_standalone()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::aerodynamics::{Aerodynamics, AerodynamicsTask};

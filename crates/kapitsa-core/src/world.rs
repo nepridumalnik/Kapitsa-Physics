@@ -2455,6 +2455,8 @@ impl PhysicsWorld {
                                         !matches!(
                                             geometry,
                                             assembly_aerodynamics::PartGeometry::Mesh(_)
+                                                | assembly_aerodynamics::PartGeometry::Wave(_)
+                                                | assembly_aerodynamics::PartGeometry::WaveSourceMesh(_)
                                         )
                                     }))
                     });
@@ -2462,6 +2464,14 @@ impl PhysicsWorld {
                     self.part_aerodynamic_geometry
                         .as_ref()
                         .is_some_and(|geometry| geometry.contains_key(part))
+                });
+                let has_pressure_geometry = cluster.parts.iter().any(|part| {
+                    self.part_aerodynamic_geometry
+                        .as_ref()
+                        .and_then(|geometry| geometry.get(part))
+                        .is_some_and(|geometry| {
+                            matches!(geometry, assembly_aerodynamics::PartGeometry::Mesh(_))
+                        })
                 });
                 let part_wings_certified = part_surfaces_certified
                     && !has_geometry
@@ -2504,7 +2514,7 @@ impl PhysicsWorld {
                     part_surfaces_certified,
                     part_surface_count: body.aerodynamic_surfaces.len(),
                     vacuum: matches!(self.atmosphere, Atmosphere::Vacuum),
-                    part_geometry: has_geometry,
+                    part_geometry: has_pressure_geometry,
                 });
             }
         }
