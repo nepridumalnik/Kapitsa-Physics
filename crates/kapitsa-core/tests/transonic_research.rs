@@ -161,6 +161,33 @@ fn conservative_source_telescopes_across_nose_and_cutoff() {
 }
 
 #[test]
+fn nose_source_cell_quadrature_sensitivity() {
+    // Compare the midpoint source with the exact cell integral over the
+    // fixed physical interval [0, 1/16]. Face-aligned grids isolate the
+    // source quadrature; no flow solution or physical validation is implied.
+    const END: f64 = 1.0 / 16.0;
+    let mut previous_error = f64::INFINITY;
+    for cells in [4_usize, 6, 8, 16] {
+        let dx = END / cells as f64;
+        let mut midpoint_sum = 0.0;
+        let mut exact_sum = 0.0;
+        for i in 0..cells {
+            let x = (i as f64 + 0.5) * dx;
+            midpoint_sum += harris_geometry(x).2 * dx;
+            exact_sum += harris_conservative_source(x, dx) * dx;
+        }
+        let expected = 0.5 * harris_geometry(END).0.powi(2);
+        let error = (midpoint_sum - expected).abs();
+        assert!((exact_sum - expected).abs() < 1e-16);
+        assert!(error < previous_error);
+        println!(
+            "nose_quadrature cells={cells} dx={dx:.9} midpoint={midpoint_sum:.12e} exact={expected:.12e} error={error:.12e}"
+        );
+        previous_error = error;
+    }
+}
+
+#[test]
 fn radial_face_difference_converges_for_logarithmic_line_source() {
     // For locally constant q = R R', the axisymmetric line-source field
     // phi = q ln(r/R) has phi_r(R) = R'. This verifies reconstruction only;
