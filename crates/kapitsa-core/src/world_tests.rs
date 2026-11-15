@@ -3403,6 +3403,25 @@ fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn
     const DT: f64 = 0.02;
 
     let mut world = PhysicsWorld::new();
+    // Publish a real, isolated impact before constructing the failing step.
+    let seed_wall = world.add_body(RigidBody::new_static(Transform::new(
+        Vec3::new(0.0, -1000.0, 0.0),
+        Quat::IDENTITY,
+    )?))?;
+    world.add_collider(seed_wall, collider(0.5))?;
+    let mut seed = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(-5.0, -1000.0, 0.0), Quat::IDENTITY)?,
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?;
+    seed.set_linear_velocity(Vec3::new(1000.0, 0.0, 0.0))?;
+    seed.set_ccd_mode(CcdMode::Continuous);
+    let seed = world.add_body(seed)?;
+    world.add_collider(seed, collider(0.5))?;
+    world.step(0.01)?;
+    let previous_impulses = world.contact_impulses().to_vec();
+    let previous_omitted = world.contact_impulses_omitted_points();
+    let previous_events = world.collision_events().to_vec();
+    assert!(previous_impulses.iter().any(|entry| entry.ccd));
     let restitution = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
     let front_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let front_wall = world.add_collider(
@@ -3490,7 +3509,9 @@ fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn
             &expected
         );
     }
-    assert!(world.collision_events().is_empty());
+    assert_eq!(world.collision_events(), previous_events.as_slice());
+    assert_eq!(world.contact_impulses(), previous_impulses.as_slice());
+    assert_eq!(world.contact_impulses_omitted_points(), previous_omitted);
     #[cfg(feature = "bench-internals")]
     assert!(world.collision_step_metrics().ccd_parallel_island_count >= 4);
     Ok(())
