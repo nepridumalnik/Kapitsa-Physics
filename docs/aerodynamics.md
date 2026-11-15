@@ -694,6 +694,16 @@ article is subscription-only; consequently it has not been established that
 the paper provides suitable drag observations at all. Its flow visualization
 alone is not a quantitative drag validation of the Re = 10,000 curve.
 
+In a separate open-access shock-tube study, [Nagata et al. (2022)](https://doi.org/10.2322/tjsass.65.185)
+report sphere drag estimated from position histories at relative Mach 0.46
+and Re 3,100–9,800. Their transonic cases are flow-visualization cases,
+not the drag-estimation cases. Figure 13 displays drag estimates with error
+bars based on uncertainty of the quadratic trajectory-fit coefficient; the
+authors note that these bars are smaller than uncertainty estimated from the
+time-series force standard deviation. The figure has not been digitized here,
+and those fit uncertainties do not constitute a complete error budget. These
+independent subsonic observations are not a matched transonic drag benchmark.
+
 The later Bailey–Starr transonic measurements
 ([AIAA Journal, 1976](https://doi.org/10.2514/3.7262)) are another candidate.
 Nagata et al.'s [2020 DNS paper](https://doi.org/10.1017/jfm.2020.629),
