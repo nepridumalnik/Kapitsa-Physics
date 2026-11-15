@@ -335,6 +335,25 @@ fn grid_build_estimate_reserves_cell_buffers_prefix_scan_and_index_copy() {
 }
 
 #[test]
+fn triangle_grid_index_ranges_cover_each_triangle_cell_entry() {
+    let triangles = [
+        visibility_triangle(Vec3::ZERO, Vec3::Y, Vec3::Z),
+        visibility_triangle(Vec3::X, Vec3::X + Vec3::Y, Vec3::X + Vec3::Z),
+    ];
+    let grid = TriangleGrid::build(&triangles, 10_000).unwrap();
+    assert_eq!(grid.offsets.first(), Some(&0));
+    assert_eq!(grid.offsets.last(), Some(&grid.triangles.len()));
+    for range in grid.offsets.windows(2) {
+        assert!(range[0] <= range[1]);
+        let entries = &grid.triangles[range[0]..range[1]];
+        assert!(entries.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(entries.iter().all(|&index| index < triangles.len()));
+    }
+    assert!(grid.triangles.contains(&0));
+    assert!(grid.triangles.contains(&1));
+}
+
+#[test]
 fn triangle_grid_build_accounts_for_input_scans() {
     const TRIANGLE_COUNT: usize = 2;
     const SCAN_WORK: usize = TRIANGLE_COUNT * 3;
