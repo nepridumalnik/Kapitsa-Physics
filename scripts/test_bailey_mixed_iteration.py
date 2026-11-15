@@ -32,6 +32,23 @@ class MixedIterationTests(unittest.TestCase):
             iterate_mixed(phi, [0, 0, 0.001, 0, 0, 0, 0, 0, 0],
                           0.1, 0.1, 0.7, 1.4, 1e-20, 1)
 
+    def test_free_boundary_source_generates_mixed_flow(self):
+        # No shock is prescribed at the outer boundary. These resolutions
+        # demonstrate a mixed solution, not converged shock position.
+        for n in (9, 17, 25):
+            h = 1 / (n - 1)
+            source = [0.01 * math.sin(2 * math.pi * i / (n - 1)) for i in range(n)]
+            phi = [[0.0] * n for _ in range(n)]
+            history = iterate_mixed(phi, source, h, h, 0.9, 1.4, 1e-6, 3000)
+            sonic = (1 - 0.9**2) / (0.9**2 * 2.4)
+            u = [(phi[i + 1][1] - phi[i - 1][1]) / (2*h) for i in range(2, n - 1)]
+            crossings = [i for i in range(len(u) - 1) if u[i] > sonic >= u[i + 1]]
+            self.assertLessEqual(history[-1], 1e-6)
+            if n == 9:
+                self.assertFalse(crossings)
+            else:
+                self.assertTrue(crossings)
+
 
 if __name__ == "__main__":
     unittest.main()
