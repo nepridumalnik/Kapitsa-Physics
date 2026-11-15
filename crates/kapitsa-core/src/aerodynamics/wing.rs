@@ -179,6 +179,7 @@ pub struct FiniteWing {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DragRise {
     critical_mach: f64,
+    lift_sensitivity: f64,
     scale: f64,
 }
 
@@ -401,9 +402,37 @@ impl FiniteWing {
         }
         self.drag_rise = (scale != 0.0).then_some(DragRise {
             critical_mach,
+            lift_sensitivity: 0.0,
             scale,
         });
         Ok(self)
+    }
+
+    /// Adds the NDARC drag-rise correlation with lift-dependent critical Mach.
+    ///
+    /// `zero_lift_critical_mach` and `lift_sensitivity` are dimensionless
+    /// caller-supplied parameters; the latter must be nonnegative and smaller
+    /// than the former. `scale` has the same meaning as in `with_drag_rise`.
+    /// With nonzero scale and sensitivity this correlation is limited to lift
+    /// coefficients in [0, 1] and its Mach ratio must not exceed 1.1. The existing wing Mach
+    /// and attached-flow limits apply independently. No values are inferred.
+    pub fn with_lift_dependent_drag_rise(
+        self,
+        zero_lift_critical_mach: f64,
+        lift_sensitivity: f64,
+        scale: f64,
+    ) -> Result<Self, WingError> {
+        if !lift_sensitivity.is_finite()
+            || lift_sensitivity < 0.0
+            || lift_sensitivity >= zero_lift_critical_mach
+        {
+            return Err(WingError::InvalidParameters);
+        }
+        let mut wing = self.with_drag_rise(zero_lift_critical_mach, scale)?;
+        if let Some(ref mut model) = wing.drag_rise {
+            model.lift_sensitivity = lift_sensitivity;
+        }
+        Ok(wing)
     }
 
     /// The default incompressible model supports Mach <= 0.3. An optional
@@ -436,8 +465,23 @@ impl FiniteWing {
             PI * effective_aspect / (1.0 + beta * effective_aspect / 2.0)
         };
         let lift = slope * alpha;
+        if effective_aspect == 0.0 || !lift.is_finite() {
+            return Err(WingError::ArithmeticOverflow);
+        }
         let drag_rise = if let Some(model) = self.drag_rise {
-            let ratio = mach / model.critical_mach;
+            let critical_mach = if model.lift_sensitivity != 0.0 {
+                if !(0.0..=1.0).contains(&lift) {
+                    return Err(WingError::UnsupportedFlow);
+                }
+                let correction = lift * (0.03 + lift * (0.19 + lift * 0.78));
+                model.critical_mach - model.lift_sensitivity * correction
+            } else {
+                model.critical_mach
+            };
+            if !critical_mach.is_finite() || critical_mach <= 0.0 {
+                return Err(WingError::ArithmeticOverflow);
+            }
+            let ratio = mach / critical_mach;
             if ratio > 1.1 {
                 return Err(WingError::UnsupportedFlow);
             }
@@ -644,6 +688,30 @@ mod tests {
         }
         let beyond = base.with_control(WingControl::new(0.2, 0.2, 3.0).unwrap());
         assert_eq!(beyond.evaluate(flow), Err(WingError::UnsupportedFlow));
+    }
+
+    #[test]
+    fn lift_dependent_drag_rise_lowers_critical_mach() -> Result<(), WingError> {
+        let base = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?.with_subsonic_compressibility(0.9)?;
+        let fixed = base.with_drag_rise(0.8, 0.0011)?;
+        let dependent = base.with_lift_dependent_drag_rise(0.8, 0.2, 0.0011)?;
+        let fixed_coefficients = fixed.coefficients(0.08, 0.7)?;
+        let adjusted = dependent.coefficients(0.08, 0.7)?;
+        assert_eq!(fixed_coefficients.lift, adjusted.lift);
+        assert!(adjusted.drag > fixed_coefficients.drag);
+        assert_eq!(
+            dependent.coefficients(-0.08, 0.7),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert!(
+            base.with_lift_dependent_drag_rise(0.8, 0.8, 0.0011)
+                .is_err()
+        );
+        assert!(
+            base.with_lift_dependent_drag_rise(0.8, f64::NAN, 0.0011)
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]

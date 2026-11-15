@@ -291,6 +291,12 @@ independent configured Mach and attached-flow limits also apply. Outside these
 limits the evaluator returns an error. This engineering correlation does not
 predict stall or replace validation against suitable aerodynamic data.
 
+`FiniteWing::with_lift_dependent_drag_rise` additionally uses the same NASA
+correlation's `M_critical = M_critical_zero - sensitivity *
+(0.03 CL + 0.19 CL? + 0.78 CL?)`. The caller supplies the zero-lift critical
+Mach, sensitivity and drag scale. With nonzero sensitivity, the correlation
+rejects lift coefficients outside [0, 1]; it does not clamp or extrapolate.
+
 ### Explicit wing polars and control deflection — UNVERIFIED
 
 `WingPolar::new(mach, angles, coefficients)` validates a rectangular grid:
