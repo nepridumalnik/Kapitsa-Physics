@@ -35,6 +35,64 @@ class UnsupportedFlow(ValueError):
     pass
 
 
+def iterate_mixed(phi, axis_flux, dx, dr, mach, gamma, tolerance, max_iterations):
+    """Experimental damped coordinate Newton iteration; mutates phi in place.
+
+    Two upstream columns, the downstream column and outer radial row are
+    fixed Dirichlet data. No claim of convergence for arbitrary mixed flows.
+    """
+    nx = len(phi)
+    nr = len(phi[0]) if nx else 0
+    if (nx < 4 or nr < 2 or any(len(row) != nr for row in phi)
+            or len(axis_flux) != nx or max_iterations < 1):
+        raise ValueError("invalid grid")
+    if not all(math.isfinite(v) for row in phi for v in row):
+        raise ValueError("invalid initial field")
+    if not all(math.isfinite(v) for v in (*axis_flux, dx, dr, mach, gamma, tolerance)):
+        raise ValueError("non-finite input")
+    if dx <= 0 or dr <= 0 or mach <= 0 or gamma <= 1 or tolerance <= 0:
+        raise ValueError("invalid parameters")
+
+    def norm():
+        return max(abs(mixed_residual(phi, i, k, dx, dr, mach, gamma, axis_flux))
+                   for i in range(2, nx - 1) for k in range(nr - 1))
+
+    history = [norm()]
+    for _ in range(max_iterations):
+        if not math.isfinite(history[-1]):
+            raise ArithmeticError("non-finite residual")
+        if history[-1] <= tolerance:
+            return history
+        for i in range(2, nx - 1):
+            for k in range(nr - 1):
+                old = phi[i][k]
+                f = mixed_residual(phi, i, k, dx, dr, mach, gamma, axis_flux)
+                # Central numerical Jacobian also handles the C1 sonic split.
+                delta = 1e-7 * max(1.0, abs(old))
+                phi[i][k] = old + delta
+                plus = mixed_residual(phi, i, k, dx, dr, mach, gamma, axis_flux)
+                phi[i][k] = old - delta
+                minus = mixed_residual(phi, i, k, dx, dr, mach, gamma, axis_flux)
+                phi[i][k] = old
+                derivative = (plus - minus) / (2 * delta)
+                if not math.isfinite(derivative) or abs(derivative) < 1e-14:
+                    raise ArithmeticError("singular local Jacobian")
+                # Cap an update by local residual reduction, not a physical fit.
+                step = -f / derivative
+                for _ in range(20):
+                    phi[i][k] = old + step
+                    trial = mixed_residual(phi, i, k, dx, dr, mach, gamma, axis_flux)
+                    if math.isfinite(trial) and abs(trial) <= abs(f):
+                        break
+                    step *= 0.5
+                else:
+                    phi[i][k] = old
+        history.append(norm())
+    if history[-1] <= tolerance:
+        return history
+    raise RuntimeError(f"mixed iteration failed: residual={history[-1]:.6g}")
+
+
 def solve(axis_flux, nx, nr, dx, dr, mach, gamma, tolerance, max_iterations):
     """Return potential and residual history; raise if unsupported or unconverged.
 
