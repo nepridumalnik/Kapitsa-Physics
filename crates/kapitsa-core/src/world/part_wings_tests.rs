@@ -40,6 +40,53 @@ fn advance(world: &mut PhysicsWorld, sharded: bool) -> Result<(), StepError> {
 }
 
 #[test]
+fn automatic_weld_failure_uses_part_wing_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::cluster::ClusterPartDesc;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let velocity = Vec3::new(50.0, 0.0, -3.0);
+        let mut rigid = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        rigid.set_linear_velocity(velocity)?;
+        let body = world.add_body(rigid)?;
+        let root = world.enable_cluster(body)?;
+        let mut description = weld();
+        description.strength = WeldStrength::Breakable {
+            max_force: Some(1.0),
+            max_torque: None,
+        };
+        let child = world.add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: velocity,
+                angular_velocity: Vec3::ZERO,
+            },
+            description,
+        )?;
+        let weld_id = world.cluster(body).ok_or("cluster")?.welds()[0];
+        world.set_part_aerodynamic_wings(child, vec![wing(Transform::identity())?])?;
+        world
+            .set_automatic_weld_failure(Some((1e-8, 1e-8)))
+            .map_err(|e| format!("{e:?}"))?;
+        advance(&mut world, sharded)?;
+        assert!(world.weld(weld_id).is_none());
+        assert_ne!(world.part_body(child), Some(body));
+        let loads = world.part_wing_wrenches();
+        assert_eq!(loads.len(), 1);
+        let reactions = world
+            .part_aerodynamic_weld_reactions(body, 1e-8, 1e-8)
+            .map_err(|e| format!("{e:?}"))?;
+        assert!((reactions[0].force + loads[0].wrench.force * 0.5).length() < 1e-8);
+        assert_eq!(world.validate_clusters(), Ok(()));
+    }
+    Ok(())
+}
+
+#[test]
 fn part_wing_snapshot_sums_force_and_moment_and_reuses_buffers()
 -> Result<(), Box<dyn std::error::Error>> {
     for sharded in [false, true] {
