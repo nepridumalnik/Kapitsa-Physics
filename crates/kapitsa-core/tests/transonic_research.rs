@@ -230,6 +230,69 @@ fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+#[ignore = "synthetic sting sensitivity diagnostic; run in release mode"]
+fn harris_subsonic_synthetic_sting_sensitivity() -> Result<(), String> {
+    // This prescribed taper is a sensitivity case, not measured sting geometry.
+    // Both continuations share the Harris body before its truncation.
+    const CUTOFF: f64 = 36.0 / 38.240;
+    const TAPER_LENGTH: f64 = 0.5;
+    const EXTENSION: f64 = 1.0;
+    const OUTER: f64 = 1.25;
+    const MACH: f64 = 0.9;
+    const GAMMA: f64 = 1.4;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 40000;
+    const STATIONS: [f64; 4] = [0.25, 0.5, 0.75, 0.875];
+    let cutoff_radius = harris_geometry(CUTOFF).0;
+    for intervals in [16_usize, 32, 64] {
+        let dx = 1.0 / intervals as f64;
+        let nx = 3 * intervals + 1;
+        let nr = (OUTER / dx + 0.5).round_ties_even() as usize;
+        let dr = OUTER / (nr as f64 - 0.5);
+        for taper in [false, true] {
+            let source = (0..nx)
+                .map(|i| {
+                    let x = i as f64 * dx - EXTENSION;
+                    if (0.0..CUTOFF).contains(&x) {
+                        harris_geometry(x).2
+                    } else if taper && (CUTOFF..CUTOFF + TAPER_LENGTH).contains(&x) {
+                        let slope = -cutoff_radius / TAPER_LENGTH;
+                        let radius = cutoff_radius + slope * (x - CUTOFF);
+                        radius * slope
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let mut grid = MixedGrid {
+                phi: vec![vec![0.0; nr]; nx],
+                axis_flux: source,
+                dx,
+                dr,
+                mach: MACH,
+                gamma: GAMMA,
+            };
+            let (iterations, residual) =
+                grid.iterate(TOLERANCE, MAX_ITERATIONS).map_err(|value| {
+                    format!("intervals={intervals} taper={taper}: residual={value}")
+                })?;
+            println!(
+                "intervals={intervals} taper={taper} iterations={iterations} residual={residual:.3e}"
+            );
+            for x in STATIONS {
+                let i = ((x + EXTENSION) / dx).round() as usize;
+                let (radius, slope, _) = harris_geometry(x);
+                let cp = grid
+                    .surface_cp(i, radius, slope)
+                    .ok_or_else(|| format!("unavailable Cp: x={x} intervals={intervals}"))?;
+                println!("intervals={intervals} taper={taper} x={x:.3} cp={cp:.9}");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn interpolated_radial_derivative(values: &[f64], dr: f64, radius: f64) -> Option<f64> {
     if values.len() < 3 || !dr.is_finite() || dr <= 0.0 || !radius.is_finite() {
         return None;
