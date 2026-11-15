@@ -59,6 +59,8 @@ mod aerodynamics {
     /// Checks the current aerodynamic force calculation without advancing the world.
     ///
     /// This preflight does not apply forces or check timestep-dependent integration.
+    /// Bodies with base-pressure patches return `UnsupportedModel`: this path
+    /// does not prepare the primary geometry needed to verify their visibility.
     /// Use [`PhysicsWorld::step`] to advance the simulation.
     #[derive(Clone, Copy, Debug, Default)]
     pub struct AerodynamicsTask;
@@ -72,6 +74,7 @@ mod aerodynamics {
             let mut assembly_cache = None;
             for (dense, entry) in world.bodies.iter() {
                 if entry.body.aerodynamic_surfaces.is_empty()
+                    && entry.body.base_pressure_patches.is_empty()
                     && !super::assembly_aerodynamics::wings_configured(entry, &world.parts)
                     && !super::assembly_aerodynamics::hull_configured(entry, &world.parts)
                     && matches!(
@@ -89,6 +92,12 @@ mod aerodynamics {
                     world: world.world_id,
                     dense,
                 };
+                if !entry.body.base_pressure_patches.is_empty() {
+                    return Err(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                    });
+                }
                 let patches = super::assembly_aerodynamics::prepare(
                     body_id,
                     entry,

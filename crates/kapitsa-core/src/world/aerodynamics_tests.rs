@@ -1130,6 +1130,52 @@ fn selected_base_rejects_blocked_geometry_without_changing_motion()
 }
 
 #[test]
+fn preflight_rejects_unchecked_base_pressure_without_mutating_world()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            AerodynamicsError, AerodynamicsTask,
+            pressure::{BasePressure, PressurePatch},
+        },
+        shape::TriangleMesh,
+    };
+    for selected in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            0.001,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 2000.0)?;
+        body.set_aerodynamics(Aerodynamics::Mesh(TriangleMesh::new(
+            vec![Vec3::ZERO, Vec3::Z, Vec3::Y],
+            vec![[0, 1, 2]],
+        )?));
+        let base = BasePressure::new(-0.4, 5.0, 10.0)?;
+        if selected {
+            body.set_mesh_base_triangles(&[0], base)?;
+        } else {
+            body.set_base_pressure_patches(vec![(
+                PressurePatch::new(Vec3::ZERO, -Vec3::X, 1.0)?,
+                base,
+            )]);
+        }
+        let id = world.add_body(body)?;
+        let before = world.body(id).unwrap().motion();
+        assert_eq!(
+            AerodynamicsTask.execute(&world),
+            Err(super::StepError::Aerodynamics {
+                body_id: id,
+                cause: AerodynamicsError::UnsupportedModel
+            })
+        );
+        assert_eq!(world.body(id).unwrap().motion(), before);
+    }
+    Ok(())
+}
+
+#[test]
 fn base_pressure_outside_mach_domain_rolls_back_world_step()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
