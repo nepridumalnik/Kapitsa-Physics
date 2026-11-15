@@ -455,6 +455,8 @@ pub struct PhysicsWorld {
     /// The default is 340 m/s; callers should set this for their atmosphere.
     mesh_sound_speed: f64,
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
+    owner_pressure: Option<HashMap<BodyId, crate::aerodynamics::pressure::OwnerPressureWorkspace>>,
+    owner_pressure_owners: Vec<crate::aerodynamics::geometry::GeometryOwner>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
     joint_events: Vec<JointBreakEvent>,
@@ -504,6 +506,33 @@ impl BodyStep {
 }
 
 impl PhysicsWorld {
+    /// Impact-pressure contribution from prepared mesh patches in the last
+    /// successful full step. Forces are world-space newtons; moments are world
+    /// N·m about the body's center of mass at evaluation time. This excludes
+    /// other aerodynamic and mechanical loads and must not be used as a weld
+    /// reaction. Low-level prediction/commit APIs do not publish this data.
+    /// This diagnostic currently repeats mesh-pressure evaluation and uses
+    /// reusable workspace storage. No result is exposed for a deleted body,
+    /// vacuum, zero density, or a step without prepared mesh pressure.
+    pub fn owner_mesh_pressure(
+        &self,
+        body: BodyId,
+    ) -> Option<
+        &[(
+            crate::aerodynamics::geometry::GeometryOwner,
+            crate::aerodynamics::pressure::PressureWrench,
+        )],
+    > {
+        if body.world != self.world_id || self.bodies.get(body.dense).is_none() {
+            return None;
+        }
+        self.owner_pressure
+            .as_ref()?
+            .get(&body)
+            .map(|workspace| workspace.published())
+            .filter(|loads| !loads.is_empty())
+    }
+
     pub const fn new() -> Self {
         Self {
             world_id: 0,
@@ -525,6 +554,8 @@ impl PhysicsWorld {
             atmosphere: Atmosphere::Vacuum,
             mesh_sound_speed: 340.0,
             aerodynamics_body_updates: Vec::new(),
+            owner_pressure: None,
+            owner_pressure_owners: Vec::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
             joint_events: Vec::new(),
@@ -1506,6 +1537,9 @@ impl PhysicsWorld {
             self.rollback_aerodynamics_updates();
             self.rollback_force_source_updates();
         } else {
+            if let Some(workspaces) = &mut self.owner_pressure {
+                workspaces.retain(|_, workspace| workspace.commit());
+            }
             self.aerodynamics_body_updates.clear();
             self.clear_gravity_updates();
             self.clear_force_source_updates();
@@ -2820,6 +2854,70 @@ impl PhysicsWorld {
             return Err(error);
         }
 
+        // This diagnostic pass never applies forces; the solver path above is
+        // unchanged. The workspace is committed only after the entire step.
+        for update in &self.aerodynamics_body_updates {
+            if update.loads.sphere_patches.is_some() {
+                continue;
+            }
+            let Some(patches) = update.loads.mesh_patches.as_ref() else {
+                continue;
+            };
+            let error = || StepError::Aerodynamics {
+                body_id: update.id,
+                cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+            };
+            let center = update
+                .original
+                .world_center_of_mass()
+                .map_err(|_| error())?
+                .ok_or_else(error)?;
+            let state = atmosphere
+                .state_at(center)
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause,
+                })?;
+            if state.density() == 0.0 {
+                continue;
+            }
+            let transform = update.original.state().transform();
+            let flow = crate::aerodynamics::pressure::PressureFlow {
+                atmosphere: state,
+                sound_speed: state.sound_speed().unwrap_or(self.mesh_sound_speed),
+                transform,
+                center_of_mass: transform
+                    .inverse()
+                    .map_err(|_| error())?
+                    .transform_point(center),
+                linear_velocity: update.original.state().linear_velocity(),
+                angular_velocity: update.original.state().angular_velocity(),
+            };
+            self.owner_pressure_owners.clear();
+            self.owner_pressure_owners
+                .try_reserve(patches.iter().count())
+                .map_err(|_| error())?;
+            self.owner_pressure_owners
+                .extend(patches.iter().map(|patch| patch.owner));
+            self.owner_pressure_owners.sort_unstable();
+            self.owner_pressure_owners.dedup();
+            let map = self.owner_pressure.get_or_insert_with(HashMap::new);
+            map.try_reserve(1).map_err(|_| error())?;
+            if !map.contains_key(&update.id) {
+                let workspace = crate::aerodynamics::pressure::OwnerPressureWorkspace::new(&[])
+                    .ok_or_else(error)?;
+                map.insert(update.id, workspace);
+            }
+            let workspace = map.get_mut(&update.id).ok_or_else(error)?;
+            workspace
+                .configure_pending(&self.owner_pressure_owners)
+                .and_then(|()| workspace.prepare(patches, flow))
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                })?;
+        }
+
         for update in &self.aerodynamics_body_updates {
             if let Some(entry) = self
                 .bodies
@@ -2833,6 +2931,11 @@ impl PhysicsWorld {
     }
 
     fn rollback_aerodynamics_updates(&mut self) {
+        if let Some(workspaces) = &mut self.owner_pressure {
+            for workspace in workspaces.values_mut() {
+                workspace.rollback();
+            }
+        }
         for update in &self.aerodynamics_body_updates {
             if let Some(entry) = self
                 .bodies

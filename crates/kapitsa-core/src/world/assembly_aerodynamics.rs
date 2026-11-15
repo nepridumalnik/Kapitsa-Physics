@@ -2480,11 +2480,38 @@ mod tests {
                 } else {
                     world.step(1e-8)?;
                 }
+                let published = world
+                    .owner_mesh_pressure(id)
+                    .ok_or("published pressure")?
+                    .to_vec();
+                assert_eq!(published, vec![(GeometryOwner::Part(part), wrench)]);
                 let state = world.body(id).ok_or("body")?.state();
                 assert!((state.linear_velocity().x - (2000.0 - 2e-7)).abs() < 1e-9);
                 let angular = Vec3::new(0.0, moment.y / 200.0, moment.z / 400.0) * 1e-8;
                 assert!((state.angular_velocity() - angular).length() < 1e-12);
                 assert_eq!(world.bodies().count(), 1);
+                let center = world
+                    .body(id)
+                    .ok_or("body")?
+                    .motion()
+                    .world_center_of_mass()?
+                    .ok_or("center")?;
+                let bad = world.add_gravity(crate::gravity::CentralGravity::new(center, 1.0)?)?;
+                let failed = if sharded {
+                    world.step_with_shards(1e-8, &mut [Vec::new()], &SequentialExecutor, 1)
+                } else {
+                    world.step(1e-8)
+                };
+                assert!(failed.is_err());
+                assert_eq!(world.owner_mesh_pressure(id), Some(published.as_slice()));
+                world.remove_gravity(bad).ok_or("gravity")?;
+                world.set_atmosphere(Atmosphere::Vacuum);
+                if sharded {
+                    world.step_with_shards(1e-8, &mut [Vec::new()], &SequentialExecutor, 1)?;
+                } else {
+                    world.step(1e-8)?;
+                }
+                assert!(world.owner_mesh_pressure(id).is_none());
             }
         }
         Ok(())
