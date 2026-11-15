@@ -38,7 +38,79 @@ struct InsertedWeldSplits {
     results: Vec<Vec<BodyId>>,
 }
 
+#[derive(Debug)]
+#[allow(dead_code)]
+enum WeldSplitPreparationError {
+    Balance(super::WeldBalanceError),
+    Cluster(ClusterError),
+}
+
 impl PhysicsWorld {
+    /// Prepare all breakable clusters from the active step's pending snapshots
+    /// and final staged predictions. No topology or body state is changed.
+    #[allow(dead_code)]
+    fn prepare_pending_weld_splits(
+        &self,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<PreparedWeldSplit>, WeldSplitPreparationError> {
+        let mut plans = Vec::new();
+        plans
+            .try_reserve(self.cluster_load_states_pending.len())
+            .map_err(|_| {
+                WeldSplitPreparationError::Cluster(ClusterError::StorageCapacityExceeded)
+            })?;
+        for state in &self.cluster_load_states_pending {
+            let cluster = self
+                .cluster(state.body)
+                .ok_or(WeldSplitPreparationError::Cluster(
+                    ClusterError::InvalidTopology,
+                ))?;
+            if !cluster.welds().iter().any(|id| {
+                self.weld(*id).is_some_and(|weld| {
+                    matches!(
+                        weld.desc().strength,
+                        crate::cluster::WeldStrength::Breakable { .. }
+                    )
+                })
+            }) {
+                continue;
+            }
+            let candidates = self
+                .pending_weld_failure_candidates(state.body, force_tolerance, moment_tolerance)
+                .map_err(WeldSplitPreparationError::Balance)?;
+            if candidates.is_empty() {
+                continue;
+            }
+            let mut welds = Vec::new();
+            welds.try_reserve_exact(candidates.len()).map_err(|_| {
+                WeldSplitPreparationError::Cluster(ClusterError::StorageCapacityExceeded)
+            })?;
+            welds.extend(candidates.iter().map(|candidate| candidate.reaction.weld));
+            let predicted = self
+                .collision_system
+                .context
+                .predicted_states
+                .iter()
+                .find(|(body, _)| *body == state.body)
+                .map(|(_, state)| *state)
+                .ok_or(WeldSplitPreparationError::Cluster(
+                    ClusterError::InvalidMotion,
+                ))?;
+            let mut motion = self
+                .body(state.body)
+                .ok_or(WeldSplitPreparationError::Cluster(
+                    ClusterError::InvalidBodyId,
+                ))?
+                .motion();
+            motion.commit_integrated_state(predicted);
+            plans.push(
+                self.prepare_weld_split_for_motion(state.body, &welds, motion)
+                    .map_err(WeldSplitPreparationError::Cluster)?,
+            );
+        }
+        Ok(plans)
+    }
     /// Returns the part owning a collider, or `None` for an unclustered body
     /// or an invalid collider. Lookup scans the owning cluster's part and
     /// collider lists; it does not cache ownership across topology changes.

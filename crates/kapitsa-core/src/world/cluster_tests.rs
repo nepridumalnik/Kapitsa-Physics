@@ -1552,6 +1552,64 @@ fn invalid_merge_leaves_cluster_topology_unchanged() {
 }
 
 #[test]
+fn pending_weld_split_plan_uses_staged_loads_and_prediction()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::world::StepError;
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+    let root = world.enable_cluster(body)?;
+    let child = world.add_cluster_part(
+        root,
+        ClusterPartDesc {
+            local_transform: Transform::identity(),
+            mass,
+            colliders: Vec::new(),
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        },
+        WeldDesc {
+            frame_a: JointFrame::IDENTITY,
+            frame_b: JointFrame::IDENTITY,
+            strength: WeldStrength::Breakable {
+                max_force: Some(4.0),
+                max_torque: None,
+            },
+            stiffness: WeldStiffness {
+                linear: 1.0,
+                angular: 1.0,
+            },
+        },
+    )?;
+    world.add_force_source_for_part(child, Vec3::ZERO, Vec3::X * 10.0)?;
+    let result = world.with_force_source_updates(|world| {
+        let motion = world
+            .body(body)
+            .ok_or(StepError::InvalidStepResults)?
+            .motion();
+        let predicted =
+            crate::rigid_body::predict(&motion, 0.01).map_err(|_| StepError::InvalidStepResults)?;
+        world.collision_system.begin_step();
+        world.collision_system.stage_prediction(body, predicted);
+        let plans = world
+            .prepare_pending_weld_splits(1e-12, 1e-12)
+            .map_err(|_| StepError::InvalidStepResults)?;
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].prepared_bodies[0].state().linear_velocity(),
+            predicted.linear_velocity()
+        );
+        assert_eq!(world.part_body(child), Some(body));
+        world.collision_system.abort_step();
+        Err::<(), _>(StepError::InvalidDeltaTime)
+    });
+    assert!(result.is_err());
+    assert_eq!(world.part_body(child), Some(body));
+    assert_eq!(world.cluster(body).ok_or("cluster")?.weld_count(), 1);
+    Ok(())
+}
+
+#[test]
 fn prepared_splits_commit_in_one_batch() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = PhysicsWorld::new();
     let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
