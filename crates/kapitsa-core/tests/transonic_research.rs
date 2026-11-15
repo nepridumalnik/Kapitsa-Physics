@@ -670,6 +670,67 @@ fn harris_subsonic_cutoff_source_discretization() -> Result<(), String> {
 
 #[test]
 #[ignore = "fixed-boundary cutoff phase diagnostic; run in release mode"]
+fn harris_subsonic_upstream_cutoff_phase() -> Result<(), String> {
+    // Adjacent axial interval counts change both phase and spacing slightly,
+    // but keep the boundary nodes and geometry fixed. Interpolate at the same
+    // physical station; this does not independently isolate phase from dx.
+    const EXTENSION: f64 = 0.5;
+    const OUTER: f64 = 1.25;
+    const CUTOFF: f64 = 36.0 / 38.240;
+    // Keep even the central Cp derivative stencil entirely upstream.
+    const STATION: f64 = 0.9;
+    for axial_intervals in [128_usize, 129, 192, 193] {
+        let dx = 2.0 / axial_intervals as f64;
+        let nr = (OUTER / dx + 0.5).round() as usize;
+        let dr = OUTER / (nr as f64 - 0.5);
+        let source = (0..=axial_intervals)
+            .map(|i| {
+                let x = i as f64 * dx - EXTENSION;
+                if (0.0..=1.0).contains(&x) {
+                    harris_geometry(x).2
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; axial_intervals + 1],
+            axis_flux: source,
+            dx,
+            dr,
+            mach: 0.9,
+            gamma: 1.4,
+        };
+        let (iterations, residual) = grid
+            .iterate(1e-6, 60000)
+            .map_err(|value| format!("axial_intervals={axial_intervals}: residual={value}"))?;
+        let index = (STATION + EXTENSION) / dx;
+        let i = index.floor() as usize;
+        assert!((i + 2) as f64 * dx - EXTENSION < CUTOFF);
+        let weight = index - i as f64;
+        let (radius, slope, _) = harris_geometry(STATION);
+        // Evaluate both derivatives at the station's physical radius before
+        // interpolating axially; no extrapolation in either direction.
+        let cp = grid
+            .surface_cp(i, radius, slope)
+            .zip(grid.surface_cp(i + 1, radius, slope))
+            .map(|(a, b)| (1.0 - weight) * a + weight * b);
+        let defect = interpolated_radial_derivative(&grid.phi[i], dr, radius)
+            .zip(interpolated_radial_derivative(&grid.phi[i + 1], dr, radius))
+            .map(|(a, b)| (1.0 - weight) * a + weight * b - slope);
+        let cutoff_index = (CUTOFF + EXTENSION) / dx;
+        println!(
+            "axial_intervals={axial_intervals} dx={dx:.9} dr={dr:.9} phase={:+.6} station_bracket=[{:.9},{:.9}] cp={cp:?} linear_defect={defect:?} iterations={iterations} residual={residual:.3e}",
+            cutoff_index - cutoff_index.round(),
+            i as f64 * dx - EXTENSION,
+            (i + 1) as f64 * dx - EXTENSION
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "fixed-boundary cutoff phase diagnostic; run in release mode"]
 fn harris_subsonic_fixed_boundary_cutoff_phase() -> Result<(), String> {
     // Adjacent axial interval counts change both phase and spacing slightly,
     // but keep the boundary nodes and geometry fixed. Interpolate at the same
