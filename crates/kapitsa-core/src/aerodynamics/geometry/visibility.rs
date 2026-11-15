@@ -295,6 +295,27 @@ mod tests {
     use crate::aerodynamics::geometry::GeometryOwner;
 
     #[test]
+    fn windward_triangle_never_exceeds_four_vertices_for_all_sign_patterns() {
+        const VALUES: [f64; 3] = [-1.0, 0.0, 1.0];
+        const MAX_VERTICES: usize = 4;
+        for a in VALUES {
+            for b in VALUES {
+                for c in VALUES {
+                    let velocities = [a, b, c].map(|value| Vec3::X * value);
+                    match windward_triangle(Vec3::X, velocities) {
+                        Ok(Some(polygon)) => {
+                            assert!([a, b, c].iter().any(|value| *value > 0.0));
+                            assert!((3..=MAX_VERTICES).contains(&polygon.len()));
+                        }
+                        Ok(None) => assert!([a, b, c].iter().all(|value| *value <= 0.0)),
+                        Err(error) => panic!("signs {a}, {b}, {c}: {error:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn affine_shadow_matches_scalar_rays_away_from_boundaries() -> Result<(), GeometryError> {
         let source = SurfaceTriangle {
             vertices: [Vec3::ZERO, Vec3::Y, Vec3::Z],
