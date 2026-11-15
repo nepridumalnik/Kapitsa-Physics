@@ -231,6 +231,9 @@ the step. CCD impacts can occur at different times and `ClipIsland` may alter
 velocity without a physical impulse. Contact-enabled weld failure therefore
 also needs a specified impulse-to-strength policy and a complete account of all
 accepted solver and CCD paths; zero omitted points alone is not sufficient.
+Each `ContactImpulse` additionally carries optional body transforms from its
+velocity solve, before positional correction. These are diagnostic witnesses,
+not a certificate of simultaneous impacts or complete velocity changes.
 
 `cluster::impulse::tree_impulse_reactions` provides a separate fixed-pose,
 simultaneous impulse-balance primitive. The caller supplies a complete per-part

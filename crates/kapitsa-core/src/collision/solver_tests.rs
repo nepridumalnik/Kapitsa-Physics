@@ -318,6 +318,10 @@ fn ccd_solver_returns_velocity_impulse_and_application_points()
     )?;
     let contact = output.point(0).ok_or("solved contact")?;
     assert_eq!(contact.velocity_points, Some([point_a, point_b]));
+    assert_eq!(
+        contact.velocity_transforms,
+        Some([bodies[0].state().transform(), bodies[1].state().transform()])
+    );
     let impulse = contact.velocity_impulse.ok_or("velocity impulse")?;
     assert!((solved.linear_velocity() - initial - impulse).length() < 1e-12);
     assert!(impulse.x.abs() > 0.0 && impulse.y > 0.0);
@@ -327,6 +331,7 @@ fn ccd_solver_returns_velocity_impulse_and_application_points()
 #[test]
 fn velocity_contact_points_precede_position_correction() -> Result<(), Box<dyn std::error::Error>> {
     let (mut bodies, mut manifolds) = ball_on_plane(-Vec3::Y * 2.0);
+    let transforms = [bodies[0].state().transform(), bodies[1].state().transform()];
     let contact = manifolds[0].manifold.point(0).ok_or("contact")?;
     let before_a = bodies[0]
         .body()
@@ -349,6 +354,7 @@ fn velocity_contact_points_precede_position_correction() -> Result<(), Box<dyn s
     assert_eq!(prepared.position_b, before_b);
     let solved_contact = manifolds[0].manifold.point(0).ok_or("solved contact")?;
     assert_eq!(solved_contact.velocity_points, Some([before_a, before_b]));
+    assert_eq!(solved_contact.velocity_transforms, Some(transforms));
     let after_b = bodies[1]
         .body()
         .state()

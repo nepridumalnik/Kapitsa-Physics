@@ -296,6 +296,9 @@ pub struct ContactImpulse {
     pub pair: crate::collision::CollisionPair,
     pub parts: [Option<PartId>; 2],
     pub points: [Vec3; 2],
+    /// Poses at the velocity solve, before position projection, when available.
+    /// Presence does not certify a complete impulse ledger or event timing.
+    pub velocity_transforms: Option<[Transform; 2]>,
     pub impulse_on_b: Vec3,
     pub ccd: bool,
 }
@@ -2858,6 +2861,7 @@ impl PhysicsWorld {
                             pair: manifold.pair,
                             parts,
                             points,
+                            velocity_transforms: contact.velocity_transforms,
                             impulse_on_b,
                             ccd,
                         });

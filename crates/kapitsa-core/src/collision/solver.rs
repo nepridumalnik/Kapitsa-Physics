@@ -2748,6 +2748,8 @@ impl SolverWorkspace {
                 Some([point.position_a, point.position_b]);
             let contact = *contact_at(manifolds, point)?;
             let (body_a, body_b) = bodies_at(bodies, point.body_a, point.body_b)?;
+            let transforms = [body_a.state().transform(), body_b.state().transform()];
+            contact_mut(manifolds, point)?.velocity_transforms = Some(transforms);
             let denominator = effective_mass(
                 &body_a.body,
                 &body_b.body,
