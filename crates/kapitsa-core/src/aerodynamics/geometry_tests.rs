@@ -359,6 +359,32 @@ fn triangle_grid_charges_repeated_entries_even_when_deduplicated() {
 }
 
 #[test]
+fn triangle_grid_budget_stops_before_marking_next_candidate() {
+    const FIRST_CANDIDATE_WORK: usize = 2;
+    const ALL_CANDIDATES_WORK: usize = 3;
+    let grid = TriangleGrid {
+        origin: Vec3::ZERO,
+        cell_size: Vec3::ONE,
+        dimensions: [1, 1, 1],
+        offsets: vec![0, 2],
+        triangles: vec![0, 1],
+        build_work: 0,
+    };
+    let source = visibility_triangle(Vec3::ZERO, Vec3::Y * 0.1, Vec3::Z * 0.1);
+    let mut marks = [0; 2];
+    assert_eq!(
+        grid.candidates(&source, Vec3::X, &mut marks, 1, FIRST_CANDIDATE_WORK),
+        Err(GeometryError::WorkBudgetExceeded)
+    );
+    assert_eq!(marks, [1, 0]);
+    let (result, work) = grid
+        .candidates(&source, Vec3::X, &mut marks, 2, ALL_CANDIDATES_WORK)
+        .unwrap();
+    assert_eq!(result, [0, 1]);
+    assert_eq!(work, ALL_CANDIDATES_WORK);
+}
+
+#[test]
 fn triangle_grid_rejects_query_after_work_limit_before_scanning_all_buckets() {
     let triangles = vec![
         visibility_triangle(Vec3::ZERO, Vec3::X * 0.2, Vec3::Y * 0.2),

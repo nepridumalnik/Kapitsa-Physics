@@ -444,8 +444,8 @@ impl TriangleGrid {
                             .ok_or(GeometryError::WorkBudgetExceeded)?;
                         check_surface_work(Some(query_work), max_work)?;
                         if marks[triangle] != stamp {
-                            marks[triangle] = stamp;
                             checked_push(&mut result, triangle)?;
+                            marks[triangle] = stamp;
                         }
                     }
                 }
