@@ -802,7 +802,14 @@ fn harris_subsonic_shifted_grid_phase() -> Result<(), String> {
         let nx = 2 * intervals + 1;
         let nr = (OUTER / dx + 0.5).round() as usize;
         let dr = OUTER / (nr as f64 - 0.5);
-        for (shift, nose_average) in [(0.0_f64, false), (0.0, true), (0.5, false), (0.5, true)] {
+        for (shift, mode) in [
+            (0.0_f64, "point"),
+            (0.0, "nose"),
+            (0.0, "all"),
+            (0.5, "point"),
+            (0.5, "nose"),
+            (0.5, "all"),
+        ] {
             let origin = -EXTENSION + shift * dx;
             let nose_cell = ((0.25 * dx - origin) / dx + 0.5).floor() as usize;
             let mut modified = 0;
@@ -811,7 +818,9 @@ fn harris_subsonic_shifted_grid_phase() -> Result<(), String> {
                     let x = origin + i as f64 * dx;
                     // Average the first cell with positive axial overlap with
                     // [0, dx/2], including a nose exactly on a cell face.
-                    if nose_average && i == nose_cell {
+                    if mode == "all" {
+                        harris_conservative_source(x, dx)
+                    } else if mode == "nose" && i == nose_cell {
                         modified += 1;
                         let radius_at = |position: f64| {
                             if position <= 0.0 {
@@ -830,7 +839,7 @@ fn harris_subsonic_shifted_grid_phase() -> Result<(), String> {
                     }
                 })
                 .collect();
-            if nose_average {
+            if mode == "nose" {
                 assert_eq!(modified, 1);
             }
             let mut grid = MixedGrid {
@@ -884,14 +893,14 @@ fn harris_subsonic_shifted_grid_phase() -> Result<(), String> {
             };
             let cutoff_index = (CUTOFF - origin) / dx;
             println!(
-                "intervals={intervals} shift={shift:.1} nose_average={nose_average} dx={dx:.9} dr={dr:.9} x_min={origin:.9} x_max={:.9} cutoff_phase={:+.6} bracket=[{:.9},{:.9}] cp={cp:.9} defect={defect:+.9} iterations={iterations} residual={residual:.3e}",
+                "intervals={intervals} shift={shift:.1} mode={mode} dx={dx:.9} dr={dr:.9} x_min={origin:.9} x_max={:.9} cutoff_phase={:+.6} bracket=[{:.9},{:.9}] cp={cp:.9} defect={defect:+.9} iterations={iterations} residual={residual:.3e}",
                 origin + (nx - 1) as f64 * dx,
                 cutoff_index - cutoff_index.round(),
                 origin + i as f64 * dx,
                 origin + (i + 1) as f64 * dx
             );
             println!(
-                "interpolation intervals={intervals} shift={shift:.1} nose_average={nose_average} quadratic_cp={quadratic_cp:.9} cp_delta={:+.9} quadratic_defect={quadratic_defect:+.9} defect_delta={:+.9}",
+                "interpolation intervals={intervals} shift={shift:.1} mode={mode} quadratic_cp={quadratic_cp:.9} cp_delta={:+.9} quadratic_defect={quadratic_defect:+.9} defect_delta={:+.9}",
                 quadratic_cp - cp,
                 quadratic_defect - defect
             );
