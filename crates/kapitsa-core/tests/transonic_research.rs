@@ -312,7 +312,7 @@ fn harris_low_mach_conservative_profile_and_balance() -> Result<(), String> {
     const GAMMA: f64 = 1.4;
     const CUTOFF: f64 = 36.0 / 38.240;
     let mut profiles = Vec::new();
-    for intervals in [16_usize, 32, 64] {
+    for intervals in [16_usize, 32, 64, 96] {
         let dx = 1.0 / intervals as f64;
         let nx = 2 * intervals + 1;
         let nr = (OUTER / dx + 0.5).round() as usize;
@@ -375,6 +375,39 @@ fn harris_low_mach_conservative_profile_and_balance() -> Result<(), String> {
                 "profile intervals={intervals} x={x:.3} cp={cp:?} stencil_crosses_cutoff={}",
                 left_x - dx < CUTOFF && left_x + 2.0 * dx >= CUTOFF
             );
+            if x >= 0.89 && left_x + dx < CUTOFF {
+                let backward_cp = |j: usize| -> Option<f64> {
+                    let body_x = j as f64 * dx - EXTENSION;
+                    if j < 2 || body_x >= CUTOFF {
+                        return None;
+                    }
+                    let (radius, slope, _) = harris_geometry(body_x);
+                    let index = radius / dr - 0.5;
+                    if !(0.0..=(nr - 1) as f64).contains(&index) {
+                        return None;
+                    }
+                    let k = (index.floor() as usize).min(nr - 2);
+                    let weight = index - k as f64;
+                    let derivative = |r: usize| {
+                        backward_derivative(
+                            grid.phi[j - 2][r],
+                            grid.phi[j - 1][r],
+                            grid.phi[j][r],
+                            dx,
+                        )
+                    };
+                    let value = -2.0
+                        * ((1.0 - weight) * derivative(k) + weight * derivative(k + 1))
+                        - slope * slope;
+                    value.is_finite().then_some(value)
+                };
+                let backward = backward_cp(i)
+                    .zip(backward_cp(i + 1))
+                    .map(|(a, b)| (1.0 - t) * a + t * b);
+                println!(
+                    "reconstruction intervals={intervals} x={x:.3} central={cp:?} backward={backward:?}"
+                );
+            }
             profile.push(cp);
         }
         profiles.push(profile);
@@ -394,6 +427,26 @@ fn harris_low_mach_conservative_profile_and_balance() -> Result<(), String> {
             max_delta = max_delta.max((b - a).abs());
         }
         println!("common count={} max_delta={max_delta:.9}", common.len());
+    }
+    let fine_common: Vec<_> = (0..harris_data::TABLE_III_A_MACH_090.len())
+        .filter(|&i| profiles[1..].iter().all(|p| p[i].is_some()))
+        .collect();
+    for pair in profiles[1..].windows(2) {
+        let mut max_delta = 0.0_f64;
+        let mut max_x = 0.0;
+        for &i in &fine_common {
+            let (Some(a), Some(b)) = (pair[0][i], pair[1][i]) else {
+                return Err("missing fine common station".to_string());
+            };
+            if (b - a).abs() > max_delta {
+                max_delta = (b - a).abs();
+                max_x = harris_data::TABLE_III_A_MACH_090[i].0;
+            }
+        }
+        println!(
+            "fine_common count={} max_delta={max_delta:.9} max_x={max_x:.3}",
+            fine_common.len()
+        );
     }
     Ok(())
 }
