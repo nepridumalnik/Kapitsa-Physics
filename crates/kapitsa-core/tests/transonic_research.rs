@@ -411,6 +411,41 @@ fn synthetic_mixed_iteration_without_prescribed_shock() {
     }
 }
 
+// Linear threshold positions for a decreasing profile, restricted to a
+// fixed physical window. This diagnostic does not assert a physical shock.
+fn transition_width(values: &[f64], dx: f64, start: usize, end: usize) -> Option<(f64, f64, f64)> {
+    if start >= end || end >= values.len() || dx <= 0.0 {
+        return None;
+    }
+    let drop = values[start] - values[end];
+    if !drop.is_finite() || drop <= 0.0 {
+        return None;
+    }
+    let position = |fraction: f64| {
+        let threshold = values[start] - fraction * drop;
+        (start..end).find_map(|i| {
+            let (a, b) = (values[i], values[i + 1]);
+            if a >= threshold && b < threshold {
+                Some((i as f64 + 0.5 + (a - threshold) / (a - b)) * dx)
+            } else {
+                None
+            }
+        })
+    };
+    let x10 = position(0.1)?;
+    let x90 = position(0.9)?;
+    (x90 >= x10).then_some((x10, x90, drop))
+}
+
+#[test]
+fn transition_width_uses_face_coordinates_and_rejects_increasing_profiles() {
+    let (x10, x90, drop) = transition_width(&[1.0, 1.0, 0.0, 0.0], 0.1, 0, 3).unwrap();
+    assert!((x10 - 0.16).abs() < 1e-14);
+    assert!((x90 - 0.24).abs() < 1e-14);
+    assert_eq!(drop, 1.0);
+    assert!(transition_width(&[0.0, 1.0], 0.1, 0, 1).is_none());
+}
+
 #[test]
 fn harris_mach_one_field_transition_diagnostic() {
     // Zero Dirichlet boundaries and the simplified sting do not match the
@@ -446,6 +481,14 @@ fn harris_mach_one_field_transition_diagnostic() {
                         .map(|row| (1.0 - weight) * row[k] + weight * row[k + 1])
                         .collect();
                     let velocity: Vec<_> = values.windows(2).map(|v| (v[1] - v[0]) / dx).collect();
+                    let start = (0.6875 / dx) as usize;
+                    let end = (0.875 / dx) as usize;
+                    let (x10, x90, drop) = transition_width(&velocity, dx, start, end)
+                        .expect("fixed-window transition must be measurable");
+                    println!(
+                        "  indicator n={n} outer={outer} r={radius} x10={x10:.6} x90={x90:.6} width={:.6} drop={drop:.6}",
+                        x90 - x10
+                    );
                     let crossings: Vec<_> = velocity
                         .windows(2)
                         .enumerate()
