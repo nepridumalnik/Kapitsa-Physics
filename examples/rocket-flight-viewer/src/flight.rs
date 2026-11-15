@@ -4,6 +4,7 @@ use std::{error::Error, io, time::Duration};
 #[allow(dead_code)]
 mod spec;
 
+use kapitsa::aerodynamics::{Aerodynamics, Atmosphere};
 use kapitsa::{
     BodyId, ColliderId, ForceSourceId, JointId, PhysicsBatchResults, PhysicsClient,
     PhysicsCommandBuffer, PhysicsSnapshot, Simulation, SimulationConfig, TimeStepPolicy,
@@ -30,6 +31,14 @@ pub(crate) struct FlightConfig {
     pub(crate) warp: f64,
     pub(crate) maximum_steps: u64,
     pub(crate) fps: u32,
+}
+
+/// Explicit per-stage models. Callers must not represent the same area twice;
+/// the viewer does not infer coefficients, interference, or stage shielding.
+pub(crate) struct FlightAerodynamics {
+    pub(crate) atmosphere: Atmosphere,
+    pub(crate) lower: Aerodynamics,
+    pub(crate) upper: Aerodynamics,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +117,13 @@ fn frame_step(frame_index: u64, fps: u32) -> u64 {
 }
 
 pub(crate) async fn run(config: FlightConfig) -> Result<Vec<SceneFrame>, Box<dyn Error>> {
+    run_with_aerodynamics(config, None).await
+}
+
+pub(crate) async fn run_with_aerodynamics(
+    config: FlightConfig,
+    aerodynamics: Option<FlightAerodynamics>,
+) -> Result<Vec<SceneFrame>, Box<dyn Error>> {
     let physics_config = SimulationConfig {
         tick_rate: spec::TICK_RATE,
         max_catch_up_steps: 1,
@@ -115,16 +131,21 @@ pub(crate) async fn run(config: FlightConfig) -> Result<Vec<SceneFrame>, Box<dyn
         time_step_policy: TimeStepPolicy::Fixed,
         ..SimulationConfig::default()
     };
-    let mut simulation = Simulation::new_from_config(physics_config)?;
+    let atmosphere = aerodynamics
+        .as_ref()
+        .map_or(Atmosphere::Vacuum, |a| a.atmosphere);
+    let mut simulation = Simulation::builder()
+        .config(physics_config)
+        .atmosphere(atmosphere)
+        .spawn_on_tokio(&tokio::runtime::Handle::current())?;
     simulation.set_time_multiplier(config.warp)?;
     let mut physics = simulation.client();
     let mut collisions = physics.subscribe_collision_events();
     let mut results = physics.subscribe_batch_results();
-    simulation.start()?;
 
     let flight = async {
         let (planet_collider, stage_one, stage_two, lower_collider, upper_collider, joint, engine_one, engine_two) =
-            setup(&physics).await?;
+            setup(&physics, aerodynamics).await?;
         let mut initial_batch = physics.commands();
         initial_batch.set_force_source(
             engine_one,
@@ -297,6 +318,7 @@ pub(crate) async fn run(config: FlightConfig) -> Result<Vec<SceneFrame>, Box<dyn
 
 async fn setup(
     physics: &PhysicsClient,
+    aerodynamics: Option<FlightAerodynamics>,
 ) -> Result<
     (
         ColliderId,
@@ -314,12 +336,14 @@ async fn setup(
     let planet_collider = physics
         .add_collider(planet, spec::planet_collider()?)
         .await?;
-    let lower = physics
-        .add_body(spec::stage_body(spec::Stage::One)?)
-        .await?;
-    let upper = physics
-        .add_body(spec::stage_body(spec::Stage::Two)?)
-        .await?;
+    let mut lower_body = spec::stage_body(spec::Stage::One)?;
+    let mut upper_body = spec::stage_body(spec::Stage::Two)?;
+    if let Some(models) = aerodynamics {
+        lower_body.set_aerodynamics(models.lower);
+        upper_body.set_aerodynamics(models.upper);
+    }
+    let lower = physics.add_body(lower_body).await?;
+    let upper = physics.add_body(upper_body).await?;
     let lower_collider = physics.add_collider(lower, spec::stage_collider()?).await?;
     let upper_collider = physics.add_collider(upper, spec::stage_collider()?).await?;
     let joint = physics.add_joint(lower, upper, spec::fixed_joint()).await?;
