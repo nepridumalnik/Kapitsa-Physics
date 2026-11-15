@@ -99,13 +99,7 @@ pub fn area_slopes_from_sections(
     cell_size: f64,
     smoothing_radius: usize,
 ) -> Result<Vec<f64>, WaveDragError> {
-    if sections.is_empty()
-        || !cell_size.is_finite()
-        || cell_size <= 0.0
-        || sections
-            .iter()
-            .any(|section| !section.area.is_finite() || section.area < 0.0)
-    {
+    if sections.is_empty() || !cell_size.is_finite() || cell_size <= 0.0 {
         return Err(WaveDragError::InvalidInput);
     }
     let padding = smoothing_radius
@@ -117,6 +111,12 @@ pub fn area_slopes_from_sections(
         .ok_or(WaveDragError::WorkLimitExceeded)?;
     if length > 2049 {
         return Err(WaveDragError::WorkLimitExceeded);
+    }
+    if sections
+        .iter()
+        .any(|section| !section.area.is_finite() || section.area < 0.0)
+    {
+        return Err(WaveDragError::InvalidInput);
     }
     let width = smoothing_radius
         .checked_mul(2)
@@ -219,15 +219,17 @@ pub fn wave_drag(
 }
 
 fn validate_slopes(area_slopes: &[f64]) -> Result<(), WaveDragError> {
-    if area_slopes.len() < 3
-        || area_slopes.iter().any(|value| !value.is_finite())
-        || area_slopes.first() != Some(&0.0)
-        || area_slopes.last() != Some(&0.0)
-    {
+    if area_slopes.len() < 3 {
         return Err(WaveDragError::InvalidInput);
     }
     if area_slopes.len() - 1 > 2048 {
         return Err(WaveDragError::WorkLimitExceeded);
+    }
+    if area_slopes.iter().any(|value| !value.is_finite())
+        || area_slopes.first() != Some(&0.0)
+        || area_slopes.last() != Some(&0.0)
+    {
+        return Err(WaveDragError::InvalidInput);
     }
     Ok(())
 }
@@ -365,6 +367,26 @@ mod tests {
         assert!(slopes.iter().any(|value| *value > 0.0));
         assert!(slopes.iter().any(|value| *value < 0.0));
         Ok(())
+    }
+
+    #[test]
+    fn oversized_inputs_are_rejected_before_scanning_values() {
+        let sections = vec![
+            GeometrySection {
+                area: f64::NAN,
+                centroid: None
+            };
+            2050
+        ];
+        assert_eq!(
+            area_slopes_from_sections(&sections, 1.0, 0),
+            Err(WaveDragError::WorkLimitExceeded)
+        );
+        let slopes = vec![f64::NAN; 2050];
+        assert_eq!(
+            wave_drag(&slopes, 1.0, 2.0, 1.0),
+            Err(WaveDragError::WorkLimitExceeded)
+        );
     }
 
     #[test]
