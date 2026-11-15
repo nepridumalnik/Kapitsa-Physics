@@ -918,6 +918,60 @@ fn collider_edits_clear_only_collider_based_base_patches() -> Result<(), Box<dyn
 }
 
 #[test]
+fn mesh_base_triangle_selection_validates_indices_and_applies_load()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::pressure::{BasePressure, PressureError},
+        shape::TriangleMesh,
+    };
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            0.001,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 2000.0)?;
+        body.set_aerodynamics(Aerodynamics::Mesh(TriangleMesh::new(
+            vec![Vec3::Y, Vec3::Y + Vec3::Z * 2.0, Vec3::Y + Vec3::Y],
+            vec![[0, 1, 2]],
+        )?));
+        let base = BasePressure::new(-0.4, 5.0, 10.0)?;
+        body.set_mesh_base_triangles(&[0], base)?;
+        let selected = body.base_pressure_patches().to_vec();
+        assert_eq!(selected[0].0.area(), 1.0);
+        assert_eq!(selected[0].0.normal(), -Vec3::X);
+        assert_eq!(
+            body.set_mesh_base_triangles(&[0, 0], base),
+            Err(PressureError::InvalidPatch)
+        );
+        assert_eq!(
+            body.set_mesh_base_triangles(&[1], base),
+            Err(PressureError::InvalidPatch)
+        );
+        assert_eq!(body.base_pressure_patches(), selected);
+        let id = world.add_body(body)?;
+        if sharded {
+            world.step_with_shards(
+                1e-5,
+                &mut [Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(1e-5)?;
+        }
+        assert!(
+            (world.body(id).unwrap().state().linear_velocity().x - (2000.0 - 8e-5)).abs() < 1e-10
+        );
+        world.set_aerodynamics(id, Aerodynamics::None)?;
+        assert!(world.body(id).unwrap().base_pressure_patches().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn base_pressure_outside_mach_domain_rolls_back_world_step()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{

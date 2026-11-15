@@ -123,6 +123,49 @@ impl RigidBody {
         &self.base_pressure_patches
     }
 
+    /// Selects whole triangles of the current primary Mesh as base patches.
+    /// Indices must be unique and refer to outward-wound, exposed base faces.
+    /// This verifies geometry membership, not shielding or wake applicability.
+    /// On error the previous configuration is preserved. Collider-derived meshes
+    /// and clipped/partially exposed faces are not supported by this method.
+    pub fn set_mesh_base_triangles(
+        &mut self,
+        indices: &[usize],
+        base: crate::aerodynamics::pressure::BasePressure,
+    ) -> Result<(), crate::aerodynamics::pressure::PressureError> {
+        use crate::aerodynamics::{
+            Aerodynamics,
+            pressure::{PressureError, PressurePatch},
+        };
+        let Aerodynamics::Mesh(mesh) = &self.aerodynamics else {
+            return Err(PressureError::InvalidPatch);
+        };
+        let mut sorted = indices.to_vec();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(PressureError::InvalidPatch);
+        }
+        let mut patches = Vec::with_capacity(indices.len());
+        for &index in indices {
+            let face = mesh
+                .triangles()
+                .get(index)
+                .ok_or(PressureError::InvalidPatch)?;
+            let [a, b, c] = face.map(|i| mesh.vertices()[i]);
+            let cross = b
+                .checked_sub(a)
+                .and_then(|u| c.checked_sub(a).and_then(|v| u.checked_cross(v)))
+                .ok_or(PressureError::ArithmeticOverflow)?;
+            let length = cross
+                .checked_length()
+                .ok_or(PressureError::ArithmeticOverflow)?;
+            let center = a / 3.0 + b / 3.0 + c / 3.0;
+            patches.push((PressurePatch::new(center, cross, length * 0.5)?, base));
+        }
+        self.base_pressure_patches = patches;
+        Ok(())
+    }
+
     pub(crate) fn invalidate_collider_base_patches(&mut self) {
         if matches!(
             self.aerodynamics,
