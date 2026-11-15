@@ -319,6 +319,7 @@ pub struct ClusterLoadState {
     pub(crate) part_wings_certified: bool,
     pub(crate) part_surfaces_certified: bool,
     pub(crate) part_surface_count: usize,
+    pub(crate) vacuum: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1092,7 +1093,10 @@ impl PhysicsWorld {
             center,
             origin,
         )?;
-        if matches!(load_mode, WeldLoadMode::PartAerodynamics) && state.part_surface_count > 0 {
+        if matches!(load_mode, WeldLoadMode::PartAerodynamics)
+            && state.part_surface_count > 0
+            && !state.vacuum
+        {
             let (corrections, raw) = simple;
             let mut matching = corrections.iter().filter(|item| item.body == body);
             let correction = matching.next().ok_or(WeldBalanceError::IncompleteLoads)?;
@@ -2431,6 +2435,7 @@ impl PhysicsWorld {
                     part_wings_certified,
                     part_surfaces_certified,
                     part_surface_count: body.aerodynamic_surfaces.len(),
+                    vacuum: matches!(self.atmosphere, Atmosphere::Vacuum),
                 });
             }
         }

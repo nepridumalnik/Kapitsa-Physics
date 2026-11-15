@@ -93,12 +93,11 @@ are required for motion and force changes on clustered bodies.
 
 ## Fracture and runtime
 
-Manual weld removal is implemented; automatic weld fracture and an elastic graph
-load solver are **not implemented**. `WeldStrength::Breakable` stores validated
-thresholds but does not currently trigger fracture. Diagnostic snapshots retain
-some part-owned aerodynamic wrenches, but they are not a complete load ledger
-and are not used for weld evaluation. Do not interpret the net cluster wrench
-as the force on any weld.
+Manual weld removal and restricted automatic tree-weld fracture are implemented;
+see the policy below. An elastic graph load solver is not implemented.
+Diagnostic snapshots retain some part-owned aerodynamic wrenches, but they are
+not a complete load ledger for arbitrary configurations. Do not interpret the
+net cluster wrench as the force on any weld.
 
 The simple `AerodynamicSurface` path applies a body-level timestep-dependent
 drag limit and a coupled lift correction after summing surfaces. The raw force
@@ -174,8 +173,8 @@ and moment equilibrium tolerances in N and N·m. The force and torque limits
 compare magnitudes at the child-side weld anchor; equality does not break a
 weld. A step with a breakable cluster fails before commit when its loads cannot
 be certified. Currently certification requires a dynamic cluster with no
-accumulated body forces, no aerodynamic loads, and only part-targeted persistent
-force sources, part-owned `HullSection` and `WingSurface` loads, and gravity sampled uniformly at the cluster center of mass, with
+accumulated body forces, only part-targeted persistent force sources,
+certified part-owned aerodynamic loads, and gravity sampled uniformly at the cluster center of mass, with
 no colliders on the cluster and no joints or chunks in the world. Gravity
 gradients across the cluster are not modeled. Colliders on other bodies are permitted. Thus
 contact and CCD forces are not supported, not assumed absent from a diagnostic
@@ -193,8 +192,10 @@ aggregate, and applied drag and lift exactly equal their raw values. Body-target
 surfaces and unattributed corrections are rejected. The
 evaluator now records an explicit zero correction when the aggregate force and
 moment vanish, including when individual loads cancel. An absent correction is
-still not a certificate of zero individual loads: vacuum and skipped surface
-records currently cause an explicit incomplete-load error.
+still not a certificate of zero individual loads: skipped surface records in
+an atmosphere cause an explicit incomplete-load error. The explicit global
+`Atmosphere::Vacuum` configuration certifies zero aerodynamic loads without
+surface records; this does not apply to locally zero-density samples.
 
 The reaction is evaluated at the start of the timestep, while the split uses
 the predicted end-of-step rigid velocity field. This is a discrete failure

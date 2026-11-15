@@ -362,11 +362,12 @@ fn automatic_failure_certifies_only_uncorrected_part_surfaces()
         assert_eq!(*world.body(body).ok_or("body")?.state(), before);
         assert!(world.weld(weld).is_some());
         world.set_atmosphere(crate::aerodynamics::Atmosphere::Vacuum);
-        assert!(matches!(
-            step(&mut world, 1e-5),
-            Err(StepError::WeldBalance(_))
-        ));
+        step(&mut world, 1e-5)?;
         assert!(world.weld(weld).is_some());
+        let vacuum_reactions = world
+            .part_aerodynamic_weld_reactions(body, 1e-9, 1e-9)
+            .map_err(|e| format!("{e:?}"))?;
+        assert_eq!(vacuum_reactions[0].force, Vec3::ZERO);
         world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));
         step(&mut world, 1e-5)?;
         assert!(world.weld(weld).is_none());
