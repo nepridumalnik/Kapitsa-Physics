@@ -38,6 +38,77 @@ use crate::execution::{ExecutionError, StepExecutor};
 #[path = "world/free_ball_tests.rs"]
 mod free_ball_tests;
 
+#[test]
+fn kinematic_part_contact_impulse_matches_dynamic_part_momentum()
+-> Result<(), Box<dyn std::error::Error>> {
+    for ccd in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let (start, speed, dt) = if ccd {
+            (-5.0, 1000.0, 0.01)
+        } else {
+            (-1.1, 10.0, 0.02)
+        };
+        let mut kinematic =
+            RigidBody::new_kinematic(Transform::new(Vec3::new(start, 0.0, 0.0), Quat::IDENTITY)?);
+        kinematic.set_linear_velocity(Vec3::X * speed)?;
+        if ccd {
+            kinematic.set_ccd_mode(CcdMode::Continuous);
+        }
+        let driver = world.add_body(kinematic)?;
+        let driver_part = world.enable_cluster_with_mass(driver, mass)?;
+        let driver_collider = world.add_part_collider(driver_part, collider(0.5))?;
+        let mut moving = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        if ccd {
+            moving.set_ccd_mode(CcdMode::Continuous);
+        }
+        let body = world.add_body(moving)?;
+        let part = world.enable_cluster(body)?;
+        let sphere = world.add_part_collider(part, collider(0.5))?;
+        world.step(dt)?;
+        let mut total = Vec3::ZERO;
+        let mut count = 0;
+        for entry in world.contact_impulses() {
+            if entry.pair.a == sphere {
+                assert_eq!(entry.pair.b, driver_collider);
+                assert_eq!(entry.parts, [Some(part), Some(driver_part)]);
+                total -= entry.impulse_on_b;
+            } else {
+                assert_eq!(entry.pair.a, driver_collider);
+                assert_eq!(entry.pair.b, sphere);
+                assert_eq!(entry.parts, [Some(driver_part), Some(part)]);
+                total += entry.impulse_on_b;
+            }
+            count += 1;
+        }
+        assert!(count > 0, "ccd={ccd}");
+        assert_eq!(world.contact_impulses_omitted_points(), 0);
+        assert!(!world.contact_impulses_ccd_clipped());
+        let velocity = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity();
+        assert!(velocity.x > 0.0);
+        assert!(
+            (total - velocity).length() < speed * 1e-10,
+            "impulse={total:?}, velocity={velocity:?}"
+        );
+        assert_eq!(
+            world
+                .body(driver)
+                .ok_or(WorldError::InvalidBodyId)?
+                .state()
+                .linear_velocity(),
+            Vec3::X * speed
+        );
+        if ccd {
+            assert!(world.contact_impulses().iter().any(|entry| entry.ccd));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "bench-internals")]
 #[test]
 fn ccd_clipping_flag_survives_local_replay() -> Result<(), Box<dyn std::error::Error>> {
