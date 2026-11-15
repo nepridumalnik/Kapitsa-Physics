@@ -1207,6 +1207,93 @@ fn base_visibility_is_rechecked_after_flow_reversal() -> Result<(), Box<dyn std:
 }
 
 #[test]
+fn base_visibility_tracks_rotation_on_mesh_and_colliders() -> Result<(), Box<dyn std::error::Error>>
+{
+    use crate::{
+        aerodynamics::{
+            AerodynamicsError,
+            pressure::{BasePressure, PressureError},
+        },
+        collider::Collider,
+        shape::{Cuboid, Shape, TriangleMesh},
+    };
+    for collider_mode in [false, true] {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                0.001,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 2000.0)?;
+            body.set_aerodynamics(if collider_mode {
+                Aerodynamics::Colliders
+            } else {
+                Aerodynamics::Mesh(TriangleMesh::new(
+                    vec![
+                        Vec3::new(0.0, 2.0, 0.0),
+                        Vec3::new(0.0, 2.0, 1.0),
+                        Vec3::new(0.0, 3.0, 0.0),
+                    ],
+                    vec![[0, 1, 2]],
+                )?)
+            });
+            let id = world.add_body(body)?;
+            let base = BasePressure::new(-0.4, 5.0, 20.0)?;
+            if collider_mode {
+                let collider = world.add_collider(
+                    id,
+                    Collider::new(
+                        Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                        Transform::new(Vec3::Y * 2.0, kapitsa_math::Quat::IDENTITY)?,
+                    ),
+                )?;
+                world.set_collider_base_triangles(id, collider, &[2, 3], base)?;
+            } else {
+                world
+                    .body_mut(id)
+                    .unwrap()
+                    .set_mesh_base_triangles(&[0], base)?;
+            }
+            let step = |world: &mut PhysicsWorld| {
+                if sharded {
+                    world.step_with_shards(
+                        1e-8,
+                        &mut [Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )
+                } else {
+                    world.step(1e-8)
+                }
+            };
+            step(&mut world)?;
+            // At y >= 1.5, omega_z=2000 produces a negative local x velocity,
+            // while the unchanged COM translation still points along +X.
+            world
+                .body_mut(id)
+                .unwrap()
+                .set_angular_velocity(Vec3::Z * 2000.0)?;
+            let before = world.body(id).unwrap().motion();
+            let result = step(&mut world);
+            assert!(
+                matches!(
+                    result,
+                    Err(super::StepError::Aerodynamics {
+                        cause: AerodynamicsError::Pressure(PressureError::BaseNotFullyVisible),
+                        ..
+                    })
+                ),
+                "collider={collider_mode}, sharded={sharded}: {result:?}"
+            );
+            assert_eq!(world.body(id).unwrap().motion(), before);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn preflight_rejects_unchecked_base_pressure_without_mutating_world()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
