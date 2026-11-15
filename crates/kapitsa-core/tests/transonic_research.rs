@@ -150,6 +150,59 @@ fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+#[ignore = "boundary sensitivity research diagnostic; run in release mode"]
+fn harris_subsonic_radial_boundary_sensitivity() -> Result<(), String> {
+    // Hold the entire mesh spacing and axial domain fixed; only the location
+    // of the outer zero-potential cell centre changes. Not a tunnel model.
+    const BODY_INTERVALS: usize = 32;
+    const AXIAL_EXTENSION: f64 = 0.5;
+    const MACH: f64 = 0.9;
+    const GAMMA: f64 = 1.4;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 40000;
+    const STATIONS: [f64; 5] = [0.25, 0.375, 0.5, 0.625, 0.75];
+    let dx = 1.0 / BODY_INTERVALS as f64;
+    let dr = dx;
+    let nx = 2 * BODY_INTERVALS + 1;
+    for nr in [25_usize, 41, 65, 97] {
+        let outer = (nr as f64 - 0.5) * dr;
+        let source = (0..nx)
+            .map(|i| {
+                let x = i as f64 * dx - AXIAL_EXTENSION;
+                if (0.0..=1.0).contains(&x) {
+                    harris_geometry(x).2
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; nx],
+            axis_flux: source,
+            dx,
+            dr,
+            mach: MACH,
+            gamma: GAMMA,
+        };
+        let (iterations, residual) = grid
+            .iterate(TOLERANCE, MAX_ITERATIONS)
+            .map_err(|value| format!("outer={outer}: residual={value}"))?;
+        println!(
+            "outer={outer:.6} dx={dx:.6} dr={dr:.6} iterations={iterations} residual={residual:.3e}"
+        );
+        for x in STATIONS {
+            let i = ((x + AXIAL_EXTENSION) / dx).round() as usize;
+            let (radius, slope, _) = harris_geometry(x);
+            let cp = grid
+                .surface_cp(i, radius, slope)
+                .ok_or_else(|| format!("unavailable Cp at x/l={x}, outer={outer}"))?;
+            println!("outer={outer:.6} x/l={x:.3} cp={cp:.9}");
+        }
+    }
+    Ok(())
+}
+
 fn axial_flux(u: f64, mach: f64, gamma: f64) -> f64 {
     (1.0 - mach * mach) * u - 0.5 * mach * mach * (gamma + 1.0) * u * u
 }
