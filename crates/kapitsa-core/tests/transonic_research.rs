@@ -81,6 +81,31 @@ fn harris_axis_source_matches_area_derivative_away_from_truncation() {
 }
 
 #[test]
+fn cutoff_cell_source_average_preserves_cross_section_change() {
+    // Integral of R R' over a cell is exactly half the change in R²,
+    // including a cell crossed by the continuous-radius slope discontinuity.
+    const CUTOFF: f64 = 36.0 / 38.240;
+    const ROUNDING_TOLERANCE: f64 = 1e-15;
+    for intervals in [32_usize, 64, 96, 128] {
+        let dx = 1.0 / intervals as f64;
+        let i = (CUTOFF / dx).round() as usize;
+        let x = i as f64 * dx;
+        let left = harris_geometry(x - dx / 2.0).0;
+        let right = harris_geometry(x + dx / 2.0).0;
+        let average = (right * right - left * left) / (2.0 * dx);
+        let point = harris_geometry(x).2;
+        let integrated = average * dx;
+        assert!((integrated - (right * right - left * left) / 2.0).abs() < ROUNDING_TOLERANCE);
+        assert!(x - dx / 2.0 < CUTOFF && x + dx / 2.0 > CUTOFF);
+        println!(
+            "intervals={intervals} offset_in_cells={:.6} point={point:.9} average={average:.9} difference={:+.9}",
+            (CUTOFF - x) / dx,
+            average - point
+        );
+    }
+}
+
+#[test]
 fn radial_face_difference_converges_for_logarithmic_line_source() {
     // For locally constant q = R R', the axisymmetric line-source field
     // phi = q ln(r/R) has phi_r(R) = R'. This verifies reconstruction only;
