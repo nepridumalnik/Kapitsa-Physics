@@ -928,3 +928,41 @@ fn simple_surface_attribution_accepts_only_complete_uncorrected_part_loads()
     }
     Ok(())
 }
+
+#[test]
+fn simple_surface_zero_aggregate_has_explicit_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::AerodynamicProperties;
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let part = world.enable_cluster(body)?;
+        world.add_aerodynamic_surface_for_part(
+            part,
+            AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO)?,
+        )?;
+        if sharded {
+            world.step_with_shards(
+                1e-4,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )?;
+        } else {
+            world.step(1e-4)?;
+        }
+        let correction = world
+            .simple_surface_corrections()
+            .first()
+            .ok_or("correction")?;
+        assert_eq!(correction.raw_drag.force, Vec3::ZERO);
+        assert_eq!(correction.applied_drag, correction.raw_drag);
+        assert_eq!(correction.applied_lift, correction.raw_lift);
+        assert_eq!(
+            correction.check_part_attribution(world.raw_simple_surface_wrenches()),
+            Ok(())
+        );
+    }
+    Ok(())
+}

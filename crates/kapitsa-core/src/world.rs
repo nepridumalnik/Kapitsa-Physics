@@ -3214,13 +3214,6 @@ impl PhysicsWorld {
                 });
             }
         }
-        if drag == Vec3::ZERO
-            && drag_torque == Vec3::ZERO
-            && lift_force == Vec3::ZERO
-            && lift_torque == Vec3::ZERO
-        {
-            return Ok(());
-        }
         let raw_drag = crate::aerodynamics::pressure::PressureWrench {
             force: drag,
             moment: drag_torque,
@@ -3229,6 +3222,24 @@ impl PhysicsWorld {
             force: lift_force,
             moment: lift_torque,
         };
+        if drag == Vec3::ZERO
+            && drag_torque == Vec3::ZERO
+            && lift_force == Vec3::ZERO
+            && lift_torque == Vec3::ZERO
+        {
+            if (!surfaces.is_empty() || primary_surface.is_some())
+                && let Some(output) = simple_surface_correction
+            {
+                *output = Some(SimpleSurfaceCorrection {
+                    body: body_id,
+                    raw_drag,
+                    raw_lift,
+                    applied_drag: raw_drag,
+                    applied_lift: raw_lift,
+                });
+            }
+            return Ok(());
+        }
         let center_wind = atmosphere
             .state_at(center)
             .map_err(|cause| StepError::Aerodynamics { body_id, cause })?
