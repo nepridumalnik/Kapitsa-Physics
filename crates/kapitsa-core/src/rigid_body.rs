@@ -38,6 +38,7 @@ pub struct RigidBody {
         crate::aerodynamics::pressure::PressurePatch,
         crate::aerodynamics::pressure::BasePressure,
     )>,
+    pub(crate) base_pressure_triangles: Option<Vec<[Vec3; 3]>>,
 }
 
 impl RigidBody {
@@ -60,6 +61,7 @@ impl RigidBody {
             aerodynamic_geometry_identity: None,
             aerodynamic_surfaces: Vec::new(),
             base_pressure_patches: Vec::new(),
+            base_pressure_triangles: None,
         }
     }
 
@@ -76,6 +78,7 @@ impl RigidBody {
         aerodynamics: crate::aerodynamics::Aerodynamics,
     ) {
         self.base_pressure_patches.clear();
+        self.base_pressure_triangles = None;
         self.aerodynamic_geometry_identity = matches!(
             aerodynamics,
             crate::aerodynamics::Aerodynamics::Mesh(_)
@@ -111,6 +114,7 @@ impl RigidBody {
         )>,
     ) {
         self.base_pressure_patches = patches;
+        self.base_pressure_triangles = None;
     }
 
     /// Returns the explicit body-local base-pressure configuration.
@@ -138,7 +142,12 @@ impl RigidBody {
             return Err(PressureError::InvalidPatch);
         };
         let patches = Self::base_triangles_from_mesh(mesh, indices, base)?;
+        let triangles = indices
+            .iter()
+            .map(|&i| mesh.triangles()[i].map(|v| mesh.vertices()[v]))
+            .collect();
         self.base_pressure_patches = patches;
+        self.base_pressure_triangles = Some(triangles);
         Ok(())
     }
 
@@ -188,6 +197,7 @@ impl RigidBody {
             crate::aerodynamics::Aerodynamics::Colliders
         ) {
             self.base_pressure_patches.clear();
+            self.base_pressure_triangles = None;
         }
     }
 

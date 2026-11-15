@@ -1038,6 +1038,98 @@ fn collider_base_triangle_selection_uses_owned_geometry_and_invalidates()
 }
 
 #[test]
+fn selected_base_rejects_blocked_geometry_without_changing_motion()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            AerodynamicsError,
+            pressure::{BasePressure, PressureError},
+        },
+        collider::Collider,
+        shape::{Cuboid, Shape, TriangleMesh},
+    };
+    for collider_mode in [false, true] {
+        for sharded in [false, true] {
+            for width in [0.5, 2.0] {
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                    0.001,
+                    Vec3::ZERO,
+                )?));
+                let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+                let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+                body.set_linear_velocity(Vec3::X * 2000.0)?;
+                body.set_aerodynamics(if collider_mode {
+                    Aerodynamics::Colliders
+                } else {
+                    Aerodynamics::Mesh(TriangleMesh::new(
+                        vec![
+                            Vec3::ZERO,
+                            Vec3::Z,
+                            Vec3::Y,
+                            Vec3::new(-1.0, 0.0, 0.0),
+                            Vec3::new(-1.0, width, 0.0),
+                            Vec3::new(-1.0, 0.0, 2.0),
+                        ],
+                        vec![[0, 1, 2], [3, 4, 5]],
+                    )?)
+                });
+                let id = world.add_body(body)?;
+                let base = BasePressure::new(-0.4, 5.0, 10.0)?;
+                if collider_mode {
+                    let target = world.add_collider(
+                        id,
+                        Collider::new(
+                            Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                            Transform::identity(),
+                        ),
+                    )?;
+                    world.add_collider(
+                        id,
+                        Collider::new(
+                            Shape::Cuboid(Cuboid::new(0.1, width, 2.0)?),
+                            Transform::new(
+                                Vec3::new(-1.0, if width < 1.0 { 0.25 } else { 0.0 }, 0.0),
+                                kapitsa_math::Quat::IDENTITY,
+                            )?,
+                        ),
+                    )?;
+                    world.set_collider_base_triangles(id, target, &[2, 3], base)?;
+                } else {
+                    world
+                        .body_mut(id)
+                        .unwrap()
+                        .set_mesh_base_triangles(&[0], base)?;
+                }
+                let before = world.body(id).unwrap().motion();
+                let result = if sharded {
+                    world.step_with_shards(
+                        1e-5,
+                        &mut [Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )
+                } else {
+                    world.step(1e-5)
+                };
+                assert!(
+                    matches!(
+                        result,
+                        Err(super::StepError::Aerodynamics {
+                            cause: AerodynamicsError::Pressure(PressureError::BaseNotFullyVisible),
+                            ..
+                        })
+                    ),
+                    "collider={collider_mode}, width={width}, result={result:?}"
+                );
+                assert_eq!(world.body(id).unwrap().motion(), before);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn base_pressure_outside_mach_domain_rolls_back_world_step()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{

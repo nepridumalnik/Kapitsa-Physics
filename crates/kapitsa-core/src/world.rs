@@ -596,11 +596,17 @@ impl PhysicsWorld {
         )?;
         let patches = RigidBody::base_triangles_from_mesh(&mesh, indices, base)
             .map_err(AerodynamicsError::Pressure)?;
-        self.bodies
+        let triangles = indices
+            .iter()
+            .map(|&i| mesh.triangles()[i].map(|v| mesh.vertices()[v]))
+            .collect();
+        let body = &mut self
+            .bodies
             .get_mut(body.dense)
             .ok_or(AerodynamicsError::UnsupportedModel)?
-            .body
-            .set_base_pressure_patches(patches);
+            .body;
+        body.set_base_pressure_patches(patches);
+        body.base_pressure_triangles = Some(triangles);
         self.body_revision = self.body_revision.wrapping_add(1);
         Ok(())
     }
@@ -2632,6 +2638,38 @@ impl PhysicsWorld {
                         cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
                     })?
                     .center_of_mass();
+                if let Some(selected) = entry
+                    .body
+                    .base_pressure_triangles
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                {
+                    let visible = geometry
+                        .surface_patches_with_flow(
+                            &[crate::aerodynamics::geometry::GeometryInstance {
+                                mesh,
+                                local_transform: crate::transform::Transform::identity(),
+                                owner: crate::aerodynamics::geometry::GeometryOwner::Body,
+                            }],
+                            config.max_patch_work,
+                            |point| {
+                                point.checked_sub(center)
+                            .and_then(|arm| omega.checked_cross(arm))
+                            .and_then(|velocity| direction.checked_add(velocity))
+                            .and_then(|velocity| Vec3::ZERO.checked_sub(velocity))
+                            .ok_or(crate::aerodynamics::geometry::GeometryError::ArithmeticOverflow)
+                            },
+                        )
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                        })?;
+                    crate::aerodynamics::pressure::verify_full_base_visibility(selected, &visible)
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                        })?;
+                }
                 mesh_patches = Some(
                     geometry
                         .surface_patches_with_flow(
