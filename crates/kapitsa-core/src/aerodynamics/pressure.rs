@@ -717,8 +717,8 @@ pub fn evaluate_prepared_mesh_by_owner(
 /// Reusable transactional storage for owner-attributed impact-pressure wrenches.
 /// `evaluate` replaces published results only on success; errors preserve them.
 /// Owners are preconfigured and strictly sorted so patch lookup is O(log K).
-/// Once created, evaluation does not allocate. This workspace is not a complete
-/// part-load ledger and is not attached to a `PhysicsWorld` step.
+/// Once created, evaluation does not allocate. This workspace alone is not a
+/// complete part-load ledger; the world stages it transactionally when needed.
 pub struct OwnerPressureWorkspace {
     published: Vec<(super::geometry::GeometryOwner, PressureWrench)>,
     scratch: Vec<(super::geometry::GeometryOwner, PressureWrench)>,

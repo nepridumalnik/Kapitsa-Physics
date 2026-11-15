@@ -199,6 +199,16 @@ surface records, including part-owned aerodynamic geometry; this does not apply
 to locally zero-density samples. Collider and other load-path restrictions
 remain in force even in vacuum.
 
+For part-owned Mesh geometry in air, the full-step pressure workspace must be
+staged from the same patches and flow as the applied impact-pressure wrench;
+its patch-order total must match that applied wrench exactly. Every pressure
+owner must be a part in the certified tree. The owner wrenches are evaluated
+about the assembly COM and incorporated into the pending weld balance. Missing
+staging is rejected, including when COM density is zero. Collider geometry,
+voxel wave geometry, contacts, joints and other unsupported paths remain excluded.
+This certifies attribution of the implemented Mach >= 5 impact approximation,
+not experimental accuracy of the pressure model.
+
 The reaction is evaluated at the start of the timestep, while the split uses
 the predicted end-of-step rigid velocity field. This is a discrete failure
 policy, not an impact, fracture propagation, or within-step failure-time model.

@@ -2394,6 +2394,83 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn mesh_pressure_can_break_certified_tree_weld() -> Result<(), Box<dyn std::error::Error>> {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(
+                crate::aerodynamics::AtmosphericState::new(0.001, Vec3::ZERO)?,
+            ));
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let mut rigid = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            rigid.set_linear_velocity(Vec3::X * 2000.0)?;
+            let body = world.add_body(rigid)?;
+            let root = world.enable_cluster(body)?;
+            let child = world.add_cluster_part(
+                root,
+                crate::cluster::ClusterPartDesc {
+                    local_transform: Transform::identity(),
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * 2000.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    strength: WeldStrength::Breakable {
+                        max_force: Some(100.0),
+                        max_torque: None,
+                    },
+                    ..weld()
+                },
+            )?;
+            world.set_part_aerodynamic_mesh(child, Some(plate()?))?;
+            world.step(1e-8)?;
+            let previous = world.owner_mesh_pressure(body).ok_or("pressure")?.to_vec();
+            let reactions = world
+                .part_aerodynamic_weld_reactions(body, 1e-8, 1e-8)
+                .map_err(|e| format!("{e:?}"))?;
+            assert!((reactions[0].force - Vec3::X * 2000.0).length() < 1e-6);
+            let center = world
+                .body(body)
+                .ok_or("body")?
+                .motion()
+                .world_center_of_mass()?
+                .ok_or("center")?;
+            let bad_gravity =
+                world.add_gravity(crate::gravity::CentralGravity::new(center, 1.0)?)?;
+            let failed = if sharded {
+                world.step_with_shards(1e-8, &mut [Vec::new(), Vec::new()], &SequentialExecutor, 1)
+            } else {
+                world.step(1e-8)
+            };
+            assert!(failed.is_err());
+            assert_eq!(world.owner_mesh_pressure(body), Some(previous.as_slice()));
+            assert_eq!(
+                world
+                    .part_aerodynamic_weld_reactions(body, 1e-8, 1e-8)
+                    .map_err(|e| format!("{e:?}"))?,
+                reactions
+            );
+            world.remove_gravity(bad_gravity).ok_or("gravity")?;
+            world
+                .set_automatic_weld_failure(Some((1e-8, 1e-8)))
+                .map_err(|e| format!("{e:?}"))?;
+            if sharded {
+                world.step_with_shards(
+                    1e-8,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(1e-8)?;
+            }
+            assert!(world.cluster(body).ok_or("cluster")?.welds().is_empty());
+            assert_ne!(world.cluster_part(child).ok_or("part")?.body(), body);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn vacuum_part_geometry_allows_certified_weld_balance() -> Result<(), Box<dyn std::error::Error>>
     {
         for sharded in [false, true] {

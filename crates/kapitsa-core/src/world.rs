@@ -320,6 +320,7 @@ pub struct ClusterLoadState {
     pub(crate) part_surfaces_certified: bool,
     pub(crate) part_surface_count: usize,
     pub(crate) vacuum: bool,
+    pub(crate) part_geometry: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -496,6 +497,7 @@ struct AerodynamicsBodyUpdate {
     part_wing_wrenches: Vec<PartWingWrench>,
     simple_surface_correction: Option<SimpleSurfaceCorrection>,
     raw_simple_surfaces: Vec<RawSimpleSurfaceWrench>,
+    applied_mesh_pressure: Option<crate::aerodynamics::pressure::PressureWrench>,
 }
 
 struct PreparedAerodynamicLoads {
@@ -524,6 +526,7 @@ struct AerodynamicsInputs<'a> {
     part_wing_wrenches: Option<&'a mut Vec<PartWingWrench>>,
     simple_surface_correction: Option<&'a mut Option<SimpleSurfaceCorrection>>,
     raw_simple_surfaces: Option<&'a mut Vec<RawSimpleSurfaceWrench>>,
+    applied_mesh_pressure: Option<&'a mut Option<crate::aerodynamics::pressure::PressureWrench>>,
 }
 
 impl<'a> AerodynamicsInputs<'a> {
@@ -542,6 +545,7 @@ impl<'a> AerodynamicsInputs<'a> {
             part_wing_wrenches: None,
             simple_surface_correction: None,
             raw_simple_surfaces: None,
+            applied_mesh_pressure: None,
         }
     }
 
@@ -570,6 +574,14 @@ impl<'a> AerodynamicsInputs<'a> {
 
     fn with_raw_simple_surfaces(mut self, entries: &'a mut Vec<RawSimpleSurfaceWrench>) -> Self {
         self.raw_simple_surfaces = Some(entries);
+        self
+    }
+
+    fn with_applied_mesh_pressure(
+        mut self,
+        wrench: &'a mut Option<crate::aerodynamics::pressure::PressureWrench>,
+    ) -> Self {
+        self.applied_mesh_pressure = Some(wrench);
         self
     }
 
@@ -918,6 +930,10 @@ impl PhysicsWorld {
             &self.part_hull_pending,
             &self.part_wing_pending,
             (&self.simple_surface_pending, &self.raw_simple_pending),
+            self.owner_pressure
+                .as_ref()
+                .and_then(|map| map.get(&body))
+                .and_then(|workspace| workspace.staged()),
             WeldLoadMode::PartAerodynamics,
         )?;
         Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_pending)
@@ -991,6 +1007,7 @@ impl PhysicsWorld {
             &[],
             &[],
             (&[], &[]),
+            None,
             WeldLoadMode::Sources,
         )
     }
@@ -1016,13 +1033,15 @@ impl PhysicsWorld {
             &self.part_hull_published,
             &[],
             (&[], &[]),
+            None,
             WeldLoadMode::Hull,
         )
     }
 
     /// Reactions including part-owned hull and wing loads from the same step.
-    /// Body-owned aerodynamics, common surface corrections, geometry-based
-    /// aerodynamics and contacts are not certified.
+    /// Body-owned aerodynamics, common surface corrections, non-Mesh geometry
+    /// and contacts are not certified. Part-owned Mesh pressure is supported
+    /// only when its same-step owner snapshot matches the applied wrench.
     pub fn part_aerodynamic_weld_reactions(
         &self,
         body: BodyId,
@@ -1041,6 +1060,10 @@ impl PhysicsWorld {
             &self.part_hull_published,
             &self.part_wing_published,
             (&self.simple_surface_published, &self.raw_simple_published),
+            self.owner_pressure
+                .as_ref()
+                .and_then(|map| map.get(&body))
+                .map(|workspace| workspace.published()),
             WeldLoadMode::PartAerodynamics,
         )
     }
@@ -1058,6 +1081,12 @@ impl PhysicsWorld {
         hull: &[PartHullWrench],
         wings: &[PartWingWrench],
         simple: (&[SimpleSurfaceCorrection], &[RawSimpleSurfaceWrench]),
+        pressure: Option<
+            &[(
+                crate::aerodynamics::geometry::GeometryOwner,
+                crate::aerodynamics::pressure::PressureWrench,
+            )],
+        >,
         load_mode: WeldLoadMode,
     ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
         use crate::cluster::balance::{
@@ -1093,6 +1122,32 @@ impl PhysicsWorld {
             center,
             origin,
         )?;
+        if state.part_geometry && !state.vacuum {
+            use crate::aerodynamics::geometry::GeometryOwner;
+            let pressure = pressure.ok_or(WeldBalanceError::IncompleteLoads)?;
+            let mut indices = HashMap::new();
+            indices
+                .try_reserve(tree.len())
+                .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+            for (index, part) in tree.iter().enumerate() {
+                indices.insert(part.part, index);
+            }
+            for (owner, wrench) in pressure {
+                let GeometryOwner::Part(part) = owner else {
+                    return Err(WeldBalanceError::IncompleteLoads);
+                };
+                let index = *indices.get(part).ok_or(WeldBalanceError::InvalidTree)?;
+                let input = &mut inputs[index];
+                input.external_force = input
+                    .external_force
+                    .checked_add(wrench.force)
+                    .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                input.external_moment = input
+                    .external_moment
+                    .checked_add(wrench.moment)
+                    .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+            }
+        }
         if matches!(load_mode, WeldLoadMode::PartAerodynamics)
             && state.part_surface_count > 0
             && !state.vacuum
@@ -2395,10 +2450,22 @@ impl PhysicsWorld {
                                 || !self
                                     .part_aerodynamic_geometry
                                     .as_ref()
-                                    .is_some_and(|geometry| geometry.contains_key(part_id)))
+                                    .and_then(|geometry| geometry.get(part_id))
+                                    .is_some_and(|geometry| {
+                                        !matches!(
+                                            geometry,
+                                            assembly_aerodynamics::PartGeometry::Mesh(_)
+                                        )
+                                    }))
                     });
-                let part_wings_certified =
-                    part_surfaces_certified && body.aerodynamic_surfaces.is_empty();
+                let has_geometry = cluster.parts.iter().any(|part| {
+                    self.part_aerodynamic_geometry
+                        .as_ref()
+                        .is_some_and(|geometry| geometry.contains_key(part))
+                });
+                let part_wings_certified = part_surfaces_certified
+                    && !has_geometry
+                    && body.aerodynamic_surfaces.is_empty();
                 let part_hull_certified = part_wings_certified
                     && cluster.parts.iter().all(|id| {
                         self.parts
@@ -2437,6 +2504,7 @@ impl PhysicsWorld {
                     part_surfaces_certified,
                     part_surface_count: body.aerodynamic_surfaces.len(),
                     vacuum: matches!(self.atmosphere, Atmosphere::Vacuum),
+                    part_geometry: has_geometry,
                 });
             }
         }
@@ -2947,6 +3015,7 @@ impl PhysicsWorld {
             mut part_wing_wrenches,
             simple_surface_correction,
             mut raw_simple_surfaces,
+            applied_mesh_pressure,
         } = inputs;
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
@@ -3029,6 +3098,11 @@ impl PhysicsWorld {
             })?;
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;
+            if sphere_patches.is_none()
+                && let Some(applied) = applied_mesh_pressure
+            {
+                *applied = Some(wrench);
+            }
             for &(patch, base) in base_pressure_patches {
                 let wrench =
                     patch
@@ -3951,6 +4025,7 @@ impl PhysicsWorld {
                 part_wing_wrenches: self.part_wing_buffers.pop().unwrap_or_default(),
                 simple_surface_correction: None,
                 raw_simple_surfaces: self.raw_simple_buffers.pop().unwrap_or_default(),
+                applied_mesh_pressure: None,
                 loads: PreparedAerodynamicLoads {
                     mesh_patches,
                     sphere_patches,
@@ -3993,7 +4068,10 @@ impl PhysicsWorld {
                                         .with_simple_surface_correction(
                                             &mut update.simple_surface_correction,
                                         )
-                                        .with_raw_simple_surfaces(&mut update.raw_simple_surfaces),
+                                        .with_raw_simple_surfaces(&mut update.raw_simple_surfaces)
+                                        .with_applied_mesh_pressure(
+                                            &mut update.applied_mesh_pressure,
+                                        ),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -4108,6 +4186,16 @@ impl PhysicsWorld {
                     body_id: update.id,
                     cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
                 })?;
+            if workspace
+                .staged_total()
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                })?
+                != update.applied_mesh_pressure
+            {
+                return Err(StepError::InvalidStepResults);
+            }
         }
 
         for update in &self.aerodynamics_body_updates {
