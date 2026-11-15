@@ -31,12 +31,15 @@ def geometry(x):
 def run(n, outer):
     h = 1 / (n - 1)
     nr = round(outer / h + 0.5)
+    # Adjust dr independently of dx so the Dirichlet row has the same
+    # physical radius on every grid, rather than rounding that radius.
+    dr = outer / (nr - 0.5)
     source = [geometry(i*h)[2] for i in range(n)]
     phi = [[0.0] * nr for _ in range(n)]
-    history = iterate_mixed(phi, source, h, h, 0.9, 1.4, 1e-6, 5000)
+    history = iterate_mixed(phi, source, h, dr, 0.9, 1.4, 1e-6, 5000)
     radius, slope, _ = geometry(0.5)
-    cp = surface_cp(phi, (n - 1)//2, h, h, radius, slope)
-    return (nr - 0.5)*h, len(history)-1, history[-1], cp
+    cp = surface_cp(phi, (n - 1)//2, h, dr, radius, slope)
+    return (nr - 0.5)*dr, len(history)-1, history[-1], cp
 
 
 if __name__ == "__main__":
