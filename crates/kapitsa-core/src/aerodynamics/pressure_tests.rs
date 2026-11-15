@@ -76,6 +76,26 @@ fn base_pressure_rejects_invalid_coefficients_and_domains() {
 }
 
 #[test]
+fn base_pressure_rejects_windward_surface_in_local_flow() {
+    let base = BasePressure::new(-0.4, 0.0, 20.0).unwrap();
+    let windward = PressurePatch::new(Vec3::ZERO, Vec3::X, 1.0).unwrap();
+    assert_eq!(
+        windward.evaluate_base(flow(), base),
+        Err(PressureError::InvalidBaseOrientation)
+    );
+    let rotating = PressurePatch::new(Vec3::Y, -Vec3::X, 1.0).unwrap();
+    let reversed = PressureFlow {
+        linear_velocity: Vec3::ZERO,
+        angular_velocity: Vec3::Z * 1000.0,
+        ..flow()
+    };
+    assert_eq!(
+        rotating.evaluate_base(reversed, base),
+        Err(PressureError::InvalidBaseOrientation)
+    );
+}
+
+#[test]
 fn normal_plate_matches_analytic_pressure_and_offset_moment() {
     let p = PressurePatch::new(Vec3::Y, Vec3::X, 2.0).unwrap();
     let w = p.evaluate(flow()).unwrap();

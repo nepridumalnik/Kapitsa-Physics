@@ -19,6 +19,7 @@ pub enum PressureError {
     InvalidMotion,
     InvalidSoundSpeed,
     InvalidCoefficient,
+    InvalidBaseOrientation,
     UnsupportedMach,
     ArithmeticOverflow,
 }
@@ -120,8 +121,9 @@ impl PressurePatch {
     }
 
     /// Applies a caller-supplied constant base Cp to this explicitly selected
-    /// physical patch. Force acts outward for negative Cp. No automatic base
-    /// detection, shielding, or wake interaction is performed.
+    /// physical patch. Force acts outward for negative Cp. A patch whose outward
+    /// normal points into its local body-relative velocity is rejected; callers
+    /// must still establish that the patch is a base and is not shielded.
     pub fn evaluate_base(
         &self,
         flow: PressureFlow,
@@ -179,6 +181,10 @@ impl PressurePatch {
             return Err(PressureError::UnsupportedMach);
         }
         if let Some(base) = base {
+            let alignment = normal.checked_dot(relative / speed).ok_or(overflow)?;
+            if alignment > 0.0 {
+                return Err(PressureError::InvalidBaseOrientation);
+            }
             let magnitude = super::hull::scaled_product(
                 &[
                     0.5,
