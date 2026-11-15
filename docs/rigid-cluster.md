@@ -195,7 +195,9 @@ moment vanish, including when individual loads cancel. An absent correction is
 still not a certificate of zero individual loads: skipped surface records in
 an atmosphere cause an explicit incomplete-load error. The explicit global
 `Atmosphere::Vacuum` configuration certifies zero aerodynamic loads without
-surface records; this does not apply to locally zero-density samples.
+surface records, including part-owned aerodynamic geometry; this does not apply
+to locally zero-density samples. Collider and other load-path restrictions
+remain in force even in vacuum.
 
 The reaction is evaluated at the start of the timestep, while the split uses
 the predicted end-of-step rigid velocity field. This is a discrete failure

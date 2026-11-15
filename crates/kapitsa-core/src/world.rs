@@ -2391,10 +2391,11 @@ impl PhysicsWorld {
                     && body.potential_sphere.is_none()
                     && cluster.parts.iter().all(|part_id| {
                         self.parts.get(part_id.dense).is_some()
-                            && !self
-                                .part_aerodynamic_geometry
-                                .as_ref()
-                                .is_some_and(|geometry| geometry.contains_key(part_id))
+                            && (matches!(self.atmosphere, Atmosphere::Vacuum)
+                                || !self
+                                    .part_aerodynamic_geometry
+                                    .as_ref()
+                                    .is_some_and(|geometry| geometry.contains_key(part_id)))
                     });
                 let part_wings_certified =
                     part_surfaces_certified && body.aerodynamic_surfaces.is_empty();

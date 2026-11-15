@@ -2394,6 +2394,56 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn vacuum_part_geometry_allows_certified_weld_balance() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+            let root = world.enable_cluster(body)?;
+            let child = world.add_cluster_part(
+                root,
+                crate::cluster::ClusterPartDesc {
+                    local_transform: Transform::identity(),
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::ZERO,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    strength: WeldStrength::Breakable {
+                        max_force: Some(1.0),
+                        max_torque: None,
+                    },
+                    ..weld()
+                },
+            )?;
+            world.set_part_aerodynamic_mesh(child, Some(plate()?))?;
+            world
+                .set_automatic_weld_failure(Some((1e-9, 1e-9)))
+                .map_err(|e| format!("{e:?}"))?;
+            if sharded {
+                world.step_with_shards(
+                    0.01,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(0.01)?;
+            }
+            let reactions = world
+                .part_aerodynamic_weld_reactions(body, 1e-9, 1e-9)
+                .map_err(|e| format!("{e:?}"))?;
+            assert_eq!(reactions.len(), 1);
+            assert_eq!(reactions[0].force, Vec3::ZERO);
+            assert_eq!(reactions[0].moment, Vec3::ZERO);
+            assert_eq!(world.cluster(body).ok_or("cluster")?.welds().len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn transformed_part_geometry_has_correct_body_frame_force_and_com_moment()
     -> Result<(), Box<dyn std::error::Error>> {
         for collider_mode in [false, true] {
