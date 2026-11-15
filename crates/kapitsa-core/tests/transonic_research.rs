@@ -669,6 +669,86 @@ fn harris_subsonic_cutoff_source_discretization() -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "near-cutoff boundary sensitivity diagnostic; run in release mode"]
+fn harris_subsonic_upstream_cutoff_boundaries() -> Result<(), String> {
+    // Shift boundaries by whole cells, retaining the source grid phase and
+    // both spacings. These finite Dirichlet boundaries are not tunnel walls.
+    const STATION: f64 = 0.9;
+    const CUTOFF: f64 = 36.0 / 38.240;
+    const EXTENSION: f64 = 0.5;
+    const OUTER: f64 = 1.25;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 100_000;
+    for axial_intervals in [128_usize, 129] {
+        let dx = 2.0 / axial_intervals as f64;
+        let base_nr = (OUTER / dx + 0.5).round() as usize;
+        let dr = OUTER / (base_nr as f64 - 0.5);
+        let extra_x = (0.5 / dx).round() as usize;
+        let extra_r = (0.75 / dr).round() as usize;
+        for (label, added_x, added_r) in [
+            ("baseline", 0, 0),
+            ("axial", extra_x, 0),
+            ("radial", 0, extra_r),
+        ] {
+            let nx = axial_intervals + 1 + 2 * added_x;
+            let nr = base_nr + added_r;
+            let origin = -EXTENSION - added_x as f64 * dx;
+            let source = (0..nx)
+                .map(|i| {
+                    // Evaluate with the original indexing to keep node positions
+                    // identical even when the left boundary moves.
+                    let x = (i as f64 - added_x as f64) * dx - EXTENSION;
+                    if (0.0..=1.0).contains(&x) {
+                        harris_geometry(x).2
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let mut grid = MixedGrid {
+                phi: vec![vec![0.0; nr]; nx],
+                axis_flux: source,
+                dx,
+                dr,
+                mach: 0.9,
+                gamma: 1.4,
+            };
+            let (iterations, residual) =
+                grid.iterate(TOLERANCE, MAX_ITERATIONS).map_err(|value| {
+                    format!("grid={axial_intervals} boundary={label}: residual={value}")
+                })?;
+            let index = (STATION + EXTENSION) / dx;
+            let base_i = index.floor() as usize;
+            let i = base_i + added_x;
+            let weight = index - base_i as f64;
+            assert!((base_i + 2) as f64 * dx - EXTENSION < CUTOFF);
+            let (radius, slope, _) = harris_geometry(STATION);
+            let cp = grid
+                .surface_cp(i, radius, slope)
+                .zip(grid.surface_cp(i + 1, radius, slope))
+                .map(|(a, b)| (1.0 - weight) * a + weight * b)
+                .ok_or_else(|| {
+                    format!("Cp unavailable: grid={axial_intervals} boundary={label}")
+                })?;
+            let defect = interpolated_radial_derivative(&grid.phi[i], dr, radius)
+                .zip(interpolated_radial_derivative(&grid.phi[i + 1], dr, radius))
+                .map(|(a, b)| (1.0 - weight) * a + weight * b - slope)
+                .ok_or_else(|| {
+                    format!(
+                        "surface derivative unavailable: grid={axial_intervals} boundary={label}"
+                    )
+                })?;
+            println!(
+                "grid={axial_intervals} boundary={label} x_min={origin:.6} x_max={:.6} outer={:.6} dx={dx:.9} dr={dr:.9} cp={cp:.9} defect={defect:+.9} iterations={iterations} residual={residual:.3e}",
+                origin + (nx - 1) as f64 * dx,
+                (nr as f64 - 0.5) * dr
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "fixed-boundary cutoff phase diagnostic; run in release mode"]
 fn harris_subsonic_upstream_cutoff_phase() -> Result<(), String> {
     // Adjacent axial interval counts change both phase and spacing slightly,
