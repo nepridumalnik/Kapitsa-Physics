@@ -11,6 +11,17 @@ def physical_flux(u, mach, gamma):
     return (1 - mach**2) * u - 0.5 * mach**2 * (gamma + 1) * u**2
 
 
+def tsd_sonic_flux(left, right, mach, gamma):
+    """Sonic-split spatial TSD flux; requires mach > 0 and gamma > 1."""
+    if mach <= 0 or gamma <= 1:
+        raise ValueError("expected positive Mach and gamma > 1")
+    sonic = (1 - mach**2) / (mach**2 * (gamma + 1))
+    peak = physical_flux(sonic, mach, gamma)
+    upstream_loss = peak - physical_flux(left, mach, gamma) if left > sonic else 0
+    downstream_loss = peak - physical_flux(right, mach, gamma) if right < sonic else 0
+    return peak - upstream_loss - downstream_loss
+
+
 def godunov_flux(left, right, mach, gamma):
     """Entropy flux for the strictly concave quadratic, mach > 0, gamma > 1."""
     if mach <= 0 or gamma <= 1:

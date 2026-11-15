@@ -10,15 +10,7 @@ https://ntrs.nasa.gov/api/citations/19840012417/downloads/19840012417.pdf
 
 import unittest
 
-from bailey_flux import physical_flux
-
-
-def tsd_flux(left, right, mach, gamma):
-    sonic = (1 - mach**2) / (mach**2 * (gamma + 1))
-    peak = physical_flux(sonic, mach, gamma)
-    upstream_loss = peak - physical_flux(left, mach, gamma) if left > sonic else 0
-    downstream_loss = peak - physical_flux(right, mach, gamma) if right < sonic else 0
-    return peak - upstream_loss - downstream_loss
+from bailey_flux import physical_flux, tsd_sonic_flux as tsd_flux
 
 
 class SonicSplitTests(unittest.TestCase):

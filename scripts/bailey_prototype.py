@@ -8,6 +8,28 @@ https://ntrs.nasa.gov/api/citations/19720004250/downloads/19720004250.pdf
 
 import math
 
+from bailey_flux import tsd_sonic_flux
+
+
+def mixed_residual(phi, i, k, dx, dr, mach, gamma, axis_flux):
+    """Experimental mixed-type residual at an interior node, not an iteration.
+
+    Requires i >= 2 and i+1 < nx; the caller supplies boundary values and
+    must not treat the outer radial Dirichlet row as an interior row.
+    """
+    u0 = (phi[i - 1][k] - phi[i - 2][k]) / dx
+    u1 = (phi[i][k] - phi[i - 1][k]) / dx
+    u2 = (phi[i + 1][k] - phi[i][k]) / dx
+    axial = (tsd_sonic_flux(u1, u2, mach, gamma)
+             - tsd_sonic_flux(u0, u1, mach, gamma)) / dx
+    r = (k + 0.5) * dr
+    lower = k * dr / (r * dr**2)
+    upper = (k + 1) * dr / (r * dr**2)
+    p = phi[i][k]
+    radial = (lower * (phi[i][k - 1] - p) if k else -axis_flux[i] / (r * dr))
+    radial += upper * (phi[i][k + 1] - p)
+    return axial + radial
+
 
 class UnsupportedFlow(ValueError):
     pass
