@@ -127,20 +127,32 @@ pub fn area_slopes_from_sections(
         .try_reserve_exact(length)
         .map_err(|_| WaveDragError::AllocationFailed)?;
     for index in 0..length {
-        let mut area = 0.0;
-        for offset in 0..width {
-            if let Some(source) = index
-                .checked_add(offset)
-                .and_then(|v| v.checked_sub(smoothing_radius))
-                .and_then(|v| v.checked_sub(padding))
-                .and_then(|v| sections.get(v))
-            {
-                area += source.area / width as f64;
+        let start = index
+            .saturating_sub(padding + smoothing_radius)
+            .min(sections.len());
+        let end = (index + smoothing_radius + 1)
+            .saturating_sub(padding)
+            .min(sections.len());
+        let window = sections
+            .get(start..end)
+            .ok_or(WaveDragError::PrecisionLoss)?;
+        let max_area = window
+            .iter()
+            .fold(0.0_f64, |max, section| max.max(section.area));
+        let area = if max_area == 0.0 {
+            0.0
+        } else {
+            let mut sum = 0.0;
+            let mut correction = 0.0;
+            for section in window {
+                let value = section.area / max_area - correction;
+                let next = sum + value;
+                correction = (next - sum) - value;
+                sum = next;
             }
-        }
-        if !area.is_finite() {
-            return Err(WaveDragError::ArithmeticOverflow);
-        }
+            super::hull::scaled_product(&[max_area, sum], width as f64)
+                .map_err(|_| WaveDragError::ArithmeticOverflow)?
+        };
         smoothed.push(area);
     }
     let mut slopes = Vec::new();
@@ -272,6 +284,20 @@ mod tests {
         }
         assert!(errors[2] < errors[1] && errors[1] < errors[0], "{errors:?}");
         assert!(errors[2] < (256.0 / PI) * 0.02, "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn section_smoothing_preserves_subnormal_area_when_average_is_representable()
+    -> Result<(), WaveDragError> {
+        let tiny = f64::from_bits(1);
+        let sections = [GeometrySection {
+            area: tiny,
+            centroid: None,
+        }; 3];
+        let slopes = area_slopes_from_sections(&sections, tiny, 1)?;
+        assert!(slopes.iter().any(|value| *value > 0.0));
+        assert!(slopes.iter().any(|value| *value < 0.0));
         Ok(())
     }
 
