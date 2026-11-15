@@ -105,6 +105,36 @@ fn cutoff_cell_source_average_preserves_cross_section_change() {
     }
 }
 
+fn harris_conservative_source(x: f64, dx: f64) -> f64 {
+    let left = harris_geometry(x - 0.5 * dx).0;
+    let right = harris_geometry(x + 0.5 * dx).0;
+    (right * right - left * left) / (2.0 * dx)
+}
+
+#[test]
+fn conservative_source_telescopes_across_nose_and_cutoff() {
+    const CUTOFF: f64 = 36.0 / 38.240;
+    for intervals in [32_usize, 64, 96, 128] {
+        let dx = 1.0 / intervals as f64;
+        let source: Vec<_> = (0..=intervals)
+            .map(|i| harris_conservative_source(i as f64 * dx, dx))
+            .collect();
+        let integrated = source.iter().sum::<f64>() * dx;
+        let expected = (harris_geometry(1.0 + 0.5 * dx).0.powi(2)
+            - harris_geometry(-0.5 * dx).0.powi(2))
+            / 2.0;
+        let cutoff_cell = (CUTOFF / dx).round() as usize;
+        let cutoff_left = cutoff_cell as f64 * dx - 0.5 * dx;
+        let cutoff_right = cutoff_left + dx;
+        let cutoff_bracketed = cutoff_left < CUTOFF && cutoff_right > CUTOFF;
+        assert!(cutoff_bracketed);
+        assert!((integrated - expected).abs() < 2e-15);
+        println!(
+            "intervals={intervals} integrated={integrated:.15e} expected={expected:.15e} cutoff_cell={cutoff_cell} cutoff_bracket=[{cutoff_left:.9},{cutoff_right:.9}] bracketed={cutoff_bracketed}"
+        );
+    }
+}
+
 #[test]
 fn radial_face_difference_converges_for_logarithmic_line_source() {
     // For locally constant q = R R', the axisymmetric line-source field
@@ -618,16 +648,7 @@ fn harris_subsonic_cutoff_source_discretization() -> Result<(), String> {
                         if mode == "cutoff_cell" {
                             changed_cells += 1;
                         }
-                        let radius_at = |position: f64| {
-                            if position <= 0.0 {
-                                0.0
-                            } else {
-                                harris_geometry(position).0
-                            }
-                        };
-                        let left = radius_at(x - 0.5 * dx);
-                        let right = radius_at(x + 0.5 * dx);
-                        (right * right - left * left) / (2.0 * dx)
+                        harris_conservative_source(x, dx)
                     } else if (0.0..=1.0).contains(&x) {
                         harris_geometry(x).2
                     } else {
