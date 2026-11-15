@@ -19,6 +19,36 @@ fn axial_flux(u: f64, mach: f64, gamma: f64) -> f64 {
     (1.0 - mach * mach) * u - 0.5 * mach * mach * (gamma + 1.0) * u * u
 }
 
+#[test]
+fn normal_shock_flux_factorization_and_type_change() {
+    for mach in [0.9_f64, 1.0, 1.1] {
+        let gamma = 1.4;
+        let sonic = (1.0 - mach.powi(2)) / (mach.powi(2) * (gamma + 1.0));
+        let (upstream, downstream) = (sonic + 0.02, sonic - 0.02);
+        assert!(
+            (axial_flux(upstream, mach, gamma) - axial_flux(downstream, mach, gamma)).abs() < 1e-14
+        );
+        let lambda = |u| 1.0 - mach.powi(2) - mach.powi(2) * (gamma + 1.0) * u;
+        assert!(lambda(upstream) < 0.0 && lambda(downstream) > 0.0);
+    }
+    let (mach, gamma) = (0.95_f64, 1.4);
+    for (u1, u2) in [(0.1, -0.05), (0.02, 0.07), (0.0, 0.0)] {
+        let jump = axial_flux(u1, mach, gamma) - axial_flux(u2, mach, gamma);
+        let factorized =
+            (u1 - u2) * (1.0 - mach.powi(2) - mach.powi(2) * (gamma + 1.0) * (u1 + u2) / 2.0);
+        assert!((jump - factorized).abs() < 1e-14);
+    }
+}
+
+#[test]
+fn sonic_flux_is_consistent_on_smooth_branches() {
+    for u in [-0.1, 0.0, 0.1] {
+        assert!((sonic_flux(u, u, 1.0, 1.4) - axial_flux(u, 1.0, 1.4)).abs() < 1e-14);
+    }
+    assert!((sonic_flux(0.1, 0.2, 1.0, 1.4) - axial_flux(0.1, 1.0, 1.4)).abs() < 1e-14);
+    assert!((sonic_flux(-0.1, -0.2, 1.0, 1.4) - axial_flux(-0.2, 1.0, 1.4)).abs() < 1e-14);
+}
+
 fn sonic_flux(left: f64, right: f64, mach: f64, gamma: f64) -> f64 {
     let sonic = (1.0 - mach * mach) / (mach * mach * (gamma + 1.0));
     let peak = axial_flux(sonic, mach, gamma);
