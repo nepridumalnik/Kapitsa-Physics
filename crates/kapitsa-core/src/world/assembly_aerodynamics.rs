@@ -32,12 +32,27 @@ pub(super) struct AssemblyAerodynamics {
     collider_parts: Vec<PartId>,
     wave_only_parts: Vec<PartId>,
     wave_cache: PreparedGeometryCache,
+    wing_cache: Vec<CachedWingVisibility>,
 }
 
 pub(super) struct PreparedAssembly {
     pub patches: Option<PreparedSurfacePatches>,
     pub wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
     pub wing_visibility: Vec<PreparedWingVisibility>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct WingVisibilityKey {
+    part: PartId,
+    index: usize,
+    part_transform: Transform,
+    wing_transform: Transform,
+    footprint: crate::aerodynamics::wing::WingFootprint,
+}
+
+struct CachedWingVisibility {
+    key: WingVisibilityKey,
+    visibility: crate::aerodynamics::wing::WingVisibility,
 }
 
 pub(super) struct PreparedWingVisibility {
@@ -652,6 +667,7 @@ pub(super) fn prepare(
         wave_only_parts,
         cache: PreparedGeometryCache::default(),
         wave_cache: PreparedGeometryCache::default(),
+        wing_cache: Vec::new(),
     };
     let prepared = evaluate(
         body_id,
@@ -734,40 +750,79 @@ fn evaluate(
     };
     let mut wing_visibility = Vec::new();
     if !wing_requests.is_empty() {
-        let config = pressure_geometry_config(&prepared.collider_parts);
-        let geometry = prepared
-            .cache
-            .prepare_instances(
-                GeometryCacheKey {
-                    body: body_id,
-                    geometry_version: 0,
-                    config_version: 1,
+        let cache_matches = prepared.wing_cache.len() == wing_requests.len()
+            && prepared.wing_cache.iter().zip(wing_requests).all(
+                |(cached, &(part, index, wing, local))| {
+                    wing.footprint_signature()
+                        .is_some_and(|(wing_transform, footprint)| {
+                            cached.key
+                                == WingVisibilityKey {
+                                    part,
+                                    index,
+                                    part_transform: local,
+                                    wing_transform,
+                                    footprint,
+                                }
+                        })
                 },
-                &instances,
-                config,
-            )
-            .map_err(AerodynamicsError::Geometry)?;
-        wing_visibility
-            .try_reserve_exact(wing_requests.len())
-            .map_err(|_| AerodynamicsError::Geometry(GeometryError::AllocationFailed))?;
-        let mut remaining = 1_000_000_usize;
-        for &(part, index, wing, local) in wing_requests {
-            let visibility = wing
-                .volume_visibility(geometry, local, remaining)
-                .map_err(AerodynamicsError::Wing)?
-                .ok_or(AerodynamicsError::Wing(
-                    crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
-                ))?;
-            remaining =
-                remaining
-                    .checked_sub(visibility.samples)
-                    .ok_or(AerodynamicsError::Wing(
-                        crate::aerodynamics::wing::WingError::ShieldingBudgetExceeded,
+            );
+        if !cache_matches {
+            let config = pressure_geometry_config(&prepared.collider_parts);
+            let geometry = prepared
+                .cache
+                .prepare_instances(
+                    GeometryCacheKey {
+                        body: body_id,
+                        geometry_version: 0,
+                        config_version: 1,
+                    },
+                    &instances,
+                    config,
+                )
+                .map_err(AerodynamicsError::Geometry)?;
+            let mut candidate = Vec::new();
+            candidate
+                .try_reserve_exact(wing_requests.len())
+                .map_err(|_| AerodynamicsError::Geometry(GeometryError::AllocationFailed))?;
+            let mut remaining = 1_000_000_usize;
+            for &(part, index, wing, local) in wing_requests {
+                let (wing_transform, footprint) =
+                    wing.footprint_signature().ok_or(AerodynamicsError::Wing(
+                        crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
                     ))?;
+                let visibility = wing
+                    .volume_visibility(geometry, local, remaining)
+                    .map_err(AerodynamicsError::Wing)?
+                    .ok_or(AerodynamicsError::Wing(
+                        crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
+                    ))?;
+                remaining =
+                    remaining
+                        .checked_sub(visibility.samples)
+                        .ok_or(AerodynamicsError::Wing(
+                            crate::aerodynamics::wing::WingError::ShieldingBudgetExceeded,
+                        ))?;
+                candidate.push(CachedWingVisibility {
+                    key: WingVisibilityKey {
+                        part,
+                        index,
+                        part_transform: local,
+                        wing_transform,
+                        footprint,
+                    },
+                    visibility,
+                });
+            }
+            prepared.wing_cache = candidate;
+        }
+        wing_visibility
+            .try_reserve_exact(prepared.wing_cache.len())
+            .map_err(|_| AerodynamicsError::Geometry(GeometryError::AllocationFailed))?;
+        for cached in &prepared.wing_cache {
             wing_visibility.push(PreparedWingVisibility {
-                part,
-                index,
-                visibility,
+                part: cached.key.part,
+                index: cached.key.index,
+                visibility: cached.visibility,
             });
         }
         wing_visibility.sort_unstable_by_key(|entry| (entry.part, entry.index));
@@ -1467,6 +1522,24 @@ mod tests {
             body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0))?;
             let id = world.add_body(body)?;
             let part = world.enable_cluster(id)?;
+            let valid = WingSurface::new(
+                FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+                Transform::identity(),
+                4.0,
+            )?
+            .with_rectangular_footprint(Vec3::ZERO, 2.0, 2.0)?;
+            world.set_part_aerodynamic_wings(part, vec![valid.clone()])?;
+            let source = plate()?;
+            let distant = TriangleMesh::new(
+                source
+                    .vertices()
+                    .iter()
+                    .map(|v| *v + Vec3::Y * 10.0)
+                    .collect(),
+                source.triangles().to_vec(),
+            )?;
+            world.set_part_wave_source_mesh(part, Some(distant))?;
+            world.step(1e-4)?;
             let wing = WingSurface::new(
                 FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
                 Transform::identity(),
@@ -1474,7 +1547,6 @@ mod tests {
             )?
             .with_rectangular_footprint(Vec3::ZERO, 1e6, 1e6)?;
             world.set_part_aerodynamic_wings(part, vec![wing])?;
-            world.set_part_wave_source_mesh(part, Some(plate()?))?;
             let before = world.body(id).ok_or("body")?.motion();
             let result = if sharded {
                 world.step_with_shards(1e-4, &mut [Vec::new()], &SequentialExecutor, 1)
@@ -1489,6 +1561,9 @@ mod tests {
                 })
             ));
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+            world.set_part_aerodynamic_wings(part, vec![valid])?;
+            world.step(1e-4)?;
+            assert_ne!(world.body(id).ok_or("body")?.motion(), before);
         }
         Ok(())
     }

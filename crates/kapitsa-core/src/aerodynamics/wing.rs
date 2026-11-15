@@ -223,7 +223,7 @@ pub struct WingSurface {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct WingFootprint {
+pub(crate) struct WingFootprint {
     center: kapitsa_math::Vec3,
     chord: f64,
     span: f64,
@@ -298,6 +298,13 @@ impl WingSurface {
 
     pub(crate) fn has_footprint(&self) -> bool {
         self.footprint.is_some()
+    }
+
+    pub(crate) fn footprint_signature(
+        &self,
+    ) -> Option<(crate::transform::Transform, WingFootprint)> {
+        self.footprint
+            .map(|footprint| (self.local_transform, footprint))
     }
 
     pub(crate) fn volume_visibility(

@@ -944,6 +944,27 @@ fn preflight_counts_triangle_bounds_and_enforces_budget() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn occupancy_query_validates_points_and_grid_boundaries() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mesh = cube();
+    let geometry = PreparedGeometry::prepare(&[instance(&mesh, Vec3::ZERO)], config(0.125))?;
+    assert!(geometry.occupied_at(Vec3::splat(0.5))?);
+    assert!(!geometry.occupied_at(Vec3::splat(10.0))?);
+    assert_eq!(
+        geometry.occupied_at(Vec3::new(f64::NAN, 0.0, 0.0)),
+        Err(GeometryError::InvalidGeometry)
+    );
+    let upper = geometry.origin()
+        + Vec3::new(
+            geometry.dimensions()[0] as f64 * geometry.cell_size(),
+            geometry.dimensions()[1] as f64 * geometry.cell_size(),
+            geometry.dimensions()[2] as f64 * geometry.cell_size(),
+        );
+    assert!(!geometry.occupied_at(upper)?);
+    Ok(())
+}
+
+#[test]
 fn wing_volume_visibility_resolves_full_partial_and_clear_footprints()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::aerodynamics::wing::{FiniteWing, WingError, WingSurface};

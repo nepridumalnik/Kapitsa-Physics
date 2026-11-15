@@ -327,8 +327,12 @@ center. The original wing application point remains the atmospheric sampling
 point. Without a footprint or without assembly geometry, existing wing behavior
 is unchanged.
 
-At most 1,000,000 sample points are processed per body per step; exceeding the
-budget returns an error and rolls the step back. Solid meshes fill sealed
+At most 1,000,000 sample points are processed per body during visibility
+preparation; exceeding the budget returns an error and rolls the step back.
+Visibility is reused while the source geometry, owning-part transform, wing
+footprint and set of active wings remain unchanged. Changes to those inputs
+recompute it; ordinary body motion and center-of-mass edits preserve it when
+part-local transforms are unchanged. Solid meshes fill sealed
 interiors; open surface-only meshes represent only their voxelized surfaces.
 The caller must not include a wing's own footprint as solid hull geometry unless
 it should be shielded. Voxel resolution affects partial exposure. This model

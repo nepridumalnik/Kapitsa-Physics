@@ -153,3 +153,23 @@ pre-existing formatting in `src/world.rs`, `src/world/cluster.rs` and
 `src/world/aerodynamics_tests.rs` under `kapitsa-core`. Incidental formatting
 changes there were discarded to preserve the benchmark-only scope. No production
 source changes are included. Workspace-wide checks remain the supervising stage.
+
+## Voxel wing shielding cache
+
+`cargo bench -p kapitsa-core --bench wing_shielding` measures full sequential
+world steps in an optimized build. The synthetic scene has one body, a
+20 x 4 x 0.5 m geometry-only sensor cuboid, and 1 or 32 identical 20 x 4 m
+rectangular wing footprints completely enclosed by it. The 0.125 m geometry
+cell size gives 5,120 visibility samples per wing. The benchmark checks before
+timing that the unshielded reference wing changes velocity and the enclosed
+wing does not. It uses three warmups, seven samples of 30 tiny steps, and reports
+median and individual sample times. It does not measure topology edits or a
+representative fleet of distinct shapes.
+
+On the same local machine with rustc 1.98.0 and cargo 1.98.0, a sequential run
+before caching measured medians of 232.12 us/step for one enclosed wing and
+7,262.25 us/step for 32. After caching, the corresponding medians were 1.89 and
+12.18 us/step. The post-change unshielded reference was 8.19 and 20.44 us/step;
+it continues evaluating wing forces, so its timings are not directly comparable
+to fully shielded wings that contribute no force. These measurements are not a
+performance guarantee or an accuracy validation.
