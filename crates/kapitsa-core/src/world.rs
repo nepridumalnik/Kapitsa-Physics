@@ -202,6 +202,15 @@ use crate::{
 
 pub use crate::cluster::balance::{BalanceError as WeldBalanceError, WeldReaction};
 
+/// One overloaded weld in a diagnostic failure plan. The reaction is the
+/// parent-on-child load at the child-side anchor from the sampled step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeldFailureCandidate {
+    pub reaction: WeldReaction,
+    pub force_exceeded: bool,
+    pub torque_exceeded: bool,
+}
+
 struct MeshAerodynamics {
     identity: Option<std::sync::Arc<()>>,
     cache: crate::aerodynamics::cache::PreparedGeometryCache,
@@ -747,6 +756,59 @@ impl BodyStep {
 }
 
 impl PhysicsWorld {
+    /// Plans weld failures for the last certified part-source snapshot without
+    /// changing the world. Both thresholds compare vector magnitudes; equality
+    /// does not exceed a threshold. This historical plan is not authorization
+    /// to break welds after subsequent edits or integration.
+    pub fn part_source_weld_failure_candidates(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
+        use crate::cluster::WeldStrength;
+        let reactions = self.part_source_weld_reactions(body, force_tolerance, moment_tolerance)?;
+        let mut welds = HashMap::new();
+        welds
+            .try_reserve(self.cluster_load_welds_published.len())
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        for weld in &self.cluster_load_welds_published {
+            if welds.insert(weld.weld, weld.value).is_some() {
+                return Err(WeldBalanceError::InvalidTree);
+            }
+        }
+        let mut candidates = Vec::new();
+        candidates
+            .try_reserve_exact(reactions.len())
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        for reaction in reactions {
+            let weld = welds
+                .get(&reaction.weld)
+                .ok_or(WeldBalanceError::InvalidTree)?;
+            let WeldStrength::Breakable {
+                max_force,
+                max_torque,
+            } = weld.desc().strength
+            else {
+                continue;
+            };
+            let force = reaction.force.length();
+            let torque = reaction.moment.length();
+            if !force.is_finite() || !torque.is_finite() {
+                return Err(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow));
+            }
+            let force_exceeded = max_force.is_some_and(|limit| force > limit);
+            let torque_exceeded = max_torque.is_some_and(|limit| torque > limit);
+            if force_exceeded || torque_exceeded {
+                candidates.push(WeldFailureCandidate {
+                    reaction,
+                    force_exceeded,
+                    torque_exceeded,
+                });
+            }
+        }
+        Ok(candidates)
+    }
     /// Calculates instantaneous parent-on-child weld reactions from the last
     /// successful full-step snapshot. Currently only force-free
     /// clusters are supported. This diagnostic does not break welds. Tolerances

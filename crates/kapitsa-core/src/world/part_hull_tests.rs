@@ -310,7 +310,10 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
         WeldDesc {
             frame_a: JointFrame::IDENTITY,
             frame_b: JointFrame::IDENTITY,
-            strength: WeldStrength::Unbreakable,
+            strength: WeldStrength::Breakable {
+                max_force: Some(4.0),
+                max_torque: None,
+            },
             stiffness: WeldStiffness {
                 linear: 1.0,
                 angular: 1.0,
@@ -331,6 +334,13 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
         .part_source_weld_reactions(body, 1e-12, 1e-12)
         .map_err(|error| format!("{error:?}"))?;
     assert_eq!(reactions[0].force, -Vec3::X * 5.0);
+    let candidates = world
+        .part_source_weld_failure_candidates(body, 1e-12, 1e-12)
+        .map_err(|error| format!("{error:?}"))?;
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].force_exceeded);
+    assert!(!candidates[0].torque_exceeded);
+    assert!(world.weld(candidates[0].reaction.weld).is_some());
     assert!(matches!(
         world.force_free_weld_reactions(body, 1e-12, 1e-12),
         Err(BalanceError::IncompleteLoads)
@@ -354,6 +364,10 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
     ));
     assert!(matches!(
         world.part_source_weld_reactions(body, 1e-12, 1e-12),
+        Err(BalanceError::IncompleteLoads)
+    ));
+    assert!(matches!(
+        world.part_source_weld_failure_candidates(body, 1e-12, 1e-12),
         Err(BalanceError::IncompleteLoads)
     ));
     let state = world.cluster_load_states()[0];
