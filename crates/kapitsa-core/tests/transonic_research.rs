@@ -518,9 +518,9 @@ fn harris_subsonic_surface_impermeability_diagnostic() -> Result<(), String> {
     const MACH: f64 = 0.9;
     const GAMMA: f64 = 1.4;
     const TOLERANCE: f64 = 1e-6;
-    const MAX_ITERATIONS: usize = 40000;
+    const MAX_ITERATIONS: usize = 60000;
     const STATIONS: [f64; 5] = [0.125, 0.25, 0.625, 0.875, 0.9375];
-    for intervals in [16_usize, 32, 64] {
+    for intervals in [16_usize, 32, 64, 96] {
         let dx = 1.0 / intervals as f64;
         let nx = 2 * intervals + 1;
         let nr = (OUTER / dx + 0.5).round_ties_even() as usize;
