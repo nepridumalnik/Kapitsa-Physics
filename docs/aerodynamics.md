@@ -446,6 +446,15 @@ After a request changes, it refuses to configure a section until the matching
 geometry has been prepared. The returned section is a snapshot: it is not
 updated automatically when the world or assembly changes.
 
+`Aerodynamics::VoxelWave(VoxelWave::new(...))` provides an opt-in standalone
+body mode that prepares and caches this wave configuration automatically during
+world steps. Replacing the body's model changes geometry identity and triggers
+preparation of the replacement. Vacuum skips preparation; failures return an
+error without applying a partial step. This mode supplies only the configured
+section loads and does not activate mesh-pressure loads. Cluster conversion is
+currently rejected explicitly and assembly automatic preparation is not yet
+implemented.
+
 Voxel occupancy conservatively thickens geometry, and differentiation can
 amplify grid noise. Callers must check convergence under grid and smoothing
 refinement and establish that the shape and flow meet the slender axisymmetric

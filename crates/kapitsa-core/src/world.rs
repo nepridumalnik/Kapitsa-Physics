@@ -99,6 +99,20 @@ mod aerodynamics {
                     atmosphere,
                 )?;
                 let mut body = entry.body.motion();
+                let mut wave_cache = crate::aerodynamics::cache::PreparedGeometryCache::default();
+                let voxel_wave = if let crate::aerodynamics::Aerodynamics::VoxelWave(model) =
+                    entry.body.aerodynamics()
+                {
+                    PhysicsWorld::prepare_voxel_wave(
+                        model,
+                        body_id,
+                        &body,
+                        atmosphere,
+                        &mut wave_cache,
+                    )?
+                } else {
+                    None
+                };
                 PhysicsWorld::apply_aerodynamics(
                     atmosphere,
                     entry.body.aerodynamics(),
@@ -113,6 +127,7 @@ mod aerodynamics {
                     None,
                     patches.as_ref(),
                     world.mesh_sound_speed,
+                    voxel_wave.as_ref(),
                 )?;
             }
             Ok(())
@@ -266,6 +281,7 @@ struct AerodynamicsBodyUpdate {
     original: BodyMotion,
     prepared: BodyMotion,
     mesh_patches: Option<crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    voxel_wave: Option<crate::aerodynamics::hull::HullSection>,
 }
 
 const FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT: usize = 128;
@@ -476,6 +492,7 @@ impl PhysicsWorld {
             && matches!(
                 aerodynamics,
                 crate::aerodynamics::Aerodynamics::Mesh(_)
+                    | crate::aerodynamics::Aerodynamics::VoxelWave(_)
                     | crate::aerodynamics::Aerodynamics::Colliders
             )
         {
@@ -891,6 +908,7 @@ impl PhysicsWorld {
             && matches!(
                 body.aerodynamics(),
                 crate::aerodynamics::Aerodynamics::Mesh(_)
+                    | crate::aerodynamics::Aerodynamics::VoxelWave(_)
                     | crate::aerodynamics::Aerodynamics::Colliders
             )
         {
@@ -1672,6 +1690,7 @@ impl PhysicsWorld {
         dt: Option<f64>,
         mesh_patches: Option<&crate::aerodynamics::geometry::PreparedSurfacePatches>,
         mesh_sound_speed: f64,
+        voxel_wave: Option<&crate::aerodynamics::hull::HullSection>,
     ) -> Result<(), StepError> {
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
@@ -1690,7 +1709,8 @@ impl PhysicsWorld {
             crate::aerodynamics::Aerodynamics::None
             | crate::aerodynamics::Aerodynamics::Wing(_)
             | crate::aerodynamics::Aerodynamics::Wings(_)
-            | crate::aerodynamics::Aerodynamics::Hull(_) => None,
+            | crate::aerodynamics::Aerodynamics::Hull(_)
+            | crate::aerodynamics::Aerodynamics::VoxelWave(_) => None,
             crate::aerodynamics::Aerodynamics::Simple(properties) => {
                 Some(AerodynamicSurface::new(*properties))
             }
@@ -1735,32 +1755,51 @@ impl PhysicsWorld {
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;
         }
-        if let crate::aerodynamics::Aerodynamics::Hull(sections) = primary {
-            for section in sections {
-                let transform = body.state().transform();
-                let point = transform.transform_point(section.local_transform().translation());
-                if !point.is_finite() {
-                    return Err(error());
-                }
-                let state = atmosphere
-                    .state_at(point)
-                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
-                let wrench = section
-                    .evaluate(crate::aerodynamics::pressure::PressureFlow {
-                        atmosphere: state,
-                        sound_speed: state.sound_speed().unwrap_or(mesh_sound_speed),
-                        transform,
-                        center_of_mass: body.physics().mass().ok_or_else(error)?.center_of_mass(),
-                        linear_velocity: body.state().linear_velocity(),
-                        angular_velocity: body.state().angular_velocity(),
-                    })
-                    .map_err(|cause| StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
-                    })?;
-                body.apply_force(wrench.force).map_err(|_| error())?;
-                body.apply_torque(wrench.moment).map_err(|_| error())?;
+        let primary_hull: &[crate::aerodynamics::hull::HullSection] = match primary {
+            crate::aerodynamics::Aerodynamics::Hull(sections) => sections,
+            _ => &[],
+        };
+        if let crate::aerodynamics::Aerodynamics::VoxelWave(model) = primary
+            && voxel_wave.is_none()
+        {
+            let point = body
+                .state()
+                .transform()
+                .transform_point(model.section.local_transform().translation());
+            let state = atmosphere
+                .state_at(point)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            if state.density() != 0.0 {
+                return Err(StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                });
             }
+        }
+        for section in primary_hull.iter().chain(voxel_wave) {
+            let transform = body.state().transform();
+            let point = transform.transform_point(section.local_transform().translation());
+            if !point.is_finite() {
+                return Err(error());
+            }
+            let state = atmosphere
+                .state_at(point)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            let wrench = section
+                .evaluate(crate::aerodynamics::pressure::PressureFlow {
+                    atmosphere: state,
+                    sound_speed: state.sound_speed().unwrap_or(mesh_sound_speed),
+                    transform,
+                    center_of_mass: body.physics().mass().ok_or_else(error)?.center_of_mass(),
+                    linear_velocity: body.state().linear_velocity(),
+                    angular_velocity: body.state().angular_velocity(),
+                })
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
+                })?;
+            body.apply_force(wrench.force).map_err(|_| error())?;
+            body.apply_torque(wrench.moment).map_err(|_| error())?;
         }
         let mut drag = Vec3::ZERO;
         let wings: &[crate::aerodynamics::wing::WingSurface] = match primary {
@@ -2125,6 +2164,49 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    fn prepare_voxel_wave(
+        model: &crate::aerodynamics::wave::VoxelWave,
+        body_id: BodyId,
+        body: &BodyMotion,
+        atmosphere: Atmosphere,
+        cache: &mut crate::aerodynamics::cache::PreparedGeometryCache,
+    ) -> Result<Option<crate::aerodynamics::hull::HullSection>, StepError> {
+        if body.physics().body_type() != BodyType::Dynamic {
+            return Ok(None);
+        }
+        let point = body
+            .state()
+            .transform()
+            .transform_point(model.section.local_transform().translation());
+        let state = atmosphere
+            .state_at(point)
+            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+        if state.density() == 0.0 {
+            return Ok(None);
+        }
+        cache
+            .prepare(
+                crate::aerodynamics::cache::GeometryCacheKey {
+                    body: body_id,
+                    geometry_version: 0,
+                    config_version: 1,
+                },
+                &model.mesh,
+                model.geometry_config,
+            )
+            .map_err(|cause| StepError::Aerodynamics {
+                body_id,
+                cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+            })?;
+        let section = cache
+            .configure_voxel_wave_drag(model.section.clone(), model.axis, model.smoothing_radius)
+            .map_err(|cause| StepError::Aerodynamics {
+                body_id,
+                cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
+            })?;
+        Ok(Some(section))
+    }
+
     fn prepare_aerodynamics_updates<E: StepExecutor>(
         &mut self,
         executor: &E,
@@ -2177,6 +2259,27 @@ impl PhysicsWorld {
                 entry.mesh_aerodynamics = None;
                 entry.collider_aerodynamic_mesh = None;
             }
+            let voxel_wave = if let crate::aerodynamics::Aerodynamics::VoxelWave(model) =
+                entry.body.aerodynamics()
+            {
+                let prepared = entry
+                    .mesh_aerodynamics
+                    .get_or_insert_with(|| MeshAerodynamics {
+                        identity: entry.body.aerodynamic_geometry_identity.clone(),
+                        cache: crate::aerodynamics::cache::PreparedGeometryCache::default(),
+                        config: model.geometry_config,
+                        sound_speed: self.mesh_sound_speed,
+                    });
+                Self::prepare_voxel_wave(
+                    model,
+                    body_id,
+                    &entry.body.motion(),
+                    atmosphere,
+                    &mut prepared.cache,
+                )?
+            } else {
+                None
+            };
             let mut mesh_patches = assembly_aerodynamics::prepare(
                 body_id,
                 entry,
@@ -2343,6 +2446,7 @@ impl PhysicsWorld {
                 original: entry.body.motion(),
                 prepared: entry.body.motion(),
                 mesh_patches,
+                voxel_wave,
             });
         }
 
@@ -2372,6 +2476,7 @@ impl PhysicsWorld {
                                     Some(dt),
                                     update.mesh_patches.as_ref(),
                                     self.mesh_sound_speed,
+                                    update.voxel_wave.as_ref(),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -3566,22 +3671,51 @@ impl PhysicsWorld {
                                     self.part_aerodynamic_geometry.as_ref(),
                                 ))
                         {
-                            step.error = Self::apply_aerodynamics(
-                                atmosphere,
-                                entry.body.aerodynamics(),
-                                &entry.body.aerodynamic_surfaces,
-                                step.body_id,
-                                &mut step.prepared,
-                                &self.parts,
-                                entry.cluster.as_ref(),
-                                dt,
-                                self.aerodynamics_body_updates
-                                    .iter()
-                                    .find(|update| update.id == step.body_id)
-                                    .and_then(|update| update.mesh_patches.as_ref()),
-                                self.mesh_sound_speed,
-                            )
-                            .err();
+                            let staged = self
+                                .aerodynamics_body_updates
+                                .iter()
+                                .find(|update| update.id == step.body_id);
+                            let mut temporary_cache =
+                                crate::aerodynamics::cache::PreparedGeometryCache::default();
+                            let local_wave = if staged.is_none() {
+                                if let crate::aerodynamics::Aerodynamics::VoxelWave(model) =
+                                    entry.body.aerodynamics()
+                                {
+                                    Self::prepare_voxel_wave(
+                                        model,
+                                        step.body_id,
+                                        &entry.body.motion(),
+                                        atmosphere,
+                                        &mut temporary_cache,
+                                    )
+                                } else {
+                                    Ok(None)
+                                }
+                            } else {
+                                Ok(None)
+                            };
+                            step.error = local_wave
+                                .and_then(|local_wave| {
+                                    Self::apply_aerodynamics(
+                                        atmosphere,
+                                        entry.body.aerodynamics(),
+                                        &entry.body.aerodynamic_surfaces,
+                                        step.body_id,
+                                        &mut step.prepared,
+                                        &self.parts,
+                                        entry.cluster.as_ref(),
+                                        dt,
+                                        self.aerodynamics_body_updates
+                                            .iter()
+                                            .find(|update| update.id == step.body_id)
+                                            .and_then(|update| update.mesh_patches.as_ref()),
+                                        self.mesh_sound_speed,
+                                        staged
+                                            .and_then(|update| update.voxel_wave.as_ref())
+                                            .or(local_wave.as_ref()),
+                                    )
+                                })
+                                .err();
                         }
                         if step.error.is_none() {
                             step.error = Self::apply_gravity(

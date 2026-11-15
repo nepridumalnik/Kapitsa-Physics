@@ -1968,3 +1968,151 @@ fn ndarc_wing_crosses_mach_one_in_world_steps() -> Result<(), Box<dyn std::error
     }
     Ok(())
 }
+
+#[test]
+fn automatic_voxel_wave_tracks_primary_geometry_and_step_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{
+        AerodynamicsError, AerodynamicsTask,
+        geometry::{GeometryConfig, OpenMeshPolicy},
+        hull::{HullError, HullSection},
+        wave::VoxelWave,
+    };
+    fn model(scale: f64) -> Result<VoxelWave, Box<dyn std::error::Error>> {
+        let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y * scale], vec![[0, 1, 2]])?;
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?;
+        Ok(VoxelWave::new(
+            mesh,
+            section,
+            0,
+            1,
+            GeometryConfig {
+                cell_size: 0.25,
+                max_cells: 100_000,
+                max_work: 1_000_000,
+                max_patch_work: 1_000_000,
+                open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+                weld_tolerance: None,
+            },
+        )?)
+    }
+    let mut velocities = Vec::new();
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.2,
+            Vec3::ZERO,
+        )?));
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?;
+        body.set_linear_velocity(Vec3::X * 680.0)?;
+        body.set_aerodynamics(Aerodynamics::VoxelWave(model(1.0)?));
+        let id = world.add_body(body)?;
+        AerodynamicsTask.execute(&world)?;
+        world.fill_step_shards(&mut [Vec::new()])?;
+        if sharded {
+            world.step_with_shards(
+                1e-5,
+                &mut [Vec::new(), Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(1e-5)?;
+        }
+        let first = world.body(id).ok_or("body")?.state().linear_velocity().x;
+        assert!(first < 680.0 && first > 0.0);
+        velocities.push(first);
+        let body = world.body_mut(id).ok_or("body")?;
+        body.set_linear_velocity(Vec3::X * 680.0)?;
+        body.set_aerodynamics(Aerodynamics::VoxelWave(model(2.0)?));
+        world.step(1e-5)?;
+        let changed = world.body(id).ok_or("body")?.state().linear_velocity().x;
+        assert!(changed < first, "first={first}, changed={changed}");
+        world
+            .body_mut(id)
+            .ok_or("body")?
+            .set_linear_velocity(Vec3::X * 100.0)?;
+        let before = world.body(id).ok_or("body")?.motion();
+        let error = world.step(1e-5);
+        assert!(matches!(
+            error,
+            Err(crate::world::StepError::Aerodynamics {
+                cause: AerodynamicsError::Hull(HullError::UnsupportedMach),
+                ..
+            })
+        ));
+        assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+    }
+    assert_eq!(velocities.first(), velocities.last());
+    Ok(())
+}
+
+#[test]
+fn automatic_voxel_wave_skips_vacuum_and_rolls_back_invalid_geometry()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{
+        AerodynamicsError, AerodynamicsTask,
+        geometry::{GeometryConfig, GeometryError, OpenMeshPolicy},
+        hull::HullSection,
+        wave::VoxelWave,
+    };
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]])?;
+    let section = HullSection::new(
+        Transform::identity(),
+        Vec3::X,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        None,
+    )?;
+    let config = GeometryConfig {
+        cell_size: 0.0,
+        max_cells: 100,
+        max_work: 1000,
+        max_patch_work: 1000,
+        open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+        weld_tolerance: None,
+    };
+    let mut body = RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?;
+    body.set_linear_velocity(Vec3::X * 680.0)?;
+    body.set_aerodynamics(Aerodynamics::VoxelWave(VoxelWave::new(
+        mesh, section, 0, 1, config,
+    )?));
+    let mut world = PhysicsWorld::new();
+    let id = world.add_body(body)?;
+    AerodynamicsTask.execute(&world)?;
+    world.step(1e-5)?;
+    world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+        1.2,
+        Vec3::ZERO,
+    )?));
+    let before = world.body(id).ok_or("body")?.motion();
+    assert!(matches!(
+        world.step(1e-5),
+        Err(crate::world::StepError::Aerodynamics {
+            cause: AerodynamicsError::Geometry(GeometryError::InvalidConfig),
+            ..
+        })
+    ));
+    assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+    Ok(())
+}

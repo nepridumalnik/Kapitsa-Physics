@@ -28,6 +28,7 @@ pub enum Aerodynamics {
     Wing(wing::WingSurface),
     Wings(Vec<wing::WingSurface>),
     Hull(Vec<hull::HullSection>),
+    VoxelWave(wave::VoxelWave),
     Mesh(crate::shape::TriangleMesh),
     Colliders,
 }
@@ -40,6 +41,7 @@ impl fmt::Debug for Aerodynamics {
             Self::Wing(surface) => formatter.debug_tuple("Wing").field(surface).finish(),
             Self::Wings(surfaces) => formatter.debug_tuple("Wings").field(surfaces).finish(),
             Self::Hull(sections) => formatter.debug_tuple("Hull").field(sections).finish(),
+            Self::VoxelWave(_) => formatter.write_str("VoxelWave(..)"),
             Self::Mesh(_) => formatter.write_str("Mesh(..)"),
             Self::Colliders => formatter.write_str("Colliders"),
         }

@@ -28,6 +28,42 @@ impl std::fmt::Display for WaveDragError {
 }
 impl std::error::Error for WaveDragError {}
 
+/// Geometry and section settings for an automatically prepared wave-drag model.
+///
+/// The caller must select a slender axisymmetric mesh, a body-local axis (0, 1,
+/// or 2), a section whose axis matches it, an application point, and a grid and
+/// smoothing scale appropriate for the shape. Geometry preparation and the
+/// resulting force are approximate; validate resolution and force convergence.
+/// The model currently represents wave drag, not complete hull aerodynamics.
+pub struct VoxelWave {
+    pub(crate) mesh: crate::shape::TriangleMesh,
+    pub(crate) section: super::hull::HullSection,
+    pub(crate) axis: usize,
+    pub(crate) smoothing_radius: usize,
+    pub(crate) geometry_config: super::geometry::GeometryConfig,
+}
+
+impl VoxelWave {
+    /// Constructs the model. Geometry is prepared when the world evaluates it;
+    /// invalid grid settings or geometry are returned as preparation errors.
+    pub fn new(
+        mesh: crate::shape::TriangleMesh,
+        section: super::hull::HullSection,
+        axis: usize,
+        smoothing_radius: usize,
+        geometry_config: super::geometry::GeometryConfig,
+    ) -> Result<Self, super::hull::HullError> {
+        section.validate_voxel_axis(axis)?;
+        Ok(Self {
+            mesh,
+            section,
+            axis,
+            smoothing_radius,
+            geometry_config,
+        })
+    }
+}
+
 /// A caller-supplied multiplier for the slender-body wave-drag factor.
 ///
 /// Values are dimensionless and must come from data or a separately validated

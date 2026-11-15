@@ -73,6 +73,7 @@ impl RigidBody {
         self.aerodynamic_geometry_identity = matches!(
             aerodynamics,
             crate::aerodynamics::Aerodynamics::Mesh(_)
+                | crate::aerodynamics::Aerodynamics::VoxelWave(_)
                 | crate::aerodynamics::Aerodynamics::Colliders
         )
         .then(|| std::sync::Arc::new(()));
