@@ -62,6 +62,58 @@ fn close(actual: Vec3, expected: Vec3) {
 }
 
 #[test]
+fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{mass::MassProperties, rigid_body::RigidBody, world::PhysicsWorld};
+    use kapitsa_math::Mat3;
+    let mut world = PhysicsWorld::new();
+    let id = world.add_body(RigidBody::new_dynamic(
+        Transform::identity(),
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?)?;
+    let part = world.enable_cluster(id)?;
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Z, Vec3::Y], vec![[0, 2, 1]])?;
+    let instances = [
+        GeometryInstance {
+            mesh: &mesh,
+            local_transform: Transform::identity(),
+            owner: GeometryOwner::Body,
+        },
+        GeometryInstance {
+            mesh: &mesh,
+            local_transform: Transform::new(Vec3::Y * 2.0, Quat::IDENTITY)?,
+            owner: GeometryOwner::Part(part),
+        },
+    ];
+    let config = GeometryConfig {
+        cell_size: 0.1,
+        max_cells: 100_000,
+        max_work: 10_000_000,
+        open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+        weld_tolerance: None,
+        max_patch_work: 100_000,
+    };
+    let geometry = PreparedGeometry::prepare(&instances, config)?;
+    let patches = geometry.exposed_surface_patches(&instances, Vec3::X, 1e-6, 100_000)?;
+    let total = evaluate_prepared_mesh(&patches, flow())?;
+    let a = evaluate_prepared_mesh_owner(&patches, flow(), GeometryOwner::Body)?;
+    let b = evaluate_prepared_mesh_owner(&patches, flow(), GeometryOwner::Part(part))?;
+    close(a.force + b.force, total.force);
+    close(a.moment + b.moment, total.moment);
+    assert!(a.force.length() > 0.0 && b.force.length() > 0.0);
+    assert!((b.moment - a.moment).length() > 0.0);
+    let invalid = PressureFlow {
+        sound_speed: 0.0,
+        ..flow()
+    };
+    assert_eq!(
+        evaluate_prepared_mesh_owner(&patches, invalid, GeometryOwner::Part(part)),
+        Err(PressureError::InvalidSoundSpeed)
+    );
+    Ok(())
+}
+
+#[test]
 fn signed_cp_on_prepared_mesh_sums_force_and_moment() {
     let patches = plate();
     let state = PressureFlow {

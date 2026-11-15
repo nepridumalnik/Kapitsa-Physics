@@ -662,6 +662,31 @@ pub fn evaluate_prepared_mesh(
     evaluate_prepared(patches, flow, None)
 }
 
+/// Returns the impact-pressure wrench of one geometry owner about the common
+/// body COM, in world coordinates. Geometry ownership reflects the prepared
+/// exposure and overlap policy; this is not a complete external or weld load.
+/// The result is computed locally and returned only if every selected patch
+/// and the accumulated wrench are valid. No body state is mutated.
+pub fn evaluate_prepared_mesh_owner(
+    patches: &PreparedSurfacePatches,
+    flow: PressureFlow,
+    owner: super::geometry::GeometryOwner,
+) -> Result<PressureWrench, PressureError> {
+    let mut total = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
+    for patch in patches.iter().filter(|patch| patch.owner == owner) {
+        let load = PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
+        total.force = total
+            .force
+            .checked_add(load.force)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        total.moment = total
+            .moment
+            .checked_add(load.moment)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+    }
+    Ok(total)
+}
+
 /// Applies the supplied base Cp to every explicitly selected prepared patch.
 /// The set must represent actual exposed base surfaces, not windward impact
 /// patches; this function does not determine which surfaces are in a wake.
