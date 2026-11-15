@@ -303,7 +303,14 @@ velocity relative to air, `alpha = atan2(-v_z, v_x)`: a nose-up wing in
 horizontal flight has positive incidence. Point velocity includes rotation
 and wind. By default, physical sideslip and reversed flow are unsupported; spanwise
 components within 64 machine epsilons of planar speed are discarded solely
-to tolerate rigid-transform roundoff. `WingSurface::with_spanwise_projection`
+to tolerate rigid-transform roundoff. `WingSurface::with_full_angle_polar` is
+an explicit opt-in for normal and reversed planar flow using a caller-provided
+total finite-wing polar. Signed AoA is in [-pi, pi]; the table must cover the
+actual angle and Mach, including any control incidence shift. No extrapolation,
+periodic interpolation or seam continuity is inferred: callers must supply
+consistent values at -pi and pi. This enables measured or otherwise justified
+full-angle data, not a predictive stall model or automatic fallback.
+`WingSurface::with_spanwise_projection`
 optionally enables a bounded normal-flow independence approximation, using a
 caller-supplied maximum sideslip angle in radians. It evaluates Mach, dynamic
 pressure and the supplied polar using only flow perpendicular to the span;

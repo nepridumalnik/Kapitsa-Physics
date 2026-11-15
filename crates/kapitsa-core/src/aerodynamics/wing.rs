@@ -221,6 +221,7 @@ pub struct WingSurface {
     planform_area: f64,
     footprint: Option<WingFootprint>,
     spanwise_limit: Option<f64>,
+    full_angle_polar: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -246,6 +247,24 @@ impl WingSurface {
     pub fn with_polar(mut self, polar: Arc<WingPolar>) -> Self {
         self.polar = Some(polar);
         self
+    }
+
+    /// Allows a caller-supplied polar to evaluate reverse and normal flow.
+    ///
+    /// The polar must provide total finite-wing coefficients for the actual
+    /// signed angle in [-pi, pi], measured as atan2(-velocity.z, velocity.x),
+    /// and for the projected Mach number. It must cover all angles and Mach
+    /// numbers expected by the caller; no periodic interpolation, extrapolation,
+    /// or continuity across the -pi/pi seam is inferred. The caller is
+    /// responsible for consistent values at that seam. This is not a stall
+    /// prediction or an automatic fallback. An incidence-shift control must
+    /// also remain inside the supplied polar domain.
+    pub fn with_full_angle_polar(mut self) -> Result<Self, WingError> {
+        if self.polar.is_none() {
+            return Err(WingError::InvalidParameters);
+        }
+        self.full_angle_polar = true;
+        Ok(self)
     }
 
     /// Enables conservative voxel-volume shielding for an explicit rectangle.
@@ -427,6 +446,7 @@ impl WingSurface {
             planform_area,
             footprint: None,
             spanwise_limit: None,
+            full_angle_polar: false,
         })
     }
 
@@ -490,6 +510,7 @@ impl WingSurface {
             flow.sound_speed,
             self.planform_area * fraction,
             self.spanwise_limit,
+            self.full_angle_polar,
             |alpha, mach| self.coefficients(alpha, mach),
         )?;
         let force = flow
@@ -521,6 +542,7 @@ impl FiniteWing {
             sound_speed,
             planform_area,
             None,
+            false,
             |alpha, mach| self.coefficients(alpha, mach),
         )
     }
@@ -774,6 +796,7 @@ fn planar_force(
     sound_speed: f64,
     planform_area: f64,
     spanwise_limit: Option<f64>,
+    full_angle_polar: bool,
     coefficients: impl FnOnce(f64, f64) -> Result<WingCoefficients, WingError>,
 ) -> Result<kapitsa_math::Vec3, WingError> {
     use kapitsa_math::Vec3;
@@ -793,12 +816,15 @@ fn planar_force(
     // The default accepts only frame-roundoff spanwise flow. The opt-in
     // projection uses the normal-flow independence approximation instead.
     let planar_scale = relative_velocity.x.abs().max(relative_velocity.z.abs());
-    if relative_velocity.x <= 0.0 {
+    if relative_velocity.x <= 0.0 && !full_angle_polar {
         return Err(WingError::UnsupportedFlow);
     }
     let velocity = Vec3::new(relative_velocity.x, 0.0, relative_velocity.z);
     let speed = velocity.x.hypot(velocity.z);
-    if !speed.is_finite() || speed == 0.0 {
+    if speed == 0.0 {
+        return Err(WingError::UnsupportedFlow);
+    }
+    if !speed.is_finite() {
         return Err(WingError::ArithmeticOverflow);
     }
     match spanwise_limit {
@@ -1271,6 +1297,63 @@ mod tests {
         let difference = wing_force_component(1e-300, 1.0, 1.0, (1.0, f64::MAX), (-1.0, next))?;
         let expected = 0.5 * 1e-300 * (f64::MAX - next);
         assert!((difference / expected - 1.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn full_angle_polar_explicitly_supports_reverse_and_normal_flow()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{AtmosphericState, pressure::PressureFlow};
+        use kapitsa_math::Vec3;
+        let base = WingSurface::new(
+            FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+            crate::transform::Transform::identity(),
+            1.0,
+        )?;
+        assert!(base.clone().with_full_angle_polar().is_err());
+        // Synthetic isotropic drag fixture, not measured wing data.
+        let polar = Arc::new(WingPolar::new(
+            vec![0.0, 1.0],
+            vec![-PI, 0.0, PI],
+            vec![
+                WingCoefficients {
+                    lift: 0.0,
+                    drag: 1.0
+                };
+                6
+            ],
+        )?);
+        let ordinary = base.with_polar(polar);
+        let full = ordinary.clone().with_full_angle_polar()?;
+        let flow = PressureFlow {
+            atmosphere: AtmosphericState::new(2.0, Vec3::ZERO)?,
+            sound_speed: 100.0,
+            transform: crate::transform::Transform::identity(),
+            center_of_mass: Vec3::ZERO,
+            linear_velocity: -Vec3::X * 10.0,
+            angular_velocity: Vec3::ZERO,
+        };
+        assert_eq!(ordinary.evaluate(flow), Err(WingError::UnsupportedFlow));
+        assert_eq!(full.evaluate(flow)?.force, Vec3::X * 100.0);
+        let normal = full.evaluate(PressureFlow {
+            linear_velocity: Vec3::Z * 10.0,
+            ..flow
+        })?;
+        assert_eq!(normal.force, -Vec3::Z * 100.0);
+        assert_eq!(
+            full.evaluate(PressureFlow {
+                linear_velocity: Vec3::Y,
+                ..flow
+            }),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert_eq!(
+            full.evaluate(PressureFlow {
+                linear_velocity: -Vec3::X * 200.0,
+                ..flow
+            }),
+            Err(WingError::UnsupportedFlow)
+        );
         Ok(())
     }
 

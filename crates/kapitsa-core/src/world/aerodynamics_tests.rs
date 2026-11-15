@@ -1891,6 +1891,64 @@ fn wing_world_loads_and_failures_match_between_step_paths() {
 }
 
 #[test]
+fn full_angle_polar_runs_reverse_flow_in_both_world_paths() -> Result<(), Box<dyn std::error::Error>>
+{
+    use crate::aerodynamics::wing::{FiniteWing, WingCoefficients, WingPolar, WingSurface};
+    use std::{f64::consts::PI, sync::Arc};
+    let polar = Arc::new(WingPolar::new(
+        vec![0.0, 1.0],
+        vec![-PI, 0.0, PI],
+        vec![
+            WingCoefficients {
+                lift: 0.0,
+                drag: 1.0
+            };
+            6
+        ],
+    )?);
+    let mut previous = None;
+    for sharded in [false, true] {
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?;
+        body.set_linear_velocity(-Vec3::X * 50.0)?;
+        body.set_aerodynamics(Aerodynamics::Wing(
+            WingSurface::new(
+                FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?,
+                Transform::identity(),
+                2.0,
+            )?
+            .with_polar(polar.clone())
+            .with_full_angle_polar()?,
+        ));
+        let mut world = PhysicsWorld::new();
+        let id = world.add_body(body)?;
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.2,
+            Vec3::ZERO,
+        )?));
+        if sharded {
+            world.step_with_shards(
+                1e-4,
+                &mut [Vec::new(), Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(1e-4)?;
+        }
+        let motion = world.body(id).ok_or("body")?.motion();
+        assert!(world.body(id).ok_or("body")?.state().linear_velocity().x > -50.0);
+        if let Some(expected) = previous {
+            assert_eq!(motion, expected);
+        }
+        previous = Some(motion);
+    }
+    Ok(())
+}
+
+#[test]
 fn wing_trajectory_converges_with_timestep() {
     use crate::aerodynamics::wing::{FiniteWing, WingSurface};
     let simulate = |steps: usize| {
