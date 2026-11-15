@@ -590,17 +590,16 @@ are neither experimental observations nor validation at Re = 10,000.
 A different regime is represented by the experimental values reproduced in
 tables 3 and 4 of [Li et al.](https://doi.org/10.7638/kqdlxxb-2021.0051):
 `(Re, Mach, Cd) = (19.4, 1.195, 2.303)` and `(18.6, 1.164, 2.381)`.
-These are secondary transcriptions, not yet checked against the original
-measurements or their uncertainty. The paper adjusts its gas-surface
+Both values are confirmed in the original report's table II, page 77;
+their individual uncertainties remain unverified. The paper adjusts its gas-surface
 accommodation coefficient using the first point, so its simulation at that
 point is not an independent prediction. Moreover, these low-Re points are in
 a rarefied-flow regime, unlike the continuum Re = 10,000 benchmark; they must
 not be used to validate that correlation or a continuum no-slip model.
 Li et al.'s figure 5 attributes the first experimental value specifically to
 Bailey and Hiatt (1972), the same experimental source used by Karr. It is
-therefore not an independent dataset for testing Karr; the original individual
-measurement and its uncertainty have not been verified here. This attribution
-does not establish the provenance of the second point.
+therefore not an independent dataset for testing Karr. The second value also
+appears in the same original report.
 
 The original [Bailey and Hiatt report AEDC-TR-70-291](https://archive.org/details/DTIC_AD0721208)
 is available, including individual measurements in table II. Section 4.1
@@ -613,8 +612,11 @@ estimate approximately 2% drag uncertainty for their derived faired curves,
 not a guaranteed uncertainty for every individual observation. Section 4.4
 explicitly cautions that the curve near Mach 1 is an estimate with reduced
 confidence because the sphere decelerates through a Mach interval during a
-measurement. Table II needs careful transcription against the scanned pages;
-its data cannot independently validate Karr's fit, which used this report.
+measurement. On the [scanned page 77](https://archive.org/download/DTIC_AD0721208/page/n88.jpg),
+for example, the table gives `(Mach, Re, Cd) = (0.983, 5042, 0.697)` and
+`(1.214, 5070, 0.872)`. These transonic measurements are near Re = 5,000,
+not Re = 10,000, and cannot independently validate Karr's fit, which used
+this report. Other table pages still require careful transcription.
 
 For an additional transonic comparison, Usry and Wallace,
 [NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
