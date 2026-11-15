@@ -782,6 +782,14 @@ differ, including an approximately 0.103 low-Mach level; tunnel-wall and sting
 effects, Reynolds number and transition conditions complicate comparisons.
 This is neither a Sears–Haack body nor a sphere, and using its values as table
 knots would be fitting input data, not independent model validation.
+The model is 114.30 cm long, with maximum diameter 12.70 cm and base diameter
+3.28 cm; its radius coordinates are tabulated in the report's table I. The
+45-degree swept stabilizing fins have a 3% biconvex section, and a transition
+strip was placed 2.54 cm behind the nose. The reported forebody coefficient is
+the total axial-force coefficient less the measured base-pressure contribution,
+not an isolated inviscid body wave-drag coefficient. A meaningful comparison
+therefore requires matching the fins, boundary layer and base subtraction as
+well as geometry and flight conditions; it cannot directly validate `wave_drag`.
 
 ### Explicit slender-body wave drag
 
