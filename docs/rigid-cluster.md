@@ -142,6 +142,11 @@ more than one per step, while the position solver applies separate corrections.
 Consequently a future transactional ledger must cover every applicable solve
 and preserve the relevant application positions; neither events nor the last
 manifold alone are sufficient to claim a complete weld balance.
+`PhysicsWorld::contact_impulses_ccd_clipped()` reports whether the last
+successful full step clipped a dynamic body. CCD clipping sets velocities to
+zero without recording a physical impulse, so such a snapshot cannot support a
+complete load balance even if `contact_impulses_omitted_points()` is zero. A
+false clipping flag does not establish completeness of other solver paths.
 
 Runtime topology commands execute in existing FIFO order at step boundaries.
 Each structural command is atomic; no stronger batch atomicity is implied.

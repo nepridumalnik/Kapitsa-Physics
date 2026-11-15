@@ -39,6 +39,69 @@ use crate::execution::{ExecutionError, StepExecutor};
 mod free_ball_tests;
 
 #[test]
+fn clipped_ccd_contact_snapshot_reports_unrecorded_velocity_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    for x in [0.0, 10.0] {
+        let wall = world.add_body(RigidBody::new_static(Transform::new(
+            Vec3::new(x, 0.0, 0.0),
+            Quat::IDENTITY,
+        )?))?;
+        let collider = world.add_collider(
+            wall,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        world.set_collider_material(collider, Some(material))?;
+    }
+    let mut body = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY)?,
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?;
+    body.set_linear_velocity(Vec3::X * -2000.0)?;
+    body.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(body)?;
+    let part = world.enable_cluster(body)?;
+    let sphere = world.add_part_collider(part, collider(0.5))?;
+    world.set_collider_material(sphere, Some(material))?;
+    world.set_collision_config(crate::collision::CollisionConfig {
+        max_ccd_impacts: 1,
+        ccd_limit_policy: crate::collision::CcdLimitPolicy::ClipIsland,
+        ..world.collision_config()
+    })?;
+    world.step(0.01)?;
+    assert!(world.contact_impulses_ccd_clipped());
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    let total = world
+        .contact_impulses()
+        .iter()
+        .fold(Vec3::ZERO, |sum, entry| {
+            if entry.pair.a == sphere {
+                sum - entry.impulse_on_b
+            } else if entry.pair.b == sphere {
+                sum + entry.impulse_on_b
+            } else {
+                sum
+            }
+        });
+    let velocity = world
+        .body(body)
+        .ok_or(WorldError::InvalidBodyId)?
+        .state()
+        .linear_velocity();
+    assert_eq!(velocity, Vec3::ZERO);
+    assert!((total - (velocity + Vec3::X * 2000.0)).length() > 1.0);
+    assert!(world.step(-1.0).is_err());
+    assert!(world.contact_impulses_ccd_clipped());
+    world.step(0.001)?;
+    assert!(!world.contact_impulses_ccd_clipped());
+    Ok(())
+}
+
+#[test]
 fn off_center_part_contact_impulse_matches_linear_and_angular_momentum()
 -> Result<(), Box<dyn std::error::Error>> {
     for ccd in [false, true] {

@@ -649,6 +649,8 @@ pub struct PhysicsWorld {
     contact_impulses_pending: Vec<ContactImpulse>,
     contact_impulses_omitted_published: usize,
     contact_impulses_omitted_pending: usize,
+    contact_ccd_clipped_published: bool,
+    contact_ccd_clipped_pending: bool,
     part_hull_buffers: Vec<Vec<PartHullWrench>>,
     part_wing_buffers: Vec<Vec<PartWingWrench>>,
     owner_pressure: Option<HashMap<BodyId, crate::aerodynamics::pressure::OwnerPressureWorkspace>>,
@@ -714,6 +716,14 @@ impl PhysicsWorld {
     /// other solver paths, CCD replay, or the overall part-load balance.
     pub fn contact_impulses_omitted_points(&self) -> usize {
         self.contact_impulses_omitted_published
+    }
+
+    /// Whether CCD clipped any dynamic body during the last successful full
+    /// step. Clipping changes velocity without a recorded physical impulse;
+    /// contact snapshots from such a step cannot form a complete load balance.
+    /// False does not prove that other contact paths are complete.
+    pub fn contact_impulses_ccd_clipped(&self) -> bool {
+        self.contact_ccd_clipped_published
     }
 
     /// Part-targeted persistent-source contributions from the last successful
@@ -819,6 +829,8 @@ impl PhysicsWorld {
             contact_impulses_pending: Vec::new(),
             contact_impulses_omitted_published: 0,
             contact_impulses_omitted_pending: 0,
+            contact_ccd_clipped_published: false,
+            contact_ccd_clipped_pending: false,
             part_hull_buffers: Vec::new(),
             part_wing_buffers: Vec::new(),
             owner_pressure: None,
@@ -1794,6 +1806,7 @@ impl PhysicsWorld {
     ) -> Result<T, StepError> {
         self.contact_impulses_pending.clear();
         self.contact_impulses_omitted_pending = 0;
+        self.contact_ccd_clipped_pending = false;
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
         if let Err((source_id, cause)) = self.prepare_force_source_updates() {
@@ -1831,6 +1844,10 @@ impl PhysicsWorld {
             std::mem::swap(
                 &mut self.contact_impulses_omitted_published,
                 &mut self.contact_impulses_omitted_pending,
+            );
+            std::mem::swap(
+                &mut self.contact_ccd_clipped_published,
+                &mut self.contact_ccd_clipped_pending,
             );
             self.recycle_aerodynamics_updates();
             self.clear_gravity_updates();
@@ -1979,6 +1996,8 @@ impl PhysicsWorld {
         self.contact_impulses_pending.clear();
         self.contact_impulses_omitted_pending = 0;
         let context = &self.collision_system.context;
+        self.contact_ccd_clipped_pending =
+            context.ccd_clipped_bodies.iter().any(|&clipped| clipped);
         let count = context
             .ccd_solved_manifolds
             .iter()
