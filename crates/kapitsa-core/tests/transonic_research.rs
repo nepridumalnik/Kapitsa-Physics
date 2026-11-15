@@ -485,7 +485,7 @@ fn harris_mach_one_field_transition_diagnostic() {
 #[test]
 #[ignore = "expensive fine-grid research diagnostic; run explicitly in release mode"]
 fn harris_mach_one_fine_grid_diagnostic() {
-    harris_mach_one_cases(&[(97, 1.25)]);
+    harris_mach_one_cases(&[(97, 0.75), (97, 1.0), (97, 1.25)]);
 }
 
 fn harris_mach_one_cases(cases: &[(usize, f64)]) {
