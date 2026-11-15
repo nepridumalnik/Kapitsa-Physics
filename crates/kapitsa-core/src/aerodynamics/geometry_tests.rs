@@ -198,6 +198,45 @@ fn budgeted_sort_counts_comparisons_and_rejects_exhaustion() {
 }
 
 #[test]
+fn budgeted_sort_matches_standard_sort_for_varied_inputs() {
+    const MAX_LEN: usize = 128;
+    const CASES: u64 = 8;
+    const MULTIPLIER: u64 = 6_364_136_223_846_793_005;
+    const INCREMENT: u64 = 1_442_695_040_888_963_407;
+    const VALUE_COUNT: u64 = 17;
+    const WORK_LIMIT: usize = 100_000;
+    for len in 0..=MAX_LEN {
+        for seed in 0..CASES {
+            let mut state = seed;
+            let input: Vec<_> = (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(MULTIPLIER).wrapping_add(INCREMENT);
+                    state % VALUE_COUNT
+                })
+                .collect();
+            let mut expected = input.clone();
+            expected.sort_unstable();
+            let mut actual = input.clone();
+            let mut work = 0;
+            budgeted_sort(&mut actual, &mut work, WORK_LIMIT, Ord::cmp).unwrap();
+            assert_eq!(actual, expected, "length {len}, seed {seed}");
+            if work > 0 {
+                let mut retry = input.clone();
+                let mut charged = 0;
+                assert_eq!(
+                    budgeted_sort(&mut retry, &mut charged, work - 1, Ord::cmp),
+                    Err(GeometryError::WorkBudgetExceeded)
+                );
+                let mut retry = input;
+                let mut charged = 0;
+                budgeted_sort(&mut retry, &mut charged, work, Ord::cmp).unwrap();
+                assert_eq!(retry, expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn surface_work_charge_rejects_overflow_and_preserves_previous_value() {
     let mut work = 4;
     assert_eq!(charge_surface_work(&mut work, 1, 5), Ok(()));
