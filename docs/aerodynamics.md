@@ -249,9 +249,16 @@ to body coordinates, with the origin at the application point. Wing axes are
 +X toward the leading edge, +Y spanwise and +Z toward positive lift. For body
 velocity relative to air, `alpha = atan2(-v_z, v_x)`: a nose-up wing in
 horizontal flight has positive incidence. Point velocity includes rotation
-and wind. Physical sideslip and reversed flow are unsupported; spanwise
+and wind. By default, physical sideslip and reversed flow are unsupported; spanwise
 components within 64 machine epsilons of planar speed are discarded solely
-to tolerate rigid-transform roundoff. `Aerodynamics::Wing(surface)` enables
+to tolerate rigid-transform roundoff. `WingSurface::with_spanwise_projection`
+optionally enables a bounded normal-flow independence approximation, using a
+caller-supplied maximum sideslip angle in radians. It evaluates Mach, dynamic
+pressure and the supplied polar using only flow perpendicular to the span;
+the computed force has no spanwise component. This approximation does not
+predict finite-wing side force, sweep, tip effects or separated flow. The
+caller must choose a suitable angular range and coefficients. It is based on
+the normal-velocity concept described in [NACA TN 2335](https://ntrs.nasa.gov/api/citations/19930082969/downloads/19930082969.pdf). `Aerodynamics::Wing(surface)` enables
 this model for a body's primary loads in ordinary and sharded world steps.
 `Aerodynamics::Wings(Vec<WingSurface>)` evaluates multiple explicitly placed
 wings; an empty list contributes no loads. Each wing samples its own atmosphere.

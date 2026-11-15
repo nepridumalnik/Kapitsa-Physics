@@ -1504,6 +1504,72 @@ mod tests {
     }
 
     #[test]
+    fn partial_shielding_with_spanwise_projection_advances_multiple_steps()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{
+            AerodynamicsError,
+            wing::{FiniteWing, WingError, WingSurface},
+        };
+        for projection in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::new(50.0, 0.0, -5.0))?;
+            let id = world.add_body(body)?;
+            let part = world.enable_cluster(id)?;
+            let wing = WingSurface::new(
+                FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+                Transform::identity(),
+                4.0,
+            )?
+            .with_rectangular_footprint(Vec3::new(0.4, 0.2, 0.0), 2.0, 2.0)?;
+            let wing = if projection {
+                wing.with_spanwise_projection(0.3)?
+            } else {
+                wing
+            };
+            world.set_part_aerodynamic_wings(part, vec![wing])?;
+            let mut collider = crate::collider::Collider::new(
+                crate::shape::Shape::Cuboid(crate::shape::Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            );
+            collider.set_mode(crate::collider::CollisionMode::Sensor);
+            world.add_part_collider(part, collider)?;
+            world.set_part_wave_source_colliders(part, true)?;
+            world.step(1e-4)?;
+            assert!(
+                world
+                    .body(id)
+                    .ok_or("body")?
+                    .state()
+                    .angular_velocity()
+                    .length()
+                    > 0.0
+            );
+            if projection {
+                for _ in 0..10 {
+                    world.step(1e-4)?;
+                }
+            } else {
+                let before = world.body(id).ok_or("body")?.motion();
+                assert!(matches!(
+                    world.step(1e-4),
+                    Err(StepError::Aerodynamics {
+                        cause: AerodynamicsError::Wing(WingError::UnsupportedFlow),
+                        ..
+                    })
+                ));
+                assert_eq!(world.body(id).ok_or("body")?.motion(), before);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn wing_shielding_budget_failure_rolls_back_world() -> Result<(), Box<dyn std::error::Error>> {
         use crate::aerodynamics::{
             AerodynamicsError,

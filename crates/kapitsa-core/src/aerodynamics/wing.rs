@@ -220,6 +220,7 @@ pub struct WingSurface {
     local_transform: crate::transform::Transform,
     planform_area: f64,
     footprint: Option<WingFootprint>,
+    spanwise_limit: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -373,6 +374,23 @@ impl WingSurface {
         }))
     }
 
+    /// Enables a normal-flow projection for limited spanwise flow.
+    ///
+    /// `max_sideslip` is a caller-selected angle in radians, finite and in
+    /// (0, pi/2). The local spanwise component is ignored when evaluating
+    /// dynamic pressure, Mach, lift and drag; the resulting force has no
+    /// spanwise component. This independence approximation is not a model of
+    /// finite-wing side force, sweep, wingtip effects or separated flow. The
+    /// caller must select a range and polar consistent with that approximation.
+    /// By default physical spanwise flow remains unsupported.
+    pub fn with_spanwise_projection(mut self, max_sideslip: f64) -> Result<Self, WingError> {
+        if !max_sideslip.is_finite() || max_sideslip <= 0.0 || max_sideslip >= PI / 2.0 {
+            return Err(WingError::InvalidParameters);
+        }
+        self.spanwise_limit = Some(max_sideslip);
+        Ok(self)
+    }
+
     pub fn with_control(mut self, control: WingControl) -> Self {
         self.control = Some(control);
         self
@@ -408,6 +426,7 @@ impl WingSurface {
             local_transform,
             planform_area,
             footprint: None,
+            spanwise_limit: None,
         })
     }
 
@@ -470,6 +489,7 @@ impl WingSurface {
             flow.atmosphere.density(),
             flow.sound_speed,
             self.planform_area * fraction,
+            self.spanwise_limit,
             |alpha, mach| self.coefficients(alpha, mach),
         )?;
         let force = flow
@@ -500,6 +520,7 @@ impl FiniteWing {
             density,
             sound_speed,
             planform_area,
+            None,
             |alpha, mach| self.coefficients(alpha, mach),
         )
     }
@@ -752,6 +773,7 @@ fn planar_force(
     density: f64,
     sound_speed: f64,
     planform_area: f64,
+    spanwise_limit: Option<f64>,
     coefficients: impl FnOnce(f64, f64) -> Result<WingCoefficients, WingError>,
 ) -> Result<kapitsa_math::Vec3, WingError> {
     use kapitsa_math::Vec3;
@@ -768,16 +790,25 @@ fn planar_force(
     if density == 0.0 || planform_area == 0.0 || relative_velocity == Vec3::ZERO {
         return Ok(Vec3::ZERO);
     }
-    // Permit rigid-frame roundoff, never physical sideslip or reversed flow.
+    // The default accepts only frame-roundoff spanwise flow. The opt-in
+    // projection uses the normal-flow independence approximation instead.
     let planar_scale = relative_velocity.x.abs().max(relative_velocity.z.abs());
-    if relative_velocity.y.abs() > 64.0 * f64::EPSILON * planar_scale || relative_velocity.x <= 0.0
-    {
+    if relative_velocity.x <= 0.0 {
         return Err(WingError::UnsupportedFlow);
     }
     let velocity = Vec3::new(relative_velocity.x, 0.0, relative_velocity.z);
     let speed = velocity
         .checked_length()
         .ok_or(WingError::ArithmeticOverflow)?;
+    match spanwise_limit {
+        Some(limit) if relative_velocity.y.abs().atan2(speed) > limit => {
+            return Err(WingError::UnsupportedFlow);
+        }
+        None if relative_velocity.y.abs() > 64.0 * f64::EPSILON * planar_scale => {
+            return Err(WingError::UnsupportedFlow);
+        }
+        _ => {}
+    }
     let alpha = (-velocity.z).atan2(velocity.x);
     let c = coefficients(alpha, speed / sound_speed)?;
     let direction = velocity / speed;
@@ -1024,6 +1055,54 @@ mod tests {
         );
         assert!(base.with_ndarc_lift_correction(0.9, 1.2).is_err());
         assert!(base.with_ndarc_lift_correction(0.75, 0.99).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn spanwise_projection_is_explicit_bounded_and_uses_normal_flow()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::{AtmosphericState, pressure::PressureFlow};
+        use kapitsa_math::Vec3;
+        let wing = WingSurface::new(
+            FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+            crate::transform::Transform::identity(),
+            4.0,
+        )?;
+        let projected = wing.clone().with_spanwise_projection(0.3)?;
+        let flow = PressureFlow {
+            atmosphere: AtmosphericState::new(1.2, Vec3::ZERO)?,
+            sound_speed: 340.0,
+            transform: crate::transform::Transform::identity(),
+            center_of_mass: Vec3::ZERO,
+            linear_velocity: Vec3::new(50.0, 10.0, -5.0),
+            angular_velocity: Vec3::ZERO,
+        };
+        assert_eq!(wing.evaluate(flow), Err(WingError::UnsupportedFlow));
+        let load = projected.evaluate(flow)?;
+        let planar = wing.evaluate(PressureFlow {
+            linear_velocity: Vec3::new(50.0, 0.0, -5.0),
+            ..flow
+        })?;
+        assert_eq!(load, planar);
+        assert!(load.force.dot(flow.linear_velocity) < 0.0);
+        assert_eq!(
+            projected.evaluate(PressureFlow {
+                linear_velocity: Vec3::new(50.0, 100.0, -5.0),
+                ..flow
+            }),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert_eq!(
+            projected.evaluate(PressureFlow {
+                linear_velocity: Vec3::new(-50.0, 0.0, -5.0),
+                ..flow
+            }),
+            Err(WingError::UnsupportedFlow)
+        );
+        assert!(
+            wing.with_spanwise_projection(std::f64::consts::FRAC_PI_2)
+                .is_err()
+        );
         Ok(())
     }
 
