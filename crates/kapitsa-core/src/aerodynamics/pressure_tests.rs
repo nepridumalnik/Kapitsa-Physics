@@ -108,6 +108,21 @@ fn base_pressure_rejects_invalid_coefficients_and_domains() {
 }
 
 #[test]
+fn base_pressure_rejects_unrepresentable_mach_without_computing_force() {
+    let patch = PressurePatch::new(Vec3::ZERO, -Vec3::X, 1.0).unwrap();
+    let base = BasePressure::new(-0.4, 0.0, f64::MAX).unwrap();
+    let extreme = PressureFlow {
+        sound_speed: f64::MIN_POSITIVE,
+        linear_velocity: Vec3::X * 1000.0,
+        ..flow()
+    };
+    assert_eq!(
+        patch.evaluate_base(extreme, base),
+        Err(PressureError::ArithmeticOverflow)
+    );
+}
+
+#[test]
 fn base_pressure_rejects_windward_surface_in_local_flow() {
     let base = BasePressure::new(-0.4, 0.0, 20.0).unwrap();
     let windward = PressurePatch::new(Vec3::ZERO, Vec3::X, 1.0).unwrap();
