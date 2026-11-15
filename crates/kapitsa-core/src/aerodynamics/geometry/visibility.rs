@@ -263,12 +263,36 @@ pub(super) fn windward_triangle(
     Ok(Some(positive))
 }
 
-pub(super) fn polygon_fraction(points: &[Vec3]) -> Result<f64, GeometryError> {
-    let mut area = 0.0;
-    for index in 1..points.len().saturating_sub(1) {
-        area += triangle_fraction([points[0], points[index], points[index + 1]])?;
+/// Compensates accumulation roundoff only, not errors in clipped vertices.
+#[derive(Default)]
+pub(super) struct AreaSum {
+    sum: f64,
+    correction: f64,
+}
+
+impl AreaSum {
+    pub fn add(&mut self, value: f64) {
+        let adjusted = value - self.correction;
+        let next = self.sum + adjusted;
+        self.correction = (next - self.sum) - adjusted;
+        self.sum = next;
     }
-    finite(area)
+
+    pub fn value(&self) -> f64 {
+        self.sum
+    }
+}
+
+pub(super) fn polygon_fraction(points: &[Vec3]) -> Result<f64, GeometryError> {
+    let mut area = AreaSum::default();
+    for index in 1..points.len().saturating_sub(1) {
+        area.add(triangle_fraction([
+            points[0],
+            points[index],
+            points[index + 1],
+        ])?);
+    }
+    finite(area.value())
 }
 
 pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, GeometryError> {
@@ -293,6 +317,17 @@ pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, GeometryError>
 mod tests {
     use super::*;
     use crate::aerodynamics::geometry::GeometryOwner;
+
+    #[test]
+    fn compensated_area_sum_retains_small_positive_contributions() {
+        const SMALL: f64 = f64::EPSILON / 4.0;
+        let mut sum = AreaSum::default();
+        sum.add(1.0);
+        for _ in 0..4 {
+            sum.add(SMALL);
+        }
+        assert_eq!(sum.value(), 1.0 + f64::EPSILON);
+    }
 
     #[test]
     fn windward_clipping_rejects_normalization_that_erases_positive_velocity() {

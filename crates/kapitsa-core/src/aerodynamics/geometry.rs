@@ -1318,7 +1318,7 @@ impl PreparedGeometry {
                 }
                 checked_push(&mut shadows, shadow)?;
             }
-            let mut partition_fraction = 0.0;
+            let mut partition_fraction = visibility::AreaSum::default();
             for polygon in pieces {
                 charge_surface_work(&mut work, POLYGON_VISIT_WORK, max_work)?;
                 for k in 1..polygon.len().saturating_sub(1) {
@@ -1330,7 +1330,7 @@ impl PreparedGeometry {
                     check_surface_work(Some(work), max_work)?;
                     let coordinates = [polygon[0], polygon[k], polygon[k + 1]];
                     let fraction = visibility::triangle_fraction(coordinates)?;
-                    partition_fraction += fraction;
+                    partition_fraction.add(fraction);
                     let area = triangle.area * fraction;
                     let [a, b, c] = triangle.vertices;
                     let reconstruct = |point: Vec3| a + (b - a) * point.x + (c - a) * point.y;
@@ -1383,6 +1383,7 @@ impl PreparedGeometry {
             // this is not a proven numerical bound for the current partition.
             let roundoff = work as f64 * f64::EPSILON;
             let allowance = roundoff / (1.0 - roundoff);
+            let partition_fraction = partition_fraction.value();
             if !partition_fraction.is_finite()
                 || (partition_fraction - initial_fraction).abs() > allowance
             {
