@@ -99,7 +99,8 @@ impl RigidBody {
     /// Replaces explicitly selected body-local base patches. The caller must
     /// ensure they remain exposed and belong to the current Mesh/Colliders
     /// geometry; no wake, overlap or shielding calculation is performed.
-    /// These loads are currently supported only on non-cluster Mesh/Colliders bodies.
+    /// These loads are currently supported only on non-cluster Mesh/Colliders bodies;
+    /// cluster conversion rejects nonempty configurations without changing the body.
     pub fn set_base_pressure_patches(
         &mut self,
         patches: Vec<(
@@ -108,6 +109,16 @@ impl RigidBody {
         )>,
     ) {
         self.base_pressure_patches = patches;
+    }
+
+    /// Returns the explicit body-local base-pressure configuration.
+    pub fn base_pressure_patches(
+        &self,
+    ) -> &[(
+        crate::aerodynamics::pressure::PressurePatch,
+        crate::aerodynamics::pressure::BasePressure,
+    )] {
+        &self.base_pressure_patches
     }
 
     /// Copies only motion, mass, and force state; owned geometry is never cloned.

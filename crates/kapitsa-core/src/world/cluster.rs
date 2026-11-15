@@ -143,6 +143,11 @@ impl PhysicsWorld {
         if body_entry.cluster.is_some() {
             return Err(ClusterError::AlreadyClustered);
         }
+        // Base patches are body-local and are not yet transferred to a part.
+        // Reject before changing topology rather than strand or lose loads.
+        if !body_entry.body.base_pressure_patches.is_empty() {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
         let mut root_hull = Vec::new();
         if let Aerodynamics::Hull(sections) = body_entry.body.aerodynamics() {
             root_hull
