@@ -810,14 +810,25 @@ continuation across Mach 1.
 
 Another candidate for a closed-body benchmark is Harris and Landrum's
 [NASA report](https://ntrs.nasa.gov/api/citations/19660003947/downloads/19660003947.pdf),
-which tests Haack–Adams bodies from Mach 0.6 to 4.0. Their zero-base-area case
-is a Sears–Haack body, and table III reports measured surface pressures. The
-authors derive wave drag from measurements and report agreement with slender
+which tests Haack–Adams bodies from Mach 0.6 to 3.95. Their theoretical
+zero-base-area shape is a Sears–Haack body, but its pressure models were
+truncated at 36 inches to accommodate a sting, so they are not closed bodies.
+For the nominal fineness ratio 7 case, theoretical length is 38.240 inches
+and base radius at the truncation is 0.880 inch. No force models were built
+for the zero-base-area series. Table III(a), printed page 13, reports for this
+model at x/l = 0.681 Cp = -0.107, -0.217 and -0.193 at Mach 0.95, 1.00 and
+1.03 respectively. Pressure-test Reynolds numbers based on the actual 36-inch
+model length are 12.2, 12.4 and 12.4 million, respectively. Pressure tests
+were aligned to yield axisymmetric distributions; force-model transition trips
+must not be assumed to apply to the pressure models. The authors derive wave
+drag from pressure measurements for the separate 0.532 base-area-ratio series,
+not the truncated Sears–Haack models, and report agreement with slender
 body theory near Mach 1 for their tested configurations, but increasing
 overprediction at higher Mach numbers, especially for lower fineness ratios.
-Before using these measurements as a holdout, extract each model's dimensions,
-test conditions, pressure table and drag-reduction method from the report, and
-establish uncertainties. No numerical acceptance or validation is claimed here.
+The three selected Cp entries were checked against the original table; their
+measurement uncertainties have not been established. No current model predicts
+comparable transonic Cp for this sting-mounted geometry, so no numerical
+acceptance or physical validation is claimed here.
 
 ### Explicit slender-body wave drag
 
