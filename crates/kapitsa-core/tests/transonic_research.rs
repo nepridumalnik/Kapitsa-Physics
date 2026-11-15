@@ -302,6 +302,103 @@ fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "low-Mach profile and balance diagnostic; run in release mode"]
+fn harris_low_mach_conservative_profile_and_balance() -> Result<(), String> {
+    // Finite idealized domain; Harris Mach 0.9 stations provide coordinates
+    // only, not reference pressures for this Mach 0.3 calculation.
+    const EXTENSION: f64 = 0.5;
+    const OUTER: f64 = 1.25;
+    const MACH: f64 = 0.3;
+    const GAMMA: f64 = 1.4;
+    const CUTOFF: f64 = 36.0 / 38.240;
+    let mut profiles = Vec::new();
+    for intervals in [16_usize, 32, 64] {
+        let dx = 1.0 / intervals as f64;
+        let nx = 2 * intervals + 1;
+        let nr = (OUTER / dx + 0.5).round() as usize;
+        let dr = OUTER / (nr as f64 - 0.5);
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; nx],
+            axis_flux: (0..nx)
+                .map(|i| harris_conservative_source(i as f64 * dx - EXTENSION, dx))
+                .collect(),
+            dx,
+            dr,
+            mach: MACH,
+            gamma: GAMMA,
+        };
+        let (iterations, residual) = grid
+            .iterate(1e-8, 100_000)
+            .map_err(|value| format!("intervals={intervals} residual={value}"))?;
+        let mut volume = 0.0;
+        let mut boundary = 0.0;
+        for i in 2..nx - 1 {
+            for k in 0..nr - 1 {
+                volume += grid.residual(i, k) * (k as f64 + 0.5) * dr * dx * dr;
+            }
+            boundary += dx
+                * ((nr - 1) as f64 * (grid.phi[i][nr - 1] - grid.phi[i][nr - 2])
+                    - grid.axis_flux[i]);
+        }
+        for k in 0..nr - 1 {
+            let slope = |j: usize| (grid.phi[j][k] - grid.phi[j - 1][k]) / dx;
+            boundary += (k as f64 + 0.5)
+                * dr
+                * dr
+                * (sonic_flux(slope(nx - 2), slope(nx - 1), MACH, GAMMA)
+                    - sonic_flux(slope(1), slope(2), MACH, GAMMA));
+        }
+        assert!((volume - boundary).abs() < 1e-12 * boundary.abs().max(1e-6));
+        println!(
+            "balance intervals={intervals} dx={dx:.9} dr={dr:.9} residual={residual:.3e} iterations={iterations} volume={volume:.9e} boundary={boundary:.9e} mismatch={:.3e}",
+            (volume - boundary).abs()
+        );
+        let mut profile = Vec::new();
+        for &(x, _) in harris_data::TABLE_III_A_MACH_090 {
+            let index = (x + EXTENSION) / dx;
+            let i = index.floor() as usize;
+            let t = index - i as f64;
+            let node = |j: usize| {
+                let node_x = j as f64 * dx - EXTENSION;
+                let (radius, slope, _) = harris_geometry(node_x);
+                grid.surface_cp(j, radius, slope)
+            };
+            // Reject interpolation across the physical corner; central Cp
+            // stencils can still span it and are explicitly reported.
+            let left_x = i as f64 * dx - EXTENSION;
+            let cp = if left_x < CUTOFF && left_x + dx >= CUTOFF {
+                None
+            } else {
+                node(i).zip(node(i + 1)).map(|(a, b)| (1.0 - t) * a + t * b)
+            };
+            println!(
+                "profile intervals={intervals} x={x:.3} cp={cp:?} stencil_crosses_cutoff={}",
+                left_x - dx < CUTOFF && left_x + 2.0 * dx >= CUTOFF
+            );
+            profile.push(cp);
+        }
+        profiles.push(profile);
+    }
+    let common: Vec<_> = (0..harris_data::TABLE_III_A_MACH_090.len())
+        .filter(|&i| profiles.iter().all(|p| p[i].is_some()))
+        .collect();
+    if common.is_empty() {
+        return Err("no common stations".to_string());
+    }
+    for pair in profiles.windows(2) {
+        let mut max_delta = 0.0_f64;
+        for &i in &common {
+            let (Some(a), Some(b)) = (pair[0][i], pair[1][i]) else {
+                return Err("missing common station".to_string());
+            };
+            max_delta = max_delta.max((b - a).abs());
+        }
+        println!("common count={} max_delta={max_delta:.9}", common.len());
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "full pressure-profile research diagnostic; run in release mode"]
 fn harris_subsonic_extended_domain_pressure_profile() -> Result<(), String> {
     // Fixed finite boundaries: not the measured tunnel, sting or viscous flow.
