@@ -231,6 +231,18 @@ pub struct ForceSource {
     enabled: bool,
 }
 
+/// One part-targeted persistent force source in the last successful full step.
+/// Force is world-space N; moment is world-space N·m about the owning body's
+/// center of mass at evaluation time. This is not a complete part or weld load.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartForceSourceWrench {
+    pub source: ForceSourceId,
+    pub part: PartId,
+    pub body: BodyId,
+    pub force: Vec3,
+    pub moment: Vec3,
+}
+
 impl ForceSource {
     /// Returns the dynamic body receiving this force.
     pub fn body(&self) -> BodyId {
@@ -446,6 +458,8 @@ pub struct PhysicsWorld {
     force_sources: DensePool<ForceSource>,
     joints: DensePool<JointEntry>,
     force_source_body_updates: Vec<ForceSourceBodyUpdate>,
+    part_force_source_published: Vec<PartForceSourceWrench>,
+    part_force_source_pending: Vec<PartForceSourceWrench>,
     force_source_body_indices: Option<HashMap<BodyId, usize>>,
     central_gravity: Option<CentralGravity>,
     gravity_fields: DensePool<Gravity>,
@@ -506,6 +520,14 @@ impl BodyStep {
 }
 
 impl PhysicsWorld {
+    /// Part-targeted persistent-source contributions from the last successful
+    /// full step. Entries preserve source iteration order and are not summed.
+    /// They are a historical snapshot, including IDs of subsequently removed
+    /// parts or sources; low-level prediction APIs do not update the snapshot.
+    pub fn part_force_source_wrenches(&self) -> &[PartForceSourceWrench] {
+        &self.part_force_source_published
+    }
+
     /// Impact-pressure contribution from prepared mesh patches in the last
     /// successful full step. Forces are world-space newtons; moments are world
     /// N·m about the body's center of mass at evaluation time. This excludes
@@ -547,6 +569,8 @@ impl PhysicsWorld {
             force_sources: DensePool::new(),
             joints: DensePool::new(),
             force_source_body_updates: Vec::new(),
+            part_force_source_published: Vec::new(),
+            part_force_source_pending: Vec::new(),
             force_source_body_indices: None,
             central_gravity: None,
             gravity_fields: DensePool::new(),
@@ -1540,6 +1564,10 @@ impl PhysicsWorld {
             if let Some(workspaces) = &mut self.owner_pressure {
                 workspaces.retain(|_, workspace| workspace.commit());
             }
+            std::mem::swap(
+                &mut self.part_force_source_published,
+                &mut self.part_force_source_pending,
+            );
             self.aerodynamics_body_updates.clear();
             self.clear_gravity_updates();
             self.clear_force_source_updates();
@@ -1836,6 +1864,26 @@ impl PhysicsWorld {
             let body = &mut self.force_source_body_updates[update_index].prepared;
             let force = transform.transform_vector(source.local_force);
             let point = transform.transform_point(source.local_point);
+            if let ForceTarget::Part(part) = source.target {
+                let center = body
+                    .world_center_of_mass()
+                    .map_err(|_| (source_id, ForceSourceError::ArithmeticOverflow))?
+                    .ok_or((source_id, ForceSourceError::ArithmeticOverflow))?;
+                let moment = point
+                    .checked_sub(center)
+                    .and_then(|arm| arm.checked_cross(force))
+                    .ok_or((source_id, ForceSourceError::ArithmeticOverflow))?;
+                self.part_force_source_pending
+                    .try_reserve(1)
+                    .map_err(|_| (source_id, ForceSourceError::StorageCapacityExceeded))?;
+                self.part_force_source_pending.push(PartForceSourceWrench {
+                    source: source_id,
+                    part,
+                    body: source.body,
+                    force,
+                    moment,
+                });
+            }
             if let Err(error) = body.apply_force_at_point(force, point) {
                 self.force_source_body_updates.clear();
                 if let Some(indices) = &mut self.force_source_body_indices {
@@ -1859,6 +1907,7 @@ impl PhysicsWorld {
 
     fn clear_force_source_updates(&mut self) {
         self.force_source_body_updates.clear();
+        self.part_force_source_pending.clear();
         if let Some(indices) = &mut self.force_source_body_indices {
             indices.clear();
         }
