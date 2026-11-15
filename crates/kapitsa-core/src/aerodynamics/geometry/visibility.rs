@@ -123,11 +123,18 @@ pub(super) fn distance(values: [f64; 3], point: Vec3) -> Result<f64, GeometryErr
     let y_virtual = y - values[2];
     let x_error = (values[1] - (x - x_virtual)) - (values[0] + x_virtual);
     let y_error = (values[2] - (y - y_virtual)) - (values[0] + y_virtual);
-    let xp = x * point.x;
-    let yp = y * point.y;
-    if (x != 0.0 && point.x != 0.0 && xp == 0.0) || (y != 0.0 && point.y != 0.0 && yp == 0.0) {
-        return Err(GeometryError::PrecisionLoss);
-    }
+    let checked_product = |a: f64, b: f64| {
+        let product = a * b;
+        if a != 0.0 && b != 0.0 && product == 0.0 {
+            Err(GeometryError::PrecisionLoss)
+        } else {
+            Ok(product)
+        }
+    };
+    let xp = checked_product(x, point.x)?;
+    let yp = checked_product(y, point.y)?;
+    let xc = checked_product(x_error, point.x)?;
+    let yc = checked_product(y_error, point.y)?;
     let xr = x.mul_add(point.x, -xp);
     let yr = y.mul_add(point.y, -yp);
     let sum = values[0] + xp;
@@ -136,7 +143,7 @@ pub(super) fn distance(values: [f64; 3], point: Vec3) -> Result<f64, GeometryErr
     let result = sum + yp;
     let v = result - sum;
     let residual = residual + ((sum - (result - v)) + (yp - v));
-    finite(result + (residual + xr + yr + x_error * point.x + y_error * point.y))
+    finite(result + (residual + xr + yr + xc + yc))
 }
 
 impl Shadow {
@@ -353,6 +360,17 @@ mod tests {
             Err(GeometryError::PrecisionLoss)
         );
         assert_eq!(distance([0.0, smallest, 0.0], Vec3::X), Ok(smallest));
+    }
+
+    #[test]
+    fn affine_distance_rejects_coefficient_correction_underflow() {
+        let smallest = f64::from_bits(1);
+        // 1 - smallest rounds to 1; its exact residual is nonzero but its
+        // product with one half cannot be represented in binary64.
+        assert_eq!(
+            distance([smallest, 1.0, 0.0], Vec3::X * 0.5),
+            Err(GeometryError::PrecisionLoss)
+        );
     }
 
     #[test]
