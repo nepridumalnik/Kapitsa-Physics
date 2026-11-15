@@ -320,11 +320,11 @@ fn candidate_mark_allocation_requires_work_budget_up_front() {
 }
 
 #[test]
-fn grid_build_estimate_reserves_both_cell_buffers_and_index_copy() {
+fn grid_build_estimate_reserves_cell_buffers_prefix_scan_and_index_copy() {
     const ENTRIES: usize = 4;
     const CELLS: usize = 3;
     const SCANS: usize = 6;
-    let expected = sort_work_estimate(ENTRIES).unwrap() + ENTRIES + 2 * CELLS + 1 + SCANS;
+    let expected = sort_work_estimate(ENTRIES).unwrap() + ENTRIES + 3 * CELLS + 1 + SCANS;
     assert_eq!(
         grid_build_work_estimate(ENTRIES, CELLS, SCANS),
         Some(expected)

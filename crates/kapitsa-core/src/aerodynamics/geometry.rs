@@ -164,19 +164,19 @@ fn check_surface_work(work: Option<usize>, max_work: usize) -> Result<(), Geomet
     Ok(())
 }
 
-// Accounting estimate only: the standard library does not specify an exact
-// comparison count for its sorting implementation.
+// Up-front accounting reservation; budgeted_sort additionally charges actual
+// comparisons and swaps as they occur.
 fn sort_work_estimate(len: usize) -> Option<usize> {
     let factor = usize::BITS as usize - len.leading_zeros() as usize + 1;
     len.checked_mul(factor)
 }
 
 fn grid_build_work_estimate(entries: usize, cells: usize, scans: usize) -> Option<usize> {
-    // Both counts and offsets are initialized; offsets has one extra element.
-    const CELL_BUFFER_COUNT: usize = 2;
+    // Initialize both buffers and scan counts to construct prefix offsets.
+    const CELL_PASSES: usize = 3;
     sort_work_estimate(entries)?
         .checked_add(entries)? // Copy sorted entries into the final index.
-        .checked_add(cells.checked_mul(CELL_BUFFER_COUNT)?)?
+        .checked_add(cells.checked_mul(CELL_PASSES)?)?
         .checked_add(1)?
         .checked_add(scans)
 }
