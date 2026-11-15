@@ -327,6 +327,76 @@ fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "low-Mach nose source and reconstruction sensitivity; run in release mode"]
+fn harris_low_mach_nose_source_reconstruction() -> Result<(), String> {
+    const EXTENSION: f64 = 0.5;
+    const OUTER: f64 = 1.25;
+    const STATIONS: [f64; 4] = [0.016, 0.023, 0.035, 0.052];
+    for intervals in [64_usize, 96, 128] {
+        let dx = 1.0 / intervals as f64;
+        let nx = 2 * intervals + 1;
+        let nr = (OUTER / dx + 0.5).round() as usize;
+        let dr = OUTER / (nr as f64 - 0.5);
+        for mode in ["point", "averaged"] {
+            let mut grid = MixedGrid {
+                phi: vec![vec![0.0; nr]; nx],
+                axis_flux: (0..nx)
+                    .map(|i| {
+                        let x = i as f64 * dx - EXTENSION;
+                        if mode == "averaged" {
+                            harris_conservative_source(x, dx)
+                        } else if (0.0..=1.0).contains(&x) {
+                            harris_geometry(x).2
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect(),
+                dx,
+                dr,
+                mach: 0.3,
+                gamma: 1.4,
+            };
+            let (iterations, residual) = grid
+                .iterate(1e-8, 100_000)
+                .map_err(|value| format!("intervals={intervals} mode={mode} residual={value}"))?;
+            println!(
+                "nose intervals={intervals} mode={mode} iterations={iterations} residual={residual:.3e}"
+            );
+            for x in STATIONS {
+                let index = (x + EXTENSION) / dx;
+                let i = index.floor() as usize;
+                let t = index - i as f64;
+                let node = |j: usize| {
+                    let position = j as f64 * dx - EXTENSION;
+                    if position <= 0.0 {
+                        return None;
+                    }
+                    let (radius, slope, _) = harris_geometry(position);
+                    grid.surface_cp(j, radius, slope)
+                };
+                let linear = node(i).zip(node(i + 1)).map(|(a, b)| (1.0 - t) * a + t * b);
+                let quadratic = if i > 0 {
+                    match (node(i - 1), node(i), node(i + 1)) {
+                        (Some(a), Some(b), Some(c)) => {
+                            Some(quadratic_axial_interpolation(a, b, c, t))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let difference = quadratic.zip(linear).map(|(q, l)| q - l);
+                println!(
+                    "nose intervals={intervals} mode={mode} x={x:.3} linear={linear:?} quadratic={quadratic:?} reconstruction_delta={difference:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "low-Mach stopping tolerance diagnostic; run in release mode"]
 fn harris_low_mach_profile_stopping_tolerance() -> Result<(), String> {
     const EXTENSION: f64 = 0.5;
