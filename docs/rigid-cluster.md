@@ -100,6 +100,14 @@ aerodynamic loads are summed onto the cluster rigid body and are not retained as
 individual part wrenches for weld evaluation. Do not interpret the net cluster
 wrench as the force on any weld.
 
+The simple `AerodynamicSurface` path applies a body-level timestep-dependent
+drag limit and a coupled lift correction after summing surfaces. The raw force
+from a particular surface is therefore not necessarily its applied force.
+Attribution of the shared correction to parts is not currently defined; a
+future load ledger must represent that correction explicitly or adopt and
+document a physically justified allocation policy. It must not silently use
+the uncorrected per-surface values as weld loads.
+
 For separate rigid bodies joined by a breakable `Joint`, the existing velocity
 constraint solver evaluates its reaction from accumulated impulses, including
 the effects of applied aerodynamic forces, and compares force and torque at the

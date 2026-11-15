@@ -220,3 +220,65 @@ fn part_hull_snapshot_preserves_offset_moment() -> Result<(), Box<dyn std::error
     assert!((state.angular_velocity().z - 30.0e-6).abs() < 1e-12);
     Ok(())
 }
+
+#[test]
+fn part_simple_surfaces_share_body_level_drag_limit() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::AerodynamicProperties,
+        cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength},
+        joint::JointFrame,
+    };
+
+    // q = 0.5 * 1.2 * 10² = 60 Pa. Each unit-area, Cd=1 surface
+    // requests 60 N, but the aggregate drag impulse is limited to the
+    // 20 kg m/s momentum of this 2 kg cluster over a one-second step.
+    for sharded in [false, true] {
+        for distributed in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 10.0)?;
+            let id = world.add_body(body)?;
+            let root = world.enable_cluster(id)?;
+            let child = world.add_cluster_part(
+                root,
+                ClusterPartDesc {
+                    local_transform: Transform::identity(),
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * 10.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    frame_a: JointFrame::IDENTITY,
+                    frame_b: JointFrame::IDENTITY,
+                    strength: WeldStrength::Unbreakable,
+                    stiffness: WeldStiffness {
+                        linear: 1.0,
+                        angular: 1.0,
+                    },
+                },
+            )?;
+            let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO)?;
+            world.add_aerodynamic_surface_for_part(child, properties)?;
+            if distributed {
+                world.add_aerodynamic_surface_for_part(root, properties)?;
+            }
+            if sharded {
+                world.step_with_shards(
+                    1.0,
+                    &mut [Vec::new(), Vec::new()],
+                    &super::tests::ScopedThreadExecutor,
+                    2,
+                )?;
+            } else {
+                world.step(1.0)?;
+            }
+            let state = world.body(id).ok_or("body")?.state();
+            assert!(state.linear_velocity().length() < 1e-12);
+            assert!(state.angular_velocity().length() < 1e-12);
+        }
+    }
+    Ok(())
+}
