@@ -36,15 +36,16 @@ def run(n, outer):
     dr = outer / (nr - 0.5)
     source = [geometry(i*h)[2] for i in range(n)]
     phi = [[0.0] * nr for _ in range(n)]
-    history = iterate_mixed(phi, source, h, dr, 0.9, 1.4, 1e-6, 5000)
+    history = iterate_mixed(phi, source, h, dr, 0.9, 1.4, 1e-6, 10000)
     radius, slope, _ = geometry(0.5)
     cp = surface_cp(phi, (n - 1)//2, h, dr, radius, slope)
     return (nr - 0.5)*dr, len(history)-1, history[-1], cp
 
 
 if __name__ == "__main__":
-    for n, outer in ((17, 0.75), (33, 0.75), (17, 1.25), (33, 1.25)):
+    for n, outer in ((17, 0.75), (33, 0.75), (65, 0.75),
+                     (17, 1.25), (33, 1.25), (65, 1.25)):
         r, iterations, residual, cp = run(n, outer)
         print(f"n={n} outer={r:.6f} iterations={iterations} residual={residual:.3g} Cp(x/l=0.5)={cp:.8f}")
     print("Diagnostic only: tunnel, boundary layer, axial boundaries and sting unmatched.")
-    print("Two grids do not establish convergence; no experimental validation is claimed.")
+    print("Grid differences do not establish shock convergence or experimental validation.")
