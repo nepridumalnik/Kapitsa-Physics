@@ -246,6 +246,17 @@ rotation is slow enough for these omissions to be acceptable.
 
 `C_p = (p - p_infinity) / q`, so a patch of area `A` and outward normal `n` has excess-pressure force `F = -q C_p A n`.
 
+`PressurePatch::evaluate_potential_cylinder` evaluates the lateral pressure of
+an isolated infinite circular cylinder in uniform inviscid incompressible flow.
+Inclined flow is supported: only the velocity perpendicular to the cylinder
+axis contributes to pressure, while the Mach <= 0.2 limit uses total speed.
+The caller must establish lateral geometry and isolation; end caps, finite
+length, rotation, viscous separation and wake are not modeled. This is a
+patch-level primitive, not automatic world-level cylinder preparation or a
+general rocket fallback. The underlying crossflow coefficient is the classical
+potential-cylinder relation described in Barlow, Rae and Pope, *Low-Speed
+Wind Tunnel Testing*, 3rd ed., section 4.3.
+
 Reference: [Pressure coefficient](https://en.wikipedia.org/wiki/Pressure_coefficient).
 
 Newtonian impact theory gives `C_p = 2 sin²(theta)`, where `theta` is the angle between an incident streamline and the surface tangent plane. For a windward patch this is `C_p = 2 max(0, n · v_hat)²`. Assigning zero excess pressure on leeward faces is an additional impact-model assumption, not a resolved wake solution.

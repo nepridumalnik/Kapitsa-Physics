@@ -444,9 +444,12 @@ impl PressurePatch {
     /// cylinder. `axis` and this side patch's normal are body-local. The caller
     /// must establish that the patch belongs to the lateral surface of an isolated
     /// cylinder; end caps, finite-length effects, separation and wake are excluded.
-    /// Only crossflow and zero angular velocity are supported. Mach <= 0.2 is an
-    /// approximation policy, not an experimental accuracy guarantee. Cp equals
-    /// 1 - 4 sin²(theta), with theta measured from a stagnation point.
+    /// Uniform flow may have an axial component, which contributes no lateral
+    /// pressure in this inviscid model. Angular velocity is unsupported. The
+    /// Mach <= 0.2 limit applies to the total relative speed and is an
+    /// approximation policy, not an experimental accuracy guarantee. The
+    /// crossflow coefficient is 1 - 4 sin²(theta), measured from a stagnation
+    /// point and referenced to crossflow dynamic pressure.
     pub fn evaluate_potential_cylinder(
         &self,
         flow: PressureFlow,
@@ -479,20 +482,29 @@ impl PressurePatch {
         }
         let direction = relative / speed;
         let world_axis = flow.transform.transform_vector(axis);
-        if world_axis
+        let axial = world_axis
             .checked_dot(direction)
-            .ok_or(PressureError::ArithmeticOverflow)?
-            .abs()
-            > POTENTIAL_CYLINDER_ORTHOGONALITY_TOLERANCE
-        {
-            return Err(PressureError::InvalidMotion);
-        }
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        let crossflow = direction
+            .checked_sub(
+                world_axis
+                    .checked_mul_scalar(axial)
+                    .ok_or(PressureError::ArithmeticOverflow)?,
+            )
+            .ok_or(PressureError::ArithmeticOverflow)?;
         let normal = flow.transform.transform_vector(self.normal);
-        let cosine = normal
-            .checked_dot(direction)
-            .ok_or(PressureError::ArithmeticOverflow)?
-            .clamp(-1.0, 1.0);
-        let cp = 1.0 - CYLINDER_SIDE_SPEED_RATIO_SQUARED * (1.0 - cosine * cosine);
+        let normal_speed = normal
+            .checked_dot(crossflow)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        let crossflow_squared = crossflow
+            .checked_dot(crossflow)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        if crossflow != Vec3::ZERO && crossflow_squared == 0.0 {
+            return Err(PressureError::ArithmeticOverflow);
+        }
+        // Cp is referenced to total dynamic pressure by evaluate_surface.
+        let cp = crossflow_squared
+            - CYLINDER_SIDE_SPEED_RATIO_SQUARED * (crossflow_squared - normal_speed * normal_speed);
         self.evaluate_surface(
             flow,
             SurfacePressure::new(cp, 0.0, POTENTIAL_FLOW_MAX_MACH)?,

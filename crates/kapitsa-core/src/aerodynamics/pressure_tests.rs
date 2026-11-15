@@ -174,7 +174,7 @@ fn potential_sphere_matches_inviscid_stagnation_and_equator() {
 }
 
 #[test]
-fn potential_cylinder_restricts_geometry_and_motion() {
+fn potential_cylinder_restricts_geometry_and_motion() -> Result<(), Box<dyn std::error::Error>> {
     let state = PressureFlow {
         linear_velocity: Vec3::X * 20.0,
         ..flow()
@@ -203,16 +203,22 @@ fn potential_cylinder_restricts_geometry_and_motion() {
         front.evaluate_potential_cylinder(state, Vec3::ZERO),
         Err(PressureError::InvalidPatch)
     );
-    assert_eq!(
-        front.evaluate_potential_cylinder(
-            PressureFlow {
-                linear_velocity: Vec3::new(10.0, 0.0, 1.0),
-                ..state
-            },
-            Vec3::Z
-        ),
-        Err(PressureError::InvalidMotion)
-    );
+    let inclined = front.evaluate_potential_cylinder(
+        PressureFlow {
+            linear_velocity: Vec3::new(10.0, 0.0, 1.0),
+            ..state
+        },
+        Vec3::Z,
+    )?;
+    assert!((inclined.force.x + 50.0).abs() < 1e-12);
+    let axial = front.evaluate_potential_cylinder(
+        PressureFlow {
+            linear_velocity: Vec3::Z * 10.0,
+            ..state
+        },
+        Vec3::Z,
+    )?;
+    assert_eq!(axial.force, Vec3::ZERO);
     assert_eq!(
         front.evaluate_potential_cylinder(
             PressureFlow {
@@ -233,6 +239,7 @@ fn potential_cylinder_restricts_geometry_and_motion() {
         ),
         Err(PressureError::UnsupportedMach)
     );
+    Ok(())
 }
 
 #[test]
