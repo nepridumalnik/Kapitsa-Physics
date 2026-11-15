@@ -456,7 +456,27 @@ fn harris_mach_one_field_transition_diagnostic() {
                         "n={n} outer={outer} r={radius} iterations={iterations} residual={residual:.3e} descending_sonic={crossings:?}"
                     );
                     assert!(!crossings.is_empty());
+                    // Fixed physical windows bracket the observed transition;
+                    // they are not extrapolated states or a shock-width estimate.
+                    let samples: Vec<_> = [0.625, 0.6875, 0.75, 0.8125, 0.875]
+                        .into_iter()
+                        .map(|x| {
+                            let i = ((x / dx) as usize).min(velocity.len() - 1);
+                            (x, velocity[i])
+                        })
+                        .collect();
+                    println!(
+                        "  face velocity samples (x-node indexing, face at x+dx/2): {samples:?}"
+                    );
                 }
+                let pressures: Vec<_> = [0.625, 0.6875, 0.75, 0.8125, 0.875]
+                    .into_iter()
+                    .map(|x| {
+                        let (radius, slope, _) = harris_geometry(x);
+                        (x, grid.surface_cp((x / dx).round() as usize, radius, slope))
+                    })
+                    .collect();
+                println!("  surface Cp samples: {pressures:?}");
             }
             Err(residual) => panic!("n={n} did not converge: residual={residual:.3e}"),
         }
