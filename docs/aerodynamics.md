@@ -370,6 +370,19 @@ Its derivation assumes smooth pointed endpoints `S(0) = S(L) = 0` and a slender 
 
 The Wikipedia article titled `Slender-body theory` concerns low-Reynolds-number Stokes flow; it must not be cited as justification for an aerodynamic lifting-body section formula.
 
+### Explicit slender-body wave drag
+
+`HullSection::with_wave_drag` accepts equally spaced samples of `dA/dx` in
+metres with zero endpoints and precomputes the NACA TN 3478 linearized wave
+integral. It contributes `rho * speed^2 * factor` at the section origin through
+ordinary and sharded body and part stepping. The caller specifies that load point;
+the integral does not determine a center of pressure. The model requires
+supersonic flow aligned with the section axis and an axisymmetric slender body.
+The caller is responsible for ensuring the supplied distribution is physically
+valid and for avoiding double counting with other hull or mesh loads. This is
+not a transonic transition model or a geometry-derived configuration.
+Nonzero density and speed outside the stated flow domain produce an error.
+
 ## Numerical validation requirements
 
 World pressure failures retain their original `PressureError` in

@@ -1798,3 +1798,56 @@ fn nonzero_unrepresentable_mesh_flow_is_not_silently_treated_as_rest()
     }
     Ok(())
 }
+
+#[test]
+fn wave_drag_is_applied_to_body_and_cluster() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::hull::HullSection;
+    for clustered in [false, true] {
+        for sharded in [false, true] {
+            let section = HullSection::new(
+                Transform::identity(),
+                Vec3::X,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                None,
+            )?
+            .with_wave_drag(&[0.0, 1.0, -1.0, 0.0])?;
+            let mut body = RigidBody::new_dynamic(
+                Transform::identity(),
+                MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY)?,
+            )?;
+            body.set_linear_velocity(Vec3::X * 680.0)?;
+            body.set_aerodynamics(Aerodynamics::Hull(vec![section]));
+            let mut world = PhysicsWorld::new();
+            let id = world.add_body(body)?;
+            if clustered {
+                world.enable_cluster(id)?;
+            }
+            world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::ZERO,
+            )?));
+            if sharded {
+                world.step_with_shards(
+                    1e-4,
+                    &mut vec![Vec::new(); 2],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(1e-4)?;
+            }
+            let velocity = world
+                .body(id)
+                .ok_or("missing body")?
+                .state()
+                .linear_velocity();
+            assert!(velocity.x < 680.0 && velocity.x > 0.0);
+        }
+    }
+    Ok(())
+}

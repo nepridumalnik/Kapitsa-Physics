@@ -80,6 +80,10 @@ pub enum HullError {
     UnsupportedReynolds,
     /// The configured incompressible flat-plate correlation has no compressible closure.
     UnsupportedSkinFrictionMach,
+    /// The wave drag approximation requires flow aligned with the body axis.
+    UnsupportedWaveIncidence,
+    /// The wave drag distribution could not be evaluated.
+    Wave(super::wave::WaveDragError),
     ArithmeticOverflow,
 }
 impl std::fmt::Display for HullError {
@@ -87,7 +91,14 @@ impl std::fmt::Display for HullError {
         write!(f, "hull evaluation failed: {self:?}")
     }
 }
-impl std::error::Error for HullError {}
+impl std::error::Error for HullError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Wave(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// A caller-supplied Mach knot and dimensionless sectional resistance coefficients.
 /// Fields are validated when constructing a [`MachCurve`].
@@ -358,6 +369,7 @@ pub struct HullSection {
     skin_friction: Option<SkinFriction>,
     mach_curve: Option<MachCurve>,
     normal_curve: Option<NormalForceCurve>,
+    wave_drag_factor: Option<f64>,
 }
 impl HullSection {
     /// Length must be positive; areas and coefficients must be nonnegative.
@@ -402,7 +414,21 @@ impl HullSection {
             skin_friction,
             mach_curve: None,
             normal_curve: None,
+            wave_drag_factor: None,
         })
+    }
+
+    /// Add zero-incidence supersonic wave drag for a slender axisymmetric body.
+    /// Samples are equally spaced values of dA/dx in metres; the first and last
+    /// values must be zero. The force acts at this section's origin. This model
+    /// does not infer geometry or a center of pressure. Other configured drag is
+    /// additive, so callers must avoid counting wave drag twice. Evaluation is
+    /// limited to Mach > 1 and flow aligned with the section axis.
+    pub fn with_wave_drag(mut self, area_slopes: &[f64]) -> Result<Self, HullError> {
+        let factor =
+            super::wave::wave_drag(area_slopes, 0.25, 2.0, 1.0).map_err(HullError::Wave)?;
+        self.wave_drag_factor = Some(factor);
+        Ok(self)
     }
 
     /// Replace constant Cd values with explicit caller data, without changing geometry.
@@ -463,6 +489,7 @@ impl HullSection {
         if flow.atmosphere.density() == 0.0
             || !drag_enabled
                 && self.normal_curve.is_none()
+                && self.wave_drag_factor.is_none()
                 && (self.wetted_area == 0.0 || self.skin_friction.is_none())
         {
             return Ok(zero);
@@ -512,6 +539,17 @@ impl HullSection {
         let crossflow = velocity.checked_sub(axial).ok_or(overflow)?;
         let cross_speed = crossflow.checked_length().ok_or(overflow)?;
         let density = flow.atmosphere.density();
+        let wave_force = if let Some(factor) = self.wave_drag_factor {
+            if mach <= 1.0 {
+                return Err(HullError::UnsupportedMach);
+            }
+            if cross_speed > speed * (64.0 * f64::EPSILON) {
+                return Err(HullError::UnsupportedWaveIncidence);
+            }
+            resistance(axial, axial_speed.abs(), density, factor, 2.0)?
+        } else {
+            Vec3::ZERO
+        };
         let mut axial_force =
             resistance(axial, axial_speed.abs(), density, self.axial_area, axial_cd)?;
         if axial_speed != 0.0
@@ -573,6 +611,7 @@ impl HullSection {
         let force = axial_force
             .checked_add(cross_force)
             .and_then(|f| f.checked_add(normal_force))
+            .and_then(|f| f.checked_add(wave_force))
             .ok_or(overflow)?;
         let moment = arm.checked_cross(force).ok_or(overflow)?;
         Ok(PressureWrench { force, moment })
@@ -682,6 +721,39 @@ mod tests {
     }
     fn close(a: Vec3, b: Vec3) {
         assert!((a - b).length() < 1e-9, "{a:?} != {b:?}");
+    }
+
+    #[test]
+    fn wave_drag_section_force_moment_and_domain() -> Result<(), Box<dyn std::error::Error>> {
+        let section = HullSection::new(
+            Transform::new(Vec3::Y, Quat::IDENTITY)?,
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?
+        .with_wave_drag(&[0.0, 1.0, -1.0, 0.0])?;
+        let moving = flow(Vec3::X * 680.0);
+        let wrench = section.evaluate(moving)?;
+        let expected = super::super::wave::wave_drag(&[0.0, 1.0, -1.0, 0.0], 1.2, 680.0, 340.0)?;
+        assert!((wrench.force.x + expected).abs() < expected * 1e-12);
+        assert_eq!(wrench.force.y, 0.0);
+        assert!((wrench.moment.z - expected).abs() < expected * 1e-12);
+        assert_eq!(
+            section.evaluate(flow(Vec3::X * 340.0)),
+            Err(HullError::UnsupportedMach)
+        );
+        assert_eq!(
+            section.evaluate(flow(Vec3::new(680.0, 1.0, 0.0))),
+            Err(HullError::UnsupportedWaveIncidence)
+        );
+        let reverse = section.evaluate(flow(-Vec3::X * 680.0))?;
+        assert!((reverse.force.x - expected).abs() < expected * 1e-12);
+        Ok(())
     }
 
     // Synthetic arithmetic fixtures only: these are not physical coefficient data.
