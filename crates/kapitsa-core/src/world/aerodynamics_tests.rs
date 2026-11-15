@@ -10,6 +10,60 @@ use crate::{
 };
 
 #[test]
+fn existing_mesh_and_collider_models_reject_subsonic_flow_without_state_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{AerodynamicsError, pressure::PressureError},
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    for collider_mode in [false, true] {
+        for sharded in [false, true] {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                1.0,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            body.set_linear_velocity(Vec3::X * 10.0)?;
+            if collider_mode {
+                body.set_aerodynamics(Aerodynamics::Colliders);
+            } else {
+                body.set_aerodynamics(Aerodynamics::Mesh(TriangleMesh::new(
+                    vec![Vec3::ZERO, Vec3::Y, Vec3::Z],
+                    vec![[0, 1, 2]],
+                )?));
+            }
+            let id = world.add_body(body)?;
+            if collider_mode {
+                world.add_collider(
+                    id,
+                    Collider::new(Shape::Sphere(Sphere::new(1.0)?), Transform::identity()),
+                )?;
+            }
+            let before = world.body(id).unwrap().motion();
+            let result = if sharded {
+                world.step_with_shards(
+                    0.001,
+                    &mut [Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+            } else {
+                world.step(0.001)
+            };
+            assert!(
+                matches!(result, Err(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::Pressure(PressureError::UnsupportedMach) }) if body_id == id),
+                "collider={collider_mode}, sharded={sharded}: {result:?}"
+            );
+            assert_eq!(world.body(id).unwrap().motion(), before);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn spherical_vacuum_skips_collider_preparation() -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
         aerodynamics::{Atmosphere, ColliderTessellation, SphericalAtmosphere},
