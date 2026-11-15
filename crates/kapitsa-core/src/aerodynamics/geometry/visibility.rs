@@ -349,6 +349,30 @@ mod tests {
     use crate::aerodynamics::geometry::GeometryOwner;
 
     #[test]
+    fn dyadic_strip_partition_preserves_exact_unit_fraction() {
+        // These triangles partition a triangle of unit area fraction,
+        // with exactly representable binary coordinates.
+        const MAX_POWER: u32 = 12;
+        for power in 0..=MAX_POWER {
+            let count = 1usize << power;
+            let mut total = AreaSum::default();
+            for i in 0..count {
+                let y0 = i as f64 / count as f64;
+                let y1 = (i + 1) as f64 / count as f64;
+                let fraction = triangle_fraction([
+                    Vec3::ZERO,
+                    Vec3::new(1.0, y0, 0.0),
+                    Vec3::new(1.0, y1, 0.0),
+                ])
+                .unwrap();
+                assert_eq!(fraction, 1.0 / count as f64);
+                total.add(fraction);
+            }
+            assert_eq!(total.value(), 1.0, "partition size {count}");
+        }
+    }
+
+    #[test]
     fn affine_distance_rejects_product_underflow() {
         let smallest = f64::from_bits(1);
         assert_eq!(
