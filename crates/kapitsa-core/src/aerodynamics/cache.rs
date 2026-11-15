@@ -80,6 +80,15 @@ pub struct PreparedMeshGeometry {
 pub struct PreparedGeometryCache {
     requested: Option<GeometryPreparation>,
     cached: Option<PreparedMeshGeometry>,
+    wave: Option<CachedWave>,
+}
+
+#[derive(Debug)]
+struct CachedWave {
+    incarnation: Arc<()>,
+    axis: usize,
+    smoothing_radius: usize,
+    factor: super::wave::PreparedWaveDrag,
 }
 
 impl PreparedGeometryCache {
@@ -111,6 +120,45 @@ impl PreparedGeometryCache {
         let request = self.requested.as_ref()?;
         let cached = self.cached.as_ref()?;
         Arc::ptr_eq(&request.incarnation, &cached.request.incarnation).then_some(&cached.geometry)
+    }
+
+    /// Configures a hull section from the current prepared voxel union.
+    ///
+    /// The wave integral is reused only for the same current geometry request,
+    /// axis and smoothing radius. A geometry or configuration version change
+    /// requires successfully preparing the new geometry first. A failed wave
+    /// preparation does not replace the previous cached result. The returned
+    /// section is a snapshot and must be refreshed after geometry changes.
+    pub fn configure_voxel_wave_drag(
+        &mut self,
+        section: super::hull::HullSection,
+        axis: usize,
+        smoothing_radius: usize,
+    ) -> Result<super::hull::HullSection, super::hull::HullError> {
+        use super::hull::HullError;
+        section.validate_voxel_axis(axis)?;
+        let request = self
+            .requested
+            .as_ref()
+            .ok_or(HullError::GeometryNotPrepared)?;
+        let geometry = self.get().ok_or(HullError::GeometryNotPrepared)?;
+        if let Some(cached) = &self.wave
+            && Arc::ptr_eq(&cached.incarnation, &request.incarnation)
+            && cached.axis == axis
+            && cached.smoothing_radius == smoothing_radius
+        {
+            return Ok(section.with_prepared_wave_drag(cached.factor));
+        }
+        let factor = super::wave::prepare_voxel_wave_drag(geometry, axis, smoothing_radius)
+            .map_err(HullError::Wave)?;
+        let incarnation = Arc::clone(&request.incarnation);
+        self.wave = Some(CachedWave {
+            incarnation,
+            axis,
+            smoothing_radius,
+            factor,
+        });
+        Ok(section.with_prepared_wave_drag(factor))
     }
 
     /// Inspect the last successful entry, even if no longer current.
@@ -274,6 +322,72 @@ mod tests {
             cache.prepare_instances(second, &instances[..1], config())?,
             &remaining
         );
+        Ok(())
+    }
+
+    #[test]
+    fn wave_configuration_follows_current_geometry_and_filter()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::aerodynamics::hull::{HullError, HullSection};
+        let mesh = mesh();
+        let first = key();
+        let second = GeometryCacheKey {
+            geometry_version: 2,
+            ..first
+        };
+        let mut cache = PreparedGeometryCache::default();
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?;
+        assert!(matches!(
+            cache.configure_voxel_wave_drag(section.clone(), 0, 1),
+            Err(HullError::GeometryNotPrepared)
+        ));
+        cache.prepare(first, &mesh, config())?;
+        let configured = cache.configure_voxel_wave_drag(section.clone(), 0, 1)?;
+        let cached = cache.wave.as_ref().ok_or("wave cache")?;
+        let identity = Arc::clone(&cached.incarnation);
+        let factor = cached.factor;
+        assert_eq!(
+            cache.configure_voxel_wave_drag(section.clone(), 0, 1)?,
+            configured
+        );
+        let hit = cache.wave.as_ref().ok_or("wave cache")?;
+        assert!(Arc::ptr_eq(&hit.incarnation, &identity));
+        assert_eq!(hit.factor, factor);
+        assert!(matches!(
+            cache.configure_voxel_wave_drag(section.clone(), 1, 1),
+            Err(HullError::InvalidParameters)
+        ));
+        assert_eq!(cache.wave.as_ref().ok_or("wave cache")?.smoothing_radius, 1);
+        assert!(
+            cache
+                .configure_voxel_wave_drag(section.clone(), 0, usize::MAX)
+                .is_err()
+        );
+        assert_eq!(cache.wave.as_ref().ok_or("wave cache")?.smoothing_radius, 1);
+        cache.configure_voxel_wave_drag(section.clone(), 0, 2)?;
+        assert_eq!(cache.wave.as_ref().ok_or("wave cache")?.smoothing_radius, 2);
+        cache.request(second, config());
+        assert!(matches!(
+            cache.configure_voxel_wave_drag(section.clone(), 0, 1),
+            Err(HullError::GeometryNotPrepared)
+        ));
+        let changed_mesh =
+            TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y * 2.0], vec![[0, 1, 2]])?;
+        cache.prepare(second, &changed_mesh, config())?;
+        cache.configure_voxel_wave_drag(section, 0, 1)?;
+        let fresh = cache.wave.as_ref().ok_or("wave cache")?;
+        assert!(!Arc::ptr_eq(&fresh.incarnation, &identity));
+        assert_ne!(fresh.factor, factor);
         Ok(())
     }
 

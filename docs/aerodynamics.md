@@ -439,6 +439,13 @@ differencing; padding supplies zero slopes at both ends. The section's origin
 remains the caller-selected application point. This is a one-time preparation:
 geometry or topology changes require constructing a new configuration.
 
+For explicit callers using `PreparedGeometryCache`,
+`configure_voxel_wave_drag(section, axis, smoothing_radius)` reuses the derived
+wave integral only while the current geometry request and filter settings match.
+After a request changes, it refuses to configure a section until the matching
+geometry has been prepared. The returned section is a snapshot: it is not
+updated automatically when the world or assembly changes.
+
 Voxel occupancy conservatively thickens geometry, and differentiation can
 amplify grid noise. Callers must check convergence under grid and smoothing
 refinement and establish that the shape and flow meet the slender axisymmetric

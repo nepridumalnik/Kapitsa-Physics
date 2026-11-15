@@ -76,6 +76,8 @@ use std::sync::Arc;
 pub enum HullError {
     InvalidParameters,
     InvalidFlow,
+    /// No geometry for the current cache request has been prepared.
+    GeometryNotPrepared,
     UnsupportedMach,
     UnsupportedReynolds,
     /// The configured incompressible flat-plate correlation has no compressible closure.
@@ -447,10 +449,13 @@ impl HullSection {
         axis: usize,
         smoothing_radius: usize,
     ) -> Result<Self, HullError> {
-        let sections = geometry
-            .sections()
-            .get(axis)
-            .ok_or(HullError::InvalidParameters)?;
+        self.validate_voxel_axis(axis)?;
+        let factor = super::wave::prepare_voxel_wave_drag(geometry, axis, smoothing_radius)
+            .map_err(HullError::Wave)?;
+        Ok(self.with_prepared_wave_drag(factor))
+    }
+
+    pub(super) fn validate_voxel_axis(&self, axis: usize) -> Result<(), HullError> {
         let expected_axis = match axis {
             0 => Vec3::X,
             1 => Vec3::Y,
@@ -465,13 +470,12 @@ impl HullSection {
         if misalignment > 64.0 * f64::EPSILON {
             return Err(HullError::InvalidParameters);
         }
-        let slopes = super::wave::area_slopes_from_sections(
-            sections,
-            geometry.cell_size(),
-            smoothing_radius,
-        )
-        .map_err(HullError::Wave)?;
-        self.with_wave_drag(&slopes)
+        Ok(())
+    }
+
+    pub(super) fn with_prepared_wave_drag(mut self, factor: super::wave::PreparedWaveDrag) -> Self {
+        self.wave_drag_factor = (!factor.is_zero()).then_some(factor);
+        self
     }
 
     /// Attach caller-supplied Mach multipliers to the wave-drag factor.

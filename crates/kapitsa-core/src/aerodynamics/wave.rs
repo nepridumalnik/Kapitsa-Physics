@@ -170,6 +170,19 @@ pub fn area_slopes_from_sections(
     Ok(slopes)
 }
 
+pub(super) fn prepare_voxel_wave_drag(
+    geometry: &super::geometry::PreparedGeometry,
+    axis: usize,
+    smoothing_radius: usize,
+) -> Result<PreparedWaveDrag, WaveDragError> {
+    let sections = geometry
+        .sections()
+        .get(axis)
+        .ok_or(WaveDragError::InvalidInput)?;
+    let slopes = area_slopes_from_sections(sections, geometry.cell_size(), smoothing_radius)?;
+    prepare_wave_drag(&slopes)
+}
+
 /// Calculates wave drag in newtons from equally spaced samples of `dA/dx`.
 ///
 /// `density` is in kg/m?, `speed` in m/s, and `sound_speed` in m/s. The
