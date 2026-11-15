@@ -145,9 +145,20 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
         }
         let snapshot = world.part_hull_wrenches().to_vec();
         let load_states = world.cluster_load_states().to_vec();
+        let load_parts = world.cluster_load_parts().to_vec();
+        let load_welds = world.cluster_load_welds().to_vec();
         assert_eq!(load_states.len(), 1);
         assert_eq!(load_states[0].body, id);
+        assert_eq!(load_states[0].root, root);
         assert_eq!(load_states[0].state.linear_velocity(), Vec3::X * 10.0);
+        assert_eq!(load_parts.len(), 2);
+        assert!(
+            load_parts
+                .iter()
+                .any(|part| part.part == child && part.mass == mass)
+        );
+        assert_eq!(load_welds.len(), 1);
+        assert_eq!(load_welds[0].value.parts(), (root, child));
         let sum = snapshot
             .iter()
             .fold(Vec3::ZERO, |sum, load| sum + load.wrench.force);
@@ -224,6 +235,8 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
         assert!(failed.is_err());
         assert_eq!(world.part_hull_wrenches(), snapshot.as_slice());
         assert_eq!(world.cluster_load_states(), load_states.as_slice());
+        assert_eq!(world.cluster_load_parts(), load_parts.as_slice());
+        assert_eq!(world.cluster_load_welds(), load_welds.as_slice());
         world.remove_gravity(bad).ok_or("gravity")?;
     }
     assert!((velocities[0] - velocities[1]).length() < 1e-12);

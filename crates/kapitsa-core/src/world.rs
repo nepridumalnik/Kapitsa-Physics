@@ -194,8 +194,10 @@ use crate::{
     execution::{SequentialExecutor, StepExecutor},
     gravity::{CentralGravity, Gravity, GravityError},
     joint::{Joint, JointBreakEvent, JointFrame},
+    mass::MassProperties,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
     rigid_body::{BodyMotion, BodyState, BodyType, CcdMode, RigidBody, predict},
+    transform::Transform,
 };
 
 struct MeshAerodynamics {
@@ -294,8 +296,26 @@ pub struct ContactImpulse {
 pub struct ClusterLoadState {
     /// Cluster body identified at force-evaluation time.
     pub body: BodyId,
+    /// Root part at force-evaluation time.
+    pub root: PartId,
     /// World-space pose and velocities before integration.
     pub state: BodyState,
+}
+
+/// Part mass and body-local pose at the same time as the load snapshots.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusterLoadPart {
+    pub part: PartId,
+    pub body: BodyId,
+    pub local_transform: Transform,
+    pub mass: MassProperties,
+}
+
+/// Weld topology and properties at the same time as the load snapshots.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusterLoadWeld {
+    pub weld: WeldId,
+    pub value: Weld,
 }
 
 /// Body-level simple-surface loads before and after the shared timestep
@@ -664,6 +684,10 @@ pub struct PhysicsWorld {
     contact_ccd_clipped_pending: bool,
     cluster_load_states_published: Vec<ClusterLoadState>,
     cluster_load_states_pending: Vec<ClusterLoadState>,
+    cluster_load_parts_published: Vec<ClusterLoadPart>,
+    cluster_load_parts_pending: Vec<ClusterLoadPart>,
+    cluster_load_welds_published: Vec<ClusterLoadWeld>,
+    cluster_load_welds_pending: Vec<ClusterLoadWeld>,
     part_hull_buffers: Vec<Vec<PartHullWrench>>,
     part_wing_buffers: Vec<Vec<PartWingWrench>>,
     owner_pressure: Option<HashMap<BodyId, crate::aerodynamics::pressure::OwnerPressureWorkspace>>,
@@ -722,6 +746,16 @@ impl PhysicsWorld {
     /// edits can make its body IDs or current part transforms stale.
     pub fn cluster_load_states(&self) -> &[ClusterLoadState] {
         &self.cluster_load_states_published
+    }
+
+    /// Part mass and local pose from the last successful full step.
+    pub fn cluster_load_parts(&self) -> &[ClusterLoadPart] {
+        &self.cluster_load_parts_published
+    }
+
+    /// Welds from the last successful full step, independent of later edits.
+    pub fn cluster_load_welds(&self) -> &[ClusterLoadWeld] {
+        &self.cluster_load_welds_published
     }
 
     /// Recorded velocity-contact impulses from the last successful full step.
@@ -853,6 +887,10 @@ impl PhysicsWorld {
             contact_ccd_clipped_pending: false,
             cluster_load_states_published: Vec::new(),
             cluster_load_states_pending: Vec::new(),
+            cluster_load_parts_published: Vec::new(),
+            cluster_load_parts_pending: Vec::new(),
+            cluster_load_welds_published: Vec::new(),
+            cluster_load_welds_pending: Vec::new(),
             part_hull_buffers: Vec::new(),
             part_wing_buffers: Vec::new(),
             owner_pressure: None,
@@ -1840,16 +1878,45 @@ impl PhysicsWorld {
         self.cluster_load_states_pending
             .try_reserve(cluster_count)
             .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+        self.cluster_load_parts_pending.clear();
+        self.cluster_load_parts_pending
+            .try_reserve(self.parts.iter().count())
+            .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+        self.cluster_load_welds_pending.clear();
+        self.cluster_load_welds_pending
+            .try_reserve(self.welds.iter().count())
+            .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
         for (dense, entry) in self.bodies.iter() {
-            if entry.cluster.is_some() {
+            if let Some(cluster) = &entry.cluster {
                 self.cluster_load_states_pending.push(ClusterLoadState {
                     body: BodyId {
                         world: self.world_id,
                         dense,
                     },
+                    root: cluster.root,
                     state: *entry.body.state(),
                 });
             }
+        }
+        for (dense, part) in self.parts.iter() {
+            self.cluster_load_parts_pending.push(ClusterLoadPart {
+                part: PartId {
+                    world: self.world_id,
+                    dense,
+                },
+                body: part.body,
+                local_transform: part.local_transform,
+                mass: part.mass,
+            });
+        }
+        for (dense, weld) in self.welds.iter() {
+            self.cluster_load_welds_pending.push(ClusterLoadWeld {
+                weld: WeldId {
+                    world: self.world_id,
+                    dense,
+                },
+                value: *weld,
+            });
         }
         if let Err((source_id, cause)) = self.prepare_force_source_updates() {
             return Err(StepError::ForceSource { source_id, cause });
@@ -1894,6 +1961,14 @@ impl PhysicsWorld {
             std::mem::swap(
                 &mut self.cluster_load_states_published,
                 &mut self.cluster_load_states_pending,
+            );
+            std::mem::swap(
+                &mut self.cluster_load_parts_published,
+                &mut self.cluster_load_parts_pending,
+            );
+            std::mem::swap(
+                &mut self.cluster_load_welds_published,
+                &mut self.cluster_load_welds_pending,
             );
             self.recycle_aerodynamics_updates();
             self.clear_gravity_updates();
