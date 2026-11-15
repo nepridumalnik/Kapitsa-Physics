@@ -81,7 +81,7 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
     use crate::{
         cluster::{
             ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength,
-            balance::{BalanceError, PartBalanceInput, tree_reactions},
+            balance::{BalanceError, PartBalanceInput, prepare_tree, tree_reactions},
         },
         joint::JointFrame,
     };
@@ -159,6 +159,24 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
         );
         assert_eq!(load_welds.len(), 1);
         assert_eq!(load_welds[0].value.parts(), (root, child));
+        let tree = prepare_tree(&load_states[0], &load_parts, &load_welds)
+            .map_err(|error| format!("tree: {error:?}"))?;
+        assert_eq!(tree.len(), 2);
+        assert_eq!(
+            (tree[0].part, tree[0].parent, tree[0].weld),
+            (root, 0, None)
+        );
+        assert_eq!(
+            (tree[1].part, tree[1].parent, tree[1].weld),
+            (child, 0, Some(load_welds[0].weld))
+        );
+        assert_eq!(tree[1].mass, mass);
+        assert_eq!(tree[1].pose, Transform::identity());
+        assert!(!tree[1].incomplete_balance_input().loads_complete);
+        assert!(matches!(
+            prepare_tree(&load_states[0], &load_parts, &[]),
+            Err(BalanceError::InvalidTree)
+        ));
         let sum = snapshot
             .iter()
             .fold(Vec3::ZERO, |sum, load| sum + load.wrench.force);

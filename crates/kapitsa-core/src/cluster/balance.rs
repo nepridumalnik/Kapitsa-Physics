@@ -1,8 +1,13 @@
 //! Internal instantaneous tree balance; not connected to world diagnostics.
 
 use kapitsa_math::Vec3;
+use std::collections::{HashMap, HashSet};
 
-use crate::{mass::MassProperties, transform::Transform};
+use crate::{
+    mass::MassProperties,
+    transform::Transform,
+    world::{ClusterLoadPart, ClusterLoadState, ClusterLoadWeld, PartId, WeldId},
+};
 
 use super::{ClusterError, motion::part_momentum_rate};
 
@@ -24,6 +29,124 @@ pub(crate) enum BalanceError {
     InvalidTolerance,
     Unbalanced,
     Physics(ClusterError),
+}
+
+/// Root-first topology from one evaluation-time snapshot. This establishes no
+/// claim about force attribution or whether a snapshot is complete.
+pub(crate) struct TreePart {
+    pub part: PartId,
+    pub parent: usize,
+    pub weld: Option<WeldId>,
+    pub mass: MassProperties,
+    pub pose: Transform,
+}
+
+impl TreePart {
+    /// Initializes a part without asserting load completeness. The ledger
+    /// must be populated and independently certified before solving.
+    pub(crate) fn incomplete_balance_input(&self) -> PartBalanceInput {
+        PartBalanceInput {
+            mass: self.mass,
+            pose: self.pose,
+            external_force: Vec3::ZERO,
+            external_moment: Vec3::ZERO,
+            loads_complete: false,
+        }
+    }
+}
+
+/// Builds an ordered tree in expected O(parts + welds), rejecting disconnected,
+/// cyclic, duplicate, and cross-body edges. Inputs must belong to one snapshot.
+pub(crate) fn prepare_tree(
+    state: &ClusterLoadState,
+    parts: &[ClusterLoadPart],
+    welds: &[ClusterLoadWeld],
+) -> Result<Vec<TreePart>, BalanceError> {
+    let capacity_error = || BalanceError::Physics(ClusterError::StorageCapacityExceeded);
+    let mut indices = HashMap::new();
+    indices
+        .try_reserve(parts.len())
+        .map_err(|_| capacity_error())?;
+    let mut selected = Vec::new();
+    selected
+        .try_reserve(parts.len())
+        .map_err(|_| capacity_error())?;
+    for part in parts.iter().filter(|part| part.body == state.body) {
+        if indices.insert(part.part, selected.len()).is_some() {
+            return Err(BalanceError::InvalidTree);
+        }
+        selected.push(part);
+    }
+    let root = *indices.get(&state.root).ok_or(BalanceError::InvalidTree)?;
+    let mut adjacency = Vec::new();
+    adjacency
+        .try_reserve_exact(selected.len())
+        .map_err(|_| capacity_error())?;
+    adjacency.resize_with(selected.len(), Vec::new);
+    let mut weld_ids = HashSet::new();
+    weld_ids
+        .try_reserve(welds.len())
+        .map_err(|_| capacity_error())?;
+    let mut edge_count = 0usize;
+    for weld in welds {
+        let (a, b) = weld.value.parts();
+        match (indices.get(&a), indices.get(&b)) {
+            (None, None) => continue,
+            (Some(&a), Some(&b)) if a != b && weld_ids.insert(weld.weld) => {
+                adjacency[a].try_reserve(1).map_err(|_| capacity_error())?;
+                adjacency[b].try_reserve(1).map_err(|_| capacity_error())?;
+                adjacency[a].push((b, weld.weld));
+                adjacency[b].push((a, weld.weld));
+                edge_count += 1;
+            }
+            _ => return Err(BalanceError::InvalidTree),
+        }
+    }
+    if edge_count != selected.len() - 1 {
+        return Err(BalanceError::InvalidTree);
+    }
+    let mut seen = Vec::new();
+    seen.try_reserve_exact(selected.len())
+        .map_err(|_| capacity_error())?;
+    seen.resize(selected.len(), false);
+    let mut queue = Vec::new();
+    queue
+        .try_reserve_exact(selected.len())
+        .map_err(|_| capacity_error())?;
+    queue.push((root, 0, None));
+    seen[root] = true;
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(selected.len())
+        .map_err(|_| capacity_error())?;
+    let mut cursor = 0;
+    while cursor < queue.len() {
+        let (index, parent, weld) = queue[cursor];
+        let part = selected[index];
+        let pose = state
+            .state
+            .transform()
+            .compose(&part.local_transform)
+            .map_err(|error| BalanceError::Physics(ClusterError::Transform(error)))?;
+        result.push(TreePart {
+            part: part.part,
+            parent,
+            weld,
+            mass: part.mass,
+            pose,
+        });
+        for &(next, edge) in &adjacency[index] {
+            if !seen[next] {
+                seen[next] = true;
+                queue.push((next, cursor, Some(edge)));
+            }
+        }
+        cursor += 1;
+    }
+    if result.len() != selected.len() {
+        return Err(BalanceError::InvalidTree);
+    }
+    Ok(result)
 }
 
 /// Express a reaction's moment at a weld anchor rather than the common
