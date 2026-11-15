@@ -40,6 +40,55 @@ mod free_ball_tests;
 
 #[cfg(feature = "bench-internals")]
 #[test]
+fn colored_contact_impulses_match_each_body_momentum_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut bodies = Vec::new();
+    for index in 0..256 {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(f64::from(index) * 0.99, 0.0, 0.0), Quat::IDENTITY)?,
+            mass,
+        )?;
+        let initial = Vec3::X * if index % 2 == 0 { 1.0 } else { -1.0 };
+        body.set_linear_velocity(initial)?;
+        let body = world.add_body(body)?;
+        let part = world.enable_cluster(body)?;
+        let collider = world.add_part_collider(part, collider(0.5))?;
+        bodies.push((body, part, collider, initial));
+    }
+    world.step_with_executor(0.001, &ScopedThreadExecutor, 4)?;
+    assert!(world.collision_step_metrics().colored_solver_selected);
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    let impulses = world.contact_impulses();
+    assert_eq!(impulses.len(), 255);
+    for (body, part, collider, initial) in bodies {
+        let mut total = Vec3::ZERO;
+        for entry in impulses {
+            if entry.pair.a == collider {
+                assert_eq!(entry.parts[0], Some(part));
+                total -= entry.impulse_on_b;
+            } else if entry.pair.b == collider {
+                assert_eq!(entry.parts[1], Some(part));
+                total += entry.impulse_on_b;
+            }
+        }
+        let change = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity()
+            - initial;
+        assert!(
+            (total - change).length() < 1e-9,
+            "impulse={total:?}, change={change:?}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
 fn repeated_ccd_pair_after_local_replay_matches_momentum() -> Result<(), Box<dyn std::error::Error>>
 {
     let mut world = PhysicsWorld::new();
