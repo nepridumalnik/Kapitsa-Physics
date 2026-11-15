@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+pub use kapitsa_core::world::StepDiagnostics;
+
 /// Measurements collected for one completed physics step.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StepMeasurement {
@@ -44,6 +46,8 @@ pub struct SimulationMetrics {
     pub actual_time_multiplier: f64,
     /// Current load-induced speed factor, between 0.3 and 1.0 while running.
     pub load_speed_factor: f64,
+    /// Degradations recorded by the latest successfully committed physics step.
+    pub step_diagnostics: StepDiagnostics,
 }
 
 /// Statistics for one completed manual `Simulation::step()` call.
@@ -60,4 +64,6 @@ pub struct StepStats {
     pub active_workers: usize,
     pub average_step_duration: Duration,
     pub max_step_duration: Duration,
+    /// Degradations recorded by this successfully committed physics step.
+    pub step_diagnostics: StepDiagnostics,
 }

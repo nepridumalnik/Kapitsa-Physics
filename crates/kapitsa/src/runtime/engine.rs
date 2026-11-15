@@ -166,6 +166,8 @@ impl<E: StepExecutor> StepEngine<E> {
             .metrics
             .deadline_misses
             .saturating_add(u64::from(deadline_missed));
+        let step_diagnostics = self.world.step_diagnostics();
+        self.metrics.step_diagnostics = step_diagnostics;
 
         Ok(StepStats {
             physics_step,
@@ -179,6 +181,7 @@ impl<E: StepExecutor> StepEngine<E> {
             active_workers: self.active_workers,
             average_step_duration,
             max_step_duration,
+            step_diagnostics,
         })
     }
 
