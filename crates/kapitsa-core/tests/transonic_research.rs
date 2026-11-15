@@ -353,6 +353,35 @@ fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
     Ok(())
 }
 
+fn partial_nose_source(x: f64, dx: f64) -> f64 {
+    const NOSE_END: f64 = 1.0 / 16.0;
+    let left = (x - 0.5 * dx).max(0.0);
+    let right = (x + 0.5 * dx).min(NOSE_END);
+    let point = harris_geometry(x).2;
+    if right <= left {
+        return point;
+    }
+    let integral = 0.5 * (harris_geometry(right).0.powi(2) - harris_geometry(left).0.powi(2));
+    (integral + (dx - (right - left)) * point) / dx
+}
+
+#[test]
+fn partial_nose_source_handles_boundary_cells() {
+    let dx = 1.0 / 64.0;
+    let end = 1.0 / 16.0;
+    assert_eq!(partial_nose_source(0.5, dx), harris_geometry(0.5).2);
+    assert!(
+        (partial_nose_source(2.0 * dx, dx) - harris_conservative_source(2.0 * dx, dx)).abs()
+            < 1e-15
+    );
+    let expected = (0.5
+        * (harris_geometry(end).0.powi(2) - harris_geometry(end - 0.5 * dx).0.powi(2))
+        + 0.5 * dx * harris_geometry(end).2)
+        / dx;
+    assert!((partial_nose_source(end, dx) - expected).abs() < 1e-15);
+    assert!((partial_nose_source(0.0, dx) - harris_conservative_source(0.0, dx)).abs() < 1e-15);
+}
+
 #[test]
 #[ignore = "low-Mach nose source and reconstruction sensitivity; run in release mode"]
 fn harris_low_mach_nose_source_reconstruction() -> Result<(), String> {
@@ -365,7 +394,7 @@ fn harris_low_mach_nose_source_reconstruction() -> Result<(), String> {
         let nx = 2 * intervals + 1;
         let nr = (OUTER / dx + 0.5).round() as usize;
         let dr = OUTER / (nr as f64 - 0.5);
-        for mode in ["point", "cutoff_cell", "averaged"] {
+        for mode in ["point", "cutoff_cell", "nose_region", "averaged"] {
             let cutoff_index = ((CUTOFF + EXTENSION) / dx).round() as usize;
             let mut cutoff_cells = 0;
             let mut grid = MixedGrid {
@@ -373,7 +402,10 @@ fn harris_low_mach_nose_source_reconstruction() -> Result<(), String> {
                 axis_flux: (0..nx)
                     .map(|i| {
                         let x = i as f64 * dx - EXTENSION;
-                        if mode == "averaged" || (mode == "cutoff_cell" && i == cutoff_index) {
+                        if mode == "nose_region" {
+                            partial_nose_source(x, dx)
+                        } else if mode == "averaged" || (mode == "cutoff_cell" && i == cutoff_index)
+                        {
                             if mode == "cutoff_cell" {
                                 cutoff_cells += 1;
                             }
