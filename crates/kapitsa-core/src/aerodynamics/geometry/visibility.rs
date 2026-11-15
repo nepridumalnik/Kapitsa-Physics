@@ -296,8 +296,7 @@ mod tests {
 
     #[test]
     fn thin_triangle_fraction_preserves_small_representable_area() {
-        // Subtracting two nearly equal products in a naive determinant loses
-        // precision; this offset is exactly representable in binary64.
+        // This offset is exactly representable in binary64.
         const HEIGHT: f64 = 1.0 / ((1u64 << 40) as f64);
         let points = [
             Vec3::ZERO,
@@ -308,6 +307,26 @@ mod tests {
         assert_eq!(
             triangle_fraction([points[0], points[2], points[1]]).unwrap(),
             HEIGHT
+        );
+    }
+
+    #[test]
+    fn adaptive_triangle_fraction_resolves_cancelling_products() {
+        // Exact determinant: 1 - (1 + delta)(1 - delta) = delta².
+        // Both products round to 1 in a naive binary64 calculation.
+        const DELTA: f64 = 1.0 / ((1u64 << 27) as f64);
+        const EXPECTED: f64 = DELTA * DELTA;
+        let points = [
+            Vec3::ZERO,
+            Vec3::new(1.0, 1.0 + DELTA, 0.0),
+            Vec3::new(1.0 - DELTA, 1.0, 0.0),
+        ];
+        let naive = points[1].x * points[2].y - points[1].y * points[2].x;
+        assert_eq!(naive, 0.0);
+        assert_eq!(triangle_fraction(points).unwrap(), EXPECTED);
+        assert_eq!(
+            triangle_fraction([points[0], points[2], points[1]]).unwrap(),
+            EXPECTED
         );
     }
 
