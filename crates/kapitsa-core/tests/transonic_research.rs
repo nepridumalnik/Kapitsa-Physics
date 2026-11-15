@@ -412,6 +412,58 @@ fn synthetic_mixed_iteration_without_prescribed_shock() {
 }
 
 #[test]
+fn harris_mach_one_field_transition_diagnostic() {
+    // Zero Dirichlet boundaries and the simplified sting do not match the
+    // experiment. A descending sonic crossing is not proof of a shock.
+    for (n, outer) in [
+        (17, 0.75_f64),
+        (33, 0.75),
+        (65, 0.75),
+        (17, 1.25),
+        (33, 1.25),
+        (65, 1.25),
+    ] {
+        let dx = 1.0 / (n - 1) as f64;
+        let nr = (outer / dx + 0.5).round_ties_even() as usize;
+        let dr = outer / (nr as f64 - 0.5);
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; n],
+            axis_flux: (0..n).map(|i| harris_geometry(i as f64 * dx).2).collect(),
+            dx,
+            dr,
+            mach: 1.0,
+            gamma: 1.4,
+        };
+        match grid.iterate(1e-6, 15000) {
+            Ok((iterations, residual)) => {
+                for radius in [0.0625, 0.125, 0.25] {
+                    let index = radius / dr - 0.5;
+                    let k = index.floor() as usize;
+                    let weight = index - k as f64;
+                    let values: Vec<_> = grid
+                        .phi
+                        .iter()
+                        .map(|row| (1.0 - weight) * row[k] + weight * row[k + 1])
+                        .collect();
+                    let velocity: Vec<_> = values.windows(2).map(|v| (v[1] - v[0]) / dx).collect();
+                    let crossings: Vec<_> = velocity
+                        .windows(2)
+                        .enumerate()
+                        .filter(|(_, v)| v[0] > 0.0 && v[1] <= 0.0)
+                        .map(|(i, _)| (i + 1) as f64 * dx)
+                        .collect();
+                    println!(
+                        "n={n} outer={outer} r={radius} iterations={iterations} residual={residual:.3e} descending_sonic={crossings:?}"
+                    );
+                    assert!(!crossings.is_empty());
+                }
+            }
+            Err(residual) => panic!("n={n} did not converge: residual={residual:.3e}"),
+        }
+    }
+}
+
+#[test]
 fn mixed_iteration_handles_subsonic_and_imposed_shock_profiles() {
     use std::f64::consts::PI;
     let n = 17;
