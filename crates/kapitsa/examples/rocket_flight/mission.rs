@@ -40,6 +40,132 @@ pub struct FlightReference {
     pub specific_energy: f64,
 }
 
+#[cfg(test)]
+mod aerodynamic_flight_tests {
+    use super::*;
+    use kapitsa_core::aerodynamics::{
+        Aerodynamics, Atmosphere, DensityProfile, SphericalAtmosphere,
+        hull::{HullSection, MachCurve, MachKnot},
+        wing::{FiniteWing, WingCoefficients, WingPolar, WingSurface},
+    };
+    use kapitsa_math::{Quat, Vec3};
+    use std::sync::Arc;
+
+    // Synthetic coefficients exercise integration, not an aircraft polar or validation.
+    fn configure(flight: &mut HeadlessFlight) -> MissionResult<()> {
+        flight.world.set_atmosphere(Atmosphere::Sphere(
+            SphericalAtmosphere::builder()
+                .reference_radius(PLANET_RADIUS)
+                .reference_density(1.2)
+                .height(100_000.0)
+                .profile(DensityProfile::Exponential {
+                    scale_height: 8_000.0,
+                })
+                .wind(-Vec3::Y * 10.0)
+                .build()?,
+        ));
+        let curve = MachCurve::new(vec![
+            MachKnot {
+                mach: 0.0,
+                axial_cd: 0.3,
+                crossflow_cd: 0.8,
+            },
+            MachKnot {
+                mach: 2.0,
+                axial_cd: 0.5,
+                crossflow_cd: 1.0,
+            },
+        ])?;
+        let polar = Arc::new(WingPolar::new(
+            vec![0.0, 2.0],
+            vec![-std::f64::consts::PI, std::f64::consts::PI],
+            vec![
+                WingCoefficients {
+                    lift: 0.1,
+                    drag: 0.1
+                };
+                4
+            ],
+        )?);
+        for (index, id) in [flight.stage_one_body, flight.stage_two_body]
+            .into_iter()
+            .enumerate()
+        {
+            let id = id.ok_or("stage missing")?;
+            let hull = HullSection::new(
+                kapitsa_core::transform::Transform::identity(),
+                Vec3::Y,
+                4.0,
+                1.0,
+                4.0,
+                0.0,
+                0.3,
+                0.8,
+                None,
+            )?
+            .with_mach_curve(curve.clone());
+            let wing = WingSurface::new(
+                FiniteWing::new(6.0, 0.8, 0.02, 0.0, 0.2)?,
+                kapitsa_core::transform::Transform::new(
+                    Vec3::Y,
+                    Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_2)
+                        .ok_or("wing rotation")?,
+                )?,
+                1.0,
+            )?
+            .with_polar(Arc::clone(&polar));
+            let model = if index == 0 {
+                Aerodynamics::Hull(vec![hull])
+            } else {
+                Aerodynamics::Wing(wing)
+            };
+            flight.world.set_aerodynamics(id, model)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn atmosphere_hull_and_wing_affect_both_stages_across_separation() -> MissionResult<()> {
+        let mut aero = HeadlessFlight::new()?;
+        let mut vacuum = HeadlessFlight::new()?;
+        configure(&mut aero)?;
+        let lower = aero.stage_one_body.ok_or("lower")?;
+        let upper = aero.stage_two_body.ok_or("upper")?;
+        let mut saw_separation = false;
+        for _ in 0..(3 * TICK_RATE) {
+            let action = aero.step_once()?;
+            assert_eq!(action, vacuum.step_once()?);
+            saw_separation |= action == FlightAction::Separate;
+        }
+        assert!(saw_separation);
+        for (id, reference_id) in [
+            (lower, vacuum.stage_one_body),
+            (upper, vacuum.stage_two_body),
+        ] {
+            let body = aero.world.body(id).ok_or("aero stage")?;
+            let reference = vacuum
+                .world
+                .body(reference_id.ok_or("reference id")?)
+                .ok_or("vacuum stage")?;
+            let difference = body.state().linear_velocity() - reference.state().linear_velocity();
+            assert!(
+                difference.length() > 1e-4,
+                "velocity difference {difference:?}"
+            );
+            assert!(
+                difference.y < 0.0 && difference.z > 0.0,
+                "velocity difference {difference:?}"
+            );
+            assert!(body.state().angular_velocity().length() > 1e-7);
+            println!(
+                "stage velocity_delta={difference:?} angular_velocity={:?}",
+                body.state().angular_velocity()
+            );
+        }
+        Ok(())
+    }
+}
+
 impl HeadlessFlight {
     pub fn new() -> MissionResult<Self> {
         let mut world = PhysicsWorld::new();
