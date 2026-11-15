@@ -319,6 +319,17 @@ mod tests {
     use crate::aerodynamics::geometry::GeometryOwner;
 
     #[test]
+    // Diagnostic of the current limitation, not a desired classification.
+    fn affine_distance_can_round_a_positive_value_to_zero() {
+        // Exact affine value is 2 * offset, although the nested evaluation
+        // first rounds -1 + 2 * offset to -1.
+        const OFFSET: f64 = 1.0 / ((1u64 << 55) as f64);
+        let point = Vec3::new(0.5, OFFSET, 0.0);
+        assert_eq!(distance([-1.0, 1.0, 1.0], point), 0.0);
+        assert!(2.0 * point.y > 0.0);
+    }
+
+    #[test]
     fn compensated_area_sum_retains_small_positive_contributions() {
         const SMALL: f64 = f64::EPSILON / 4.0;
         let mut sum = AreaSum::default();
