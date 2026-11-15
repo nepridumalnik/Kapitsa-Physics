@@ -483,6 +483,17 @@ Its derivation assumes smooth pointed endpoints `S(0) = S(L) = 0` and a slender 
 
 The Wikipedia article titled `Slender-body theory` concerns low-Reynolds-number Stokes flow; it must not be cited as justification for an aerodynamic lifting-body section formula.
 
+For a potential blunt-body validation, Heinrich and Noreen's [assessment of
+sphere drag coefficient data](https://ntrs.nasa.gov/citations/19700009271)
+reports wind-tunnel measurements with matched Mach and Reynolds numbers. The
+reported subsonic facility reaches approximately Mach 0.9; the supersonic
+facility uses nozzles starting at Mach 1.2. Figures contain the drag curves,
+but the extracted text does not provide a tabulation across the intervening
+range. The authors report scattered high-speed subsonic data and estimated
+measurement errors dependent on Mach and Reynolds number. These data are a
+candidate benchmark, not evidence of validation of the present models; any
+digitization must record figure, Reynolds number and uncertainty explicitly.
+
 ### Explicit slender-body wave drag
 
 `HullSection::with_wave_drag` accepts equally spaced samples of `dA/dx` in
