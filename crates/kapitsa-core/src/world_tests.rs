@@ -845,6 +845,57 @@ fn joint_break_force_is_in_newtons_and_removes_the_joint() {
 }
 
 #[test]
+fn fixed_joint_breaks_from_differential_aerodynamic_drag() -> Result<(), Box<dyn std::error::Error>>
+{
+    use crate::aerodynamics::{Aerodynamics, AtmosphericState, hull::HullSection};
+
+    // Two equal masses move together. Drag of 60 N on one body requires a
+    // 30 N constraint reaction to give both bodies the same acceleration.
+    // No colliders, gravity, motors or initial relative motion are present.
+    for (threshold, should_break) in [(20.0, true), (40.0, false)] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.2,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut first = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        first.set_linear_velocity(Vec3::X * 10.0)?;
+        let mut second = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        second.set_linear_velocity(Vec3::X * 10.0)?;
+        second.set_aerodynamics(Aerodynamics::Hull(vec![HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            None,
+        )?]));
+        let a = world.add_body(first)?;
+        let b = world.add_body(second)?;
+        let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        common.break_force = Some(threshold);
+        world.add_joint(a, b, Joint::Fixed(FixedJoint::new(common)))?;
+        world.step(1e-4)?;
+        assert_eq!(world.joint_count(), usize::from(!should_break));
+        assert_eq!(world.joint_events().len(), usize::from(should_break));
+        if should_break {
+            let event = &world.joint_events()[0];
+            assert!(
+                (event.force() - 30.0).abs() < 1e-8,
+                "force={}",
+                event.force()
+            );
+            assert!(event.torque() < 1e-8, "torque={}", event.torque());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn broken_joint_releases_bodies_and_does_not_break_again() {
     let common = crate::joint::JointCommon {
         break_force: Some(0.1),

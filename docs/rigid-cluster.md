@@ -93,13 +93,28 @@ are required for motion and force changes on clustered bodies.
 
 ## Fracture and runtime
 
-Manual weld removal is independent of automatic fracture. Automatic fracture is
-disabled by default and, when explicitly enabled, uses the configured elastic
-graph model. Cyclic load sharing depends on weld stiffness and is an estimate,
-not a FEM deformation model. A failed or non-convergent solve cannot cause
-fracture. Selected welds are removed together at a permitted step boundary.
-Contact impulses must include their actual vector components and application
-points; XPBD position multipliers are not automatically physical impulses.
+Manual weld removal is implemented; automatic weld fracture and an elastic graph
+load solver are **not implemented**. `WeldStrength::Breakable` stores validated
+thresholds but does not currently trigger fracture. In particular, part-owned
+aerodynamic loads are summed onto the cluster rigid body and are not retained as
+individual part wrenches for weld evaluation. Do not interpret the net cluster
+wrench as the force on any weld.
+
+For separate rigid bodies joined by a breakable `Joint`, the existing velocity
+constraint solver evaluates its reaction from accumulated impulses, including
+the effects of applied aerodynamic forces, and compares force and torque at the
+joint anchor against their thresholds. This is a discrete solver reaction, not
+a stress or material failure model. A differential-drag regression covers the
+equal-mass fixed-joint case.
+
+A future weld-fracture implementation must account for external loads per part
+and the inertial wrench of each component, including moments about a common
+point. A tree edge can be assessed from the balance of either component cut by
+that edge; for cycles, load sharing is statically indeterminate without an
+explicit mechanical model. Contact impulses must include their actual vector
+components and application points; XPBD position multipliers are not
+automatically physical impulses. Any eventual fracture policy must specify
+solver convergence and failure handling before removing welds.
 
 Runtime topology commands execute in existing FIFO order at step boundaries.
 Each structural command is atomic; no stronger batch atomicity is implied.
