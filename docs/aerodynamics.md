@@ -825,6 +825,12 @@ drag from pressure measurements for the separate 0.532 base-area-ratio series,
 not the truncated Sears–Haack models, and report agreement with slender
 body theory near Mach 1 for their tested configurations, but increasing
 overprediction at higher Mach numbers, especially for lower fineness ratios.
+This general statement must not be interpreted as agreement at exactly Mach 1:
+in figure 8, for fineness ratio 7 and base-area ratio 0.532, the experimental
+symbol at Mach 1 lies near 0.05 whereas the slender-body line lies near 0.12.
+These are approximate visual readings, not digitized measurements or an error
+estimate. The figure demonstrates that extending the supersonic formula to
+Mach 1 as a predictive closure is not justified by this experiment.
 The three selected Cp entries were checked against the original table; their
 measurement uncertainties have not been established. No current model predicts
 comparable transonic Cp for this sting-mounted geometry, so no numerical
