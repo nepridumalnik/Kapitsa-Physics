@@ -1504,6 +1504,148 @@ mod tests {
     }
 
     #[test]
+    fn rotated_assembly_com_and_geometry_edit_matches_fresh_cache()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{
+            aerodynamics::wing::{FiniteWing, WingSurface},
+            cluster::{ClusterPartDesc, MassChangeMode},
+            collider::{Collider, CollisionMode},
+            shape::{Cuboid, Shape},
+        };
+        use kapitsa_math::Quat;
+
+        fn setup() -> Result<
+            (
+                PhysicsWorld,
+                BodyId,
+                PartId,
+                PartId,
+                crate::world::ColliderId,
+            ),
+            Box<dyn std::error::Error>,
+        > {
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
+                1.2,
+                Vec3::ZERO,
+            )?));
+            let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+            let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+            let velocity = Vec3::new(50.0, 0.0, -5.0);
+            body.set_linear_velocity(velocity)?;
+            let id = world.add_body(body)?;
+            let root = world.enable_cluster(id)?;
+            let rotation = Quat::from_axis_angle(Vec3::Y, 0.05).ok_or("part rotation")?;
+            let local = Transform::new(Vec3::X * 2.0, rotation)?;
+            let part = world.add_cluster_part(
+                root,
+                ClusterPartDesc {
+                    local_transform: local,
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: velocity,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    frame_a: JointFrame::new(Vec3::X * 2.0, rotation),
+                    ..weld()
+                },
+            )?;
+            let wing = WingSurface::new(
+                FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
+                Transform::identity(),
+                4.0,
+            )?
+            .with_rectangular_footprint(Vec3::ZERO, 2.0, 2.0)?
+            .with_spanwise_projection(0.3)?;
+            world.set_part_aerodynamic_wings(part, vec![wing])?;
+            let mut collider = Collider::new(
+                Shape::Cuboid(Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            );
+            collider.set_mode(CollisionMode::Sensor);
+            let collider = world.add_part_collider(part, collider)?;
+            world.set_part_wave_source_colliders(part, true)?;
+            Ok((world, id, root, part, collider))
+        }
+
+        for sharded in [false, true] {
+            let (mut warmed, id, root, part, collider) = setup()?;
+            let (mut reference, reference_id, reference_root, reference_part, reference_collider) =
+                setup()?;
+            for world in [&mut warmed, &mut reference] {
+                world.step(1e-5)?;
+            }
+            assert!(
+                warmed
+                    .assembly_aerodynamics
+                    .as_ref()
+                    .is_some_and(|cache| cache.contains_key(&id))
+            );
+            for (world, root, part, collider) in [
+                (&mut warmed, root, part, collider),
+                (
+                    &mut reference,
+                    reference_root,
+                    reference_part,
+                    reference_collider,
+                ),
+            ] {
+                world.set_part_mass(
+                    root,
+                    MassProperties::new(120.0, Vec3::Y * 0.4, Mat3::IDENTITY * 120.0)?,
+                    MassChangeMode::KeepVelocityField,
+                )?;
+                let rotation = Quat::from_axis_angle(Vec3::X, 0.3).ok_or("collider rotation")?;
+                world.set_part_collider_transform(
+                    part,
+                    collider,
+                    Transform::new(Vec3::Y * 10.0, rotation)?,
+                )?;
+            }
+            // Reference must rebuild from current sources, not reuse the previous result.
+            reference
+                .assembly_aerodynamics
+                .as_mut()
+                .ok_or("reference cache")?
+                .remove(&reference_id);
+            let before = *warmed.body(id).ok_or("body")?.state();
+            if sharded {
+                warmed.step_with_shards(
+                    1e-5,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    1,
+                )?;
+                reference.step_with_shards(
+                    1e-5,
+                    &mut [Vec::new(), Vec::new()],
+                    &SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                warmed.step(1e-5)?;
+                reference.step(1e-5)?;
+            }
+            let actual = warmed.body(id).ok_or("body")?.state();
+            let expected = reference
+                .body(reference_id)
+                .ok_or("reference body")?
+                .state();
+            assert!((actual.linear_velocity() - expected.linear_velocity()).length() < 1e-12);
+            assert!((actual.angular_velocity() - expected.angular_velocity()).length() < 1e-12);
+            assert!((actual.linear_velocity() - before.linear_velocity()).length() > 1e-7);
+            assert!((actual.angular_velocity() - before.angular_velocity()).length() > 1e-7);
+            println!(
+                "sharded={sharded} delta_v={:?} delta_omega={:?}",
+                actual.linear_velocity() - before.linear_velocity(),
+                actual.angular_velocity() - before.angular_velocity()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn partial_shielding_with_spanwise_projection_advances_multiple_steps()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::aerodynamics::{
