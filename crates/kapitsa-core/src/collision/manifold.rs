@@ -15,6 +15,9 @@ pub(crate) struct ContactPoint {
     /// Sum of positive solver updates only; not the net impulse change.
     pub(crate) normal_impulse_increase_sum: f64,
     pub(crate) tangent_impulse: [f64; 2],
+    /// World-space application points prepared for the velocity solve, not
+    /// points reconstructed after position correction. Absent until recorded.
+    pub(crate) velocity_points: Option<[Vec3; 2]>,
 }
 
 impl ContactPoint {
@@ -27,6 +30,7 @@ impl ContactPoint {
         normal_impulse: 0.0,
         normal_impulse_increase_sum: 0.0,
         tangent_impulse: [0.0; 2],
+        velocity_points: None,
     };
 
     pub(crate) fn from_world(
@@ -68,6 +72,7 @@ impl ContactPoint {
             normal_impulse: 0.0,
             normal_impulse_increase_sum: 0.0,
             tangent_impulse: [0.0; 2],
+            velocity_points: None,
         })
     }
 }

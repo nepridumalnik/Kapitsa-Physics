@@ -309,6 +309,7 @@ fn velocity_contact_points_precede_position_correction() -> Result<(), Box<dyn s
     assert_eq!(prepared.position_a, before_a);
     assert_eq!(prepared.position_b, before_b);
     let solved_contact = manifolds[0].manifold.point(0).ok_or("solved contact")?;
+    assert_eq!(solved_contact.velocity_points, Some([before_a, before_b]));
     let after_b = bodies[1]
         .body()
         .state()

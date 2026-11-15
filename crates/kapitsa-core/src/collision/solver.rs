@@ -1102,6 +1102,7 @@ impl SolverWorkspace {
                     source_point.normal_impulse_increase_sum =
                         solved_point.normal_impulse_increase_sum;
                     source_point.tangent_impulse = solved_point.tangent_impulse;
+                    source_point.velocity_points = solved_point.velocity_points;
                 }
             }
         }
@@ -2705,6 +2706,8 @@ impl SolverWorkspace {
         manifolds: &mut [SolverManifold],
     ) -> Result<(), CollisionError> {
         for point in points.iter().copied() {
+            contact_mut(manifolds, point)?.velocity_points =
+                Some([point.position_a, point.position_b]);
             let contact = *contact_at(manifolds, point)?;
             let (body_a, body_b) = bodies_at(bodies, point.body_a, point.body_b)?;
             let denominator = effective_mass(
