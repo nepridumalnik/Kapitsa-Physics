@@ -10,6 +10,83 @@ use crate::{
 };
 
 #[test]
+fn potential_sphere_world_steps_validate_geometry_and_rollback()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::{
+        aerodynamics::{
+            AerodynamicsError,
+            colliders::{ColliderTessellation, collider_mesh},
+            pressure::PressureError,
+        },
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    for collider_mode in [false, true] {
+        for sharded in [false, true] {
+            for case in 0..4 {
+                let collider =
+                    Collider::new(Shape::Sphere(Sphere::new(1.0)?), Transform::identity());
+                let mut world = PhysicsWorld::new();
+                world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+                    1.0,
+                    Vec3::ZERO,
+                )?));
+                let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+                let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+                body.set_linear_velocity(Vec3::X * if case == 1 { 1000.0 } else { 10.0 })?;
+                if case == 2 {
+                    body.set_angular_velocity(Vec3::Z)?;
+                }
+                if collider_mode {
+                    body.set_aerodynamics(Aerodynamics::Colliders);
+                } else {
+                    body.set_aerodynamics(Aerodynamics::Mesh(collider_mesh(
+                        [&collider],
+                        ColliderTessellation::new(12, 6, 1000)?,
+                    )?));
+                }
+                body.set_potential_sphere_pressure(Vec3::ZERO, if case == 3 { 2.0 } else { 1.0 })?;
+                let id = world.add_body(body)?;
+                if collider_mode {
+                    world.add_collider(id, collider)?;
+                }
+                let before = world.body(id).unwrap().motion();
+                let result = if sharded {
+                    world.step_with_shards(
+                        0.001,
+                        &mut [Vec::new()],
+                        &crate::execution::SequentialExecutor,
+                        1,
+                    )
+                } else {
+                    world.step(0.001)
+                };
+                if case == 0 {
+                    result?;
+                    assert!(
+                        (world.body(id).unwrap().state().linear_velocity() - Vec3::X * 10.0)
+                            .length()
+                            < 1e-9
+                    );
+                } else {
+                    let expected = match case {
+                        1 => PressureError::UnsupportedMach,
+                        2 => PressureError::InvalidMotion,
+                        _ => PressureError::InvalidPatch,
+                    };
+                    assert!(
+                        matches!(result, Err(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::Pressure(error) }) if body_id == id && error == expected),
+                        "collider={collider_mode} sharded={sharded} case={case}: {result:?}"
+                    );
+                    assert_eq!(world.body(id).unwrap().motion(), before);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn existing_mesh_and_collider_models_reject_subsonic_flow_without_state_change()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{

@@ -39,6 +39,7 @@ pub struct RigidBody {
         crate::aerodynamics::pressure::BasePressure,
     )>,
     pub(crate) base_pressure_triangles: Option<Vec<[Vec3; 3]>>,
+    pub(crate) potential_sphere: Option<(Vec3, f64)>,
 }
 
 impl RigidBody {
@@ -62,6 +63,7 @@ impl RigidBody {
             aerodynamic_surfaces: Vec::new(),
             base_pressure_patches: Vec::new(),
             base_pressure_triangles: None,
+            potential_sphere: None,
         }
     }
 
@@ -79,6 +81,7 @@ impl RigidBody {
     ) {
         self.base_pressure_patches.clear();
         self.base_pressure_triangles = None;
+        self.potential_sphere = None;
         self.aerodynamic_geometry_identity = matches!(
             aerodynamics,
             crate::aerodynamics::Aerodynamics::Mesh(_)
@@ -97,6 +100,38 @@ impl RigidBody {
 
     pub fn aerodynamic_surfaces(&self) -> &[crate::aerodynamics::AerodynamicSurface] {
         &self.aerodynamic_surfaces
+    }
+
+    /// Opts into ideal, isolated, non-rotating sphere pressure for the current
+    /// Mesh or Colliders geometry. This inviscid approximation has no wake or
+    /// viscous drag and is limited to Mach <= 0.2; it is not a rocket model.
+    /// Center and radius are body-local. Geometry is checked at each world step.
+    /// The caller must ensure isolation and a uniform flow; other nearby bodies
+    /// and additional loads are not checked for aerodynamic interaction.
+    /// Changing the primary aerodynamic configuration clears this setting.
+    pub fn set_potential_sphere_pressure(
+        &mut self,
+        center: Vec3,
+        radius: f64,
+    ) -> Result<(), crate::aerodynamics::pressure::PressureError> {
+        use crate::aerodynamics::{Aerodynamics, pressure::PressureError};
+        if !center.is_finite()
+            || !radius.is_finite()
+            || radius <= 0.0
+            || !matches!(
+                self.aerodynamics,
+                Aerodynamics::Mesh(_) | Aerodynamics::Colliders
+            )
+        {
+            return Err(PressureError::InvalidPatch);
+        }
+        self.potential_sphere = Some((center, radius));
+        Ok(())
+    }
+
+    /// Restores the ordinary primary geometry pressure model.
+    pub fn clear_potential_sphere_pressure(&mut self) {
+        self.potential_sphere = None;
     }
 
     /// Replaces explicitly selected body-local base patches. The caller must

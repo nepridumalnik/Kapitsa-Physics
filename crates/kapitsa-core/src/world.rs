@@ -92,7 +92,9 @@ mod aerodynamics {
                     world: world.world_id,
                     dense,
                 };
-                if !entry.body.base_pressure_patches.is_empty() {
+                if !entry.body.base_pressure_patches.is_empty()
+                    || entry.body.potential_sphere.is_some()
+                {
                     return Err(StepError::Aerodynamics {
                         body_id,
                         cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
@@ -294,6 +296,7 @@ struct AerodynamicsBodyUpdate {
 
 struct PreparedAerodynamicLoads {
     mesh_patches: Option<crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    sphere_patches: Option<Vec<crate::aerodynamics::pressure::PressurePatch>>,
     voxel_wave: Option<crate::aerodynamics::hull::HullSection>,
     assembly_wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
     wing_visibility: Option<Vec<assembly_aerodynamics::PreparedWingVisibility>>,
@@ -305,6 +308,7 @@ struct AerodynamicsInputs<'a> {
     cluster: Option<&'a RigidCluster>,
     dt: Option<f64>,
     mesh_patches: Option<&'a crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    sphere_patches: Option<&'a [crate::aerodynamics::pressure::PressurePatch]>,
     voxel_wave: Option<&'a crate::aerodynamics::hull::HullSection>,
     assembly_wave: Option<&'a (PartId, crate::aerodynamics::hull::HullSection)>,
     wing_visibility: Option<&'a [assembly_aerodynamics::PreparedWingVisibility]>,
@@ -321,6 +325,7 @@ impl<'a> AerodynamicsInputs<'a> {
             cluster: None,
             dt: None,
             mesh_patches: None,
+            sphere_patches: None,
             voxel_wave: None,
             assembly_wave: None,
             wing_visibility: None,
@@ -351,6 +356,7 @@ impl<'a> AerodynamicsInputs<'a> {
 
     fn with_loads(mut self, loads: &'a PreparedAerodynamicLoads) -> Self {
         self.mesh_patches = loads.mesh_patches.as_ref();
+        self.sphere_patches = loads.sphere_patches.as_deref();
         self.voxel_wave = loads.voxel_wave.as_ref();
         self.assembly_wave = loads.assembly_wave.as_ref();
         self.wing_visibility = loads.wing_visibility.as_deref();
@@ -1838,6 +1844,7 @@ impl PhysicsWorld {
             cluster,
             dt,
             mesh_patches,
+            sphere_patches,
             voxel_wave,
             assembly_wave,
             wing_visibility,
@@ -1897,7 +1904,6 @@ impl PhysicsWorld {
             None
         };
         if let Some(primary_atmosphere) = primary_atmosphere {
-            let patches = mesh_patches.ok_or_else(error)?;
             let flow = crate::aerodynamics::pressure::PressureFlow {
                 atmosphere: primary_atmosphere,
                 sound_speed: primary_atmosphere.sound_speed().unwrap_or(mesh_sound_speed),
@@ -1911,11 +1917,18 @@ impl PhysicsWorld {
                 linear_velocity: body.state().linear_velocity(),
                 angular_velocity: body.state().angular_velocity(),
             };
-            let wrench = crate::aerodynamics::pressure::evaluate_prepared_mesh(patches, flow)
-                .map_err(|cause| StepError::Aerodynamics {
-                    body_id,
-                    cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
-                })?;
+            let wrench = if let Some(patches) = sphere_patches {
+                crate::aerodynamics::pressure::evaluate_potential_sphere_patches(patches, flow)
+            } else {
+                crate::aerodynamics::pressure::evaluate_prepared_mesh(
+                    mesh_patches.ok_or_else(error)?,
+                    flow,
+                )
+            }
+            .map_err(|cause| StepError::Aerodynamics {
+                body_id,
+                cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+            })?;
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;
             for &(patch, base) in base_pressure_patches {
@@ -2517,6 +2530,7 @@ impl PhysicsWorld {
                 ),
                 None => (None, None, None),
             };
+            let mut sphere_patches = None;
             // Only the primary geometry samples the COM. Additional surfaces
             // still evaluate their own positions, including when the COM is in vacuum.
             let primary_atmosphere = if matches!(
@@ -2574,127 +2588,159 @@ impl PhysicsWorld {
                 _ => None,
             };
             if let (Some(mesh), Some(primary_atmosphere)) = (mesh, primary_atmosphere) {
-                if !entry.body.base_pressure_patches.is_empty()
-                    && entry.body.base_pressure_triangles.is_none()
-                {
-                    return Err(StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
-                    });
-                }
-                let config = entry
-                    .mesh_aerodynamics
-                    .as_ref()
-                    .map(|prepared| prepared.config)
-                    .unwrap_or(crate::aerodynamics::geometry::GeometryConfig {
-                        cell_size: 0.125,
-                        max_cells: 1_048_576,
-                        max_work: 100_000_000,
-                        open_mesh_policy:
-                            crate::aerodynamics::geometry::OpenMeshPolicy::SurfaceOnly,
-                        weld_tolerance: matches!(
-                            entry.body.aerodynamics(),
-                            crate::aerodynamics::Aerodynamics::Colliders
+                if let Some((center, radius)) = entry.body.potential_sphere {
+                    if entry.cluster.is_some()
+                        || !entry.body.base_pressure_patches.is_empty()
+                        || mesh_patches.is_some()
+                        || assembly_wave.is_some()
+                    {
+                        return Err(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                        });
+                    }
+                    // A strict work budget limits the quadratic convexity check.
+                    const SPHERE_MESH_WORK_LIMIT: usize = 100_000_000;
+                    // Roundoff tolerance for tessellated vertices, relative to radius.
+                    const SPHERE_MESH_RELATIVE_TOLERANCE: f64 = 1e-10;
+                    sphere_patches = Some(
+                        crate::aerodynamics::pressure::spherical_mesh_pressure_patches(
+                            mesh,
+                            center,
+                            radius,
+                            SPHERE_MESH_RELATIVE_TOLERANCE,
+                            SPHERE_MESH_WORK_LIMIT,
                         )
-                        .then_some(1e-10),
-                        max_patch_work: 100_000_000,
-                    });
-                let prepared = entry
-                    .mesh_aerodynamics
-                    .get_or_insert_with(|| MeshAerodynamics {
-                        identity: entry.body.aerodynamic_geometry_identity.clone(),
-                        cache: crate::aerodynamics::cache::PreparedGeometryCache::default(),
-                        config,
-                        sound_speed: self.mesh_sound_speed,
-                    });
-                prepared.config = config;
-                prepared.sound_speed = self.mesh_sound_speed;
-                let key = crate::aerodynamics::cache::GeometryCacheKey {
-                    body: body_id,
-                    geometry_version: 0,
-                    config_version: 1,
-                };
-                let geometry = prepared.cache.prepare(key, mesh, config).map_err(|cause| {
-                    StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                        })?,
+                    );
+                } else {
+                    if !entry.body.base_pressure_patches.is_empty()
+                        && entry.body.base_pressure_triangles.is_none()
+                    {
+                        return Err(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                        });
                     }
-                })?;
-                let relative = entry
-                    .body
-                    .state()
-                    .linear_velocity()
-                    .checked_sub(primary_atmosphere.wind_velocity())
-                    .ok_or(StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    let config = entry
+                        .mesh_aerodynamics
+                        .as_ref()
+                        .map(|prepared| prepared.config)
+                        .unwrap_or(crate::aerodynamics::geometry::GeometryConfig {
+                            cell_size: 0.125,
+                            max_cells: 1_048_576,
+                            max_work: 100_000_000,
+                            open_mesh_policy:
+                                crate::aerodynamics::geometry::OpenMeshPolicy::SurfaceOnly,
+                            weld_tolerance: matches!(
+                                entry.body.aerodynamics(),
+                                crate::aerodynamics::Aerodynamics::Colliders
+                            )
+                            .then_some(1e-10),
+                            max_patch_work: 100_000_000,
+                        });
+                    let prepared =
+                        entry
+                            .mesh_aerodynamics
+                            .get_or_insert_with(|| MeshAerodynamics {
+                                identity: entry.body.aerodynamic_geometry_identity.clone(),
+                                cache: crate::aerodynamics::cache::PreparedGeometryCache::default(),
+                                config,
+                                sound_speed: self.mesh_sound_speed,
+                            });
+                    prepared.config = config;
+                    prepared.sound_speed = self.mesh_sound_speed;
+                    let key = crate::aerodynamics::cache::GeometryCacheKey {
+                        body: body_id,
+                        geometry_version: 0,
+                        config_version: 1,
+                    };
+                    let geometry = prepared.cache.prepare(key, mesh, config).map_err(|cause| {
+                        StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                        }
                     })?;
-                let direction = entry
-                    .body
-                    .state()
-                    .transform()
-                    .rotation()
-                    .conjugate()
-                    .rotate_vector(relative)
-                    .ok_or(StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    let relative = entry
+                        .body
+                        .state()
+                        .linear_velocity()
+                        .checked_sub(primary_atmosphere.wind_velocity())
+                        .ok_or(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        })?;
+                    let direction = entry
+                        .body
+                        .state()
+                        .transform()
+                        .rotation()
+                        .conjugate()
+                        .rotate_vector(relative)
+                        .ok_or(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        })?;
+                    let inverse = entry.body.state().transform().inverse().map_err(|_| {
+                        StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        }
                     })?;
-                let inverse = entry.body.state().transform().inverse().map_err(|_| {
-                    StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                    }
-                })?;
-                let omega = inverse.transform_vector(entry.body.state().angular_velocity());
-                let center = entry
-                    .body
-                    .physics()
-                    .mass()
-                    .ok_or(StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                    })?
-                    .center_of_mass();
-                if let Some(selected) = entry
-                    .body
-                    .base_pressure_triangles
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                {
-                    crate::aerodynamics::pressure::verify_unique_base_sources(
-                        selected,
-                        mesh,
-                        config.max_patch_work,
-                    )
-                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
-                    let visible = geometry
-                        .surface_patches_with_flow(
-                            &[crate::aerodynamics::geometry::GeometryInstance {
-                                mesh,
-                                local_transform: crate::transform::Transform::identity(),
-                                owner: crate::aerodynamics::geometry::GeometryOwner::Body,
-                            }],
+                    let omega = inverse.transform_vector(entry.body.state().angular_velocity());
+                    let center = entry
+                        .body
+                        .physics()
+                        .mass()
+                        .ok_or(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        })?
+                        .center_of_mass();
+                    if let Some(selected) = entry
+                        .body
+                        .base_pressure_triangles
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                    {
+                        crate::aerodynamics::pressure::verify_unique_base_sources(
+                            selected,
+                            mesh,
                             config.max_patch_work,
-                            |point| {
-                                point.checked_sub(center)
+                        )
+                        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                        let visible = geometry
+                            .surface_patches_with_flow(
+                                &[crate::aerodynamics::geometry::GeometryInstance {
+                                    mesh,
+                                    local_transform: crate::transform::Transform::identity(),
+                                    owner: crate::aerodynamics::geometry::GeometryOwner::Body,
+                                }],
+                                config.max_patch_work,
+                                |point| {
+                                    point.checked_sub(center)
                             .and_then(|arm| omega.checked_cross(arm))
                             .and_then(|velocity| direction.checked_add(velocity))
                             .and_then(|velocity| Vec3::ZERO.checked_sub(velocity))
                             .ok_or(crate::aerodynamics::geometry::GeometryError::ArithmeticOverflow)
-                            },
+                                },
+                            )
+                            .map_err(|cause| StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                            })?;
+                        crate::aerodynamics::pressure::verify_full_base_visibility(
+                            selected, &visible,
                         )
-                        .map_err(|cause| StepError::Aerodynamics {
-                            body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
-                        })?;
-                    crate::aerodynamics::pressure::verify_full_base_visibility(selected, &visible)
                         .map_err(|cause| StepError::Aerodynamics {
                             body_id,
                             cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
                         })?;
-                }
-                mesh_patches = Some(
+                    }
+                    mesh_patches = Some(
                     geometry
                         .surface_patches_with_flow(
                             &[crate::aerodynamics::geometry::GeometryInstance {
@@ -2713,6 +2759,7 @@ impl PhysicsWorld {
                             cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
                         })?,
                 );
+                }
             }
             self.aerodynamics_body_updates.push(AerodynamicsBodyUpdate {
                 id: body_id,
@@ -2721,6 +2768,7 @@ impl PhysicsWorld {
                 prepared: entry.body.motion(),
                 loads: PreparedAerodynamicLoads {
                     mesh_patches,
+                    sphere_patches,
                     voxel_wave,
                     assembly_wave,
                     wing_visibility,
@@ -3954,6 +4002,13 @@ impl PhysicsWorld {
                                 .aerodynamics_body_updates
                                 .iter()
                                 .find(|update| update.id == step.body_id);
+                            if staged.is_none() && entry.body.potential_sphere.is_some() {
+                                step.error = Some(StepError::Aerodynamics {
+                                    body_id: step.body_id,
+                                    cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                });
+                                continue;
+                            }
                             let mut temporary_cache =
                                 crate::aerodynamics::cache::PreparedGeometryCache::default();
                             let local_wave = if staged.is_none() {

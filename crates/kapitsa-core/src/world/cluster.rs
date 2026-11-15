@@ -145,7 +145,9 @@ impl PhysicsWorld {
         }
         // Base patches are body-local and are not yet transferred to a part.
         // Reject before changing topology rather than strand or lose loads.
-        if !body_entry.body.base_pressure_patches.is_empty() {
+        if !body_entry.body.base_pressure_patches.is_empty()
+            || body_entry.body.potential_sphere.is_some()
+        {
             return Err(ClusterError::UnsupportedGeometry);
         }
         let mut root_hull = Vec::new();
