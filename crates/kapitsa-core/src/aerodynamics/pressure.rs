@@ -723,6 +723,7 @@ pub struct OwnerPressureWorkspace {
     published: Vec<(super::geometry::GeometryOwner, PressureWrench)>,
     scratch: Vec<(super::geometry::GeometryOwner, PressureWrench)>,
     prepared: bool,
+    scratch_total: PressureWrench,
 }
 
 impl OwnerPressureWorkspace {
@@ -743,6 +744,7 @@ impl OwnerPressureWorkspace {
             scratch: published.clone(),
             published,
             prepared: false,
+            scratch_total: zero,
         })
     }
 
@@ -781,27 +783,10 @@ impl OwnerPressureWorkspace {
         self.prepared.then_some(&self.scratch)
     }
 
-    /// Sums staged owner wrenches about their shared COM, rejecting overflow.
+    /// Returns the staged total about the shared COM, accumulated in patch order.
     /// `None` means that there is no successfully staged result.
     pub fn staged_total(&self) -> Result<Option<PressureWrench>, PressureError> {
-        let Some(staged) = self.staged() else {
-            return Ok(None);
-        };
-        let mut total = PressureWrench {
-            force: Vec3::ZERO,
-            moment: Vec3::ZERO,
-        };
-        for (_, wrench) in staged {
-            total.force = total
-                .force
-                .checked_add(wrench.force)
-                .ok_or(PressureError::ArithmeticOverflow)?;
-            total.moment = total
-                .moment
-                .checked_add(wrench.moment)
-                .ok_or(PressureError::ArithmeticOverflow)?;
-        }
-        Ok(Some(total))
+        Ok(self.prepared.then_some(self.scratch_total))
     }
 
     /// Evaluates every patch once; unconfigured owners are rejected.
@@ -824,6 +809,7 @@ impl OwnerPressureWorkspace {
     ) -> Result<(), PressureError> {
         self.prepared = false;
         let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
+        self.scratch_total = zero;
         for (_, wrench) in &mut self.scratch {
             *wrench = zero;
         }
@@ -834,6 +820,16 @@ impl OwnerPressureWorkspace {
                 .map_err(|_| PressureError::InvalidPatch)?;
             let load =
                 PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
+            self.scratch_total.force = self
+                .scratch_total
+                .force
+                .checked_add(load.force)
+                .ok_or(PressureError::ArithmeticOverflow)?;
+            self.scratch_total.moment = self
+                .scratch_total
+                .moment
+                .checked_add(load.moment)
+                .ok_or(PressureError::ArithmeticOverflow)?;
             let total = &mut self.scratch[index].1;
             total.force = total
                 .force

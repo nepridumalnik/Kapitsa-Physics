@@ -149,6 +149,7 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     assert!(workspace.staged().is_some());
     let staged = workspace.staged_total()?.ok_or("staged total")?;
     let expected_faster = evaluate_prepared_mesh(&patches, faster)?;
+    assert_eq!(staged, expected_faster);
     close(staged.force, expected_faster.force);
     close(staged.moment, expected_faster.moment);
     workspace.rollback();
