@@ -119,6 +119,10 @@ pub(super) fn distance(values: [f64; 3], point: Vec3) -> f64 {
     // This reduces cancellation but does not establish an exact sign bound.
     let x = values[1] - values[0];
     let y = values[2] - values[0];
+    let x_virtual = x - values[1];
+    let y_virtual = y - values[2];
+    let x_error = (values[1] - (x - x_virtual)) - (values[0] + x_virtual);
+    let y_error = (values[2] - (y - y_virtual)) - (values[0] + y_virtual);
     let xp = x * point.x;
     let yp = y * point.y;
     let xr = x.mul_add(point.x, -xp);
@@ -129,7 +133,7 @@ pub(super) fn distance(values: [f64; 3], point: Vec3) -> f64 {
     let result = sum + yp;
     let v = result - sum;
     let residual = residual + ((sum - (result - v)) + (yp - v));
-    result + (residual + xr + yr)
+    result + (residual + xr + yr + x_error * point.x + y_error * point.y)
 }
 
 impl Shadow {
@@ -338,6 +342,15 @@ mod tests {
         const OFFSET: f64 = 1.0 / ((1u64 << 55) as f64);
         let point = Vec3::new(0.5, OFFSET, 0.0);
         assert_eq!(distance([-1.0, 1.0, 1.0], point), 2.0 * OFFSET);
+    }
+
+    #[test]
+    fn affine_distance_compensates_coefficient_difference() {
+        // At vertex 1 the exact barycentric value is values[1], even
+        // when subtracting values[0] rounds away that small value.
+        const SMALL: f64 = 1.0 / ((1u64 << 54) as f64);
+        assert_eq!(distance([1.0, SMALL, 0.0], Vec3::X), SMALL);
+        assert_eq!(distance([1.0, 0.0, SMALL], Vec3::Y), SMALL);
     }
 
     #[test]

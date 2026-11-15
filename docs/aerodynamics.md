@@ -265,7 +265,7 @@ The shadow construction uses adaptive orientation predicates from the MIT/Apache
 
 Affine shadow-plane distance evaluation uses compensated products and sums to
 reduce cancellation near a boundary. This corrects one previously demonstrated
-case but does not guarantee the exact sign: coefficient differences are rounded
+cases but does not guarantee the exact sign: residual calculations are rounded
 and extreme values may underflow. Adaptive orientation predicates alone do not
 guarantee correct clipping classification or intersection construction.
 
