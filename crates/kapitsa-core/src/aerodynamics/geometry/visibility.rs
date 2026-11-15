@@ -295,6 +295,23 @@ mod tests {
     use crate::aerodynamics::geometry::GeometryOwner;
 
     #[test]
+    fn thin_triangle_fraction_preserves_small_representable_area() {
+        // Subtracting two nearly equal products in a naive determinant loses
+        // precision; this offset is exactly representable in binary64.
+        const HEIGHT: f64 = 1.0 / ((1u64 << 40) as f64);
+        let points = [
+            Vec3::ZERO,
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0 + HEIGHT, 0.0),
+        ];
+        assert_eq!(triangle_fraction(points).unwrap(), HEIGHT);
+        assert_eq!(
+            triangle_fraction([points[0], points[2], points[1]]).unwrap(),
+            HEIGHT
+        );
+    }
+
+    #[test]
     fn windward_triangle_clips_affine_sign_change_to_analytic_area() {
         const EXPECTED_FRACTION: f64 = 0.25;
         const TOLERANCE: f64 = 1e-14;
