@@ -41,8 +41,7 @@ mod free_ball_tests;
 #[test]
 fn off_center_part_contact_impulse_matches_linear_and_angular_momentum()
 -> Result<(), Box<dyn std::error::Error>> {
-    {
-        let ccd = false;
+    for ccd in [false, true] {
         let mut world = PhysicsWorld::new();
         let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 0.0, 1.0)?)?;
         let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
@@ -83,6 +82,7 @@ fn off_center_part_contact_impulse_matches_linear_and_angular_momentum()
         let mut linear = Vec3::ZERO;
         let mut angular = Vec3::ZERO;
         let mut count = 0;
+        let mut phase_counts = [0, 0];
         for entry in world.contact_impulses() {
             let (side, impulse) = if entry.pair.a == sphere {
                 (0, -entry.impulse_on_b)
@@ -92,29 +92,24 @@ fn off_center_part_contact_impulse_matches_linear_and_angular_momentum()
                 continue;
             };
             assert_eq!(entry.parts[side], Some(part));
-            if ccd && !entry.ccd && entry.impulse_on_b == Vec3::ZERO {
-                continue;
-            }
-            assert_eq!(entry.ccd, ccd);
+            phase_counts[usize::from(entry.ccd)] += 1;
             linear += impulse;
-            // Motion is initially translational along X, so any point on the
-            // body's X-axis gives the same moment for this normal impulse.
             angular += entry.points[side].cross(impulse);
             count += 1;
         }
-        assert_eq!(
-            count,
-            1,
-            "ccd={ccd}, entries={:?}",
-            world.contact_impulses()
-        );
+        assert_eq!(phase_counts, if ccd { [1, 1] } else { [1, 0] });
+        assert_eq!(count, if ccd { 2 } else { 1 });
         let state = world.body(body).ok_or(WorldError::InvalidBodyId)?.state();
         assert!((linear - (state.linear_velocity() - Vec3::X * speed)).length() < speed * 1e-10);
         assert!(angular.z > 0.0);
+        let final_angular_momentum = state.angular_velocity()
+            + state
+                .transform()
+                .translation()
+                .cross(state.linear_velocity());
         assert!(
-            (angular - state.angular_velocity()).length() < speed * 1e-10,
-            "angular impulse={angular:?}, angular velocity={:?}",
-            state.angular_velocity()
+            (angular - final_angular_momentum).length() < speed * 1e-10,
+            "ccd={ccd}, angular impulse={angular:?}, angular momentum={final_angular_momentum:?}"
         );
     }
     Ok(())
