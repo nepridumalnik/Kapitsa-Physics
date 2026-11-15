@@ -240,4 +240,5 @@ reactions. Its tolerances are in N·s and N·m·s, not N or N·m. It does not
 certify contact snapshots or process sequential CCD impacts, and is not yet
 connected to automatic weld fracture. `ImpulseStrength` supplies separate
 linear and angular impulse limits; angular reactions must first be shifted to
-the weld anchor. It does not derive impulse limits from force limits.
+the weld anchor with `ImpulseReaction::at_anchor`. It does not derive impulse
+limits from force limits.

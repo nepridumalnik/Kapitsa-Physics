@@ -25,6 +25,19 @@ pub struct ImpulseReaction {
     pub angular: Vec3,
 }
 
+impl ImpulseReaction {
+    /// Expresses angular impulse at `anchor` instead of `origin`.
+    ///
+    /// Points are world-space metres and both impulse vectors are world-space.
+    /// The linear impulse is unchanged. Use the returned value for an angular
+    /// [`ImpulseStrength`] limit specified at the weld anchor.
+    pub fn at_anchor(self, origin: Vec3, anchor: Vec3) -> Result<Self, ImpulseBalanceError> {
+        let angular =
+            balance::reaction_moment_at_anchor(self.linear, self.angular, origin, anchor)?;
+        Ok(Self { angular, ..self })
+    }
+}
+
 /// Independent instantaneous impulse limits, not force or torque limits.
 /// Angular impulse must be expressed at the weld anchor before comparison.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -187,6 +200,31 @@ mod tests {
                 0.0
             ),
             Err(ImpulseBalanceError::Unbalanced)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn strength_uses_angular_impulse_at_weld_anchor() -> Result<(), Box<dyn std::error::Error>> {
+        let reaction = ImpulseReaction {
+            linear: Vec3::Y * 2.0,
+            angular: Vec3::Z * 6.0,
+        };
+        let anchored = reaction
+            .at_anchor(Vec3::ZERO, Vec3::X * 2.0)
+            .map_err(|e| format!("{e:?}"))?;
+        assert_eq!(anchored.angular, Vec3::Z * 2.0);
+        let limit = ImpulseStrength {
+            max_linear: None,
+            max_angular: Some(3.0),
+        };
+        assert!(limit.exceeded_by(reaction).map_err(|e| format!("{e:?}"))?);
+        assert!(!limit.exceeded_by(anchored).map_err(|e| format!("{e:?}"))?);
+        assert_eq!(
+            reaction.at_anchor(Vec3::ZERO, Vec3::new(f64::NAN, 0.0, 0.0)),
+            Err(ImpulseBalanceError::Physics(
+                super::super::ClusterError::InvalidMotion
+            ))
         );
         Ok(())
     }
