@@ -289,6 +289,34 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
 }
 
 #[test]
+fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::cluster::balance::{BalanceError, prepare_force_free_inputs, prepare_tree};
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+    let root = world.enable_cluster(body)?;
+    world.step(0.01)?;
+    let state = world.cluster_load_states()[0];
+    let tree = prepare_tree(
+        &state,
+        world.cluster_load_parts(),
+        world.cluster_load_welds(),
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let inputs = prepare_force_free_inputs(&state, &tree).map_err(|error| format!("{error:?}"))?;
+    assert!(inputs[0].loads_complete);
+    world.set_part_aerodynamic_hull(root, vec![section(Vec3::ZERO)])?;
+    world.step(0.01)?;
+    let state = world.cluster_load_states()[0];
+    assert!(matches!(
+        prepare_force_free_inputs(&state, &tree),
+        Err(BalanceError::IncompleteLoads)
+    ));
+    Ok(())
+}
+
+#[test]
 fn part_hull_snapshot_preserves_offset_moment() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = PhysicsWorld::new();
     world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));

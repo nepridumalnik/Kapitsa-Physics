@@ -132,6 +132,28 @@ impl TreePart {
     }
 }
 
+/// Certifies only the conservative force-free regime established by the world
+/// before integration. Any other regime remains unsupported, even if all
+/// diagnostic load slices happen to be empty.
+pub(crate) fn prepare_force_free_inputs(
+    state: &ClusterLoadState,
+    tree: &[TreePart],
+) -> Result<Vec<PartBalanceInput>, BalanceError> {
+    if !state.force_free_certified {
+        return Err(BalanceError::IncompleteLoads);
+    }
+    let mut inputs = Vec::new();
+    inputs
+        .try_reserve_exact(tree.len())
+        .map_err(|_| BalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+    for part in tree {
+        let mut input = part.incomplete_balance_input();
+        input.loads_complete = true;
+        inputs.push(input);
+    }
+    Ok(inputs)
+}
+
 /// Builds an ordered tree in expected O(parts + welds), rejecting disconnected,
 /// cyclic, duplicate, and cross-body edges. Inputs must belong to one snapshot.
 pub(crate) fn prepare_tree(

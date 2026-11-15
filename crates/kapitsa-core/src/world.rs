@@ -300,6 +300,8 @@ pub struct ClusterLoadState {
     pub root: PartId,
     /// World-space pose and velocities before integration.
     pub state: BodyState,
+    // Conservative evaluation-time certificate; never inferred from diagnostics.
+    pub(crate) force_free_certified: bool,
 }
 
 /// Part mass and body-local pose at the same time as the load snapshots.
@@ -1886,8 +1888,31 @@ impl PhysicsWorld {
         self.cluster_load_welds_pending
             .try_reserve(self.welds.iter().count())
             .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+        let no_world_load_paths = self.colliders.iter().next().is_none()
+            && self.joints.iter().next().is_none()
+            && self.force_sources.iter().next().is_none()
+            && self.central_gravity.is_none()
+            && self.gravity_fields.iter().next().is_none()
+            && self.chunks.iter().next().is_none();
         for (dense, entry) in self.bodies.iter() {
             if let Some(cluster) = &entry.cluster {
+                let body = &entry.body;
+                let force_free_certified = no_world_load_paths
+                    && body.physics().body_type() == BodyType::Dynamic
+                    && body.forces().force() == Vec3::ZERO
+                    && body.forces().torque() == Vec3::ZERO
+                    && matches!(body.aerodynamics(), crate::aerodynamics::Aerodynamics::None)
+                    && body.aerodynamic_surfaces.is_empty()
+                    && body.base_pressure_patches.is_empty()
+                    && body.potential_sphere.is_none()
+                    && cluster.parts.iter().all(|part_id| {
+                        self.parts.get(part_id.dense).is_some_and(|part| {
+                            part.aerodynamic_hull.is_empty() && part.aerodynamic_wings.is_empty()
+                        }) && !self
+                            .part_aerodynamic_geometry
+                            .as_ref()
+                            .is_some_and(|geometry| geometry.contains_key(part_id))
+                    });
                 self.cluster_load_states_pending.push(ClusterLoadState {
                     body: BodyId {
                         world: self.world_id,
@@ -1895,6 +1920,7 @@ impl PhysicsWorld {
                     },
                     root: cluster.root,
                     state: *entry.body.state(),
+                    force_free_certified,
                 });
             }
         }
