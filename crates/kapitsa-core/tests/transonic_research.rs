@@ -35,6 +35,31 @@ fn backward_derivative_is_second_order_on_smooth_field() {
 }
 
 #[test]
+fn cutoff_crossing_stencil_on_piecewise_smooth_manufactured_field() {
+    // Synthetic C1 field: upstream phi=x², downstream adds (x-c)².
+    // It has a jump in phi_xx, not a claimed local model of Harris flow.
+    // Station x=0 lies strictly upstream, cutoff c=phase*h. The central
+    // stencil crosses c; the backward stencil remains on the smooth branch.
+    for phase in [0.2_f64, 0.5, 0.8] {
+        let mut previous = f64::INFINITY;
+        for h in [0.1_f64, 0.05, 0.025] {
+            let cutoff = phase * h;
+            let phi = |x: f64| x * x + (x - cutoff).max(0.0).powi(2);
+            let central = (phi(h) - phi(-h)) / (2.0 * h);
+            let backward = backward_derivative(phi(-2.0 * h), phi(-h), phi(0.0), h);
+            let expected_central = 0.5 * h * (1.0 - phase).powi(2);
+            assert!((central - expected_central).abs() < 16.0 * f64::EPSILON * h);
+            assert!(backward.abs() < 16.0 * f64::EPSILON * h);
+            assert!(central < previous);
+            println!(
+                "phase={phase:.1} h={h:.3} central_error={central:.9} backward_error={backward:.9}"
+            );
+            previous = central;
+        }
+    }
+}
+
+#[test]
 fn harris_fixed_upstream_row_omits_nonzero_axis_source() {
     // The mixed stencil starts at i=2, leaving i=1 fixed even though the
     // Harris body source at that station is nonzero. This diagnostic does not
