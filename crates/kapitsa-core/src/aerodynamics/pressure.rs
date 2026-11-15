@@ -246,6 +246,39 @@ pub fn spherical_mesh_pressure_patches(
     Ok(patches)
 }
 
+/// Evaluates potential-sphere pressure over all previously validated patches.
+///
+/// The caller must obtain the complete set from `spherical_mesh_pressure_patches`
+/// for the current geometry and verify the isolated, non-rotating uniform-flow
+/// assumptions. This function does not integrate with `PhysicsWorld`, certify
+/// geometry, detect interference, or model viscous drag. An invalid patch or
+/// nonfinite sum rejects the whole result.
+pub fn evaluate_potential_sphere_patches(
+    patches: &[PressurePatch],
+    flow: PressureFlow,
+) -> Result<PressureWrench, PressureError> {
+    // Validate flow even for an empty set; an empty set is not a sphere.
+    if patches.is_empty() {
+        return Err(PressureError::InvalidPatch);
+    }
+    let mut total = PressureWrench {
+        force: Vec3::ZERO,
+        moment: Vec3::ZERO,
+    };
+    for patch in patches {
+        let load = patch.evaluate_potential_sphere(flow)?;
+        total.force = total
+            .force
+            .checked_add(load.force)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+        total.moment = total
+            .moment
+            .checked_add(load.moment)
+            .ok_or(PressureError::ArithmeticOverflow)?;
+    }
+    Ok(total)
+}
+
 /// Net world-space force and moment about the current center of mass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PressureWrench {

@@ -269,6 +269,53 @@ fn spherical_mesh_preparation_checks_collider_radius_winding_and_budget() {
 }
 
 #[test]
+fn verified_sphere_patches_sum_without_partial_results() {
+    use crate::{
+        aerodynamics::colliders::{ColliderTessellation, collider_mesh},
+        collider::Collider,
+        shape::{Shape, Sphere},
+    };
+    let collider = Collider::new(
+        Shape::Sphere(Sphere::new(1.0).unwrap()),
+        Transform::identity(),
+    );
+    let mesh = collider_mesh([&collider], ColliderTessellation::new(16, 9, 1000).unwrap()).unwrap();
+    let patches =
+        spherical_mesh_pressure_patches(&mesh, Vec3::ZERO, 1.0, 1e-12, 1_000_000).unwrap();
+    let state = PressureFlow {
+        linear_velocity: Vec3::X * 20.0,
+        ..flow()
+    };
+    let wrench = evaluate_potential_sphere_patches(&patches, state).unwrap();
+    assert!(wrench.force.length() < 1e-8, "{:?}", wrench.force);
+    assert!(wrench.moment.length() < 1e-8, "{:?}", wrench.moment);
+    assert_eq!(
+        evaluate_potential_sphere_patches(&[], state),
+        Err(PressureError::InvalidPatch)
+    );
+    assert_eq!(
+        evaluate_potential_sphere_patches(
+            &patches,
+            PressureFlow {
+                linear_velocity: Vec3::X * 21.0,
+                ..state
+            }
+        ),
+        Err(PressureError::UnsupportedMach)
+    );
+    assert_eq!(
+        evaluate_potential_sphere_patches(
+            &patches,
+            PressureFlow {
+                angular_velocity: Vec3::Z,
+                ..state
+            }
+        ),
+        Err(PressureError::InvalidMotion)
+    );
+}
+
+#[test]
 fn collider_sphere_and_cylinder_converge_to_newtonian_integrals() {
     use crate::{
         aerodynamics::colliders::{ColliderTessellation, collider_mesh},
