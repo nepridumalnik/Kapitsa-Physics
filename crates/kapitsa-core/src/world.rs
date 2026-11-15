@@ -255,6 +255,16 @@ pub struct PartGravityWrench {
     pub moment: Vec3,
 }
 
+/// A single part-owned hull section's aerodynamic contribution. The force is
+/// in world-space N and moment in world-space N·m about the body COM at
+/// evaluation time; this is not a complete part load or a weld reaction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartHullWrench {
+    pub body: BodyId,
+    pub part: PartId,
+    pub wrench: crate::aerodynamics::pressure::PressureWrench,
+}
+
 impl ForceSource {
     /// Returns the dynamic body receiving this force.
     pub fn body(&self) -> BodyId {
@@ -316,6 +326,7 @@ struct AerodynamicsBodyUpdate {
     original: BodyMotion,
     prepared: BodyMotion,
     loads: PreparedAerodynamicLoads,
+    part_hull_wrenches: Vec<PartHullWrench>,
 }
 
 struct PreparedAerodynamicLoads {
@@ -340,6 +351,7 @@ struct AerodynamicsInputs<'a> {
         crate::aerodynamics::pressure::PressurePatch,
         crate::aerodynamics::pressure::BasePressure,
     )],
+    part_hull_wrenches: Option<&'a mut Vec<PartHullWrench>>,
 }
 
 impl<'a> AerodynamicsInputs<'a> {
@@ -354,11 +366,17 @@ impl<'a> AerodynamicsInputs<'a> {
             assembly_wave: None,
             wing_visibility: None,
             base_pressure_patches: &[],
+            part_hull_wrenches: None,
         }
     }
 
     fn with_cluster(mut self, cluster: Option<&'a RigidCluster>) -> Self {
         self.cluster = cluster;
+        self
+    }
+
+    fn with_part_hull_wrenches(mut self, wrenches: &'a mut Vec<PartHullWrench>) -> Self {
+        self.part_hull_wrenches = Some(wrenches);
         self
     }
 
@@ -483,6 +501,8 @@ pub struct PhysicsWorld {
     /// The default is 340 m/s; callers should set this for their atmosphere.
     mesh_sound_speed: f64,
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
+    part_hull_published: Vec<PartHullWrench>,
+    part_hull_pending: Vec<PartHullWrench>,
     owner_pressure: Option<HashMap<BodyId, crate::aerodynamics::pressure::OwnerPressureWorkspace>>,
     owner_pressure_owners: Vec<crate::aerodynamics::geometry::GeometryOwner>,
     materials: MaterialStorage,
@@ -548,6 +568,12 @@ impl PhysicsWorld {
         &self.part_gravity_published
     }
 
+    /// Part hull contributions from the last successful full step. This is a
+    /// historical snapshot and excludes wings, mesh pressure and other loads.
+    pub fn part_hull_wrenches(&self) -> &[PartHullWrench] {
+        &self.part_hull_published
+    }
+
     /// Impact-pressure contribution from prepared mesh patches in the last
     /// successful full step. Forces are world-space newtons; moments are world
     /// N·m about the body's center of mass at evaluation time. This excludes
@@ -600,6 +626,8 @@ impl PhysicsWorld {
             atmosphere: Atmosphere::Vacuum,
             mesh_sound_speed: 340.0,
             aerodynamics_body_updates: Vec::new(),
+            part_hull_published: Vec::new(),
+            part_hull_pending: Vec::new(),
             owner_pressure: None,
             owner_pressure_owners: Vec::new(),
             materials: MaterialStorage::new(),
@@ -1594,6 +1622,7 @@ impl PhysicsWorld {
                 &mut self.part_gravity_published,
                 &mut self.part_gravity_pending,
             );
+            std::mem::swap(&mut self.part_hull_published, &mut self.part_hull_pending);
             self.aerodynamics_body_updates.clear();
             self.clear_gravity_updates();
             self.clear_force_source_updates();
@@ -1958,6 +1987,7 @@ impl PhysicsWorld {
             assembly_wave,
             wing_visibility,
             base_pressure_patches,
+            mut part_hull_wrenches,
         } = inputs;
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
@@ -2248,6 +2278,14 @@ impl PhysicsWorld {
                     })?;
                 body.apply_force(wrench.force).map_err(|_| error())?;
                 body.apply_torque(wrench.moment).map_err(|_| error())?;
+                if let Some(wrenches) = part_hull_wrenches.as_deref_mut() {
+                    wrenches.try_reserve(1).map_err(|_| error())?;
+                    wrenches.push(PartHullWrench {
+                        body: body_id,
+                        part: part_id,
+                        wrench,
+                    });
+                }
             }
         }
         let mut drag_torque = Vec3::ZERO;
@@ -2555,6 +2593,7 @@ impl PhysicsWorld {
         dt: f64,
     ) -> Result<(), StepError> {
         self.aerodynamics_body_updates.clear();
+        self.part_hull_pending.clear();
         let atmosphere = self.atmosphere;
         if matches!(atmosphere, Atmosphere::Vacuum) {
             return Ok(());
@@ -2875,6 +2914,7 @@ impl PhysicsWorld {
                 error: None,
                 original: entry.body.motion(),
                 prepared: entry.body.motion(),
+                part_hull_wrenches: Vec::new(),
                 loads: PreparedAerodynamicLoads {
                     mesh_patches,
                     sphere_patches,
@@ -2911,7 +2951,8 @@ impl PhysicsWorld {
                                         .with_base_pressure(&entry.body.base_pressure_patches)
                                         .with_cluster(entry.cluster.as_ref())
                                         .with_timestep(Some(dt))
-                                        .with_loads(&update.loads),
+                                        .with_loads(&update.loads)
+                                        .with_part_hull_wrenches(&mut update.part_hull_wrenches),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -2927,6 +2968,17 @@ impl PhysicsWorld {
         {
             self.aerodynamics_body_updates.clear();
             return Err(error);
+        }
+
+        for update in &self.aerodynamics_body_updates {
+            self.part_hull_pending
+                .try_reserve(update.part_hull_wrenches.len())
+                .map_err(|_| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                })?;
+            self.part_hull_pending
+                .extend_from_slice(&update.part_hull_wrenches);
         }
 
         // This diagnostic pass never applies forces; the solver path above is

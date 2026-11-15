@@ -84,7 +84,7 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
     };
     const DT: f64 = 1e-4;
     let mut velocities = Vec::new();
-    for distributed in [false, true] {
+    for (distributed, sharded) in [(false, false), (true, true)] {
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));
         let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
@@ -130,15 +130,93 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
         } else {
             world.set_part_aerodynamic_hull(child, vec![drag_section(1.0)?])?;
         }
-        world.step(DT)?;
+        if sharded {
+            world.step_with_shards(
+                DT,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )?;
+        } else {
+            world.step(DT)?;
+        }
+        let snapshot = world.part_hull_wrenches().to_vec();
+        let sum = snapshot
+            .iter()
+            .fold(Vec3::ZERO, |sum, load| sum + load.wrench.force);
+        assert!((sum - Vec3::X * -60.0).length() < 1e-12);
+        assert!(
+            snapshot
+                .iter()
+                .all(|load| load.body == id && load.wrench.moment == Vec3::ZERO)
+        );
+        assert_eq!(snapshot.len(), if distributed { 2 } else { 1 });
+        assert!(snapshot.iter().any(|load| load.part == child));
+        if distributed {
+            assert!(snapshot.iter().any(|load| load.part == root));
+        }
         let state = world.body(id).ok_or("cluster body")?.state();
         assert!((state.linear_velocity().x - (10.0 - 30.0 * DT)).abs() < 1e-12);
         assert!(state.angular_velocity().length() < 1e-12);
         velocities.push(state.linear_velocity());
+        let center = world
+            .body(id)
+            .ok_or("body")?
+            .motion()
+            .world_center_of_mass()?
+            .ok_or("center")?;
+        let bad = world.add_gravity(crate::gravity::CentralGravity::new(center, 1.0)?)?;
+        let failed = if sharded {
+            world.step_with_shards(
+                DT,
+                &mut [Vec::new(), Vec::new()],
+                &super::tests::ScopedThreadExecutor,
+                2,
+            )
+        } else {
+            world.step(DT)
+        };
+        assert!(failed.is_err());
+        assert_eq!(world.part_hull_wrenches(), snapshot.as_slice());
+        world.remove_gravity(bad).ok_or("gravity")?;
     }
     assert!((velocities[0] - velocities[1]).length() < 1e-12);
     // By Newton's law, each 1 kg part accelerates at -30 m/s². The cut
     // reaction is 30 N when drag is all on the child, but zero when each
     // part receives 30 N. The current implementation does not evaluate it.
+    Ok(())
+}
+
+#[test]
+fn part_hull_snapshot_preserves_offset_moment() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    world.set_atmosphere(test_atmosphere(AtmosphericState::new(1.2, Vec3::ZERO)?));
+    let mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY * 2.0)?;
+    let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+    body.set_linear_velocity(Vec3::X * 10.0)?;
+    let id = world.add_body(body)?;
+    let part = world.enable_cluster(id)?;
+    world.set_part_aerodynamic_hull(
+        part,
+        vec![HullSection::new(
+            Transform::new(Vec3::Y, Quat::IDENTITY)?,
+            Vec3::X,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            None,
+        )?],
+    )?;
+    world.step(1e-6)?;
+    let loads = world.part_hull_wrenches();
+    assert_eq!(loads.len(), 1);
+    assert_eq!(loads[0].part, part);
+    assert!((loads[0].wrench.force + Vec3::X * 60.0).length() < 1e-12);
+    assert!((loads[0].wrench.moment - Vec3::Z * 60.0).length() < 1e-12);
+    let state = world.body(id).ok_or("body")?.state();
+    assert!((state.angular_velocity().z - 30.0e-6).abs() < 1e-12);
     Ok(())
 }
