@@ -164,6 +164,13 @@ fn check_surface_work(work: Option<usize>, max_work: usize) -> Result<(), Geomet
     Ok(())
 }
 
+// Accounting estimate only: the standard library does not specify an exact
+// comparison count for its sorting implementation.
+fn sort_work_estimate(len: usize) -> Option<usize> {
+    let factor = usize::BITS as usize - len.leading_zeros() as usize + 1;
+    len.checked_mul(factor)
+}
+
 fn charge_surface_work(
     work: &mut usize,
     amount: usize,
@@ -259,9 +266,7 @@ impl TriangleGrid {
                 )
                 .ok_or(GeometryError::WorkBudgetExceeded)?;
         }
-        let sort_factor = usize::BITS as usize - entry_count.leading_zeros() as usize + 1;
-        let build_work = entry_count
-            .checked_mul(sort_factor)
+        let build_work = sort_work_estimate(entry_count)
             .and_then(|work| work.checked_add(cell_count))
             .and_then(|work| work.checked_add(scan_work))
             .ok_or(GeometryError::WorkBudgetExceeded)?;
@@ -971,9 +976,9 @@ impl PreparedGeometry {
         // all visit every instance, even when its mesh has no triangles.
         check_surface_work(instances.len().checked_mul(4), max_work)?;
         let total = surface_triangle_count(instances)?;
-        let preprocessing = total
-            .checked_mul(16)
-            .and_then(|n| n.checked_mul(usize::BITS as usize - total.leading_zeros() as usize + 1))
+        const TRIANGLE_PREPARATION_WORK: usize = 16;
+        let preprocessing = sort_work_estimate(total)
+            .and_then(|n| n.checked_mul(TRIANGLE_PREPARATION_WORK))
             .and_then(|n| {
                 instances
                     .len()

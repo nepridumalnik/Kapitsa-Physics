@@ -167,6 +167,16 @@ fn triangle_grid_candidates_are_conservative_for_axis_and_diagonal_sweeps() {
 }
 
 #[test]
+fn sort_work_estimate_checks_power_of_two_boundaries_and_overflow() {
+    assert_eq!(sort_work_estimate(0), Some(0));
+    assert_eq!(sort_work_estimate(1), Some(2));
+    assert_eq!(sort_work_estimate(2), Some(6));
+    assert_eq!(sort_work_estimate(3), Some(9));
+    assert_eq!(sort_work_estimate(4), Some(16));
+    assert_eq!(sort_work_estimate(usize::MAX), None);
+}
+
+#[test]
 fn surface_work_charge_rejects_overflow_and_preserves_previous_value() {
     let mut work = 4;
     assert_eq!(charge_surface_work(&mut work, 1, 5), Ok(()));
