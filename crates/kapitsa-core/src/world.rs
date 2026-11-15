@@ -4116,6 +4116,7 @@ impl PhysicsWorld {
             entry.first_collider = Some(id);
             entry.collider_aerodynamic_mesh = None;
             entry.mesh_aerodynamics = None;
+            entry.body.invalidate_collider_base_patches();
         }
         if let Some(caches) = &mut self.assembly_aerodynamics {
             caches.remove(&body);
@@ -4183,6 +4184,7 @@ impl PhysicsWorld {
         if let Some(entry) = self.bodies.get_mut(body.dense) {
             entry.collider_aerodynamic_mesh = None;
             entry.mesh_aerodynamics = None;
+            entry.body.invalidate_collider_base_patches();
         }
         if let Some(caches) = &mut self.assembly_aerodynamics {
             caches.remove(&body);
@@ -4258,6 +4260,7 @@ impl PhysicsWorld {
         if let Some(entry) = self.bodies.get_mut(body.dense) {
             entry.collider_aerodynamic_mesh = None;
             entry.mesh_aerodynamics = None;
+            entry.body.invalidate_collider_base_patches();
         }
         if let Some(caches) = &mut self.assembly_aerodynamics {
             caches.remove(&body);

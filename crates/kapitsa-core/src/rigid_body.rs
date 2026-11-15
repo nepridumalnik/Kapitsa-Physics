@@ -101,6 +101,8 @@ impl RigidBody {
     /// geometry; no wake, overlap or shielding calculation is performed.
     /// These loads are currently supported only on non-cluster Mesh/Colliders bodies;
     /// cluster conversion rejects nonempty configurations without changing the body.
+    /// For Colliders, adding or removing a collider or requesting mutable access
+    /// clears the patches; configure them after editing colliders.
     pub fn set_base_pressure_patches(
         &mut self,
         patches: Vec<(
@@ -119,6 +121,15 @@ impl RigidBody {
         crate::aerodynamics::pressure::BasePressure,
     )] {
         &self.base_pressure_patches
+    }
+
+    pub(crate) fn invalidate_collider_base_patches(&mut self) {
+        if matches!(
+            self.aerodynamics,
+            crate::aerodynamics::Aerodynamics::Colliders
+        ) {
+            self.base_pressure_patches.clear();
+        }
     }
 
     /// Copies only motion, mass, and force state; owned geometry is never cloned.
