@@ -618,6 +618,16 @@ for example, the table gives `(Mach, Re, Cd) = (0.983, 5042, 0.697)` and
 not Re = 10,000, and cannot independently validate Karr's fit, which used
 this report. Other table pages still require careful transcription.
 
+Historical measurements are not automatically independent validation for
+Karr's curve merely because they predate Bailey and Hiatt. In section 4.1
+Bailey and Hiatt state that their faired curves incorporate earlier data,
+and section 4.3 explicitly discusses measurements by Charters and Thomas
+and by Naumann. Karr cites the Bailey and Hiatt report as his source. Thus,
+before using either historical dataset as a holdout, its contribution to the
+specific faired curve used by Karr must be checked. Chronological separation
+alone does not establish independence, and the original individual points and
+their matching Mach, Reynolds number and uncertainty remain to be verified.
+
 For an additional transonic comparison, Usry and Wallace,
 [NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
 forebody axial-force coefficients for a fin-stabilized supercritical body of
