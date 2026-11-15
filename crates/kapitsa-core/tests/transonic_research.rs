@@ -231,6 +231,83 @@ fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "full pressure-profile research diagnostic; run in release mode"]
+fn harris_subsonic_extended_domain_pressure_profile() -> Result<(), String> {
+    // Fixed finite boundaries: not the measured tunnel, sting or viscous flow.
+    // Experimental uncertainty is not established. No acceptance threshold.
+    const EXTENSION: f64 = 2.0;
+    const OUTER: f64 = 3.015625;
+    const MACH: f64 = 0.9;
+    const GAMMA: f64 = 1.4;
+    const TOLERANCE: f64 = 1e-6;
+    const MAX_ITERATIONS: usize = 60000;
+    for intervals in [16_usize, 32, 64] {
+        let dx = 1.0 / intervals as f64;
+        let nx = 5 * intervals + 1;
+        let nr = (OUTER / dx + 0.5).round_ties_even() as usize;
+        let dr = OUTER / (nr as f64 - 0.5);
+        let source = (0..nx)
+            .map(|i| {
+                let x = i as f64 * dx - EXTENSION;
+                if (0.0..=1.0).contains(&x) {
+                    harris_geometry(x).2
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; nx],
+            axis_flux: source,
+            dx,
+            dr,
+            mach: MACH,
+            gamma: GAMMA,
+        };
+        let (iterations, residual) = grid
+            .iterate(TOLERANCE, MAX_ITERATIONS)
+            .map_err(|value| format!("intervals={intervals}: residual={value}"))?;
+        println!(
+            "intervals={intervals} dx={dx:.8} dr={dr:.8} iterations={iterations} residual={residual:.3e}"
+        );
+        let mut count = 0_usize;
+        let mut sum_squared = 0.0;
+        for &(x, measured) in harris_data::TABLE_III_A_MACH_090 {
+            let index = (x + EXTENSION) / dx;
+            let i = index.floor() as usize;
+            let node_cp = |j: usize| {
+                let body_x = j as f64 * dx - EXTENSION;
+                let (radius, slope, _) = harris_geometry(body_x);
+                grid.surface_cp(j, radius, slope)
+            };
+            let (Some(left), Some(right)) = (node_cp(i), node_cp(i + 1)) else {
+                println!(
+                    "intervals={intervals} x/l={x:.3} unavailable without radial extrapolation"
+                );
+                continue;
+            };
+            let t = index - i as f64;
+            let cp = (1.0 - t) * left + t * right;
+            let difference = cp - measured;
+            sum_squared += difference * difference;
+            count += 1;
+            println!(
+                "intervals={intervals} x/l={x:.3} cp={cp:.6} measured={measured:.3} delta={difference:+.6}"
+            );
+        }
+        if count == 0 {
+            return Err(format!("no available stations: intervals={intervals}"));
+        }
+        println!(
+            "intervals={intervals} available={count}/{} rmse={:.6}",
+            harris_data::TABLE_III_A_MACH_090.len(),
+            (sum_squared / count as f64).sqrt()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "synthetic sting sensitivity diagnostic; run in release mode"]
 fn harris_subsonic_synthetic_sting_sensitivity() -> Result<(), String> {
     // This prescribed taper is a sensitivity case, not measured sting geometry.
