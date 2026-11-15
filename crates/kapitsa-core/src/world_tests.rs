@@ -39,6 +39,38 @@ use crate::execution::{ExecutionError, StepExecutor};
 mod free_ball_tests;
 
 #[test]
+fn replay_discards_only_affected_ccd_solves() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mut colliders = Vec::new();
+    for _ in 0..4 {
+        let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        colliders.push(world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?);
+    }
+    let replayed = CollisionPair::new(colliders[0], colliders[1]).ok_or("pair")?;
+    let independent = CollisionPair::new(colliders[2], colliders[3]).ok_or("pair")?;
+    let context = &mut world.collision_system.context;
+    context
+        .ccd_solved_manifolds
+        .push(crate::collision::ContactManifold::new(replayed));
+    context
+        .ccd_solved_manifolds
+        .push(crate::collision::ContactManifold::new(independent));
+    context
+        .ccd_solved_manifolds
+        .push(crate::collision::ContactManifold::new(replayed));
+    context.ccd_replay_pairs.push(replayed);
+    context.discard_replayed_ccd_solves();
+    assert_eq!(context.ccd_solved_manifolds.len(), 1);
+    assert_eq!(context.ccd_solved_manifolds[0].pair, independent);
+    context.clear();
+    assert!(context.ccd_solved_manifolds.is_empty());
+    Ok(())
+}
+
+#[test]
 fn resting_contact_keeps_the_previous_ccd_impact_witness() -> Result<(), Box<dyn std::error::Error>>
 {
     let mut world = PhysicsWorld::new();

@@ -619,6 +619,15 @@ impl PhysicsWorld {
                     if impulse_delta <= 0.0 {
                         return Err(CollisionError::NonConvergent);
                     }
+                    self.collision_system
+                        .context
+                        .ccd_solved_manifolds
+                        .try_reserve(1)
+                        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    self.collision_system
+                        .context
+                        .ccd_solved_manifolds
+                        .push(solved_manifold);
                     let solved_point = solved_manifold
                         .points()
                         .first()
@@ -918,6 +927,16 @@ impl PhysicsWorld {
             let Some(impact) = result.impact else {
                 continue;
             };
+
+            self.collision_system
+                .context
+                .ccd_solved_manifolds
+                .try_reserve(1)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.collision_system
+                .context
+                .ccd_solved_manifolds
+                .push(impact.solved_manifold);
 
             #[cfg(feature = "bench-internals")]
             let commit_started = Instant::now();
@@ -1245,6 +1264,7 @@ impl PhysicsWorld {
             impact_elapsed,
             solved_a,
             solved_b,
+            solved_manifold,
             interaction: CollisionInteraction {
                 pair,
                 sensor: false,
@@ -1589,6 +1609,7 @@ impl PhysicsWorld {
             }
             context.ccd_replay_pairs.sort_unstable();
             context.ccd_replay_pairs.dedup();
+            context.discard_replayed_ccd_solves();
             remove_interactions_for_pairs(
                 &mut context.interactions,
                 &mut context.interaction_indices,
@@ -2405,6 +2426,7 @@ impl PhysicsWorld {
         {
             let context = &mut self.collision_system.context;
             context.ccd_processed_pairs.clear();
+            context.ccd_solved_manifolds.clear();
             context.ccd_processed_time = 0.0;
             context.ccd_toi_cache.fill(Default::default());
             context.ccd_candidate_active.fill(true);

@@ -40,6 +40,7 @@ pub(crate) struct CcdIslandImpactResult {
     pub(crate) impact_elapsed: f64,
     pub(crate) solved_a: BodyState,
     pub(crate) solved_b: BodyState,
+    pub(crate) solved_manifold: ContactManifold,
     pub(crate) interaction: CollisionInteraction,
     #[cfg(feature = "bench-internals")]
     pub(crate) solve_time: std::time::Duration,
@@ -91,6 +92,8 @@ pub(crate) struct StepContext {
     pub(crate) colliders: Vec<CollisionProxy>,
     pub(crate) spatial_proxies: Vec<(ColliderId, Aabb)>,
     pub(crate) manifolds: Vec<ContactManifold>,
+    /// Accepted CCD solves for this tentative step, in execution order.
+    pub(crate) ccd_solved_manifolds: Vec<ContactManifold>,
     pub(crate) solver_bodies: Vec<SolverBody>,
     pub(crate) constrained_starts: Vec<Option<SolverBody>>,
     pub(crate) solver_body_predictions: Vec<usize>,
@@ -130,6 +133,13 @@ pub(crate) struct StepContext {
 }
 
 impl StepContext {
+    /// Discard every tentative CCD solve for pairs being replayed. Multiple
+    /// impacts for a pair are retained until that pair actually replays.
+    pub(crate) fn discard_replayed_ccd_solves(&mut self) {
+        self.ccd_solved_manifolds
+            .retain(|manifold| self.ccd_replay_pairs.binary_search(&manifold.pair).is_err());
+    }
+
     pub(crate) const fn new() -> Self {
         Self {
             predicted_states: Vec::new(),
@@ -140,6 +150,7 @@ impl StepContext {
             colliders: Vec::new(),
             spatial_proxies: Vec::new(),
             manifolds: Vec::new(),
+            ccd_solved_manifolds: Vec::new(),
             solver_bodies: Vec::new(),
             constrained_starts: Vec::new(),
             solver_body_predictions: Vec::new(),
@@ -187,6 +198,7 @@ impl StepContext {
         self.colliders.clear();
         self.spatial_proxies.clear();
         self.manifolds.clear();
+        self.ccd_solved_manifolds.clear();
         self.solver_bodies.clear();
         self.constrained_starts.clear();
         self.solver_body_predictions.clear();
