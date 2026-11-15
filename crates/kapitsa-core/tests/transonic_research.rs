@@ -166,6 +166,103 @@ fn harris_iteration_reproduces_python_diagnostic() {
 }
 
 #[test]
+fn harris_grid_profiles_and_fixed_radius_field_match_python() {
+    // The sting and boundaries do not reproduce the experiment. These are
+    // numerical regression values, not measurements or validation tolerances.
+    let cases = [
+        (
+            17,
+            0.75,
+            [
+                0.196190, -0.037680, -0.105760, -0.124849, -0.111550, -0.059938, 0.066606,
+            ],
+            0.044320,
+        ),
+        (
+            33,
+            0.75,
+            [
+                0.104276, -0.051816, -0.107763, -0.123622, -0.109791, -0.058739, 0.075109,
+            ],
+            0.044704,
+        ),
+        (
+            65,
+            0.75,
+            [
+                0.077474, -0.056453, -0.108625, -0.123408, -0.109210, -0.057948, 0.081071,
+            ],
+            0.044871,
+        ),
+        (
+            17,
+            1.25,
+            [
+                0.198532, -0.037238, -0.107824, -0.128443, -0.113579, -0.058834, 0.069891,
+            ],
+            0.046207,
+        ),
+        (
+            33,
+            1.25,
+            [
+                0.106549, -0.051079, -0.110076, -0.127682, -0.112156, -0.057811, 0.078009,
+            ],
+            0.046782,
+        ),
+        (
+            65,
+            1.25,
+            [
+                0.080083, -0.055647, -0.111106, -0.127769, -0.111749, -0.057121, 0.083856,
+            ],
+            0.047047,
+        ),
+    ];
+    for (n, outer, expected, expected_peak) in cases {
+        let dx = 1.0 / (n - 1) as f64;
+        let nr = (outer / dx + 0.5_f64).round_ties_even() as usize;
+        let dr = outer / (nr as f64 - 0.5);
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; n],
+            axis_flux: (0..n).map(|i| harris_geometry(i as f64 * dx).2).collect(),
+            dx,
+            dr,
+            mach: 0.9,
+            gamma: 1.4,
+        };
+        let (_, residual) = grid.iterate(1e-6, 10000).unwrap();
+        assert!(residual <= 1e-6);
+        for (x, reference) in [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875]
+            .into_iter()
+            .zip(expected)
+        {
+            let (radius, slope, _) = harris_geometry(x);
+            let cp = grid
+                .surface_cp((x / dx).round() as usize, radius, slope)
+                .unwrap();
+            assert!(
+                (cp - reference).abs() < 1e-6,
+                "n={n} outer={outer} x={x}: {cp}"
+            );
+        }
+        let index = 0.125 / dr - 0.5;
+        let k = index.floor() as usize;
+        let w = index - k as f64;
+        let samples: Vec<_> = grid
+            .phi
+            .iter()
+            .map(|row| (1.0 - w) * row[k] + w * row[k + 1])
+            .collect();
+        let slopes: Vec<_> = samples.windows(2).map(|v| (v[1] - v[0]) / dx).collect();
+        let peak = slopes.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!((peak - expected_peak).abs() < 1e-6);
+        let sonic = (1.0 - grid.mach.powi(2)) / (grid.mach.powi(2) * (grid.gamma + 1.0));
+        assert!(slopes.windows(2).all(|u| !(u[0] > sonic && u[1] <= sonic)));
+    }
+}
+
+#[test]
 fn surface_pressure_uses_fixed_radius_derivative() {
     let h = 0.1;
     let grid = MixedGrid {
