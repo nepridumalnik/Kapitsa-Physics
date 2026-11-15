@@ -602,6 +602,20 @@ therefore not an independent dataset for testing Karr; the original individual
 measurement and its uncertainty have not been verified here. This attribution
 does not establish the provenance of the second point.
 
+The original [Bailey and Hiatt report AEDC-TR-70-291](https://archive.org/details/DTIC_AD0721208)
+is available, including individual measurements in table II. Section 4.1
+explains that the points in figure 7 are cross-plots from faired curves, not
+individual measurements; those curves also include earlier researchers' data.
+The experiment used free-flight spheres in dry air, with wall-to-free-stream
+temperature ratio approximately one. Section 3.4 estimates probable Reynolds
+uncertainty of 0.8% for Re > 200 and Mach uncertainty of 0.2%; the authors
+estimate approximately 2% drag uncertainty for their derived faired curves,
+not a guaranteed uncertainty for every individual observation. Section 4.4
+explicitly cautions that the curve near Mach 1 is an estimate with reduced
+confidence because the sphere decelerates through a Mach interval during a
+measurement. Table II needs careful transcription against the scanned pages;
+its data cannot independently validate Karr's fit, which used this report.
+
 For an additional transonic comparison, Usry and Wallace,
 [NASA TN D-6580](https://ntrs.nasa.gov/citations/19720004249), report free-flight
 forebody axial-force coefficients for a fin-stabilized supercritical body of
