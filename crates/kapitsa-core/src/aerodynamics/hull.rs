@@ -1232,6 +1232,36 @@ mod tests {
     }
 
     #[test]
+    fn mach_curve_is_continuous_at_representative_regime_boundaries() {
+        // Synthetic coefficients exercise interpolation, not physical accuracy.
+        let curve = MachCurve::new(
+            [
+                (0.0, 0.4, 0.8),
+                (0.3, 0.45, 0.85),
+                (1.0, 0.9, 1.1),
+                (1.2, 0.8, 1.0),
+                (2.0, 0.7, 0.9),
+            ]
+            .into_iter()
+            .map(|(mach, axial_cd, crossflow_cd)| MachKnot {
+                mach,
+                axial_cd,
+                crossflow_cd,
+            })
+            .collect(),
+        )
+        .unwrap();
+        for mach in [0.3_f64, 1.0, 1.2] {
+            let center = curve.coefficients(mach).unwrap();
+            for neighbor in [mach.next_down(), mach.next_up()] {
+                let side = curve.coefficients(neighbor).unwrap();
+                assert!((side.0 - center.0).abs() <= 4.0 * f64::EPSILON);
+                assert!((side.1 - center.1).abs() <= 4.0 * f64::EPSILON);
+            }
+        }
+    }
+
+    #[test]
     fn mach_curve_knots_interpolation_and_explicit_domain() {
         let c = curve();
         for k in c.knots() {
