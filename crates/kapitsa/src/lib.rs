@@ -91,7 +91,8 @@ pub mod world {
     };
     pub use kapitsa_core::world::{
         BodyId, ClusterError, ColliderId, ErrorPolicy, ForceSource, ForceSourceError,
-        ForceSourceId, GravityId, JointId, JointTarget, PartId, StepError, WeldId, WorldError,
+        ForceSourceId, GravityId, JointId, JointTarget, PartId, StepDiagnostics, StepError, WeldId,
+        WorldError,
     };
 }
 
@@ -112,7 +113,7 @@ pub use kapitsa_core::{
     world::{
         AddChunkBatchError, AddChunkError, BodyId, ChunkId, ChunkOperationError, ClusterError,
         ColliderId, ErrorPolicy, ForceSourceId, GravityId, JointId, JointTarget, PartId,
-        RemoveChunkBatchError, StepError, WeldId, WorldError,
+        RemoveChunkBatchError, StepDiagnostics, StepError, WeldId, WorldError,
     },
 };
 

@@ -679,10 +679,30 @@ pub enum ErrorPolicy {
     Strict,
 }
 
+/// Degradations observed in the last successfully committed full step.
+///
+/// Counts are per affected body, not per CCD event. The CCD limit policy is
+/// configured independently of [`ErrorPolicy`], including in strict mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StepDiagnostics {
+    /// Bodies whose motion was clipped by the collision subsystem after its
+    /// configured CCD event limit was reached.
+    pub collision_ccd_limit_clipped_bodies: usize,
+}
+
+impl StepDiagnostics {
+    /// Whether any recorded approximation was applied.
+    pub fn used_fallback(self) -> bool {
+        self.collision_ccd_limit_clipped_bodies != 0
+    }
+}
+
 /// Owns rigid bodies and colliders and assigns IDs scoped to this world instance.
 pub struct PhysicsWorld {
     world_id: u64,
     error_policy: ErrorPolicy,
+    step_diagnostics: StepDiagnostics,
+    pending_step_diagnostics: StepDiagnostics,
     body_revision: u64,
     automatic_weld_failure: Option<(f64, f64)>,
     #[cfg(test)]
@@ -784,6 +804,12 @@ impl BodyStep {
 }
 
 impl PhysicsWorld {
+    /// Diagnostics of the last committed full step, or empty before one succeeds.
+    /// Failed steps and low-level shard operations do not publish diagnostics.
+    pub fn step_diagnostics(&self) -> StepDiagnostics {
+        self.step_diagnostics
+    }
+
     /// Returns the policy used for full physics steps.
     pub fn error_policy(&self) -> ErrorPolicy {
         self.error_policy
@@ -1284,6 +1310,12 @@ impl PhysicsWorld {
         Self {
             world_id: 0,
             error_policy: ErrorPolicy::Realtime,
+            step_diagnostics: StepDiagnostics {
+                collision_ccd_limit_clipped_bodies: 0,
+            },
+            pending_step_diagnostics: StepDiagnostics {
+                collision_ccd_limit_clipped_bodies: 0,
+            },
             body_revision: 0,
             automatic_weld_failure: None,
             #[cfg(test)]
@@ -2303,6 +2335,7 @@ impl PhysicsWorld {
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T, StepError>,
     ) -> Result<T, StepError> {
+        self.pending_step_diagnostics = StepDiagnostics::default();
         self.contact_impulses_pending.clear();
         self.contact_impulses_omitted_pending = 0;
         self.contact_ccd_clipped_pending = false;
@@ -2431,6 +2464,7 @@ impl PhysicsWorld {
             self.rollback_aerodynamics_updates();
             self.rollback_force_source_updates();
         } else {
+            self.step_diagnostics = self.pending_step_diagnostics;
             if let Some(workspaces) = &mut self.owner_pressure {
                 workspaces.retain(|_, workspace| workspace.commit());
             }
@@ -2630,8 +2664,16 @@ impl PhysicsWorld {
         self.contact_impulses_pending.clear();
         self.contact_impulses_omitted_pending = 0;
         let context = &self.collision_system.context;
-        self.contact_ccd_clipped_pending =
-            context.ccd_clipped_bodies.iter().any(|&clipped| clipped);
+        self.pending_step_diagnostics
+            .collision_ccd_limit_clipped_bodies = context
+            .ccd_clipped_bodies
+            .iter()
+            .filter(|&&clipped| clipped)
+            .count();
+        self.contact_ccd_clipped_pending = self
+            .pending_step_diagnostics
+            .collision_ccd_limit_clipped_bodies
+            != 0;
         let count = context
             .ccd_solved_manifolds
             .iter()

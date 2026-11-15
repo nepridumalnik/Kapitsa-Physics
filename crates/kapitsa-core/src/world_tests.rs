@@ -4673,3 +4673,27 @@ fn benchmark_force_source_update_scaling() {
         }
     }
 }
+#[test]
+fn step_diagnostics_publish_only_on_success() -> Result<(), super::StepError> {
+    use super::{PhysicsWorld, StepDiagnostics, StepError};
+
+    let mut world = PhysicsWorld::new();
+    let clipped = StepDiagnostics {
+        collision_ccd_limit_clipped_bodies: 2,
+    };
+    world.with_force_source_updates(|world| {
+        world.pending_step_diagnostics = clipped;
+        Ok(())
+    })?;
+    assert!(world.step_diagnostics().used_fallback());
+    assert_eq!(world.step_diagnostics(), clipped);
+    let failed: Result<(), StepError> = world.with_force_source_updates(|world| {
+        world.pending_step_diagnostics = StepDiagnostics::default();
+        Err(StepError::InvalidStepResults)
+    });
+    assert_eq!(failed, Err(StepError::InvalidStepResults));
+    assert_eq!(world.step_diagnostics(), clipped);
+    world.step(0.01)?;
+    assert_eq!(world.step_diagnostics(), StepDiagnostics::default());
+    Ok(())
+}
