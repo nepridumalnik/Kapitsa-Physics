@@ -1125,6 +1125,8 @@ impl PreparedGeometry {
         const CLIP_VERTEX_WORK: usize = 16;
         const POLYGON_VISIT_WORK: usize = 1;
         const PARTITION_TRIANGLE_WORK: usize = 16;
+        // Reserve the outer frame's vertex, center and normal transformations.
+        const PATCH_FRAME_WORK: usize = 1;
 
         let mut triangles = Self::surface_triangles(instances, max_work)?;
         // Exact canonical vertex triples avoid centroid/area aliasing and
@@ -1375,6 +1377,11 @@ impl PreparedGeometry {
                 )?;
             }
         }
+        let frame_work = patches
+            .len()
+            .checked_mul(PATCH_FRAME_WORK)
+            .ok_or(GeometryError::WorkBudgetExceeded)?;
+        charge_surface_work(&mut work, frame_work, max_work)?;
         Ok(PreparedSurfacePatches { patches })
     }
 

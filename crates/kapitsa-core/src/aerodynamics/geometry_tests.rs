@@ -861,6 +861,37 @@ fn patch_budget_includes_unshadowed_partition_output() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn patch_frame_conversion_is_reserved_before_return() {
+    use std::cell::Cell;
+
+    const MAX_WORK: usize = 10_000;
+    let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]]).unwrap();
+    let instances = [instance(&mesh, Vec3::ZERO)];
+    let geometry = surface_geometry(&instances);
+    let calls = Cell::new(0);
+    let evaluate = |budget| {
+        calls.set(0);
+        geometry.surface_patches_with_flow(&instances, budget, |_| {
+            calls.set(calls.get() + 1);
+            Ok(Vec3::X)
+        })
+    };
+    let (mut low, mut high) = (0, MAX_WORK);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if evaluate(middle).is_ok() {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    assert_eq!(evaluate(high).unwrap().len(), 1);
+    let successful_calls = calls.get();
+    assert_eq!(evaluate(low), Err(GeometryError::WorkBudgetExceeded));
+    assert_eq!(calls.get(), successful_calls);
+}
+
+#[test]
 fn partially_clipped_patches_respect_exact_budget_boundary() {
     const MAX_WORK: usize = 100_000;
     const EPSILON: f64 = 0.01;
