@@ -302,6 +302,64 @@ fn harris_subsonic_fixed_domain_grid_refinement() -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "low-Mach stopping tolerance diagnostic; run in release mode"]
+fn harris_low_mach_profile_stopping_tolerance() -> Result<(), String> {
+    const EXTENSION: f64 = 0.5;
+    const OUTER: f64 = 1.25;
+    const CUTOFF: f64 = 36.0 / 38.240;
+    const STATIONS: [f64; 6] = [0.016, 0.023, 0.052, 0.89, 0.927, 0.937];
+    for intervals in [64_usize, 96] {
+        let dx = 1.0 / intervals as f64;
+        let nx = 2 * intervals + 1;
+        let nr = (OUTER / dx + 0.5).round() as usize;
+        let dr = OUTER / (nr as f64 - 0.5);
+        let mut grid = MixedGrid {
+            phi: vec![vec![0.0; nr]; nx],
+            axis_flux: (0..nx)
+                .map(|i| harris_conservative_source(i as f64 * dx - EXTENSION, dx))
+                .collect(),
+            dx,
+            dr,
+            mach: 0.3,
+            gamma: 1.4,
+        };
+        let mut previous = [None; STATIONS.len()];
+        for tolerance in [1e-8, 1e-10] {
+            let (iterations, residual) = grid.iterate(tolerance, 120_000).map_err(|value| {
+                format!("intervals={intervals} tolerance={tolerance} residual={value}")
+            })?;
+            println!(
+                "stopping intervals={intervals} tolerance={tolerance:.0e} iterations={iterations} residual={residual:.3e}"
+            );
+            for (station, x) in STATIONS.into_iter().enumerate() {
+                let index = (x + EXTENSION) / dx;
+                let i = index.floor() as usize;
+                let t = index - i as f64;
+                let left = i as f64 * dx - EXTENSION;
+                let cp = if left < CUTOFF && left + dx >= CUTOFF {
+                    None
+                } else {
+                    let node = |j: usize| {
+                        let (radius, slope, _) = harris_geometry(j as f64 * dx - EXTENSION);
+                        grid.surface_cp(j, radius, slope)
+                    };
+                    node(i).zip(node(i + 1)).map(|(a, b)| (1.0 - t) * a + t * b)
+                };
+                let change = cp
+                    .zip(previous[station])
+                    .map(|(current, old)| current - old);
+                println!(
+                    "stopping intervals={intervals} tolerance={tolerance:.0e} x={x:.3} cp={cp:?} change={change:?} stencil_crosses_cutoff={}",
+                    left - dx < CUTOFF && left + 2.0 * dx >= CUTOFF
+                );
+                previous[station] = cp;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "low-Mach profile and balance diagnostic; run in release mode"]
 fn harris_low_mach_conservative_profile_and_balance() -> Result<(), String> {
     // Finite idealized domain; Harris Mach 0.9 stations provide coordinates
