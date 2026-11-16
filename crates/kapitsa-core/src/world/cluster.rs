@@ -91,7 +91,13 @@ impl PhysicsWorld {
         let states = contact
             .isolated_velocity_states
             .ok_or(Error::IncompleteLoads)?;
-        let part_id = contact.parts[side].ok_or(Error::IncompleteLoads)?;
+        let other_body = self
+            .collider_body(if side == 0 {
+                contact.pair.b
+            } else {
+                contact.pair.a
+            })
+            .ok_or(Error::IncompleteLoads)?;
         let before = states[0][side];
         let after = states[1][side];
         let mut impact_state = *state;
@@ -111,67 +117,79 @@ impl PhysicsWorld {
             .angular_velocity()
             .checked_sub(before.angular_velocity())
             .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-        let mut impulse = Vec3::ZERO;
-        let mut angular = Vec3::ZERO;
-        let mut count = 0usize;
-        for (point, point_side) in std::iter::once((contact, side)).chain(matching) {
-            if point.pair != contact.pair
-                || point_side != side
-                || point.ccd
-                || point.parts[side] != Some(part_id)
-                || point.isolated_velocity_states != Some(states)
-            {
-                return Err(Error::IncompleteLoads);
-            }
-            let contribution = if side == 0 {
-                point.impulse_on_b.checked_mul_scalar(-1.0)
-            } else {
-                Some(point.impulse_on_b)
-            }
-            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-            let moment = point.points[side]
-                .checked_sub(origin)
-                .and_then(|arm| arm.checked_cross(contribution))
-                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-            impulse = impulse
-                .checked_add(contribution)
-                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-            angular = angular
-                .checked_add(moment)
-                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-            count = count
-                .checked_add(1)
-                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-        }
-        let manifold = context
-            .manifolds
-            .iter()
-            .find(|manifold| manifold.pair == contact.pair)
-            .ok_or(Error::IncompleteLoads)?;
-        if manifold.len() != count {
-            return Err(Error::IncompleteLoads);
-        }
         let mut inputs = Vec::new();
         let mut parents = Vec::new();
+        let mut indices = HashMap::new();
         inputs
             .try_reserve_exact(tree.len())
             .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
         parents
             .try_reserve_exact(tree.len())
             .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
-        let mut found = false;
-        for part in &tree {
-            let hit = part.part == part_id;
-            found |= hit;
+        indices
+            .try_reserve(tree.len())
+            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
+        for (index, part) in tree.iter().enumerate() {
+            indices.insert(part.part, index);
             inputs.push(PartImpulse {
                 mass: part.mass,
                 pose: part.pose,
-                linear: if hit { impulse } else { Vec3::ZERO },
-                angular: if hit { angular } else { Vec3::ZERO },
+                linear: Vec3::ZERO,
+                angular: Vec3::ZERO,
             });
             parents.push(part.parent);
         }
-        if !found {
+        let mut count = 0usize;
+        for (point, point_side) in std::iter::once((contact, side)).chain(matching) {
+            let point_states = point
+                .isolated_velocity_states
+                .ok_or(Error::IncompleteLoads)?;
+            let point_other = self.collider_body(if point_side == 0 {
+                point.pair.b
+            } else {
+                point.pair.a
+            });
+            if point.ccd
+                || point_other != Some(other_body)
+                || point_states[0][point_side] != before
+                || point_states[1][point_side] != after
+            {
+                return Err(Error::IncompleteLoads);
+            }
+            let part = point.parts[point_side].ok_or(Error::IncompleteLoads)?;
+            let index = *indices.get(&part).ok_or(Error::IncompleteLoads)?;
+            let contribution = if point_side == 0 {
+                point.impulse_on_b.checked_mul_scalar(-1.0)
+            } else {
+                Some(point.impulse_on_b)
+            }
+            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            let moment = point.points[point_side]
+                .checked_sub(origin)
+                .and_then(|arm| arm.checked_cross(contribution))
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            inputs[index].linear = inputs[index]
+                .linear
+                .checked_add(contribution)
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            inputs[index].angular = inputs[index]
+                .angular
+                .checked_add(moment)
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            count = count
+                .checked_add(1)
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        }
+        let expected = context
+            .manifolds
+            .iter()
+            .filter(|manifold| {
+                self.collider_body(manifold.pair.a) == Some(state.body)
+                    || self.collider_body(manifold.pair.b) == Some(state.body)
+            })
+            .try_fold(0usize, |count, manifold| count.checked_add(manifold.len()))
+            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        if expected != count {
             return Err(Error::IncompleteLoads);
         }
         let reactions = tree_impulse_reactions(

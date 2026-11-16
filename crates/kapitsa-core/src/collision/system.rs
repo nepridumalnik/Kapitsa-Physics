@@ -1475,11 +1475,10 @@ impl CollisionSystem {
                     .get_mut(global_index)
                     .ok_or(CollisionError::InvalidContact)?;
                 original.manifold = solved.manifold;
-                // An isolated discrete manifold with no positional projection has
+                // An isolated two-body discrete island without position projection has
                 // one simultaneous velocity-solver event. Preserve its input
                 // and output states; all other cases deliberately remain None.
                 if island.joints.is_empty()
-                    && island.manifolds.len() == 1
                     && island.bodies.len() == 2
                     && context.ccd_solved_manifolds.is_empty()
                     && !context.ccd_clipped_bodies.iter().any(|&clipped| clipped)

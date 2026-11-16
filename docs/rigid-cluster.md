@@ -234,7 +234,7 @@ to certify the full impulse ledger.
 Each `ContactImpulse` additionally carries optional body transforms from its
 velocity solve, before positional correction. These are diagnostic witnesses,
 not a certificate of simultaneous impacts or complete velocity changes.
-For a single-manifold discrete solver island without joints, CCD solves or clipping,
+For a two-body discrete solver island, possibly with multiple manifolds, without joints, CCD solves or clipping,
 `isolated_velocity_states` also records before/after states when position
 projection did not change either pose. The record is committed with the contact
 snapshot and retained on failure. It does not by itself certify all physical
@@ -254,7 +254,7 @@ welds, preserving them through cluster topology changes.
 `set_automatic_weld_impulse_tolerances` separately stores absolute momentum
 balance tolerances in N·s and N·m·s; these are not force-balance tolerances.
 With automatic weld failure enabled, a configured tolerance permits checks for
-one discrete isolated manifold with recorded owners and solver
+one discrete isolated two-body island with recorded owners for all manifold points and solver
 states, no omitted impulses, CCD solves or clipping, and no pose change during
 position projection. The force ledger must also be certified. The solver's
 momentum change is checked against the sum of attributed impulses and moments at the contact pose;

@@ -299,9 +299,9 @@ pub struct ContactImpulse {
     /// Poses at the velocity solve, before position projection, when available.
     /// Presence does not certify a complete impulse ledger or event timing.
     pub velocity_transforms: Option<[Transform; 2]>,
-    /// Before and after solver states for an isolated discrete manifold when
-    /// available. All its points share the same states. The outer array is
-    /// before/after, the inner array is A/B.
+    /// Before and after solver states for an isolated two-body discrete island
+    /// when available. Its manifolds share the same states, ordered by each
+    /// manifold's A/B sides. The outer array is before/after.
     /// Other load paths must still be checked before weld-balance use.
     pub isolated_velocity_states: Option<[[BodyState; 2]; 2]>,
     pub impulse_on_b: Vec3,
