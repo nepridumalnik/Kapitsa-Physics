@@ -599,6 +599,30 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
             },
         )?;
         let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+        let limits = crate::cluster::impulse::ImpulseStrength {
+            max_linear: Some(5.0),
+            max_angular: None,
+        };
+        world.set_weld_impulse_strength(weld, Some(limits))?;
+        assert_eq!(
+            world.weld(weld).ok_or("weld")?.impulse_strength(),
+            Some(limits)
+        );
+        assert!(
+            world
+                .set_weld_impulse_strength(
+                    weld,
+                    Some(crate::cluster::impulse::ImpulseStrength {
+                        max_linear: Some(f64::NAN),
+                        max_angular: None
+                    })
+                )
+                .is_err()
+        );
+        assert_eq!(
+            world.weld(weld).ok_or("weld")?.impulse_strength(),
+            Some(limits)
+        );
         world.add_force_source_for_part(child, Vec3::ZERO, Vec3::X * 10.0)?;
         world
             .set_automatic_weld_failure(Some((1e-10, 1e-10)))

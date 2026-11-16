@@ -171,6 +171,7 @@ fn weld(world: &mut PhysicsWorld, a: PartId, b: PartId) -> WeldId {
         part_a: a,
         part_b: b,
         desc,
+        impulse_strength: None,
     }) {
         Ok(value) => value,
         Err(error) => panic!("weld: {error}"),

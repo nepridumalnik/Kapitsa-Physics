@@ -579,6 +579,7 @@ impl PhysicsWorld {
             part_a: parent,
             part_b: part,
             desc: weld_desc,
+            impulse_strength: None,
         }) {
             Ok(value) => value,
             Err(_) => {
@@ -1194,6 +1195,7 @@ impl PhysicsWorld {
                 part_a: first_root,
                 part_b: second_root,
                 desc: weld_desc,
+                impulse_strength: None,
             })
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let bridge = WeldId {
@@ -2084,6 +2086,43 @@ impl PhysicsWorld {
             return None;
         }
         self.welds.get(weld.dense)
+    }
+
+    /// Stores independent impulse limits on a weld, or clears them with `None`.
+    ///
+    /// Linear and angular limits are in N·s and N·m·s. This configuration is
+    /// currently metadata only: automatic fracture does not evaluate it yet.
+    /// An unbreakable weld cannot be given impulse limits. Invalid input leaves
+    /// both the existing limits and prepared step results unchanged.
+    pub fn set_weld_impulse_strength(
+        &mut self,
+        weld: WeldId,
+        strength: Option<crate::cluster::impulse::ImpulseStrength>,
+    ) -> Result<(), ClusterError> {
+        let entry = self.weld(weld).ok_or(ClusterError::InvalidWeldId)?;
+        if let Some(value) = strength {
+            if matches!(
+                entry.desc().strength,
+                crate::cluster::WeldStrength::Unbreakable
+            ) || value
+                .exceeded_by(crate::cluster::impulse::ImpulseReaction {
+                    linear: Vec3::ZERO,
+                    angular: Vec3::ZERO,
+                })
+                .is_err()
+            {
+                return Err(ClusterError::InvalidWeld);
+            }
+        }
+        if entry.impulse_strength() == strength {
+            return Ok(());
+        }
+        self.welds
+            .get_mut(weld.dense)
+            .ok_or(ClusterError::InvalidWeldId)?
+            .impulse_strength = strength;
+        self.body_revision = self.body_revision.wrapping_add(1);
+        Ok(())
     }
 
     pub fn part_body(&self, part: PartId) -> Option<BodyId> {
