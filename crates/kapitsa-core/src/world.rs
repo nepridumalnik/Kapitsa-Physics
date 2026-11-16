@@ -289,7 +289,9 @@ pub struct PartWingWrench {
 
 /// Diagnostic witness for one CCD solver event, not a certificate of a complete
 /// impact history. Time is in seconds from the start of the step; states are
-/// ordered before/after, then by the contact pair's A/B sides.
+/// ordered before/after, then by the contact pair's A/B sides. The after state
+/// includes solver position projection and may have a different pose from the
+/// velocity-solve pose; use `ContactImpulse::velocity_transforms` for the latter.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CcdContactEvent {
     pub time: f64,

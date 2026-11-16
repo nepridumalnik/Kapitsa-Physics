@@ -267,7 +267,10 @@ refusal or realtime diagnostic skipping; sequential CCD fracture is unsupported.
 A possible first supported CCD case is one complete, isolated two-body impact
 with no joints, clipping, or other impulses on the assembly during the step.
 This is not implemented. CCD contact impulses carry a diagnostic witness with
-the event time and the solver's before/after body states. The sequential path can
+the event time and the solver's before/after body states. The latter state may
+include position projection; velocity-solve points and transforms refer to the
+pre-projection pose. An impulse-balance certificate must reject a pose change or
+account for it explicitly. The sequential path can
 solve and resweep further impacts; the parallel path commits its own island
 results. A replay can discard earlier CCD solves. Consequently, a single entry
 in the final journal alone does not certify that it is the only relevant event.

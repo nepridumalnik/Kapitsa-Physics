@@ -322,6 +322,7 @@ fn ccd_solver_returns_velocity_impulse_and_application_points()
         contact.velocity_transforms,
         Some([bodies[0].state().transform(), bodies[1].state().transform()])
     );
+    assert_ne!(solved.transform(), bodies[1].state().transform());
     let impulse = contact.velocity_impulse.ok_or("velocity impulse")?;
     assert!((solved.linear_velocity() - initial - impulse).length() < 1e-12);
     assert!(impulse.x.abs() > 0.0 && impulse.y > 0.0);
