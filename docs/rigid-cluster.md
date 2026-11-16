@@ -253,3 +253,6 @@ limits from force limits.
 `PhysicsWorld::set_weld_impulse_strength` stores optional limits on breakable
 welds, preserving them through cluster topology changes. These limits are
 configuration metadata only: automatic fracture does not yet evaluate them.
+`set_automatic_weld_impulse_tolerances` separately stores absolute momentum
+balance tolerances in N·s and N·m·s; these are not force-balance tolerances.
+The setting is not yet used by automatic fracture and does not enable it.

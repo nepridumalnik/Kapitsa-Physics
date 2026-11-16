@@ -739,6 +739,7 @@ pub struct PhysicsWorld {
     pending_step_diagnostics: StepDiagnostics,
     body_revision: u64,
     automatic_weld_failure: Option<(f64, f64)>,
+    automatic_weld_impulse_tolerances: Option<(f64, f64)>,
     #[cfg(test)]
     weld_split_fail_after: Option<usize>,
     bodies: DensePool<BodyEntry>,
@@ -870,6 +871,31 @@ impl PhysicsWorld {
         }
         self.automatic_weld_failure = tolerances;
         Ok(())
+    }
+
+    /// Configure absolute linear and angular impulse-balance tolerances in
+    /// N·s and N·m·s respectively. `None` clears the configuration (default).
+    ///
+    /// This only stores tolerances for future automatic impact checks; it does
+    /// not enable such checks or change the handling of contacts. Both values
+    /// must be finite and nonnegative. An invalid update preserves the previous
+    /// configuration.
+    pub fn set_automatic_weld_impulse_tolerances(
+        &mut self,
+        tolerances: Option<(f64, f64)>,
+    ) -> Result<(), WeldBalanceError> {
+        if tolerances.is_some_and(|(linear, angular)| {
+            !linear.is_finite() || linear < 0.0 || !angular.is_finite() || angular < 0.0
+        }) {
+            return Err(WeldBalanceError::InvalidTolerance);
+        }
+        self.automatic_weld_impulse_tolerances = tolerances;
+        Ok(())
+    }
+
+    /// Returns the configured impulse-balance tolerances, if any.
+    pub fn automatic_weld_impulse_tolerances(&self) -> Option<(f64, f64)> {
+        self.automatic_weld_impulse_tolerances
     }
     /// Plans weld failures for the last certified part-source snapshot without
     /// changing the world. Both thresholds compare vector magnitudes; equality
@@ -1406,6 +1432,7 @@ impl PhysicsWorld {
             },
             body_revision: 0,
             automatic_weld_failure: None,
+            automatic_weld_impulse_tolerances: None,
             #[cfg(test)]
             weld_split_fail_after: None,
             bodies: DensePool::new(),

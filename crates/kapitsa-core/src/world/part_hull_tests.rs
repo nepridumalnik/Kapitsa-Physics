@@ -777,6 +777,40 @@ fn collider_cluster_fractures_in_contact_free_step() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn impulse_balance_tolerances_are_independent_and_transactional()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    assert_eq!(world.automatic_weld_impulse_tolerances(), None);
+    world
+        .set_automatic_weld_impulse_tolerances(Some((0.0, 2e-8)))
+        .map_err(|e| format!("{e:?}"))?;
+    world
+        .set_automatic_weld_failure(Some((5.0, 7.0)))
+        .map_err(|e| format!("{e:?}"))?;
+    for invalid in [
+        (f64::NAN, 0.0),
+        (0.0, f64::INFINITY),
+        (-1.0, 0.0),
+        (0.0, -1.0),
+    ] {
+        assert!(matches!(
+            world.set_automatic_weld_impulse_tolerances(Some(invalid)),
+            Err(super::WeldBalanceError::InvalidTolerance)
+        ));
+        assert_eq!(world.automatic_weld_impulse_tolerances(), Some((0.0, 2e-8)));
+    }
+    world
+        .set_automatic_weld_failure(None)
+        .map_err(|e| format!("{e:?}"))?;
+    assert_eq!(world.automatic_weld_impulse_tolerances(), Some((0.0, 2e-8)));
+    world
+        .set_automatic_weld_impulse_tolerances(None)
+        .map_err(|e| format!("{e:?}"))?;
+    assert_eq!(world.automatic_weld_impulse_tolerances(), None);
+    Ok(())
+}
+
+#[test]
 fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn std::error::Error>>
 {
     use crate::cluster::{ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength};
