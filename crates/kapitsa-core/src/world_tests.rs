@@ -829,12 +829,15 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths()
     };
     use crate::joint::JointFrame;
     for sharded in [false, true] {
-        for (limit, ccd, box_contact) in [
-            (1.0, false, false),
-            (100.0, false, false),
-            (1.0, true, false),
-            (1.0, false, true),
-            (100.0, false, true),
+        for (limit, ccd, box_contact, angular_limit, shifted_anchor) in [
+            (1.0, false, false, false, false),
+            (100.0, false, false, false, false),
+            (1.0, true, false, false, false),
+            (1.0, false, true, false, false),
+            (100.0, false, true, false, false),
+            (1.0, false, false, true, true),
+            (100.0, false, false, true, true),
+            (1.0, false, false, true, false),
         ] {
             let mut world = PhysicsWorld::new();
             world.set_error_policy(crate::world::ErrorPolicy::Strict);
@@ -891,8 +894,16 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths()
                     angular_velocity: Vec3::ZERO,
                 },
                 WeldDesc {
-                    frame_a: JointFrame::IDENTITY,
-                    frame_b: JointFrame::IDENTITY,
+                    frame_a: if shifted_anchor {
+                        JointFrame::new(Vec3::Y, Quat::IDENTITY)
+                    } else {
+                        JointFrame::IDENTITY
+                    },
+                    frame_b: if shifted_anchor {
+                        JointFrame::new(Vec3::Y, Quat::IDENTITY)
+                    } else {
+                        JointFrame::IDENTITY
+                    },
                     strength: WeldStrength::Breakable {
                         max_force: Some(1e6),
                         max_torque: None,
@@ -908,8 +919,8 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths()
             world.set_weld_impulse_strength(
                 weld,
                 Some(ImpulseStrength {
-                    max_linear: Some(limit),
-                    max_angular: None,
+                    max_linear: if angular_limit { None } else { Some(limit) },
+                    max_angular: if angular_limit { Some(limit) } else { None },
                 }),
             )?;
             world
@@ -954,8 +965,9 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths()
             } else {
                 world.step(dt)?;
             }
-            assert_eq!(world.weld(weld).is_none(), limit == 1.0);
-            assert_eq!(world.part_body(child) != Some(body), limit == 1.0);
+            let should_break = limit == 1.0 && (!angular_limit || shifted_anchor);
+            assert_eq!(world.weld(weld).is_none(), should_break);
+            assert_eq!(world.part_body(child) != Some(body), should_break);
             assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 0);
             if box_contact {
                 assert!(world.contact_impulses().len() > 1);
