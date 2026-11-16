@@ -1087,13 +1087,21 @@ fn replay_discards_only_affected_ccd_solves() -> Result<(), Box<dyn std::error::
     }
     let replayed = CollisionPair::new(colliders[0], colliders[1]).ok_or("pair")?;
     let independent = CollisionPair::new(colliders[2], colliders[3]).ok_or("pair")?;
+    let state = *world
+        .body(world.collider_body(colliders[0]).ok_or("body")?)
+        .ok_or("body")?
+        .state();
+    let witness = crate::world::CcdContactEvent {
+        time: 0.25,
+        states: [[state, state], [state, state]],
+    };
+    let mut retained = crate::collision::ContactManifold::new(independent);
+    retained.ccd_event = Some(witness);
     let context = &mut world.collision_system.context;
     context
         .ccd_solved_manifolds
         .push(crate::collision::ContactManifold::new(replayed));
-    context
-        .ccd_solved_manifolds
-        .push(crate::collision::ContactManifold::new(independent));
+    context.ccd_solved_manifolds.push(retained);
     context
         .ccd_solved_manifolds
         .push(crate::collision::ContactManifold::new(replayed));
@@ -1101,6 +1109,7 @@ fn replay_discards_only_affected_ccd_solves() -> Result<(), Box<dyn std::error::
     context.discard_replayed_ccd_solves();
     assert_eq!(context.ccd_solved_manifolds.len(), 1);
     assert_eq!(context.ccd_solved_manifolds[0].pair, independent);
+    assert_eq!(context.ccd_solved_manifolds[0].ccd_event, Some(witness));
     context.clear();
     assert!(context.ccd_solved_manifolds.is_empty());
     Ok(())
