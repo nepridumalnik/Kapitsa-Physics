@@ -860,6 +860,17 @@ fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn
         }
         assert!(world.weld(weld).is_some());
         assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
+        let snapshot = world
+            .cluster_load_states_published
+            .iter()
+            .find(|state| state.body == body)
+            .ok_or("cluster snapshot")?;
+        assert!(snapshot.part_surfaces_certified);
+        assert!(snapshot.collision_loads_uncertified);
+        assert!(matches!(
+            world.part_aerodynamic_weld_reactions(body, 1e-9, 1e-9),
+            Err(super::WeldBalanceError::IncompleteLoads)
+        ));
         assert!(world.step(-1.0).is_err());
         assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
     }

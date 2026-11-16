@@ -319,7 +319,8 @@ pub struct ClusterLoadState {
     /// World-space pose and velocities before integration.
     pub state: BodyState,
     pub(crate) mass: Option<MassProperties>,
-    // Conservative evaluation-time certificate; never inferred from diagnostics.
+    // Continuous-load certificates at force evaluation, independent of collisions.
+    // They do not certify that contact or CCD impulses have been accounted for.
     pub(crate) force_free_certified: bool,
     pub(crate) part_sources_certified: bool,
     pub(crate) part_hull_certified: bool,
@@ -334,11 +335,6 @@ pub struct ClusterLoadState {
 impl ClusterLoadState {
     fn invalidate_collision_loads(&mut self) {
         self.collision_loads_uncertified = true;
-        self.force_free_certified = false;
-        self.part_sources_certified = false;
-        self.part_hull_certified = false;
-        self.part_wings_certified = false;
-        self.part_surfaces_certified = false;
     }
 }
 
@@ -1005,7 +1001,7 @@ impl PhysicsWorld {
             .iter()
             .find(|state| state.body == body)
             .ok_or(WeldBalanceError::IncompleteLoads)?;
-        if !state.force_free_certified {
+        if !state.force_free_certified || state.collision_loads_uncertified {
             return Err(WeldBalanceError::IncompleteLoads);
         }
         self.part_source_weld_reactions(body, force_tolerance, moment_tolerance)
@@ -1124,11 +1120,13 @@ impl PhysicsWorld {
             .iter()
             .find(|state| state.body == body)
             .ok_or(WeldBalanceError::IncompleteLoads)?;
-        if !match load_mode {
-            WeldLoadMode::Sources => state.part_sources_certified,
-            WeldLoadMode::Hull => state.part_hull_certified,
-            WeldLoadMode::PartAerodynamics => state.part_surfaces_certified,
-        } {
+        if state.collision_loads_uncertified
+            || !match load_mode {
+                WeldLoadMode::Sources => state.part_sources_certified,
+                WeldLoadMode::Hull => state.part_hull_certified,
+                WeldLoadMode::PartAerodynamics => state.part_surfaces_certified,
+            }
+        {
             return Err(WeldBalanceError::IncompleteLoads);
         }
         let tree = prepare_tree(state, parts, snapshot_welds)?;

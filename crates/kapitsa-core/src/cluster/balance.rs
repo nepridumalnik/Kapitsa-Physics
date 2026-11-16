@@ -149,7 +149,7 @@ pub(crate) fn prepare_force_free_inputs(
     state: &ClusterLoadState,
     tree: &[TreePart],
 ) -> Result<Vec<PartBalanceInput>, BalanceError> {
-    if !state.force_free_certified {
+    if !state.force_free_certified || state.collision_loads_uncertified {
         return Err(BalanceError::IncompleteLoads);
     }
     let mut inputs = Vec::new();
