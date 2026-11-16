@@ -287,6 +287,15 @@ pub struct PartWingWrench {
     pub wrench: crate::aerodynamics::pressure::PressureWrench,
 }
 
+/// Diagnostic witness for one CCD solver event, not a certificate of a complete
+/// impact history. Time is in seconds from the start of the step; states are
+/// ordered before/after, then by the contact pair's A/B sides.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CcdContactEvent {
+    pub time: f64,
+    pub states: [[BodyState; 2]; 2],
+}
+
 /// A recorded velocity-contact impulse. The impulse acts on B; A receives its
 /// negative. Points are world-space metres at velocity-solve time, impulse is
 /// in N·s. Static and kinematic sides do not receive a velocity change.
@@ -304,6 +313,8 @@ pub struct ContactImpulse {
     /// manifold's A/B sides. The outer array is before/after.
     /// Other load paths must still be checked before weld-balance use.
     pub isolated_velocity_states: Option<[[BodyState; 2]; 2]>,
+    /// CCD solver event witness, when available. Does not certify completeness.
+    pub ccd_event: Option<CcdContactEvent>,
     pub impulse_on_b: Vec3,
     pub ccd: bool,
 }
@@ -2902,6 +2913,7 @@ impl PhysicsWorld {
                             points,
                             velocity_transforms: contact.velocity_transforms,
                             isolated_velocity_states: contact.isolated_velocity_states,
+                            ccd_event: manifold.ccd_event,
                             impulse_on_b,
                             ccd,
                         });

@@ -266,15 +266,14 @@ refusal or realtime diagnostic skipping; sequential CCD fracture is unsupported.
 
 A possible first supported CCD case is one complete, isolated two-body impact
 with no joints, clipping, or other impulses on the assembly during the step.
-This is not implemented. The CCD solver receives the two states at impact and
-returns the solved states and manifold, but the committed contact journal stores
-neither the impact time nor those before/after states. The sequential path can
+This is not implemented. CCD contact impulses carry a diagnostic witness with
+the event time and the solver's before/after body states. The sequential path can
 solve and resweep further impacts; the parallel path commits its own island
 results. A replay can discard earlier CCD solves. Consequently, a single entry
 in the final journal alone does not certify that it is the only relevant event.
 
-Before enabling fracture for that case, both CCD paths must preserve an event
-witness transactionally, establish complete ownership and absence of other
+Before enabling fracture for that case, the implementation must establish
+complete ownership and absence of other
 velocity changes, and verify the linear and angular momentum balance at the
 impact pose. The implementation must also define and test how a split at impact
 affects the remainder of the timestep; applying a split only at the end is not

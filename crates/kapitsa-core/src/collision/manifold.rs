@@ -93,6 +93,7 @@ impl ContactPoint {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ContactManifold {
     pub(crate) pair: CollisionPair,
+    pub(crate) ccd_event: Option<crate::world::CcdContactEvent>,
     points: [ContactPoint; 4],
     world_points: [Vec3; 4],
     count: u8,
@@ -102,6 +103,7 @@ impl ContactManifold {
     pub(crate) const fn new(pair: CollisionPair) -> Self {
         Self {
             pair,
+            ccd_event: None,
             points: [ContactPoint::EMPTY; 4],
             world_points: [Vec3::ZERO; 4],
             count: 0,

@@ -976,6 +976,7 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
         assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
         assert_eq!(world.body(body).ok_or("body")?.motion(), before);
         assert!(world.weld(weld).is_some());
+        assert!(world.contact_impulses().is_empty());
         world.set_error_policy(crate::world::ErrorPolicy::Realtime);
         if sharded {
             world.step_with_shards(
@@ -989,6 +990,16 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
         }
         assert!(world.weld(weld).is_some());
         assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
+        let impact = world
+            .contact_impulses()
+            .iter()
+            .find(|point| point.ccd)
+            .ok_or("ccd impact")?;
+        let event = impact.ccd_event.ok_or("ccd event")?;
+        assert!(event.time > 0.0 && event.time <= dt);
+        let side = if impact.parts[0] == Some(root) { 0 } else { 1 };
+        assert!((event.states[0][side].linear_velocity().x - speed).abs() < 1e-8);
+        assert!(event.states[1][side].linear_velocity().x < speed);
         return Ok(());
     }
     if sharded {
@@ -4293,13 +4304,7 @@ fn independent_single_pair_ccd_islands_resolve_across_workers()
     for workers in [2, 4] {
         let mut world = independent_wall_ccd_world()?;
         let mut shards = vec![Vec::new(); workers];
-        world.fill_step_shards(&mut shards)?;
-        for shard in &mut shards {
-            for step in shard {
-                step.integrate(dt)?;
-            }
-        }
-        world.commit_step_shards_with_executor(&shards, &ScopedThreadExecutor, workers)?;
+        world.step_with_shards(dt, &mut shards, &ScopedThreadExecutor, workers)?;
 
         for ((_, actual), (_, expected)) in world.bodies().zip(sequential.bodies()) {
             assert_eq!(
@@ -4317,6 +4322,24 @@ fn independent_single_pair_ccd_islands_resolve_across_workers()
             .filter(|event| event.kind == crate::collision::CollisionEventKind::Impact)
             .count();
         assert_eq!(actual_impacts, expected_impacts);
+        let expected_ccd: Vec<_> = sequential
+            .contact_impulses()
+            .iter()
+            .filter(|point| point.ccd)
+            .collect();
+        let actual_ccd: Vec<_> = world
+            .contact_impulses()
+            .iter()
+            .filter(|point| point.ccd)
+            .collect();
+        assert_eq!(actual_ccd.len(), expected_ccd.len());
+        assert_eq!(actual_ccd.len(), expected_impacts);
+        for (actual, expected) in actual_ccd.iter().zip(expected_ccd) {
+            let actual_event = actual.ccd_event.ok_or("parallel CCD witness")?;
+            let expected_event = expected.ccd_event.ok_or("sequential CCD witness")?;
+            assert!(actual_event.time > 0.0 && actual_event.time <= dt);
+            assert_eq!(actual_event, expected_event);
+        }
         for (actual, expected) in world
             .collision_events()
             .iter()

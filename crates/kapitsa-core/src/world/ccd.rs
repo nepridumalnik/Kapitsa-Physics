@@ -604,9 +604,13 @@ impl PhysicsWorld {
                         continue;
                     }
                     let material = self.combined_solver_material(material_a, material_b)?;
-                    let (solved_a, solved_b, solved_manifold) = self
+                    let (solved_a, solved_b, mut solved_manifold) = self
                         .collision_system
                         .solve_ccd_contact(body_a, state_a, body_b, state_b, manifold, material)?;
+                    solved_manifold.ccd_event = Some(super::CcdContactEvent {
+                        time: impact_elapsed,
+                        states: [[state_a, state_b], [solved_a, solved_b]],
+                    });
                     let mut normal_impulse = 0.0;
                     let mut impulse_delta = 0.0;
                     for point in solved_manifold.points() {
@@ -1212,7 +1216,7 @@ impl PhysicsWorld {
         let material = self.combined_solver_material(material_a, material_b)?;
         #[cfg(feature = "bench-internals")]
         let solve_started = Instant::now();
-        let (solved_a, solved_b, solved_manifold) =
+        let (solved_a, solved_b, mut solved_manifold) =
             CollisionSystem::solve_ccd_contact_with_workspace(
                 &mut result.solver,
                 body_a,
@@ -1223,6 +1227,10 @@ impl PhysicsWorld {
                 material,
                 self.collision_system.config(),
             )?;
+        solved_manifold.ccd_event = Some(super::CcdContactEvent {
+            time: impact_elapsed,
+            states: [[state_a, state_b], [solved_a, solved_b]],
+        });
         #[cfg(feature = "bench-internals")]
         let solve_time = solve_started.elapsed();
         let mut normal_impulse = 0.0;
