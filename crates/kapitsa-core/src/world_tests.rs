@@ -1000,6 +1000,10 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
         let side = if impact.parts[0] == Some(root) { 0 } else { 1 };
         assert!((event.states[0][side].linear_velocity().x - speed).abs() < 1e-8);
         assert!(event.states[1][side].linear_velocity().x < speed);
+        let published = world.contact_impulses().to_vec();
+        assert!(world.step(f64::NAN).is_err());
+        assert_eq!(world.contact_impulses(), published);
+        assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
         return Ok(());
     }
     if sharded {
