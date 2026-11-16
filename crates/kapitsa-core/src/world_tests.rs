@@ -1099,6 +1099,46 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
 }
 
 #[test]
+fn real_ccd_solver_event_has_checkable_witness() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    world.add_collider(wall, collider(0.5))?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut moving = RigidBody::new_dynamic(Transform::new(Vec3::X * -5.0, Quat::IDENTITY)?, mass)?;
+    moving.set_linear_velocity(Vec3::X * 1000.0)?;
+    moving.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(moving)?;
+    world.add_collider(body, collider(0.5))?;
+    let dt = 0.01;
+    world.collision_system.begin_step();
+    world.prepare_joint_collision_pairs()?;
+    for id in [wall, body] {
+        let state = crate::rigid_body::predict(&world.body(id).ok_or("body")?.motion(), dt)?;
+        world.collision_system.stage_prediction(id, state);
+    }
+    world.prepare_collision_candidates(dt, 1, &crate::execution::SequentialExecutor)?;
+    world.process_collision_candidates(1, &crate::execution::SequentialExecutor, dt)?;
+    let context = &world.collision_system.context;
+    assert_eq!(context.ccd_solved_manifolds.len(), 1);
+    let manifold = context
+        .isolated_ccd_solver_event()
+        .ok_or("isolated event")?;
+    let event = manifold.ccd_event.ok_or("event")?;
+    let side = if world.collider_body(manifold.pair.a) == Some(body) {
+        0
+    } else {
+        1
+    };
+    let mut impulse = Vec3::ZERO;
+    for point in manifold.points() {
+        impulse += point.velocity_impulse.ok_or("impulse")? * if side == 0 { -1.0 } else { 1.0 };
+    }
+    let delta = event.states[1][side].linear_velocity() - event.states[0][side].linear_velocity();
+    assert!((impulse - delta).length() < 1e-8);
+    Ok(())
+}
+
+#[test]
 fn isolated_ccd_solver_event_rejects_incomplete_witnesses() -> Result<(), Box<dyn std::error::Error>>
 {
     let mut world = PhysicsWorld::new();
