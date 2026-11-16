@@ -342,3 +342,327 @@ async fn detached_part_keeps_its_force_source_after_resuming() {
     .unwrap();
     simulation.stop().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn part_aerodynamic_geometry_commands_apply_loads_on_both_executors()
+-> Result<(), Box<dyn std::error::Error>> {
+    use kapitsa::aerodynamics::{
+        Atmosphere, ColliderTessellation, DensityProfile, SphericalAtmosphere,
+    };
+    for rayon_executor in [false, true] {
+        let atmosphere = Atmosphere::Sphere(
+            SphericalAtmosphere::builder()
+                .reference_radius(1_000_000.0)
+                .reference_density(0.001)
+                .height(1_000_000.0)
+                .profile(DensityProfile::Exponential {
+                    scale_height: 1_000_000.0,
+                })
+                .build()?,
+        );
+        let builder = Simulation::builder()
+            .max_workers(2)
+            .atmosphere(atmosphere)
+            .mesh_sound_speed(100.0);
+        let mut simulation = if rayon_executor {
+            builder.spawn_on_rayon(std::sync::Arc::new(
+                rayon::ThreadPoolBuilder::new().num_threads(2).build()?,
+            ))?
+        } else {
+            builder.spawn_on_tokio(&tokio::runtime::Handle::current())?
+        };
+        simulation.pause()?;
+        let mut client = simulation.client();
+        let mut body = RigidBody::new_dynamic(
+            Transform::identity(),
+            MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?,
+        )?;
+        body.set_linear_velocity(Vec3::X * 2000.0)?;
+        let id = client.add_body(body).await?;
+        let part = client.enable_cluster(id).await?;
+        let collider = client
+            .add_part_collider(
+                part,
+                Collider::new(
+                    Shape::Cuboid(kapitsa::shape::Cuboid::new(1.0, 1.0, 1.0)?),
+                    Transform::identity(),
+                ),
+            )
+            .await?;
+        let mesh =
+            kapitsa::shape::TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])?;
+        client.set_part_aerodynamic_mesh(part, Some(mesh)).await?;
+        client.set_part_aerodynamic_colliders(part, true).await?;
+        client
+            .set_collider_tessellation(id, ColliderTessellation::new(12, 6, 1024)?)
+            .await?;
+        client
+            .set_part_collider_transform(
+                part,
+                collider,
+                Transform::new(Vec3::Y, kapitsa::math::Quat::IDENTITY)?,
+            )
+            .await?;
+        simulation.resume()?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let snapshot = client.next_snapshot().await?;
+                if let Some(body) = snapshot.body(id)
+                    && body.linear_velocity().x < 2000.0
+                    && body.angular_velocity().z > 0.0
+                {
+                    break;
+                }
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        simulation.stop().await?;
+    }
+    Ok(())
+}
+
+// Authored only: execution is intentionally deferred at the user's request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn part_wings_and_hull_replace_clear_and_follow_queue_while_paused()
+-> Result<(), Box<dyn std::error::Error>> {
+    use kapitsa::aerodynamics::{
+        hull::{HullSection, MachCurve, MachKnot},
+        wing::{FiniteWing, WingCoefficients, WingControl, WingPolar, WingSurface},
+    };
+    fn assert_owned_configuration<T: Clone + Send + Sync + 'static>() {}
+    assert_owned_configuration::<WingSurface>();
+    assert_owned_configuration::<HullSection>();
+
+    for rayon_executor in [false, true] {
+        let builder = Simulation::builder().max_workers(2);
+        let mut simulation = if rayon_executor {
+            builder.spawn_on_rayon(std::sync::Arc::new(
+                rayon::ThreadPoolBuilder::new().num_threads(2).build()?,
+            ))?
+        } else {
+            builder.spawn_on_tokio(&tokio::runtime::Handle::current())?
+        };
+        simulation.pause()?;
+        let client = simulation.client();
+        let body = client
+            .add_body(RigidBody::new_dynamic(Transform::identity(), mass(1.0))?)
+            .await?;
+        let part = client.enable_cluster(body).await?;
+        let wing = WingSurface::new(
+            FiniteWing::new(6.0, 0.8, 0.02, 0.0, 0.2)?,
+            Transform::identity(),
+            2.0,
+        )?
+        .with_polar(std::sync::Arc::new(WingPolar::new(
+            vec![0.0, 1.2],
+            vec![-0.5, 0.5],
+            vec![
+                WingCoefficients {
+                    lift: 0.2,
+                    drag: 0.1
+                };
+                4
+            ],
+        )?))
+        .with_control(WingControl::new(0.1, 0.2, 0.5)?);
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            1.0,
+            2.0,
+            0.0,
+            0.2,
+            0.8,
+            None,
+        )?
+        .with_mach_curve(MachCurve::new(vec![
+            MachKnot {
+                mach: 0.0,
+                axial_cd: 0.2,
+                crossflow_cd: 0.8,
+            },
+            MachKnot {
+                mach: 1.0,
+                axial_cd: 0.4,
+                crossflow_cd: 1.0,
+            },
+        ])?);
+        client
+            .set_part_aerodynamic_wings(part, vec![wing.clone(), wing.clone()])
+            .await?;
+        client
+            .set_part_aerodynamic_hull(part, vec![section.clone(), section.clone()])
+            .await?;
+        client
+            .set_part_aerodynamic_wings(part, vec![wing.clone()])
+            .await?;
+        client
+            .set_part_aerodynamic_hull(part, vec![section.clone()])
+            .await?;
+        let configured = client.cluster_part(part).await?.ok_or("missing part")?;
+        assert_eq!(configured.aerodynamic_wings(), std::slice::from_ref(&wing));
+        assert_eq!(configured.aerodynamic_hull(), &[section]);
+        // Owned query snapshots are not modified by subsequent queued edits.
+        client.set_part_aerodynamic_wings(part, Vec::new()).await?;
+        client.set_part_aerodynamic_hull(part, Vec::new()).await?;
+        let cleared = client.cluster_part(part).await?.ok_or("missing part")?;
+        assert!(cleared.aerodynamic_wings().is_empty());
+        assert!(cleared.aerodynamic_hull().is_empty());
+        assert_eq!(configured.aerodynamic_wings().len(), 1);
+        assert_eq!(configured.aerodynamic_hull().len(), 1);
+
+        client.remove_body(body).await?;
+        assert!(matches!(
+            client.set_part_aerodynamic_wings(part, vec![wing]).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::InvalidPartId
+            ))
+        ));
+        assert!(matches!(
+            client.set_part_aerodynamic_hull(part, Vec::new()).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::InvalidPartId
+            ))
+        ));
+        simulation.stop().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn voxel_wave_commands_work_in_both_runtime_executors()
+-> Result<(), Box<dyn std::error::Error>> {
+    use kapitsa::aerodynamics::{
+        Atmosphere, DensityProfile, SphericalAtmosphere,
+        geometry::{GeometryConfig, OpenMeshPolicy},
+        hull::HullSection,
+        wave::VoxelWave,
+    };
+    fn mesh() -> Result<kapitsa::shape::TriangleMesh, kapitsa::shape::ShapeError> {
+        kapitsa::shape::TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])
+    }
+    fn model() -> Result<VoxelWave, Box<dyn std::error::Error>> {
+        let section = HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+        )?;
+        Ok(VoxelWave::new(
+            mesh()?,
+            section,
+            0,
+            1,
+            GeometryConfig {
+                cell_size: 0.25,
+                max_cells: 100_000,
+                max_work: 1_000_000,
+                max_patch_work: 1_000_000,
+                open_mesh_policy: OpenMeshPolicy::SurfaceOnly,
+                weld_tolerance: None,
+            },
+        )?)
+    }
+    for rayon_executor in [false, true] {
+        let atmosphere = Atmosphere::Sphere(
+            SphericalAtmosphere::builder()
+                .reference_radius(1_000_000.0)
+                .reference_density(0.001)
+                .height(1_000_000.0)
+                .profile(DensityProfile::Exponential {
+                    scale_height: 1_000_000.0,
+                })
+                .build()?,
+        );
+        let builder = Simulation::builder()
+            .max_workers(2)
+            .atmosphere(atmosphere)
+            .mesh_sound_speed(100.0);
+        let mut simulation = if rayon_executor {
+            builder.spawn_on_rayon(std::sync::Arc::new(
+                rayon::ThreadPoolBuilder::new().num_threads(2).build()?,
+            ))?
+        } else {
+            builder.spawn_on_tokio(&tokio::runtime::Handle::current())?
+        };
+        simulation.pause()?;
+        let mut client = simulation.client();
+        let mass = MassProperties::new(100.0, Vec3::ZERO, Mat3::IDENTITY * 100.0)?;
+        let mut body = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        body.set_linear_velocity(Vec3::X * 680.0)?;
+        let id = client.add_body(body).await?;
+        let root = client.enable_cluster(id).await?;
+        let source = client
+            .add_cluster_part(
+                root,
+                ClusterPartDesc {
+                    local_transform: Transform::identity(),
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * 680.0,
+                    angular_velocity: Vec3::ZERO,
+                },
+                weld(),
+            )
+            .await?;
+        client.set_part_voxel_wave(root, Some(model()?)).await?;
+        assert!(matches!(
+            client.set_part_voxel_wave(source, Some(model()?)).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::UnsupportedGeometry
+            ))
+        ));
+        client
+            .add_part_collider(
+                source,
+                Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+            )
+            .await?;
+        client.set_part_wave_source_colliders(source, true).await?;
+        client
+            .set_part_wave_source_mesh(source, Some(mesh()?))
+            .await?;
+        simulation.resume()?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let snapshot = client.next_snapshot().await?;
+                if let Some(body) = snapshot.body(id)
+                    && body.linear_velocity().x < 680.0
+                {
+                    break;
+                }
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        simulation.pause()?;
+        client.remove_body(id).await?;
+        assert!(matches!(
+            client.set_part_voxel_wave(root, None).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::InvalidPartId
+            ))
+        ));
+        assert!(matches!(
+            client.set_part_wave_source_mesh(source, None).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::InvalidPartId
+            ))
+        ));
+        assert!(matches!(
+            client.set_part_wave_source_colliders(source, false).await,
+            Err(kapitsa::PhysicsClientError::Cluster(
+                kapitsa::ClusterError::InvalidPartId
+            ))
+        ));
+        simulation.stop().await?;
+    }
+    Ok(())
+}

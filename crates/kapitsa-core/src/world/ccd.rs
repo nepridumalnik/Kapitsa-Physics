@@ -106,7 +106,7 @@ impl PhysicsWorld {
                 .bodies
                 .get(body_id.dense)
                 .filter(|_| body_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .map(|entry| entry.body.motion())
                 .ok_or(CollisionError::InvalidContact)?;
             let context = &mut self.collision_system.context;
             context.ccd_states.push(*body.state());
@@ -240,13 +240,13 @@ impl PhysicsWorld {
                             .bodies
                             .get(collider_a.body.dense)
                             .filter(|_| collider_a.body.world == self.world_id)
-                            .map(|entry| entry.body)
+                            .map(|entry| entry.body.motion())
                             .ok_or(CollisionError::InvalidContact)?;
                         let body_b = self
                             .bodies
                             .get(collider_b.body.dense)
                             .filter(|_| collider_b.body.world == self.world_id)
-                            .map(|entry| entry.body)
+                            .map(|entry| entry.body.motion())
                             .ok_or(CollisionError::InvalidContact)?;
                         if ![body_a, body_b].into_iter().any(|body| {
                             body.physics().body_type() == BodyType::Dynamic
@@ -463,12 +463,12 @@ impl PhysicsWorld {
                             self.bodies
                                 .get(body_a_id.dense)
                                 .filter(|_| body_a_id.world == self.world_id)
-                                .map(|entry| entry.body)
+                                .map(|entry| entry.body.motion())
                                 .ok_or(CollisionError::InvalidContact)?,
                             self.bodies
                                 .get(body_b_id.dense)
                                 .filter(|_| body_b_id.world == self.world_id)
-                                .map(|entry| entry.body)
+                                .map(|entry| entry.body.motion())
                                 .ok_or(CollisionError::InvalidContact)?,
                         )
                     };
@@ -604,9 +604,13 @@ impl PhysicsWorld {
                         continue;
                     }
                     let material = self.combined_solver_material(material_a, material_b)?;
-                    let (solved_a, solved_b, solved_manifold) = self
+                    let (solved_a, solved_b, mut solved_manifold) = self
                         .collision_system
                         .solve_ccd_contact(body_a, state_a, body_b, state_b, manifold, material)?;
+                    solved_manifold.ccd_event = Some(super::CcdContactEvent {
+                        time: impact_elapsed,
+                        states: [[state_a, state_b], [solved_a, solved_b]],
+                    });
                     let mut normal_impulse = 0.0;
                     let mut impulse_delta = 0.0;
                     for point in solved_manifold.points() {
@@ -619,6 +623,15 @@ impl PhysicsWorld {
                     if impulse_delta <= 0.0 {
                         return Err(CollisionError::NonConvergent);
                     }
+                    self.collision_system
+                        .context
+                        .ccd_solved_manifolds
+                        .try_reserve(1)
+                        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    self.collision_system
+                        .context
+                        .ccd_solved_manifolds
+                        .push(solved_manifold);
                     let solved_point = solved_manifold
                         .points()
                         .first()
@@ -919,6 +932,16 @@ impl PhysicsWorld {
                 continue;
             };
 
+            self.collision_system
+                .context
+                .ccd_solved_manifolds
+                .try_reserve(1)
+                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            self.collision_system
+                .context
+                .ccd_solved_manifolds
+                .push(impact.solved_manifold);
+
             #[cfg(feature = "bench-internals")]
             let commit_started = Instant::now();
             upsert_interaction(
@@ -944,7 +967,7 @@ impl PhysicsWorld {
                             .bodies
                             .get(body_id.dense)
                             .filter(|_| body_id.world == self.world_id)
-                            .map(|entry| entry.body)
+                            .map(|entry| entry.body.motion())
                             .ok_or(CollisionError::InvalidContact)?;
                         body.set_state_preserving_forces(solved);
                         predict(&body, remaining_after_impact)
@@ -956,7 +979,7 @@ impl PhysicsWorld {
                     .bodies
                     .get(body_id.dense)
                     .filter(|_| body_id.world == self.world_id)
-                    .map(|entry| entry.body)
+                    .map(|entry| entry.body.motion())
                     .ok_or(CollisionError::InvalidContact)?;
                 if body.physics().body_type() == BodyType::Dynamic
                     && body.ccd_mode() == CcdMode::Continuous
@@ -1122,12 +1145,12 @@ impl PhysicsWorld {
             self.bodies
                 .get(body_a_id.dense)
                 .filter(|_| body_a_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .map(|entry| entry.body.motion())
                 .ok_or(CollisionError::InvalidContact)?,
             self.bodies
                 .get(body_b_id.dense)
                 .filter(|_| body_b_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .map(|entry| entry.body.motion())
                 .ok_or(CollisionError::InvalidContact)?,
         );
         let exhausted = [(body_a, prediction_a), (body_b, prediction_b)]
@@ -1193,7 +1216,7 @@ impl PhysicsWorld {
         let material = self.combined_solver_material(material_a, material_b)?;
         #[cfg(feature = "bench-internals")]
         let solve_started = Instant::now();
-        let (solved_a, solved_b, solved_manifold) =
+        let (solved_a, solved_b, mut solved_manifold) =
             CollisionSystem::solve_ccd_contact_with_workspace(
                 &mut result.solver,
                 body_a,
@@ -1204,6 +1227,10 @@ impl PhysicsWorld {
                 material,
                 self.collision_system.config(),
             )?;
+        solved_manifold.ccd_event = Some(super::CcdContactEvent {
+            time: impact_elapsed,
+            states: [[state_a, state_b], [solved_a, solved_b]],
+        });
         #[cfg(feature = "bench-internals")]
         let solve_time = solve_started.elapsed();
         let mut normal_impulse = 0.0;
@@ -1245,6 +1272,7 @@ impl PhysicsWorld {
             impact_elapsed,
             solved_a,
             solved_b,
+            solved_manifold,
             interaction: CollisionInteraction {
                 pair,
                 sensor: false,
@@ -1525,7 +1553,7 @@ impl PhysicsWorld {
                     .bodies
                     .get(body_id.dense)
                     .filter(|_| body_id.world == self.world_id)
-                    .map(|entry| entry.body)
+                    .map(|entry| entry.body.motion())
                     .ok_or(CollisionError::InvalidContact)?;
                 let end_state =
                     predict(&body, dt).map_err(|_| CollisionError::ArithmeticOverflow)?;
@@ -1589,6 +1617,7 @@ impl PhysicsWorld {
             }
             context.ccd_replay_pairs.sort_unstable();
             context.ccd_replay_pairs.dedup();
+            context.discard_replayed_ccd_solves();
             remove_interactions_for_pairs(
                 &mut context.interactions,
                 &mut context.interaction_indices,
@@ -1769,7 +1798,7 @@ impl PhysicsWorld {
             .bodies
             .get(body_id.dense)
             .filter(|_| body_id.world == self.world_id)
-            .map(|entry| entry.body)
+            .map(|entry| entry.body.motion())
             .ok_or(CollisionError::InvalidContact)?;
         let end_state = predict(&body, dt).map_err(|_| CollisionError::ArithmeticOverflow)?;
         let context = &mut self.collision_system.context;
@@ -1964,7 +1993,7 @@ impl PhysicsWorld {
                     .bodies
                     .get(body_id.dense)
                     .filter(|_| body_id.world == self.world_id)
-                    .map(|entry| entry.body)
+                    .map(|entry| entry.body.motion())
                     .ok_or(CollisionError::InvalidContact)?;
                 let prediction = Self::predicted_body_index(
                     &self.collision_system.context.body_indices,
@@ -2032,13 +2061,13 @@ impl PhysicsWorld {
             .bodies
             .get(collider_a.body.dense)
             .filter(|_| collider_a.body.world == self.world_id)
-            .map(|entry| entry.body)
+            .map(|entry| entry.body.motion())
             .ok_or(CollisionError::InvalidContact)?;
         let body_b = self
             .bodies
             .get(collider_b.body.dense)
             .filter(|_| collider_b.body.world == self.world_id)
-            .map(|entry| entry.body)
+            .map(|entry| entry.body.motion())
             .ok_or(CollisionError::InvalidContact)?;
         let mut cache = CcdCandidateToi {
             evaluated: true,
@@ -2286,7 +2315,7 @@ impl PhysicsWorld {
                 .get(body_id.dense)
                 .filter(|_| body_id.world == world_id)
                 .ok_or(CollisionError::InvalidContact)?;
-            let body = body_entry.body;
+            let body = body_entry.body.motion();
             let end_state = collision_system
                 .context
                 .predicted_states
@@ -2384,6 +2413,7 @@ impl PhysicsWorld {
     }
 
     fn reset_ccd_pass(&mut self, dt: f64, force_single_island: bool) -> Result<(), CollisionError> {
+        self.collision_system.context.ccd_replayed = true;
         let prediction_count = self.collision_system.context.predicted_states.len();
         for prediction in 0..prediction_count {
             let body_id = self.collision_system.context.predicted_states[prediction].0;
@@ -2391,7 +2421,7 @@ impl PhysicsWorld {
                 .bodies
                 .get(body_id.dense)
                 .filter(|_| body_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .map(|entry| entry.body.motion())
                 .ok_or(CollisionError::InvalidContact)?;
             let end_state = predict(&body, dt).map_err(|_| CollisionError::ArithmeticOverflow)?;
             let context = &mut self.collision_system.context;
@@ -2405,6 +2435,7 @@ impl PhysicsWorld {
         {
             let context = &mut self.collision_system.context;
             context.ccd_processed_pairs.clear();
+            context.ccd_solved_manifolds.clear();
             context.ccd_processed_time = 0.0;
             context.ccd_toi_cache.fill(Default::default());
             context.ccd_candidate_active.fill(true);
@@ -2432,7 +2463,7 @@ impl PhysicsWorld {
             .bodies
             .get(id.dense)
             .filter(|_| id.world == self.world_id)
-            .map(|entry| entry.body)
+            .map(|entry| entry.body.motion())
             .ok_or(CollisionError::InvalidContact)?;
         let state_start = *self
             .collision_system
@@ -2489,7 +2520,7 @@ impl PhysicsWorld {
                 .bodies
                 .get(body_id.dense)
                 .filter(|_| body_id.world == self.world_id)
-                .map(|entry| entry.body)
+                .map(|entry| entry.body.motion())
                 .ok_or(CollisionError::InvalidContact)?;
             body.set_state_preserving_forces(state);
             body.set_linear_velocity(Vec3::ZERO)

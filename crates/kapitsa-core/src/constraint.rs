@@ -2,13 +2,13 @@ use kapitsa_math::{CholeskyError, Vec3};
 
 use crate::{
     mass::MassProperties,
-    rigid_body::{BodyType, RigidBody, solver_mass::SolverMass},
+    rigid_body::{BodyMotion, BodyType, solver_mass::SolverMass},
 };
 
 /// A staged body shared by the contact and joint solvers.
 #[derive(Clone, Copy)]
 pub(crate) struct SolverBody {
-    pub(crate) body: RigidBody,
+    pub(crate) body: BodyMotion,
 }
 
 impl SolverBody {
@@ -17,18 +17,18 @@ impl SolverBody {
     }
 
     pub(crate) fn from_prediction(
-        mut body: RigidBody,
+        mut body: BodyMotion,
         state: crate::rigid_body::BodyState,
     ) -> Self {
         body.commit_integrated_state(state);
         Self { body }
     }
 
-    pub(crate) fn body(&self) -> &RigidBody {
+    pub(crate) fn body(&self) -> &BodyMotion {
         &self.body
     }
 
-    pub(crate) fn body_mut(&mut self) -> &mut RigidBody {
+    pub(crate) fn body_mut(&mut self) -> &mut BodyMotion {
         &mut self.body
     }
 
@@ -122,7 +122,7 @@ pub(crate) struct Jacobian {
 }
 
 fn inverse_inertia_world_with_mass(
-    body: &RigidBody,
+    body: &BodyMotion,
     mass: MassProperties,
     impulse: Vec3,
 ) -> Result<Vec3, ConstraintError> {
@@ -141,8 +141,8 @@ fn inverse_inertia_world_with_mass(
 }
 
 pub(crate) fn effective_cross_mass_at(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     position_a: Vec3,
     position_b: Vec3,
     measurement: Vec3,
@@ -185,8 +185,8 @@ pub(crate) fn effective_cross_mass_at(
 
 /// Generalized inverse-mass matrix entry for two scalar Jacobian rows.
 pub(crate) fn effective_cross_mass(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     measurement: [Jacobian; 2],
     impulse: [Jacobian; 2],
 ) -> Result<f64, ConstraintError> {
@@ -248,7 +248,7 @@ pub(crate) fn effective_cross_mass_cached(
     Ok(result)
 }
 
-pub(crate) fn point_velocity(body: &RigidBody, position: Vec3) -> Result<Vec3, ConstraintError> {
+pub(crate) fn point_velocity(body: &BodyMotion, position: Vec3) -> Result<Vec3, ConstraintError> {
     let center = body
         .world_center_of_mass()
         .map_err(map_body_error)?
@@ -264,8 +264,8 @@ pub(crate) fn point_velocity(body: &RigidBody, position: Vec3) -> Result<Vec3, C
 }
 
 pub(crate) fn relative_velocity_at(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     position_a: Vec3,
     position_b: Vec3,
 ) -> Result<Vec3, ConstraintError> {
@@ -275,7 +275,7 @@ pub(crate) fn relative_velocity_at(
 }
 
 pub(crate) fn apply_point_impulse(
-    body: &mut RigidBody,
+    body: &mut BodyMotion,
     point: Vec3,
     impulse: Vec3,
 ) -> Result<(), ConstraintError> {
@@ -284,7 +284,7 @@ pub(crate) fn apply_point_impulse(
 }
 
 pub(crate) fn apply_point_position_impulse(
-    body: &mut RigidBody,
+    body: &mut BodyMotion,
     point: Vec3,
     impulse: Vec3,
 ) -> Result<(), ConstraintError> {
@@ -293,7 +293,7 @@ pub(crate) fn apply_point_position_impulse(
 }
 
 pub(crate) fn apply_generalized_impulse_cached(
-    body: &mut RigidBody,
+    body: &mut BodyMotion,
     mass: SolverMass,
     impulse: Jacobian,
 ) -> Result<(), ConstraintError> {
@@ -302,7 +302,7 @@ pub(crate) fn apply_generalized_impulse_cached(
 }
 
 pub(crate) fn apply_generalized_impulse(
-    body: &mut RigidBody,
+    body: &mut BodyMotion,
     impulse: Jacobian,
 ) -> Result<(), ConstraintError> {
     body.apply_constraint_impulse(impulse.linear, impulse.angular)
@@ -310,7 +310,7 @@ pub(crate) fn apply_generalized_impulse(
 }
 
 pub(crate) fn apply_generalized_position_impulse(
-    body: &mut RigidBody,
+    body: &mut BodyMotion,
     impulse: Jacobian,
 ) -> Result<(), ConstraintError> {
     body.apply_constraint_position_impulse(impulse.linear, impulse.angular)
@@ -318,7 +318,7 @@ pub(crate) fn apply_generalized_position_impulse(
 }
 
 pub(crate) fn apply_generalized_position_impulse_cached(
-    body: &mut RigidBody,
+    body: &mut BodyMotion,
     mass: SolverMass,
     impulse: Jacobian,
 ) -> Result<(), ConstraintError> {

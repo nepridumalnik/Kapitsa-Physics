@@ -13,7 +13,7 @@ use crate::{
         JointWorkspace,
     },
     mass::MassProperties,
-    rigid_body::RigidBody,
+    rigid_body::{BodyMotion, RigidBody},
     shape::{Shape, Sphere},
     transform::Transform,
     world::PhysicsWorld,
@@ -28,7 +28,7 @@ fn safe_binding_preserves_shared_static_and_consumes_dynamic_ownership() {
         .map(|_| {
             let body = dynamic_body(Vec3::ZERO);
             let state = *body.state();
-            SolverBody::from_prediction(body, state)
+            SolverBody::from_prediction(body.motion(), state)
         })
         .collect();
     let indices = [0, 2, 4];
@@ -178,8 +178,8 @@ fn ball_on_plane(linear_velocity: Vec3) -> (Vec<SolverBody>, Vec<SolverManifold>
         .unwrap();
     (
         vec![
-            SolverBody::from_prediction(ground, ground_state),
-            SolverBody::from_prediction(ball, ball_state),
+            SolverBody::from_prediction(ground.motion(), ground_state),
+            SolverBody::from_prediction(ball.motion(), ball_state),
         ],
         vec![SolverManifold {
             body_a: 0,
@@ -247,6 +247,125 @@ fn friction_limits_tangent_impulses_and_creates_angular_response() {
 }
 
 #[test]
+fn accumulated_contact_vector_matches_velocity_change_with_warm_start()
+-> Result<(), Box<dyn std::error::Error>> {
+    for warm in [false, true] {
+        let initial_velocity = Vec3::new(2.0, -1.0, 0.5);
+        let (mut bodies, mut manifolds) = ball_on_plane(initial_velocity);
+        manifolds[0].material.static_friction = 0.6;
+        manifolds[0].material.dynamic_friction = 0.5;
+        let contact = manifolds[0].manifold.point_mut(0).ok_or("contact")?;
+        if warm {
+            contact.normal_impulse = 0.4;
+            contact.tangent_impulse = [0.05, -0.03];
+        }
+        let position = bodies[1]
+            .body()
+            .state()
+            .transform()
+            .transform_point(contact.local_b);
+        let center = bodies[1].body().world_center_of_mass()?.ok_or("center")?;
+        let mut solver = SolverWorkspace::default();
+        solver.solve(
+            &mut bodies,
+            &mut manifolds,
+            super::CollisionConfig::default(),
+        )?;
+        let contact = manifolds[0].manifold.point(0).ok_or("solved contact")?;
+        let (tangent_a, tangent_b) = super::tangent_basis(contact.normal)?;
+        let impulse = contact.normal * contact.normal_impulse
+            + tangent_a * contact.tangent_impulse[0]
+            + tangent_b * contact.tangent_impulse[1];
+        assert_eq!(contact.velocity_impulse, Some(impulse));
+        assert!(contact.normal_impulse > 0.0);
+        assert!(contact.tangent_impulse[0].hypot(contact.tangent_impulse[1]) > 0.0);
+        let state = bodies[1].body().state();
+        assert!((state.linear_velocity() - initial_velocity - impulse).length() < 1e-12);
+        assert!((state.angular_velocity() - (position - center).cross(impulse)).length() < 1e-12);
+    }
+    Ok(())
+}
+
+#[test]
+fn ccd_solver_returns_velocity_impulse_and_application_points()
+-> Result<(), Box<dyn std::error::Error>> {
+    let initial = Vec3::new(2.0, -1.0, 0.5);
+    let (bodies, mut manifolds) = ball_on_plane(initial);
+    let material = SolverMaterial {
+        restitution: 0.5,
+        static_friction: 0.6,
+        dynamic_friction: 0.5,
+    };
+    let contact = manifolds[0].manifold.point(0).ok_or("contact")?;
+    let point_a = bodies[0]
+        .state()
+        .transform()
+        .transform_point(contact.local_a);
+    let point_b = bodies[1]
+        .state()
+        .transform()
+        .transform_point(contact.local_b);
+    let manifold = manifolds.remove(0).manifold;
+    let (_, solved, output) = crate::collision::CollisionSystem::solve_ccd_contact_with_workspace(
+        &mut SolverWorkspace::default(),
+        *bodies[0].body(),
+        bodies[0].state(),
+        *bodies[1].body(),
+        bodies[1].state(),
+        manifold,
+        material,
+        super::CollisionConfig::default(),
+    )?;
+    let contact = output.point(0).ok_or("solved contact")?;
+    assert_eq!(contact.velocity_points, Some([point_a, point_b]));
+    assert_eq!(
+        contact.velocity_transforms,
+        Some([bodies[0].state().transform(), bodies[1].state().transform()])
+    );
+    assert_ne!(solved.transform(), bodies[1].state().transform());
+    let impulse = contact.velocity_impulse.ok_or("velocity impulse")?;
+    assert!((solved.linear_velocity() - initial - impulse).length() < 1e-12);
+    assert!(impulse.x.abs() > 0.0 && impulse.y > 0.0);
+    Ok(())
+}
+
+#[test]
+fn velocity_contact_points_precede_position_correction() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut bodies, mut manifolds) = ball_on_plane(-Vec3::Y * 2.0);
+    let transforms = [bodies[0].state().transform(), bodies[1].state().transform()];
+    let contact = manifolds[0].manifold.point(0).ok_or("contact")?;
+    let before_a = bodies[0]
+        .body()
+        .state()
+        .transform()
+        .transform_point(contact.local_a);
+    let before_b = bodies[1]
+        .body()
+        .state()
+        .transform()
+        .transform_point(contact.local_b);
+    let mut solver = SolverWorkspace::default();
+    solver.solve(
+        &mut bodies,
+        &mut manifolds,
+        super::CollisionConfig::default(),
+    )?;
+    let prepared = solver.points.first().ok_or("velocity point")?;
+    assert_eq!(prepared.position_a, before_a);
+    assert_eq!(prepared.position_b, before_b);
+    let solved_contact = manifolds[0].manifold.point(0).ok_or("solved contact")?;
+    assert_eq!(solved_contact.velocity_points, Some([before_a, before_b]));
+    assert_eq!(solved_contact.velocity_transforms, Some(transforms));
+    let after_b = bodies[1]
+        .body()
+        .state()
+        .transform()
+        .transform_point(solved_contact.local_b);
+    assert!((after_b - before_b).length() > 0.0);
+    Ok(())
+}
+
+#[test]
 fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
     fn solve(warm_start: bool) -> (f64, f64) {
         let pair = pair();
@@ -292,8 +411,8 @@ fn rotated_contact_warm_start_does_not_increase_energy_vs_cold_start() {
         let ground = RigidBody::new_static(Transform::identity());
         let ball_state = *ball.state();
         let mut bodies = vec![
-            SolverBody::from_prediction(ground, *ground.state()),
-            SolverBody::from_prediction(ball, ball_state),
+            SolverBody::from_prediction(ground.motion(), *ground.state()),
+            SolverBody::from_prediction(ball.motion(), ball_state),
         ];
         let mut manifolds = vec![SolverManifold {
             body_a: 0,
@@ -363,7 +482,7 @@ fn solve_with_joints_reuses_scalar_velocity_rows_across_sweeps_in_phase_order() 
         .into_iter()
         .map(|body| {
             let state = *body.state();
-            SolverBody::from_prediction(body, state)
+            SolverBody::from_prediction(body.motion(), state)
         })
         .collect::<Vec<_>>();
     let mut manifolds = Vec::new();
@@ -464,7 +583,7 @@ fn colored_batch_layout_rebuilds_when_contact_joint_boundary_changes() {
         .map(|_| {
             let body = dynamic_body(Vec3::ZERO);
             let state = *body.state();
-            SolverBody::from_prediction(body, state)
+            SolverBody::from_prediction(body.motion(), state)
         })
         .collect();
     let mut workspace = SolverWorkspace::new();
@@ -592,7 +711,7 @@ fn contact_only_phases_do_not_touch_joints() {
         .into_iter()
         .map(|body| {
             let state = *body.state();
-            SolverBody::from_prediction(body, state)
+            SolverBody::from_prediction(body.motion(), state)
         })
         .collect::<Vec<_>>();
     let manifolds = Vec::new();
@@ -822,7 +941,7 @@ fn static_contact_fixture(count: usize) -> (Vec<SolverBody>, Vec<SolverManifold>
         .map(|_| {
             let body = RigidBody::new_static(Transform::identity());
             let state = *body.state();
-            SolverBody::from_prediction(body, state)
+            SolverBody::from_prediction(body.motion(), state)
         })
         .collect::<Vec<_>>();
     let contact = ContactPoint::from_world(
@@ -923,7 +1042,7 @@ fn colored_solver_choice_respects_compatibility_configuration() {
         .map(|_| {
             let body = RigidBody::new_static(Transform::identity());
             let state = *body.state();
-            SolverBody::from_prediction(body, state)
+            SolverBody::from_prediction(body.motion(), state)
         })
         .collect::<Vec<_>>();
     let empty_manifold = ContactManifold::new(pair());
@@ -992,7 +1111,7 @@ fn mixed_joint_and_contact_solve_keeps_all_constraints_active() {
     for position in [Vec3::ZERO, Vec3::new(1.5, 0.0, 0.0)] {
         let body = dynamic_body(position);
         let state = *body.state();
-        bodies.push(SolverBody::from_prediction(body, state));
+        bodies.push(SolverBody::from_prediction(body.motion(), state));
     }
     let joints = [fixed_joint_constraint(2, 3)];
     let initial_joint_distance = (bodies[3].body().state().transform().translation()
@@ -1086,8 +1205,8 @@ fn adaptive_joint_iterations_stop_at_minimum_or_report_the_max_residual() {
         let state_a = *body_a.state();
         let state_b = *body_b.state();
         let mut bodies = vec![
-            SolverBody::from_prediction(body_a, state_a),
-            SolverBody::from_prediction(body_b, state_b),
+            SolverBody::from_prediction(body_a.motion(), state_a),
+            SolverBody::from_prediction(body_b.motion(), state_b),
         ];
         let tolerance = JointTolerance {
             linear_m: 1.0e-6,
@@ -1168,7 +1287,7 @@ fn adaptive_joint_policy_leaves_contact_iteration_budget_unchanged() {
         let body =
             RigidBody::new_static(Transform::new(position, kapitsa_math::Quat::IDENTITY).unwrap());
         let state = *body.state();
-        bodies.push(SolverBody::from_prediction(body, state));
+        bodies.push(SolverBody::from_prediction(body.motion(), state));
     }
     let mut id_world = PhysicsWorld::new();
     let id_a = id_world
@@ -1240,7 +1359,7 @@ fn adaptive_joint_policy_leaves_contact_iteration_budget_unchanged() {
     );
 }
 
-fn kinetic_energy(body: &RigidBody) -> f64 {
+fn kinetic_energy(body: &BodyMotion) -> f64 {
     let mass = body.physics().mass().unwrap();
     let state = body.state();
     let rotation = state.transform().rotation().to_mat3().unwrap();
@@ -1291,8 +1410,8 @@ fn kinematic_velocity_contributes_without_kinematic_reaction() {
     let mut manifold = ContactManifold::new(pair());
     manifold.insert(contact, point_a).unwrap();
     let mut bodies = vec![
-        SolverBody::from_prediction(surface, surface_state),
-        SolverBody::from_prediction(ball, ball_state),
+        SolverBody::from_prediction(surface.motion(), surface_state),
+        SolverBody::from_prediction(ball.motion(), ball_state),
     ];
     let mut manifolds = vec![SolverManifold {
         body_a: 0,

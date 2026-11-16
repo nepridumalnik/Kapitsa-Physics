@@ -6,18 +6,348 @@ use super::{
     PhysicsWorld, WeldId,
 };
 use crate::{
-    aerodynamics::AerodynamicTarget,
+    aerodynamics::{AerodynamicSurface, AerodynamicTarget, Aerodynamics},
     cluster::{
         ClusterPart, MassChangeMode, MassTransfer, RigidCluster, Weld,
         mass::aggregate_mass,
         motion::{transfer_motion, velocity_field, world_properties},
     },
     mass::MassProperties,
-    rigid_body::{BodyType, RigidBody},
+    rigid_body::{BodyMotion, BodyType, RigidBody},
     transform::Transform,
 };
 
+/// Prepared against an unchanged world; commit must immediately follow it.
+pub(super) struct PreparedWeldSplit {
+    body: BodyId,
+    removed_welds: Vec<WeldId>,
+    entries: Vec<BodyEntry>,
+    prepared_bodies: Vec<BodyMotion>,
+    part_rebinds: Vec<(usize, PartId, Vec<(ColliderId, Transform)>)>,
+    part_components: HashMap<PartId, usize>,
+    root_aerodynamics: Vec<AerodynamicSurface>,
+    root_cluster: RigidCluster,
+    other_clusters: std::vec::IntoIter<RigidCluster>,
+    affected_bodies: Vec<BodyId>,
+}
+
+/// Inserted entries and plans; must be finalized without intervening fallible
+/// operations. This type is internal and cannot outlive the transaction.
+pub(super) struct InsertedWeldSplits {
+    plans: Vec<PreparedWeldSplit>,
+    results: Vec<Vec<BodyId>>,
+}
+
+#[derive(Debug)]
+pub(super) enum WeldSplitPreparationError {
+    Balance(super::WeldBalanceError),
+    Cluster(ClusterError),
+}
+
 impl PhysicsWorld {
+    fn pending_contact_weld_impulses(
+        &self,
+        state: &super::ClusterLoadState,
+    ) -> Result<Vec<WeldId>, super::WeldBalanceError> {
+        use super::WeldBalanceError as Error;
+        use crate::cluster::{
+            balance::prepare_tree,
+            impulse::{PartImpulse, tree_impulse_reactions},
+            motion::world_properties,
+        };
+
+        let (linear_tolerance, angular_tolerance) = self
+            .automatic_weld_impulse_tolerances
+            .ok_or(Error::IncompleteLoads)?;
+        let context = &self.collision_system.context;
+        if !context.ccd_solved_manifolds.is_empty()
+            || (!context.ccd_clipped_bodies.is_empty()
+                && context.ccd_clipped_bodies.len() != context.predicted_states.len())
+            || context.manifolds.iter().any(|manifold| {
+                self.collider_body(manifold.pair.a).is_none()
+                    || self.collider_body(manifold.pair.b).is_none()
+            })
+        {
+            return Err(Error::IncompleteLoads);
+        }
+        let mut matching = self.contact_impulses_pending.iter().filter_map(|contact| {
+            let a = self.collider_body(contact.pair.a);
+            let b = self.collider_body(contact.pair.b);
+            if a == Some(state.body) {
+                Some((contact, 0))
+            } else if b == Some(state.body) {
+                Some((contact, 1))
+            } else {
+                None
+            }
+        });
+        let (contact, side) = matching.next().ok_or(Error::IncompleteLoads)?;
+        if contact.ccd
+            || self.contact_impulses_omitted_pending != 0
+            || self.contact_ccd_clipped_pending
+        {
+            return Err(Error::IncompleteLoads);
+        }
+        let states = contact
+            .isolated_velocity_states
+            .ok_or(Error::IncompleteLoads)?;
+        let other_body = self
+            .collider_body(if side == 0 {
+                contact.pair.b
+            } else {
+                contact.pair.a
+            })
+            .ok_or(Error::IncompleteLoads)?;
+        let before = states[0][side];
+        let after = states[1][side];
+        let mut impact_state = *state;
+        impact_state.state = before;
+        let tree = prepare_tree(
+            &impact_state,
+            &self.cluster_load_parts_pending,
+            &self.cluster_load_welds_pending,
+        )?;
+        let mass = state.mass.ok_or(Error::IncompleteLoads)?;
+        let (origin, _) = world_properties(mass, before.transform()).map_err(Error::Physics)?;
+        let delta_linear = after
+            .linear_velocity()
+            .checked_sub(before.linear_velocity())
+            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        let delta_angular = after
+            .angular_velocity()
+            .checked_sub(before.angular_velocity())
+            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        let mut inputs = Vec::new();
+        let mut parents = Vec::new();
+        let mut indices = HashMap::new();
+        inputs
+            .try_reserve_exact(tree.len())
+            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
+        parents
+            .try_reserve_exact(tree.len())
+            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
+        indices
+            .try_reserve(tree.len())
+            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
+        for (index, part) in tree.iter().enumerate() {
+            indices.insert(part.part, index);
+            inputs.push(PartImpulse {
+                mass: part.mass,
+                pose: part.pose,
+                linear: Vec3::ZERO,
+                angular: Vec3::ZERO,
+            });
+            parents.push(part.parent);
+        }
+        let mut count = 0usize;
+        for (point, point_side) in std::iter::once((contact, side)).chain(matching) {
+            let point_states = point
+                .isolated_velocity_states
+                .ok_or(Error::IncompleteLoads)?;
+            let point_other = self.collider_body(if point_side == 0 {
+                point.pair.b
+            } else {
+                point.pair.a
+            });
+            if point.ccd
+                || point_other != Some(other_body)
+                || point_states[0][point_side] != before
+                || point_states[1][point_side] != after
+            {
+                return Err(Error::IncompleteLoads);
+            }
+            let part = point.parts[point_side].ok_or(Error::IncompleteLoads)?;
+            let index = *indices.get(&part).ok_or(Error::IncompleteLoads)?;
+            let contribution = if point_side == 0 {
+                point.impulse_on_b.checked_mul_scalar(-1.0)
+            } else {
+                Some(point.impulse_on_b)
+            }
+            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            let moment = point.points[point_side]
+                .checked_sub(origin)
+                .and_then(|arm| arm.checked_cross(contribution))
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            inputs[index].linear = inputs[index]
+                .linear
+                .checked_add(contribution)
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            inputs[index].angular = inputs[index]
+                .angular
+                .checked_add(moment)
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            count = count
+                .checked_add(1)
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        }
+        let expected = context
+            .manifolds
+            .iter()
+            .filter(|manifold| {
+                self.collider_body(manifold.pair.a) == Some(state.body)
+                    || self.collider_body(manifold.pair.b) == Some(state.body)
+            })
+            .try_fold(0usize, |count, manifold| count.checked_add(manifold.len()))
+            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        if expected != count {
+            return Err(Error::IncompleteLoads);
+        }
+        let reactions = tree_impulse_reactions(
+            &inputs,
+            &parents,
+            origin,
+            delta_linear,
+            delta_angular,
+            origin,
+            linear_tolerance,
+            angular_tolerance,
+        )?;
+        let mut candidates = Vec::new();
+        candidates
+            .try_reserve(tree.len().saturating_sub(1))
+            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
+        for (part, reaction) in tree.iter().zip(reactions).skip(1) {
+            let id = part.weld.ok_or(Error::InvalidTree)?;
+            let weld = self.weld(id).ok_or(Error::InvalidTree)?;
+            let Some(strength) = weld.impulse_strength() else {
+                continue;
+            };
+            let frame = if weld.part_a() == part.part {
+                weld.desc().frame_a
+            } else if weld.part_b() == part.part {
+                weld.desc().frame_b
+            } else {
+                return Err(Error::InvalidTree);
+            };
+            let reaction =
+                reaction.at_anchor(origin, part.pose.transform_point(frame.local_anchor))?;
+            if strength.exceeded_by(reaction)? {
+                candidates.push(id);
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// Prepare all breakable clusters from the active step's pending snapshots
+    /// and final staged predictions. No topology or body state is changed.
+    pub(super) fn prepare_pending_weld_splits(
+        &mut self,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<PreparedWeldSplit>, WeldSplitPreparationError> {
+        let mut plans = Vec::new();
+        plans
+            .try_reserve(self.cluster_load_states_pending.len())
+            .map_err(|_| {
+                WeldSplitPreparationError::Cluster(ClusterError::StorageCapacityExceeded)
+            })?;
+        for state in &self.cluster_load_states_pending {
+            let cluster = self
+                .cluster(state.body)
+                .ok_or(WeldSplitPreparationError::Cluster(
+                    ClusterError::InvalidTopology,
+                ))?;
+            if !cluster.welds().iter().any(|id| {
+                self.weld(*id).is_some_and(|weld| {
+                    matches!(
+                        weld.desc().strength,
+                        crate::cluster::WeldStrength::Breakable { .. }
+                    )
+                })
+            }) {
+                continue;
+            }
+            let evaluation = (|| {
+                let mut welds = if state.collision_loads_uncertified {
+                    self.pending_contact_weld_impulses(state)?
+                } else {
+                    Vec::new()
+                };
+                let candidates = self.pending_weld_failure_candidates(
+                    state.body,
+                    force_tolerance,
+                    moment_tolerance,
+                    state.collision_loads_uncertified,
+                )?;
+                welds.try_reserve(candidates.len()).map_err(|_| {
+                    super::WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded)
+                })?;
+                let mut seen = HashSet::new();
+                seen.try_reserve(welds.len().saturating_add(candidates.len()))
+                    .map_err(|_| {
+                        super::WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded)
+                    })?;
+                seen.extend(welds.iter().copied());
+                for candidate in candidates {
+                    if seen.insert(candidate.reaction.weld) {
+                        welds.push(candidate.reaction.weld);
+                    }
+                }
+                Ok::<_, super::WeldBalanceError>(welds)
+            })();
+            let welds = match evaluation {
+                Ok(welds) => welds,
+                Err(super::WeldBalanceError::IncompleteLoads)
+                    if self.error_policy == super::ErrorPolicy::Realtime =>
+                {
+                    self.pending_step_diagnostics.weld_incomplete_load_clusters = self
+                        .pending_step_diagnostics
+                        .weld_incomplete_load_clusters
+                        .checked_add(1)
+                        .ok_or(WeldSplitPreparationError::Cluster(
+                            ClusterError::StorageCapacityExceeded,
+                        ))?;
+                    if state.collision_loads_uncertified {
+                        self.pending_step_diagnostics.weld_collision_load_clusters = self
+                            .pending_step_diagnostics
+                            .weld_collision_load_clusters
+                            .checked_add(1)
+                            .ok_or(WeldSplitPreparationError::Cluster(
+                                ClusterError::StorageCapacityExceeded,
+                            ))?;
+                    }
+                    continue;
+                }
+                Err(error) => return Err(WeldSplitPreparationError::Balance(error)),
+            };
+            if welds.is_empty() {
+                continue;
+            }
+            let predicted = self
+                .collision_system
+                .context
+                .predicted_states
+                .iter()
+                .find(|(body, _)| *body == state.body)
+                .map(|(_, state)| *state)
+                .ok_or(WeldSplitPreparationError::Cluster(
+                    ClusterError::InvalidMotion,
+                ))?;
+            let mut motion = self
+                .body(state.body)
+                .ok_or(WeldSplitPreparationError::Cluster(
+                    ClusterError::InvalidBodyId,
+                ))?
+                .motion();
+            motion.commit_integrated_state(predicted);
+            plans.push(
+                self.prepare_weld_split_for_motion(state.body, &welds, motion)
+                    .map_err(WeldSplitPreparationError::Cluster)?,
+            );
+        }
+        Ok(plans)
+    }
+    /// Returns the part owning a collider, or `None` for an unclustered body
+    /// or an invalid collider. Lookup scans the owning cluster's part and
+    /// collider lists; it does not cache ownership across topology changes.
+    pub fn collider_part(&self, collider: ColliderId) -> Option<PartId> {
+        let body = self.collider_body(collider)?;
+        self.cluster(body)?.parts().iter().copied().find(|part| {
+            self.cluster_part(*part)
+                .is_some_and(|entry| entry.colliders().contains(&collider))
+        })
+    }
+
     /// Adds a collider owned by a cluster part.
     pub fn add_part_collider(
         &mut self,
@@ -48,22 +378,46 @@ impl PhysicsWorld {
         Ok(id)
     }
 
+    /// Changes a collider's rigid transform relative to its owning part.
+    /// Validates ownership and composition before changing collision or aero state.
+    pub fn set_part_collider_transform(
+        &mut self,
+        part: PartId,
+        collider: ColliderId,
+        part_local_transform: Transform,
+    ) -> Result<(), ClusterError> {
+        let owner = self.cluster_part(part).ok_or(ClusterError::InvalidPartId)?;
+        if !owner.colliders().contains(&collider) {
+            return Err(ClusterError::InvalidTopology);
+        }
+        let body = owner.body();
+        let local = owner
+            .local_transform()
+            .compose(&part_local_transform)
+            .map_err(ClusterError::Transform)?;
+        self.rebind_collider(collider, body, local)?;
+        let entry = self
+            .bodies
+            .get_mut(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        entry.collider_aerodynamic_mesh = None;
+        entry.mesh_aerodynamics = None;
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
+        }
+        self.body_revision = self.body_revision.wrapping_add(1);
+        Ok(())
+    }
+
     /// Removes a collider from its owning cluster part.
     pub fn remove_part_collider(
         &mut self,
         id: ColliderId,
     ) -> Result<crate::collider::Collider, ClusterError> {
         let body = self.collider_body(id).ok_or(ClusterError::InvalidPartId)?;
+        self.cluster(body).ok_or(ClusterError::NotClustered)?;
         let part = self
-            .cluster(body)
-            .ok_or(ClusterError::NotClustered)?
-            .parts()
-            .iter()
-            .copied()
-            .find(|part| {
-                self.cluster_part(*part)
-                    .is_some_and(|entry| entry.colliders().contains(&id))
-            })
+            .collider_part(id)
             .ok_or(ClusterError::InvalidTopology)?;
         let collider = self
             .remove_collider_internal(id)
@@ -112,6 +466,28 @@ impl PhysicsWorld {
         if body_entry.cluster.is_some() {
             return Err(ClusterError::AlreadyClustered);
         }
+        // Base patches are body-local and are not yet transferred to a part.
+        // Reject before changing topology rather than strand or lose loads.
+        if !body_entry.body.base_pressure_patches.is_empty()
+            || body_entry.body.potential_sphere.is_some()
+        {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
+        let mut root_hull = Vec::new();
+        if let Aerodynamics::Hull(sections) = body_entry.body.aerodynamics() {
+            root_hull
+                .try_reserve(sections.len())
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        }
+        let mut root_wings = Vec::new();
+        if matches!(body_entry.body.aerodynamics(), Aerodynamics::Wing(_)) {
+            root_wings
+                .try_reserve(1)
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        }
+        let mesh_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::Mesh(_));
+        let collider_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::Colliders);
+        let wave_mode = matches!(body_entry.body.aerodynamics(), Aerodynamics::VoxelWave(_));
         if body_entry.body.physics().body_type() == BodyType::Dynamic
             && body_entry.body.physics().mass() != Some(mass)
         {
@@ -135,6 +511,12 @@ impl PhysicsWorld {
         self.parts
             .try_reserve_insertions(1)
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        if mesh_mode || collider_mode || wave_mode {
+            self.part_aerodynamic_geometry
+                .get_or_insert_with(HashMap::new)
+                .try_reserve(1)
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        }
 
         let dense = self
             .parts
@@ -143,6 +525,8 @@ impl PhysicsWorld {
                 local_transform: Transform::identity(),
                 mass,
                 colliders,
+                aerodynamic_wings: Vec::new(),
+                aerodynamic_hull: Vec::new(),
             })
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let part = PartId {
@@ -158,6 +542,44 @@ impl PhysicsWorld {
             parts: vec![part],
             welds: Vec::new(),
         });
+        // Capacity was reserved before inserting the part; these moves cannot
+        // lose the original body model on a fallible preparation operation.
+        match entry.body.take_primary_aerodynamics() {
+            Aerodynamics::Mesh(mesh) => {
+                self.part_aerodynamic_geometry
+                    .get_or_insert_with(HashMap::new)
+                    .insert(
+                        part,
+                        super::assembly_aerodynamics::PartGeometry::Mesh(std::sync::Arc::new(mesh)),
+                    );
+                entry.mesh_aerodynamics = None;
+            }
+            Aerodynamics::VoxelWave(model) => {
+                self.part_aerodynamic_geometry
+                    .get_or_insert_with(HashMap::new)
+                    .insert(
+                        part,
+                        super::assembly_aerodynamics::PartGeometry::Wave(Box::new(model)),
+                    );
+                entry.mesh_aerodynamics = None;
+            }
+            Aerodynamics::Colliders => {
+                self.part_aerodynamic_geometry
+                    .get_or_insert_with(HashMap::new)
+                    .insert(part, super::assembly_aerodynamics::PartGeometry::Colliders);
+                entry.mesh_aerodynamics = None;
+                entry.collider_aerodynamic_mesh = None;
+            }
+            Aerodynamics::Wing(wing) => root_wings.push(wing),
+            Aerodynamics::Wings(wings) => root_wings = wings,
+            Aerodynamics::Hull(sections) => root_hull = sections,
+            model => entry.body.set_primary_aerodynamics(model),
+        }
+        if let Some(root) = self.parts.get_mut(part.dense) {
+            root.aerodynamic_wings = root_wings;
+            root.aerodynamic_hull = root_hull;
+        }
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(part)
     }
 
@@ -202,7 +624,7 @@ impl PhysicsWorld {
             .map_err(ClusterError::Transform)?;
         validate_weld_frames(parent_transform, desc.local_transform, weld_desc)?;
 
-        let original = *self.body(body).ok_or(ClusterError::InvalidBodyId)?;
+        let original = self.body(body).ok_or(ClusterError::InvalidBodyId)?.motion();
         let mut values = Vec::new();
         values
             .try_reserve(cluster.parts().len().saturating_add(1))
@@ -316,9 +738,12 @@ impl PhysicsWorld {
             collider.set_local_transform(local_transform);
             prepared_colliders.push(collider);
         }
-        if let Some(prepared) = &prepared_body {
-            self.validate_cluster_surface_rebase(body, &original, prepared)?;
-        }
+        let prepared_surfaces = if let Some(prepared) = &prepared_body {
+            Some(self.prepare_cluster_surface_rebase(body, &original, prepared)?)
+        } else {
+            self.cluster_aerodynamic_surfaces(body)?;
+            None
+        };
         let part_dense = self
             .parts
             .insert(ClusterPart {
@@ -326,6 +751,8 @@ impl PhysicsWorld {
                 local_transform: desc.local_transform,
                 mass: desc.mass,
                 colliders: Vec::new(),
+                aerodynamic_wings: Vec::new(),
+                aerodynamic_hull: Vec::new(),
             })
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let part = PartId {
@@ -354,6 +781,7 @@ impl PhysicsWorld {
             part_a: parent,
             part_b: part,
             desc: weld_desc,
+            impulse_strength: None,
         }) {
             Ok(value) => value,
             Err(_) => {
@@ -374,8 +802,10 @@ impl PhysicsWorld {
                 .bodies
                 .get_mut(body.dense)
                 .expect("cluster body must exist");
-            Self::commit_cluster_surface_rebase(&mut entry.aerodynamics, &original, &prepared);
-            entry.body = prepared;
+            if let Some(surfaces) = prepared_surfaces {
+                Self::commit_cluster_surface_rebase(&mut entry.body, surfaces);
+            }
+            entry.body.set_motion(prepared);
         }
         let cluster = self
             .bodies
@@ -483,7 +913,7 @@ impl PhysicsWorld {
             values.push((entry.mass(), entry.local_transform()));
         }
         let aggregate = aggregate_mass(values.iter().map(|(mass, transform)| (mass, transform)))?;
-        let original = *self.body(body).ok_or(ClusterError::InvalidBodyId)?;
+        let original = self.body(body).ok_or(ClusterError::InvalidBodyId)?.motion();
         let new_center = original
             .state()
             .transform()
@@ -522,7 +952,8 @@ impl PhysicsWorld {
             }
         }
 
-        self.validate_cluster_surface_rebase(body, &original, &prepared)?;
+        let mut prepared_surfaces =
+            self.prepare_cluster_surface_rebase(body, &original, &prepared)?;
         let removed_sources = self
             .force_sources
             .iter()
@@ -583,11 +1014,9 @@ impl PhysicsWorld {
             .bodies
             .get_mut(body.dense)
             .expect("cluster body must exist");
-        Self::commit_cluster_surface_rebase(&mut entry.aerodynamics, &original, &prepared);
-        entry
-            .aerodynamics
-            .retain(|surface| surface.target() != AerodynamicTarget::Part(part));
-        entry.body = prepared;
+        prepared_surfaces.retain(|surface| surface.target() != AerodynamicTarget::Part(part));
+        Self::commit_cluster_surface_rebase(&mut entry.body, prepared_surfaces);
+        entry.body.set_motion(prepared);
         self.synchronize_cluster_physics_state(&[body]);
         Ok(())
     }
@@ -646,13 +1075,45 @@ impl PhysicsWorld {
         weld_desc.validate()?;
         let first_cluster = self.cluster(first).ok_or(ClusterError::NotClustered)?;
         let second_cluster = self.cluster(second).ok_or(ClusterError::NotClustered)?;
+        let has_wave = |cluster: &RigidCluster| {
+            cluster.parts().iter().any(|part| {
+                matches!(
+                    self.part_aerodynamic_geometry
+                        .as_ref()
+                        .and_then(|geometry| geometry.get(part)),
+                    Some(super::assembly_aerodynamics::PartGeometry::Wave(_))
+                )
+            })
+        };
+        if has_wave(first_cluster) && has_wave(second_cluster) {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
+        let first_tessellation = self
+            .bodies
+            .get(first.dense)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .collider_tessellation;
+        let second_tessellation = self
+            .bodies
+            .get(second.dense)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .collider_tessellation;
+        if first_tessellation != second_tessellation {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
         let first_root = first_cluster.root();
         let second_root = second_cluster.root();
         let first_parts = first_cluster.parts().to_vec();
         let second_parts = second_cluster.parts().to_vec();
         let second_welds = second_cluster.welds().to_vec();
-        let first_body = *self.body(first).ok_or(ClusterError::InvalidBodyId)?;
-        let second_body = *self.body(second).ok_or(ClusterError::InvalidBodyId)?;
+        let first_body = self
+            .body(first)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .motion();
+        let second_body = self
+            .body(second)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .motion();
         let first_type = first_body.physics().body_type();
         if first_type != second_body.physics().body_type() {
             return Err(ClusterError::IncompatibleMotion);
@@ -889,8 +1350,8 @@ impl PhysicsWorld {
             joint_updates.push((dense, target_a_moves, target_b_moves, frame_a, frame_b));
         }
 
-        let first_aerodynamics = &self.bodies.get(first.dense).unwrap().aerodynamics;
-        let second_aerodynamics = &self.bodies.get(second.dense).unwrap().aerodynamics;
+        let first_aerodynamics = self.cluster_aerodynamic_surfaces(first)?;
+        let second_aerodynamics = self.cluster_aerodynamic_surfaces(second)?;
         let mut merged_aerodynamics = Vec::new();
         merged_aerodynamics
             .try_reserve(
@@ -899,13 +1360,13 @@ impl PhysicsWorld {
                     .saturating_add(second_aerodynamics.len()),
             )
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
-        for &surface in first_aerodynamics {
+        for surface in first_aerodynamics {
             merged_aerodynamics.push(
                 PhysicsWorld::rebase_aerodynamic_surface(surface, &first_body, &prepared)
                     .map_err(|_| ClusterError::ArithmeticOverflow)?,
             );
         }
-        for &surface in second_aerodynamics {
+        for surface in second_aerodynamics {
             merged_aerodynamics.push(
                 PhysicsWorld::rebase_aerodynamic_surface(surface, &second_body, &prepared)
                     .map_err(|_| ClusterError::ArithmeticOverflow)?,
@@ -936,6 +1397,7 @@ impl PhysicsWorld {
                 part_a: first_root,
                 part_b: second_root,
                 desc: weld_desc,
+                impulse_strength: None,
             })
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let bridge = WeldId {
@@ -992,14 +1454,19 @@ impl PhysicsWorld {
         cluster.parts.extend(second_parts);
         cluster.welds.extend(second_welds);
         cluster.welds.push(bridge);
-        self.bodies
+        let entry = self
+            .bodies
             .get_mut(first.dense)
-            .expect("first body must exist during merge commit")
-            .body = prepared;
-        self.bodies.get_mut(first.dense).unwrap().aerodynamics = merged_aerodynamics;
+            .expect("first body must exist during merge commit");
+        entry.body.set_motion(prepared);
+        entry.body.set_primary_aerodynamics(Aerodynamics::None);
+        entry.body.aerodynamic_surfaces = merged_aerodynamics;
         self.bodies
             .remove(second.dense)
             .expect("second body must exist during merge commit");
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&second);
+        }
         self.synchronize_cluster_physics_state(&[first]);
         Ok(())
     }
@@ -1009,6 +1476,31 @@ impl PhysicsWorld {
         body: BodyId,
         removed_welds: &[WeldId],
     ) -> Result<Vec<BodyId>, ClusterError> {
+        let prepared = self.prepare_weld_split(body, removed_welds)?;
+        self.commit_weld_split(prepared)
+    }
+
+    /// Performs all geometry, topology, and motion preparation without
+    /// changing world state. The result is valid only for this exact world.
+    fn prepare_weld_split(
+        &self,
+        body: BodyId,
+        removed_welds: &[WeldId],
+    ) -> Result<PreparedWeldSplit, ClusterError> {
+        let motion = self.body(body).ok_or(ClusterError::InvalidBodyId)?.motion();
+        self.prepare_weld_split_for_motion(body, removed_welds, motion)
+    }
+
+    /// Prepare from the motion to be committed, which may be a staged end-of-step
+    /// motion rather than the current one. The caller must supply motion for the
+    /// same body and must not mutate topology between preparation and commit.
+    #[allow(dead_code)]
+    fn prepare_weld_split_for_motion(
+        &self,
+        body: BodyId,
+        removed_welds: &[WeldId],
+        original: BodyMotion,
+    ) -> Result<PreparedWeldSplit, ClusterError> {
         let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
         let original_root = cluster.root();
         let removed_set = removed_welds.iter().copied().collect::<HashSet<_>>();
@@ -1072,7 +1564,6 @@ impl PhysicsWorld {
             .ok_or(ClusterError::InvalidTopology)?;
         components.swap(0, root_index);
 
-        let original = *self.body(body).ok_or(ClusterError::InvalidBodyId)?;
         let mut prepared_bodies = Vec::new();
         prepared_bodies
             .try_reserve(components.len())
@@ -1162,9 +1653,40 @@ impl PhysicsWorld {
                 part_components.insert(part, index);
             }
         }
-        let original_aerodynamics = &self.bodies.get(body.dense).unwrap().aerodynamics;
-        let mut component_aerodynamics = vec![Vec::new(); components.len()];
-        for &surface in original_aerodynamics {
+        // Build every component's final topology before inserting any bodies or
+        // removing welds. No fallible topology allocation belongs in commit.
+        let mut component_welds = Vec::new();
+        component_welds
+            .try_reserve_exact(components.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        component_welds.resize_with(components.len(), Vec::new);
+        for &weld_id in &remaining_welds {
+            let weld = self.weld(weld_id).ok_or(ClusterError::InvalidTopology)?;
+            let index = *part_components
+                .get(&weld.part_a())
+                .ok_or(ClusterError::InvalidTopology)?;
+            if part_components.get(&weld.part_b()) != Some(&index) {
+                return Err(ClusterError::InvalidTopology);
+            }
+            component_welds[index]
+                .try_reserve(1)
+                .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+            component_welds[index].push(weld_id);
+        }
+        let mut prepared_clusters = Vec::new();
+        prepared_clusters
+            .try_reserve_exact(components.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for (index, (parts, welds)) in components.into_iter().zip(component_welds).enumerate() {
+            let root = if index == 0 { original_root } else { parts[0] };
+            prepared_clusters.push(RigidCluster { root, parts, welds });
+        }
+        if prepared_clusters.is_empty() {
+            return Err(ClusterError::InvalidTopology);
+        }
+        let original_aerodynamics = self.cluster_aerodynamic_surfaces(body)?;
+        let mut component_aerodynamics = vec![Vec::new(); prepared_clusters.len()];
+        for surface in original_aerodynamics {
             let (index, surface) = match surface.target() {
                 AerodynamicTarget::Body => (
                     0,
@@ -1189,31 +1711,155 @@ impl PhysicsWorld {
         }
         let mut component_aerodynamics = component_aerodynamics.into_iter();
         let root_aerodynamics = component_aerodynamics.next().unwrap();
+        let collider_tessellation = self
+            .bodies
+            .get(body.dense)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .collider_tessellation;
         let entries = prepared_bodies
             .iter()
             .skip(1)
             .copied()
             .zip(component_aerodynamics)
-            .map(|(body, aerodynamics)| BodyEntry {
-                body,
-                aerodynamics,
-                first_collider: None,
-                cluster: None,
+            .map(|(motion, aerodynamics)| {
+                let mut body = RigidBody::from_motion(motion);
+                body.aerodynamic_surfaces = aerodynamics;
+                BodyEntry {
+                    body,
+                    first_collider: None,
+                    cluster: None,
+                    mesh_aerodynamics: None,
+                    collider_aerodynamic_mesh: None,
+                    collider_tessellation,
+                }
             })
             .collect::<Vec<_>>();
-        let new_bodies = self
-            .bodies
-            .try_insert_many(entries)
-            .map_err(|_| ClusterError::StorageCapacityExceeded)?
-            .into_iter()
-            .map(|dense| BodyId {
-                world: self.world_id,
-                dense,
-            })
-            .collect::<Vec<_>>();
-        self.bodies.get_mut(body.dense).unwrap().aerodynamics = root_aerodynamics;
+        let mut affected_bodies = Vec::new();
+        affected_bodies
+            .try_reserve_exact(prepared_clusters.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let mut clusters = prepared_clusters.into_iter();
+        let root_cluster = clusters.next().ok_or(ClusterError::InvalidTopology)?;
+        let mut removed = Vec::new();
+        removed
+            .try_reserve_exact(removed_welds.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        removed.extend_from_slice(removed_welds);
+        Ok(PreparedWeldSplit {
+            body,
+            removed_welds: removed,
+            entries,
+            prepared_bodies,
+            part_rebinds,
+            part_components,
+            root_aerodynamics,
+            root_cluster,
+            other_clusters: clusters,
+            affected_bodies,
+        })
+    }
 
-        for &weld in removed_welds {
+    /// Commits a plan before any other world mutation. Batch insertion fails
+    /// without mutation; subsequent operations rely on preparation invariants.
+    fn commit_weld_split(&mut self, plan: PreparedWeldSplit) -> Result<Vec<BodyId>, ClusterError> {
+        let mut plans = Vec::new();
+        plans
+            .try_reserve_exact(1)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        plans.push(plan);
+        let mut results = self.commit_weld_splits(plans)?;
+        results.pop().ok_or(ClusterError::InvalidTopology)
+    }
+
+    /// Plans must refer to distinct clusters prepared against the same unchanged
+    /// world. All body entries are inserted in one rollback-capable pool batch.
+    fn commit_weld_splits(
+        &mut self,
+        plans: Vec<PreparedWeldSplit>,
+    ) -> Result<Vec<Vec<BodyId>>, ClusterError> {
+        let staged = self.insert_weld_split_bodies(plans)?;
+        Ok(self.finish_weld_splits(staged))
+    }
+
+    pub(super) fn insert_weld_split_bodies(
+        &mut self,
+        mut plans: Vec<PreparedWeldSplit>,
+    ) -> Result<InsertedWeldSplits, ClusterError> {
+        let mut bodies = HashSet::new();
+        bodies
+            .try_reserve(plans.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let mut count = 0usize;
+        for plan in &plans {
+            if !bodies.insert(plan.body) {
+                return Err(ClusterError::InvalidTopology);
+            }
+            count = count
+                .checked_add(plan.entries.len())
+                .ok_or(ClusterError::StorageCapacityExceeded)?;
+        }
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(count)
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let mut results = Vec::new();
+        results
+            .try_reserve_exact(plans.len())
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        for plan in &mut plans {
+            entries.append(&mut plan.entries);
+        }
+        #[cfg(test)]
+        let inserted = if let Some(fail_after) = self.weld_split_fail_after.take() {
+            self.bodies
+                .try_insert_many_failing_after(entries, fail_after)
+        } else {
+            self.bodies.try_insert_many(entries)
+        };
+        #[cfg(not(test))]
+        let inserted = self.bodies.try_insert_many(entries);
+        let inserted = inserted.map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        let mut ids = inserted.into_iter();
+        for plan in &mut plans {
+            plan.affected_bodies.push(plan.body);
+            for dense in ids.by_ref().take(plan.other_clusters.len()) {
+                plan.affected_bodies.push(BodyId {
+                    world: self.world_id,
+                    dense,
+                });
+            }
+        }
+        Ok(InsertedWeldSplits { plans, results })
+    }
+
+    pub(super) fn finish_weld_splits(&mut self, staged: InsertedWeldSplits) -> Vec<Vec<BodyId>> {
+        let InsertedWeldSplits { plans, mut results } = staged;
+        for plan in plans {
+            results.push(self.commit_inserted_weld_split(plan));
+        }
+        results
+    }
+
+    /// Applies a validated plan after its new body entries have been inserted.
+    fn commit_inserted_weld_split(&mut self, plan: PreparedWeldSplit) -> Vec<BodyId> {
+        let PreparedWeldSplit {
+            body,
+            removed_welds,
+            entries: _,
+            prepared_bodies,
+            part_rebinds,
+            part_components,
+            root_aerodynamics,
+            root_cluster,
+            other_clusters: clusters,
+            affected_bodies,
+        } = plan;
+        let new_bodies = &affected_bodies[1..];
+        let entry = self.bodies.get_mut(body.dense).unwrap();
+        entry.body.set_primary_aerodynamics(Aerodynamics::None);
+        entry.body.aerodynamic_surfaces = root_aerodynamics;
+
+        for weld in removed_welds {
             self.welds
                 .remove(weld.dense)
                 .expect("weld must be validated before split commit");
@@ -1228,91 +1874,49 @@ impl PhysicsWorld {
                 self.rebind_collider_prepared(collider, target_body, local_transform);
             }
         }
-        let root_component = &components[0];
-        let root_welds = remaining_welds
-            .iter()
-            .copied()
-            .filter(|weld_id| {
-                self.weld(*weld_id).is_some_and(|weld| {
-                    root_component.contains(&weld.part_a())
-                        && root_component.contains(&weld.part_b())
-                })
-            })
-            .collect::<Vec<_>>();
-        let root = original_root;
         let entry = self
             .bodies
             .get_mut(body.dense)
             .expect("root body must exist during split commit");
-        entry.body = prepared_bodies[0];
-        entry.cluster = Some(RigidCluster {
-            root,
-            parts: root_component.clone(),
-            welds: root_welds,
-        });
-        for (component_index, component) in components.iter().enumerate().skip(1) {
+        entry.body.set_motion(prepared_bodies[0]);
+        entry.cluster = Some(root_cluster);
+        for (component_index, cluster) in clusters.enumerate() {
+            let component_index = component_index + 1;
             let target_body = new_bodies[component_index - 1];
-            let welds = remaining_welds
-                .iter()
-                .copied()
-                .filter(|weld_id| {
-                    self.weld(*weld_id).is_some_and(|weld| {
-                        component.contains(&weld.part_a()) && component.contains(&weld.part_b())
-                    })
-                })
-                .collect::<Vec<_>>();
             let entry = self
                 .bodies
                 .get_mut(target_body.dense)
                 .expect("split body must exist during commit");
-            entry.cluster = Some(RigidCluster {
-                root: component[0],
-                parts: component.clone(),
-                welds,
-            });
+            entry.cluster = Some(cluster);
         }
-        let part_body = components
-            .iter()
-            .enumerate()
-            .flat_map(|(component_index, component)| {
-                let target_body = if component_index == 0 {
-                    body
-                } else {
-                    new_bodies[component_index - 1]
-                };
-                component
-                    .iter()
-                    .copied()
-                    .map(move |part| (part, target_body))
-            })
-            .collect::<HashMap<_, _>>();
+        let target_body = |index: usize| {
+            if index == 0 {
+                body
+            } else {
+                new_bodies[index - 1]
+            }
+        };
         for entry in self.joints.iter_mut().map(|(_, entry)| entry) {
             if let JointTarget::Part(part) = entry.target_a
-                && let Some(&target_body) = part_body.get(&part)
+                && let Some(&index) = part_components.get(&part)
             {
-                entry.body_a = target_body;
+                entry.body_a = target_body(index);
             }
             if let JointTarget::Part(part) = entry.target_b
-                && let Some(&target_body) = part_body.get(&part)
+                && let Some(&index) = part_components.get(&part)
             {
-                entry.body_b = target_body;
+                entry.body_b = target_body(index);
             }
         }
         for (_, source) in self.force_sources.iter_mut() {
             if let ForceTarget::Part(part) = source.target
-                && let Some(&target_body) = part_body.get(&part)
+                && let Some(&index) = part_components.get(&part)
             {
-                source.body = target_body;
+                source.body = target_body(index);
             }
         }
-        let mut affected_bodies = Vec::with_capacity(new_bodies.len() + 1);
-        affected_bodies.push(body);
-        affected_bodies.extend(new_bodies.iter().copied());
         self.synchronize_cluster_physics_state(&affected_bodies);
-        let mut result = Vec::with_capacity(new_bodies.len() + 1);
-        result.push(body);
-        result.extend(new_bodies);
-        Ok(result)
+        affected_bodies
     }
 
     /// Changes a part's mass while preserving the body's world-space velocity field.
@@ -1368,7 +1972,7 @@ impl PhysicsWorld {
             ));
         }
         let aggregate = aggregate_mass(values.iter().map(|(mass, transform)| (mass, transform)))?;
-        let original = *self.body(body).ok_or(ClusterError::InvalidBodyId)?;
+        let original = self.body(body).ok_or(ClusterError::InvalidBodyId)?.motion();
         let new_center = original
             .state()
             .transform()
@@ -1433,7 +2037,7 @@ impl PhysicsWorld {
                 prepared.apply_torque(torque).map_err(ClusterError::Body)?;
             }
         }
-        self.validate_cluster_surface_rebase(body, &original, &prepared)?;
+        let prepared_surfaces = self.prepare_cluster_surface_rebase(body, &original, &prepared)?;
         let target = self
             .parts
             .get_mut(part.dense)
@@ -1443,8 +2047,8 @@ impl PhysicsWorld {
             .get_mut(body.dense)
             .ok_or(ClusterError::InvalidBodyId)?;
         target.mass = mass;
-        Self::commit_cluster_surface_rebase(&mut entry.aerodynamics, &original, &prepared);
-        entry.body = prepared;
+        Self::commit_cluster_surface_rebase(&mut entry.body, prepared_surfaces);
+        entry.body.set_motion(prepared);
         let mut collider = entry.first_collider;
         while let Some(id) = collider {
             collider = self.colliders.get(id.dense).and_then(|entry| entry.next);
@@ -1454,45 +2058,64 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn validate_cluster_surface_rebase(
-        &self,
-        body: BodyId,
-        original: &RigidBody,
-        prepared: &RigidBody,
-    ) -> Result<(), ClusterError> {
-        if original.physics().body_type() != BodyType::Dynamic {
-            return Ok(());
-        }
-        let surfaces = &self
-            .bodies
-            .get(body.dense)
-            .ok_or(ClusterError::InvalidBodyId)?
-            .aerodynamics;
-        for &surface in surfaces
-            .iter()
-            .filter(|surface| surface.target() == AerodynamicTarget::Body)
+    fn commit_cluster_surface_rebase(body: &mut RigidBody, mut prepared: Vec<AerodynamicSurface>) {
+        if matches!(body.aerodynamics(), Aerodynamics::Simple(_))
+            && let Some(primary) = prepared.pop()
         {
-            Self::rebase_aerodynamic_surface(surface, original, prepared)
-                .map_err(|_| ClusterError::ArithmeticOverflow)?;
+            body.set_primary_aerodynamics(Aerodynamics::Simple(primary.properties()));
         }
-        Ok(())
+        if prepared.len() <= body.aerodynamic_surfaces.len() {
+            body.aerodynamic_surfaces.truncate(prepared.len());
+            body.aerodynamic_surfaces.copy_from_slice(&prepared);
+        } else {
+            body.aerodynamic_surfaces = prepared;
+        }
     }
 
-    fn commit_cluster_surface_rebase(
-        surfaces: &mut [crate::aerodynamics::AerodynamicSurface],
-        original: &RigidBody,
-        prepared: &RigidBody,
-    ) {
-        if original.physics().body_type() != BodyType::Dynamic {
-            return;
+    fn cluster_aerodynamic_surfaces(
+        &self,
+        body: BodyId,
+    ) -> Result<Vec<AerodynamicSurface>, ClusterError> {
+        let body = self.body(body).ok_or(ClusterError::InvalidBodyId)?;
+        let primary = match body.aerodynamics() {
+            Aerodynamics::None => None,
+            Aerodynamics::Simple(properties) => Some(AerodynamicSurface::new(*properties)),
+            Aerodynamics::Mesh(_)
+            | Aerodynamics::VoxelWave(_)
+            | Aerodynamics::Colliders
+            | Aerodynamics::Wing(_)
+            | Aerodynamics::Wings(_)
+            | Aerodynamics::Hull(_) => {
+                return Err(ClusterError::UnsupportedGeometry);
+            }
+        };
+        let mut surfaces = Vec::new();
+        surfaces
+            .try_reserve(
+                body.aerodynamic_surfaces
+                    .len()
+                    .saturating_add(usize::from(primary.is_some())),
+            )
+            .map_err(|_| ClusterError::StorageCapacityExceeded)?;
+        surfaces.extend(body.aerodynamic_surfaces.iter().copied());
+        surfaces.extend(primary);
+        Ok(surfaces)
+    }
+
+    fn prepare_cluster_surface_rebase(
+        &self,
+        body: BodyId,
+        original: &BodyMotion,
+        prepared: &BodyMotion,
+    ) -> Result<Vec<AerodynamicSurface>, ClusterError> {
+        let mut surfaces = self.cluster_aerodynamic_surfaces(body)?;
+        if original.physics().body_type() == BodyType::Dynamic {
+            for surface in &mut surfaces {
+                *surface = Self::rebase_aerodynamic_surface(*surface, original, prepared)
+                    .map_err(|_| ClusterError::ArithmeticOverflow)?;
+            }
         }
-        for surface in surfaces
-            .iter_mut()
-            .filter(|surface| surface.target() == AerodynamicTarget::Body)
-        {
-            *surface = Self::rebase_aerodynamic_surface(*surface, original, prepared)
-                .expect("surface rebase was validated before mutation");
-        }
+        Ok(surfaces)
     }
 
     #[allow(dead_code)]
@@ -1665,6 +2288,44 @@ impl PhysicsWorld {
             return None;
         }
         self.welds.get(weld.dense)
+    }
+
+    /// Stores independent impulse limits on a weld, or clears them with `None`.
+    ///
+    /// Linear and angular limits are in N·s and N·m·s. This configuration is
+    /// checked only for supported isolated discrete contacts when automatic
+    /// weld failure and impulse-balance tolerances are configured. An
+    /// unbreakable weld cannot be given impulse limits. Invalid input leaves
+    /// both the existing limits and prepared step results unchanged.
+    pub fn set_weld_impulse_strength(
+        &mut self,
+        weld: WeldId,
+        strength: Option<crate::cluster::impulse::ImpulseStrength>,
+    ) -> Result<(), ClusterError> {
+        let entry = self.weld(weld).ok_or(ClusterError::InvalidWeldId)?;
+        if let Some(value) = strength {
+            if matches!(
+                entry.desc().strength,
+                crate::cluster::WeldStrength::Unbreakable
+            ) || value
+                .exceeded_by(crate::cluster::impulse::ImpulseReaction {
+                    linear: Vec3::ZERO,
+                    angular: Vec3::ZERO,
+                })
+                .is_err()
+            {
+                return Err(ClusterError::InvalidWeld);
+            }
+        }
+        if entry.impulse_strength() == strength {
+            return Ok(());
+        }
+        self.welds
+            .get_mut(weld.dense)
+            .ok_or(ClusterError::InvalidWeldId)?
+            .impulse_strength = strength;
+        self.body_revision = self.body_revision.wrapping_add(1);
+        Ok(())
     }
 
     pub fn part_body(&self, part: PartId) -> Option<BodyId> {

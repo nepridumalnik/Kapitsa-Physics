@@ -82,7 +82,10 @@ fn free_ball_pair_all_step_routes_are_deterministic() {
             }
             for (world, ids, _) in &worlds[1..] {
                 for (&id, &reference) in ids.iter().zip(&worlds[0].1) {
-                    assert_eq!(world.body(id), worlds[0].0.body(reference));
+                    assert_eq!(
+                        world.body(id).map(RigidBody::motion),
+                        worlds[0].0.body(reference).map(RigidBody::motion)
+                    );
                 }
             }
         }
@@ -104,14 +107,14 @@ fn free_ball_pair_numerical_failures_are_atomic() {
                         .unwrap();
                 }
             }
-            let original = ids.map(|id| *world.body(id).unwrap());
+            let original = ids.map(|id| world.body(id).unwrap().motion());
             let original_joint = *world.joint(joint).unwrap();
             let dt = if overflow { 1.0e100 } else { 1.0 };
             let error = step_route(&mut world, route, dt).unwrap_err();
             if !overflow {
                 assert_eq!(error, StepError::Collision(CollisionError::NonConvergent));
             }
-            assert_eq!(ids.map(|id| *world.body(id).unwrap()), original);
+            assert_eq!(ids.map(|id| world.body(id).unwrap().motion()), original);
             assert_eq!(*world.joint(joint).unwrap(), original_joint);
             assert!(world.joint_events().is_empty());
             assert!(world.collision_events().is_empty());
@@ -181,10 +184,13 @@ fn free_ball_pair_rejects_unsupported_configurations_without_mutation() {
             }
             _ => {}
         }
-        let original: Vec<_> = world.bodies().map(|(_, body)| *body).collect();
+        let original: Vec<_> = world.bodies().map(|(_, body)| body.motion()).collect();
 
         assert_eq!(
-            world.bodies().map(|(_, body)| *body).collect::<Vec<_>>(),
+            world
+                .bodies()
+                .map(|(_, body)| body.motion())
+                .collect::<Vec<_>>(),
             original
         );
         world.step(1.0 / 120.0).unwrap();
@@ -209,12 +215,12 @@ fn free_ball_pair_rejects_stale_shards_before_any_commit() {
         .unwrap()
         .set_linear_velocity(Vec3::Y)
         .unwrap();
-    let original = ids.map(|id| *world.body(id).unwrap());
+    let original = ids.map(|id| world.body(id).unwrap().motion());
     assert_eq!(
         world.commit_step_shards(&shards),
         Err(StepError::InvalidStepResults)
     );
-    assert_eq!(ids.map(|id| *world.body(id).unwrap()), original);
+    assert_eq!(ids.map(|id| world.body(id).unwrap().motion()), original);
 }
 
 #[test]
@@ -240,7 +246,7 @@ fn free_ball_pair_preserves_pending_collision_events_across_failure_and_commit()
         for id in colliders {
             world.remove_collider(id).unwrap();
         }
-        let original = ids.map(|id| *world.body(id).unwrap());
+        let original = ids.map(|id| world.body(id).unwrap().motion());
         for id in ids {
             world
                 .body_mut(id)
@@ -254,7 +260,7 @@ fn free_ball_pair_preserves_pending_collision_events_across_failure_and_commit()
         );
         assert_eq!(world.collision_events(), events);
         for (id, body) in ids.into_iter().zip(original) {
-            *world.body_mut(id).unwrap() = body;
+            *world.body_mut(id).unwrap() = RigidBody::from_motion(body);
         }
         step_route(&mut world, route, 1.0 / 120.0).unwrap();
         assert_eq!(world.collision_events().len(), 1);
@@ -302,11 +308,9 @@ fn constrained_large_warm_steps_do_not_allocate() {
             )
             .unwrap();
             body.set_angular_velocity(omega).unwrap();
-            body.set_linear_velocity(
-                Vec3::new(0.2, -0.1, 0.05)
-                    + omega.cross(body.world_center_of_mass().unwrap().unwrap()),
-            )
-            .unwrap();
+            let center = body.world_center_of_mass().unwrap().unwrap();
+            body.set_linear_velocity(Vec3::new(0.2, -0.1, 0.05) + omega.cross(center))
+                .unwrap();
             ids.push(world.add_body(body).unwrap());
         }
         for pair in ids.windows(2) {

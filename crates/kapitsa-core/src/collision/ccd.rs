@@ -1,6 +1,6 @@
 use crate::{
     aabb::Aabb,
-    rigid_body::{BodyState, BodyType, RigidBody, predict_from_state, trajectory_bounds},
+    rigid_body::{BodyMotion, BodyState, BodyType, predict_from_state, trajectory_bounds},
     shape::{HeightField, LevelSet, Plane, Shape, Triangle, TriangleMesh},
     transform::Transform,
 };
@@ -19,7 +19,7 @@ const MAX_CCD_ITERATIONS: usize = 80;
 
 #[derive(Clone, Copy)]
 pub(crate) struct CcdTrajectory {
-    body: RigidBody,
+    body: BodyMotion,
     base_state: BodyState,
     base_time: f64,
     sample_start_time: f64,
@@ -30,7 +30,7 @@ pub(crate) struct CcdTrajectory {
 
 impl CcdTrajectory {
     pub(crate) fn new(
-        body: RigidBody,
+        body: BodyMotion,
         base_state: BodyState,
         base_time: f64,
         sample_start_time: f64,

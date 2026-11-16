@@ -250,7 +250,21 @@ If a command has already changed the world but the subsequent physics step fails
 
 ## Aerodynamics and Hydrodynamics
 
-The aerodynamics module provides quadratic drag and an optional simplified lift model for body and cluster-part surfaces. Configure a spherical atmosphere on `PhysicsWorld` or `Simulation::builder()`; aerodynamic forces are applied during world steps. Worlds and simulation builders default to `Atmosphere::Vacuum`. The hydrodynamics module currently provides an extension point without an active physics model.
+The aerodynamics module provides quadratic drag and an optional simplified lift model for body and cluster-part surfaces. Aerodynamic configuration and additional surfaces are owned by `RigidBody`; the world supplies the atmosphere and evaluates loads. Configure a spherical atmosphere on `PhysicsWorld` or `Simulation::builder()`; aerodynamic forces are applied during world steps. Worlds and simulation builders default to `Atmosphere::Vacuum`. The hydrodynamics module currently provides an extension point without an active physics model.
+
+```rust
+use kapitsa::aerodynamics::{AerodynamicProperties, Aerodynamics};
+
+body.set_aerodynamics(Aerodynamics::Simple(AerodynamicProperties::new(
+    2.0,       // reference area, m²
+    0.5,       // drag coefficient
+    Vec3::ZERO // application offset from COM, body-local
+)?));
+```
+
+`Aerodynamics::None` is the default. `Mesh(TriangleMesh)` owns its mesh by value and `Colliders` selects attached collision geometry. These modes prepare geometry for pressure evaluation during world stepping. The current Newtonian pressure model requires Mach >= 5 and a sound speed supplied by the atmosphere or world fallback; it is not a FAR-equivalent model. `VoxelWave` optionally derives a bounded, slender-body wave model from voxel sections and supports part-owned assembly geometry; it has narrower assumptions and is not a complete FAR-equivalent solver. See [physical formulas and their limits](docs/aerodynamics.md).
+
+`RigidBody` is no longer `Copy` or `Clone`. Its `motion()` method returns a compact `BodyMotion` snapshot containing motion, mass, accumulated forces and CCD mode, but not aerodynamic configuration or geometry. Physics staging and runtime command batches copy only this snapshot; they do not clone meshes.
 
 ```rust
 use kapitsa::aerodynamics::{Atmosphere, DensityProfile, SphericalAtmosphere};
@@ -283,7 +297,7 @@ radius, then follows `rho = reference_density * exp(-altitude / scale_height)`.
 At or beyond `reference_radius + height`, density is zero and the profile is not
 evaluated. Optional smoothing multiplies density by `t?(3 - 2t)` over the final
 transition width, where `t` is the remaining distance to the boundary divided by
-that width and clamped to `[0, 1]`. Wind is constant throughout the sphere.
+that width and clamped to `[0, 1]`. Wind is constant by default; `wind_at_top` optionally sets a world-space wind at the outer radius, linearly interpolated with altitude from `wind` at the reference radius.
 `Atmosphere::state_at(point)` exposes the same local density and wind used by the
 simulation. Pressure, temperature and gas composition are not modeled.
 

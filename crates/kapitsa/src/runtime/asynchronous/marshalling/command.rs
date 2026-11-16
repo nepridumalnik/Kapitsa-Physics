@@ -11,7 +11,7 @@ use kapitsa_core::{
     joint::Joint,
     mass::MassProperties,
     material::{MaterialId, PhysicsMaterial},
-    rigid_body::{BodyError, CcdMode, RigidBody},
+    rigid_body::{BodyError, BodyMotion, CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
     world::{
@@ -77,6 +77,54 @@ pub enum PhysicsCommand {
     AddPartCollider {
         part: PartId,
         collider: Collider,
+    },
+    /// Replaces owned finite wings in the stable part-local frame; empty clears.
+    /// Applied in queue order, including while paused; not an atomic-motion command.
+    SetPartAerodynamicWings {
+        part: PartId,
+        wings: Vec<kapitsa_core::aerodynamics::wing::WingSurface>,
+    },
+    /// Replaces owned hull sections in the stable part-local frame; empty clears.
+    /// Applied in queue order, including while paused; not an atomic-motion command.
+    SetPartAerodynamicHull {
+        part: PartId,
+        sections: Vec<kapitsa_core::aerodynamics::hull::HullSection>,
+    },
+    /// Selects a part-local physical aerodynamic Mesh; None disables geometry.
+    SetPartAerodynamicMesh {
+        part: PartId,
+        mesh: Option<kapitsa_core::shape::TriangleMesh>,
+    },
+    /// Selects collider-derived part geometry, replacing Mesh mode when enabled.
+    SetPartAerodynamicColliders {
+        part: PartId,
+        enabled: bool,
+    },
+    /// Selects the assembly wave model owned by this part.
+    SetPartVoxelWave {
+        part: PartId,
+        model: Option<kapitsa_core::aerodynamics::wave::VoxelWave>,
+    },
+    /// Selects a mesh as geometry-only input to the assembly wave union.
+    SetPartWaveSourceMesh {
+        part: PartId,
+        mesh: Option<kapitsa_core::shape::TriangleMesh>,
+    },
+    /// Selects part colliders as geometry-only input to the wave union.
+    SetPartWaveSourceColliders {
+        part: PartId,
+        enabled: bool,
+    },
+    /// Changes an owned collider's transform in the part-local frame.
+    SetPartColliderTransform {
+        part: PartId,
+        collider: ColliderId,
+        transform: Transform,
+    },
+    /// Changes geometric aerodynamic tessellation for one solver body.
+    SetColliderTessellation {
+        body: BodyId,
+        config: kapitsa_core::aerodynamics::ColliderTessellation,
     },
     /// Removes a part-owned collider.
     RemovePartCollider {
@@ -580,7 +628,7 @@ struct StagedJoint {
 
 #[derive(Default)]
 pub(crate) struct BatchScratch {
-    updated_bodies: Vec<(BodyId, RigidBody)>,
+    updated_bodies: Vec<(BodyId, BodyMotion)>,
     body_indices: HashMap<BodyId, usize>,
     updated_force_sources: Vec<StagedForceSource>,
     force_source_indices: HashMap<ForceSourceId, usize>,
@@ -710,7 +758,7 @@ fn apply_command_batch_staged(
         let body_index = match body_index {
             Some(index) => index,
             None => {
-                let Some(body) = world.body(id).copied() else {
+                let Some(body) = world.body(id).map(RigidBody::motion) else {
                     return Err(PhysicsBatchError {
                         command_index: Some(command_index),
                         error: PhysicsClientError::World(WorldError::InvalidBodyId),
@@ -771,7 +819,10 @@ fn apply_command_batch_staged(
     // remains live until the final copyback.
     for (id, body) in &scratch.updated_bodies {
         world
-            .replace_body_state(*id, *body)
+            .edit_body(*id, |motion| {
+                *motion = *body;
+                Ok(())
+            })
             .map_err(|error| PhysicsBatchError {
                 command_index: None,
                 error: error.into(),
@@ -896,6 +947,15 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::EnableClusterWithMass { .. }
         | PhysicsCommand::AddClusterPart { .. }
         | PhysicsCommand::AddPartCollider { .. }
+        | PhysicsCommand::SetPartAerodynamicWings { .. }
+        | PhysicsCommand::SetPartAerodynamicHull { .. }
+        | PhysicsCommand::SetPartAerodynamicMesh { .. }
+        | PhysicsCommand::SetPartAerodynamicColliders { .. }
+        | PhysicsCommand::SetPartVoxelWave { .. }
+        | PhysicsCommand::SetPartWaveSourceMesh { .. }
+        | PhysicsCommand::SetPartWaveSourceColliders { .. }
+        | PhysicsCommand::SetPartColliderTransform { .. }
+        | PhysicsCommand::SetColliderTessellation { .. }
         | PhysicsCommand::RemovePartCollider { .. }
         | PhysicsCommand::DestroyClusterPart { .. }
         | PhysicsCommand::BreakWeld { .. }
@@ -932,7 +992,7 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
     }
 }
 
-fn apply_body_command(body: &mut RigidBody, command: &PhysicsCommand) -> Result<(), BodyError> {
+fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result<(), BodyError> {
     match command {
         PhysicsCommand::SetTransform { transform, .. } => body.set_transform(*transform)?,
         PhysicsCommand::SetLinearVelocity { velocity, .. } => {
@@ -966,6 +1026,15 @@ fn apply_body_command(body: &mut RigidBody, command: &PhysicsCommand) -> Result<
         | PhysicsCommand::EnableClusterWithMass { .. }
         | PhysicsCommand::AddClusterPart { .. }
         | PhysicsCommand::AddPartCollider { .. }
+        | PhysicsCommand::SetPartAerodynamicWings { .. }
+        | PhysicsCommand::SetPartAerodynamicHull { .. }
+        | PhysicsCommand::SetPartAerodynamicMesh { .. }
+        | PhysicsCommand::SetPartAerodynamicColliders { .. }
+        | PhysicsCommand::SetPartVoxelWave { .. }
+        | PhysicsCommand::SetPartWaveSourceMesh { .. }
+        | PhysicsCommand::SetPartWaveSourceColliders { .. }
+        | PhysicsCommand::SetPartColliderTransform { .. }
+        | PhysicsCommand::SetColliderTessellation { .. }
         | PhysicsCommand::RemovePartCollider { .. }
         | PhysicsCommand::DestroyClusterPart { .. }
         | PhysicsCommand::BreakWeld { .. }
@@ -1053,6 +1122,46 @@ pub(crate) fn apply_command(
         }
         PhysicsCommand::AddPartCollider { part, collider } => {
             PhysicsCommandResult::Collider(world.add_part_collider(part, collider)?)
+        }
+        PhysicsCommand::SetPartAerodynamicWings { part, wings } => {
+            world.set_part_aerodynamic_wings(part, wings)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartAerodynamicHull { part, sections } => {
+            world.set_part_aerodynamic_hull(part, sections)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartAerodynamicMesh { part, mesh } => {
+            world.set_part_aerodynamic_mesh(part, mesh)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartAerodynamicColliders { part, enabled } => {
+            world.set_part_aerodynamic_colliders(part, enabled)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartVoxelWave { part, model } => {
+            world.set_part_voxel_wave(part, model)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartWaveSourceMesh { part, mesh } => {
+            world.set_part_wave_source_mesh(part, mesh)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartWaveSourceColliders { part, enabled } => {
+            world.set_part_wave_source_colliders(part, enabled)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetPartColliderTransform {
+            part,
+            collider,
+            transform,
+        } => {
+            world.set_part_collider_transform(part, collider, transform)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetColliderTessellation { body, config } => {
+            world.set_collider_tessellation(body, config)?;
+            PhysicsCommandResult::Done
         }
         PhysicsCommand::RemovePartCollider { id } => {
             world.remove_part_collider(id)?;
@@ -1523,7 +1632,7 @@ pub(crate) mod tests {
     fn staged_buffer_control(case: &BatchCase) {
         let mut bodies = Vec::with_capacity(case.commands.len());
         for id in &case.staged_bodies {
-            bodies.push((*id, *case.world.body(*id).expect("staged body")));
+            bodies.push((*id, case.world.body(*id).expect("staged body").motion()));
         }
 
         let mut sources = Vec::new();
@@ -1690,6 +1799,56 @@ pub(crate) mod tests {
             ),
             Err(PhysicsClientError::World(WorldError::InvalidBodyId))
         ));
+    }
+
+    #[test]
+    fn motion_batch_preserves_owned_aerodynamic_mesh() {
+        use kapitsa_core::{aerodynamics::Aerodynamics, shape::TriangleMesh};
+
+        let mesh = TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y], vec![[0, 1, 2]]).unwrap();
+        let vertices = mesh.vertices().as_ptr();
+        let mut body = dynamic_body();
+        body.set_aerodynamics(Aerodynamics::Mesh(mesh));
+        let mut world = PhysicsWorld::new();
+        let id = world.add_body(body).unwrap();
+        let mut scratch = BatchScratch::default();
+        apply_command_batch(
+            &mut world,
+            &[PhysicsCommand::SetLinearVelocity {
+                id,
+                velocity: Vec3::X,
+            }],
+            &mut scratch,
+        )
+        .unwrap();
+        let body = world.body(id).unwrap();
+        let Aerodynamics::Mesh(mesh) = body.aerodynamics() else {
+            panic!("motion batch discarded aerodynamic mesh");
+        };
+        assert_eq!(mesh.vertices().as_ptr(), vertices);
+        assert_eq!(body.state().linear_velocity(), Vec3::X);
+
+        let result = apply_command_batch(
+            &mut world,
+            &[
+                PhysicsCommand::SetLinearVelocity {
+                    id,
+                    velocity: Vec3::Y,
+                },
+                PhysicsCommand::SetAngularVelocity {
+                    id,
+                    velocity: Vec3::splat(f64::NAN),
+                },
+            ],
+            &mut scratch,
+        );
+        assert!(result.is_err());
+        let body = world.body(id).unwrap();
+        assert_eq!(body.state().linear_velocity(), Vec3::X);
+        let Aerodynamics::Mesh(mesh) = body.aerodynamics() else {
+            panic!("failed motion batch discarded aerodynamic mesh");
+        };
+        assert_eq!(mesh.vertices().as_ptr(), vertices);
     }
 
     #[test]
@@ -2038,6 +2197,51 @@ pub(crate) mod tests {
                 .local_force(),
             Vec3::new(2.0, 0.0, 0.0)
         );
+    }
+
+    // Authored for the runtime API stage; not executed at the user's request.
+    #[test]
+    fn part_aerodynamic_metadata_rejects_atomic_motion_batches_without_mutation() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_body(dynamic_body()).expect("body");
+        let part = world.enable_cluster(body).expect("cluster");
+        for metadata in [
+            PhysicsCommand::SetPartAerodynamicWings {
+                part,
+                wings: Vec::new(),
+            },
+            PhysicsCommand::SetPartAerodynamicHull {
+                part,
+                sections: Vec::new(),
+            },
+        ] {
+            let before = world.body(body).expect("body").state().linear_velocity();
+            let commands = [
+                PhysicsCommand::SetLinearVelocity {
+                    id: body,
+                    velocity: Vec3::X * 42.0,
+                },
+                metadata,
+            ];
+            let error = apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
+                .expect_err("metadata cannot join atomic motion batch");
+            assert_eq!(error.command_index, Some(1));
+            assert!(matches!(
+                error.error,
+                PhysicsClientError::UnsupportedBatchCommand
+            ));
+            assert_eq!(
+                world.body(body).expect("body").state().linear_velocity(),
+                before
+            );
+            assert!(
+                world
+                    .part_aerodynamic_wings(part)
+                    .expect("wings")
+                    .is_empty()
+            );
+            assert!(world.part_aerodynamic_hull(part).expect("hull").is_empty());
+        }
     }
 
     #[test]

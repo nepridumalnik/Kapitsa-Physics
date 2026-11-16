@@ -59,6 +59,8 @@ mod aerodynamics {
     /// Checks the current aerodynamic force calculation without advancing the world.
     ///
     /// This preflight does not apply forces or check timestep-dependent integration.
+    /// Bodies with base-pressure patches return `UnsupportedModel`: this path
+    /// does not prepare the primary geometry needed to verify their visibility.
     /// Use [`PhysicsWorld::step`] to advance the simulation.
     #[derive(Clone, Copy, Debug, Default)]
     pub struct AerodynamicsTask;
@@ -69,21 +71,74 @@ mod aerodynamics {
             if matches!(atmosphere, Atmosphere::Vacuum) {
                 return Ok(());
             };
+            let mut assembly_cache = None;
             for (dense, entry) in world.bodies.iter() {
-                if entry.aerodynamics.is_empty() {
+                if entry.body.aerodynamic_surfaces.is_empty()
+                    && entry.body.base_pressure_patches.is_empty()
+                    && !super::assembly_aerodynamics::wings_configured(entry, &world.parts)
+                    && !super::assembly_aerodynamics::hull_configured(entry, &world.parts)
+                    && matches!(
+                        entry.body.aerodynamics(),
+                        crate::aerodynamics::Aerodynamics::None
+                    )
+                    && !super::assembly_aerodynamics::configured(
+                        entry,
+                        world.part_aerodynamic_geometry.as_ref(),
+                    )
+                {
                     continue;
                 }
-                let mut body = entry.body;
+                let body_id = BodyId {
+                    world: world.world_id,
+                    dense,
+                };
+                if !entry.body.base_pressure_patches.is_empty()
+                    || entry.body.potential_sphere.is_some()
+                {
+                    return Err(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                    });
+                }
+                let patches = super::assembly_aerodynamics::prepare(
+                    body_id,
+                    entry,
+                    &world.parts,
+                    world.part_aerodynamic_geometry.as_ref(),
+                    &world.colliders,
+                    &mut assembly_cache,
+                    atmosphere,
+                )?;
+                let mut body = entry.body.motion();
+                let mut wave_cache = crate::aerodynamics::cache::PreparedGeometryCache::default();
+                let voxel_wave = if let crate::aerodynamics::Aerodynamics::VoxelWave(model) =
+                    entry.body.aerodynamics()
+                {
+                    PhysicsWorld::prepare_voxel_wave(
+                        model,
+                        body_id,
+                        &body,
+                        atmosphere,
+                        &mut wave_cache,
+                    )?
+                } else {
+                    None
+                };
                 PhysicsWorld::apply_aerodynamics(
                     atmosphere,
-                    &entry.aerodynamics,
+                    entry.body.aerodynamics(),
+                    &entry.body.aerodynamic_surfaces,
                     BodyId {
                         world: world.world_id,
                         dense,
                     },
                     &mut body,
                     &world.parts,
-                    None,
+                    super::AerodynamicsInputs::new(world.mesh_sound_speed)
+                        .with_base_pressure(&entry.body.base_pressure_patches)
+                        .with_cluster(entry.cluster.as_ref())
+                        .with_assembly(patches.as_ref())
+                        .with_voxel_wave(voxel_wave.as_ref()),
                 )?;
             }
             Ok(())
@@ -92,6 +147,7 @@ mod aerodynamics {
 }
 #[cfg(test)]
 mod aerodynamics_tests;
+mod assembly_aerodynamics;
 mod ccd;
 mod chunk;
 mod cluster;
@@ -101,6 +157,10 @@ mod gravity_fields_tests;
 mod id;
 #[cfg(feature = "bench-internals")]
 mod metrics;
+#[cfg(test)]
+mod part_hull_tests;
+#[cfg(test)]
+mod part_wings_tests;
 mod query;
 
 pub use aerodynamics::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
@@ -134,15 +194,37 @@ use crate::{
     execution::{SequentialExecutor, StepExecutor},
     gravity::{CentralGravity, Gravity, GravityError},
     joint::{Joint, JointBreakEvent, JointFrame},
+    mass::MassProperties,
     material::{MaterialId, MaterialStorage, PhysicsMaterial},
-    rigid_body::{BodyState, BodyType, CcdMode, RigidBody, predict},
+    rigid_body::{BodyMotion, BodyState, BodyType, CcdMode, RigidBody, predict},
+    transform::Transform,
 };
+
+pub use crate::cluster::balance::{BalanceError as WeldBalanceError, WeldReaction};
+
+/// One overloaded weld in a diagnostic failure plan. The reaction is the
+/// parent-on-child load at the child-side anchor from the sampled step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WeldFailureCandidate {
+    pub reaction: WeldReaction,
+    pub force_exceeded: bool,
+    pub torque_exceeded: bool,
+}
+
+struct MeshAerodynamics {
+    identity: Option<std::sync::Arc<()>>,
+    cache: crate::aerodynamics::cache::PreparedGeometryCache,
+    config: crate::aerodynamics::geometry::GeometryConfig,
+    sound_speed: f64,
+}
 
 struct BodyEntry {
     body: RigidBody,
-    aerodynamics: Vec<AerodynamicSurface>,
     first_collider: Option<ColliderId>,
     cluster: Option<RigidCluster>,
+    mesh_aerodynamics: Option<MeshAerodynamics>,
+    collider_aerodynamic_mesh: Option<crate::shape::TriangleMesh>,
+    collider_tessellation: crate::aerodynamics::ColliderTessellation,
 }
 
 /// Object receiving a persistent force source.
@@ -160,6 +242,223 @@ pub struct ForceSource {
     local_point: Vec3,
     local_force: Vec3,
     enabled: bool,
+}
+
+/// One part-targeted persistent force source in the last successful full step.
+/// Force is world-space N; moment is world-space N·m about the owning body's
+/// center of mass at evaluation time. This is not a complete part or weld load.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartForceSourceWrench {
+    pub source: ForceSourceId,
+    pub part: PartId,
+    pub body: BodyId,
+    pub force: Vec3,
+    pub moment: Vec3,
+}
+
+/// Gravity contribution attributed to a cluster part for the last full step.
+/// The acceleration is sampled at the cluster COM, as in the body model, and
+/// treated as uniform across the cluster. Vectors are world-space, force in N
+/// and moment in N·m about the cluster COM; gravity gradients are not modeled.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartGravityWrench {
+    pub body: BodyId,
+    pub part: PartId,
+    pub force: Vec3,
+    pub moment: Vec3,
+}
+
+/// A single part-owned hull section's aerodynamic contribution. The force is
+/// in world-space N and moment in world-space N·m about the body COM at
+/// evaluation time; this is not a complete part load or a weld reaction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartHullWrench {
+    pub body: BodyId,
+    pub part: PartId,
+    pub wrench: crate::aerodynamics::pressure::PressureWrench,
+}
+
+/// One part-owned wing's world-space force (N) and moment (N·m) about
+/// the body COM at evaluation time. Not a complete part or weld load.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartWingWrench {
+    pub body: BodyId,
+    pub part: PartId,
+    pub wrench: crate::aerodynamics::pressure::PressureWrench,
+}
+
+/// Diagnostic witness for one CCD solver event, not a certificate of a complete
+/// impact history. Time is in seconds from the start of the step; states are
+/// ordered before/after, then by the contact pair's A/B sides. The after state
+/// includes solver position projection and may have a different pose from the
+/// velocity-solve pose; use `ContactImpulse::velocity_transforms` for the latter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CcdContactEvent {
+    pub time: f64,
+    pub states: [[BodyState; 2]; 2],
+}
+
+/// A recorded velocity-contact impulse. The impulse acts on B; A receives its
+/// negative. Points are world-space metres at velocity-solve time, impulse is
+/// in N·s. Static and kinematic sides do not receive a velocity change.
+/// This diagnostic is not a complete part-load ledger or weld reaction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactImpulse {
+    pub pair: crate::collision::CollisionPair,
+    pub parts: [Option<PartId>; 2],
+    pub points: [Vec3; 2],
+    /// Poses at the velocity solve, before position projection, when available.
+    /// Presence does not certify a complete impulse ledger or event timing.
+    pub velocity_transforms: Option<[Transform; 2]>,
+    /// Before and after solver states for an isolated two-body discrete island
+    /// when available. Its manifolds share the same states, ordered by each
+    /// manifold's A/B sides. The outer array is before/after.
+    /// Other load paths must still be checked before weld-balance use.
+    pub isolated_velocity_states: Option<[[BodyState; 2]; 2]>,
+    /// CCD solver event witness, when available. Does not certify completeness.
+    pub ccd_event: Option<CcdContactEvent>,
+    pub impulse_on_b: Vec3,
+    pub ccd: bool,
+}
+
+/// State of a cluster body at the beginning of the last successful full step.
+/// This is the evaluation-time state for the corresponding force snapshots;
+/// it is not a certificate that all loads are attributed to parts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusterLoadState {
+    /// Cluster body identified at force-evaluation time.
+    pub body: BodyId,
+    /// Root part at force-evaluation time.
+    pub root: PartId,
+    /// World-space pose and velocities before integration.
+    pub state: BodyState,
+    pub(crate) mass: Option<MassProperties>,
+    // Continuous-load certificates at force evaluation, independent of collisions.
+    // They do not certify that contact or CCD impulses have been accounted for.
+    pub(crate) force_free_certified: bool,
+    pub(crate) part_sources_certified: bool,
+    pub(crate) part_hull_certified: bool,
+    pub(crate) part_wings_certified: bool,
+    pub(crate) part_surfaces_certified: bool,
+    pub(crate) collision_loads_uncertified: bool,
+    pub(crate) part_surface_count: usize,
+    pub(crate) vacuum: bool,
+    pub(crate) part_geometry: bool,
+}
+
+impl ClusterLoadState {
+    fn invalidate_collision_loads(&mut self) {
+        self.collision_loads_uncertified = true;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WeldLoadMode {
+    Sources,
+    Hull,
+    PartAerodynamics,
+}
+
+/// Part mass and body-local pose at the same time as the load snapshots.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusterLoadPart {
+    pub part: PartId,
+    pub body: BodyId,
+    pub local_transform: Transform,
+    pub mass: MassProperties,
+}
+
+/// Weld topology and properties at the same time as the load snapshots.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusterLoadWeld {
+    pub weld: WeldId,
+    pub value: Weld,
+}
+
+/// Body-level simple-surface loads before and after the shared timestep
+/// corrections. World-space N and N·m about the body COM at evaluation time.
+/// These sums include both body- and part-targeted surfaces; their difference
+/// is not attributed to individual parts and must not be treated as a weld load.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SimpleSurfaceCorrection {
+    pub body: BodyId,
+    pub raw_drag: crate::aerodynamics::pressure::PressureWrench,
+    pub raw_lift: crate::aerodynamics::pressure::PressureWrench,
+    pub applied_drag: crate::aerodynamics::pressure::PressureWrench,
+    pub applied_lift: crate::aerodynamics::pressure::PressureWrench,
+}
+
+/// Uncorrected simple-surface force and torque, in world N and N·m about
+/// the owning body's evaluation-time COM. This is not an applied part load:
+/// aggregate timestep corrections are reported separately at body level.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RawSimpleSurfaceWrench {
+    pub body: BodyId,
+    pub target: AerodynamicTarget,
+    pub drag: crate::aerodynamics::pressure::PressureWrench,
+    pub lift: crate::aerodynamics::pressure::PressureWrench,
+}
+
+/// Why raw simple-surface loads cannot safely be used as applied part loads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimpleSurfaceAttributionError {
+    /// The aggregate timestep correction changes drag or lift.
+    CorrectedAggregate,
+    /// At least one recorded surface targets the body rather than a part.
+    BodyTarget,
+    /// Raw entries are absent, incomplete, or inconsistent with the aggregate.
+    InconsistentSnapshot,
+}
+
+impl SimpleSurfaceCorrection {
+    /// Checks whether this body's raw simple-surface snapshot can be used as
+    /// the applied per-part surface contributions, without allocating or
+    /// inventing a distribution of the body-level correction. This says
+    /// nothing about other forces, impulses, inertia, or weld equilibrium.
+    /// Exact equality is intentional: no nonzero correction is discarded.
+    pub fn check_part_attribution(
+        &self,
+        raw: &[RawSimpleSurfaceWrench],
+    ) -> Result<(), SimpleSurfaceAttributionError> {
+        if self.raw_drag != self.applied_drag || self.raw_lift != self.applied_lift {
+            return Err(SimpleSurfaceAttributionError::CorrectedAggregate);
+        }
+        if raw
+            .iter()
+            .any(|entry| entry.body == self.body && entry.target == AerodynamicTarget::Body)
+        {
+            return Err(SimpleSurfaceAttributionError::BodyTarget);
+        }
+        let mut drag_force = Vec3::ZERO;
+        let mut drag_moment = Vec3::ZERO;
+        let mut lift_force = Vec3::ZERO;
+        let mut lift_moment = Vec3::ZERO;
+        let mut found = false;
+        for entry in raw.iter().filter(|entry| entry.body == self.body) {
+            found = true;
+            drag_force = drag_force
+                .checked_add(entry.drag.force)
+                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
+            drag_moment = drag_moment
+                .checked_add(entry.drag.moment)
+                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
+            lift_force = lift_force
+                .checked_add(entry.lift.force)
+                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
+            lift_moment = lift_moment
+                .checked_add(entry.lift.moment)
+                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
+        }
+        if !found
+            || drag_force != self.raw_drag.force
+            || drag_moment != self.raw_drag.moment
+            || lift_force != self.raw_lift.force
+            || lift_moment != self.raw_lift.moment
+        {
+            return Err(SimpleSurfaceAttributionError::InconsistentSnapshot);
+        }
+        Ok(())
+    }
 }
 
 impl ForceSource {
@@ -191,8 +490,8 @@ impl ForceSource {
 
 struct ForceSourceBodyUpdate {
     id: BodyId,
-    original: RigidBody,
-    prepared: RigidBody,
+    original: BodyMotion,
+    prepared: BodyMotion,
 }
 
 struct JointEntry {
@@ -213,15 +512,152 @@ pub enum JointTarget {
 struct GravityBodyUpdate {
     id: BodyId,
     error: Option<StepError>,
-    original: RigidBody,
-    prepared: RigidBody,
+    original: BodyMotion,
+    prepared: BodyMotion,
 }
 
 struct AerodynamicsBodyUpdate {
     id: BodyId,
     error: Option<StepError>,
-    original: RigidBody,
-    prepared: RigidBody,
+    original: BodyMotion,
+    prepared: BodyMotion,
+    loads: PreparedAerodynamicLoads,
+    part_hull_wrenches: Vec<PartHullWrench>,
+    part_wing_wrenches: Vec<PartWingWrench>,
+    simple_surface_correction: Option<SimpleSurfaceCorrection>,
+    raw_simple_surfaces: Vec<RawSimpleSurfaceWrench>,
+    applied_mesh_pressure: Option<crate::aerodynamics::pressure::PressureWrench>,
+}
+
+struct PreparedAerodynamicLoads {
+    mesh_patches: Option<crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    sphere_patches: Option<Vec<crate::aerodynamics::pressure::PressurePatch>>,
+    voxel_wave: Option<crate::aerodynamics::hull::HullSection>,
+    assembly_wave: Option<(PartId, crate::aerodynamics::hull::HullSection)>,
+    wing_visibility: Option<Vec<assembly_aerodynamics::PreparedWingVisibility>>,
+}
+
+/// Borrowed inputs prepared before aerodynamic loads are evaluated.
+struct AerodynamicsInputs<'a> {
+    mesh_sound_speed: f64,
+    cluster: Option<&'a RigidCluster>,
+    dt: Option<f64>,
+    mesh_patches: Option<&'a crate::aerodynamics::geometry::PreparedSurfacePatches>,
+    sphere_patches: Option<&'a [crate::aerodynamics::pressure::PressurePatch]>,
+    voxel_wave: Option<&'a crate::aerodynamics::hull::HullSection>,
+    assembly_wave: Option<&'a (PartId, crate::aerodynamics::hull::HullSection)>,
+    wing_visibility: Option<&'a [assembly_aerodynamics::PreparedWingVisibility]>,
+    base_pressure_patches: &'a [(
+        crate::aerodynamics::pressure::PressurePatch,
+        crate::aerodynamics::pressure::BasePressure,
+    )],
+    part_hull_wrenches: Option<&'a mut Vec<PartHullWrench>>,
+    part_wing_wrenches: Option<&'a mut Vec<PartWingWrench>>,
+    simple_surface_correction: Option<&'a mut Option<SimpleSurfaceCorrection>>,
+    raw_simple_surfaces: Option<&'a mut Vec<RawSimpleSurfaceWrench>>,
+    applied_mesh_pressure: Option<&'a mut Option<crate::aerodynamics::pressure::PressureWrench>>,
+}
+
+impl<'a> AerodynamicsInputs<'a> {
+    fn new(mesh_sound_speed: f64) -> Self {
+        Self {
+            mesh_sound_speed,
+            cluster: None,
+            dt: None,
+            mesh_patches: None,
+            sphere_patches: None,
+            voxel_wave: None,
+            assembly_wave: None,
+            wing_visibility: None,
+            base_pressure_patches: &[],
+            part_hull_wrenches: None,
+            part_wing_wrenches: None,
+            simple_surface_correction: None,
+            raw_simple_surfaces: None,
+            applied_mesh_pressure: None,
+        }
+    }
+
+    fn with_cluster(mut self, cluster: Option<&'a RigidCluster>) -> Self {
+        self.cluster = cluster;
+        self
+    }
+
+    fn with_part_hull_wrenches(mut self, wrenches: &'a mut Vec<PartHullWrench>) -> Self {
+        self.part_hull_wrenches = Some(wrenches);
+        self
+    }
+
+    fn with_part_wing_wrenches(mut self, wrenches: &'a mut Vec<PartWingWrench>) -> Self {
+        self.part_wing_wrenches = Some(wrenches);
+        self
+    }
+
+    fn with_simple_surface_correction(
+        mut self,
+        correction: &'a mut Option<SimpleSurfaceCorrection>,
+    ) -> Self {
+        self.simple_surface_correction = Some(correction);
+        self
+    }
+
+    fn with_raw_simple_surfaces(mut self, entries: &'a mut Vec<RawSimpleSurfaceWrench>) -> Self {
+        self.raw_simple_surfaces = Some(entries);
+        self
+    }
+
+    fn with_applied_mesh_pressure(
+        mut self,
+        wrench: &'a mut Option<crate::aerodynamics::pressure::PressureWrench>,
+    ) -> Self {
+        self.applied_mesh_pressure = Some(wrench);
+        self
+    }
+
+    fn with_base_pressure(
+        mut self,
+        patches: &'a [(
+            crate::aerodynamics::pressure::PressurePatch,
+            crate::aerodynamics::pressure::BasePressure,
+        )],
+    ) -> Self {
+        self.base_pressure_patches = patches;
+        self
+    }
+
+    fn with_timestep(mut self, dt: Option<f64>) -> Self {
+        self.dt = dt;
+        self
+    }
+
+    fn with_loads(mut self, loads: &'a PreparedAerodynamicLoads) -> Self {
+        self.mesh_patches = loads.mesh_patches.as_ref();
+        self.sphere_patches = loads.sphere_patches.as_deref();
+        self.voxel_wave = loads.voxel_wave.as_ref();
+        self.assembly_wave = loads.assembly_wave.as_ref();
+        self.wing_visibility = loads.wing_visibility.as_deref();
+        self
+    }
+
+    fn with_assembly(
+        mut self,
+        assembly: Option<&'a assembly_aerodynamics::PreparedAssembly>,
+    ) -> Self {
+        if let Some(assembly) = assembly {
+            self.mesh_patches = assembly.patches.as_ref();
+            self.assembly_wave = assembly.wave.as_ref();
+            self.wing_visibility = Some(&assembly.wing_visibility);
+        }
+        self
+    }
+
+    fn with_voxel_wave(
+        mut self,
+        section: Option<&'a crate::aerodynamics::hull::HullSection>,
+    ) -> Self {
+        self.voxel_wave = section;
+        self
+    }
 }
 
 const FORCE_SOURCE_BODY_LINEAR_SEARCH_LIMIT: usize = 128;
@@ -272,23 +708,103 @@ fn swept_bounds_for_trajectory(
     crate::collision::swept_bounds_motion(local_bounds, &motion)
 }
 
+/// Controls whether explicitly supported approximations may be used during a step.
+///
+/// Unsupported aerodynamic regimes and critical errors remain errors under both
+/// policies. Realtime can skip uncertifiable automatic weld checks as documented.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ErrorPolicy {
+    /// Allow documented, safe fallback models when available.
+    #[default]
+    Realtime,
+    /// Reject unsupported regimes without automatic approximations.
+    Strict,
+}
+
+/// Degradations observed in the last successfully committed full step.
+///
+/// Counts are per affected body, not per CCD event. The CCD limit policy is
+/// configured independently of [`ErrorPolicy`], including in strict mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StepDiagnostics {
+    /// Bodies whose motion was clipped by the collision subsystem after its
+    /// configured CCD event limit was reached.
+    pub collision_ccd_limit_clipped_bodies: usize,
+    /// Breakable clusters whose automatic weld checks were skipped because the
+    /// external load balance could not be certified.
+    pub weld_incomplete_load_clusters: usize,
+    /// Subset of skipped clusters affected by a contact, CCD clipping, or
+    /// unresolved collision ownership. Other incomplete paths may also exist.
+    pub weld_collision_load_clusters: usize,
+}
+
+impl StepDiagnostics {
+    /// Whether any recorded approximation was applied.
+    pub fn used_fallback(self) -> bool {
+        self.collision_ccd_limit_clipped_bodies != 0 || self.weld_incomplete_load_clusters != 0
+    }
+}
+
 /// Owns rigid bodies and colliders and assigns IDs scoped to this world instance.
 pub struct PhysicsWorld {
     world_id: u64,
+    error_policy: ErrorPolicy,
+    step_diagnostics: StepDiagnostics,
+    pending_step_diagnostics: StepDiagnostics,
+    body_revision: u64,
+    automatic_weld_failure: Option<(f64, f64)>,
+    automatic_weld_impulse_tolerances: Option<(f64, f64)>,
+    #[cfg(test)]
+    weld_split_fail_after: Option<usize>,
     bodies: DensePool<BodyEntry>,
     parts: DensePool<ClusterPart>,
+    part_aerodynamic_geometry: Option<HashMap<PartId, assembly_aerodynamics::PartGeometry>>,
+    assembly_aerodynamics: Option<HashMap<BodyId, assembly_aerodynamics::AssemblyAerodynamics>>,
     welds: DensePool<Weld>,
     colliders: DensePool<ColliderEntry>,
     chunks: DensePool<chunk::ChunkEntry>,
     force_sources: DensePool<ForceSource>,
     joints: DensePool<JointEntry>,
     force_source_body_updates: Vec<ForceSourceBodyUpdate>,
+    part_force_source_published: Vec<PartForceSourceWrench>,
+    part_force_source_pending: Vec<PartForceSourceWrench>,
     force_source_body_indices: Option<HashMap<BodyId, usize>>,
     central_gravity: Option<CentralGravity>,
     gravity_fields: DensePool<Gravity>,
     gravity_body_updates: Vec<GravityBodyUpdate>,
+    part_gravity_published: Vec<PartGravityWrench>,
+    part_gravity_pending: Vec<PartGravityWrench>,
     atmosphere: Atmosphere,
+    /// Sound speed used by the Newtonian mesh pressure model (m/s).
+    /// The default is 340 m/s; callers should set this for their atmosphere.
+    mesh_sound_speed: f64,
     aerodynamics_body_updates: Vec<AerodynamicsBodyUpdate>,
+    part_hull_published: Vec<PartHullWrench>,
+    part_hull_pending: Vec<PartHullWrench>,
+    part_wing_published: Vec<PartWingWrench>,
+    part_wing_pending: Vec<PartWingWrench>,
+    simple_surface_published: Vec<SimpleSurfaceCorrection>,
+    simple_surface_pending: Vec<SimpleSurfaceCorrection>,
+    raw_simple_published: Vec<RawSimpleSurfaceWrench>,
+    raw_simple_pending: Vec<RawSimpleSurfaceWrench>,
+    raw_simple_buffers: Vec<Vec<RawSimpleSurfaceWrench>>,
+    contact_impulses_published: Vec<ContactImpulse>,
+    contact_impulses_pending: Vec<ContactImpulse>,
+    contact_impulses_omitted_published: usize,
+    contact_impulses_omitted_pending: usize,
+    contact_ccd_clipped_published: bool,
+    contact_ccd_clipped_pending: bool,
+    cluster_load_states_published: Vec<ClusterLoadState>,
+    cluster_load_states_pending: Vec<ClusterLoadState>,
+    cluster_load_indices: Option<HashMap<BodyId, usize>>,
+    cluster_load_parts_published: Vec<ClusterLoadPart>,
+    cluster_load_parts_pending: Vec<ClusterLoadPart>,
+    cluster_load_welds_published: Vec<ClusterLoadWeld>,
+    cluster_load_welds_pending: Vec<ClusterLoadWeld>,
+    part_hull_buffers: Vec<Vec<PartHullWrench>>,
+    part_wing_buffers: Vec<Vec<PartWingWrench>>,
+    owner_pressure: Option<HashMap<BodyId, crate::aerodynamics::pressure::OwnerPressureWorkspace>>,
+    owner_pressure_owners: Vec<crate::aerodynamics::geometry::GeometryOwner>,
     materials: MaterialStorage,
     collision_system: CollisionSystem,
     joint_events: Vec<JointBreakEvent>,
@@ -303,11 +819,12 @@ pub struct PhysicsWorld {
 #[derive(Clone, Copy, Debug)]
 pub struct BodyStep {
     body_id: BodyId,
-    source: RigidBody,
+    source: BodyMotion,
+    body_revision: u64,
     predicted: Option<BodyState>,
     dt: Option<f64>,
     error: Option<StepError>,
-    prepared: RigidBody,
+    prepared: BodyMotion,
 }
 
 impl BodyStep {
@@ -337,23 +854,657 @@ impl BodyStep {
 }
 
 impl PhysicsWorld {
+    /// Diagnostics of the last committed full step, or empty before one succeeds.
+    /// Failed steps and low-level shard operations do not publish diagnostics.
+    pub fn step_diagnostics(&self) -> StepDiagnostics {
+        self.step_diagnostics
+    }
+
+    /// Returns the policy used for full physics steps.
+    pub fn error_policy(&self) -> ErrorPolicy {
+        self.error_policy
+    }
+
+    /// Selects the policy used for subsequent steps.
+    pub fn set_error_policy(&mut self, policy: ErrorPolicy) {
+        self.error_policy = policy;
+    }
+
+    /// Enable automatic weld failure for certified full steps using absolute
+    /// equilibrium tolerances in N and N·m. `None` disables it (the default).
+    /// Incomplete loads skip fracture with diagnostics in `Realtime`; `Strict`
+    /// rejects them before commit. Other balance errors fail in both policies.
+    pub fn set_automatic_weld_failure(
+        &mut self,
+        tolerances: Option<(f64, f64)>,
+    ) -> Result<(), WeldBalanceError> {
+        if tolerances.is_some_and(|(force, moment)| {
+            !force.is_finite() || force < 0.0 || !moment.is_finite() || moment < 0.0
+        }) {
+            return Err(WeldBalanceError::InvalidTolerance);
+        }
+        self.automatic_weld_failure = tolerances;
+        Ok(())
+    }
+
+    /// Configure absolute linear and angular impulse-balance tolerances in
+    /// N·s and N·m·s respectively. `None` clears the configuration (default).
+    ///
+    /// Together with automatic weld failure and per-weld impulse limits, this
+    /// enables checks for supported isolated discrete contacts. Unsupported
+    /// contact and CCD paths remain incomplete. Both values must be finite and
+    /// nonnegative. An invalid update preserves the previous configuration.
+    pub fn set_automatic_weld_impulse_tolerances(
+        &mut self,
+        tolerances: Option<(f64, f64)>,
+    ) -> Result<(), WeldBalanceError> {
+        if tolerances.is_some_and(|(linear, angular)| {
+            !linear.is_finite() || linear < 0.0 || !angular.is_finite() || angular < 0.0
+        }) {
+            return Err(WeldBalanceError::InvalidTolerance);
+        }
+        self.automatic_weld_impulse_tolerances = tolerances;
+        Ok(())
+    }
+
+    /// Returns the configured impulse-balance tolerances, if any.
+    pub fn automatic_weld_impulse_tolerances(&self) -> Option<(f64, f64)> {
+        self.automatic_weld_impulse_tolerances
+    }
+    /// Plans weld failures for the last certified part-source snapshot without
+    /// changing the world. Both thresholds compare vector magnitudes; equality
+    /// does not exceed a threshold. This historical plan is not authorization
+    /// to break welds after subsequent edits or integration.
+    pub fn part_source_weld_failure_candidates(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
+        let reactions = self.part_source_weld_reactions(body, force_tolerance, moment_tolerance)?;
+        Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_published)
+    }
+
+    fn weld_failure_candidates_from_reactions(
+        reactions: Vec<WeldReaction>,
+        snapshot_welds: &[ClusterLoadWeld],
+    ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
+        use crate::cluster::WeldStrength;
+        let mut welds = HashMap::new();
+        welds
+            .try_reserve(snapshot_welds.len())
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        for weld in snapshot_welds {
+            if welds.insert(weld.weld, weld.value).is_some() {
+                return Err(WeldBalanceError::InvalidTree);
+            }
+        }
+        let mut candidates = Vec::new();
+        candidates
+            .try_reserve_exact(reactions.len())
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        for reaction in reactions {
+            let weld = welds
+                .get(&reaction.weld)
+                .ok_or(WeldBalanceError::InvalidTree)?;
+            let WeldStrength::Breakable {
+                max_force,
+                max_torque,
+            } = weld.desc().strength
+            else {
+                continue;
+            };
+            let force = reaction.force.length();
+            let torque = reaction.moment.length();
+            if !force.is_finite() || !torque.is_finite() {
+                return Err(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow));
+            }
+            let force_exceeded = max_force.is_some_and(|limit| force > limit);
+            let torque_exceeded = max_torque.is_some_and(|limit| torque > limit);
+            if force_exceeded || torque_exceeded {
+                candidates.push(WeldFailureCandidate {
+                    reaction,
+                    force_exceeded,
+                    torque_exceeded,
+                });
+            }
+        }
+        Ok(candidates)
+    }
+
+    /// Evaluate only data staged for the active full step, never a previously
+    /// published diagnostic. Call after persistent sources have been prepared.
+    #[allow(dead_code)]
+    fn pending_weld_failure_candidates(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+        collision_accounted: bool,
+    ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
+        let mut state = *self
+            .cluster_load_states_pending
+            .iter()
+            .find(|state| state.body == body)
+            .ok_or(WeldBalanceError::IncompleteLoads)?;
+        if collision_accounted {
+            state.collision_loads_uncertified = false;
+        }
+        let reactions = Self::part_source_weld_reactions_from_snapshot(
+            body,
+            force_tolerance,
+            moment_tolerance,
+            std::slice::from_ref(&state),
+            &self.cluster_load_parts_pending,
+            &self.cluster_load_welds_pending,
+            &self.part_force_source_pending,
+            &self.part_gravity_pending,
+            &self.part_hull_pending,
+            &self.part_wing_pending,
+            (&self.simple_surface_pending, &self.raw_simple_pending),
+            self.owner_pressure
+                .as_ref()
+                .and_then(|map| map.get(&body))
+                .and_then(|workspace| workspace.staged()),
+            WeldLoadMode::PartAerodynamics,
+        )?;
+        Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_pending)
+    }
+
+    fn stage_automatic_weld_splits(
+        &mut self,
+    ) -> Result<Option<cluster::InsertedWeldSplits>, StepError> {
+        let Some((force, moment)) = self.automatic_weld_failure else {
+            return Ok(None);
+        };
+        let plans =
+            self.prepare_pending_weld_splits(force, moment)
+                .map_err(|error| match error {
+                    cluster::WeldSplitPreparationError::Balance(cause) => {
+                        StepError::WeldBalance(cause)
+                    }
+                    cluster::WeldSplitPreparationError::Cluster(cause) => {
+                        StepError::WeldSplit(cause)
+                    }
+                })?;
+        if plans.is_empty() {
+            return Ok(None);
+        }
+        self.insert_weld_split_bodies(plans)
+            .map(Some)
+            .map_err(StepError::WeldSplit)
+    }
+    /// Calculates instantaneous parent-on-child weld reactions from the last
+    /// successful full-step snapshot. Currently only force-free
+    /// clusters are supported. This diagnostic does not break welds. Tolerances
+    /// are absolute, in N and N·m. Topology and loads come from the same step;
+    /// later world edits do not alter the snapshot.
+    pub fn force_free_weld_reactions(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+        let state = self
+            .cluster_load_states_published
+            .iter()
+            .find(|state| state.body == body)
+            .ok_or(WeldBalanceError::IncompleteLoads)?;
+        if !state.force_free_certified || state.collision_loads_uncertified {
+            return Err(WeldBalanceError::IncompleteLoads);
+        }
+        self.part_source_weld_reactions(body, force_tolerance, moment_tolerance)
+    }
+
+    /// Instantaneous reactions for clusters subject only to
+    /// part-targeted persistent forces and gravity sampled at the cluster COM.
+    /// The cluster must have no colliders; the world must have no joints or
+    /// chunks, and the cluster must have no aerodynamic loads.
+    /// Results are diagnostics from the last successful full-step snapshot.
+    pub fn part_source_weld_reactions(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+        Self::part_source_weld_reactions_from_snapshot(
+            body,
+            force_tolerance,
+            moment_tolerance,
+            &self.cluster_load_states_published,
+            &self.cluster_load_parts_published,
+            &self.cluster_load_welds_published,
+            &self.part_force_source_published,
+            &self.part_gravity_published,
+            &[],
+            &[],
+            (&[], &[]),
+            None,
+            WeldLoadMode::Sources,
+        )
+    }
+
+    /// Reactions including part-owned hull sections from the last full step.
+    /// Other aerodynamic models, surfaces, wings, contacts and joints remain
+    /// unsupported. Gravity uses the same COM sampling as the body model.
+    pub fn part_hull_weld_reactions(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+        Self::part_source_weld_reactions_from_snapshot(
+            body,
+            force_tolerance,
+            moment_tolerance,
+            &self.cluster_load_states_published,
+            &self.cluster_load_parts_published,
+            &self.cluster_load_welds_published,
+            &self.part_force_source_published,
+            &self.part_gravity_published,
+            &self.part_hull_published,
+            &[],
+            (&[], &[]),
+            None,
+            WeldLoadMode::Hull,
+        )
+    }
+
+    /// Reactions including part-owned hull and wing loads from the same step.
+    /// Body-owned aerodynamics, common surface corrections, non-Mesh geometry
+    /// and contacts are not certified. Part-owned Mesh pressure is supported
+    /// only when its same-step owner snapshot matches the applied wrench.
+    pub fn part_aerodynamic_weld_reactions(
+        &self,
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+        Self::part_source_weld_reactions_from_snapshot(
+            body,
+            force_tolerance,
+            moment_tolerance,
+            &self.cluster_load_states_published,
+            &self.cluster_load_parts_published,
+            &self.cluster_load_welds_published,
+            &self.part_force_source_published,
+            &self.part_gravity_published,
+            &self.part_hull_published,
+            &self.part_wing_published,
+            (&self.simple_surface_published, &self.raw_simple_published),
+            self.owner_pressure
+                .as_ref()
+                .and_then(|map| map.get(&body))
+                .map(|workspace| workspace.published()),
+            WeldLoadMode::PartAerodynamics,
+        )
+    }
+
+    /// All slices must belong to the same evaluation-time transaction.
+    fn part_source_weld_reactions_from_snapshot(
+        body: BodyId,
+        force_tolerance: f64,
+        moment_tolerance: f64,
+        states: &[ClusterLoadState],
+        parts: &[ClusterLoadPart],
+        snapshot_welds: &[ClusterLoadWeld],
+        sources: &[PartForceSourceWrench],
+        gravity: &[PartGravityWrench],
+        hull: &[PartHullWrench],
+        wings: &[PartWingWrench],
+        simple: (&[SimpleSurfaceCorrection], &[RawSimpleSurfaceWrench]),
+        pressure: Option<
+            &[(
+                crate::aerodynamics::geometry::GeometryOwner,
+                crate::aerodynamics::pressure::PressureWrench,
+            )],
+        >,
+        load_mode: WeldLoadMode,
+    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+        use crate::cluster::balance::{
+            RecordedPartLoads, prepare_recorded_loads, prepare_tree, reaction_moment_at_anchor,
+            tree_reactions,
+        };
+        let state = states
+            .iter()
+            .find(|state| state.body == body)
+            .ok_or(WeldBalanceError::IncompleteLoads)?;
+        if state.collision_loads_uncertified
+            || !match load_mode {
+                WeldLoadMode::Sources => state.part_sources_certified,
+                WeldLoadMode::Hull => state.part_hull_certified,
+                WeldLoadMode::PartAerodynamics => state.part_surfaces_certified,
+            }
+        {
+            return Err(WeldBalanceError::IncompleteLoads);
+        }
+        let tree = prepare_tree(state, parts, snapshot_welds)?;
+        let mass = state.mass.ok_or(WeldBalanceError::IncompleteLoads)?;
+        let (center, inertia) =
+            crate::cluster::motion::world_properties(mass, state.state.transform())
+                .map_err(WeldBalanceError::Physics)?;
+        let origin = center;
+        let mut inputs = prepare_recorded_loads(
+            state,
+            &tree,
+            RecordedPartLoads {
+                sources,
+                gravity,
+                hull,
+                wings,
+            },
+            center,
+            origin,
+        )?;
+        if state.part_geometry && !state.vacuum {
+            use crate::aerodynamics::geometry::GeometryOwner;
+            let pressure = pressure.ok_or(WeldBalanceError::IncompleteLoads)?;
+            let mut indices = HashMap::new();
+            indices
+                .try_reserve(tree.len())
+                .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+            for (index, part) in tree.iter().enumerate() {
+                indices.insert(part.part, index);
+            }
+            for (owner, wrench) in pressure {
+                let GeometryOwner::Part(part) = owner else {
+                    return Err(WeldBalanceError::IncompleteLoads);
+                };
+                let index = *indices.get(part).ok_or(WeldBalanceError::InvalidTree)?;
+                let input = &mut inputs[index];
+                input.external_force = input
+                    .external_force
+                    .checked_add(wrench.force)
+                    .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                input.external_moment = input
+                    .external_moment
+                    .checked_add(wrench.moment)
+                    .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+            }
+        }
+        if matches!(load_mode, WeldLoadMode::PartAerodynamics)
+            && state.part_surface_count > 0
+            && !state.vacuum
+        {
+            let (corrections, raw) = simple;
+            let mut matching = corrections.iter().filter(|item| item.body == body);
+            let correction = matching.next().ok_or(WeldBalanceError::IncompleteLoads)?;
+            if matching.next().is_some()
+                || raw.iter().filter(|item| item.body == body).count() != state.part_surface_count
+                || correction.check_part_attribution(raw).is_err()
+            {
+                return Err(WeldBalanceError::IncompleteLoads);
+            }
+            let mut indices = HashMap::new();
+            indices
+                .try_reserve(tree.len())
+                .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+            for (index, part) in tree.iter().enumerate() {
+                indices.insert(part.part, index);
+            }
+            for load in raw.iter().filter(|item| item.body == body) {
+                let AerodynamicTarget::Part(part) = load.target else {
+                    return Err(WeldBalanceError::IncompleteLoads);
+                };
+                let input =
+                    &mut inputs[*indices.get(&part).ok_or(WeldBalanceError::InvalidTree)?];
+                for wrench in [load.drag, load.lift] {
+                    input.external_force = input
+                        .external_force
+                        .checked_add(wrench.force)
+                        .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                    input.external_moment = input
+                        .external_moment
+                        .checked_add(wrench.moment)
+                        .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                }
+            }
+        }
+        let mut force = Vec3::ZERO;
+        let mut moment = Vec3::ZERO;
+        for input in &mut inputs {
+            force = force
+                .checked_add(input.external_force)
+                .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+            moment = moment
+                .checked_add(input.external_moment)
+                .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+            input.loads_complete = true;
+        }
+        let acceleration = force
+            .checked_mul_scalar(1.0 / mass.mass())
+            .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+        let omega = state.state.angular_velocity();
+        let effective_moment = inertia
+            .checked_mul_vector(omega)
+            .and_then(|angular_momentum| omega.checked_cross(angular_momentum))
+            .and_then(|gyroscopic| moment.checked_sub(gyroscopic))
+            .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+        let alpha = inertia
+            .solve_spd(effective_moment)
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::InvalidMotion))?;
+        let mut parents = Vec::new();
+        parents
+            .try_reserve_exact(tree.len())
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        parents.extend(tree.iter().map(|part| part.parent));
+        let reactions = tree_reactions(
+            &inputs,
+            &parents,
+            center,
+            acceleration,
+            omega,
+            alpha,
+            origin,
+            force_tolerance,
+            moment_tolerance,
+        )?;
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(tree.len().saturating_sub(1))
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        let mut welds = HashMap::new();
+        welds
+            .try_reserve(snapshot_welds.len())
+            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        for weld in snapshot_welds {
+            if welds.insert(weld.weld, weld.value).is_some() {
+                return Err(WeldBalanceError::InvalidTree);
+            }
+        }
+        for (index, part) in tree.iter().enumerate().skip(1) {
+            let weld_id = part.weld.ok_or(WeldBalanceError::InvalidTree)?;
+            let weld = welds.get(&weld_id).ok_or(WeldBalanceError::InvalidTree)?;
+            let frame = if weld.part_a() == part.part {
+                weld.desc().frame_a
+            } else if weld.part_b() == part.part {
+                weld.desc().frame_b
+            } else {
+                return Err(WeldBalanceError::InvalidTree);
+            };
+            let anchor = part.pose.transform_point(frame.local_anchor);
+            let (force, moment) = reactions[index];
+            let moment = reaction_moment_at_anchor(force, moment, origin, anchor)?;
+            result.push(WeldReaction {
+                weld: weld_id,
+                child: part.part,
+                force,
+                moment,
+                anchor,
+            });
+        }
+        Ok(result)
+    }
+    /// Cluster-body states from the beginning of the last successful full step.
+    /// Low-level shard commits do not publish this diagnostic. Later topology
+    /// edits can make its body IDs or current part transforms stale.
+    pub fn cluster_load_states(&self) -> &[ClusterLoadState] {
+        &self.cluster_load_states_published
+    }
+
+    /// Part mass and local pose from the last successful full step.
+    pub fn cluster_load_parts(&self) -> &[ClusterLoadPart] {
+        &self.cluster_load_parts_published
+    }
+
+    /// Welds from the last successful full step, independent of later edits.
+    pub fn cluster_load_welds(&self) -> &[ClusterLoadWeld] {
+        &self.cluster_load_welds_published
+    }
+
+    /// Recorded velocity-contact impulses from the last successful full step.
+    /// This is diagnostic data, not a complete contact or weld-load balance.
+    /// Low-level shard commits do not publish this snapshot.
+    pub fn contact_impulses(&self) -> &[ContactImpulse] {
+        &self.contact_impulses_published
+    }
+
+    /// Number of staged contact points missing velocity-solve data in the
+    /// last successful full step. Zero does not establish completeness of
+    /// other solver paths, CCD replay, or the overall part-load balance.
+    pub fn contact_impulses_omitted_points(&self) -> usize {
+        self.contact_impulses_omitted_published
+    }
+
+    /// Whether CCD clipped any dynamic body during the last successful full
+    /// step. Clipping changes velocity without a recorded physical impulse;
+    /// contact snapshots from such a step cannot form a complete load balance.
+    /// False does not prove that other contact paths are complete.
+    pub fn contact_impulses_ccd_clipped(&self) -> bool {
+        self.contact_ccd_clipped_published
+    }
+
+    /// Part-targeted persistent-source contributions from the last successful
+    /// full step. Entries preserve source iteration order and are not summed.
+    /// They are a historical snapshot, including IDs of subsequently removed
+    /// parts or sources; low-level prediction APIs do not update the snapshot.
+    pub fn part_force_source_wrenches(&self) -> &[PartForceSourceWrench] {
+        &self.part_force_source_published
+    }
+
+    /// Per-part gravity attribution from the last successful full step. This
+    /// historical snapshot is not a weld reaction or a gravity-gradient model.
+    pub fn part_gravity_wrenches(&self) -> &[PartGravityWrench] {
+        &self.part_gravity_published
+    }
+
+    /// Part hull contributions from the last successful full step. This is a
+    /// historical snapshot and excludes wings, mesh pressure and other loads.
+    pub fn part_hull_wrenches(&self) -> &[PartHullWrench] {
+        &self.part_hull_published
+    }
+
+    /// Part wing contributions from the last successful full step, excluding
+    /// hulls, mesh pressure and all non-aerodynamic loads.
+    pub fn part_wing_wrenches(&self) -> &[PartWingWrench] {
+        &self.part_wing_published
+    }
+
+    /// Aggregate simple-surface corrections from the last successful full step.
+    pub fn simple_surface_corrections(&self) -> &[SimpleSurfaceCorrection] {
+        &self.simple_surface_published
+    }
+
+    /// Raw simple-surface wrenches from the last successful full step. Body
+    /// and part targets are included; zero-density surfaces are omitted.
+    /// These are before the shared correction and are not applied part loads.
+    pub fn raw_simple_surface_wrenches(&self) -> &[RawSimpleSurfaceWrench] {
+        &self.raw_simple_published
+    }
+
+    /// Impact-pressure contribution from prepared mesh patches in the last
+    /// successful full step. Forces are world-space newtons; moments are world
+    /// N·m about the body's center of mass at evaluation time. This excludes
+    /// other aerodynamic and mechanical loads and must not be used as a weld
+    /// reaction. Low-level prediction/commit APIs do not publish this data.
+    /// This diagnostic currently repeats mesh-pressure evaluation and uses
+    /// reusable workspace storage. No result is exposed for a deleted body,
+    /// vacuum, zero density, or a step without prepared mesh pressure.
+    pub fn owner_mesh_pressure(
+        &self,
+        body: BodyId,
+    ) -> Option<
+        &[(
+            crate::aerodynamics::geometry::GeometryOwner,
+            crate::aerodynamics::pressure::PressureWrench,
+        )],
+    > {
+        if body.world != self.world_id || self.bodies.get(body.dense).is_none() {
+            return None;
+        }
+        self.owner_pressure
+            .as_ref()?
+            .get(&body)
+            .map(|workspace| workspace.published())
+            .filter(|loads| !loads.is_empty())
+    }
+
     pub const fn new() -> Self {
         Self {
             world_id: 0,
+            error_policy: ErrorPolicy::Realtime,
+            step_diagnostics: StepDiagnostics {
+                collision_ccd_limit_clipped_bodies: 0,
+                weld_incomplete_load_clusters: 0,
+                weld_collision_load_clusters: 0,
+            },
+            pending_step_diagnostics: StepDiagnostics {
+                collision_ccd_limit_clipped_bodies: 0,
+                weld_incomplete_load_clusters: 0,
+                weld_collision_load_clusters: 0,
+            },
+            body_revision: 0,
+            automatic_weld_failure: None,
+            automatic_weld_impulse_tolerances: None,
+            #[cfg(test)]
+            weld_split_fail_after: None,
             bodies: DensePool::new(),
             parts: DensePool::new(),
+            part_aerodynamic_geometry: None,
+            assembly_aerodynamics: None,
             welds: DensePool::new(),
             colliders: DensePool::new(),
             chunks: DensePool::new(),
             force_sources: DensePool::new(),
             joints: DensePool::new(),
             force_source_body_updates: Vec::new(),
+            part_force_source_published: Vec::new(),
+            part_force_source_pending: Vec::new(),
             force_source_body_indices: None,
             central_gravity: None,
             gravity_fields: DensePool::new(),
             gravity_body_updates: Vec::new(),
+            part_gravity_published: Vec::new(),
+            part_gravity_pending: Vec::new(),
             atmosphere: Atmosphere::Vacuum,
+            mesh_sound_speed: 340.0,
             aerodynamics_body_updates: Vec::new(),
+            part_hull_published: Vec::new(),
+            part_hull_pending: Vec::new(),
+            part_wing_published: Vec::new(),
+            part_wing_pending: Vec::new(),
+            simple_surface_published: Vec::new(),
+            simple_surface_pending: Vec::new(),
+            raw_simple_published: Vec::new(),
+            raw_simple_pending: Vec::new(),
+            raw_simple_buffers: Vec::new(),
+            contact_impulses_published: Vec::new(),
+            contact_impulses_pending: Vec::new(),
+            contact_impulses_omitted_published: 0,
+            contact_impulses_omitted_pending: 0,
+            contact_ccd_clipped_published: false,
+            contact_ccd_clipped_pending: false,
+            cluster_load_states_published: Vec::new(),
+            cluster_load_states_pending: Vec::new(),
+            cluster_load_indices: None,
+            cluster_load_parts_published: Vec::new(),
+            cluster_load_parts_pending: Vec::new(),
+            cluster_load_welds_published: Vec::new(),
+            cluster_load_welds_pending: Vec::new(),
+            part_hull_buffers: Vec::new(),
+            part_wing_buffers: Vec::new(),
+            owner_pressure: None,
+            owner_pressure_owners: Vec::new(),
             materials: MaterialStorage::new(),
             collision_system: CollisionSystem::new(),
             joint_events: Vec::new(),
@@ -384,46 +1535,108 @@ impl PhysicsWorld {
         self.atmosphere = atmosphere;
     }
 
-    pub fn aerodynamics(&self, id: BodyId) -> Option<AerodynamicProperties> {
-        if id.world != self.world_id {
-            return None;
+    /// Sets the uniform sound speed used by Mesh/Colliders, in m/s.
+    /// Must be finite and positive and match the configured atmospheric medium.
+    /// The compatibility default is 340 m/s; density alone cannot determine it.
+    /// This changes Mach classification without invalidating local geometry.
+    pub fn set_mesh_sound_speed(
+        &mut self,
+        sound_speed: f64,
+    ) -> Result<(), crate::aerodynamics::pressure::PressureError> {
+        if !sound_speed.is_finite() || sound_speed <= 0.0 {
+            return Err(crate::aerodynamics::pressure::PressureError::InvalidSoundSpeed);
         }
-        self.bodies.get(id.dense).and_then(|entry| {
-            entry
-                .aerodynamics
-                .iter()
-                .find(|surface| surface.target() == AerodynamicTarget::Body)
-                .map(|surface| surface.properties())
-        })
+        self.mesh_sound_speed = sound_speed;
+        Ok(())
     }
 
-    /// Replaces body surfaces. All previously returned surface indices are invalidated.
+    /// Returns the uniform Mesh/Colliders sound speed in m/s.
+    pub fn mesh_sound_speed(&self) -> f64 {
+        self.mesh_sound_speed
+    }
+
+    /// Selects triangles from one attached collider's current tessellation.
+    /// Indices use `collider_mesh([collider], body's tessellation)` ordering.
+    /// The caller must establish outward winding, full exposure and base/wake
+    /// applicability; no overlap or shielding check is performed. Replacing or
+    /// mutating colliders or tessellation clears the resulting configuration.
+    /// Errors leave the previous selection unchanged.
+    pub fn set_collider_base_triangles(
+        &mut self,
+        body: BodyId,
+        collider: ColliderId,
+        indices: &[usize],
+        base: crate::aerodynamics::pressure::BasePressure,
+    ) -> Result<(), crate::aerodynamics::AerodynamicsError> {
+        use crate::aerodynamics::{Aerodynamics, AerodynamicsError};
+        if body.world != self.world_id || collider.world != self.world_id {
+            return Err(AerodynamicsError::UnsupportedModel);
+        }
+        let entry = self
+            .bodies
+            .get(body.dense)
+            .ok_or(AerodynamicsError::UnsupportedModel)?;
+        if entry.cluster.is_some() || !matches!(entry.body.aerodynamics(), Aerodynamics::Colliders)
+        {
+            return Err(AerodynamicsError::UnsupportedModel);
+        }
+        let source = self
+            .colliders
+            .get(collider.dense)
+            .filter(|entry| entry.body == body && entry.chunk.is_none())
+            .ok_or(AerodynamicsError::UnsupportedModel)?;
+        let mesh = crate::aerodynamics::colliders::collider_mesh(
+            [&source.collider],
+            entry.collider_tessellation,
+        )?;
+        let patches = RigidBody::base_triangles_from_mesh(&mesh, indices, base)
+            .map_err(AerodynamicsError::Pressure)?;
+        let triangles = indices
+            .iter()
+            .map(|&i| mesh.triangles()[i].map(|v| mesh.vertices()[v]))
+            .collect();
+        let body = &mut self
+            .bodies
+            .get_mut(body.dense)
+            .ok_or(AerodynamicsError::UnsupportedModel)?
+            .body;
+        body.set_base_pressure_patches(patches);
+        body.base_pressure_triangles = Some(triangles);
+        self.body_revision = self.body_revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn aerodynamics(&self, id: BodyId) -> Option<&crate::aerodynamics::Aerodynamics> {
+        self.body(id).map(RigidBody::aerodynamics)
+    }
+
+    /// Replaces the primary aerodynamic model, retaining additional surfaces.
     pub fn set_aerodynamics(
         &mut self,
         id: BodyId,
-        properties: Option<AerodynamicProperties>,
+        aerodynamics: crate::aerodynamics::Aerodynamics,
     ) -> Result<(), WorldError> {
         if id.world != self.world_id {
             return Err(WorldError::InvalidBodyId);
         }
-        let surfaces = &mut self
+        if self.cluster(id).is_some()
+            && matches!(
+                aerodynamics,
+                crate::aerodynamics::Aerodynamics::Mesh(_)
+                    | crate::aerodynamics::Aerodynamics::VoxelWave(_)
+                    | crate::aerodynamics::Aerodynamics::Colliders
+            )
+        {
+            return Err(WorldError::UnsupportedAerodynamics);
+        }
+        let entry = self
             .bodies
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidBodyId)?
-            .aerodynamics;
-        if properties.is_some()
-            && !surfaces
-                .iter()
-                .any(|surface| surface.target() == AerodynamicTarget::Body)
-        {
-            surfaces
-                .try_reserve(1)
-                .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
-        }
-        surfaces.retain(|surface| surface.target() != AerodynamicTarget::Body);
-        if let Some(properties) = properties {
-            surfaces.push(AerodynamicSurface::new(properties));
-        }
+            .ok_or(WorldError::InvalidBodyId)?;
+        entry.body.set_aerodynamics(aerodynamics);
+        entry.mesh_aerodynamics = None;
+        entry.collider_aerodynamic_mesh = None;
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(())
     }
 
@@ -433,7 +1646,7 @@ impl PhysicsWorld {
         }
         self.bodies
             .get(id.dense)
-            .map(|entry| entry.aerodynamics.as_slice())
+            .map(|entry| entry.body.aerodynamic_surfaces.as_slice())
     }
 
     /// Returns an index valid until the surface list changes or the cluster is split or merged.
@@ -449,11 +1662,13 @@ impl PhysicsWorld {
             .bodies
             .get_mut(id.dense)
             .ok_or(WorldError::InvalidBodyId)?
-            .aerodynamics;
+            .body
+            .aerodynamic_surfaces;
         surfaces
             .try_reserve(1)
             .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
         surfaces.push(AerodynamicSurface::new(properties));
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(surfaces.len() - 1)
     }
 
@@ -470,11 +1685,14 @@ impl PhysicsWorld {
             .bodies
             .get_mut(id.dense)
             .ok_or(WorldError::InvalidBodyId)?
-            .aerodynamics;
+            .body
+            .aerodynamic_surfaces;
         if index >= surfaces.len() {
             return Err(WorldError::InvalidAerodynamicSurface);
         }
-        Ok(surfaces.remove(index).properties())
+        let properties = surfaces.remove(index).properties();
+        self.body_revision = self.body_revision.wrapping_add(1);
+        Ok(properties)
     }
 
     /// Returns an index valid until the surface list changes or the cluster is split or merged.
@@ -489,18 +1707,20 @@ impl PhysicsWorld {
             .bodies
             .get_mut(body.dense)
             .ok_or(WorldError::InvalidBodyId)?
-            .aerodynamics;
+            .body
+            .aerodynamic_surfaces;
         surfaces
             .try_reserve(1)
             .map_err(|_| WorldError::DensePoolCapacityExceeded)?;
         surfaces.push(AerodynamicSurface::for_part(part, properties));
+        self.body_revision = self.body_revision.wrapping_add(1);
         Ok(surfaces.len() - 1)
     }
 
     pub(crate) fn rebase_aerodynamic_surface(
         surface: AerodynamicSurface,
-        old_body: &RigidBody,
-        new_body: &RigidBody,
+        old_body: &BodyMotion,
+        new_body: &BodyMotion,
     ) -> Result<AerodynamicSurface, crate::aerodynamics::AerodynamicsError> {
         if !matches!(surface.target(), AerodynamicTarget::Body) {
             return Ok(surface);
@@ -715,6 +1935,32 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    /// Changes collider aerodynamic resolution, invalidating local preparation.
+    pub fn set_collider_tessellation(
+        &mut self,
+        body: BodyId,
+        config: crate::aerodynamics::ColliderTessellation,
+    ) -> Result<(), WorldError> {
+        if body.world != self.world_id {
+            return Err(WorldError::InvalidBodyId);
+        }
+        let entry = self
+            .bodies
+            .get_mut(body.dense)
+            .ok_or(WorldError::InvalidBodyId)?;
+        if entry.collider_tessellation != config {
+            entry.collider_tessellation = config;
+            entry.collider_aerodynamic_mesh = None;
+            entry.mesh_aerodynamics = None;
+            entry.body.invalidate_collider_base_patches();
+            if let Some(caches) = &mut self.assembly_aerodynamics {
+                caches.remove(&body);
+            }
+            self.body_revision = self.body_revision.wrapping_add(1);
+        }
+        Ok(())
+    }
+
     pub fn add_body(&mut self, body: RigidBody) -> Result<BodyId, WorldError> {
         if self.world_id == 0 {
             self.world_id = allocate_world_id(&NEXT_WORLD_ID)?;
@@ -723,9 +1969,11 @@ impl PhysicsWorld {
             .bodies
             .insert(BodyEntry {
                 body,
-                aerodynamics: Vec::new(),
                 first_collider: None,
                 cluster: None,
+                mesh_aerodynamics: None,
+                collider_aerodynamic_mesh: None,
+                collider_tessellation: crate::aerodynamics::ColliderTessellation::default(),
             })
             .map_err(WorldError::from)?;
         Ok(BodyId {
@@ -755,11 +2003,25 @@ impl PhysicsWorld {
     pub fn edit_body(
         &mut self,
         id: BodyId,
-        edit: impl FnOnce(&mut RigidBody) -> Result<(), crate::rigid_body::BodyError>,
+        edit: impl FnOnce(&mut BodyMotion) -> Result<(), crate::rigid_body::BodyError>,
     ) -> Result<(), ClusterError> {
-        let mut body = *self.body(id).ok_or(ClusterError::InvalidBodyId)?;
-        edit(&mut body).map_err(ClusterError::Body)?;
-        self.replace_body_state(id, body)
+        let entry = self
+            .bodies
+            .get(id.dense)
+            .filter(|_| id.world == self.world_id)
+            .ok_or(ClusterError::InvalidBodyId)?;
+        let mut motion = entry.body.motion();
+        edit(&mut motion).map_err(ClusterError::Body)?;
+        if entry.cluster.is_some() && entry.body.physics() != motion.physics() {
+            return Err(ClusterError::ManagedMass);
+        }
+        self.invalidate_body_edit(id);
+        self.bodies
+            .get_mut(id.dense)
+            .ok_or(ClusterError::InvalidBodyId)?
+            .body
+            .set_motion(motion);
+        Ok(())
     }
 
     /// Replaces body state while protecting cluster-managed physical properties.
@@ -774,6 +2036,16 @@ impl PhysicsWorld {
         if entry.cluster.is_some() && entry.body.physics() != body.physics() {
             return Err(ClusterError::ManagedMass);
         }
+        if entry.cluster.is_some()
+            && matches!(
+                body.aerodynamics(),
+                crate::aerodynamics::Aerodynamics::Mesh(_)
+                    | crate::aerodynamics::Aerodynamics::VoxelWave(_)
+                    | crate::aerodynamics::Aerodynamics::Colliders
+            )
+        {
+            return Err(ClusterError::UnsupportedGeometry);
+        }
         self.invalidate_body_edit(id);
         let entry = self
             .bodies
@@ -784,6 +2056,7 @@ impl PhysicsWorld {
     }
 
     fn invalidate_body_edit(&mut self, id: BodyId) {
+        self.body_revision = self.body_revision.wrapping_add(1);
         self.synchronize_cluster_physics_state(&[id]);
     }
 
@@ -1201,8 +2474,150 @@ impl PhysicsWorld {
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T, StepError>,
     ) -> Result<T, StepError> {
+        self.pending_step_diagnostics = StepDiagnostics::default();
+        self.contact_impulses_pending.clear();
+        self.contact_impulses_omitted_pending = 0;
+        self.contact_ccd_clipped_pending = false;
         self.validate_collision_inputs()
             .map_err(StepError::Collision)?;
+        self.cluster_load_states_pending.clear();
+        let cluster_count = self
+            .bodies
+            .iter()
+            .filter(|(_, entry)| entry.cluster.is_some())
+            .count();
+        self.cluster_load_states_pending
+            .try_reserve(cluster_count)
+            .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+        self.cluster_load_parts_pending.clear();
+        self.cluster_load_parts_pending
+            .try_reserve(self.parts.iter().count())
+            .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+        self.cluster_load_welds_pending.clear();
+        self.cluster_load_welds_pending
+            .try_reserve(self.welds.iter().count())
+            .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+        let no_world_load_paths =
+            self.joints.iter().next().is_none() && self.chunks.iter().next().is_none();
+        for (dense, entry) in self.bodies.iter() {
+            if let Some(cluster) = &entry.cluster {
+                let body = &entry.body;
+                let sources_certified = self.force_sources.iter().all(|(_, source)| {
+                    !source.enabled
+                        || source.body
+                            != BodyId {
+                                world: self.world_id,
+                                dense,
+                            }
+                        || matches!(source.target, ForceTarget::Part(_))
+                });
+                let part_surfaces_certified = no_world_load_paths
+                    && sources_certified
+                    && body.physics().body_type() == BodyType::Dynamic
+                    && body.forces().force() == Vec3::ZERO
+                    && body.forces().torque() == Vec3::ZERO
+                    && matches!(body.aerodynamics(), crate::aerodynamics::Aerodynamics::None)
+                    && body
+                        .aerodynamic_surfaces
+                        .iter()
+                        .all(|surface| matches!(surface.target(), AerodynamicTarget::Part(_)))
+                    && body.base_pressure_patches.is_empty()
+                    && body.potential_sphere.is_none()
+                    && cluster.parts.iter().all(|part_id| {
+                        self.parts.get(part_id.dense).is_some()
+                            && (matches!(self.atmosphere, Atmosphere::Vacuum)
+                                || !self
+                                    .part_aerodynamic_geometry
+                                    .as_ref()
+                                    .and_then(|geometry| geometry.get(part_id))
+                                    .is_some_and(|geometry| {
+                                        !matches!(
+                                            geometry,
+                                            assembly_aerodynamics::PartGeometry::Mesh(_)
+                                                | assembly_aerodynamics::PartGeometry::Wave(_)
+                                                | assembly_aerodynamics::PartGeometry::WaveSourceMesh(_)
+                                        )
+                                    }))
+                    });
+                let has_geometry = cluster.parts.iter().any(|part| {
+                    self.part_aerodynamic_geometry
+                        .as_ref()
+                        .is_some_and(|geometry| geometry.contains_key(part))
+                });
+                let has_pressure_geometry = cluster.parts.iter().any(|part| {
+                    self.part_aerodynamic_geometry
+                        .as_ref()
+                        .and_then(|geometry| geometry.get(part))
+                        .is_some_and(|geometry| {
+                            matches!(geometry, assembly_aerodynamics::PartGeometry::Mesh(_))
+                        })
+                });
+                let part_wings_certified = part_surfaces_certified
+                    && !has_geometry
+                    && body.aerodynamic_surfaces.is_empty();
+                let part_hull_certified = part_wings_certified
+                    && cluster.parts.iter().all(|id| {
+                        self.parts
+                            .get(id.dense)
+                            .is_some_and(|part| part.aerodynamic_wings.is_empty())
+                    });
+                let part_sources_certified = part_hull_certified
+                    && cluster.parts.iter().all(|id| {
+                        self.parts
+                            .get(id.dense)
+                            .is_some_and(|part| part.aerodynamic_hull.is_empty())
+                    });
+                let force_free_certified = part_sources_certified
+                    && self.central_gravity.is_none()
+                    && self.gravity_fields.is_empty()
+                    && self.force_sources.iter().all(|(_, source)| {
+                        !source.enabled
+                            || source.body
+                                != BodyId {
+                                    world: self.world_id,
+                                    dense,
+                                }
+                    });
+                self.cluster_load_states_pending.push(ClusterLoadState {
+                    body: BodyId {
+                        world: self.world_id,
+                        dense,
+                    },
+                    root: cluster.root,
+                    state: *entry.body.state(),
+                    mass: body.physics().mass(),
+                    force_free_certified,
+                    part_sources_certified,
+                    part_hull_certified,
+                    part_wings_certified,
+                    part_surfaces_certified,
+                    collision_loads_uncertified: false,
+                    part_surface_count: body.aerodynamic_surfaces.len(),
+                    vacuum: matches!(self.atmosphere, Atmosphere::Vacuum),
+                    part_geometry: has_pressure_geometry,
+                });
+            }
+        }
+        for (dense, part) in self.parts.iter() {
+            self.cluster_load_parts_pending.push(ClusterLoadPart {
+                part: PartId {
+                    world: self.world_id,
+                    dense,
+                },
+                body: part.body,
+                local_transform: part.local_transform,
+                mass: part.mass,
+            });
+        }
+        for (dense, weld) in self.welds.iter() {
+            self.cluster_load_welds_pending.push(ClusterLoadWeld {
+                weld: WeldId {
+                    world: self.world_id,
+                    dense,
+                },
+                value: *weld,
+            });
+        }
         if let Err((source_id, cause)) = self.prepare_force_source_updates() {
             return Err(StepError::ForceSource { source_id, cause });
         }
@@ -1213,7 +2628,50 @@ impl PhysicsWorld {
             self.rollback_aerodynamics_updates();
             self.rollback_force_source_updates();
         } else {
-            self.aerodynamics_body_updates.clear();
+            self.step_diagnostics = self.pending_step_diagnostics;
+            if let Some(workspaces) = &mut self.owner_pressure {
+                workspaces.retain(|_, workspace| workspace.commit());
+            }
+            std::mem::swap(
+                &mut self.part_force_source_published,
+                &mut self.part_force_source_pending,
+            );
+            std::mem::swap(
+                &mut self.part_gravity_published,
+                &mut self.part_gravity_pending,
+            );
+            std::mem::swap(&mut self.part_hull_published, &mut self.part_hull_pending);
+            std::mem::swap(&mut self.part_wing_published, &mut self.part_wing_pending);
+            std::mem::swap(
+                &mut self.simple_surface_published,
+                &mut self.simple_surface_pending,
+            );
+            std::mem::swap(&mut self.raw_simple_published, &mut self.raw_simple_pending);
+            std::mem::swap(
+                &mut self.contact_impulses_published,
+                &mut self.contact_impulses_pending,
+            );
+            std::mem::swap(
+                &mut self.contact_impulses_omitted_published,
+                &mut self.contact_impulses_omitted_pending,
+            );
+            std::mem::swap(
+                &mut self.contact_ccd_clipped_published,
+                &mut self.contact_ccd_clipped_pending,
+            );
+            std::mem::swap(
+                &mut self.cluster_load_states_published,
+                &mut self.cluster_load_states_pending,
+            );
+            std::mem::swap(
+                &mut self.cluster_load_parts_published,
+                &mut self.cluster_load_parts_pending,
+            );
+            std::mem::swap(
+                &mut self.cluster_load_welds_published,
+                &mut self.cluster_load_welds_pending,
+            );
+            self.recycle_aerodynamics_updates();
             self.clear_gravity_updates();
             self.clear_force_source_updates();
         }
@@ -1265,7 +2723,11 @@ impl PhysicsWorld {
             if shards.is_empty() {
                 return Err(StepError::InvalidStepResults);
             }
-            world.fill_step_shards_with_executor_at_dt(shards, executor, Some(dt))?;
+            // Prepare persistent aerodynamic forces through the same path as the
+            // ordinary step.  In particular, Mesh requires prepared surface
+            // patches and must not be evaluated with a missing patch set.
+            world.prepare_aerodynamics_updates(executor, worker_count, dt)?;
+            world.fill_step_shards_with_executor_at_dt(shards, executor, Some(dt), false)?;
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunk| {
                     for shard in chunk {
@@ -1277,7 +2739,7 @@ impl PhysicsWorld {
                     }
                 })
                 .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
-            world.commit_step_shards_with_executor(shards, executor, worker_count)
+            world.commit_step_shards_inner(shards, executor, worker_count, true)
         })
     }
 
@@ -1336,15 +2798,133 @@ impl PhysicsWorld {
             self.collision_system.abort_step();
             return Err(StepError::Collision(error));
         }
+        if let Err(error) = self.stage_contact_impulses() {
+            self.collision_system.abort_step();
+            return Err(StepError::Collision(error));
+        }
+        let splits = match self.stage_automatic_weld_splits() {
+            Ok(splits) => splits,
+            Err(error) => {
+                self.collision_system.abort_step();
+                return Err(error);
+            }
+        };
 
         #[cfg(feature = "bench-internals")]
         let commit_started = Instant::now();
         self.commit_predicted_states();
+        if let Some(splits) = splits {
+            self.finish_weld_splits(splits);
+        }
         self.commit_joint_breaks();
         self.collision_system.commit_step();
         #[cfg(feature = "bench-internals")]
         self.collision_system
             .record_commit(commit_started.elapsed());
+        Ok(())
+    }
+
+    fn stage_contact_impulses(&mut self) -> Result<(), CollisionError> {
+        self.contact_impulses_pending.clear();
+        self.contact_impulses_omitted_pending = 0;
+        let context = &self.collision_system.context;
+        self.pending_step_diagnostics
+            .collision_ccd_limit_clipped_bodies = context
+            .ccd_clipped_bodies
+            .iter()
+            .filter(|&&clipped| clipped)
+            .count();
+        self.contact_ccd_clipped_pending = self
+            .pending_step_diagnostics
+            .collision_ccd_limit_clipped_bodies
+            != 0;
+        // A manifold can change motion without a recorded velocity impulse.
+        // Mark its owners and every clipped CCD body, independently of the
+        // impulse snapshot. Unknown ownership conservatively invalidates all.
+        let indices = self.cluster_load_indices.get_or_insert_with(HashMap::new);
+        indices.clear();
+        indices
+            .try_reserve(self.cluster_load_states_pending.len())
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for (index, state) in self.cluster_load_states_pending.iter().enumerate() {
+            indices.insert(state.body, index);
+        }
+        let mut unknown = context.ccd_clipped_bodies.len() != context.predicted_states.len()
+            && !context.ccd_clipped_bodies.is_empty();
+        for (clipped, (body, _)) in context
+            .ccd_clipped_bodies
+            .iter()
+            .zip(&context.predicted_states)
+        {
+            if *clipped {
+                if let Some(&index) = indices.get(body) {
+                    self.cluster_load_states_pending[index].invalidate_collision_loads();
+                }
+            }
+        }
+        for manifold in context
+            .ccd_solved_manifolds
+            .iter()
+            .chain(&context.manifolds)
+        {
+            for collider in [manifold.pair.a, manifold.pair.b] {
+                if let Some(body) = self
+                    .colliders
+                    .get(collider.dense)
+                    .filter(|_| collider.world == self.world_id)
+                    .map(|entry| entry.body)
+                {
+                    if let Some(&index) = indices.get(&body) {
+                        self.cluster_load_states_pending[index].invalidate_collision_loads();
+                    }
+                } else {
+                    unknown = true;
+                }
+            }
+        }
+        if unknown {
+            for state in &mut self.cluster_load_states_pending {
+                state.invalidate_collision_loads();
+            }
+        }
+        let count = context
+            .ccd_solved_manifolds
+            .iter()
+            .chain(&context.manifolds)
+            .try_fold(0usize, |count, manifold| count.checked_add(manifold.len()))
+            .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+        self.contact_impulses_pending
+            .try_reserve(count)
+            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        for (ccd, manifolds) in [
+            (true, &context.ccd_solved_manifolds),
+            (false, &context.manifolds),
+        ] {
+            for manifold in manifolds {
+                let parts = [
+                    self.collider_part(manifold.pair.a),
+                    self.collider_part(manifold.pair.b),
+                ];
+                for contact in manifold.points() {
+                    if let (Some(points), Some(impulse_on_b)) =
+                        (contact.velocity_points, contact.velocity_impulse)
+                    {
+                        self.contact_impulses_pending.push(ContactImpulse {
+                            pair: manifold.pair,
+                            parts,
+                            points,
+                            velocity_transforms: contact.velocity_transforms,
+                            isolated_velocity_states: contact.isolated_velocity_states,
+                            ccd_event: manifold.ccd_event,
+                            impulse_on_b,
+                            ccd,
+                        });
+                    } else {
+                        self.contact_impulses_omitted_pending += 1;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1383,7 +2963,7 @@ impl PhysicsWorld {
             if !source.enabled {
                 continue;
             }
-            let Some(body) = self.body(source.body).copied() else {
+            let Some(body) = self.body(source.body).map(RigidBody::motion) else {
                 self.force_source_body_updates.clear();
                 if let Some(indices) = &mut self.force_source_body_indices {
                     indices.clear();
@@ -1505,6 +3085,26 @@ impl PhysicsWorld {
             let body = &mut self.force_source_body_updates[update_index].prepared;
             let force = transform.transform_vector(source.local_force);
             let point = transform.transform_point(source.local_point);
+            if let ForceTarget::Part(part) = source.target {
+                let center = body
+                    .world_center_of_mass()
+                    .map_err(|_| (source_id, ForceSourceError::ArithmeticOverflow))?
+                    .ok_or((source_id, ForceSourceError::ArithmeticOverflow))?;
+                let moment = point
+                    .checked_sub(center)
+                    .and_then(|arm| arm.checked_cross(force))
+                    .ok_or((source_id, ForceSourceError::ArithmeticOverflow))?;
+                self.part_force_source_pending
+                    .try_reserve(1)
+                    .map_err(|_| (source_id, ForceSourceError::StorageCapacityExceeded))?;
+                self.part_force_source_pending.push(PartForceSourceWrench {
+                    source: source_id,
+                    part,
+                    body: source.body,
+                    force,
+                    moment,
+                });
+            }
             if let Err(error) = body.apply_force_at_point(force, point) {
                 self.force_source_body_updates.clear();
                 if let Some(indices) = &mut self.force_source_body_indices {
@@ -1520,7 +3120,7 @@ impl PhysicsWorld {
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.prepared;
+                entry.body.set_motion(update.prepared);
             }
         }
         Ok(())
@@ -1528,6 +3128,7 @@ impl PhysicsWorld {
 
     fn clear_force_source_updates(&mut self) {
         self.force_source_body_updates.clear();
+        self.part_force_source_pending.clear();
         if let Some(indices) = &mut self.force_source_body_indices {
             indices.clear();
         }
@@ -1535,16 +3136,46 @@ impl PhysicsWorld {
 
     fn apply_aerodynamics(
         atmosphere: Atmosphere,
+        primary: &crate::aerodynamics::Aerodynamics,
         surfaces: &[AerodynamicSurface],
         body_id: BodyId,
-        body: &mut RigidBody,
+        body: &mut BodyMotion,
         parts: &DensePool<ClusterPart>,
-        dt: Option<f64>,
+        inputs: AerodynamicsInputs<'_>,
     ) -> Result<(), StepError> {
+        let AerodynamicsInputs {
+            mesh_sound_speed,
+            cluster,
+            dt,
+            mesh_patches,
+            sphere_patches,
+            voxel_wave,
+            assembly_wave,
+            wing_visibility,
+            base_pressure_patches,
+            mut part_hull_wrenches,
+            mut part_wing_wrenches,
+            simple_surface_correction,
+            mut raw_simple_surfaces,
+            applied_mesh_pressure,
+        } = inputs;
         if matches!(atmosphere, Atmosphere::Vacuum)
             || body.physics().body_type() != BodyType::Dynamic
         {
             return Ok(());
+        }
+        if !base_pressure_patches.is_empty()
+            && (cluster.is_some()
+                || !matches!(
+                    primary,
+                    crate::aerodynamics::Aerodynamics::Mesh(_)
+                        | crate::aerodynamics::Aerodynamics::Colliders
+                ))
+        {
+            return Err(StepError::Aerodynamics {
+                body_id,
+                cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+            });
         }
         let error = || StepError::Aerodynamics {
             body_id,
@@ -1554,11 +3185,299 @@ impl PhysicsWorld {
             .world_center_of_mass()
             .map_err(|_| error())?
             .ok_or_else(error)?;
+        let primary_surface = match primary {
+            crate::aerodynamics::Aerodynamics::None
+            | crate::aerodynamics::Aerodynamics::Wing(_)
+            | crate::aerodynamics::Aerodynamics::Wings(_)
+            | crate::aerodynamics::Aerodynamics::Hull(_)
+            | crate::aerodynamics::Aerodynamics::VoxelWave(_) => None,
+            crate::aerodynamics::Aerodynamics::Simple(properties) => {
+                Some(AerodynamicSurface::new(*properties))
+            }
+            crate::aerodynamics::Aerodynamics::Mesh(_)
+            | crate::aerodynamics::Aerodynamics::Colliders => None,
+        };
+        let primary_atmosphere = if mesh_patches.is_some()
+            || matches!(
+                primary,
+                crate::aerodynamics::Aerodynamics::Mesh(_)
+                    | crate::aerodynamics::Aerodynamics::Colliders
+            ) {
+            Some(
+                atmosphere
+                    .state_at(center)
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
+            )
+            .filter(|state| state.density() != 0.0)
+        } else {
+            None
+        };
+        if let Some(primary_atmosphere) = primary_atmosphere {
+            let flow = crate::aerodynamics::pressure::PressureFlow {
+                atmosphere: primary_atmosphere,
+                sound_speed: primary_atmosphere.sound_speed().unwrap_or(mesh_sound_speed),
+                transform: body.state().transform(),
+                center_of_mass: body
+                    .state()
+                    .transform()
+                    .inverse()
+                    .map_err(|_| error())?
+                    .transform_point(center),
+                linear_velocity: body.state().linear_velocity(),
+                angular_velocity: body.state().angular_velocity(),
+            };
+            let wrench = if let Some(patches) = sphere_patches {
+                crate::aerodynamics::pressure::evaluate_potential_sphere_patches(patches, flow)
+            } else {
+                crate::aerodynamics::pressure::evaluate_prepared_mesh(
+                    mesh_patches.ok_or_else(error)?,
+                    flow,
+                )
+            }
+            .map_err(|cause| StepError::Aerodynamics {
+                body_id,
+                cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+            })?;
+            body.apply_force(wrench.force).map_err(|_| error())?;
+            body.apply_torque(wrench.moment).map_err(|_| error())?;
+            if sphere_patches.is_none()
+                && let Some(applied) = applied_mesh_pressure
+            {
+                *applied = Some(wrench);
+            }
+            for &(patch, base) in base_pressure_patches {
+                let wrench =
+                    patch
+                        .evaluate_base(flow, base)
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                        })?;
+                body.apply_force(wrench.force).map_err(|_| error())?;
+                body.apply_torque(wrench.moment).map_err(|_| error())?;
+            }
+        }
+        let primary_hull: &[crate::aerodynamics::hull::HullSection] = match primary {
+            crate::aerodynamics::Aerodynamics::Hull(sections) => sections,
+            _ => &[],
+        };
+        if let crate::aerodynamics::Aerodynamics::VoxelWave(model) = primary
+            && voxel_wave.is_none()
+        {
+            let point = body
+                .state()
+                .transform()
+                .transform_point(model.section.local_transform().translation());
+            let state = atmosphere
+                .state_at(point)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            if state.density() != 0.0 {
+                return Err(StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                });
+            }
+        }
+        for section in primary_hull.iter().chain(voxel_wave) {
+            let transform = body.state().transform();
+            let point = transform.transform_point(section.local_transform().translation());
+            if !point.is_finite() {
+                return Err(error());
+            }
+            let state = atmosphere
+                .state_at(point)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            let wrench = section
+                .evaluate(crate::aerodynamics::pressure::PressureFlow {
+                    atmosphere: state,
+                    sound_speed: state.sound_speed().unwrap_or(mesh_sound_speed),
+                    transform,
+                    center_of_mass: body.physics().mass().ok_or_else(error)?.center_of_mass(),
+                    linear_velocity: body.state().linear_velocity(),
+                    angular_velocity: body.state().angular_velocity(),
+                })
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
+                })?;
+            body.apply_force(wrench.force).map_err(|_| error())?;
+            body.apply_torque(wrench.moment).map_err(|_| error())?;
+        }
         let mut drag = Vec3::ZERO;
+        let wings: &[crate::aerodynamics::wing::WingSurface] = match primary {
+            crate::aerodynamics::Aerodynamics::Wing(surface) => std::slice::from_ref(surface),
+            crate::aerodynamics::Aerodynamics::Wings(surfaces) => surfaces,
+            _ => &[],
+        };
+        let part_wings = cluster
+            .into_iter()
+            .flat_map(|cluster| cluster.parts())
+            .map(|id| {
+                (
+                    *id,
+                    parts
+                        .get(id.dense)
+                        .filter(|part| id.world == body_id.world && part.body() == body_id)
+                        .ok_or_else(error),
+                )
+            });
+        let mut evaluate_wing = |surface: &crate::aerodynamics::wing::WingSurface,
+                                 local: crate::transform::Transform,
+                                 visibility: Option<crate::aerodynamics::wing::WingVisibility>,
+                                 visibility_required: bool,
+                                 owner: Option<PartId>|
+         -> Result<(), StepError> {
+            let transform = body
+                .state()
+                .transform()
+                .compose(&local)
+                .map_err(|_| error())?;
+            let local_center = local
+                .inverse()
+                .map_err(|_| error())?
+                .transform_point(body.physics().mass().ok_or_else(error)?.center_of_mass());
+            let point = transform.transform_point(surface.local_transform().translation());
+            if !point.is_finite() {
+                return Err(error());
+            }
+            let atmosphere = atmosphere
+                .state_at(point)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            if atmosphere.density() != 0.0 {
+                if visibility_required && visibility.is_none() {
+                    return Err(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::Wing(
+                            crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
+                        ),
+                    });
+                }
+                let flow = crate::aerodynamics::pressure::PressureFlow {
+                    atmosphere,
+                    sound_speed: atmosphere.sound_speed().unwrap_or(mesh_sound_speed),
+                    transform,
+                    center_of_mass: local_center,
+                    linear_velocity: body.state().linear_velocity(),
+                    angular_velocity: body.state().angular_velocity(),
+                };
+                let wrench =
+                    surface
+                        .evaluate_with_visibility(flow, visibility)
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Wing(cause),
+                        })?;
+                body.apply_force(wrench.force).map_err(|_| error())?;
+                body.apply_torque(wrench.moment).map_err(|_| error())?;
+                if let (Some(part), Some(wrenches)) = (owner, part_wing_wrenches.as_deref_mut()) {
+                    wrenches.try_reserve(1).map_err(|_| error())?;
+                    wrenches.push(PartWingWrench {
+                        body: body_id,
+                        part,
+                        wrench,
+                    });
+                }
+            }
+            Ok(())
+        };
+        for surface in wings {
+            evaluate_wing(
+                surface,
+                crate::transform::Transform::identity(),
+                None,
+                false,
+                None,
+            )?;
+        }
+        for (part_id, part) in part_wings {
+            let part = part?;
+            for (index, surface) in part.aerodynamic_wings.iter().enumerate() {
+                let visibility = if surface.has_footprint() {
+                    wing_visibility
+                        .and_then(|values| {
+                            values
+                                .binary_search_by_key(&(part_id, index), |value| {
+                                    (value.part, value.index)
+                                })
+                                .ok()
+                                .and_then(|i| values.get(i))
+                        })
+                        .map(|value| value.visibility)
+                } else {
+                    None
+                };
+                evaluate_wing(
+                    surface,
+                    part.local_transform(),
+                    visibility,
+                    surface.has_footprint() && wing_visibility.is_some(),
+                    Some(part_id),
+                )?;
+            }
+        }
+        let part_hulls = cluster
+            .into_iter()
+            .flat_map(|cluster| cluster.parts())
+            .map(|id| {
+                (
+                    *id,
+                    parts
+                        .get(id.dense)
+                        .filter(|part| id.world == body_id.world && part.body() == body_id)
+                        .ok_or_else(error),
+                )
+            });
+        for (part_id, part) in part_hulls {
+            let part = part?;
+            let part_transform = body
+                .state()
+                .transform()
+                .compose(&part.local_transform())
+                .map_err(|_| error())?;
+            let part_com = part_transform
+                .inverse()
+                .map_err(|_| error())?
+                .transform_point(center);
+            let derived = assembly_wave
+                .filter(|(owner, _)| *owner == part_id)
+                .map(|(_, section)| section);
+            for section in part.aerodynamic_hull.iter().chain(derived) {
+                let point = part_transform.transform_point(section.local_transform().translation());
+                if !point.is_finite() {
+                    return Err(error());
+                }
+                let state = atmosphere
+                    .state_at(point)
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                let wrench = section
+                    .evaluate(crate::aerodynamics::pressure::PressureFlow {
+                        atmosphere: state,
+                        sound_speed: state.sound_speed().unwrap_or(mesh_sound_speed),
+                        transform: part_transform,
+                        center_of_mass: part_com,
+                        linear_velocity: body.state().linear_velocity(),
+                        angular_velocity: body.state().angular_velocity(),
+                    })
+                    .map_err(|cause| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
+                    })?;
+                body.apply_force(wrench.force).map_err(|_| error())?;
+                body.apply_torque(wrench.moment).map_err(|_| error())?;
+                if let Some(wrenches) = part_hull_wrenches.as_deref_mut() {
+                    wrenches.try_reserve(1).map_err(|_| error())?;
+                    wrenches.push(PartHullWrench {
+                        body: body_id,
+                        part: part_id,
+                        wrench,
+                    });
+                }
+            }
+        }
         let mut drag_torque = Vec3::ZERO;
         let mut lift_force = Vec3::ZERO;
         let mut lift_torque = Vec3::ZERO;
-        for surface in surfaces {
+        for surface in primary_surface.iter().chain(surfaces.iter()) {
             let properties = surface.properties();
             let target_transform = match surface.target() {
                 AerodynamicTarget::Body => body.state().transform(),
@@ -1587,6 +3506,19 @@ impl PhysicsWorld {
                 .state_at(point)
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             if local_atmosphere.density() == 0.0 {
+                if let Some(entries) = raw_simple_surfaces.as_deref_mut() {
+                    entries.try_reserve(1).map_err(|_| error())?;
+                    let zero = crate::aerodynamics::pressure::PressureWrench {
+                        force: Vec3::ZERO,
+                        moment: Vec3::ZERO,
+                    };
+                    entries.push(RawSimpleSurfaceWrench {
+                        body: body_id,
+                        target: surface.target(),
+                        drag: zero,
+                        lift: zero,
+                    });
+                }
                 continue;
             }
             let offset = point.checked_sub(center).ok_or_else(error)?;
@@ -1608,23 +3540,61 @@ impl PhysicsWorld {
                 )
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             drag = drag.checked_add(surface_drag).ok_or_else(error)?;
-            drag_torque = offset
-                .checked_cross(surface_drag)
-                .and_then(|torque| drag_torque.checked_add(torque))
+            let surface_drag_torque = offset.checked_cross(surface_drag).ok_or_else(error)?;
+            drag_torque = drag_torque
+                .checked_add(surface_drag_torque)
                 .ok_or_else(error)?;
             lift_force = lift_force.checked_add(lift).ok_or_else(error)?;
-            lift_torque = offset
-                .checked_cross(lift)
-                .and_then(|torque| lift_torque.checked_add(torque))
+            let surface_lift_torque = offset.checked_cross(lift).ok_or_else(error)?;
+            lift_torque = lift_torque
+                .checked_add(surface_lift_torque)
                 .ok_or_else(error)?;
+            if let Some(entries) = raw_simple_surfaces.as_deref_mut() {
+                entries.try_reserve(1).map_err(|_| error())?;
+                entries.push(RawSimpleSurfaceWrench {
+                    body: body_id,
+                    target: surface.target(),
+                    drag: crate::aerodynamics::pressure::PressureWrench {
+                        force: surface_drag,
+                        moment: surface_drag_torque,
+                    },
+                    lift: crate::aerodynamics::pressure::PressureWrench {
+                        force: lift,
+                        moment: surface_lift_torque,
+                    },
+                });
+            }
         }
+        let raw_drag = crate::aerodynamics::pressure::PressureWrench {
+            force: drag,
+            moment: drag_torque,
+        };
+        let raw_lift = crate::aerodynamics::pressure::PressureWrench {
+            force: lift_force,
+            moment: lift_torque,
+        };
         if drag == Vec3::ZERO
             && drag_torque == Vec3::ZERO
             && lift_force == Vec3::ZERO
             && lift_torque == Vec3::ZERO
         {
+            if (!surfaces.is_empty() || primary_surface.is_some())
+                && let Some(output) = simple_surface_correction
+            {
+                *output = Some(SimpleSurfaceCorrection {
+                    body: body_id,
+                    raw_drag,
+                    raw_lift,
+                    applied_drag: raw_drag,
+                    applied_lift: raw_lift,
+                });
+            }
             return Ok(());
         }
+        let center_wind = atmosphere
+            .state_at(center)
+            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?
+            .wind_velocity();
         let mut scale = 1.0_f64;
         if let Some(dt) = dt {
             let mass = body.physics().mass().ok_or_else(error)?;
@@ -1643,7 +3613,7 @@ impl PhysicsWorld {
             let relative_velocity = body
                 .state()
                 .linear_velocity()
-                .checked_sub(atmosphere.wind_velocity())
+                .checked_sub(center_wind)
                 .ok_or_else(error)?;
             let power = relative_velocity
                 .checked_dot(drag)
@@ -1669,9 +3639,12 @@ impl PhysicsWorld {
                 scale = (-power / dt / curvature).clamp(0.0, 1.0);
             }
         }
-        body.apply_force(drag.checked_mul_scalar(scale).ok_or_else(error)?)
-            .map_err(|_| error())?;
-        body.apply_torque(drag_torque.checked_mul_scalar(scale).ok_or_else(error)?)
+        let applied_drag = crate::aerodynamics::pressure::PressureWrench {
+            force: drag.checked_mul_scalar(scale).ok_or_else(error)?,
+            moment: drag_torque.checked_mul_scalar(scale).ok_or_else(error)?,
+        };
+        body.apply_force(applied_drag.force).map_err(|_| error())?;
+        body.apply_torque(applied_drag.moment)
             .map_err(|_| error())?;
         if let Some(dt) = dt
             && (lift_force != Vec3::ZERO || lift_torque != Vec3::ZERO)
@@ -1706,7 +3679,7 @@ impl PhysicsWorld {
             let relative_velocity = body
                 .state()
                 .linear_velocity()
-                .checked_sub(atmosphere.wind_velocity())
+                .checked_sub(center_wind)
                 .and_then(|velocity| {
                     drag.checked_mul_scalar(scale * dt / mass.mass())
                         .and_then(|change| velocity.checked_add(change))
@@ -1725,6 +3698,18 @@ impl PhysicsWorld {
                 .filter(|value| value.is_finite() && *value >= 0.0)
                 .ok_or_else(error)?;
             if metric == 0.0 {
+                if let Some(output) = simple_surface_correction {
+                    *output = Some(SimpleSurfaceCorrection {
+                        body: body_id,
+                        raw_drag,
+                        raw_lift,
+                        applied_drag,
+                        applied_lift: crate::aerodynamics::pressure::PressureWrench {
+                            force: Vec3::ZERO,
+                            moment: Vec3::ZERO,
+                        },
+                    });
+                }
                 return Ok(());
             }
             let power = relative_velocity
@@ -1803,7 +3788,62 @@ impl PhysicsWorld {
         }
         body.apply_force(lift_force).map_err(|_| error())?;
         body.apply_torque(lift_torque).map_err(|_| error())?;
+        if let Some(output) = simple_surface_correction {
+            *output = Some(SimpleSurfaceCorrection {
+                body: body_id,
+                raw_drag,
+                raw_lift,
+                applied_drag,
+                applied_lift: crate::aerodynamics::pressure::PressureWrench {
+                    force: lift_force,
+                    moment: lift_torque,
+                },
+            });
+        }
         Ok(())
+    }
+
+    fn prepare_voxel_wave(
+        model: &crate::aerodynamics::wave::VoxelWave,
+        body_id: BodyId,
+        body: &BodyMotion,
+        atmosphere: Atmosphere,
+        cache: &mut crate::aerodynamics::cache::PreparedGeometryCache,
+    ) -> Result<Option<crate::aerodynamics::hull::HullSection>, StepError> {
+        if body.physics().body_type() != BodyType::Dynamic {
+            return Ok(None);
+        }
+        let point = body
+            .state()
+            .transform()
+            .transform_point(model.section.local_transform().translation());
+        let state = atmosphere
+            .state_at(point)
+            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+        if state.density() == 0.0 {
+            return Ok(None);
+        }
+        cache
+            .prepare(
+                crate::aerodynamics::cache::GeometryCacheKey {
+                    body: body_id,
+                    geometry_version: 0,
+                    config_version: 1,
+                },
+                &model.mesh,
+                model.geometry_config,
+            )
+            .map_err(|cause| StepError::Aerodynamics {
+                body_id,
+                cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+            })?;
+        let section = cache
+            .configure_voxel_wave_drag(model.section.clone(), model.axis, model.smoothing_radius)
+            .map_err(|cause| StepError::Aerodynamics {
+                body_id,
+                cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
+            })?;
+        Ok(Some(section))
     }
 
     fn prepare_aerodynamics_updates<E: StepExecutor>(
@@ -1812,14 +3852,29 @@ impl PhysicsWorld {
         workers: usize,
         dt: f64,
     ) -> Result<(), StepError> {
-        self.aerodynamics_body_updates.clear();
+        self.recycle_aerodynamics_updates();
+        self.part_hull_pending.clear();
+        self.part_wing_pending.clear();
+        self.simple_surface_pending.clear();
+        self.raw_simple_pending.clear();
         let atmosphere = self.atmosphere;
         if matches!(atmosphere, Atmosphere::Vacuum) {
             return Ok(());
         };
 
-        for (dense_id, entry) in self.bodies.iter() {
-            if entry.aerodynamics.is_empty()
+        for (dense_id, entry) in self.bodies.iter_mut() {
+            if (entry.body.aerodynamic_surfaces.is_empty()
+                && entry.body.base_pressure_patches.is_empty()
+                && !assembly_aerodynamics::wings_configured(entry, &self.parts)
+                && !assembly_aerodynamics::hull_configured(entry, &self.parts)
+                && matches!(
+                    entry.body.aerodynamics(),
+                    crate::aerodynamics::Aerodynamics::None
+                )
+                && !assembly_aerodynamics::configured(
+                    entry,
+                    self.part_aerodynamic_geometry.as_ref(),
+                ))
                 || entry.body.physics().body_type() != BodyType::Dynamic
             {
                 continue;
@@ -1829,17 +3884,310 @@ impl PhysicsWorld {
                 dense: dense_id,
             };
             if self.aerodynamics_body_updates.try_reserve(1).is_err() {
-                self.aerodynamics_body_updates.clear();
                 return Err(StepError::Aerodynamics {
                     body_id,
                     cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
                 });
             }
+            if entry.mesh_aerodynamics.as_ref().is_some_and(|prepared| {
+                match (
+                    &prepared.identity,
+                    &entry.body.aerodynamic_geometry_identity,
+                ) {
+                    (Some(cached), Some(current)) => !std::sync::Arc::ptr_eq(cached, current),
+                    (None, None) => false,
+                    _ => true,
+                }
+            }) {
+                entry.mesh_aerodynamics = None;
+                entry.collider_aerodynamic_mesh = None;
+            }
+            let voxel_wave = if let crate::aerodynamics::Aerodynamics::VoxelWave(model) =
+                entry.body.aerodynamics()
+            {
+                let prepared = entry
+                    .mesh_aerodynamics
+                    .get_or_insert_with(|| MeshAerodynamics {
+                        identity: entry.body.aerodynamic_geometry_identity.clone(),
+                        cache: crate::aerodynamics::cache::PreparedGeometryCache::default(),
+                        config: model.geometry_config,
+                        sound_speed: self.mesh_sound_speed,
+                    });
+                Self::prepare_voxel_wave(
+                    model,
+                    body_id,
+                    &entry.body.motion(),
+                    atmosphere,
+                    &mut prepared.cache,
+                )?
+            } else {
+                None
+            };
+            let assembly_prepared = assembly_aerodynamics::prepare(
+                body_id,
+                entry,
+                &self.parts,
+                self.part_aerodynamic_geometry.as_ref(),
+                &self.colliders,
+                &mut self.assembly_aerodynamics,
+                atmosphere,
+            )?;
+            let (mut mesh_patches, assembly_wave, wing_visibility) = match assembly_prepared {
+                Some(prepared) => (
+                    prepared.patches,
+                    prepared.wave,
+                    Some(prepared.wing_visibility),
+                ),
+                None => (None, None, None),
+            };
+            let mut sphere_patches = None;
+            // Only the primary geometry samples the COM. Additional surfaces
+            // still evaluate their own positions, including when the COM is in vacuum.
+            let primary_atmosphere = if matches!(
+                entry.body.aerodynamics(),
+                crate::aerodynamics::Aerodynamics::Mesh(_)
+                    | crate::aerodynamics::Aerodynamics::Colliders
+            ) {
+                let center = entry
+                    .body
+                    .world_center_of_mass()
+                    .map_err(|_| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    })?
+                    .ok_or(StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    })?;
+                Some(
+                    atmosphere
+                        .state_at(center)
+                        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
+                )
+                .filter(|state| state.density() != 0.0)
+            } else {
+                None
+            };
+            if primary_atmosphere.is_some()
+                && matches!(
+                    entry.body.aerodynamics(),
+                    crate::aerodynamics::Aerodynamics::Colliders
+                )
+                && entry.collider_aerodynamic_mesh.is_none()
+            {
+                let mut next = entry.first_collider;
+                let attached = std::iter::from_fn(|| {
+                    let id = next?;
+                    let collider = self.colliders.get(id.dense)?;
+                    next = collider.next;
+                    Some(&collider.collider)
+                });
+                entry.collider_aerodynamic_mesh = Some(
+                    crate::aerodynamics::colliders::collider_mesh(
+                        attached,
+                        entry.collider_tessellation,
+                    )
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
+                );
+            }
+            let mesh = match entry.body.aerodynamics() {
+                crate::aerodynamics::Aerodynamics::Mesh(mesh) => Some(mesh),
+                crate::aerodynamics::Aerodynamics::Colliders => {
+                    entry.collider_aerodynamic_mesh.as_ref()
+                }
+                _ => None,
+            };
+            if let (Some(mesh), Some(primary_atmosphere)) = (mesh, primary_atmosphere) {
+                if let Some((center, radius)) = entry.body.potential_sphere {
+                    if entry.cluster.is_some()
+                        || !entry.body.base_pressure_patches.is_empty()
+                        || mesh_patches.is_some()
+                        || assembly_wave.is_some()
+                    {
+                        return Err(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                        });
+                    }
+                    // A strict work budget limits the quadratic convexity check.
+                    const SPHERE_MESH_WORK_LIMIT: usize = 100_000_000;
+                    // Roundoff tolerance for tessellated vertices, relative to radius.
+                    const SPHERE_MESH_RELATIVE_TOLERANCE: f64 = 1e-10;
+                    sphere_patches = Some(
+                        crate::aerodynamics::pressure::spherical_mesh_pressure_patches(
+                            mesh,
+                            center,
+                            radius,
+                            SPHERE_MESH_RELATIVE_TOLERANCE,
+                            SPHERE_MESH_WORK_LIMIT,
+                        )
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                        })?,
+                    );
+                } else {
+                    if !entry.body.base_pressure_patches.is_empty()
+                        && entry.body.base_pressure_triangles.is_none()
+                    {
+                        return Err(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                        });
+                    }
+                    let config = entry
+                        .mesh_aerodynamics
+                        .as_ref()
+                        .map(|prepared| prepared.config)
+                        .unwrap_or(crate::aerodynamics::geometry::GeometryConfig {
+                            cell_size: 0.125,
+                            max_cells: 1_048_576,
+                            max_work: 100_000_000,
+                            open_mesh_policy:
+                                crate::aerodynamics::geometry::OpenMeshPolicy::SurfaceOnly,
+                            weld_tolerance: matches!(
+                                entry.body.aerodynamics(),
+                                crate::aerodynamics::Aerodynamics::Colliders
+                            )
+                            .then_some(1e-10),
+                            max_patch_work: 100_000_000,
+                        });
+                    let prepared =
+                        entry
+                            .mesh_aerodynamics
+                            .get_or_insert_with(|| MeshAerodynamics {
+                                identity: entry.body.aerodynamic_geometry_identity.clone(),
+                                cache: crate::aerodynamics::cache::PreparedGeometryCache::default(),
+                                config,
+                                sound_speed: self.mesh_sound_speed,
+                            });
+                    prepared.config = config;
+                    prepared.sound_speed = self.mesh_sound_speed;
+                    let key = crate::aerodynamics::cache::GeometryCacheKey {
+                        body: body_id,
+                        geometry_version: 0,
+                        config_version: 1,
+                    };
+                    let geometry = prepared.cache.prepare(key, mesh, config).map_err(|cause| {
+                        StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                        }
+                    })?;
+                    let relative = entry
+                        .body
+                        .state()
+                        .linear_velocity()
+                        .checked_sub(primary_atmosphere.wind_velocity())
+                        .ok_or(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        })?;
+                    let direction = entry
+                        .body
+                        .state()
+                        .transform()
+                        .rotation()
+                        .conjugate()
+                        .rotate_vector(relative)
+                        .ok_or(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        })?;
+                    let inverse = entry.body.state().transform().inverse().map_err(|_| {
+                        StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        }
+                    })?;
+                    let omega = inverse.transform_vector(entry.body.state().angular_velocity());
+                    let center = entry
+                        .body
+                        .physics()
+                        .mass()
+                        .ok_or(StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        })?
+                        .center_of_mass();
+                    if let Some(selected) = entry
+                        .body
+                        .base_pressure_triangles
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                    {
+                        crate::aerodynamics::pressure::verify_unique_base_sources(
+                            selected,
+                            mesh,
+                            config.max_patch_work,
+                        )
+                        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                        let visible = geometry
+                            .surface_patches_with_flow(
+                                &[crate::aerodynamics::geometry::GeometryInstance {
+                                    mesh,
+                                    local_transform: crate::transform::Transform::identity(),
+                                    owner: crate::aerodynamics::geometry::GeometryOwner::Body,
+                                }],
+                                config.max_patch_work,
+                                |point| {
+                                    point.checked_sub(center)
+                            .and_then(|arm| omega.checked_cross(arm))
+                            .and_then(|velocity| direction.checked_add(velocity))
+                            .and_then(|velocity| Vec3::ZERO.checked_sub(velocity))
+                            .ok_or(crate::aerodynamics::geometry::GeometryError::ArithmeticOverflow)
+                                },
+                            )
+                            .map_err(|cause| StepError::Aerodynamics {
+                                body_id,
+                                cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                            })?;
+                        crate::aerodynamics::pressure::verify_full_base_visibility(
+                            selected, &visible,
+                        )
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                        })?;
+                    }
+                    mesh_patches = Some(
+                    geometry
+                        .surface_patches_with_flow(
+                            &[crate::aerodynamics::geometry::GeometryInstance {
+                                mesh,
+                                local_transform: crate::transform::Transform::identity(),
+                                owner: crate::aerodynamics::geometry::GeometryOwner::Body,
+                            }],
+                            config.max_patch_work,
+                            |point| point.checked_sub(center)
+                                .and_then(|arm| omega.checked_cross(arm))
+                                .and_then(|velocity| direction.checked_add(velocity))
+                                .ok_or(crate::aerodynamics::geometry::GeometryError::ArithmeticOverflow),
+                        )
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                        })?,
+                );
+                }
+            }
             self.aerodynamics_body_updates.push(AerodynamicsBodyUpdate {
                 id: body_id,
                 error: None,
-                original: entry.body,
-                prepared: entry.body,
+                original: entry.body.motion(),
+                prepared: entry.body.motion(),
+                part_hull_wrenches: self.part_hull_buffers.pop().unwrap_or_default(),
+                part_wing_wrenches: self.part_wing_buffers.pop().unwrap_or_default(),
+                simple_surface_correction: None,
+                raw_simple_surfaces: self.raw_simple_buffers.pop().unwrap_or_default(),
+                applied_mesh_pressure: None,
+                loads: PreparedAerodynamicLoads {
+                    mesh_patches,
+                    sphere_patches,
+                    voxel_wave,
+                    assembly_wave,
+                    wing_visibility,
+                },
             });
         }
 
@@ -1860,11 +4208,25 @@ impl PhysicsWorld {
                             .map(|entry| {
                                 Self::apply_aerodynamics(
                                     atmosphere,
-                                    &entry.aerodynamics,
+                                    entry.body.aerodynamics(),
+                                    &entry.body.aerodynamic_surfaces,
                                     update.id,
                                     &mut update.prepared,
                                     &self.parts,
-                                    Some(dt),
+                                    AerodynamicsInputs::new(self.mesh_sound_speed)
+                                        .with_base_pressure(&entry.body.base_pressure_patches)
+                                        .with_cluster(entry.cluster.as_ref())
+                                        .with_timestep(Some(dt))
+                                        .with_loads(&update.loads)
+                                        .with_part_hull_wrenches(&mut update.part_hull_wrenches)
+                                        .with_part_wing_wrenches(&mut update.part_wing_wrenches)
+                                        .with_simple_surface_correction(
+                                            &mut update.simple_surface_correction,
+                                        )
+                                        .with_raw_simple_surfaces(&mut update.raw_simple_surfaces)
+                                        .with_applied_mesh_pressure(
+                                            &mut update.applied_mesh_pressure,
+                                        ),
                                 )
                             })
                             .unwrap_or(Ok(()))
@@ -1878,8 +4240,117 @@ impl PhysicsWorld {
             .iter()
             .find_map(|update| update.error)
         {
-            self.aerodynamics_body_updates.clear();
             return Err(error);
+        }
+
+        for update in &self.aerodynamics_body_updates {
+            self.part_hull_pending
+                .try_reserve(update.part_hull_wrenches.len())
+                .map_err(|_| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                })?;
+            self.part_hull_pending
+                .extend_from_slice(&update.part_hull_wrenches);
+            self.part_wing_pending
+                .try_reserve(update.part_wing_wrenches.len())
+                .map_err(|_| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                })?;
+            self.part_wing_pending
+                .extend_from_slice(&update.part_wing_wrenches);
+            if let Some(correction) = update.simple_surface_correction {
+                self.simple_surface_pending.try_reserve(1).map_err(|_| {
+                    StepError::Aerodynamics {
+                        body_id: update.id,
+                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    }
+                })?;
+                self.simple_surface_pending.push(correction);
+            }
+            self.raw_simple_pending
+                .try_reserve(update.raw_simple_surfaces.len())
+                .map_err(|_| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                })?;
+            self.raw_simple_pending
+                .extend_from_slice(&update.raw_simple_surfaces);
+        }
+
+        // This diagnostic pass never applies forces; the solver path above is
+        // unchanged. The workspace is committed only after the entire step.
+        for update in &self.aerodynamics_body_updates {
+            if update.loads.sphere_patches.is_some() {
+                continue;
+            }
+            let Some(patches) = update.loads.mesh_patches.as_ref() else {
+                continue;
+            };
+            let error = || StepError::Aerodynamics {
+                body_id: update.id,
+                cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+            };
+            let center = update
+                .original
+                .world_center_of_mass()
+                .map_err(|_| error())?
+                .ok_or_else(error)?;
+            let state = atmosphere
+                .state_at(center)
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause,
+                })?;
+            if state.density() == 0.0 {
+                continue;
+            }
+            let transform = update.original.state().transform();
+            let flow = crate::aerodynamics::pressure::PressureFlow {
+                atmosphere: state,
+                sound_speed: state.sound_speed().unwrap_or(self.mesh_sound_speed),
+                transform,
+                center_of_mass: transform
+                    .inverse()
+                    .map_err(|_| error())?
+                    .transform_point(center),
+                linear_velocity: update.original.state().linear_velocity(),
+                angular_velocity: update.original.state().angular_velocity(),
+            };
+            self.owner_pressure_owners.clear();
+            self.owner_pressure_owners
+                .try_reserve(patches.iter().count())
+                .map_err(|_| error())?;
+            self.owner_pressure_owners
+                .extend(patches.iter().map(|patch| patch.owner));
+            self.owner_pressure_owners.sort_unstable();
+            self.owner_pressure_owners.dedup();
+            let map = self.owner_pressure.get_or_insert_with(HashMap::new);
+            map.try_reserve(1).map_err(|_| error())?;
+            if !map.contains_key(&update.id) {
+                let workspace = crate::aerodynamics::pressure::OwnerPressureWorkspace::new(&[])
+                    .ok_or_else(error)?;
+                map.insert(update.id, workspace);
+            }
+            let workspace = map.get_mut(&update.id).ok_or_else(error)?;
+            workspace
+                .configure_pending(&self.owner_pressure_owners)
+                .and_then(|()| workspace.prepare(patches, flow))
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                })?;
+            if workspace
+                .staged_total()
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id: update.id,
+                    cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                })?
+                != update.applied_mesh_pressure
+            {
+                return Err(StepError::InvalidStepResults);
+            }
         }
 
         for update in &self.aerodynamics_body_updates {
@@ -1888,30 +4359,53 @@ impl PhysicsWorld {
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.prepared;
+                entry.body.set_motion(update.prepared);
             }
         }
         Ok(())
     }
 
     fn rollback_aerodynamics_updates(&mut self) {
+        if let Some(workspaces) = &mut self.owner_pressure {
+            for workspace in workspaces.values_mut() {
+                workspace.rollback();
+            }
+        }
         for update in &self.aerodynamics_body_updates {
             if let Some(entry) = self
                 .bodies
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.original;
+                entry.body.set_motion(update.original);
             }
         }
-        self.aerodynamics_body_updates.clear();
+        self.recycle_aerodynamics_updates();
+    }
+
+    fn recycle_aerodynamics_updates(&mut self) {
+        for mut update in self.aerodynamics_body_updates.drain(..) {
+            update.part_hull_wrenches.clear();
+            update.part_wing_wrenches.clear();
+            update.raw_simple_surfaces.clear();
+            // If the pool cannot grow, dropping scratch buffers is safe.
+            if self.part_hull_buffers.try_reserve(1).is_ok() {
+                self.part_hull_buffers.push(update.part_hull_wrenches);
+            }
+            if self.part_wing_buffers.try_reserve(1).is_ok() {
+                self.part_wing_buffers.push(update.part_wing_wrenches);
+            }
+            if self.raw_simple_buffers.try_reserve(1).is_ok() {
+                self.raw_simple_buffers.push(update.raw_simple_surfaces);
+            }
+        }
     }
 
     fn gravity_force_for_body(
         gravity: Option<CentralGravity>,
         fields: &DensePool<Gravity>,
         body_id: BodyId,
-        body: &RigidBody,
+        body: &BodyMotion,
     ) -> Result<Vec3, StepError> {
         if gravity.is_none() && fields.is_empty() {
             return Ok(Vec3::ZERO);
@@ -1960,7 +4454,7 @@ impl PhysicsWorld {
         gravity: Option<CentralGravity>,
         fields: &DensePool<Gravity>,
         body_id: BodyId,
-        body: &mut RigidBody,
+        body: &mut BodyMotion,
     ) -> Result<(), StepError> {
         let force = Self::gravity_force_for_body(gravity, fields, body_id, body)?;
         if force != Vec3::ZERO {
@@ -1978,6 +4472,7 @@ impl PhysicsWorld {
         workers: usize,
     ) -> Result<(), StepError> {
         self.gravity_body_updates.clear();
+        self.part_gravity_pending.clear();
         if self.central_gravity.is_none() && self.gravity_fields.is_empty() {
             return Ok(());
         }
@@ -2000,8 +4495,8 @@ impl PhysicsWorld {
             self.gravity_body_updates.push(GravityBodyUpdate {
                 id: body_id,
                 error: None,
-                original: entry.body,
-                prepared: entry.body,
+                original: entry.body.motion(),
+                prepared: entry.body.motion(),
             });
         }
 
@@ -2030,12 +4525,82 @@ impl PhysicsWorld {
         }
 
         for update in &self.gravity_body_updates {
+            let Some(entry) = self.bodies.get(update.id.dense) else {
+                continue;
+            };
+            let Some(cluster) = entry.cluster.as_ref() else {
+                continue;
+            };
+            let error = || StepError::Gravity {
+                body_id: update.id,
+                cause: GravityError::ArithmeticOverflow,
+            };
+            let transform = update.original.state().transform();
+            let center = update
+                .original
+                .world_center_of_mass()
+                .map_err(|_| error())?
+                .ok_or_else(error)?;
+            let mut acceleration = match gravity {
+                Some(field) => {
+                    field
+                        .acceleration_at(center)
+                        .map_err(|cause| StepError::Gravity {
+                            body_id: update.id,
+                            cause,
+                        })?
+                }
+                None => Vec3::ZERO,
+            };
+            for (_, field) in fields.iter() {
+                acceleration = acceleration
+                    .checked_add(field.acceleration_at(center).map_err(|cause| {
+                        StepError::Gravity {
+                            body_id: update.id,
+                            cause,
+                        }
+                    })?)
+                    .ok_or_else(error)?;
+            }
+            self.part_gravity_pending
+                .try_reserve(cluster.parts().len())
+                .map_err(|_| StepError::Gravity {
+                    body_id: update.id,
+                    cause: GravityError::StorageCapacityExceeded,
+                })?;
+            for &part_id in cluster.parts() {
+                let part = self
+                    .parts
+                    .get(part_id.dense)
+                    .filter(|part| part_id.world == self.world_id && part.body() == update.id)
+                    .ok_or_else(error)?;
+                let part_transform = transform
+                    .compose(&part.local_transform())
+                    .map_err(|_| error())?;
+                let part_center = part_transform.transform_point(part.mass().center_of_mass());
+                let force = acceleration
+                    .checked_mul_scalar(part.mass().mass())
+                    .ok_or_else(error)?;
+                let moment = part_center
+                    .checked_sub(center)
+                    .and_then(|arm| arm.checked_cross(force))
+                    .ok_or_else(error)?;
+                self.part_gravity_pending.push(PartGravityWrench {
+                    body: update.id,
+                    part: part_id,
+                    force,
+                    moment,
+                });
+            }
+        }
+
+        for update in &self.gravity_body_updates {
             if let Some(entry) = self
                 .bodies
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.prepared;
+                entry.body.set_motion(update.prepared);
             }
         }
         Ok(())
@@ -2048,10 +4613,11 @@ impl PhysicsWorld {
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.original;
+                entry.body.set_motion(update.original);
             }
         }
         self.clear_gravity_updates();
+        self.part_gravity_pending.clear();
     }
 
     fn clear_gravity_updates(&mut self) {
@@ -2065,7 +4631,7 @@ impl PhysicsWorld {
                 .get_mut(update.id.dense)
                 .filter(|_| update.id.world == self.world_id)
             {
-                entry.body = update.original;
+                entry.body.set_motion(update.original);
             }
         }
         self.clear_force_source_updates();
@@ -2101,7 +4667,7 @@ impl PhysicsWorld {
                 }
                 let bounds = if body_type != BodyType::Static {
                     let trajectory = CcdTrajectory::new(
-                        body_entry.body,
+                        body_entry.body.motion(),
                         *body_entry.body.state(),
                         0.0,
                         0.0,
@@ -2882,7 +5448,7 @@ impl PhysicsWorld {
             .get(body_id.dense)
             .filter(|_| body_id.world == world_id)
             .ok_or(CollisionError::InvalidContact)?;
-        let body = entry.body;
+        let body = entry.body.motion();
         let constrained_start = (entry.first_collider.is_none()
             && entry.cluster.is_none()
             && body.ccd_mode() == CcdMode::Discrete)
@@ -2988,7 +5554,7 @@ impl PhysicsWorld {
         shards: &mut [Vec<BodyStep>],
         executor: &E,
     ) -> Result<(), StepError> {
-        self.fill_step_shards_with_executor_at_dt(shards, executor, None)
+        self.fill_step_shards_with_executor_at_dt(shards, executor, None, true)
     }
 
     fn fill_step_shards_with_executor_at_dt<E: StepExecutor>(
@@ -2996,6 +5562,7 @@ impl PhysicsWorld {
         shards: &mut [Vec<BodyStep>],
         executor: &E,
         dt: Option<f64>,
+        apply_aerodynamics: bool,
     ) -> Result<(), StepError> {
         if shards.is_empty() {
             return Err(StepError::InvalidStepResults);
@@ -3026,11 +5593,12 @@ impl PhysicsWorld {
             };
             shards[shard_index].push(BodyStep {
                 body_id,
-                source: entry.body,
+                source: entry.body.motion(),
+                body_revision: self.body_revision,
                 predicted: None,
                 dt: None,
                 error: None,
-                prepared: entry.body,
+                prepared: entry.body.motion(),
             });
             shard_remaining -= 1;
         }
@@ -3042,22 +5610,100 @@ impl PhysicsWorld {
             executor
                 .for_each_chunk_mut(shards, 1, |_, chunks| {
                     for step in chunks.iter_mut().flatten() {
-                        if !matches!(atmosphere, Atmosphere::Vacuum)
-                            && let Some(properties) = self
-                                .bodies
-                                .get(step.body_id.dense)
-                                .map(|entry| entry.aerodynamics.as_slice())
-                                .filter(|surfaces| !surfaces.is_empty())
+                        if apply_aerodynamics
+                            && !matches!(atmosphere, Atmosphere::Vacuum)
+                            && let Some(entry) = self.bodies.get(step.body_id.dense)
+                            && (!entry.body.aerodynamic_surfaces.is_empty()
+                                || !entry.body.base_pressure_patches.is_empty()
+                                || assembly_aerodynamics::wings_configured(entry, &self.parts)
+                                || assembly_aerodynamics::hull_configured(entry, &self.parts)
+                                || !matches!(
+                                    entry.body.aerodynamics(),
+                                    crate::aerodynamics::Aerodynamics::None
+                                )
+                                || assembly_aerodynamics::configured(
+                                    entry,
+                                    self.part_aerodynamic_geometry.as_ref(),
+                                ))
                         {
-                            step.error = Self::apply_aerodynamics(
-                                atmosphere,
-                                properties,
-                                step.body_id,
-                                &mut step.prepared,
-                                &self.parts,
-                                dt,
-                            )
-                            .err();
+                            let staged = self
+                                .aerodynamics_body_updates
+                                .iter()
+                                .find(|update| update.id == step.body_id);
+                            if staged.is_none() && entry.body.potential_sphere.is_some() {
+                                step.error = Some(StepError::Aerodynamics {
+                                    body_id: step.body_id,
+                                    cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                });
+                                continue;
+                            }
+                            let mut temporary_cache =
+                                crate::aerodynamics::cache::PreparedGeometryCache::default();
+                            let local_wave = if staged.is_none() {
+                                if let crate::aerodynamics::Aerodynamics::VoxelWave(model) =
+                                    entry.body.aerodynamics()
+                                {
+                                    Self::prepare_voxel_wave(
+                                        model,
+                                        step.body_id,
+                                        &entry.body.motion(),
+                                        atmosphere,
+                                        &mut temporary_cache,
+                                    )
+                                } else {
+                                    Ok(None)
+                                }
+                            } else {
+                                Ok(None)
+                            };
+                            let mut temporary_assembly = None;
+                            let local_assembly = if staged.is_none()
+                                && (assembly_aerodynamics::wave_configured(
+                                    entry,
+                                    self.part_aerodynamic_geometry.as_ref(),
+                                ) || assembly_aerodynamics::shielding_configured(
+                                    entry,
+                                    &self.parts,
+                                    self.part_aerodynamic_geometry.as_ref(),
+                                )) {
+                                assembly_aerodynamics::prepare(
+                                    step.body_id,
+                                    entry,
+                                    &self.parts,
+                                    self.part_aerodynamic_geometry.as_ref(),
+                                    &self.colliders,
+                                    &mut temporary_assembly,
+                                    atmosphere,
+                                )
+                            } else {
+                                Ok(None)
+                            };
+                            step.error = local_wave
+                                .and_then(|local_wave| {
+                                    local_assembly.and_then(|local_assembly| {
+                                        let inputs = AerodynamicsInputs::new(self.mesh_sound_speed)
+                                            .with_base_pressure(&entry.body.base_pressure_patches)
+                                            .with_cluster(entry.cluster.as_ref())
+                                            .with_timestep(dt);
+                                        let inputs = if let Some(update) = staged {
+                                            inputs.with_loads(&update.loads)
+                                        } else {
+                                            inputs
+                                                .with_assembly(local_assembly.as_ref())
+                                                .with_voxel_wave(local_wave.as_ref())
+                                        };
+                                        Self::apply_aerodynamics(
+                                            atmosphere,
+                                            entry.body.aerodynamics(),
+                                            &entry.body.aerodynamic_surfaces,
+                                            step.body_id,
+                                            &mut step.prepared,
+                                            &self.parts,
+                                            inputs,
+                                        )
+                                    })
+                                })
+                                .err();
                         }
                         if step.error.is_none() {
                             step.error = Self::apply_gravity(
@@ -3107,6 +5753,16 @@ impl PhysicsWorld {
         executor: &E,
         worker_count: usize,
     ) -> Result<(), StepError> {
+        self.commit_step_shards_inner(shards, executor, worker_count, false)
+    }
+
+    fn commit_step_shards_inner<E: StepExecutor>(
+        &mut self,
+        shards: &[Vec<BodyStep>],
+        executor: &E,
+        worker_count: usize,
+        full_step: bool,
+    ) -> Result<(), StepError> {
         let mut steps = shards.iter().flatten();
         let mut step_dt = None;
         for (dense_id, entry) in self.bodies.iter() {
@@ -3121,7 +5777,8 @@ impl PhysicsWorld {
                     world: self.world_id,
                     dense: dense_id,
                 })
-                || step.source != entry.body
+                || step.source != entry.body.motion()
+                || step.body_revision != self.body_revision
                 || step.predicted.is_none()
                 || step.dt.is_none_or(|dt| !dt.is_finite() || dt <= 0.0)
             {
@@ -3171,10 +5828,32 @@ impl PhysicsWorld {
             self.rollback_aerodynamics_updates();
             return Err(StepError::Collision(error));
         }
+        if let Err(error) = self.stage_contact_impulses() {
+            self.collision_system.abort_step();
+            self.rollback_gravity_updates();
+            self.rollback_aerodynamics_updates();
+            return Err(StepError::Collision(error));
+        }
+        let splits = if full_step {
+            match self.stage_automatic_weld_splits() {
+                Ok(splits) => splits,
+                Err(error) => {
+                    self.collision_system.abort_step();
+                    self.rollback_gravity_updates();
+                    self.rollback_aerodynamics_updates();
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
 
         #[cfg(feature = "bench-internals")]
         let commit_started = Instant::now();
         self.commit_predicted_states();
+        if let Some(splits) = splits {
+            self.finish_weld_splits(splits);
+        }
         self.commit_joint_breaks();
         self.collision_system.commit_step();
         self.clear_gravity_updates();
@@ -3259,6 +5938,12 @@ impl PhysicsWorld {
         }
         if let Some(entry) = self.bodies.get_mut(body.dense) {
             entry.first_collider = Some(id);
+            entry.collider_aerodynamic_mesh = None;
+            entry.mesh_aerodynamics = None;
+            entry.body.invalidate_collider_base_patches();
+        }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
         }
         if has_finite_bounds {
             self.update_query_index_for_collider(id);
@@ -3320,6 +6005,14 @@ impl PhysicsWorld {
         }
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
+        if let Some(entry) = self.bodies.get_mut(body.dense) {
+            entry.collider_aerodynamic_mesh = None;
+            entry.mesh_aerodynamics = None;
+            entry.body.invalidate_collider_base_patches();
+        }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
+        }
         self.colliders
             .get_mut(id.dense)
             .map(|entry| &mut entry.collider)
@@ -3388,6 +6081,14 @@ impl PhysicsWorld {
             .retain(|collider| *collider != id);
 
         let removed = self.colliders.remove(id.dense)?;
+        if let Some(entry) = self.bodies.get_mut(body.dense) {
+            entry.collider_aerodynamic_mesh = None;
+            entry.mesh_aerodynamics = None;
+            entry.body.invalidate_collider_base_patches();
+        }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&body);
+        }
         if let Some(prev) = prev {
             if let Some(entry) = self.colliders.get_mut(prev.dense) {
                 entry.next = next;
@@ -3446,13 +6147,22 @@ impl PhysicsWorld {
             self.force_sources.remove(source.dense)?;
         }
         let removed = self.bodies.remove(id.dense).map(|entry| entry.body)?;
+        if let Some(workspaces) = &mut self.owner_pressure {
+            workspaces.remove(&id);
+        }
         if let Some(cluster) = cluster {
             for weld in cluster.welds {
                 self.welds.remove(weld.dense);
             }
             for part in cluster.parts {
                 self.parts.remove(part.dense);
+                if let Some(meshes) = &mut self.part_aerodynamic_geometry {
+                    meshes.remove(&part);
+                }
             }
+        }
+        if let Some(caches) = &mut self.assembly_aerodynamics {
+            caches.remove(&id);
         }
         Some(removed)
     }
@@ -3473,6 +6183,7 @@ impl PhysicsWorld {
     /// Mutably iterates over non-cluster bodies in dense storage order.
     /// The order may change after removal; cluster-managed bodies are omitted.
     pub fn bodies_mut(&mut self) -> impl Iterator<Item = (BodyId, &mut RigidBody)> {
+        self.body_revision = self.body_revision.wrapping_add(1);
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();
         self.bodies.iter_mut().filter_map(|(dense, entry)| {
@@ -3540,7 +6251,7 @@ pub(crate) fn transform_joint_frame(
 }
 
 fn body_point_velocity(
-    mut body: RigidBody,
+    mut body: BodyMotion,
     state: BodyState,
     point: Vec3,
 ) -> Result<Vec3, CollisionError> {

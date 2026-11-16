@@ -3,7 +3,7 @@ use crate::joint::solver::map_rigid_body_error;
 use crate::{
     collision::CollisionError,
     mass::MassProperties,
-    rigid_body::{BodyState, RigidBody, solver_mass::inverse_spd},
+    rigid_body::{BodyMotion, BodyState, solver_mass::inverse_spd},
     transform::Transform,
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
@@ -20,7 +20,7 @@ pub(crate) struct MomentumBody {
 }
 
 impl MomentumBody {
-    pub(crate) fn new(body: &RigidBody) -> Result<Self, CollisionError> {
+    pub(crate) fn new(body: &BodyMotion) -> Result<Self, CollisionError> {
         let mass = body
             .physics()
             .mass()
@@ -87,7 +87,7 @@ impl MomentumBody {
         Err(CollisionError::NonConvergent)
     }
 
-    pub(crate) fn state(self, mut body: RigidBody) -> Result<BodyState, CollisionError> {
+    pub(crate) fn state(self, mut body: BodyMotion) -> Result<BodyState, CollisionError> {
         let origin = finite(self.center - rotate(self.rotation, self.mass.center_of_mass())?)?;
         let transform = Transform::new(origin, self.rotation)
             .map_err(|_| CollisionError::ArithmeticOverflow)?;

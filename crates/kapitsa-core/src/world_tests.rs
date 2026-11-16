@@ -15,7 +15,7 @@ use crate::{
     joint::{FixedJoint, Joint, JointCommon, JointFrame},
     mass::MassProperties,
     material::PhysicsMaterial,
-    rigid_body::{BodyType, CcdMode, IntegrationError, RigidBody},
+    rigid_body::{BodyMotion, BodyType, CcdMode, IntegrationError, RigidBody},
     shape::{BoneInfluence, Cuboid, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh},
     transform::Transform,
 };
@@ -37,6 +37,1263 @@ use crate::execution::{ExecutionError, StepExecutor};
 
 #[path = "world/free_ball_tests.rs"]
 mod free_ball_tests;
+
+#[test]
+fn kinematic_part_contact_impulse_matches_dynamic_part_momentum()
+-> Result<(), Box<dyn std::error::Error>> {
+    for ccd in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let (start, speed, dt) = if ccd {
+            (-5.0, 1000.0, 0.01)
+        } else {
+            (-1.1, 10.0, 0.02)
+        };
+        let mut kinematic =
+            RigidBody::new_kinematic(Transform::new(Vec3::new(start, 0.0, 0.0), Quat::IDENTITY)?);
+        kinematic.set_linear_velocity(Vec3::X * speed)?;
+        if ccd {
+            kinematic.set_ccd_mode(CcdMode::Continuous);
+        }
+        let driver = world.add_body(kinematic)?;
+        let driver_part = world.enable_cluster_with_mass(driver, mass)?;
+        let driver_collider = world.add_part_collider(driver_part, collider(0.5))?;
+        let mut moving = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        if ccd {
+            moving.set_ccd_mode(CcdMode::Continuous);
+        }
+        let body = world.add_body(moving)?;
+        let part = world.enable_cluster(body)?;
+        let sphere = world.add_part_collider(part, collider(0.5))?;
+        world.step(dt)?;
+        let mut total = Vec3::ZERO;
+        let mut count = 0;
+        for entry in world.contact_impulses() {
+            if entry.pair.a == sphere {
+                assert_eq!(entry.pair.b, driver_collider);
+                assert_eq!(entry.parts, [Some(part), Some(driver_part)]);
+                total -= entry.impulse_on_b;
+            } else {
+                assert_eq!(entry.pair.a, driver_collider);
+                assert_eq!(entry.pair.b, sphere);
+                assert_eq!(entry.parts, [Some(driver_part), Some(part)]);
+                total += entry.impulse_on_b;
+            }
+            count += 1;
+        }
+        assert!(count > 0, "ccd={ccd}");
+        assert_eq!(world.contact_impulses_omitted_points(), 0);
+        assert!(!world.contact_impulses_ccd_clipped());
+        let velocity = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity();
+        assert!(velocity.x > 0.0);
+        assert!(
+            (total - velocity).length() < speed * 1e-10,
+            "impulse={total:?}, velocity={velocity:?}"
+        );
+        assert_eq!(
+            world
+                .body(driver)
+                .ok_or(WorldError::InvalidBodyId)?
+                .state()
+                .linear_velocity(),
+            Vec3::X * speed
+        );
+        if ccd {
+            assert!(world.contact_impulses().iter().any(|entry| entry.ccd));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn ccd_clipping_flag_survives_local_replay() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    for x in [0.0, 18.0] {
+        let wall = world.add_body(RigidBody::new_static(Transform::new(
+            Vec3::new(x, 0.0, 0.0),
+            Quat::IDENTITY,
+        )?))?;
+        let collider = world.add_collider(
+            wall,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        world.set_collider_material(collider, Some(material))?;
+    }
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    for (x, velocity) in [(13.0, 2000.0), (5.0, -2000.0)] {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::X * velocity)?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body)?;
+        let part = world.enable_cluster(body)?;
+        let collider = world.add_part_collider(part, collider(0.5))?;
+        world.set_collider_material(collider, Some(material))?;
+    }
+    world.set_collision_config(crate::collision::CollisionConfig {
+        max_ccd_impacts: 2,
+        ccd_limit_policy: crate::collision::CcdLimitPolicy::ClipIsland,
+        ..world.collision_config()
+    })?;
+    world.step(0.025)?;
+    assert!(world.collision_step_metrics().ccd_local_replay_count > 0);
+    assert!(world.collision_step_metrics().ccd_clipped_body_count > 0);
+    assert!(world.contact_impulses_ccd_clipped());
+    Ok(())
+}
+
+#[test]
+fn clipped_ccd_contact_snapshot_reports_unrecorded_velocity_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+        for x in [0.0, 10.0] {
+            let wall = world.add_body(RigidBody::new_static(Transform::new(
+                Vec3::new(x, 0.0, 0.0),
+                Quat::IDENTITY,
+            )?))?;
+            let collider = world.add_collider(
+                wall,
+                Collider::new(
+                    Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+                    Transform::identity(),
+                ),
+            )?;
+            world.set_collider_material(collider, Some(material))?;
+        }
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY)?,
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?;
+        body.set_linear_velocity(Vec3::X * -2000.0)?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body)?;
+        let part = world.enable_cluster(body)?;
+        let sphere = world.add_part_collider(part, collider(0.5))?;
+        world.set_collider_material(sphere, Some(material))?;
+        world.set_collision_config(crate::collision::CollisionConfig {
+            max_ccd_impacts: 1,
+            ccd_limit_policy: crate::collision::CcdLimitPolicy::ClipIsland,
+            ..world.collision_config()
+        })?;
+        let mut shards = vec![Vec::new(), Vec::new()];
+        if sharded {
+            world.step_with_shards(0.01, &mut shards, &crate::execution::SequentialExecutor, 1)?;
+        } else {
+            world.step(0.01)?;
+        }
+        assert!(world.contact_impulses_ccd_clipped());
+        let diagnostics = world.step_diagnostics();
+        assert!(diagnostics.used_fallback());
+        assert_eq!(diagnostics.collision_ccd_limit_clipped_bodies, 1);
+        assert_eq!(world.contact_impulses_omitted_points(), 0);
+        let total = world
+            .contact_impulses()
+            .iter()
+            .fold(Vec3::ZERO, |sum, entry| {
+                if entry.pair.a == sphere {
+                    sum - entry.impulse_on_b
+                } else if entry.pair.b == sphere {
+                    sum + entry.impulse_on_b
+                } else {
+                    sum
+                }
+            });
+        let velocity = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity();
+        assert_eq!(velocity, Vec3::ZERO);
+        assert!((total - (velocity + Vec3::X * 2000.0)).length() > 1.0);
+        assert!(world.step(-1.0).is_err());
+        assert!(world.contact_impulses_ccd_clipped());
+        assert_eq!(world.step_diagnostics(), diagnostics);
+        assert!(
+            world
+                .step_with_shards(0.01, &mut [], &crate::execution::SequentialExecutor, 1)
+                .is_err()
+        );
+        assert_eq!(world.step_diagnostics(), diagnostics);
+        world.step(0.001)?;
+        assert!(!world.contact_impulses_ccd_clipped());
+        assert!(!world.step_diagnostics().used_fallback());
+    }
+    Ok(())
+}
+
+#[test]
+fn off_center_part_contact_impulse_matches_linear_and_angular_momentum()
+-> Result<(), Box<dyn std::error::Error>> {
+    for ccd in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 0.0, 1.0)?)?;
+        let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        let wall = world.add_collider(
+            wall_body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 10.0, 10.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        let (x, speed, dt) = if ccd {
+            (-5.0, 1000.0, 0.01)
+        } else {
+            (-0.65, 10.0, 0.02)
+        };
+        let mut moving = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY)?,
+            MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+        )?;
+        moving.set_linear_velocity(Vec3::X * speed)?;
+        if ccd {
+            moving.set_ccd_mode(CcdMode::Continuous);
+        }
+        let body = world.add_body(moving)?;
+        let part = world.enable_cluster(body)?;
+        let sphere = world.add_part_collider(
+            part,
+            Collider::new(
+                Shape::Sphere(Sphere::new(0.5)?),
+                Transform::new(Vec3::Y * 0.4, Quat::IDENTITY)?,
+            ),
+        )?;
+        for collider in [wall, sphere] {
+            world.set_collider_material(collider, Some(material))?;
+        }
+        world.step(dt)?;
+        assert_eq!(world.contact_impulses_omitted_points(), 0);
+        let mut linear = Vec3::ZERO;
+        let mut angular = Vec3::ZERO;
+        let mut count = 0;
+        let mut phase_counts = [0, 0];
+        for entry in world.contact_impulses() {
+            let (side, impulse) = if entry.pair.a == sphere {
+                (0, -entry.impulse_on_b)
+            } else if entry.pair.b == sphere {
+                (1, entry.impulse_on_b)
+            } else {
+                continue;
+            };
+            assert_eq!(entry.parts[side], Some(part));
+            phase_counts[usize::from(entry.ccd)] += 1;
+            linear += impulse;
+            angular += entry.points[side].cross(impulse);
+            count += 1;
+        }
+        assert_eq!(phase_counts, if ccd { [1, 1] } else { [1, 0] });
+        assert_eq!(count, if ccd { 2 } else { 1 });
+        let state = world.body(body).ok_or(WorldError::InvalidBodyId)?.state();
+        assert!((linear - (state.linear_velocity() - Vec3::X * speed)).length() < speed * 1e-10);
+        assert!(angular.z > 0.0);
+        let final_angular_momentum = state.angular_velocity()
+            + state
+                .transform()
+                .translation()
+                .cross(state.linear_velocity());
+        assert!(
+            (angular - final_angular_momentum).length() < speed * 1e-10,
+            "ccd={ccd}, angular impulse={angular:?}, angular momentum={final_angular_momentum:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn persistent_friction_contact_impulse_matches_step_momentum_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    const DT: f64 = 0.01;
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.6, 0.6, 0.0, 1.0)?)?;
+    let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let wall = world.add_collider(
+        wall_body,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 20.0, 20.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    let mut body = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(-0.54, 0.0, 0.0), Quat::IDENTITY)?,
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?;
+    body.set_linear_velocity(Vec3::new(1.0, 0.01, 0.0))?;
+    let body = world.add_body(body)?;
+    let part = world.enable_cluster(body)?;
+    let sphere = world.add_part_collider(part, collider(0.5))?;
+    for collider in [wall, sphere] {
+        world.set_collider_material(collider, Some(material))?;
+    }
+    let force = Vec3::X * 100.0;
+    world.add_force_source_for_part(part, Vec3::ZERO, force)?;
+    let mut warm_starts = 0;
+    for step in 0..3 {
+        let before = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity();
+        crate::collision::solver::take_nonzero_contact_warm_starts();
+        world.step(DT)?;
+        let applied_warm_starts = crate::collision::solver::take_nonzero_contact_warm_starts();
+        if step == 0 {
+            assert_eq!(applied_warm_starts, 0);
+        } else {
+            warm_starts += applied_warm_starts;
+        }
+        assert_eq!(world.contact_impulses_omitted_points(), 0);
+        let mut impulse = Vec3::ZERO;
+        let mut count = 0;
+        for entry in world.contact_impulses() {
+            if entry.pair.a == sphere {
+                assert_eq!(entry.parts[0], Some(part));
+                impulse -= entry.impulse_on_b;
+                count += 1;
+            } else if entry.pair.b == sphere {
+                assert_eq!(entry.parts[1], Some(part));
+                impulse += entry.impulse_on_b;
+                count += 1;
+            }
+        }
+        assert_eq!(count, 1, "step {step}");
+        let after = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity();
+        let applied_force = world
+            .part_force_source_wrenches()
+            .first()
+            .ok_or("force snapshot")?
+            .force;
+        assert!(
+            (impulse - (after - before - applied_force * DT)).length() < 1e-9,
+            "step {step}: impulse={impulse:?}, momentum change={:?}",
+            after - before - applied_force * DT
+        );
+        if step == 0 {
+            assert!(impulse.y < 0.0);
+        }
+    }
+    assert!(warm_starts > 0, "no nonzero cached impulse was applied");
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn fixed_tree_with_contact_falls_back_and_preserves_impulse_balance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    world.set_reduced_fixed_tree_for_bench(true);
+    let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let wall = world.add_collider(wall_body, collider(0.5))?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut bodies = Vec::new();
+    for x in [-1.1, -2.1] {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::X * 10.0)?;
+        let body = world.add_body(body)?;
+        let part = world.enable_cluster(body)?;
+        bodies.push((body, part));
+    }
+    let sphere = world.add_part_collider(bodies[0].1, collider(0.5))?;
+    let common = JointCommon::new(
+        JointFrame::new(Vec3::new(-0.5, 0.0, 0.0), Quat::IDENTITY),
+        JointFrame::new(Vec3::new(0.5, 0.0, 0.0), Quat::IDENTITY),
+    );
+    world.add_joint(
+        bodies[0].0,
+        bodies[1].0,
+        Joint::Fixed(FixedJoint::new(common)),
+    )?;
+    world.step(0.02)?;
+    assert_ne!(
+        world.collision_step_metrics().colored_schedule.rejection,
+        "reduced-fixed-tree"
+    );
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    let pair = CollisionPair::new(wall, sphere).ok_or("contact pair")?;
+    let impulses = world.contact_impulses();
+    assert_eq!(impulses.len(), 1);
+    let entry = &impulses[0];
+    assert_eq!(entry.pair, pair);
+    let contact_impulse = if pair.a == sphere {
+        assert_eq!(entry.parts[0], Some(bodies[0].1));
+        -entry.impulse_on_b
+    } else {
+        assert_eq!(entry.parts[1], Some(bodies[0].1));
+        entry.impulse_on_b
+    };
+    let mut change = Vec3::ZERO;
+    for (body, _) in bodies {
+        change += world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity()
+            - Vec3::X * 10.0;
+    }
+    assert!(
+        (contact_impulse - change).length() < 1e-9,
+        "published={contact_impulse:?}, total momentum change={change:?}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn colored_contact_impulses_match_each_body_momentum_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut bodies = Vec::new();
+    for index in 0..256 {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(f64::from(index) * 0.99, 0.0, 0.0), Quat::IDENTITY)?,
+            mass,
+        )?;
+        let initial = Vec3::X * if index % 2 == 0 { 1.0 } else { -1.0 };
+        body.set_linear_velocity(initial)?;
+        let body = world.add_body(body)?;
+        let part = world.enable_cluster(body)?;
+        let collider = world.add_part_collider(part, collider(0.5))?;
+        bodies.push((body, part, collider, initial));
+    }
+    world.step_with_executor(0.001, &ScopedThreadExecutor, 4)?;
+    assert!(world.collision_step_metrics().colored_solver_selected);
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    let impulses = world.contact_impulses();
+    assert_eq!(impulses.len(), 255);
+    for (body, part, collider, initial) in bodies {
+        let mut total = Vec3::ZERO;
+        for entry in impulses {
+            if entry.pair.a == collider {
+                assert_eq!(entry.parts[0], Some(part));
+                total -= entry.impulse_on_b;
+            } else if entry.pair.b == collider {
+                assert_eq!(entry.parts[1], Some(part));
+                total += entry.impulse_on_b;
+            }
+        }
+        let change = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity()
+            - initial;
+        assert!(
+            (total - change).length() < 1e-9,
+            "impulse={total:?}, change={change:?}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn repeated_ccd_pair_after_local_replay_matches_momentum() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    let mut walls = Vec::new();
+    for x in [0.0, 18.0] {
+        let body = world.add_body(RigidBody::new_static(Transform::new(
+            Vec3::new(x, 0.0, 0.0),
+            Quat::IDENTITY,
+        )?))?;
+        let wall = world.add_collider(
+            body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        world.set_collider_material(wall, Some(material))?;
+        walls.push(wall);
+    }
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut bodies = Vec::new();
+    for (x, velocity) in [(13.0, 2000.0), (5.0, -2000.0)] {
+        let mut body = RigidBody::new_dynamic(
+            Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY)?,
+            mass,
+        )?;
+        body.set_linear_velocity(Vec3::X * velocity)?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let body = world.add_body(body)?;
+        let part = world.enable_cluster(body)?;
+        let collider = world.add_part_collider(part, collider(0.5))?;
+        world.set_collider_material(collider, Some(material))?;
+        bodies.push((body, part, collider, Vec3::X * velocity));
+    }
+    world.step(0.025)?;
+    assert!(world.collision_step_metrics().ccd_local_replay_count > 0);
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    let pair = CollisionPair::new(bodies[0].2, bodies[1].2).ok_or("pair")?;
+    let impulses = world.contact_impulses();
+    assert_eq!(
+        impulses
+            .iter()
+            .filter(|entry| entry.ccd && entry.pair == pair)
+            .count(),
+        3,
+        "{impulses:?}"
+    );
+    for (wall, body) in [(walls[0], bodies[1].2), (walls[1], bodies[0].2)] {
+        let pair = CollisionPair::new(wall, body).ok_or("wall pair")?;
+        assert_eq!(
+            impulses
+                .iter()
+                .filter(|entry| entry.ccd && entry.pair == pair)
+                .count(),
+            3
+        );
+    }
+    assert_eq!(impulses.iter().filter(|entry| entry.ccd).count(), 9);
+    for (body, part, collider, initial) in bodies {
+        let mut total = Vec3::ZERO;
+        for entry in impulses {
+            if entry.pair.a == collider {
+                assert_eq!(entry.parts[0], Some(part));
+                total -= entry.impulse_on_b;
+            } else if entry.pair.b == collider {
+                assert_eq!(entry.parts[1], Some(part));
+                total += entry.impulse_on_b;
+            }
+        }
+        let change = world
+            .body(body)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity()
+            - initial;
+        assert!(
+            (total - change).length() < 1e-7,
+            "impulse={total:?}, change={change:?}, entries={impulses:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn repeated_ccd_pair_impulses_match_momentum_change() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    let mut walls = Vec::new();
+    for x in [0.0, 10.0] {
+        let body = world.add_body(RigidBody::new_static(Transform::new(
+            Vec3::new(x, 0.0, 0.0),
+            Quat::IDENTITY,
+        )?))?;
+        let collider = world.add_collider(
+            body,
+            Collider::new(
+                Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+                Transform::identity(),
+            ),
+        )?;
+        world.set_collider_material(collider, Some(material))?;
+        walls.push(collider);
+    }
+    let mut moving = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(5.0, 0.0, 0.0), Quat::IDENTITY)?,
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?;
+    moving.set_linear_velocity(Vec3::new(-2000.0, 0.0, 0.0))?;
+    moving.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(moving)?;
+    let part = world.enable_cluster(body)?;
+    let sphere = world.add_part_collider(part, collider(0.5))?;
+    world.set_collider_material(sphere, Some(material))?;
+    world.step(0.012)?;
+    let pairs = [
+        CollisionPair::new(walls[0], sphere).ok_or("left pair")?,
+        CollisionPair::new(walls[1], sphere).ok_or("right pair")?,
+    ];
+    let impulses = world.contact_impulses();
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    assert_eq!(
+        impulses
+            .iter()
+            .filter(|e| e.ccd && e.pair == pairs[0])
+            .count(),
+        2,
+        "{impulses:?}"
+    );
+    assert_eq!(
+        impulses
+            .iter()
+            .filter(|e| e.ccd && e.pair == pairs[1])
+            .count(),
+        1,
+        "{impulses:?}"
+    );
+    let mut total = Vec3::ZERO;
+    for entry in impulses {
+        if entry.pair.a == sphere {
+            assert_eq!(entry.parts[0], Some(part));
+            total -= entry.impulse_on_b;
+        } else if entry.pair.b == sphere {
+            assert_eq!(entry.parts[1], Some(part));
+            total += entry.impulse_on_b;
+        }
+    }
+    let change = world
+        .body(body)
+        .ok_or(WorldError::InvalidBodyId)?
+        .state()
+        .linear_velocity()
+        - Vec3::new(-2000.0, 0.0, 0.0);
+    assert!((total - change).length() < 1e-7, "{total:?} != {change:?}");
+    Ok(())
+}
+
+#[cfg(feature = "bench-internals")]
+#[test]
+fn ccd_replay_publishes_each_accepted_impact_once() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let material = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
+    let wall_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let wall = world.add_collider(
+        wall_body,
+        Collider::new(
+            Shape::Cuboid(Cuboid::new(0.1, 4.0, 4.0)?),
+            Transform::identity(),
+        ),
+    )?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut bodies = Vec::new();
+    for (position, velocity) in [
+        (Vec3::new(5.0, 0.0, 0.0), -2000.0),
+        (Vec3::new(13.0, 0.0, 0.0), 0.0),
+        (Vec3::new(5.0, 1.25, 0.0), -2000.0),
+    ] {
+        let mut body = RigidBody::new_dynamic(Transform::new(position, Quat::IDENTITY)?, mass)?;
+        body.set_linear_velocity(Vec3::X * velocity)?;
+        body.set_ccd_mode(CcdMode::Continuous);
+        let id = world.add_body(body)?;
+        let part = world.enable_cluster(id)?;
+        let collider = world.add_part_collider(part, collider(0.5))?;
+        bodies.push((id, part, collider, Vec3::X * velocity));
+    }
+    for collider in [wall, bodies[0].2, bodies[1].2, bodies[2].2] {
+        world.set_collider_material(collider, Some(material))?;
+    }
+    world.step(0.01)?;
+    assert!(world.collision_step_metrics().ccd_local_replay_count > 0);
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    let expected_pairs = [
+        CollisionPair::new(wall, bodies[0].2).ok_or("wall pair")?,
+        CollisionPair::new(bodies[0].2, bodies[1].2).ok_or("dynamic pair")?,
+        CollisionPair::new(wall, bodies[2].2).ok_or("independent pair")?,
+    ];
+    let impulses = world.contact_impulses();
+    for pair in expected_pairs {
+        assert_eq!(
+            impulses
+                .iter()
+                .filter(|entry| entry.ccd && entry.pair == pair)
+                .count(),
+            1,
+            "expected exactly one accepted CCD impulse for {pair:?}: {impulses:?}"
+        );
+    }
+    assert_eq!(impulses.iter().filter(|entry| entry.ccd).count(), 3);
+    for (id, part, collider, initial_velocity) in bodies {
+        let mut total = Vec3::ZERO;
+        for entry in impulses {
+            if entry.pair.a == collider {
+                assert_eq!(entry.parts[0], Some(part));
+                total -= entry.impulse_on_b;
+            } else if entry.pair.b == collider {
+                assert_eq!(entry.parts[1], Some(part));
+                total += entry.impulse_on_b;
+            }
+        }
+        let change = world
+            .body(id)
+            .ok_or(WorldError::InvalidBodyId)?
+            .state()
+            .linear_velocity()
+            - initial_velocity;
+        assert!(
+            (total - change).length() < 1e-7,
+            "impulse={total:?}, momentum change={change:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
+-> Result<(), Box<dyn std::error::Error>> {
+    for ccd in [false, true] {
+        for wall_first in [false, true] {
+            let mut world = PhysicsWorld::new();
+            let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+            let (position, speed, dt) = if ccd {
+                (-5.0, 1000.0, 0.01)
+            } else {
+                (-1.2, 10.0, 0.02)
+            };
+            let mut moving = RigidBody::new_dynamic(
+                Transform::new(Vec3::new(position, 0.0, 0.0), Quat::IDENTITY)?,
+                MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY)?,
+            )?;
+            moving.set_linear_velocity(Vec3::new(speed, 0.0, 0.0))?;
+            if ccd {
+                moving.set_ccd_mode(CcdMode::Continuous);
+            }
+            let body = world.add_body(moving)?;
+            let part = world.enable_cluster(body)?;
+            let (wall_collider, part_collider) = if wall_first {
+                let wall_collider = world.add_collider(wall, collider(0.5))?;
+                (wall_collider, world.add_part_collider(part, collider(0.5))?)
+            } else {
+                let part_collider = world.add_part_collider(part, collider(0.5))?;
+                (world.add_collider(wall, collider(0.5))?, part_collider)
+            };
+
+            world.step(dt)?;
+            let mut impulse = Vec3::ZERO;
+            let mut count = 0;
+            for entry in world.contact_impulses() {
+                assert_eq!(entry.ccd, ccd);
+                let (part_side, sign) = if entry.pair.a == part_collider {
+                    assert_eq!(entry.pair.b, wall_collider);
+                    (0, -1.0)
+                } else {
+                    assert_eq!(entry.pair.a, wall_collider);
+                    assert_eq!(entry.pair.b, part_collider);
+                    (1, 1.0)
+                };
+                assert_eq!(entry.parts[part_side], Some(part));
+                assert_eq!(entry.parts[1 - part_side], None);
+                if !ccd {
+                    let states = entry
+                        .isolated_velocity_states
+                        .ok_or("isolated velocity states")?;
+                    let delta = states[1][part_side].linear_velocity()
+                        - states[0][part_side].linear_velocity();
+                    assert!((delta * 2.0 - entry.impulse_on_b * sign).length() < 1e-10);
+                } else {
+                    assert!(entry.isolated_velocity_states.is_none());
+                }
+                impulse += entry.impulse_on_b * sign;
+                count += 1;
+            }
+            assert!(
+                count > 0,
+                "missing contact impulse: ccd={ccd}, wall_first={wall_first}"
+            );
+            assert_eq!(world.contact_impulses_omitted_points(), 0);
+            let final_velocity = world
+                .body(body)
+                .ok_or(WorldError::InvalidBodyId)?
+                .state()
+                .linear_velocity();
+            let momentum_change = (final_velocity - Vec3::new(speed, 0.0, 0.0)) * 2.0;
+            assert!(impulse.x < 0.0);
+            assert!(
+                (impulse - momentum_change).length() < speed * 1e-10,
+                "impulse={impulse:?}, momentum change={momentum_change:?}, ccd={ccd}"
+            );
+            let snapshot = world.contact_impulses().to_vec();
+            assert!(world.step(-1.0).is_err());
+            assert_eq!(world.contact_impulses(), snapshot);
+        }
+    }
+    Ok(())
+}
+
+#[rstest::rstest]
+#[case::linear_break(1.0, false, false, false, false, false)]
+#[case::linear_intact(100.0, false, false, false, false, false)]
+#[case::ccd(1.0, true, false, false, false, false)]
+#[case::ccd_multiple_manifolds(1.0, true, false, false, false, true)]
+#[case::ccd_with_force(3.0, true, false, false, false, false)]
+#[case::multipoint_break(1.0, false, true, false, false, false)]
+#[case::multipoint_intact(100.0, false, true, false, false, false)]
+#[case::angular_break(1.0, false, false, true, true, false)]
+#[case::angular_intact(100.0, false, false, true, true, false)]
+#[case::centered_anchor(1.0, false, false, true, false, false)]
+#[case::multiple_manifolds_break(1.0, false, false, false, false, true)]
+#[case::multiple_manifolds_intact(100.0, false, false, false, false, true)]
+#[case::multiple_part_owners(2.0, false, false, false, false, true)]
+fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
+    #[case] limit: f64,
+    #[case] ccd: bool,
+    #[case] box_contact: bool,
+    #[case] angular_limit: bool,
+    #[case] shifted_anchor: bool,
+    #[case] multi_manifold: bool,
+    #[values(false, true)] sharded: bool,
+    #[values(false, true)] wall_first: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::cluster::{
+        ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength, impulse::ImpulseStrength,
+    };
+    use crate::joint::JointFrame;
+    let mut world = PhysicsWorld::new();
+    world.set_error_policy(crate::world::ErrorPolicy::Strict);
+    let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let make_collider = || -> Result<Collider, Box<dyn std::error::Error>> {
+        if box_contact {
+            Ok(Collider::new(
+                Shape::Cuboid(crate::shape::Cuboid::new(1.0, 1.0, 1.0)?),
+                Transform::identity(),
+            ))
+        } else {
+            Ok(collider(0.5))
+        }
+    };
+    let wall_collider = if box_contact {
+        let mesh = crate::shape::TriangleMesh::new(
+            vec![
+                Vec3::new(-0.5, -1.0, -1.0),
+                Vec3::new(-0.5, 1.0, -1.0),
+                Vec3::new(-0.5, 1.0, 1.0),
+                Vec3::new(-0.5, -1.0, 1.0),
+                Vec3::new(-0.5, 0.0, 0.0),
+            ],
+            vec![[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],
+        )?;
+        Collider::new(Shape::TriangleMesh(mesh), Transform::identity())
+    } else {
+        make_collider()?
+    };
+    let mut wall_collider = Some(wall_collider);
+    if wall_first {
+        world.add_collider(wall, wall_collider.take().ok_or("wall collider")?)?;
+    }
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let (position, speed, dt) = if ccd {
+        (-5.0, 1000.0, 0.01)
+    } else if box_contact {
+        (-1.1999, 10.0, 0.02)
+    } else {
+        (-1.2, 10.0, 0.02)
+    };
+    let mut moving =
+        RigidBody::new_dynamic(Transform::new(Vec3::X * position, Quat::IDENTITY)?, mass)?;
+    moving.set_linear_velocity(Vec3::X * speed)?;
+    if limit == 3.0 {
+        moving.apply_force(Vec3::X * 2.0)?;
+    }
+    if ccd {
+        moving.set_ccd_mode(CcdMode::Continuous);
+    }
+    let body = world.add_body(moving)?;
+    let root = world.enable_cluster(body)?;
+    let child = world.add_cluster_part(
+        root,
+        ClusterPartDesc {
+            local_transform: Transform::identity(),
+            mass,
+            colliders: Vec::new(),
+            linear_velocity: Vec3::X * speed,
+            angular_velocity: Vec3::ZERO,
+        },
+        WeldDesc {
+            frame_a: if shifted_anchor {
+                JointFrame::new(Vec3::Y, Quat::IDENTITY)
+            } else {
+                JointFrame::IDENTITY
+            },
+            frame_b: if shifted_anchor {
+                JointFrame::new(Vec3::Y, Quat::IDENTITY)
+            } else {
+                JointFrame::IDENTITY
+            },
+            strength: WeldStrength::Breakable {
+                max_force: Some(1e6),
+                max_torque: None,
+            },
+            stiffness: WeldStiffness {
+                linear: 1.0,
+                angular: 1.0,
+            },
+        },
+    )?;
+    world.add_part_collider(root, make_collider()?)?;
+    if multi_manifold {
+        world.add_part_collider(if limit == 2.0 { child } else { root }, make_collider()?)?;
+    }
+    if let Some(collider) = wall_collider {
+        world.add_collider(wall, collider)?;
+    }
+    let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+    world.set_weld_impulse_strength(
+        weld,
+        Some(ImpulseStrength {
+            max_linear: if angular_limit { None } else { Some(limit) },
+            max_angular: if angular_limit { Some(limit) } else { None },
+        }),
+    )?;
+    world
+        .set_automatic_weld_failure(Some((1e-8, 1e-8)))
+        .map_err(|e| format!("{e:?}"))?;
+    let before = world.body(body).ok_or("body")?.motion();
+    let rejected = if sharded {
+        world.step_with_shards(
+            dt,
+            &mut [Vec::new(), Vec::new()],
+            &crate::execution::SequentialExecutor,
+            1,
+        )
+    } else {
+        world.step(dt)
+    };
+    assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+    assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+    assert!(world.weld(weld).is_some());
+    assert!(world.contact_impulses().is_empty());
+    world
+        .set_automatic_weld_impulse_tolerances(Some((1e-8, 1e-8)))
+        .map_err(|e| format!("{e:?}"))?;
+    if ccd {
+        let rejected = if sharded {
+            world.step_with_shards(
+                dt,
+                &mut [Vec::new(), Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )
+        } else {
+            world.step(dt)
+        };
+        assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+        assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+        assert!(world.weld(weld).is_some());
+        assert!(world.contact_impulses().is_empty());
+        world.set_error_policy(crate::world::ErrorPolicy::Realtime);
+        if sharded {
+            world.step_with_shards(
+                dt,
+                &mut [Vec::new(), Vec::new()],
+                &crate::execution::SequentialExecutor,
+                1,
+            )?;
+        } else {
+            world.step(dt)?;
+        }
+        assert!(world.weld(weld).is_some());
+        assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
+        let impact = world
+            .contact_impulses()
+            .iter()
+            .find(|point| point.ccd)
+            .ok_or("ccd impact")?;
+        let event = impact.ccd_event.ok_or("ccd event")?;
+        assert!(event.time > 0.0 && event.time <= dt);
+        let side = if impact.parts[0] == Some(root) { 0 } else { 1 };
+        if limit == 3.0 {
+            assert!(event.states[0][side].linear_velocity().x > speed);
+        } else {
+            assert!((event.states[0][side].linear_velocity().x - speed).abs() < 1e-8);
+        }
+        assert!(event.states[1][side].linear_velocity().x < speed);
+        if !multi_manifold {
+            let mut impulse = Vec3::ZERO;
+            for point in world.contact_impulses().iter().filter(|point| point.ccd) {
+                assert_eq!(point.ccd_event, Some(event));
+                impulse += point.impulse_on_b * if side == 0 { -1.0 } else { 1.0 };
+            }
+            let delta =
+                event.states[1][side].linear_velocity() - event.states[0][side].linear_velocity();
+            // The cluster has two 1 kg parts. This checks the solver event,
+            // not completeness of the subsequent timestep or a weld reaction.
+            assert!((impulse - delta * 2.0).length() < 1e-8);
+        }
+        let published = world.contact_impulses().to_vec();
+        assert!(world.step(f64::NAN).is_err());
+        assert_eq!(world.contact_impulses(), published);
+        assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
+        return Ok(());
+    }
+    if sharded {
+        world.step_with_shards(
+            dt,
+            &mut [Vec::new(), Vec::new()],
+            &crate::execution::SequentialExecutor,
+            1,
+        )?;
+    } else {
+        world.step(dt)?;
+    }
+    let should_break = if limit == 2.0 {
+        let first = world.contact_impulses().first().ok_or("contact")?;
+        let side = if first.parts[0] == Some(root) || first.parts[0] == Some(child) {
+            0
+        } else {
+            1
+        };
+        let states = first.isolated_velocity_states.ok_or("states")?;
+        let delta = states[1][side].linear_velocity() - states[0][side].linear_velocity();
+        let mut child_impulse = Vec3::ZERO;
+        for point in world.contact_impulses() {
+            let point_side = if point.parts[0] == Some(root) || point.parts[0] == Some(child) {
+                0
+            } else {
+                1
+            };
+            if point.parts[point_side] == Some(child) {
+                child_impulse += point.impulse_on_b * if point_side == 0 { -1.0 } else { 1.0 };
+            }
+        }
+        (delta - child_impulse).length() > limit
+    } else {
+        limit == 1.0 && (!angular_limit || shifted_anchor)
+    };
+    assert_eq!(world.weld(weld).is_none(), should_break);
+    assert_eq!(world.part_body(child) != Some(body), should_break);
+    assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 0);
+    if multi_manifold {
+        assert!(world.contact_impulses().len() > 1);
+        assert!(world.contact_impulses().iter().all(|point| {
+            (point.parts[0] == Some(root) || point.parts[0] == Some(child)) != wall_first
+        }));
+        assert!(
+            world
+                .contact_impulses()
+                .iter()
+                .any(|point| point.pair != world.contact_impulses()[0].pair)
+        );
+    }
+    if box_contact {
+        assert!(world.contact_impulses().len() > 1);
+        let first = world.contact_impulses().first().ok_or("contact")?;
+        let side = if first.parts[0] == Some(root) { 0 } else { 1 };
+        let states = first.isolated_velocity_states.ok_or("states")?;
+        let center = states[0][side].transform().translation();
+        let mut total = Vec3::ZERO;
+        let mut angular = Vec3::ZERO;
+        for contact in world.contact_impulses() {
+            assert_eq!(contact.isolated_velocity_states, Some(states));
+            let impulse = contact.impulse_on_b * if side == 0 { -1.0 } else { 1.0 };
+            total += impulse;
+            angular += (contact.points[side] - center).cross(impulse);
+        }
+        let delta_v = states[1][side].linear_velocity() - states[0][side].linear_velocity();
+        let delta_w = states[1][side].angular_velocity() - states[0][side].angular_velocity();
+        assert!((total - delta_v * 2.0).length() < 1e-8);
+        assert!((angular - delta_w * 2.0).length() < 1e-8);
+    }
+    assert_eq!(world.validate_clusters(), Ok(()));
+    Ok(())
+}
+
+#[test]
+fn real_ccd_solver_event_has_checkable_witness() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    world.add_collider(wall, collider(0.5))?;
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut moving = RigidBody::new_dynamic(Transform::new(Vec3::X * -5.0, Quat::IDENTITY)?, mass)?;
+    moving.set_linear_velocity(Vec3::X * 1000.0)?;
+    moving.set_ccd_mode(CcdMode::Continuous);
+    let body = world.add_body(moving)?;
+    world.add_collider(
+        body,
+        Collider::new(
+            Shape::Sphere(Sphere::new(0.5)?),
+            Transform::new(Vec3::Y * 0.25, Quat::IDENTITY)?,
+        ),
+    )?;
+    let dt = 0.01;
+    world.collision_system.begin_step();
+    world.prepare_joint_collision_pairs()?;
+    for id in [wall, body] {
+        let state = crate::rigid_body::predict(&world.body(id).ok_or("body")?.motion(), dt)?;
+        world.collision_system.stage_prediction(id, state);
+    }
+    world.prepare_collision_candidates(dt, 1, &crate::execution::SequentialExecutor)?;
+    world.process_collision_candidates(1, &crate::execution::SequentialExecutor, dt)?;
+    let context = &world.collision_system.context;
+    assert_eq!(context.ccd_solved_manifolds.len(), 1);
+    let manifold = context
+        .isolated_ccd_solver_event()
+        .ok_or("isolated event")?;
+    let event = manifold.ccd_event.ok_or("event")?;
+    let side = if world.collider_body(manifold.pair.a) == Some(body) {
+        0
+    } else {
+        1
+    };
+    let mut impulse = Vec3::ZERO;
+    let mut angular_impulse = Vec3::ZERO;
+    let center = event.states[0][side].transform().translation();
+    for point in manifold.points() {
+        let contribution =
+            point.velocity_impulse.ok_or("impulse")? * if side == 0 { -1.0 } else { 1.0 };
+        let position = point.velocity_points.ok_or("points")?[side];
+        impulse += contribution;
+        angular_impulse += (position - center).cross(contribution);
+    }
+    let delta = event.states[1][side].linear_velocity() - event.states[0][side].linear_velocity();
+    assert!((impulse - delta).length() < 1e-8);
+    // The test body's inertia is identity about its center of mass.
+    let angular_delta =
+        event.states[1][side].angular_velocity() - event.states[0][side].angular_velocity();
+    assert!(angular_impulse.length() > 1.0);
+    assert!((angular_impulse - angular_delta).length() < 1e-8);
+    Ok(())
+}
+
+#[test]
+fn isolated_ccd_solver_event_rejects_incomplete_witnesses() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut world = PhysicsWorld::new();
+    let a = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let b = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let ca = world.add_collider(a, collider(0.5))?;
+    let cb = world.add_collider(b, collider(0.5))?;
+    let pair = CollisionPair::new(ca, cb).ok_or("pair")?;
+    let state = *world.body(a).ok_or("body")?.state();
+    let mut manifold = crate::collision::ContactManifold::new(pair);
+    let mut point = crate::collision::ContactPoint::from_world(
+        &Transform::identity(),
+        &Transform::identity(),
+        Vec3::ZERO,
+        Vec3::ZERO,
+        Vec3::X,
+        0.0,
+        0,
+    )?;
+    point.velocity_points = Some([Vec3::ZERO; 2]);
+    point.velocity_impulse = Some(Vec3::X);
+    point.velocity_transforms = Some([Transform::identity(); 2]);
+    manifold.insert(point, Vec3::ZERO)?;
+    manifold.ccd_event = Some(crate::world::CcdContactEvent {
+        time: 0.5,
+        states: [[state; 2]; 2],
+    });
+    let context = &mut world.collision_system.context;
+    context.ccd_solved_manifolds.push(manifold);
+    assert!(context.isolated_ccd_solver_event().is_some());
+    context.ccd_replayed = true;
+    assert!(context.isolated_ccd_solver_event().is_none());
+    context.ccd_replayed = false;
+    context.ccd_clipped_bodies.push(true);
+    assert!(context.isolated_ccd_solver_event().is_none());
+    context.ccd_clipped_bodies.clear();
+    context.manifolds.push(manifold);
+    assert!(context.isolated_ccd_solver_event().is_none());
+    context.manifolds.clear();
+    context.ccd_solved_manifolds.push(manifold);
+    assert!(context.isolated_ccd_solver_event().is_none());
+    context.ccd_solved_manifolds.pop();
+    let mut moved = RigidBody::new_static(Transform::identity());
+    moved.set_transform(Transform::new(Vec3::X, Quat::IDENTITY)?)?;
+    context.ccd_solved_manifolds[0]
+        .ccd_event
+        .as_mut()
+        .ok_or("event")?
+        .states[1][0] = *moved.state();
+    assert!(context.isolated_ccd_solver_event().is_none());
+    context.ccd_solved_manifolds[0].ccd_event = manifold.ccd_event;
+    context.ccd_solved_manifolds[0]
+        .point_mut(0)
+        .ok_or("point")?
+        .velocity_impulse = None;
+    assert!(context.isolated_ccd_solver_event().is_none());
+    Ok(())
+}
+
+#[test]
+fn replay_discards_only_affected_ccd_solves() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mut colliders = Vec::new();
+    for _ in 0..4 {
+        let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        colliders.push(world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?);
+    }
+    let replayed = CollisionPair::new(colliders[0], colliders[1]).ok_or("pair")?;
+    let independent = CollisionPair::new(colliders[2], colliders[3]).ok_or("pair")?;
+    let state = *world
+        .body(world.collider_body(colliders[0]).ok_or("body")?)
+        .ok_or("body")?
+        .state();
+    let witness = crate::world::CcdContactEvent {
+        time: 0.25,
+        states: [[state, state], [state, state]],
+    };
+    let mut retained = crate::collision::ContactManifold::new(independent);
+    retained.ccd_event = Some(witness);
+    let context = &mut world.collision_system.context;
+    context
+        .ccd_solved_manifolds
+        .push(crate::collision::ContactManifold::new(replayed));
+    context.ccd_solved_manifolds.push(retained);
+    context
+        .ccd_solved_manifolds
+        .push(crate::collision::ContactManifold::new(replayed));
+    context.ccd_replay_pairs.push(replayed);
+    assert!(!context.ccd_replayed);
+    context.discard_replayed_ccd_solves();
+    assert!(context.ccd_replayed);
+    assert_eq!(context.ccd_solved_manifolds.len(), 1);
+    assert_eq!(context.ccd_solved_manifolds[0].pair, independent);
+    assert_eq!(context.ccd_solved_manifolds[0].ccd_event, Some(witness));
+    context.clear();
+    assert!(context.ccd_solved_manifolds.is_empty());
+    assert!(!context.ccd_replayed);
+    Ok(())
+}
+
+#[test]
+fn contact_snapshot_counts_missing_velocity_data_without_publishing_early()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
+        ids.push(world.add_collider(
+            body,
+            Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
+        )?);
+    }
+    let pair = CollisionPair::new(ids[0], ids[1]).ok_or("pair")?;
+    let point = crate::collision::ContactPoint::from_world(
+        &Transform::identity(),
+        &Transform::identity(),
+        Vec3::ZERO,
+        Vec3::ZERO,
+        Vec3::X,
+        0.0,
+        0,
+    )?;
+    let mut manifold = crate::collision::ContactManifold::new(pair);
+    manifold.insert(point, Vec3::ZERO)?;
+    world.collision_system.context.manifolds.push(manifold);
+    world.stage_contact_impulses()?;
+    assert_eq!(world.contact_impulses_omitted_pending, 1);
+    assert!(world.contact_impulses_pending.is_empty());
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    world.collision_system.abort_step();
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    world.step(0.01)?;
+    assert_eq!(world.contact_impulses_omitted_points(), 0);
+    Ok(())
+}
 
 #[test]
 fn resting_contact_keeps_the_previous_ccd_impact_witness() -> Result<(), Box<dyn std::error::Error>>
@@ -108,7 +1365,7 @@ fn clear_joint_metric_timings(mut metrics: JointSolverMetrics) -> JointSolverMet
     metrics
 }
 
-struct ScopedThreadExecutor;
+pub(super) struct ScopedThreadExecutor;
 
 impl StepExecutor for ScopedThreadExecutor {
     fn for_each_chunk_mut<T, F>(
@@ -240,9 +1497,9 @@ fn shard_world_with_source() -> (PhysicsWorld, Vec<BodyId>, ForceSourceId) {
     (world, bodies, source)
 }
 
-fn assert_bodies_match(world: &PhysicsWorld, body_ids: &[BodyId], expected: &[RigidBody]) {
+fn assert_bodies_match(world: &PhysicsWorld, body_ids: &[BodyId], expected: &[BodyMotion]) {
     for (id, expected) in body_ids.iter().zip(expected) {
-        assert_eq!(world.body(*id), Some(expected));
+        assert_eq!(world.body(*id).map(RigidBody::motion), Some(*expected));
     }
 }
 
@@ -842,6 +2099,111 @@ fn joint_break_force_is_in_newtons_and_removes_the_joint() {
         (force - 30.0).abs() <= 1.0e-6,
         "expected the 0.5 kg*m/s impulse over 1/60 s to read as 30 N, got {force}"
     );
+}
+
+#[test]
+fn fixed_joint_breaks_from_differential_aerodynamic_drag() -> Result<(), Box<dyn std::error::Error>>
+{
+    use crate::aerodynamics::{Aerodynamics, AtmosphericState, hull::HullSection};
+
+    // Two equal masses move together. Drag of 60 N on one body requires a
+    // 30 N constraint reaction to give both bodies the same acceleration.
+    // No colliders, gravity, motors or initial relative motion are present.
+    for (threshold, should_break) in [(20.0, true), (40.0, false)] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.2,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut first = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        first.set_linear_velocity(Vec3::X * 10.0)?;
+        let mut second = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        second.set_linear_velocity(Vec3::X * 10.0)?;
+        second.set_aerodynamics(Aerodynamics::Hull(vec![HullSection::new(
+            Transform::identity(),
+            Vec3::X,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            None,
+        )?]));
+        let a = world.add_body(first)?;
+        let b = world.add_body(second)?;
+        let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        common.break_force = Some(threshold);
+        world.add_joint(a, b, Joint::Fixed(FixedJoint::new(common)))?;
+        world.step(1e-4)?;
+        assert_eq!(world.joint_count(), usize::from(!should_break));
+        assert_eq!(world.joint_events().len(), usize::from(should_break));
+        if should_break {
+            let event = &world.joint_events()[0];
+            assert!(
+                (event.force() - 30.0).abs() < 1e-8,
+                "force={}",
+                event.force()
+            );
+            assert!(event.torque() < 1e-8, "torque={}", event.torque());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fixed_joint_breaks_from_offset_aerodynamic_torque() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::aerodynamics::{Aerodynamics, AtmosphericState, hull::HullSection};
+
+    // A 60 N drag applied 1 m off-center produces 60 N m on one body.
+    // Equal inertias share the angular acceleration, so the joint carries
+    // 30 N m. Coincident centers and anchors decouple force from torque.
+    for (threshold, should_break) in [(20.0, true), (40.0, false)] {
+        let mut world = PhysicsWorld::new();
+        world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
+            1.2,
+            Vec3::ZERO,
+        )?));
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let mut first = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        first.set_linear_velocity(Vec3::X * 10.0)?;
+        let mut second = RigidBody::new_dynamic(Transform::identity(), mass)?;
+        second.set_linear_velocity(Vec3::X * 10.0)?;
+        second.set_aerodynamics(Aerodynamics::Hull(vec![HullSection::new(
+            Transform::new(Vec3::Y, Quat::IDENTITY)?,
+            Vec3::X,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            None,
+        )?]));
+        let a = world.add_body(first)?;
+        let b = world.add_body(second)?;
+        let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
+        common.break_torque = Some(threshold);
+        world.add_joint(a, b, Joint::Fixed(FixedJoint::new(common)))?;
+        world.step(1e-4)?;
+        assert_eq!(world.joint_count(), usize::from(!should_break));
+        assert_eq!(world.joint_events().len(), usize::from(should_break));
+        if should_break {
+            let event = &world.joint_events()[0];
+            assert!(
+                (event.torque() - 30.0).abs() < 1e-8,
+                "torque={}",
+                event.torque()
+            );
+            assert!(
+                (event.force() - 30.0).abs() < 1e-8,
+                "force={}",
+                event.force()
+            );
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -1772,13 +3134,13 @@ fn invalid_material_fails_step_without_changing_body_or_forces() {
         .collider_mut(collider_id)
         .expect("collider")
         .set_material(Some(foreign_material));
-    let original = *world.body(body_id).expect("body");
+    let original = world.body(body_id).expect("body").motion();
 
     assert_eq!(
         world.step(0.1),
         Err(StepError::Collision(CollisionError::InvalidMaterial))
     );
-    assert_eq!(world.body(body_id), Some(&original));
+    assert_eq!(world.body(body_id).map(RigidBody::motion), Some(original));
     assert!(world.collision_events().is_empty());
 }
 
@@ -1797,7 +3159,7 @@ fn invalid_material_fails_shard_commit_before_any_body_changes() {
         .collider_mut(collider_id)
         .expect("collider")
         .set_material(Some(foreign_material));
-    let original = *world.body(body_id).expect("body");
+    let original = world.body(body_id).expect("body").motion();
     let mut shards = vec![Vec::new()];
     world.fill_step_shards(&mut shards).expect("fill shards");
     shards[0][0].integrate(0.1).expect("predict body");
@@ -1806,7 +3168,7 @@ fn invalid_material_fails_shard_commit_before_any_body_changes() {
         world.commit_step_shards(&shards),
         Err(StepError::Collision(CollisionError::InvalidMaterial))
     );
-    assert_eq!(world.body(body_id), Some(&original));
+    assert_eq!(world.body(body_id).map(RigidBody::motion), Some(original));
 }
 
 #[test]
@@ -1907,7 +3269,10 @@ fn adds_multiple_colliders_and_tracks_each_owner() -> Result<(), WorldError> {
 fn collider_mut_changes_only_the_collider() -> Result<(), WorldError> {
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
-    let original_body = *world.body(body_id).ok_or(WorldError::InvalidBodyId)?;
+    let original_body = world
+        .body(body_id)
+        .ok_or(WorldError::InvalidBodyId)?
+        .motion();
     let collider_id = world.add_collider(body_id, collider(1.0))?;
 
     world
@@ -1915,7 +3280,10 @@ fn collider_mut_changes_only_the_collider() -> Result<(), WorldError> {
         .ok_or(WorldError::InvalidColliderId)?
         .set_filter(CollisionFilter::new(0b0100, 0b1000));
 
-    assert_eq!(world.body(body_id), Some(&original_body));
+    assert_eq!(
+        world.body(body_id).map(RigidBody::motion),
+        Some(original_body)
+    );
     assert_eq!(
         world.collider(collider_id).map(Collider::filter),
         Some(CollisionFilter::new(0b0100, 0b1000))
@@ -1988,11 +3356,17 @@ fn removed_collider_slot_reuses_generation_without_reviving_old_id() -> Result<(
 fn body_state_is_unchanged_when_colliders_are_added_or_removed() -> Result<(), WorldError> {
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(dynamic_body())?;
-    let original_body = *world.body(body_id).ok_or(WorldError::InvalidBodyId)?;
+    let original_body = world
+        .body(body_id)
+        .ok_or(WorldError::InvalidBodyId)?
+        .motion();
     let collider_id = world.add_collider(body_id, collider(1.0))?;
     assert!(world.remove_collider(collider_id).is_some());
 
-    assert_eq!(world.body(body_id), Some(&original_body));
+    assert_eq!(
+        world.body(body_id).map(RigidBody::motion),
+        Some(original_body)
+    );
     Ok(())
 }
 
@@ -2016,10 +3390,19 @@ fn invalid_collider_ids_are_rejected() -> Result<(), DensePoolError> {
 fn removing_body_without_colliders_returns_it_and_invalidates_its_id() -> Result<(), WorldError> {
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(RigidBody::new_static(Transform::identity()))?;
-    let original = *world.body(body_id).ok_or(WorldError::InvalidBodyId)?;
+    let original = world
+        .body(body_id)
+        .ok_or(WorldError::InvalidBodyId)?
+        .motion();
 
-    assert_eq!(world.remove_body(body_id), Some(original));
-    assert_eq!(world.remove_body(body_id), None);
+    assert_eq!(
+        world.remove_body(body_id).as_ref().map(RigidBody::motion),
+        Some(original)
+    );
+    assert_eq!(
+        world.remove_body(body_id).as_ref().map(RigidBody::motion),
+        None
+    );
     assert!(world.body(body_id).is_none());
     assert_eq!(world.body_count(), 0);
     Ok(())
@@ -2216,7 +3599,7 @@ fn step_advances_each_body_type_and_clears_accumulated_forces() -> Result<(), Wo
     assert_eq!(moving.forces().force(), Vec3::ZERO);
     assert_eq!(moving.forces().torque(), Vec3::ZERO);
     assert_eq!(
-        world.body(sleeping_id).map(RigidBody::state),
+        world.body(sleeping_id).map(|body| body.state()),
         Some(&sleeping_state)
     );
     Ok(())
@@ -2350,9 +3733,9 @@ fn indexed_force_source_preparation_errors_do_not_commit_staged_bodies() {
         .body = stale_body;
     let originals = bodies
         .iter()
-        .map(|body| (*body, *world.body(*body).expect("body")))
+        .map(|body| (*body, world.body(*body).expect("body").motion()))
         .collect::<Vec<_>>();
-    let replacement_original = *world.body(replacement).expect("replacement");
+    let replacement_original = world.body(replacement).expect("replacement").motion();
 
     assert_eq!(
         world.prepare_force_source_updates(),
@@ -2361,9 +3744,12 @@ fn indexed_force_source_preparation_errors_do_not_commit_staged_bodies() {
     assert!(
         originals
             .iter()
-            .all(|(id, original)| world.body(*id) == Some(original))
+            .all(|(id, original)| world.body(*id).map(RigidBody::motion) == Some(*original))
     );
-    assert_eq!(world.body(replacement), Some(&replacement_original));
+    assert_eq!(
+        world.body(replacement).map(RigidBody::motion),
+        Some(replacement_original)
+    );
     assert!(world.force_source_body_updates.is_empty());
     assert!(
         world
@@ -2389,7 +3775,7 @@ fn indexed_force_source_step_failure_rolls_back_and_keeps_capacity() {
         .expect("overflow source");
     let originals = bodies
         .iter()
-        .map(|body| (*body, *world.body(*body).expect("body")))
+        .map(|body| (*body, world.body(*body).expect("body").motion()))
         .collect::<Vec<_>>();
 
     assert!(matches!(
@@ -2402,7 +3788,7 @@ fn indexed_force_source_step_failure_rolls_back_and_keeps_capacity() {
     assert!(
         originals
             .iter()
-            .all(|(id, original)| world.body(*id) == Some(original))
+            .all(|(id, original)| world.body(*id).map(RigidBody::motion) == Some(*original))
     );
     assert!(world.force_source_body_updates.is_empty());
     let index_capacity = world
@@ -2446,7 +3832,7 @@ fn sharded_force_source_preparation_error_leaves_world_unchanged_and_can_retry()
         .body = stale_body;
     let originals = bodies
         .iter()
-        .map(|id| *world.body(*id).expect("body"))
+        .map(|id| world.body(*id).expect("body").motion())
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -2484,7 +3870,7 @@ fn sharded_fill_error_rolls_back_force_sources_and_can_retry() {
     let (mut world, bodies, _) = shard_world_with_source();
     let originals = bodies
         .iter()
-        .map(|id| *world.body(*id).expect("body"))
+        .map(|id| world.body(*id).expect("body").motion())
         .collect::<Vec<_>>();
     let mut no_shards: [Vec<BodyStep>; 0] = [];
 
@@ -2514,7 +3900,7 @@ fn sharded_gravity_error_rolls_back_force_sources_and_can_retry() {
     ));
     let originals = bodies
         .iter()
-        .map(|id| *world.body(*id).expect("body"))
+        .map(|id| world.body(*id).expect("body").motion())
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -2570,7 +3956,7 @@ fn sharded_collision_preparation_error_rolls_back_force_sources_and_can_retry() 
         .expect("force source");
     let originals = bodies
         .iter()
-        .map(|id| *world.body(*id).expect("body"))
+        .map(|id| world.body(*id).expect("body").motion())
         .collect::<Vec<_>>();
 
     let error = step_with_shards(&mut world, 0.1).expect_err("invalid spatial bounds");
@@ -2596,17 +3982,17 @@ fn sharded_collision_preparation_error_rolls_back_force_sources_and_can_retry() 
 #[test]
 fn sharded_integration_error_rolls_back_force_sources_and_can_retry() {
     let (mut world, bodies, _) = shard_world_with_source();
-    let mut invalid = *world.body(bodies[3]).expect("last body");
+    let mut invalid = world.body(bodies[3]).expect("last body").motion();
     invalid
         .set_transform(Transform::new(Vec3::X * 1.0e308, Quat::IDENTITY).expect("finite transform"))
         .expect("large position");
     invalid
         .set_linear_velocity(Vec3::X * 1.0e308)
         .expect("finite velocity");
-    *world.body_mut(bodies[3]).expect("last body") = invalid;
+    *world.body_mut(bodies[3]).expect("last body") = RigidBody::from_motion(invalid);
     let originals = bodies
         .iter()
-        .map(|id| *world.body(*id).expect("body"))
+        .map(|id| world.body(*id).expect("body").motion())
         .collect::<Vec<_>>();
 
     assert!(matches!(
@@ -2646,7 +4032,7 @@ fn sharded_executor_error_rolls_back_force_sources_and_can_retry() {
         .expect("user force before step");
     let originals = bodies
         .iter()
-        .map(|id| *world.body(*id).expect("body"))
+        .map(|id| world.body(*id).expect("body").motion())
         .collect::<Vec<_>>();
     let mut shards: [Vec<BodyStep>; 4] = std::array::from_fn(|_| Vec::new());
     let failing_executor = FailingExecutor {
@@ -2687,7 +4073,7 @@ fn sharded_collision_solver_error_rolls_back_force_sources_and_can_retry() {
         .expect("force source");
     let originals = bodies
         .iter()
-        .map(|id| *world.body(*id).expect("body"))
+        .map(|id| world.body(*id).expect("body").motion())
         .collect::<Vec<_>>();
     let mut shards: [Vec<BodyStep>; 4] = std::array::from_fn(|_| Vec::new());
     let failing_executor = FailingExecutor {
@@ -2800,11 +4186,11 @@ fn invalid_timestep_preserves_all_body_state_and_forces() -> Result<(), WorldErr
     body.set_linear_velocity(Vec3::X).expect("finite velocity");
     body.apply_force(Vec3::Y).expect("finite force");
     let id = world.add_body(body)?;
-    let original = *world.body(id).ok_or(WorldError::InvalidBodyId)?;
+    let original = world.body(id).ok_or(WorldError::InvalidBodyId)?.motion();
 
     for dt in [0.0, -0.1, f64::NAN, f64::INFINITY] {
         assert_eq!(world.step(dt), Err(StepError::InvalidDeltaTime));
-        assert_eq!(world.body(id), Some(&original));
+        assert_eq!(world.body(id).map(RigidBody::motion), Some(original));
     }
     Ok(())
 }
@@ -2822,8 +4208,14 @@ fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), World
         .apply_force(Vec3::X * f64::MAX)
         .expect("finite force");
     let failing_id = world.add_body(failing)?;
-    let first_original = *world.body(first_id).ok_or(WorldError::InvalidBodyId)?;
-    let failing_original = *world.body(failing_id).ok_or(WorldError::InvalidBodyId)?;
+    let first_original = world
+        .body(first_id)
+        .ok_or(WorldError::InvalidBodyId)?
+        .motion();
+    let failing_original = world
+        .body(failing_id)
+        .ok_or(WorldError::InvalidBodyId)?
+        .motion();
 
     assert_eq!(
         world.step(2.0),
@@ -2832,8 +4224,14 @@ fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), World
             cause: IntegrationError::ArithmeticOverflow,
         })
     );
-    assert_eq!(world.body(first_id), Some(&first_original));
-    assert_eq!(world.body(failing_id), Some(&failing_original));
+    assert_eq!(
+        world.body(first_id).map(RigidBody::motion),
+        Some(first_original)
+    );
+    assert_eq!(
+        world.body(failing_id).map(RigidBody::motion),
+        Some(failing_original)
+    );
     assert!(world.collision_system.context.predicted_states.is_empty());
 
     world
@@ -2876,7 +4274,10 @@ fn repeated_steps_are_deterministic_and_reuse_the_scratch_buffer() -> Result<(),
     for _ in 0..8 {
         first.step(1.0 / 120.0).expect("valid step");
         second.step(1.0 / 120.0).expect("valid step");
-        assert_eq!(first.body(first_id), second.body(second_id));
+        assert_eq!(
+            first.body(first_id).map(RigidBody::motion),
+            second.body(second_id).map(RigidBody::motion)
+        );
     }
     let capacity = first.collision_system.context.predicted_states.capacity();
     first.step(1.0 / 120.0).expect("valid step");
@@ -2895,8 +4296,15 @@ fn ccd_swept_bounds_cover_offset_com_rotation_arcs() {
         .expect("angular velocity");
     let start = *body.state();
     let end = crate::rigid_body::predict(&body, 1.0).expect("integrator endpoint");
-    let trajectory =
-        super::CcdTrajectory::new(body, start, 0.0, 0.0, 1.0, Transform::identity(), false);
+    let trajectory = super::CcdTrajectory::new(
+        body.motion(),
+        start,
+        0.0,
+        0.0,
+        1.0,
+        Transform::identity(),
+        false,
+    );
     let collider = Collider::new(
         Shape::Sphere(Sphere::new(0.1).expect("sphere")),
         Transform::identity(),
@@ -3002,7 +4410,7 @@ fn step_shards_are_balanced_and_commit_the_same_states() -> Result<(), Box<dyn s
     for index in 0..7 {
         let mut body = RigidBody::new_kinematic(Transform::identity());
         body.set_linear_velocity(Vec3::new(f64::from(index), 1.0, -1.0))?;
-        parallel_world.add_body(body)?;
+        parallel_world.add_body(RigidBody::from_motion(body.motion()))?;
         sequential_world.add_body(body)?;
     }
 
@@ -3028,7 +4436,7 @@ fn step_shards_are_balanced_and_commit_the_same_states() -> Result<(), Box<dyn s
         assert_eq!(parallel_id.index(), sequential_id.index());
         assert_eq!(parallel_id.generation(), sequential_id.generation());
         assert_ne!(parallel_id, sequential_id);
-        assert_eq!(parallel, sequential);
+        assert_eq!(parallel.motion(), sequential.motion());
     }
     Ok(())
 }
@@ -3049,13 +4457,7 @@ fn independent_single_pair_ccd_islands_resolve_across_workers()
     for workers in [2, 4] {
         let mut world = independent_wall_ccd_world()?;
         let mut shards = vec![Vec::new(); workers];
-        world.fill_step_shards(&mut shards)?;
-        for shard in &mut shards {
-            for step in shard {
-                step.integrate(dt)?;
-            }
-        }
-        world.commit_step_shards_with_executor(&shards, &ScopedThreadExecutor, workers)?;
+        world.step_with_shards(dt, &mut shards, &ScopedThreadExecutor, workers)?;
 
         for ((_, actual), (_, expected)) in world.bodies().zip(sequential.bodies()) {
             assert_eq!(
@@ -3073,6 +4475,24 @@ fn independent_single_pair_ccd_islands_resolve_across_workers()
             .filter(|event| event.kind == crate::collision::CollisionEventKind::Impact)
             .count();
         assert_eq!(actual_impacts, expected_impacts);
+        let expected_ccd: Vec<_> = sequential
+            .contact_impulses()
+            .iter()
+            .filter(|point| point.ccd)
+            .collect();
+        let actual_ccd: Vec<_> = world
+            .contact_impulses()
+            .iter()
+            .filter(|point| point.ccd)
+            .collect();
+        assert_eq!(actual_ccd.len(), expected_ccd.len());
+        assert_eq!(actual_ccd.len(), expected_impacts);
+        for (actual, expected) in actual_ccd.iter().zip(expected_ccd) {
+            let actual_event = actual.ccd_event.ok_or("parallel CCD witness")?;
+            let expected_event = expected.ccd_event.ok_or("sequential CCD witness")?;
+            assert!(actual_event.time > 0.0 && actual_event.time <= dt);
+            assert_eq!(actual_event, expected_event);
+        }
         for (actual, expected) in world
             .collision_events()
             .iter()
@@ -3088,6 +4508,31 @@ fn independent_single_pair_ccd_islands_resolve_across_workers()
             world.collision_step_metrics().ccd_parallel_island_count >= workers,
             "the CCD island resolver should launch work for this scene"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn full_step_publishes_ccd_impulses_and_preserves_them_on_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    for parallel in [false, true] {
+        let mut world = independent_wall_ccd_world()?;
+        if parallel {
+            world.step_with_executor(0.01, &ScopedThreadExecutor, 2)?;
+        } else {
+            world.step(0.01)?;
+        }
+        let snapshot = world.contact_impulses().to_vec();
+        assert_eq!(snapshot.iter().filter(|entry| entry.ccd).count(), 128);
+        assert!(
+            snapshot
+                .iter()
+                .filter(|entry| entry.ccd)
+                .all(|entry| entry.impulse_on_b.length() > 0.0
+                    && entry.points.iter().all(|point| point.is_finite()))
+        );
+        assert!(world.step(-1.0).is_err());
+        assert_eq!(world.contact_impulses(), snapshot.as_slice());
     }
     Ok(())
 }
@@ -3159,6 +4604,25 @@ fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn
     const DT: f64 = 0.02;
 
     let mut world = PhysicsWorld::new();
+    // Publish a real, isolated impact before constructing the failing step.
+    let seed_wall = world.add_body(RigidBody::new_static(Transform::new(
+        Vec3::new(0.0, -1000.0, 0.0),
+        Quat::IDENTITY,
+    )?))?;
+    world.add_collider(seed_wall, collider(0.5))?;
+    let mut seed = RigidBody::new_dynamic(
+        Transform::new(Vec3::new(-5.0, -1000.0, 0.0), Quat::IDENTITY)?,
+        MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?,
+    )?;
+    seed.set_linear_velocity(Vec3::new(1000.0, 0.0, 0.0))?;
+    seed.set_ccd_mode(CcdMode::Continuous);
+    let seed = world.add_body(seed)?;
+    world.add_collider(seed, collider(0.5))?;
+    world.step(0.01)?;
+    let previous_impulses = world.contact_impulses().to_vec();
+    let previous_omitted = world.contact_impulses_omitted_points();
+    let previous_events = world.collision_events().to_vec();
+    assert!(previous_impulses.iter().any(|entry| entry.ccd));
     let restitution = world.add_material(PhysicsMaterial::new(0.0, 0.0, 1.0, 1.0)?)?;
     let front_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let front_wall = world.add_collider(
@@ -3246,7 +4710,9 @@ fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn
             &expected
         );
     }
-    assert!(world.collision_events().is_empty());
+    assert_eq!(world.collision_events(), previous_events.as_slice());
+    assert_eq!(world.contact_impulses(), previous_impulses.as_slice());
+    assert_eq!(world.contact_impulses_omitted_points(), previous_omitted);
     #[cfg(feature = "bench-internals")]
     assert!(world.collision_step_metrics().ccd_parallel_island_count >= 4);
     Ok(())
@@ -3257,8 +4723,14 @@ fn incomplete_step_shards_do_not_change_the_world() -> Result<(), Box<dyn std::e
     let mut world = PhysicsWorld::new();
     let first_id = world.add_body(dynamic_body())?;
     let second_id = world.add_body(dynamic_body())?;
-    let original_first = *world.body(first_id).ok_or(WorldError::InvalidBodyId)?;
-    let original_second = *world.body(second_id).ok_or(WorldError::InvalidBodyId)?;
+    let original_first = world
+        .body(first_id)
+        .ok_or(WorldError::InvalidBodyId)?
+        .motion();
+    let original_second = world
+        .body(second_id)
+        .ok_or(WorldError::InvalidBodyId)?
+        .motion();
     let mut shards = vec![Vec::new()];
     world.fill_step_shards(&mut shards)?;
     shards[0][0].integrate(0.1)?;
@@ -3267,8 +4739,14 @@ fn incomplete_step_shards_do_not_change_the_world() -> Result<(), Box<dyn std::e
         world.commit_step_shards(&shards),
         Err(StepError::InvalidStepResults)
     );
-    assert_eq!(world.body(first_id), Some(&original_first));
-    assert_eq!(world.body(second_id), Some(&original_second));
+    assert_eq!(
+        world.body(first_id).map(RigidBody::motion),
+        Some(original_first)
+    );
+    assert_eq!(
+        world.body(second_id).map(RigidBody::motion),
+        Some(original_second)
+    );
     Ok(())
 }
 
@@ -3367,9 +4845,8 @@ fn force_source_bench_world(
     };
     let mut world = PhysicsWorld::new();
     let mut bodies = Vec::with_capacity(body_count);
-    let body_template = dynamic_body();
     for _ in 0..body_count {
-        bodies.push(world.add_body(body_template).expect("benchmark body"));
+        bodies.push(world.add_body(dynamic_body()).expect("benchmark body"));
     }
 
     let dominant_source_count = source_count.saturating_sub(body_count - 1);
@@ -3644,4 +5121,30 @@ fn benchmark_force_source_update_scaling() {
             );
         }
     }
+}
+#[test]
+fn step_diagnostics_publish_only_on_success() -> Result<(), super::StepError> {
+    use super::{PhysicsWorld, StepDiagnostics, StepError};
+
+    let mut world = PhysicsWorld::new();
+    let clipped = StepDiagnostics {
+        collision_ccd_limit_clipped_bodies: 2,
+        weld_incomplete_load_clusters: 0,
+        weld_collision_load_clusters: 0,
+    };
+    world.with_force_source_updates(|world| {
+        world.pending_step_diagnostics = clipped;
+        Ok(())
+    })?;
+    assert!(world.step_diagnostics().used_fallback());
+    assert_eq!(world.step_diagnostics(), clipped);
+    let failed: Result<(), StepError> = world.with_force_source_updates(|world| {
+        world.pending_step_diagnostics = StepDiagnostics::default();
+        Err(StepError::InvalidStepResults)
+    });
+    assert_eq!(failed, Err(StepError::InvalidStepResults));
+    assert_eq!(world.step_diagnostics(), clipped);
+    world.step(0.01)?;
+    assert_eq!(world.step_diagnostics(), StepDiagnostics::default());
+    Ok(())
 }

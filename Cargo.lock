@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "kapitsa"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "kapitsa-core",
  "kapitsa-math",
@@ -709,16 +709,17 @@ dependencies = [
 
 [[package]]
 name = "kapitsa-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "kapitsa-math",
  "rayon",
+ "robust",
  "rstest",
 ]
 
 [[package]]
 name = "kapitsa-math"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "khronos_api"
@@ -1323,8 +1324,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 
 [[package]]
+name = "robust"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
+
+[[package]]
 name = "rocket-flight-viewer"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "gif",
  "glium",

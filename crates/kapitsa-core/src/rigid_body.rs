@@ -28,15 +28,250 @@ use crate::{mass::MassProperties, transform::Transform};
 ///
 /// The transform describes the body's world-space local origin. Its center of mass
 /// may be offset from that origin by [`MassProperties::center_of_mass`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct RigidBody {
+    motion: BodyMotion,
+    aerodynamics: crate::aerodynamics::Aerodynamics,
+    pub(crate) aerodynamic_geometry_identity: Option<std::sync::Arc<()>>,
+    pub(crate) aerodynamic_surfaces: Vec<crate::aerodynamics::AerodynamicSurface>,
+    pub(crate) base_pressure_patches: Vec<(
+        crate::aerodynamics::pressure::PressurePatch,
+        crate::aerodynamics::pressure::BasePressure,
+    )>,
+    pub(crate) base_pressure_triangles: Option<Vec<[Vec3; 3]>>,
+    pub(crate) potential_sphere: Option<(Vec3, f64)>,
+}
+
+impl RigidBody {
+    pub fn new_static(transform: Transform) -> Self {
+        Self::from_motion(BodyMotion::new_static(transform))
+    }
+
+    pub fn new_kinematic(transform: Transform) -> Self {
+        Self::from_motion(BodyMotion::new_kinematic(transform))
+    }
+
+    pub fn new_dynamic(transform: Transform, mass: MassProperties) -> Result<Self, BodyError> {
+        BodyMotion::new_dynamic(transform, mass).map(Self::from_motion)
+    }
+
+    pub(crate) fn from_motion(motion: BodyMotion) -> Self {
+        Self {
+            motion,
+            aerodynamics: crate::aerodynamics::Aerodynamics::None,
+            aerodynamic_geometry_identity: None,
+            aerodynamic_surfaces: Vec::new(),
+            base_pressure_patches: Vec::new(),
+            base_pressure_triangles: None,
+            potential_sphere: None,
+        }
+    }
+
+    pub fn aerodynamics(&self) -> &crate::aerodynamics::Aerodynamics {
+        &self.aerodynamics
+    }
+
+    pub fn set_aerodynamics(&mut self, aerodynamics: crate::aerodynamics::Aerodynamics) {
+        self.set_primary_aerodynamics(aerodynamics);
+    }
+
+    pub(crate) fn set_primary_aerodynamics(
+        &mut self,
+        aerodynamics: crate::aerodynamics::Aerodynamics,
+    ) {
+        self.base_pressure_patches.clear();
+        self.base_pressure_triangles = None;
+        self.potential_sphere = None;
+        self.aerodynamic_geometry_identity = matches!(
+            aerodynamics,
+            crate::aerodynamics::Aerodynamics::Mesh(_)
+                | crate::aerodynamics::Aerodynamics::VoxelWave(_)
+                | crate::aerodynamics::Aerodynamics::Colliders
+        )
+        .then(|| std::sync::Arc::new(()));
+        self.aerodynamics = aerodynamics;
+    }
+
+    /// Moves primary configuration into a part without cloning owned geometry.
+    pub(crate) fn take_primary_aerodynamics(&mut self) -> crate::aerodynamics::Aerodynamics {
+        self.aerodynamic_geometry_identity = None;
+        std::mem::take(&mut self.aerodynamics)
+    }
+
+    pub fn aerodynamic_surfaces(&self) -> &[crate::aerodynamics::AerodynamicSurface] {
+        &self.aerodynamic_surfaces
+    }
+
+    /// Opts into ideal, isolated, non-rotating sphere pressure for the current
+    /// Mesh or Colliders geometry. This inviscid approximation has no wake or
+    /// viscous drag and is limited to Mach <= 0.2; it is not a rocket model.
+    /// Center and radius are body-local. Geometry is checked at each world step.
+    /// The caller must ensure isolation and a uniform flow; other nearby bodies
+    /// and additional loads are not checked for aerodynamic interaction.
+    /// Changing the primary aerodynamic configuration clears this setting.
+    pub fn set_potential_sphere_pressure(
+        &mut self,
+        center: Vec3,
+        radius: f64,
+    ) -> Result<(), crate::aerodynamics::pressure::PressureError> {
+        use crate::aerodynamics::{Aerodynamics, pressure::PressureError};
+        if !center.is_finite()
+            || !radius.is_finite()
+            || radius <= 0.0
+            || !matches!(
+                self.aerodynamics,
+                Aerodynamics::Mesh(_) | Aerodynamics::Colliders
+            )
+        {
+            return Err(PressureError::InvalidPatch);
+        }
+        self.potential_sphere = Some((center, radius));
+        Ok(())
+    }
+
+    /// Restores the ordinary primary geometry pressure model.
+    pub fn clear_potential_sphere_pressure(&mut self) {
+        self.potential_sphere = None;
+    }
+
+    /// Replaces explicitly selected body-local base patches. The caller must
+    /// No wake, overlap or shielding calculation is performed. Nonempty
+    /// configurations set by this method are rejected by world steps; use the
+    /// index-based mesh or collider selection APIs for simulation instead.
+    /// These loads are currently supported only on non-cluster Mesh/Colliders bodies;
+    /// cluster conversion rejects nonempty configurations without changing the body.
+    /// For Colliders, adding or removing a collider, requesting mutable access,
+    /// or changing tessellation clears patches; configure them after such edits.
+    pub fn set_base_pressure_patches(
+        &mut self,
+        patches: Vec<(
+            crate::aerodynamics::pressure::PressurePatch,
+            crate::aerodynamics::pressure::BasePressure,
+        )>,
+    ) {
+        self.base_pressure_patches = patches;
+        self.base_pressure_triangles = None;
+    }
+
+    /// Returns the explicit body-local base-pressure configuration.
+    pub fn base_pressure_patches(
+        &self,
+    ) -> &[(
+        crate::aerodynamics::pressure::PressurePatch,
+        crate::aerodynamics::pressure::BasePressure,
+    )] {
+        &self.base_pressure_patches
+    }
+
+    /// Selects whole triangles of the current primary Mesh as base patches.
+    /// Indices must be unique and refer to outward-wound, exposed base faces.
+    /// This verifies geometry membership, not shielding or wake applicability.
+    /// On error the previous configuration is preserved. Collider-derived meshes
+    /// and clipped/partially exposed faces are not supported by this method.
+    pub fn set_mesh_base_triangles(
+        &mut self,
+        indices: &[usize],
+        base: crate::aerodynamics::pressure::BasePressure,
+    ) -> Result<(), crate::aerodynamics::pressure::PressureError> {
+        use crate::aerodynamics::{Aerodynamics, pressure::PressureError};
+        let Aerodynamics::Mesh(mesh) = &self.aerodynamics else {
+            return Err(PressureError::InvalidPatch);
+        };
+        let patches = Self::base_triangles_from_mesh(mesh, indices, base)?;
+        let triangles = indices
+            .iter()
+            .map(|&i| mesh.triangles()[i].map(|v| mesh.vertices()[v]))
+            .collect();
+        self.base_pressure_patches = patches;
+        self.base_pressure_triangles = Some(triangles);
+        Ok(())
+    }
+
+    pub(crate) fn base_triangles_from_mesh(
+        mesh: &crate::shape::TriangleMesh,
+        indices: &[usize],
+        base: crate::aerodynamics::pressure::BasePressure,
+    ) -> Result<
+        Vec<(
+            crate::aerodynamics::pressure::PressurePatch,
+            crate::aerodynamics::pressure::BasePressure,
+        )>,
+        crate::aerodynamics::pressure::PressureError,
+    > {
+        use crate::aerodynamics::pressure::{PressureError, PressurePatch};
+        if indices.len() > mesh.triangles().len() {
+            return Err(PressureError::InvalidPatch);
+        }
+        let mut sorted = indices.to_vec();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(PressureError::InvalidPatch);
+        }
+        let mut patches = Vec::with_capacity(indices.len());
+        for &index in indices {
+            let face = mesh
+                .triangles()
+                .get(index)
+                .ok_or(PressureError::InvalidPatch)?;
+            let [a, b, c] = face.map(|i| mesh.vertices()[i]);
+            let cross = b
+                .checked_sub(a)
+                .and_then(|u| c.checked_sub(a).and_then(|v| u.checked_cross(v)))
+                .ok_or(PressureError::ArithmeticOverflow)?;
+            let length = cross
+                .checked_length()
+                .ok_or(PressureError::ArithmeticOverflow)?;
+            let center = a / 3.0 + b / 3.0 + c / 3.0;
+            patches.push((PressurePatch::new(center, cross, length * 0.5)?, base));
+        }
+        Ok(patches)
+    }
+
+    pub(crate) fn invalidate_collider_base_patches(&mut self) {
+        if matches!(
+            self.aerodynamics,
+            crate::aerodynamics::Aerodynamics::Colliders
+        ) {
+            self.base_pressure_patches.clear();
+            self.base_pressure_triangles = None;
+        }
+    }
+
+    /// Copies only motion, mass, and force state; owned geometry is never cloned.
+    pub fn motion(&self) -> BodyMotion {
+        self.motion
+    }
+
+    pub(crate) fn set_motion(&mut self, motion: BodyMotion) {
+        self.motion = motion;
+    }
+}
+
+impl std::ops::Deref for RigidBody {
+    type Target = BodyMotion;
+
+    fn deref(&self) -> &BodyMotion {
+        &self.motion
+    }
+}
+
+impl std::ops::DerefMut for RigidBody {
+    fn deref_mut(&mut self) -> &mut BodyMotion {
+        &mut self.motion
+    }
+}
+
+/// Copyable physical state used for transactional preparation and solver staging.
+/// Aerodynamic configuration and geometry remain owned by [`RigidBody`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyMotion {
     state: BodyState,
     physics: BodyPhysics,
     forces: BodyForces,
     ccd_mode: CcdMode,
 }
 
-impl RigidBody {
+impl BodyMotion {
     /// Creates a stationary body with no mass properties.
     pub fn new_static(transform: Transform) -> Self {
         Self::new(BodyType::Static, transform, None)

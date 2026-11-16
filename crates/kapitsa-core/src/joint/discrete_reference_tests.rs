@@ -262,7 +262,7 @@ fn free_ball_kernel_matches_independent_reference() {
         for dt in [1.0 / 60.0, 1.0 / 120.0, 1.0 / 240.0] {
             let mut reference = fixture(consistent);
             let world = production_world(reference);
-            let mut source = world.bodies().map(|(_, body)| *body);
+            let mut source = world.bodies().map(|(_, body)| body.motion());
             let mut bodies = [source.next().unwrap(), source.next().unwrap()];
             let mut scratch = super::constrained::ConstrainedWorkspace::default();
             for _ in 0..30 {

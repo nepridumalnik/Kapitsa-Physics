@@ -11,8 +11,9 @@ pub mod execution {
 pub mod aerodynamics {
     pub use kapitsa_core::aerodynamics::{
         AerodynamicForce, AerodynamicProperties, AerodynamicSurface, AerodynamicTarget,
-        AerodynamicsError, AerodynamicsTask, Atmosphere, AtmosphericState, DensityProfile,
-        SphericalAtmosphere, SphericalAtmosphereBuilder,
+        Aerodynamics, AerodynamicsError, AerodynamicsTask, Atmosphere, AtmosphericState,
+        ColliderTessellation, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder,
+        cache, colliders, geometry, hull, pressure, slender, wave, wing,
     };
 }
 
@@ -89,8 +90,9 @@ pub mod world {
         AddChunkBatchError, AddChunkError, ChunkId, ChunkOperationError, RemoveChunkBatchError,
     };
     pub use kapitsa_core::world::{
-        BodyId, ClusterError, ColliderId, ForceSource, ForceSourceError, ForceSourceId, GravityId,
-        JointId, JointTarget, PartId, StepError, WeldId, WorldError,
+        BodyId, ClusterError, ColliderId, ErrorPolicy, ForceSource, ForceSourceError,
+        ForceSourceId, GravityId, JointId, JointTarget, PartId, StepDiagnostics, StepError, WeldId,
+        WorldError,
     };
 }
 
@@ -105,13 +107,13 @@ pub use kapitsa_core::{
     joint::{Joint, JointBreakEvent},
     mass::MassProperties,
     material::{MaterialId, PhysicsMaterial},
-    rigid_body::{BodyState, CcdMode, RigidBody},
+    rigid_body::{BodyMotion, BodyState, CcdMode, RigidBody},
     shape::Shape,
     transform::Transform,
     world::{
         AddChunkBatchError, AddChunkError, BodyId, ChunkId, ChunkOperationError, ClusterError,
-        ColliderId, ForceSourceId, GravityId, JointId, JointTarget, PartId, RemoveChunkBatchError,
-        StepError, WeldId, WorldError,
+        ColliderId, ErrorPolicy, ForceSourceId, GravityId, JointId, JointTarget, PartId,
+        RemoveChunkBatchError, StepDiagnostics, StepError, WeldId, WorldError,
     },
 };
 

@@ -580,8 +580,8 @@ mod tests {
             prepare_block3(&rows, [solver_mass_a, solver_mass_b], 0.01).expect("prepared block");
 
         for column in 0..3 {
-            let mut applied_a = body_a;
-            let mut applied_b = body_b;
+            let mut applied_a = body_a.motion();
+            let mut applied_b = body_b.motion();
             let row = rows[column];
             applied_a
                 .apply_constraint_impulse_cached(row.linear_a, row.angular_a, solver_mass_a)

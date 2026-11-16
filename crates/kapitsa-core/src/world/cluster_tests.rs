@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    aerodynamics::{AerodynamicProperties, AerodynamicTarget},
+    aerodynamics::{AerodynamicProperties, AerodynamicTarget, Aerodynamics},
     cluster::{
         ClusterPart, ClusterPartDesc, RigidCluster, Weld, WeldDesc, WeldStiffness, WeldStrength,
     },
@@ -24,6 +24,8 @@ fn part(world: &mut PhysicsWorld, body: BodyId) -> PartId {
         local_transform: Transform::identity(),
         mass,
         colliders: Vec::new(),
+        aerodynamic_wings: Vec::new(),
+        aerodynamic_hull: Vec::new(),
     }) {
         Ok(value) => value,
         Err(error) => panic!("part: {error}"),
@@ -46,14 +48,18 @@ fn body_surface_stays_fixed_when_cluster_mass_changes() {
         .unwrap()
         .with_lift(1.0, Vec3::Z)
         .unwrap();
-    world.set_aerodynamics(body, Some(properties)).unwrap();
+    world
+        .set_aerodynamics(body, Aerodynamics::Simple(properties))
+        .unwrap();
     world
         .add_aerodynamic_surface_for_part(root, properties)
         .unwrap();
     let original_buffer = world.aerodynamic_surfaces(body).unwrap().as_ptr();
     let check = |world: &PhysicsWorld| {
         let rigid = world.body(body).unwrap();
-        let properties = world.aerodynamics(body).unwrap();
+        let Aerodynamics::Simple(properties) = world.aerodynamics(body).unwrap() else {
+            panic!("expected simple aerodynamics");
+        };
         let point = rigid.world_center_of_mass().unwrap().unwrap()
             + rigid
                 .state()
@@ -136,7 +142,7 @@ fn mass_change_preserves_part_surface_buffer_and_rebase_failure_is_atomic() {
     assert_eq!(world.aerodynamic_surfaces(body).unwrap().as_ptr(), pointer);
     let overflow = AerodynamicProperties::new(1.0, 1.0, Vec3::X * f64::MAX).unwrap();
     world.add_aerodynamic_surface(body, overflow).unwrap();
-    let before = *world.body(body).unwrap();
+    let before = world.body(body).unwrap().motion();
     let before_surfaces = world.aerodynamic_surfaces(body).unwrap().to_vec();
     assert_eq!(
         world.set_part_mass(
@@ -146,7 +152,7 @@ fn mass_change_preserves_part_surface_buffer_and_rebase_failure_is_atomic() {
         ),
         Err(ClusterError::ArithmeticOverflow)
     );
-    assert_eq!(*world.body(body).unwrap(), before);
+    assert_eq!(world.body(body).unwrap().motion(), before);
     assert_eq!(world.cluster_part(root).unwrap().mass(), new_mass);
     assert_eq!(world.aerodynamic_surfaces(body).unwrap(), before_surfaces);
 }
@@ -165,6 +171,7 @@ fn weld(world: &mut PhysicsWorld, a: PartId, b: PartId) -> WeldId {
         part_a: a,
         part_b: b,
         desc,
+        impulse_strength: None,
     }) {
         Ok(value) => value,
         Err(error) => panic!("weld: {error}"),
@@ -236,9 +243,11 @@ fn merge_rebase_overflow_preserves_topology() {
     let first_root = world.enable_cluster(first).unwrap();
     let second_root = world.enable_cluster(second).unwrap();
     let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::X * f64::MAX).unwrap();
-    world.set_aerodynamics(first, Some(properties)).unwrap();
-    let first_before = *world.body(first).unwrap();
-    let second_before = *world.body(second).unwrap();
+    world
+        .set_aerodynamics(first, Aerodynamics::Simple(properties))
+        .unwrap();
+    let first_before = world.body(first).unwrap().motion();
+    let second_before = world.body(second).unwrap().motion();
     let desc = WeldDesc {
         frame_a: JointFrame::IDENTITY,
         frame_b: JointFrame::IDENTITY,
@@ -253,13 +262,15 @@ fn merge_rebase_overflow_preserves_topology() {
         Err(ClusterError::ArithmeticOverflow)
     );
     assert_eq!(world.body_count(), 2);
-    assert_eq!(*world.body(first).unwrap(), first_before);
-    assert_eq!(*world.body(second).unwrap(), second_before);
+    assert_eq!(world.body(first).unwrap().motion(), first_before);
+    assert_eq!(world.body(second).unwrap().motion(), second_before);
     assert_eq!(world.part_body(first_root), Some(first));
     assert_eq!(world.part_body(second_root), Some(second));
     assert!(world.cluster(first).unwrap().welds().is_empty());
     assert!(world.cluster(second).unwrap().welds().is_empty());
-    assert_eq!(world.aerodynamics(first), Some(properties));
+    assert!(
+        matches!(world.aerodynamics(first), Some(Aerodynamics::Simple(actual)) if *actual == properties)
+    );
     assert_eq!(world.validate_clusters(), Ok(()));
 }
 
@@ -296,18 +307,22 @@ fn split_rebase_overflow_preserves_topology() {
         .unwrap();
     let bridge = world.cluster(body).unwrap().welds()[0];
     let properties = AerodynamicProperties::new(1.0, 1.0, Vec3::X * f64::MAX).unwrap();
-    world.set_aerodynamics(body, Some(properties)).unwrap();
-    let before = *world.body(body).unwrap();
+    world
+        .set_aerodynamics(body, Aerodynamics::Simple(properties))
+        .unwrap();
+    let before = world.body(body).unwrap().motion();
     assert_eq!(
         world.break_weld(bridge),
         Err(ClusterError::ArithmeticOverflow)
     );
     assert_eq!(world.body_count(), 1);
-    assert_eq!(*world.body(body).unwrap(), before);
+    assert_eq!(world.body(body).unwrap().motion(), before);
     assert_eq!(world.part_body(root), Some(body));
     assert_eq!(world.part_body(child), Some(body));
     assert_eq!(world.cluster(body).unwrap().welds(), &[bridge]);
-    assert_eq!(world.aerodynamics(body), Some(properties));
+    assert!(
+        matches!(world.aerodynamics(body), Some(Aerodynamics::Simple(actual)) if *actual == properties)
+    );
     assert_eq!(world.validate_clusters(), Ok(()));
 }
 
@@ -540,7 +555,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
         Ok(())
     );
     let updated = match world.body(body) {
-        Some(value) => *value,
+        Some(value) => value.motion(),
         None => panic!("missing body"),
     };
     assert_eq!(updated.state().linear_velocity(), Vec3::X);
@@ -553,7 +568,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
         ),
         Err(ClusterError::InvalidMotion)
     );
-    assert_eq!(world.body(body), Some(&updated));
+    assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
     let invalid = crate::cluster::MassTransfer {
         linear_impulse: Vec3::splat(f64::NAN),
         ..transfer
@@ -562,7 +577,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
         world.set_part_mass_with_transfer(root, mass, invalid),
         Err(ClusterError::InvalidMotion)
     );
-    assert_eq!(world.body(body), Some(&updated));
+    assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
     let overflow = crate::cluster::MassTransfer {
         world_origin: Vec3::splat(f64::MAX),
         linear_impulse: Vec3::splat(f64::MAX),
@@ -573,7 +588,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
             .set_part_mass_with_transfer(root, mass, overflow)
             .is_err()
     );
-    assert_eq!(world.body(body), Some(&updated));
+    assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
     assert_eq!(world.cluster_part(root).map(ClusterPart::mass), Some(mass));
     let unlinked = part(&mut world, body);
     assert_eq!(
@@ -584,7 +599,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
         ),
         Err(ClusterError::InvalidTopology)
     );
-    assert_eq!(world.body(body), Some(&updated));
+    assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
 }
 
 #[test]
@@ -867,6 +882,143 @@ fn part_force_source_uses_part_transform_and_keeps_target_identity() {
         world.body(body).map(|body| body.forces().torque()),
         Some(Vec3::Z * 0.5)
     );
+}
+
+#[test]
+fn part_force_source_snapshot_commits_only_after_full_step()
+-> Result<(), Box<dyn std::error::Error>> {
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let root = world.enable_cluster(body)?;
+        let part = world.add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY)?,
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::new(Vec3::X, kapitsa_math::Quat::IDENTITY),
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )?;
+        let source = world.add_force_source_for_part(part, Vec3::ZERO, Vec3::Y * 10.0)?;
+        let step = |world: &mut PhysicsWorld| {
+            if sharded {
+                world.step_with_shards(
+                    1e-6,
+                    &mut [Vec::new(), Vec::new()],
+                    &super::super::tests::ScopedThreadExecutor,
+                    2,
+                )
+            } else {
+                world.step(1e-6)
+            }
+        };
+        step(&mut world)?;
+        let snapshot = world.part_force_source_wrenches().to_vec();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].source, source);
+        assert_eq!(snapshot[0].part, part);
+        assert_eq!(snapshot[0].body, body);
+        assert_eq!(snapshot[0].force, Vec3::Y * 10.0);
+        assert_eq!(snapshot[0].moment, Vec3::Z * 5.0);
+        let center = world
+            .body(body)
+            .ok_or("body")?
+            .motion()
+            .world_center_of_mass()?
+            .ok_or("center")?;
+        let bad = world.add_gravity(crate::gravity::CentralGravity::new(center, 1.0)?)?;
+        assert!(step(&mut world).is_err());
+        assert_eq!(world.part_force_source_wrenches(), snapshot.as_slice());
+        world.remove_gravity(bad).ok_or("gravity")?;
+        world.set_force_source_enabled(source, false)?;
+        step(&mut world)?;
+        assert!(world.part_force_source_wrenches().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn part_gravity_snapshot_balances_uniform_field_and_rolls_back()
+-> Result<(), Box<dyn std::error::Error>> {
+    for sharded in [false, true] {
+        let mut world = PhysicsWorld::new();
+        let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let root = world.enable_cluster(body)?;
+        let child = world.add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY)?,
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::new(Vec3::X, kapitsa_math::Quat::IDENTITY),
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )?;
+        let uniform = world.add_gravity(crate::gravity::UniformGravity::new(Vec3::Y * -10.0)?)?;
+        let step = |world: &mut PhysicsWorld| {
+            if sharded {
+                world.step_with_shards(
+                    1e-6,
+                    &mut [Vec::new(), Vec::new()],
+                    &super::super::tests::ScopedThreadExecutor,
+                    2,
+                )
+            } else {
+                world.step(1e-6)
+            }
+        };
+        step(&mut world)?;
+        let snapshot = world.part_gravity_wrenches().to_vec();
+        assert_eq!(snapshot.len(), 2);
+        let root_load = snapshot
+            .iter()
+            .find(|load| load.part == root)
+            .ok_or("root")?;
+        let child_load = snapshot
+            .iter()
+            .find(|load| load.part == child)
+            .ok_or("child")?;
+        assert_eq!(root_load.force, Vec3::Y * -10.0);
+        assert_eq!(child_load.force, Vec3::Y * -10.0);
+        assert_eq!(root_load.moment, Vec3::Z * 5.0);
+        assert_eq!(child_load.moment, Vec3::Z * -5.0);
+        let center = world
+            .body(body)
+            .ok_or("body")?
+            .motion()
+            .world_center_of_mass()?
+            .ok_or("center")?;
+        let bad = world.add_gravity(crate::gravity::CentralGravity::new(center, 1.0)?)?;
+        assert!(step(&mut world).is_err());
+        assert_eq!(world.part_gravity_wrenches(), snapshot.as_slice());
+        world.remove_gravity(bad).ok_or("gravity")?;
+        world.remove_gravity(uniform).ok_or("uniform gravity")?;
+        step(&mut world)?;
+        assert!(world.part_gravity_wrenches().is_empty());
+    }
+    Ok(())
 }
 
 #[test]
@@ -1166,6 +1318,7 @@ fn part_collider_ownership_rejects_legacy_structural_edits() {
     let id = world
         .add_part_collider(part, collider)
         .expect("part collider");
+    assert_eq!(world.collider_part(id), Some(part));
     assert_eq!(
         world.cluster_part(part).map(ClusterPart::colliders),
         Some(&[id][..])
@@ -1193,6 +1346,7 @@ fn part_collider_ownership_rejects_legacy_structural_edits() {
     assert_eq!(world.validate_clusters(), Ok(()));
 
     assert!(world.remove_part_collider(id).is_ok());
+    assert_eq!(world.collider_part(id), None);
     assert_eq!(
         world.cluster_part(part).map(ClusterPart::colliders),
         Some(&[][..])
@@ -1396,6 +1550,162 @@ fn invalid_merge_leaves_cluster_topology_unchanged() {
     assert_eq!(world.part_body(first_part), Some(first));
     assert_eq!(world.part_body(second_part), Some(second));
     assert_eq!(world.validate_clusters(), Ok(()));
+}
+
+#[test]
+fn pending_weld_split_plan_uses_staged_loads_and_prediction()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::world::StepError;
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+    let root = world.enable_cluster(body)?;
+    let child = world.add_cluster_part(
+        root,
+        ClusterPartDesc {
+            local_transform: Transform::identity(),
+            mass,
+            colliders: Vec::new(),
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        },
+        WeldDesc {
+            frame_a: JointFrame::IDENTITY,
+            frame_b: JointFrame::IDENTITY,
+            strength: WeldStrength::Breakable {
+                max_force: Some(4.0),
+                max_torque: None,
+            },
+            stiffness: WeldStiffness {
+                linear: 1.0,
+                angular: 1.0,
+            },
+        },
+    )?;
+    world.add_force_source_for_part(child, Vec3::ZERO, Vec3::X * 10.0)?;
+    let result = world.with_force_source_updates(|world| {
+        let motion = world
+            .body(body)
+            .ok_or(StepError::InvalidStepResults)?
+            .motion();
+        let predicted =
+            crate::rigid_body::predict(&motion, 0.01).map_err(|_| StepError::InvalidStepResults)?;
+        world.collision_system.begin_step();
+        world.collision_system.stage_prediction(body, predicted);
+        let plans = world
+            .prepare_pending_weld_splits(1e-12, 1e-12)
+            .map_err(|_| StepError::InvalidStepResults)?;
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].prepared_bodies[0].state().linear_velocity(),
+            predicted.linear_velocity()
+        );
+        assert_eq!(world.part_body(child), Some(body));
+        world.collision_system.abort_step();
+        Err::<(), _>(StepError::InvalidDeltaTime)
+    });
+    assert!(result.is_err());
+    assert_eq!(world.part_body(child), Some(body));
+    assert_eq!(world.cluster(body).ok_or("cluster")?.weld_count(), 1);
+    Ok(())
+}
+
+#[test]
+fn prepared_splits_commit_in_one_batch() -> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let mut roots = Vec::new();
+    let mut plans = Vec::new();
+    for _ in 0..2 {
+        let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+        let root = world.enable_cluster(body)?;
+        let child = world.add_cluster_part(
+            root,
+            ClusterPartDesc {
+                local_transform: Transform::identity(),
+                mass,
+                colliders: Vec::new(),
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+            WeldDesc {
+                frame_a: JointFrame::IDENTITY,
+                frame_b: JointFrame::IDENTITY,
+                strength: WeldStrength::Unbreakable,
+                stiffness: WeldStiffness {
+                    linear: 1.0,
+                    angular: 1.0,
+                },
+            },
+        )?;
+        let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+        roots.push((body, child, weld));
+    }
+    for (body, _, weld) in &roots {
+        plans.push(world.prepare_weld_split(*body, &[*weld])?);
+    }
+    let results = world.commit_weld_splits(plans)?;
+    assert_eq!(results.len(), 2);
+    for (index, (body, child, weld)) in roots.iter().enumerate() {
+        assert_eq!(results[index].len(), 2);
+        assert_eq!(results[index][0], *body);
+        assert_eq!(world.part_body(*child), Some(results[index][1]));
+        assert!(world.weld(*weld).is_none());
+    }
+    assert_eq!(world.validate_clusters(), Ok(()));
+    Ok(())
+}
+
+#[test]
+fn split_preparation_uses_staged_motion_without_mutating_world()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut world = PhysicsWorld::new();
+    let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+    let body = world.add_body(RigidBody::new_dynamic(Transform::identity(), mass)?)?;
+    let root = world.enable_cluster(body)?;
+    let child = world.add_cluster_part(
+        root,
+        ClusterPartDesc {
+            local_transform: Transform::identity(),
+            mass,
+            colliders: Vec::new(),
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        },
+        WeldDesc {
+            frame_a: JointFrame::IDENTITY,
+            frame_b: JointFrame::IDENTITY,
+            strength: WeldStrength::Unbreakable,
+            stiffness: WeldStiffness {
+                linear: 1.0,
+                angular: 1.0,
+            },
+        },
+    )?;
+    let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+    let mut motion = world.body(body).ok_or("body")?.motion();
+    motion.set_linear_velocity(Vec3::X * 3.0)?;
+    let plan = world.prepare_weld_split_for_motion(body, &[weld], motion)?;
+    assert_eq!(
+        world.body(body).ok_or("body")?.state().linear_velocity(),
+        Vec3::ZERO
+    );
+    assert_eq!(world.part_body(child), Some(body));
+    assert!(world.weld(weld).is_some());
+    let bodies = world.commit_weld_split(plan)?;
+    assert_eq!(bodies.len(), 2);
+    for id in bodies {
+        assert_eq!(
+            world
+                .body(id)
+                .ok_or("split body")?
+                .state()
+                .linear_velocity(),
+            Vec3::X * 3.0
+        );
+    }
+    assert_eq!(world.validate_clusters(), Ok(()));
+    Ok(())
 }
 
 #[test]

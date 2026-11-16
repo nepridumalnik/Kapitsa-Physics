@@ -6,7 +6,7 @@ use crate::{
         IterationRange, JointConstraint, JointIterations, JointSolver, JointSolverOptions,
         JointSolverStep, JointTolerance, JointWorkspace,
     },
-    rigid_body::RigidBody,
+    rigid_body::BodyMotion,
 };
 #[cfg(feature = "bench-internals")]
 use crate::{mass::MassProperties, rigid_body::BodyType, transform::Transform};
@@ -118,6 +118,36 @@ struct SolverPoint {
     tangent_a: Vec3,
     tangent_b: Vec3,
     restitution_target: f64,
+}
+
+impl SolverPoint {
+    /// Reconstructs the accumulated world-space impulse on body B, including
+    /// warm-start and both tangent components. Body A receives its negative.
+    fn accumulated_impulse(self, contact: ContactPoint) -> Result<Vec3, CollisionError> {
+        self.normal
+            .checked_mul_scalar(contact.normal_impulse)
+            .and_then(|normal| {
+                self.tangent_a
+                    .checked_mul_scalar(contact.tangent_impulse[0])
+                    .and_then(|tangent| normal.checked_add(tangent))
+            })
+            .and_then(|impulse| {
+                self.tangent_b
+                    .checked_mul_scalar(contact.tangent_impulse[1])
+                    .and_then(|tangent| impulse.checked_add(tangent))
+            })
+            .ok_or(CollisionError::ArithmeticOverflow)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static NONZERO_CONTACT_WARM_STARTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_nonzero_contact_warm_starts() -> usize {
+    NONZERO_CONTACT_WARM_STARTS.with(|count| count.replace(0))
 }
 
 enum ColoredConstraintKind {
@@ -429,7 +459,7 @@ fn velocity_projection_work(
 
 #[cfg(feature = "bench-internals")]
 pub(crate) fn body_energy_components(
-    body: &RigidBody,
+    body: &BodyMotion,
     state: crate::rigid_body::BodyState,
     gravity: Option<CentralGravity>,
 ) -> crate::joint::diagnostics::EnergyComponents {
@@ -750,8 +780,13 @@ impl SolverWorkspace {
         }) {
             return Ok(false);
         }
+        // The reduction solves contacts both before and after aggregation.
+        // A manifold stores only one velocity impulse and one application
+        // point per side, so it cannot represent both solves faithfully.
+        // Until a multi-solve ledger exists, use the ordinary solver rather
+        // than publish an incomplete contact snapshot.
         if !manifolds.is_empty() {
-            self.solve(bodies, manifolds, config)?;
+            return Ok(false);
         }
 
         let topology_changed = self.reduced_fixed_tree_signature.len() != joints.len()
@@ -1000,7 +1035,7 @@ impl SolverWorkspace {
         let angular_velocity = aggregate_inertia_world
             .solve_spd(angular_momentum)
             .map_err(|_| CollisionError::ArithmeticOverflow)?;
-        let mut aggregate_body = RigidBody::new_dynamic(root_transform, aggregate_mass)
+        let mut aggregate_body = BodyMotion::new_dynamic(root_transform, aggregate_mass)
             .map_err(|_| CollisionError::ArithmeticOverflow)?;
         aggregate_body
             .set_linear_velocity(linear_velocity)
@@ -1102,6 +1137,8 @@ impl SolverWorkspace {
                     source_point.normal_impulse_increase_sum =
                         solved_point.normal_impulse_increase_sum;
                     source_point.tangent_impulse = solved_point.tangent_impulse;
+                    source_point.velocity_points = solved_point.velocity_points;
+                    source_point.velocity_impulse = solved_point.velocity_impulse;
                 }
             }
         }
@@ -2676,9 +2713,7 @@ impl SolverWorkspace {
     ) -> Result<(), CollisionError> {
         for point in points.iter().copied() {
             let contact = contact_at(manifolds, point)?;
-            let impulse = point.normal * contact.normal_impulse
-                + point.tangent_a * contact.tangent_impulse[0]
-                + point.tangent_b * contact.tangent_impulse[1];
+            let impulse = point.accumulated_impulse(*contact)?;
             apply_pair_impulse(
                 bodies,
                 point.body_a,
@@ -2687,6 +2722,10 @@ impl SolverWorkspace {
                 point.position_b,
                 impulse,
             )?;
+            #[cfg(test)]
+            if impulse != Vec3::ZERO {
+                NONZERO_CONTACT_WARM_STARTS.with(|count| count.set(count.get() + 1));
+            }
         }
         Ok(())
     }
@@ -2705,8 +2744,12 @@ impl SolverWorkspace {
         manifolds: &mut [SolverManifold],
     ) -> Result<(), CollisionError> {
         for point in points.iter().copied() {
+            contact_mut(manifolds, point)?.velocity_points =
+                Some([point.position_a, point.position_b]);
             let contact = *contact_at(manifolds, point)?;
             let (body_a, body_b) = bodies_at(bodies, point.body_a, point.body_b)?;
+            let transforms = [body_a.state().transform(), body_b.state().transform()];
+            contact_mut(manifolds, point)?.velocity_transforms = Some(transforms);
             let denominator = effective_mass(
                 &body_a.body,
                 &body_b.body,
@@ -2783,6 +2826,8 @@ impl SolverWorkspace {
                 )?;
             }
             contact_mut(manifolds, point)?.tangent_impulse = tangent_impulse;
+            let impulse = point.accumulated_impulse(*contact_at(manifolds, point)?)?;
+            contact_mut(manifolds, point)?.velocity_impulse = Some(impulse);
         }
         Ok(())
     }
@@ -2884,8 +2929,8 @@ fn parallel_axis(offset: Vec3, mass: f64) -> Mat3 {
 }
 
 fn solve_tangent_impulse(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     point: SolverPoint,
     contact: ContactPoint,
     material: SolverMaterial,
@@ -2981,8 +3026,8 @@ fn solve_tangent_impulse(
 }
 
 fn effective_mass(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     position_a: Vec3,
     position_b: Vec3,
     direction: Vec3,
@@ -2991,8 +3036,8 @@ fn effective_mass(
 }
 
 fn effective_cross_mass(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     position_a: Vec3,
     position_b: Vec3,
     measurement: Vec3,
@@ -3010,8 +3055,8 @@ fn effective_cross_mass(
 }
 
 fn relative_velocity(
-    body_a: &RigidBody,
-    body_b: &RigidBody,
+    body_a: &BodyMotion,
+    body_b: &BodyMotion,
     position_a: Vec3,
     position_b: Vec3,
 ) -> Result<Vec3, CollisionError> {

@@ -1,4 +1,4 @@
-use crate::{collision::CollisionPair, transform::Transform};
+use crate::{collision::CollisionPair, rigid_body::BodyState, transform::Transform};
 use kapitsa_math::Vec3;
 
 use super::CollisionError;
@@ -15,6 +15,15 @@ pub(crate) struct ContactPoint {
     /// Sum of positive solver updates only; not the net impulse change.
     pub(crate) normal_impulse_increase_sum: f64,
     pub(crate) tangent_impulse: [f64; 2],
+    /// World-space application points prepared for the velocity solve, not
+    /// points reconstructed after position correction. Absent until recorded.
+    pub(crate) velocity_points: Option<[Vec3; 2]>,
+    /// Body poses at the velocity solve, before positional projection.
+    pub(crate) velocity_transforms: Option<[Transform; 2]>,
+    /// Complete before/after states for an isolated discrete solver event.
+    pub(crate) isolated_velocity_states: Option<[[BodyState; 2]; 2]>,
+    /// Accumulated velocity impulse on B in world coordinates, when solved.
+    pub(crate) velocity_impulse: Option<Vec3>,
 }
 
 impl ContactPoint {
@@ -27,6 +36,10 @@ impl ContactPoint {
         normal_impulse: 0.0,
         normal_impulse_increase_sum: 0.0,
         tangent_impulse: [0.0; 2],
+        velocity_points: None,
+        velocity_transforms: None,
+        isolated_velocity_states: None,
+        velocity_impulse: None,
     };
 
     pub(crate) fn from_world(
@@ -68,6 +81,10 @@ impl ContactPoint {
             normal_impulse: 0.0,
             normal_impulse_increase_sum: 0.0,
             tangent_impulse: [0.0; 2],
+            velocity_points: None,
+            velocity_transforms: None,
+            isolated_velocity_states: None,
+            velocity_impulse: None,
         })
     }
 }
@@ -76,6 +93,7 @@ impl ContactPoint {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ContactManifold {
     pub(crate) pair: CollisionPair,
+    pub(crate) ccd_event: Option<crate::world::CcdContactEvent>,
     points: [ContactPoint; 4],
     world_points: [Vec3; 4],
     count: u8,
@@ -85,6 +103,7 @@ impl ContactManifold {
     pub(crate) const fn new(pair: CollisionPair) -> Self {
         Self {
             pair,
+            ccd_event: None,
             points: [ContactPoint::EMPTY; 4],
             world_points: [Vec3::ZERO; 4],
             count: 0,

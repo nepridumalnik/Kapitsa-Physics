@@ -93,13 +93,59 @@ are required for motion and force changes on clustered bodies.
 
 ## Fracture and runtime
 
-Manual weld removal is independent of automatic fracture. Automatic fracture is
-disabled by default and, when explicitly enabled, uses the configured elastic
-graph model. Cyclic load sharing depends on weld stiffness and is an estimate,
-not a FEM deformation model. A failed or non-convergent solve cannot cause
-fracture. Selected welds are removed together at a permitted step boundary.
-Contact impulses must include their actual vector components and application
-points; XPBD position multipliers are not automatically physical impulses.
+Manual weld removal and restricted automatic tree-weld fracture are implemented;
+see the policy below. An elastic graph load solver is not implemented.
+Diagnostic snapshots retain some part-owned aerodynamic wrenches, but they are
+not a complete load ledger for arbitrary configurations. Do not interpret the
+net cluster wrench as the force on any weld.
+
+The simple `AerodynamicSurface` path applies a body-level timestep-dependent
+drag limit and a coupled lift correction after summing surfaces. The raw force
+from a particular surface is therefore not necessarily its applied force.
+`PhysicsWorld::simple_surface_corrections` publishes the raw and applied
+body-level drag and lift wrenches after a successful full step. Their difference
+is not attributed to any part. `raw_simple_surface_wrenches` records the raw
+drag and lift of each body- or part-targeted surface before that correction;
+they are not generally the applied loads. `check_part_attribution` accepts a
+complete part-only snapshot only when raw and applied aggregate wrenches match
+exactly; it rejects an unallocated correction rather than ignoring it. A
+missing aggregate, including cancelling loads, must likewise not be assumed
+attributable. A future weld ledger must adopt and document a
+physically justified allocation policy before using these corrected loads; it
+must not silently use uncorrected per-surface values as weld loads.
+
+For separate rigid bodies joined by a breakable `Joint`, the existing velocity
+constraint solver evaluates its reaction from accumulated impulses, including
+the effects of applied aerodynamic forces, and compares force and torque at the
+joint anchor against their thresholds. This is a discrete solver reaction, not
+a stress or material failure model. A differential-drag regression covers the
+equal-mass fixed-joint case.
+
+A future weld-fracture implementation must account for external loads per part
+and the inertial wrench of each component, including moments about a common
+point. A tree edge can be assessed from the balance of either component cut by
+that edge; for cycles, load sharing is statically indeterminate without an
+explicit mechanical model. Contact impulses must include their actual vector
+components and application points; XPBD position multipliers are not
+automatically physical impulses. Any eventual fracture policy must specify
+solver convergence and failure handling before removing welds.
+
+The velocity contact solver applies the normal and both tangent components at
+separate body-side contact positions: its pair impulse acts negatively on A
+and positively on B. Warm-start impulses are applied before iterative updates;
+the final accumulated contact components include that warm start. The positive
+normal-update sum used for impact detection is not a net impulse. Contact
+events instead expose a representative point and normal-impulse summary, not a
+complete vector impulse ledger. CCD has separate contact solves, potentially
+more than one per step, while the position solver applies separate corrections.
+Consequently a future transactional ledger must cover every applicable solve
+and preserve the relevant application positions; neither events nor the last
+manifold alone are sufficient to claim a complete weld balance.
+`PhysicsWorld::contact_impulses_ccd_clipped()` reports whether the last
+successful full step clipped a dynamic body. CCD clipping sets velocities to
+zero without recording a physical impulse, so such a snapshot cannot support a
+complete load balance even if `contact_impulses_omitted_points()` is zero. A
+false clipping flag does not establish completeness of other solver paths.
 
 Runtime topology commands execute in existing FIFO order at step boundaries.
 Each structural command is atomic; no stronger batch atomicity is implied.
@@ -119,3 +165,121 @@ This inventory describes the baseline, not implemented cluster behavior.
 | `add_joint` (`crates/kapitsa-core/src/world.rs`) | Requires distinct live bodies and stores body endpoints. Part targets and suspension require changes to preparation and lifecycle while preserving the legacy entry point. |
 | Async commands and batch (`crates/kapitsa/src/runtime/asynchronous/marshalling/command.rs`, `client.rs`) | Commands delegate to core; body mutations and batch copyback use mutable body access. Both paths need migration. Existing `StepFailedAfterApply` means an applied change can outlive a failed step without a published snapshot; it is not a rollback guarantee. |
 | Rocket fixtures and consumers (`crates/kapitsa/src/runtime/modular_rocket_fixture.rs`, `examples/rocket-flight-viewer/src/flight.rs`) | Existing assemblies use separate bodies and joints; their fixed-joint baseline and existing behaviors must remain available. |
+# Automatic weld failure (restricted)
+
+`PhysicsWorld::set_automatic_weld_failure` opts full steps into instantaneous
+tree-weld strength checks; it is disabled by default. Specify absolute force
+and moment equilibrium tolerances in N and N·m. The force and torque limits
+compare magnitudes at the child-side weld anchor; equality does not break a
+weld. Under `Strict`, a step with a breakable cluster fails before commit when
+its loads cannot be certified. Under `Realtime`, an incomplete load ledger skips
+automatic failure for that cluster and records it in `StepDiagnostics` after
+commit; `weld_collision_load_clusters` identifies the subset affected by contact,
+CCD clipping or unresolved collision ownership. No reaction is inferred.
+Other balance, topology, numerical and storage
+errors still fail the step. Currently certification requires a dynamic cluster with no
+accumulated body forces, only part-targeted persistent force sources,
+certified part-owned aerodynamic loads, and gravity sampled uniformly at the cluster center of mass, with
+no joints or chunks in the world. Gravity gradients across the cluster are not
+modeled. A cluster may have colliders; contact-free clusters can be checked,
+and one narrowly supported discrete contact can be checked using the separate
+impulse criterion described below. Contacts on unrelated bodies do not
+invalidate a contact-free cluster. If manifold ownership cannot be resolved,
+all cluster certificates are rejected. Absence of contact is not inferred from
+an empty impulse log. CCD forces remain unsupported.
+Low-level shard commits do not perform automatic weld failure.
+
+The separate diagnostic `part_hull_weld_reactions` also accepts part-owned
+`HullSection` loads from the same successful step. It rejects wings, simple
+surfaces, primary and geometry-based aerodynamics, and the other unsupported
+paths above. `part_aerodynamic_weld_reactions` also accepts part-owned wings;
+automatic failure uses the corresponding pending hull and wing snapshots.
+
+Part-targeted `AerodynamicSurface` loads are certified only when all configured
+surfaces have raw records from the same step, their sums match the recorded
+aggregate, and applied drag and lift exactly equal their raw values. Body-targeted
+surfaces and unattributed corrections are rejected. The
+evaluator now records an explicit zero correction when the aggregate force and
+moment vanish, including when individual loads cancel. An absent correction is
+still not a certificate of zero individual loads: missing surface records in
+an atmosphere cause an explicit incomplete-load error. Surfaces sampled at
+zero local density explicitly record zero force and moment after their target
+and position are validated. The explicit global
+`Atmosphere::Vacuum` configuration certifies zero aerodynamic loads without
+surface records, including part-owned aerodynamic geometry; this does not apply
+to locally zero-density samples. Collider and other load-path restrictions
+remain in force even in vacuum.
+
+For part-owned Mesh geometry in air, the full-step pressure workspace must be
+staged from the same patches and flow as the applied impact-pressure wrench;
+its patch-order total must match that applied wrench exactly. Every pressure
+owner must be a part in the certified tree. The owner wrenches are evaluated
+about the assembly COM and incorporated into the pending weld balance. Missing
+staging is rejected, including when COM density is zero. Part-owned voxel wave
+loads use the existing part hull wrench snapshot; mesh wave-source geometry is
+geometry-only. Joints and unsupported contact paths remain excluded as
+described above.
+This certifies attribution of the implemented Mach >= 5 impact approximation,
+not experimental accuracy of the pressure model.
+
+The reaction is evaluated at the start of the timestep, while the split uses
+the predicted end-of-step rigid velocity field. This is a discrete failure
+policy, not an impact, fracture propagation, or within-step failure-time model.
+
+The contact snapshot records velocity-solver impulses, including warm-start and
+friction, but a discrete impulse is not an instantaneous force at the start of
+the step. CCD impacts can occur at different times and `ClipIsland` may alter
+velocity without a physical impulse. Zero omitted points alone is not sufficient
+to certify the full impulse ledger.
+Each `ContactImpulse` additionally carries optional body transforms from its
+velocity solve, before positional correction. These are diagnostic witnesses,
+not a certificate of simultaneous impacts or complete velocity changes.
+For a two-body discrete solver island, possibly with multiple manifolds, without joints, CCD solves or clipping,
+`isolated_velocity_states` also records before/after states when position
+projection did not change either pose. The record is committed with the contact
+snapshot and retained on failure. It does not by itself certify all physical
+load paths; CCD events are deliberately excluded.
+
+`cluster::impulse::tree_impulse_reactions` provides a separate fixed-pose,
+simultaneous impulse-balance primitive. The caller supplies a complete per-part
+external ledger and the corresponding changes of assembly COM and angular
+velocities; it checks total momentum balance and returns parent-on-child impulse
+reactions. Its tolerances are in N·s and N·m·s, not N or N·m. It does not
+certify contact snapshots or process sequential CCD impacts. `ImpulseStrength` supplies separate
+linear and angular impulse limits; angular reactions must first be shifted to
+the weld anchor with `ImpulseReaction::at_anchor`. It does not derive impulse
+limits from force limits.
+`PhysicsWorld::set_weld_impulse_strength` stores optional limits on breakable
+welds, preserving them through cluster topology changes.
+`set_automatic_weld_impulse_tolerances` separately stores absolute momentum
+balance tolerances in N·s and N·m·s; these are not force-balance tolerances.
+With automatic weld failure enabled, a configured tolerance permits checks for
+one discrete isolated two-body island with recorded owners for all manifold points and solver
+states, no omitted impulses, CCD solves or clipping, and no pose change during
+position projection. The force ledger must also be certified. The solver's
+momentum change is checked against the sum of attributed impulses and moments at the contact pose;
+force and impulse candidates are committed together. An unset per-weld impulse
+limit disables that weld's impulse criterion. Unsupported cases retain strict
+refusal or realtime diagnostic skipping; sequential CCD fracture is unsupported.
+
+### CCD fracture certification gap
+
+A possible first supported CCD case is one complete, isolated two-body impact
+with no joints, clipping, or other impulses on the assembly during the step.
+This is not implemented. CCD contact impulses carry a diagnostic witness with
+the event time and the solver's before/after body states. The latter state may
+include position projection; velocity-solve points and transforms refer to the
+pre-projection pose. An impulse-balance certificate must reject a pose change or
+account for it explicitly. The sequential path can
+solve and resweep further impacts; the parallel path commits its own island
+results. A replay can discard earlier CCD solves. Consequently, a single entry
+in the final journal alone does not certify that it is the only relevant event.
+
+Before enabling fracture for that case, the implementation must establish
+complete ownership and absence of other
+velocity changes, and verify the linear and angular momentum balance at the
+impact pose. The implementation must also define and test how a split at impact
+affects the remainder of the timestep; applying a split only at the end is not
+equivalent to resolving the post-impact motion of separate parts. Until then,
+CCD remains a strict refusal or a diagnosed realtime skip, not an inferred
+discrete event.

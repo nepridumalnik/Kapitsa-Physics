@@ -3,7 +3,7 @@ use kapitsa_math::{CholeskyError, Mat3, Quat, Vec3};
 use crate::{
     collision::CollisionError,
     mass::MassProperties,
-    rigid_body::{BodyError, BodyType, RigidBody},
+    rigid_body::{BodyError, BodyMotion, BodyType},
     transform::Transform,
 };
 
@@ -22,7 +22,7 @@ impl SolverMass {
         center: Vec3::ZERO,
     };
 
-    pub(crate) fn from_body(body: &RigidBody) -> Result<Self, CollisionError> {
+    pub(crate) fn from_body(body: &BodyMotion) -> Result<Self, CollisionError> {
         if body.physics().body_type() != BodyType::Dynamic {
             return Ok(Self::STATIC);
         }
@@ -137,7 +137,7 @@ impl SolverMassSlot {
 
     pub(crate) fn resolve(
         &mut self,
-        body: &RigidBody,
+        body: &BodyMotion,
     ) -> Result<(SolverMass, SolverMassCacheStatus), CollisionError> {
         if body.physics().body_type() != BodyType::Dynamic {
             if self.cached_mass.is_some()
@@ -233,7 +233,7 @@ fn map_cholesky_error(error: CholeskyError) -> CollisionError {
     }
 }
 
-impl RigidBody {
+impl BodyMotion {
     /// Position correction driven by a mass resolved for the current pose.
     ///
     /// The caller must guarantee that `cached` belongs to this body's current

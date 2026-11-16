@@ -1,5 +1,8 @@
 //! Metadata for rigid assemblies made up of parts and welds.
 
+#[allow(dead_code)]
+pub(crate) mod balance;
+pub mod impulse;
 pub(crate) mod mass;
 #[allow(dead_code)]
 pub(crate) mod motion;

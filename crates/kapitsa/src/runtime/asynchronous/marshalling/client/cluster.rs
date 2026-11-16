@@ -110,6 +110,124 @@ impl PhysicsClient {
             _ => Err(PhysicsClientError::UnexpectedResult),
         }
     }
+    /// Replaces explicit finite wings in the stable part-local frame; empty clears.
+    /// Takes owned configuration and applies it in queue order, even while paused.
+    /// Loads are additive to hull, geometry and other explicit surfaces; callers
+    /// must avoid double counting. Ownership follows PartId through topology edits.
+    /// This metadata edit is unsupported in atomic motion batches.
+    pub async fn set_part_aerodynamic_wings(
+        &self,
+        part: PartId,
+        wings: Vec<kapitsa_core::aerodynamics::wing::WingSurface>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartAerodynamicWings { part, wings })
+                .await?,
+        )
+    }
+    /// Replaces explicit hull sections in the stable part-local frame; empty clears.
+    /// Takes owned configuration (including shared immutable Mach data) and applies
+    /// it in queue order, even while paused. Loads remain additive; no coefficients
+    /// or interference are inferred. Ownership follows PartId through topology edits.
+    /// This metadata edit is unsupported in atomic motion batches.
+    pub async fn set_part_aerodynamic_hull(
+        &self,
+        part: PartId,
+        sections: Vec<kapitsa_core::aerodynamics::hull::HullSection>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartAerodynamicHull { part, sections })
+                .await?,
+        )
+    }
+    /// Replaces a part's Mesh in its local frame; None disables geometric loads.
+    /// Explicit aerodynamic surfaces remain additive and must not duplicate it.
+    pub async fn set_part_aerodynamic_mesh(
+        &self,
+        part: PartId,
+        mesh: Option<kapitsa_core::shape::TriangleMesh>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartAerodynamicMesh { part, mesh })
+                .await?,
+        )
+    }
+    /// Enables collider geometry in place of the part's Mesh configuration.
+    pub async fn set_part_aerodynamic_colliders(
+        &self,
+        part: PartId,
+        enabled: bool,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartAerodynamicColliders { part, enabled })
+                .await?,
+        )
+    }
+    /// Replaces the part-owned assembly wave model. The command is applied in
+    /// queue order and is not supported in atomic motion batches.
+    pub async fn set_part_voxel_wave(
+        &self,
+        part: PartId,
+        model: Option<kapitsa_core::aerodynamics::wave::VoxelWave>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartVoxelWave { part, model })
+                .await?,
+        )
+    }
+
+    /// Sets a part-local mesh used only as geometry for the assembly wave model.
+    pub async fn set_part_wave_source_mesh(
+        &self,
+        part: PartId,
+        mesh: Option<kapitsa_core::shape::TriangleMesh>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartWaveSourceMesh { part, mesh })
+                .await?,
+        )
+    }
+
+    /// Selects part-owned colliders as geometry-only inputs to the wave model.
+    pub async fn set_part_wave_source_colliders(
+        &self,
+        part: PartId,
+        enabled: bool,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartWaveSourceColliders { part, enabled })
+                .await?,
+        )
+    }
+
+    /// Changes the collider transform in its owner's part-local frame (metres).
+    pub async fn set_part_collider_transform(
+        &self,
+        part: PartId,
+        collider: ColliderId,
+        transform: kapitsa_core::transform::Transform,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetPartColliderTransform {
+                part,
+                collider,
+                transform,
+            })
+            .await?,
+        )
+    }
+    /// Sets the solver body's collider-derived aerodynamic resolution and budget.
+    pub async fn set_collider_tessellation(
+        &self,
+        body: BodyId,
+        config: kapitsa_core::aerodynamics::ColliderTessellation,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetColliderTessellation { body, config })
+                .await?,
+        )
+    }
+
     /// Removes a collider owned by a cluster part.
     pub async fn remove_part_collider(&self, id: ColliderId) -> Result<(), PhysicsClientError> {
         expect_done(

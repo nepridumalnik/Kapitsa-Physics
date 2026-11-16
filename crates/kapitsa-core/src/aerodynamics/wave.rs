@@ -1,0 +1,538 @@
+//! Wave drag of a slender axisymmetric body in linearized supersonic flow.
+//!
+//! This is an independent numerical primitive, not a transonic closure or a
+//! complete aircraft model. The inputs are samples of dA/dx, in metres, at
+//! equally spaced positions. The endpoints must both be zero. Between samples
+//! dA/dx is linear, so the second derivative is piecewise constant. The
+//! logarithmic singularity is integrated analytically for each interval pair.
+//! See NACA TN 3478, equations (1) and (2):
+//! <https://ntrs.nasa.gov/api/citations/19930084271/downloads/19930084271.pdf>.
+
+use std::{f64::consts::PI, sync::Arc};
+
+/// Errors in the input or numerical evaluation of wave drag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveDragError {
+    InvalidInput,
+    UnsupportedMach,
+    ArithmeticOverflow,
+    PrecisionLoss,
+    WorkLimitExceeded,
+    AllocationFailed,
+}
+
+impl std::fmt::Display for WaveDragError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "wave drag evaluation failed: {self:?}")
+    }
+}
+impl std::error::Error for WaveDragError {}
+
+/// Geometry and section settings for an automatically prepared wave-drag model.
+///
+/// The caller must select a slender axisymmetric mesh, a body-local axis (0, 1,
+/// or 2), a section whose axis matches it, an application point, and a grid and
+/// smoothing scale appropriate for the shape. Geometry preparation and the
+/// resulting force are approximate; validate resolution and force convergence.
+/// The model currently represents wave drag, not complete hull aerodynamics.
+pub struct VoxelWave {
+    pub(crate) mesh: Arc<crate::shape::TriangleMesh>,
+    pub(crate) section: super::hull::HullSection,
+    pub(crate) axis: usize,
+    pub(crate) smoothing_radius: usize,
+    pub(crate) geometry_config: super::geometry::GeometryConfig,
+}
+
+impl VoxelWave {
+    /// Constructs the model. Geometry is prepared when the world evaluates it;
+    /// invalid grid settings or geometry are returned as preparation errors.
+    pub fn new(
+        mesh: crate::shape::TriangleMesh,
+        section: super::hull::HullSection,
+        axis: usize,
+        smoothing_radius: usize,
+        geometry_config: super::geometry::GeometryConfig,
+    ) -> Result<Self, super::hull::HullError> {
+        section.validate_voxel_axis(axis)?;
+        Ok(Self {
+            mesh: Arc::new(mesh),
+            section,
+            axis,
+            smoothing_radius,
+            geometry_config,
+        })
+    }
+}
+
+/// A caller-supplied multiplier for the slender-body wave-drag factor.
+///
+/// Values are dimensionless and must come from data or a separately validated
+/// model. They do not make the slender-body approximation valid for other shapes
+/// or nonzero incidence. The domain is inclusive and never extrapolated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaveMachCurve {
+    knots: Arc<[(f64, f64)]>,
+}
+
+impl WaveMachCurve {
+    /// Creates a curve from at least two strictly increasing `(Mach, multiplier)`
+    /// pairs. Both values must be finite and nonnegative.
+    pub fn new(knots: Vec<(f64, f64)>) -> Result<Self, WaveDragError> {
+        if knots.len() < 2
+            || knots.iter().any(|(mach, factor)| {
+                !mach.is_finite() || *mach < 0.0 || !factor.is_finite() || *factor < 0.0
+            })
+            || knots.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(WaveDragError::InvalidInput);
+        }
+        Ok(Self {
+            knots: knots.into(),
+        })
+    }
+
+    /// Returns the linearly interpolated multiplier, without extrapolation.
+    pub fn multiplier(&self, mach: f64) -> Result<f64, WaveDragError> {
+        if !mach.is_finite() || mach < 0.0 {
+            return Err(WaveDragError::InvalidInput);
+        }
+        for pair in self.knots.windows(2) {
+            let (x0, y0) = pair[0];
+            let (x1, y1) = pair[1];
+            if mach == x0 {
+                return Ok(y0);
+            }
+            if mach == x1 {
+                return Ok(y1);
+            }
+            if mach > x0 && mach < x1 {
+                let span = x1 - x0;
+                let t = (mach - x0) / span;
+                let remaining = (x1 - mach) / span;
+                return Ok(if y0 <= y1 {
+                    y0 + t * (y1 - y0)
+                } else {
+                    y1 + remaining * (y0 - y1)
+                });
+            }
+        }
+        Err(WaveDragError::UnsupportedMach)
+    }
+}
+
+/// Computes uniformly spaced `dA/dx` samples from voxel cross sections.
+///
+/// `cell_size` is the spacing in metres and `smoothing_radius` is the radius
+/// of an explicitly chosen centered box filter in cells. Zeros are padded
+/// outside the input, and the returned array includes that padding; its first
+/// and last derivatives are zero. The moving average is applied to areas
+/// before centered differencing. Work and output are bounded by 2048 intervals.
+///
+/// Voxel sections overestimate area and differentiating them amplifies noise.
+/// The caller must choose and validate the smoothing scale and grid resolution
+/// for the shape; this routine does not establish axisymmetry, slenderness,
+/// convergence, or the validity of a wave-drag calculation.
+pub fn area_slopes_from_sections(
+    sections: &[super::geometry::GeometrySection],
+    cell_size: f64,
+    smoothing_radius: usize,
+) -> Result<Vec<f64>, WaveDragError> {
+    Ok(area_profile_from_sections(sections, cell_size, smoothing_radius)?.1)
+}
+
+pub(super) fn area_profile_from_sections(
+    sections: &[super::geometry::GeometrySection],
+    cell_size: f64,
+    smoothing_radius: usize,
+) -> Result<(Vec<f64>, Vec<f64>), WaveDragError> {
+    if sections.is_empty() || !cell_size.is_finite() || cell_size <= 0.0 {
+        return Err(WaveDragError::InvalidInput);
+    }
+    let padding = smoothing_radius
+        .checked_add(2)
+        .ok_or(WaveDragError::WorkLimitExceeded)?;
+    let length = padding
+        .checked_mul(2)
+        .and_then(|n| sections.len().checked_add(n))
+        .ok_or(WaveDragError::WorkLimitExceeded)?;
+    if length > 2049 {
+        return Err(WaveDragError::WorkLimitExceeded);
+    }
+    if sections
+        .iter()
+        .any(|section| !section.area.is_finite() || section.area < 0.0)
+    {
+        return Err(WaveDragError::InvalidInput);
+    }
+    let width = smoothing_radius
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(1))
+        .ok_or(WaveDragError::WorkLimitExceeded)?;
+    let mut smoothed = Vec::new();
+    smoothed
+        .try_reserve_exact(length)
+        .map_err(|_| WaveDragError::AllocationFailed)?;
+    for index in 0..length {
+        let start = index
+            .saturating_sub(padding + smoothing_radius)
+            .min(sections.len());
+        let end = (index + smoothing_radius + 1)
+            .saturating_sub(padding)
+            .min(sections.len());
+        let window = sections
+            .get(start..end)
+            .ok_or(WaveDragError::PrecisionLoss)?;
+        let max_area = window
+            .iter()
+            .fold(0.0_f64, |max, section| max.max(section.area));
+        let area = if max_area == 0.0 {
+            0.0
+        } else {
+            let mut sum = 0.0;
+            let mut correction = 0.0;
+            for section in window {
+                let value = section.area / max_area - correction;
+                let next = sum + value;
+                correction = (next - sum) - value;
+                sum = next;
+            }
+            super::hull::scaled_product(&[max_area, sum], width as f64)
+                .map_err(|_| WaveDragError::ArithmeticOverflow)?
+        };
+        smoothed.push(area);
+    }
+    let mut slopes = Vec::new();
+    slopes
+        .try_reserve_exact(length)
+        .map_err(|_| WaveDragError::AllocationFailed)?;
+    slopes.push(0.0);
+    for pair in smoothed.windows(3) {
+        let delta = pair[2] - pair[0];
+        let slope = super::hull::scaled_product(&[delta.abs(), 0.5], cell_size)
+            .map_err(|_| WaveDragError::ArithmeticOverflow)?;
+        slopes.push(slope.copysign(delta));
+    }
+    slopes.push(0.0);
+    Ok((smoothed, slopes))
+}
+
+pub(super) fn prepare_voxel_wave_drag(
+    geometry: &super::geometry::PreparedGeometry,
+    axis: usize,
+    smoothing_radius: usize,
+) -> Result<PreparedWaveDrag, WaveDragError> {
+    let sections = geometry
+        .sections()
+        .get(axis)
+        .ok_or(WaveDragError::InvalidInput)?;
+    let slopes = area_slopes_from_sections(sections, geometry.cell_size(), smoothing_radius)?;
+    prepare_wave_drag(&slopes)
+}
+
+/// Calculates wave drag in newtons from equally spaced samples of `dA/dx`.
+///
+/// `density` is in kg/m³, `speed` in m/s, and `sound_speed` in m/s. The
+/// distribution must have at least three finite samples with zero endpoints.
+/// The body's length cancels when the source strength `dA/dx` is supplied.
+/// This formula assumes an axisymmetric slender body aligned with the flow,
+/// linearized supersonic conditions, and zero source strength at both ends.
+/// It does not predict transonic drag rise, viscosity, separation or lift.
+/// The `speed > sound_speed` check is necessary but not sufficient for the
+/// linear approximation to be accurate: it does not establish a safe margin
+/// above Mach 1. NACA RM A56I07 reports poor agreement near transonic speeds:
+/// <https://ntrs.nasa.gov/api/citations/19660010455/downloads/19660010455.pdf>.
+/// Work is quadratic and limited to 2048 intervals. The caller must ensure
+/// the source describes a physically valid slender axisymmetric body.
+pub fn wave_drag(
+    area_slopes: &[f64],
+    density: f64,
+    speed: f64,
+    sound_speed: f64,
+) -> Result<f64, WaveDragError> {
+    if !density.is_finite()
+        || density < 0.0
+        || !speed.is_finite()
+        || speed < 0.0
+        || !sound_speed.is_finite()
+        || sound_speed <= 0.0
+    {
+        return Err(WaveDragError::InvalidInput);
+    }
+    validate_slopes(area_slopes)?;
+    if density == 0.0 || speed == 0.0 {
+        return Ok(0.0);
+    }
+    if speed <= sound_speed {
+        return Err(WaveDragError::UnsupportedMach);
+    }
+    prepare_wave_drag(area_slopes)?.magnitude(density, speed, 1.0, speed)
+}
+
+fn validate_slopes(area_slopes: &[f64]) -> Result<(), WaveDragError> {
+    if area_slopes.len() < 3 {
+        return Err(WaveDragError::InvalidInput);
+    }
+    if area_slopes.len() - 1 > 2048 {
+        return Err(WaveDragError::WorkLimitExceeded);
+    }
+    if area_slopes.iter().any(|value| !value.is_finite())
+        || area_slopes.first() != Some(&0.0)
+        || area_slopes.last() != Some(&0.0)
+    {
+        return Err(WaveDragError::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Keeps area and the dimensionless integral separate to avoid prematurely
+/// underflowing or overflowing a squared geometry coefficient.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PreparedWaveDrag {
+    scale: f64,
+    integral: f64,
+}
+
+impl PreparedWaveDrag {
+    pub(super) fn is_zero(self) -> bool {
+        self.scale == 0.0 || self.integral == 0.0
+    }
+
+    pub(super) fn magnitude(
+        self,
+        density: f64,
+        speed: f64,
+        multiplier: f64,
+        component: f64,
+    ) -> Result<f64, WaveDragError> {
+        super::hull::scaled_product(
+            &[
+                density,
+                speed,
+                multiplier,
+                component,
+                self.scale,
+                self.scale,
+                self.integral,
+            ],
+            4.0 * PI,
+        )
+        .map_err(|_| WaveDragError::ArithmeticOverflow)
+    }
+}
+
+pub(super) fn prepare_wave_drag(area_slopes: &[f64]) -> Result<PreparedWaveDrag, WaveDragError> {
+    validate_slopes(area_slopes)?;
+    // g''(x) = ln|x|. Coordinates are in interval widths; the constant
+    // ln(h) cancels because the source strength vanishes at both ends.
+    fn g(x: f64) -> f64 {
+        if x == 0.0 {
+            0.0
+        } else {
+            x * x * (0.5 * x.abs().ln() - 0.75)
+        }
+    }
+    let scale = area_slopes
+        .iter()
+        .fold(0.0_f64, |max, value| max.max(value.abs()));
+    if scale == 0.0 {
+        return Ok(PreparedWaveDrag {
+            scale: 0.0,
+            integral: 0.0,
+        });
+    }
+    let mut integral = 0.0;
+    let mut compensation = 0.0;
+    for (i, pair_i) in area_slopes.windows(2).enumerate() {
+        let di = pair_i[1] / scale - pair_i[0] / scale;
+        for (j, pair_j) in area_slopes.windows(2).enumerate() {
+            let dj = pair_j[1] / scale - pair_j[0] / scale;
+            let k = i.abs_diff(j) as f64;
+            let kernel = if k == 0.0 {
+                -1.5
+            } else if k >= 16.0 {
+                // The direct second difference loses precision at large k.
+                let t = 1.0 / (k * k);
+                k.ln() - t * (1.0 / 12.0 + t * (1.0 / 60.0 + t / 168.0))
+            } else {
+                g(k + 1.0) + g(k - 1.0) - 2.0 * g(k)
+            };
+            let term = di * dj * kernel;
+            let corrected = term - compensation;
+            let next = integral + corrected;
+            compensation = (next - integral) - corrected;
+            integral = next;
+        }
+    }
+    if !integral.is_finite() {
+        return Err(WaveDragError::ArithmeticOverflow);
+    }
+    if integral > 0.0 {
+        return Err(WaveDragError::PrecisionLoss);
+    }
+    Ok(PreparedWaveDrag {
+        scale,
+        integral: -integral,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn wave_mach_curve_preserves_weight_near_right_endpoint() {
+        let curve = super::WaveMachCurve::new(vec![(0.0, 1.0), (3.0, 0.0)]).unwrap();
+        let mach = f64::from_bits(3.0_f64.to_bits() - 1);
+        assert_eq!(curve.multiplier(mach).unwrap(), (3.0 - mach) / 3.0);
+    }
+    use super::{WaveDragError, WaveMachCurve, area_slopes_from_sections, wave_drag};
+    use crate::aerodynamics::geometry::GeometrySection;
+    use std::f64::consts::PI;
+
+    #[test]
+    fn triangular_source_has_analytic_wave_integral() -> Result<(), WaveDragError> {
+        // For piecewise-linear dA/dx = [0, 1, 0], the double integral of
+        // A''(x) A''(y) ln|x-y| equals -4 ln(2). This checks the singular
+        // diagonal and off-diagonal terms without a discretization limit.
+        let expected = 2.0 * 9.0 * std::f64::consts::LN_2 / PI;
+        for sound_speed in [0.5, 1.0, 2.0] {
+            let drag = wave_drag(&[0.0, 1.0, 0.0], 2.0, 3.0, sound_speed)?;
+            assert!((drag - expected).abs() < 1e-12, "{drag} != {expected}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn section_wave_drag_converges_for_smooth_slender_body() -> Result<(), WaveDragError> {
+        let mut errors = Vec::new();
+        for n in [128, 256, 512] {
+            let sections: Vec<_> = (0..n)
+                .map(|i| {
+                    let x = (i as f64 + 0.5) / n as f64;
+                    GeometrySection {
+                        area: (128.0 / (3.0 * PI)) * (x * (1.0 - x)).powf(1.5),
+                        centroid: None,
+                    }
+                })
+                .collect();
+            let slopes = area_slopes_from_sections(&sections, 1.0 / n as f64, 1)?;
+            assert_eq!(slopes.first(), Some(&0.0));
+            assert_eq!(slopes.last(), Some(&0.0));
+            let drag = wave_drag(&slopes, 1.0, 2.0, 1.0)?;
+            errors.push((drag - 256.0 / PI).abs());
+        }
+        assert!(errors[2] < errors[1] && errors[1] < errors[0], "{errors:?}");
+        assert!(errors[2] < (256.0 / PI) * 0.02, "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn section_smoothing_preserves_subnormal_area_when_average_is_representable()
+    -> Result<(), WaveDragError> {
+        let tiny = f64::from_bits(1);
+        let sections = [GeometrySection {
+            area: tiny,
+            centroid: None,
+        }; 3];
+        let slopes = area_slopes_from_sections(&sections, tiny, 1)?;
+        assert!(slopes.iter().any(|value| *value > 0.0));
+        assert!(slopes.iter().any(|value| *value < 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_inputs_are_rejected_before_scanning_values() {
+        let sections = vec![
+            GeometrySection {
+                area: f64::NAN,
+                centroid: None
+            };
+            2050
+        ];
+        assert_eq!(
+            area_slopes_from_sections(&sections, 1.0, 0),
+            Err(WaveDragError::WorkLimitExceeded)
+        );
+        let slopes = vec![f64::NAN; 2050];
+        assert_eq!(
+            wave_drag(&slopes, 1.0, 2.0, 1.0),
+            Err(WaveDragError::WorkLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn section_smoothing_validates_resources_and_numeric_input() {
+        let invalid = [GeometrySection {
+            area: -1.0,
+            centroid: None,
+        }];
+        assert_eq!(
+            area_slopes_from_sections(&invalid, 1.0, 0),
+            Err(WaveDragError::InvalidInput)
+        );
+        let valid = [GeometrySection {
+            area: 1.0,
+            centroid: None,
+        }];
+        assert_eq!(
+            area_slopes_from_sections(&valid, 0.0, 0),
+            Err(WaveDragError::InvalidInput)
+        );
+        assert_eq!(
+            area_slopes_from_sections(&valid, 1.0, usize::MAX),
+            Err(WaveDragError::WorkLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn mach_curve_validates_data_and_endpoints() -> Result<(), WaveDragError> {
+        assert!(WaveMachCurve::new(vec![(0.0, 0.0)]).is_err());
+        assert!(WaveMachCurve::new(vec![(0.0, 1.0), (0.0, 2.0)]).is_err());
+        assert!(WaveMachCurve::new(vec![(0.0, 1.0), (1.0, f64::NAN)]).is_err());
+        let curve = WaveMachCurve::new(vec![(0.0, f64::MAX), (1.0, 0.0)])?;
+        assert_eq!(curve.multiplier(0.0)?, f64::MAX);
+        assert_eq!(curve.multiplier(1.0)?, 0.0);
+        assert_eq!(curve.multiplier(0.5)?, f64::MAX * 0.5);
+        assert_eq!(curve.multiplier(2.0), Err(WaveDragError::UnsupportedMach));
+        Ok(())
+    }
+
+    #[test]
+    fn sears_haack_converges() -> Result<(), WaveDragError> {
+        let expected = 64.0 / PI;
+        let mut errors = Vec::new();
+        for n in [256, 512, 1024] {
+            let samples: Vec<f64> = (0..=n)
+                .map(|i| {
+                    let x = i as f64 / n as f64;
+                    64.0 / PI * (x * (1.0 - x)).sqrt() * (1.0 - 2.0 * x)
+                })
+                .collect();
+            errors.push((wave_drag(&samples, 1.0, 2.0, 1.0)? - expected * 4.0).abs());
+        }
+        assert!(errors[2] < errors[1] && errors[1] < errors[0], "{errors:?}");
+        assert!(errors[2] < expected * 4.0 * 0.01, "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn scaling_preserves_representable_extremes() -> Result<(), WaveDragError> {
+        let reference = wave_drag(&[0.0, 1.0, -1.0, 0.0], 1.0, 2.0, 1.0)?;
+        let extreme = wave_drag(&[0.0, 1e200, -1e200, 0.0], 1e-300, 2e-50, 1e-50)?;
+        assert!((extreme / reference - 1.0).abs() < 1e-12);
+        let reflected = wave_drag(&[0.0, -1.0, 1.0, 0.0], 1.0, 2.0, 1.0)?;
+        assert_eq!(reference, reflected);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_and_subsonic_inputs() {
+        assert_eq!(
+            wave_drag(&[0.0, 1.0, 0.0], 1.0, 1.0, 1.0),
+            Err(WaveDragError::UnsupportedMach)
+        );
+        assert_eq!(
+            wave_drag(&[1.0, 1.0, 0.0], 1.0, 2.0, 1.0),
+            Err(WaveDragError::InvalidInput)
+        );
+        assert_eq!(wave_drag(&[0.0, 1.0, 0.0], 0.0, 0.0, 1.0), Ok(0.0));
+    }
+}

@@ -10,6 +10,7 @@ bench-detailed-timing = ["bench-internals"]
 
 [dependencies]
 kapitsa-math = { path = "../kapitsa-math" }
+robust = "1.2.0"
 
 [dev-dependencies]
 rayon = "1.12.0"
@@ -44,3 +45,11 @@ required-features = ["bench-internals"]
 name = "colored_solver_scaling"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "aerodynamics"
+harness = false
+
+[[bench]]
+name = "wing_shielding"
+harness = false

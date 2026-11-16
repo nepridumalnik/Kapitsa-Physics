@@ -2,7 +2,7 @@ use std::fmt;
 
 use kapitsa_math::{CholeskyError, Mat3, Vec3};
 
-use super::{BodyState, BodyType, RigidBody};
+use super::{BodyMotion, BodyState, BodyType};
 use crate::transform::Transform;
 
 /// Failure returned when a rigid-body state cannot be predicted for one timestep.
@@ -35,13 +35,13 @@ impl fmt::Display for IntegrationError {
 impl std::error::Error for IntegrationError {}
 
 /// Predicts a body's state without mutating the source body.
-pub(crate) fn predict(body: &RigidBody, dt: f64) -> Result<BodyState, IntegrationError> {
+pub(crate) fn predict(body: &BodyMotion, dt: f64) -> Result<BodyState, IntegrationError> {
     predict_from_state(body, *body.state(), dt)
 }
 
 /// Predicts from an explicit segment-start state using the body's current forces and properties.
 pub(crate) fn predict_from_state(
-    body: &RigidBody,
+    body: &BodyMotion,
     state: BodyState,
     dt: f64,
 ) -> Result<BodyState, IntegrationError> {
@@ -62,7 +62,7 @@ pub(crate) fn predict_from_state(
 
 /// Returns conservative path-length bounds for the integrator's continuous sample trajectory.
 pub(crate) fn trajectory_bounds(
-    body: &RigidBody,
+    body: &BodyMotion,
     start: BodyState,
     end: BodyState,
     dt: f64,
@@ -120,7 +120,7 @@ pub(crate) fn trajectory_bounds(
 }
 
 fn predict_kinematic(
-    body: &RigidBody,
+    body: &BodyMotion,
     state: BodyState,
     dt: f64,
 ) -> Result<BodyState, IntegrationError> {
@@ -158,7 +158,7 @@ fn predict_kinematic(
 }
 
 fn predict_dynamic(
-    body: &RigidBody,
+    body: &BodyMotion,
     state: BodyState,
     dt: f64,
 ) -> Result<BodyState, IntegrationError> {
@@ -553,12 +553,12 @@ mod tests {
     fn overflow_does_not_mutate_the_source_body() {
         let mut body = body(mass(Vec3::ZERO, Mat3::IDENTITY));
         body.apply_force(Vec3::X * f64::MAX).expect("finite force");
-        let original = body;
+        let original = body.motion();
 
         assert_eq!(
             predict(&body, 2.0),
             Err(IntegrationError::ArithmeticOverflow)
         );
-        assert_eq!(body, original);
+        assert_eq!(body.motion(), original);
     }
 }

@@ -11,7 +11,10 @@ use crate::{
     world::StepError,
 };
 use crate::{
-    collision::CollisionConfig, mass::MassProperties, rigid_body::RigidBody, transform::Transform,
+    collision::CollisionConfig,
+    mass::MassProperties,
+    rigid_body::{BodyMotion, RigidBody},
+    transform::Transform,
     world::PhysicsWorld,
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
@@ -1687,7 +1690,7 @@ fn interval_violation(value: f64, limit: JointLimit) -> f64 {
     (limit.lower - value).max(value - limit.upper).max(0.0)
 }
 
-fn world_frame(body: &RigidBody, frame: JointFrame) -> (Vec3, Quat) {
+fn world_frame(body: &BodyMotion, frame: JointFrame) -> (Vec3, Quat) {
     let transform = body.state().transform();
     let rotation = (transform.rotation() * frame.local_rotation)
         .try_normalize()
@@ -1729,7 +1732,7 @@ fn tilt_angle(rotation_a: Quat, rotation_b: Quat) -> f64 {
     axis_a.dot(axis_b).clamp(-1.0, 1.0).acos()
 }
 
-fn anchor_velocity(body: &RigidBody, anchor: Vec3) -> Vec3 {
+fn anchor_velocity(body: &BodyMotion, anchor: Vec3) -> Vec3 {
     let state = body.state();
     let Some(mass) = body.physics().mass() else {
         return Vec3::ZERO;
@@ -1738,7 +1741,7 @@ fn anchor_velocity(body: &RigidBody, anchor: Vec3) -> Vec3 {
     state.linear_velocity() + state.angular_velocity().cross(anchor - center)
 }
 
-fn joint_violation(body_a: &RigidBody, body_b: &RigidBody, joint: &Joint) -> JointViolation {
+fn joint_violation(body_a: &BodyMotion, body_b: &BodyMotion, joint: &Joint) -> JointViolation {
     let common = *joint.common();
     let (anchor_a, rotation_a) = world_frame(body_a, common.frame_a);
     let (anchor_b, rotation_b) = world_frame(body_b, common.frame_b);
@@ -2643,7 +2646,11 @@ fn reproduce_ball_projection_orbital_drift(options: super::JointSolverOptions, l
         let mut world = PhysicsWorld::new();
         let ids: Vec<_> = bodies
             .iter()
-            .map(|body| world.add_body(*body.body()).unwrap())
+            .map(|body| {
+                world
+                    .add_body(RigidBody::from_motion(*body.body()))
+                    .unwrap()
+            })
             .collect();
         for constraint in constraints {
             world
@@ -2717,7 +2724,7 @@ fn reproduce_ball_projection_orbital_drift(options: super::JointSolverOptions, l
         let mut bodies: Vec<_> = world
             .bodies()
             .map(|(_, body)| {
-                SolverBody::from_prediction(*body, integrator::predict(body, DT).unwrap())
+                SolverBody::from_prediction(body.motion(), integrator::predict(body, DT).unwrap())
             })
             .collect();
         let integrated = metrics(&bodies, &constraints);
@@ -2843,8 +2850,10 @@ fn com_only_ball_projection_cannot_preserve_orbital_momentum_at_fixed_velocities
     let mut b = dynamic_body(Vec3::X * 0.5, Quat::IDENTITY);
     a.set_linear_velocity(Vec3::Y).unwrap();
     b.set_linear_velocity(-Vec3::Y).unwrap();
-    let id_a = world.add_body(a).unwrap();
-    let id_b = world.add_body(b).unwrap();
+    let a = a.motion();
+    let b = b.motion();
+    let id_a = world.add_body(RigidBody::from_motion(a)).unwrap();
+    let id_b = world.add_body(RigidBody::from_motion(b)).unwrap();
     let joint = Joint::Ball(BallJoint::new(JointCommon::new(
         JointFrame::IDENTITY,
         JointFrame::IDENTITY,
@@ -2876,7 +2885,11 @@ fn com_only_ball_projection_cannot_preserve_orbital_momentum_at_fixed_velocities
     let mut result = PhysicsWorld::new();
     let ids: Vec<_> = bodies
         .iter()
-        .map(|body| result.add_body(*body.body()).unwrap())
+        .map(|body| {
+            result
+                .add_body(RigidBody::from_motion(*body.body()))
+                .unwrap()
+        })
         .collect();
     result.add_joint(ids[0], ids[1], joint).unwrap();
     let projected = graph_metrics(&result);
@@ -2943,11 +2956,11 @@ fn articulated_residual_profile_tracks_actual_joints() {
                             },
                         };
                         let (id, a, b, joint) = world.joints().nth(joint_metrics[0].0).unwrap();
-                        let a = *world.body(a).unwrap();
-                        let b = *world.body(b).unwrap();
+                        let a = world.body(a).unwrap();
+                        let b = world.body(b).unwrap();
                         let mut pair = [
-                            SolverBody::from_prediction(a, *a.state()),
-                            SolverBody::from_prediction(b, *b.state()),
+                            SolverBody::from_prediction(a.motion(), *a.state()),
+                            SolverBody::from_prediction(b.motion(), *b.state()),
                         ];
                         let constraint = JointConstraint {
                             id,
@@ -2984,7 +2997,10 @@ fn articulated_residual_profile_tracks_actual_joints() {
                         let indexed: Vec<_> = world
                             .bodies()
                             .map(|(id, body)| {
-                                (id, SolverBody::from_prediction(*body, *body.state()))
+                                (
+                                    id,
+                                    SolverBody::from_prediction(body.motion(), *body.state()),
+                                )
                             })
                             .collect();
                         let mut all_bodies: Vec<_> =
@@ -3074,11 +3090,11 @@ fn slider_velocity_residual_localizes_to_joint_coupling() {
             first.linear_velocity.total_cmp(&second.linear_velocity)
         })
         .unwrap();
-    let a = *world.body(a).unwrap();
-    let b = *world.body(b).unwrap();
+    let a = world.body(a).unwrap();
+    let b = world.body(b).unwrap();
     let mut pair = [
-        SolverBody::from_prediction(a, *a.state()),
-        SolverBody::from_prediction(b, *b.state()),
+        SolverBody::from_prediction(a.motion(), *a.state()),
+        SolverBody::from_prediction(b.motion(), *b.state()),
     ];
     let constraint = JointConstraint {
         id,
@@ -3132,10 +3148,10 @@ fn coupled_hard_constraint_snapshot(world: &PhysicsWorld, position: bool) -> (Gr
         rigid_body::solver_mass::SolverMass,
     };
     use std::collections::BTreeMap;
-    let indexed: Vec<_> = world.bodies().map(|(id, body)| (id, *body)).collect();
+    let indexed: Vec<_> = world.bodies().collect();
     let mut bodies: Vec<_> = indexed
         .iter()
-        .map(|(_, b)| SolverBody::from_prediction(*b, *b.state()))
+        .map(|(_, b)| SolverBody::from_prediction(b.motion(), *b.state()))
         .collect();
     let constraints: Vec<_> = world
         .joints()
@@ -3282,7 +3298,11 @@ fn coupled_hard_constraint_snapshot(world: &PhysicsWorld, position: bool) -> (Gr
     let mut corrected = PhysicsWorld::new();
     let ids: Vec<_> = bodies
         .iter()
-        .map(|body| corrected.add_body(*body.body()).unwrap())
+        .map(|body| {
+            corrected
+                .add_body(RigidBody::from_motion(*body.body()))
+                .unwrap()
+        })
         .collect();
     for c in &constraints {
         corrected
@@ -3353,10 +3373,10 @@ fn coupled_velocity_solve_reduces_slider_residual_without_external_impulse() {
             workspace::JointWorkspace,
         },
     };
-    let indexed: Vec<_> = world.bodies().map(|(id, body)| (id, *body)).collect();
+    let indexed: Vec<_> = world.bodies().collect();
     let mut bodies: Vec<_> = indexed
         .iter()
-        .map(|(_, body)| SolverBody::from_prediction(*body, *body.state()))
+        .map(|(_, body)| SolverBody::from_prediction(body.motion(), *body.state()))
         .collect();
     let constraints: Vec<_> = world
         .joints()
@@ -3373,7 +3393,11 @@ fn coupled_velocity_solve_reduces_slider_residual_without_external_impulse() {
     let mut actual_world = PhysicsWorld::new();
     let ids: Vec<_> = bodies
         .iter()
-        .map(|body| actual_world.add_body(*body.body()).unwrap())
+        .map(|body| {
+            actual_world
+                .add_body(RigidBody::from_motion(*body.body()))
+                .unwrap()
+        })
         .collect();
     for constraint in &constraints {
         actual_world
@@ -3414,7 +3438,7 @@ fn direct_velocity_solver_falls_back_without_mutation_for_unsupported_or_singula
         },
     };
     let world = slider_chain(3);
-    let indexed: Vec<_> = world.bodies().map(|(id, body)| (id, *body)).collect();
+    let indexed: Vec<_> = world.bodies().collect();
     let constraints: Vec<_> = world
         .joints()
         .map(|(id, a, b, joint)| JointConstraint {
@@ -3426,7 +3450,7 @@ fn direct_velocity_solver_falls_back_without_mutation_for_unsupported_or_singula
         .collect();
     let mut bodies: Vec<_> = indexed
         .iter()
-        .map(|(_, body)| SolverBody::from_prediction(*body, *body.state()))
+        .map(|(_, body)| SolverBody::from_prediction(body.motion(), *body.state()))
         .collect();
     let mut workspace = JointWorkspace::new();
     JointSolver::prepare(&mut workspace, &bodies, &constraints, DT).unwrap();
@@ -3468,7 +3492,7 @@ fn direct_velocity_solver_falls_back_without_mutation_for_unsupported_or_singula
         .iter()
         .map(|body| {
             let body = RigidBody::new_static(body.state().transform());
-            SolverBody::from_prediction(body, *body.state())
+            SolverBody::from_prediction(body.motion(), *body.state())
         })
         .collect();
     let initial_static: Vec<_> = static_bodies.iter().map(SolverBody::state).collect();

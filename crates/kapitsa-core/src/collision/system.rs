@@ -1475,6 +1475,63 @@ impl CollisionSystem {
                     .get_mut(global_index)
                     .ok_or(CollisionError::InvalidContact)?;
                 original.manifold = solved.manifold;
+                // An isolated two-body discrete island without position projection has
+                // one simultaneous velocity-solver event. Preserve its input
+                // and output states; all other cases deliberately remain None.
+                if island.joints.is_empty()
+                    && island.bodies.len() == 2
+                    && context.ccd_solved_manifolds.is_empty()
+                    && !context.ccd_clipped_bodies.iter().any(|&clipped| clipped)
+                    && original.manifold.len() != 0
+                {
+                    let global_a = *island
+                        .body_indices
+                        .get(solved.body_a)
+                        .ok_or(CollisionError::InvalidContact)?;
+                    let global_b = *island
+                        .body_indices
+                        .get(solved.body_b)
+                        .ok_or(CollisionError::InvalidContact)?;
+                    let before_a = context
+                        .solver_bodies
+                        .get(global_a)
+                        .ok_or(CollisionError::InvalidContact)?
+                        .state();
+                    let before_b = context
+                        .solver_bodies
+                        .get(global_b)
+                        .ok_or(CollisionError::InvalidContact)?
+                        .state();
+                    let after_a = island
+                        .bodies
+                        .get(solved.body_a)
+                        .ok_or(CollisionError::InvalidContact)?
+                        .state();
+                    let after_b = island
+                        .bodies
+                        .get(solved.body_b)
+                        .ok_or(CollisionError::InvalidContact)?
+                        .state();
+                    if before_a.transform() == after_a.transform()
+                        && before_b.transform() == after_b.transform()
+                    {
+                        if original.manifold.points().iter().all(|point| {
+                            point.velocity_impulse.is_some()
+                                && point.velocity_points.is_some()
+                                && point.velocity_transforms
+                                    == Some([before_a.transform(), before_b.transform()])
+                        }) {
+                            for index in 0..original.manifold.len() {
+                                original
+                                    .manifold
+                                    .point_mut(index)
+                                    .ok_or(CollisionError::InvalidContact)?
+                                    .isolated_velocity_states =
+                                    Some([[before_a, before_b], [after_a, after_b]]);
+                            }
+                        }
+                    }
+                }
                 #[cfg(feature = "bench-internals")]
                 {
                     self.benchmark_metrics.solver_manifold_copies = self
@@ -1509,9 +1566,9 @@ impl CollisionSystem {
 
     pub(crate) fn solve_ccd_contact(
         &mut self,
-        body_a: crate::rigid_body::RigidBody,
+        body_a: crate::rigid_body::BodyMotion,
         state_a: BodyState,
-        body_b: crate::rigid_body::RigidBody,
+        body_b: crate::rigid_body::BodyMotion,
         state_b: BodyState,
         manifold: ContactManifold,
         material: SolverMaterial,
@@ -1531,9 +1588,9 @@ impl CollisionSystem {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn solve_ccd_contact_with_workspace(
         workspace: &mut SolverWorkspace,
-        body_a: crate::rigid_body::RigidBody,
+        body_a: crate::rigid_body::BodyMotion,
         state_a: BodyState,
-        body_b: crate::rigid_body::RigidBody,
+        body_b: crate::rigid_body::BodyMotion,
         state_b: BodyState,
         manifold: ContactManifold,
         material: SolverMaterial,

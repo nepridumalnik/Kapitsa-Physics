@@ -44,6 +44,7 @@ impl<E: StepExecutor> StepEngine<E> {
         mut executor: E,
     ) -> Self {
         executor.set_parallelism(1);
+        world.set_error_policy(config.error_policy);
         if let Some(gravity) = config.central_gravity {
             world.set_central_gravity(Some(gravity));
         }
@@ -165,6 +166,8 @@ impl<E: StepExecutor> StepEngine<E> {
             .metrics
             .deadline_misses
             .saturating_add(u64::from(deadline_missed));
+        let step_diagnostics = self.world.step_diagnostics();
+        self.metrics.step_diagnostics = step_diagnostics;
 
         Ok(StepStats {
             physics_step,
@@ -178,6 +181,7 @@ impl<E: StepExecutor> StepEngine<E> {
             active_workers: self.active_workers,
             average_step_duration,
             max_step_duration,
+            step_diagnostics,
         })
     }
 
@@ -264,6 +268,27 @@ mod tests {
         SimulationConfig,
         executor::{RayonExecutor, RayonPool},
     };
+
+    #[test]
+    fn error_policy_configures_world() -> Result<(), Box<dyn std::error::Error>> {
+        use kapitsa_core::{execution::SequentialExecutor, world::ErrorPolicy};
+
+        let mut world = PhysicsWorld::new();
+        assert_eq!(world.error_policy(), ErrorPolicy::Realtime);
+        world.set_error_policy(ErrorPolicy::Strict);
+        assert_eq!(world.error_policy(), ErrorPolicy::Strict);
+        let config = SimulationConfig {
+            error_policy: ErrorPolicy::Strict,
+            ..SimulationConfig::default()
+        };
+        let engine = StepEngine::new(world, config, SequentialExecutor)?;
+        assert_eq!(engine.world().error_policy(), ErrorPolicy::Strict);
+        assert_eq!(
+            SimulationConfig::default().error_policy,
+            ErrorPolicy::Realtime
+        );
+        Ok(())
+    }
 
     struct CountingExecutor {
         inner: RayonExecutor,
@@ -406,7 +431,10 @@ mod tests {
         for workers in [1, 4] {
             let (mut reference, reference_ids) = world_with_force_sources();
             let (world, ids) = world_with_force_sources();
-            let original: Vec<_> = ids.iter().map(|id| *world.body(*id).unwrap()).collect();
+            let original: Vec<_> = ids
+                .iter()
+                .map(|id| world.body(*id).unwrap().motion())
+                .collect();
             let config = SimulationConfig {
                 tick_rate: 120,
                 central_gravity: Some(CentralGravity::new(Vec3::new(8.0, 0.0, 0.0), 1.0).unwrap()),
@@ -422,7 +450,7 @@ mod tests {
                 })
             );
             for (id, before) in ids.iter().zip(&original) {
-                assert_eq!(engine.world().body(*id).unwrap(), before);
+                assert_eq!(&engine.world().body(*id).unwrap().motion(), before);
             }
             engine.world_mut().set_central_gravity(None);
             reference.step(1.0 / 120.0).unwrap();

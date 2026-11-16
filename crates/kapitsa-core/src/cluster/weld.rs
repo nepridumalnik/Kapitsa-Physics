@@ -68,6 +68,7 @@ pub struct Weld {
     pub(crate) part_a: PartId,
     pub(crate) part_b: PartId,
     pub(crate) desc: WeldDesc,
+    pub(crate) impulse_strength: Option<super::impulse::ImpulseStrength>,
 }
 
 impl Weld {
@@ -85,5 +86,11 @@ impl Weld {
 
     pub fn desc(&self) -> &WeldDesc {
         &self.desc
+    }
+
+    /// Optional independently configured impulse limits; see
+    /// `PhysicsWorld::set_weld_impulse_strength` for supported impact cases.
+    pub fn impulse_strength(&self) -> Option<super::impulse::ImpulseStrength> {
+        self.impulse_strength
     }
 }

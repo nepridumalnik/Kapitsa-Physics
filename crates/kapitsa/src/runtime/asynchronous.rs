@@ -452,7 +452,7 @@ mod tests {
                     .bodies()
                     .map(|(_, body)| body)
                     .zip(expected.bodies())
-                    .all(|(body, (_, expected_body))| body == expected_body)
+                    .all(|(body, (_, expected_body))| body.motion() == expected_body.motion())
             );
 
             let world = timeout(Duration::from_secs(3), simulation.shutdown())
@@ -614,7 +614,7 @@ mod tests {
                 .expect("force should be finite");
             let original = world
                 .bodies()
-                .map(|(id, body)| (id, *body))
+                .map(|(id, body)| (id, body.motion()))
                 .collect::<Vec<_>>();
             let config = SimulationConfig {
                 workers: WorkerConfig {
@@ -639,7 +639,7 @@ mod tests {
                     .bodies()
                     .zip(original)
                     .all(|((id, body), (original_id, original_body))| {
-                        id == original_id && body == &original_body
+                        id == original_id && body.motion() == original_body
                     })
             );
             simulation.shutdown().await.expect("clean shutdown");

@@ -40,6 +40,7 @@ pub(crate) struct CcdIslandImpactResult {
     pub(crate) impact_elapsed: f64,
     pub(crate) solved_a: BodyState,
     pub(crate) solved_b: BodyState,
+    pub(crate) solved_manifold: ContactManifold,
     pub(crate) interaction: CollisionInteraction,
     #[cfg(feature = "bench-internals")]
     pub(crate) solve_time: std::time::Duration,
@@ -91,6 +92,8 @@ pub(crate) struct StepContext {
     pub(crate) colliders: Vec<CollisionProxy>,
     pub(crate) spatial_proxies: Vec<(ColliderId, Aabb)>,
     pub(crate) manifolds: Vec<ContactManifold>,
+    /// Accepted CCD solves for this tentative step, in execution order.
+    pub(crate) ccd_solved_manifolds: Vec<ContactManifold>,
     pub(crate) solver_bodies: Vec<SolverBody>,
     pub(crate) constrained_starts: Vec<Option<SolverBody>>,
     pub(crate) solver_body_predictions: Vec<usize>,
@@ -101,6 +104,8 @@ pub(crate) struct StepContext {
     pub(crate) ccd_completed_bodies: Vec<bool>,
     pub(crate) ccd_replay_bodies: Vec<usize>,
     pub(crate) ccd_replay_pairs: Vec<super::CollisionPair>,
+    /// Whether any CCD solve was discarded for replay during this step.
+    pub(crate) ccd_replayed: bool,
     pub(crate) ccd_deferred_candidates: Vec<usize>,
     pub(crate) ccd_island_results: Vec<CcdIslandResult>,
     pub(crate) ccd_worker_chunks: Vec<usize>,
@@ -130,6 +135,48 @@ pub(crate) struct StepContext {
 }
 
 impl StepContext {
+    /// Necessary solver-side conditions for a single fixed-pose CCD event.
+    /// This deliberately does not certify forces, ownership or momentum balance.
+    #[allow(dead_code)] // Reserved for the CCD completeness certificate; not a fracture authorization.
+    pub(crate) fn isolated_ccd_solver_event(&self) -> Option<&ContactManifold> {
+        if self.ccd_replayed
+            || self.ccd_clipped_bodies.iter().any(|&clipped| clipped)
+            || !self.manifolds.is_empty()
+            || !self.joint_constraints.is_empty()
+            || self.ccd_solved_manifolds.len() != 1
+        {
+            return None;
+        }
+        let manifold = self.ccd_solved_manifolds.first()?;
+        let event = manifold.ccd_event?;
+        if !event.time.is_finite()
+            || event.time < 0.0
+            || manifold.len() == 0
+            || (0..2)
+                .any(|side| event.states[0][side].transform() != event.states[1][side].transform())
+            || manifold.points().iter().any(|point| {
+                point.velocity_impulse.is_none()
+                    || point.velocity_points.is_none()
+                    || point.velocity_transforms
+                        != Some([
+                            event.states[0][0].transform(),
+                            event.states[0][1].transform(),
+                        ])
+            })
+        {
+            return None;
+        }
+        Some(manifold)
+    }
+
+    /// Discard every tentative CCD solve for pairs being replayed. Multiple
+    /// impacts for a pair are retained until that pair actually replays.
+    pub(crate) fn discard_replayed_ccd_solves(&mut self) {
+        self.ccd_replayed = true;
+        self.ccd_solved_manifolds
+            .retain(|manifold| self.ccd_replay_pairs.binary_search(&manifold.pair).is_err());
+    }
+
     pub(crate) const fn new() -> Self {
         Self {
             predicted_states: Vec::new(),
@@ -140,6 +187,7 @@ impl StepContext {
             colliders: Vec::new(),
             spatial_proxies: Vec::new(),
             manifolds: Vec::new(),
+            ccd_solved_manifolds: Vec::new(),
             solver_bodies: Vec::new(),
             constrained_starts: Vec::new(),
             solver_body_predictions: Vec::new(),
@@ -150,6 +198,7 @@ impl StepContext {
             ccd_completed_bodies: Vec::new(),
             ccd_replay_bodies: Vec::new(),
             ccd_replay_pairs: Vec::new(),
+            ccd_replayed: false,
             ccd_deferred_candidates: Vec::new(),
             ccd_island_results: Vec::new(),
             ccd_worker_chunks: Vec::new(),
@@ -187,6 +236,7 @@ impl StepContext {
         self.colliders.clear();
         self.spatial_proxies.clear();
         self.manifolds.clear();
+        self.ccd_solved_manifolds.clear();
         self.solver_bodies.clear();
         self.constrained_starts.clear();
         self.solver_body_predictions.clear();
@@ -197,6 +247,7 @@ impl StepContext {
         self.ccd_completed_bodies.clear();
         self.ccd_replay_bodies.clear();
         self.ccd_replay_pairs.clear();
+        self.ccd_replayed = false;
         self.ccd_deferred_candidates.clear();
         for result in &mut self.ccd_island_results {
             result.clear();

@@ -477,7 +477,7 @@ mod tests {
         gravity::CentralGravity,
         joint::{FixedJoint, Joint, JointCommon, JointFrame, SpringJoint},
         mass::MassProperties,
-        rigid_body::RigidBody,
+        rigid_body::{BodyMotion, RigidBody},
         shape::{Shape, Sphere},
         transform::Transform,
         world::{BodyId, PhysicsWorld},
@@ -575,7 +575,7 @@ mod tests {
         (world, body_a, body_b)
     }
 
-    fn collision_state(warp: Option<f64>, end: Duration) -> (RigidBody, RigidBody, bool, usize) {
+    fn collision_state(warp: Option<f64>, end: Duration) -> (BodyMotion, BodyMotion, bool, usize) {
         let (mut world, body_a, body_b) = collision_world();
         let mut config = adaptive_config();
         if let TimeStepPolicy::Adaptive(mut adaptive) = config.time_step_policy {
@@ -609,8 +609,8 @@ mod tests {
             steps += 1;
         }
         (
-            *world.body(body_a).expect("body a state"),
-            *world.body(body_b).expect("body b state"),
+            world.body(body_a).expect("body a state").motion(),
+            world.body(body_b).expect("body b state").motion(),
             contact_started,
             steps,
         )
@@ -619,7 +619,7 @@ mod tests {
     fn collision_after_warp_switch(
         switch_at: Duration,
         end: Duration,
-    ) -> (RigidBody, RigidBody, bool, usize) {
+    ) -> (BodyMotion, BodyMotion, bool, usize) {
         let (mut world, body_a, body_b) = collision_world();
         let mut config = adaptive_config();
         if let TimeStepPolicy::Adaptive(mut adaptive) = config.time_step_policy {
@@ -652,8 +652,8 @@ mod tests {
             steps += 1;
         }
         (
-            *world.body(body_a).expect("body a state"),
-            *world.body(body_b).expect("body b state"),
+            world.body(body_a).expect("body a state").motion(),
+            world.body(body_b).expect("body b state").motion(),
             contact_started,
             steps,
         )
@@ -679,10 +679,10 @@ mod tests {
         (world, body_a, body_b, anchor_a, anchor_b)
     }
 
-    fn orbit_state(warp: Option<f64>, end: Duration) -> (RigidBody, usize) {
+    fn orbit_state(warp: Option<f64>, end: Duration) -> (BodyMotion, usize) {
         let (mut world, body_id) = orbit_world();
         let steps = integrate_orbit(&mut world, body_id, warp, end);
-        (*world.body(body_id).expect("orbit body"), steps)
+        (world.body(body_id).expect("orbit body").motion(), steps)
     }
 
     fn integrate_orbit(
@@ -735,7 +735,7 @@ mod tests {
         steps
     }
 
-    fn spring_state(warp: Option<f64>, end: Duration) -> (RigidBody, usize) {
+    fn spring_state(warp: Option<f64>, end: Duration) -> (BodyMotion, usize) {
         let (mut world, body_id) = spring_world();
         let config = adaptive_config();
         let base_step = config.step_budget();
@@ -759,13 +759,13 @@ mod tests {
             simulation_time += step;
             steps += 1;
         }
-        (*world.body(body_id).expect("moving body"), steps)
+        (world.body(body_id).expect("moving body").motion(), steps)
     }
 
     fn fixed_joint_state(
         warp: Option<f64>,
         end: Duration,
-    ) -> (RigidBody, RigidBody, Vec3, Vec3, usize) {
+    ) -> (BodyMotion, BodyMotion, Vec3, Vec3, usize) {
         let (mut world, body_a, body_b, anchor_a, anchor_b) = fixed_joint_world();
         let config = adaptive_config();
         let base_step = config.step_budget();
@@ -790,8 +790,8 @@ mod tests {
             steps += 1;
         }
         (
-            *world.body(body_a).expect("body a"),
-            *world.body(body_b).expect("body b"),
+            world.body(body_a).expect("body a").motion(),
+            world.body(body_b).expect("body b").motion(),
             anchor_a,
             anchor_b,
             steps,
@@ -1487,7 +1487,7 @@ mod tests {
             let started = Instant::now();
             fixed_steps = integrate_fixed_orbit(&mut world, body_id, base_step, end);
             fixed_samples.push(started.elapsed());
-            fixed_state = world.body(body_id).copied();
+            fixed_state = world.body(body_id).map(RigidBody::motion);
         }
         fixed_samples.sort_unstable();
         let fixed_median = fixed_samples[SAMPLES / 2];
@@ -1558,7 +1558,7 @@ mod tests {
                 let started = Instant::now();
                 steps = integrate_orbit(&mut world, body_id, Some(warp), end);
                 samples.push(started.elapsed());
-                last_state = world.body(body_id).copied();
+                last_state = world.body(body_id).map(RigidBody::motion);
             }
             samples.sort_unstable();
             let median = samples[SAMPLES / 2];

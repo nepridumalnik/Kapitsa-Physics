@@ -105,7 +105,7 @@ mod tests {
                 .bodies()
                 .map(|(_, body)| body)
                 .zip(expected.bodies())
-                .all(|(body, (_, expected_body))| body == expected_body)
+                .all(|(body, (_, expected_body))| body.motion() == expected_body.motion())
         );
         assert_eq!(stats.task_wait_duration, Duration::ZERO);
         assert_eq!(stats.active_workers, 1);
@@ -113,6 +113,11 @@ mod tests {
         assert_eq!(simulation.metrics().total_steps, 1);
         assert_eq!(simulation.metrics().active_workers, 1);
         assert_eq!(simulation.metrics().rayon_pool_size, None);
+        assert_eq!(stats.step_diagnostics, expected.step_diagnostics());
+        assert_eq!(
+            simulation.metrics().step_diagnostics,
+            stats.step_diagnostics
+        );
     }
 
     #[test]

@@ -1,7 +1,17 @@
-//! Aerodynamic force models.
+//! Aerodynamic force models and independent geometry preparation.
 
 pub(crate) mod atmosphere;
+pub mod cache;
+pub mod colliders;
+pub mod geometry;
+pub mod hull;
+pub mod pressure;
+pub mod slender;
+pub mod sphere_drag;
+pub mod wave;
+pub mod wing;
 pub use atmosphere::{Atmosphere, DensityProfile, SphericalAtmosphere, SphericalAtmosphereBuilder};
+pub use colliders::ColliderTessellation;
 
 use std::fmt;
 
@@ -11,11 +21,41 @@ use crate::transform::Transform;
 
 pub use crate::world::{AerodynamicSurface, AerodynamicTarget, AerodynamicsTask};
 
+/// Aerodynamic geometry and force model owned by a rigid body.
+#[derive(Default)]
+pub enum Aerodynamics {
+    #[default]
+    None,
+    Simple(AerodynamicProperties),
+    Wing(wing::WingSurface),
+    Wings(Vec<wing::WingSurface>),
+    Hull(Vec<hull::HullSection>),
+    VoxelWave(wave::VoxelWave),
+    Mesh(crate::shape::TriangleMesh),
+    Colliders,
+}
+
+impl fmt::Debug for Aerodynamics {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => formatter.write_str("None"),
+            Self::Simple(properties) => formatter.debug_tuple("Simple").field(properties).finish(),
+            Self::Wing(surface) => formatter.debug_tuple("Wing").field(surface).finish(),
+            Self::Wings(surfaces) => formatter.debug_tuple("Wings").field(surfaces).finish(),
+            Self::Hull(sections) => formatter.debug_tuple("Hull").field(sections).finish(),
+            Self::VoxelWave(_) => formatter.write_str("VoxelWave(..)"),
+            Self::Mesh(_) => formatter.write_str("Mesh(..)"),
+            Self::Colliders => formatter.write_str("Colliders"),
+        }
+    }
+}
+
 /// Local atmospheric conditions used by an aerodynamic force model.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AtmosphericState {
     density: f64,
     wind_velocity: Vec3,
+    sound_speed: Option<f64>,
 }
 
 impl AtmosphericState {
@@ -30,6 +70,7 @@ impl AtmosphericState {
         Ok(Self {
             density,
             wind_velocity,
+            sound_speed: None,
         })
     }
 
@@ -39,6 +80,11 @@ impl AtmosphericState {
 
     pub fn wind_velocity(self) -> Vec3 {
         self.wind_velocity
+    }
+
+    /// Optional locally sampled speed of sound in m/s.
+    pub fn sound_speed(self) -> Option<f64> {
+        self.sound_speed
     }
 }
 
@@ -263,6 +309,13 @@ impl AerodynamicForce {
 /// Invalid aerodynamic parameters or an unrepresentable force calculation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AerodynamicsError {
+    Geometry(geometry::GeometryError),
+    Pressure(pressure::PressureError),
+    Wing(wing::WingError),
+    Hull(hull::HullError),
+    UnsupportedModel,
+    InvalidTessellation,
+    TessellationBudgetExceeded,
     InvalidAtmosphere(&'static str),
     InvalidDensity,
     InvalidReferenceArea,
@@ -279,6 +332,13 @@ pub enum AerodynamicsError {
 impl fmt::Display for AerodynamicsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::Geometry(error) => return write!(formatter, "{error}"),
+            Self::Pressure(error) => return write!(formatter, "{error}"),
+            Self::Wing(error) => return write!(formatter, "{error}"),
+            Self::Hull(error) => return write!(formatter, "{error}"),
+            Self::UnsupportedModel => "this aerodynamic model is not implemented",
+            Self::InvalidTessellation => "invalid collider tessellation parameters",
+            Self::TessellationBudgetExceeded => "collider tessellation triangle budget exceeded",
             Self::InvalidAtmosphere(message) => message,
             Self::InvalidDensity => "air density must be finite and non-negative",
             Self::InvalidReferenceArea => "reference area must be finite and non-negative",
@@ -295,7 +355,17 @@ impl fmt::Display for AerodynamicsError {
     }
 }
 
-impl std::error::Error for AerodynamicsError {}
+impl std::error::Error for AerodynamicsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Geometry(error) => Some(error),
+            Self::Pressure(error) => Some(error),
+            Self::Wing(error) => Some(error),
+            Self::Hull(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

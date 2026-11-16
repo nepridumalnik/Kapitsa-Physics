@@ -45,6 +45,66 @@ pub(crate) fn world_properties(
     Ok((center, inertia))
 }
 
+/// Instantaneous rates of linear and angular momentum of one rigid part.
+/// All vectors are world-space; `reference_center` is the assembly COM and
+/// `reference_acceleration` its acceleration in m/s². Angular momentum rate
+/// is about the fixed world-space `moment_origin`, in N·m. This calculation
+/// does not establish that external loads or accelerations are complete.
+#[allow(dead_code)]
+pub(crate) fn part_momentum_rate(
+    mass: MassProperties,
+    pose: Transform,
+    reference_center: Vec3,
+    reference_acceleration: Vec3,
+    omega: Vec3,
+    alpha: Vec3,
+    moment_origin: Vec3,
+) -> Result<(Vec3, Vec3), ClusterError> {
+    if [
+        reference_center,
+        reference_acceleration,
+        omega,
+        alpha,
+        moment_origin,
+    ]
+    .iter()
+    .any(|value| !value.is_finite())
+    {
+        return Err(ClusterError::InvalidMotion);
+    }
+    let (center, inertia) = world_properties(mass, pose)?;
+    let offset = center
+        .checked_sub(reference_center)
+        .ok_or(ClusterError::ArithmeticOverflow)?;
+    let tangential = alpha
+        .checked_cross(offset)
+        .ok_or(ClusterError::ArithmeticOverflow)?;
+    let centripetal = omega
+        .checked_cross(offset)
+        .and_then(|velocity| omega.checked_cross(velocity))
+        .ok_or(ClusterError::ArithmeticOverflow)?;
+    let force = reference_acceleration
+        .checked_add(tangential)
+        .and_then(|value| value.checked_add(centripetal))
+        .and_then(|value| value.checked_mul_scalar(mass.mass()))
+        .ok_or(ClusterError::ArithmeticOverflow)?;
+    let spin = inertia
+        .checked_mul_vector(alpha)
+        .and_then(|angular| {
+            inertia
+                .checked_mul_vector(omega)
+                .and_then(|momentum| omega.checked_cross(momentum))
+                .and_then(|gyroscopic| angular.checked_add(gyroscopic))
+        })
+        .ok_or(ClusterError::ArithmeticOverflow)?;
+    let moment = center
+        .checked_sub(moment_origin)
+        .and_then(|arm| arm.checked_cross(force))
+        .and_then(|orbital| spin.checked_add(orbital))
+        .ok_or(ClusterError::ArithmeticOverflow)?;
+    Ok((force, moment))
+}
+
 fn map_cholesky(error: CholeskyError) -> ClusterError {
     match error {
         CholeskyError::NonFiniteInput | CholeskyError::ResultOutOfRange => {
@@ -134,6 +194,56 @@ mod tests {
                 "{a} != {b}"
             );
         }
+    }
+
+    #[test]
+    fn part_momentum_rate_includes_centripetal_euler_and_gyroscopic_terms()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mass = MassProperties::new(
+            2.0,
+            Vec3::ZERO,
+            Mat3::from_diagonal(Vec3::new(2.0, 3.0, 4.0)),
+        )?;
+        let pose = Transform::new(Vec3::X * 2.0, Quat::IDENTITY)?;
+        let (force, moment) = part_momentum_rate(
+            mass,
+            pose,
+            Vec3::ZERO,
+            Vec3::Y,
+            Vec3::new(1.0, 0.0, 2.0),
+            Vec3::Z * 3.0,
+            Vec3::ZERO,
+        )?;
+        // a = Y + alpha × (2 X) + omega × (omega × (2 X)).
+        close(force, Vec3::new(-16.0, 14.0, 8.0));
+        // I alpha + omega × I omega + (2 X) × force.
+        close(moment, Vec3::new(0.0, -20.0, 40.0));
+        let invalid = Vec3::new(f64::NAN, 0.0, 0.0);
+        assert_eq!(
+            part_momentum_rate(
+                mass,
+                pose,
+                Vec3::ZERO,
+                invalid,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::ZERO
+            ),
+            Err(ClusterError::InvalidMotion)
+        );
+        assert_eq!(
+            part_momentum_rate(
+                mass,
+                pose,
+                Vec3::ZERO,
+                Vec3::X * f64::MAX,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::ZERO
+            ),
+            Err(ClusterError::ArithmeticOverflow)
+        );
+        Ok(())
     }
 
     #[test]
