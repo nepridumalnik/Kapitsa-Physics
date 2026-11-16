@@ -261,3 +261,23 @@ momentum change is checked against the sum of attributed impulses and moments at
 force and impulse candidates are committed together. An unset per-weld impulse
 limit disables that weld's impulse criterion. Unsupported cases retain strict
 refusal or realtime diagnostic skipping; sequential CCD fracture is unsupported.
+
+### CCD fracture certification gap
+
+A possible first supported CCD case is one complete, isolated two-body impact
+with no joints, clipping, or other impulses on the assembly during the step.
+This is not implemented. The CCD solver receives the two states at impact and
+returns the solved states and manifold, but the committed contact journal stores
+neither the impact time nor those before/after states. The sequential path can
+solve and resweep further impacts; the parallel path commits its own island
+results. A replay can discard earlier CCD solves. Consequently, a single entry
+in the final journal alone does not certify that it is the only relevant event.
+
+Before enabling fracture for that case, both CCD paths must preserve an event
+witness transactionally, establish complete ownership and absence of other
+velocity changes, and verify the linear and angular momentum balance at the
+impact pose. The implementation must also define and test how a split at impact
+affects the remainder of the timestep; applying a split only at the end is not
+equivalent to resolving the post-impact motion of separate parts. Until then,
+CCD remains a strict refusal or a diagnosed realtime skip, not an inferred
+discrete event.
