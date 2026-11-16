@@ -82,8 +82,7 @@ impl PhysicsWorld {
             }
         });
         let (contact, side) = matching.next().ok_or(Error::IncompleteLoads)?;
-        if matching.next().is_some()
-            || contact.ccd
+        if contact.ccd
             || self.contact_impulses_omitted_pending != 0
             || self.contact_ccd_clipped_pending
         {
@@ -112,16 +111,46 @@ impl PhysicsWorld {
             .angular_velocity()
             .checked_sub(before.angular_velocity())
             .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-        let impulse = if side == 0 {
-            contact.impulse_on_b.checked_mul_scalar(-1.0)
-        } else {
-            Some(contact.impulse_on_b)
-        }
-        .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-        let angular = contact.points[side]
-            .checked_sub(origin)
-            .and_then(|arm| arm.checked_cross(impulse))
+        let mut impulse = Vec3::ZERO;
+        let mut angular = Vec3::ZERO;
+        let mut count = 0usize;
+        for (point, point_side) in std::iter::once((contact, side)).chain(matching) {
+            if point.pair != contact.pair
+                || point_side != side
+                || point.ccd
+                || point.parts[side] != Some(part_id)
+                || point.isolated_velocity_states != Some(states)
+            {
+                return Err(Error::IncompleteLoads);
+            }
+            let contribution = if side == 0 {
+                point.impulse_on_b.checked_mul_scalar(-1.0)
+            } else {
+                Some(point.impulse_on_b)
+            }
             .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            let moment = point.points[side]
+                .checked_sub(origin)
+                .and_then(|arm| arm.checked_cross(contribution))
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            impulse = impulse
+                .checked_add(contribution)
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            angular = angular
+                .checked_add(moment)
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            count = count
+                .checked_add(1)
+                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        }
+        let manifold = context
+            .manifolds
+            .iter()
+            .find(|manifold| manifold.pair == contact.pair)
+            .ok_or(Error::IncompleteLoads)?;
+        if manifold.len() != count {
+            return Err(Error::IncompleteLoads);
+        }
         let mut inputs = Vec::new();
         let mut parents = Vec::new();
         inputs

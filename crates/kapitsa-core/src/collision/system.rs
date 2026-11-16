@@ -1475,7 +1475,7 @@ impl CollisionSystem {
                     .get_mut(global_index)
                     .ok_or(CollisionError::InvalidContact)?;
                 original.manifold = solved.manifold;
-                // An isolated discrete point with no positional projection has
+                // An isolated discrete manifold with no positional projection has
                 // one simultaneous velocity-solver event. Preserve its input
                 // and output states; all other cases deliberately remain None.
                 if island.joints.is_empty()
@@ -1483,7 +1483,7 @@ impl CollisionSystem {
                     && island.bodies.len() == 2
                     && context.ccd_solved_manifolds.is_empty()
                     && !context.ccd_clipped_bodies.iter().any(|&clipped| clipped)
-                    && original.manifold.len() == 1
+                    && original.manifold.len() != 0
                 {
                     let global_a = *island
                         .body_indices
@@ -1516,16 +1516,20 @@ impl CollisionSystem {
                     if before_a.transform() == after_a.transform()
                         && before_b.transform() == after_b.transform()
                     {
-                        let point = original
-                            .manifold
-                            .point_mut(0)
-                            .ok_or(CollisionError::InvalidContact)?;
-                        if point.velocity_impulse.is_some()
-                            && point.velocity_transforms
-                                == Some([before_a.transform(), before_b.transform()])
-                        {
-                            point.isolated_velocity_states =
-                                Some([[before_a, before_b], [after_a, after_b]]);
+                        if original.manifold.points().iter().all(|point| {
+                            point.velocity_impulse.is_some()
+                                && point.velocity_points.is_some()
+                                && point.velocity_transforms
+                                    == Some([before_a.transform(), before_b.transform()])
+                        }) {
+                            for index in 0..original.manifold.len() {
+                                original
+                                    .manifold
+                                    .point_mut(index)
+                                    .ok_or(CollisionError::InvalidContact)?
+                                    .isolated_velocity_states =
+                                    Some([[before_a, before_b], [after_a, after_b]]);
+                            }
                         }
                     }
                 }

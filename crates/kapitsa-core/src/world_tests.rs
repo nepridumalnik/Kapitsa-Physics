@@ -829,14 +829,47 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths()
     };
     use crate::joint::JointFrame;
     for sharded in [false, true] {
-        for (limit, ccd) in [(1.0, false), (100.0, false), (1.0, true)] {
+        for (limit, ccd, box_contact) in [
+            (1.0, false, false),
+            (100.0, false, false),
+            (1.0, true, false),
+            (1.0, false, true),
+            (100.0, false, true),
+        ] {
             let mut world = PhysicsWorld::new();
             world.set_error_policy(crate::world::ErrorPolicy::Strict);
             let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
-            world.add_collider(wall, collider(0.5))?;
+            let make_collider = || -> Result<Collider, Box<dyn std::error::Error>> {
+                if box_contact {
+                    Ok(Collider::new(
+                        Shape::Cuboid(crate::shape::Cuboid::new(1.0, 1.0, 1.0)?),
+                        Transform::identity(),
+                    ))
+                } else {
+                    Ok(collider(0.5))
+                }
+            };
+            let wall_collider = if box_contact {
+                let mesh = crate::shape::TriangleMesh::new(
+                    vec![
+                        Vec3::new(-0.5, -1.0, -1.0),
+                        Vec3::new(-0.5, 1.0, -1.0),
+                        Vec3::new(-0.5, 1.0, 1.0),
+                        Vec3::new(-0.5, -1.0, 1.0),
+                        Vec3::new(-0.5, 0.0, 0.0),
+                    ],
+                    vec![[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],
+                )?;
+                Collider::new(Shape::TriangleMesh(mesh), Transform::identity())
+            } else {
+                make_collider()?
+            };
+            world.add_collider(wall, wall_collider)?;
             let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
             let (position, speed, dt) = if ccd {
                 (-5.0, 1000.0, 0.01)
+            } else if box_contact {
+                (-1.1999, 10.0, 0.02)
             } else {
                 (-1.2, 10.0, 0.02)
             };
@@ -870,7 +903,7 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths()
                     },
                 },
             )?;
-            world.add_part_collider(root, collider(0.5))?;
+            world.add_part_collider(root, make_collider()?)?;
             let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
             world.set_weld_impulse_strength(
                 weld,
@@ -924,6 +957,26 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths()
             assert_eq!(world.weld(weld).is_none(), limit == 1.0);
             assert_eq!(world.part_body(child) != Some(body), limit == 1.0);
             assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 0);
+            if box_contact {
+                assert!(world.contact_impulses().len() > 1);
+                let first = world.contact_impulses().first().ok_or("contact")?;
+                let side = if first.parts[0] == Some(root) { 0 } else { 1 };
+                let states = first.isolated_velocity_states.ok_or("states")?;
+                let center = states[0][side].transform().translation();
+                let mut total = Vec3::ZERO;
+                let mut angular = Vec3::ZERO;
+                for contact in world.contact_impulses() {
+                    assert_eq!(contact.isolated_velocity_states, Some(states));
+                    let impulse = contact.impulse_on_b * if side == 0 { -1.0 } else { 1.0 };
+                    total += impulse;
+                    angular += (contact.points[side] - center).cross(impulse);
+                }
+                let delta_v = states[1][side].linear_velocity() - states[0][side].linear_velocity();
+                let delta_w =
+                    states[1][side].angular_velocity() - states[0][side].angular_velocity();
+                assert!((total - delta_v * 2.0).length() < 1e-8);
+                assert!((angular - delta_w * 2.0).length() < 1e-8);
+            }
             assert_eq!(world.validate_clusters(), Ok(()));
         }
     }
