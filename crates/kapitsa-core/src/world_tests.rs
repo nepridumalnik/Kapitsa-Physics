@@ -1130,11 +1130,21 @@ fn real_ccd_solver_event_has_checkable_witness() -> Result<(), Box<dyn std::erro
         1
     };
     let mut impulse = Vec3::ZERO;
+    let mut angular_impulse = Vec3::ZERO;
+    let center = event.states[0][side].transform().translation();
     for point in manifold.points() {
-        impulse += point.velocity_impulse.ok_or("impulse")? * if side == 0 { -1.0 } else { 1.0 };
+        let contribution =
+            point.velocity_impulse.ok_or("impulse")? * if side == 0 { -1.0 } else { 1.0 };
+        let position = point.velocity_points.ok_or("points")?[side];
+        impulse += contribution;
+        angular_impulse += (position - center).cross(contribution);
     }
     let delta = event.states[1][side].linear_velocity() - event.states[0][side].linear_velocity();
     assert!((impulse - delta).length() < 1e-8);
+    // The test body's inertia is identity about its center of mass.
+    let angular_delta =
+        event.states[1][side].angular_velocity() - event.states[0][side].angular_velocity();
+    assert!((angular_impulse - angular_delta).length() < 1e-8);
     Ok(())
 }
 
