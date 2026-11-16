@@ -1000,6 +1000,18 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
         let side = if impact.parts[0] == Some(root) { 0 } else { 1 };
         assert!((event.states[0][side].linear_velocity().x - speed).abs() < 1e-8);
         assert!(event.states[1][side].linear_velocity().x < speed);
+        if !multi_manifold {
+            let mut impulse = Vec3::ZERO;
+            for point in world.contact_impulses().iter().filter(|point| point.ccd) {
+                assert_eq!(point.ccd_event, Some(event));
+                impulse += point.impulse_on_b * if side == 0 { -1.0 } else { 1.0 };
+            }
+            let delta =
+                event.states[1][side].linear_velocity() - event.states[0][side].linear_velocity();
+            // The cluster has two 1 kg parts. This checks the solver event,
+            // not completeness of the subsequent timestep or a weld reaction.
+            assert!((impulse - delta * 2.0).length() < 1e-8);
+        }
         let published = world.contact_impulses().to_vec();
         assert!(world.step(f64::NAN).is_err());
         assert_eq!(world.contact_impulses(), published);
