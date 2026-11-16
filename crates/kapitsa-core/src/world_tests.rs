@@ -1122,12 +1122,15 @@ fn replay_discards_only_affected_ccd_solves() -> Result<(), Box<dyn std::error::
         .ccd_solved_manifolds
         .push(crate::collision::ContactManifold::new(replayed));
     context.ccd_replay_pairs.push(replayed);
+    assert!(!context.ccd_replayed);
     context.discard_replayed_ccd_solves();
+    assert!(context.ccd_replayed);
     assert_eq!(context.ccd_solved_manifolds.len(), 1);
     assert_eq!(context.ccd_solved_manifolds[0].pair, independent);
     assert_eq!(context.ccd_solved_manifolds[0].ccd_event, Some(witness));
     context.clear();
     assert!(context.ccd_solved_manifolds.is_empty());
+    assert!(!context.ccd_replayed);
     Ok(())
 }
 

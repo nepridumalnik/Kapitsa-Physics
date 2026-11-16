@@ -104,6 +104,8 @@ pub(crate) struct StepContext {
     pub(crate) ccd_completed_bodies: Vec<bool>,
     pub(crate) ccd_replay_bodies: Vec<usize>,
     pub(crate) ccd_replay_pairs: Vec<super::CollisionPair>,
+    /// Whether any CCD solve was discarded for replay during this step.
+    pub(crate) ccd_replayed: bool,
     pub(crate) ccd_deferred_candidates: Vec<usize>,
     pub(crate) ccd_island_results: Vec<CcdIslandResult>,
     pub(crate) ccd_worker_chunks: Vec<usize>,
@@ -136,6 +138,7 @@ impl StepContext {
     /// Discard every tentative CCD solve for pairs being replayed. Multiple
     /// impacts for a pair are retained until that pair actually replays.
     pub(crate) fn discard_replayed_ccd_solves(&mut self) {
+        self.ccd_replayed = true;
         self.ccd_solved_manifolds
             .retain(|manifold| self.ccd_replay_pairs.binary_search(&manifold.pair).is_err());
     }
@@ -161,6 +164,7 @@ impl StepContext {
             ccd_completed_bodies: Vec::new(),
             ccd_replay_bodies: Vec::new(),
             ccd_replay_pairs: Vec::new(),
+            ccd_replayed: false,
             ccd_deferred_candidates: Vec::new(),
             ccd_island_results: Vec::new(),
             ccd_worker_chunks: Vec::new(),
@@ -209,6 +213,7 @@ impl StepContext {
         self.ccd_completed_bodies.clear();
         self.ccd_replay_bodies.clear();
         self.ccd_replay_pairs.clear();
+        self.ccd_replayed = false;
         self.ccd_deferred_candidates.clear();
         for result in &mut self.ccd_island_results {
             result.clear();

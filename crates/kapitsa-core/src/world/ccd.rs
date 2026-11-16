@@ -2413,6 +2413,7 @@ impl PhysicsWorld {
     }
 
     fn reset_ccd_pass(&mut self, dt: f64, force_single_island: bool) -> Result<(), CollisionError> {
+        self.collision_system.context.ccd_replayed = true;
         let prediction_count = self.collision_system.context.predicted_states.len();
         for prediction in 0..prediction_count {
             let body_id = self.collision_system.context.predicted_states[prediction].0;
