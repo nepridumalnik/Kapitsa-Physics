@@ -1099,6 +1099,66 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
 }
 
 #[test]
+fn isolated_ccd_solver_event_rejects_incomplete_witnesses() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut world = PhysicsWorld::new();
+    let a = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let b = world.add_body(RigidBody::new_static(Transform::identity()))?;
+    let ca = world.add_collider(a, collider(0.5))?;
+    let cb = world.add_collider(b, collider(0.5))?;
+    let pair = CollisionPair::new(ca, cb).ok_or("pair")?;
+    let state = *world.body(a).ok_or("body")?.state();
+    let mut manifold = crate::collision::ContactManifold::new(pair);
+    let mut point = crate::collision::ContactPoint::from_world(
+        &Transform::identity(),
+        &Transform::identity(),
+        Vec3::ZERO,
+        Vec3::ZERO,
+        Vec3::X,
+        0.0,
+        0,
+    )?;
+    point.velocity_points = Some([Vec3::ZERO; 2]);
+    point.velocity_impulse = Some(Vec3::X);
+    point.velocity_transforms = Some([Transform::identity(); 2]);
+    manifold.insert(point, Vec3::ZERO)?;
+    manifold.ccd_event = Some(crate::world::CcdContactEvent {
+        time: 0.5,
+        states: [[state; 2]; 2],
+    });
+    let context = &mut world.collision_system.context;
+    context.ccd_solved_manifolds.push(manifold);
+    assert!(context.isolated_ccd_solver_event().is_some());
+    context.ccd_replayed = true;
+    assert!(context.isolated_ccd_solver_event().is_none());
+    context.ccd_replayed = false;
+    context.ccd_clipped_bodies.push(true);
+    assert!(context.isolated_ccd_solver_event().is_none());
+    context.ccd_clipped_bodies.clear();
+    context.manifolds.push(manifold);
+    assert!(context.isolated_ccd_solver_event().is_none());
+    context.manifolds.clear();
+    context.ccd_solved_manifolds.push(manifold);
+    assert!(context.isolated_ccd_solver_event().is_none());
+    context.ccd_solved_manifolds.pop();
+    let mut moved = RigidBody::new_static(Transform::identity());
+    moved.set_transform(Transform::new(Vec3::X, Quat::IDENTITY)?)?;
+    context.ccd_solved_manifolds[0]
+        .ccd_event
+        .as_mut()
+        .ok_or("event")?
+        .states[1][0] = *moved.state();
+    assert!(context.isolated_ccd_solver_event().is_none());
+    context.ccd_solved_manifolds[0].ccd_event = manifold.ccd_event;
+    context.ccd_solved_manifolds[0]
+        .point_mut(0)
+        .ok_or("point")?
+        .velocity_impulse = None;
+    assert!(context.isolated_ccd_solver_event().is_none());
+    Ok(())
+}
+
+#[test]
 fn replay_discards_only_affected_ccd_solves() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = PhysicsWorld::new();
     let mut colliders = Vec::new();

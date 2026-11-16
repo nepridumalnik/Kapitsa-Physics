@@ -135,6 +135,40 @@ pub(crate) struct StepContext {
 }
 
 impl StepContext {
+    /// Necessary solver-side conditions for a single fixed-pose CCD event.
+    /// This deliberately does not certify forces, ownership or momentum balance.
+    #[allow(dead_code)] // Reserved for the CCD completeness certificate; not a fracture authorization.
+    pub(crate) fn isolated_ccd_solver_event(&self) -> Option<&ContactManifold> {
+        if self.ccd_replayed
+            || self.ccd_clipped_bodies.iter().any(|&clipped| clipped)
+            || !self.manifolds.is_empty()
+            || !self.joint_constraints.is_empty()
+            || self.ccd_solved_manifolds.len() != 1
+        {
+            return None;
+        }
+        let manifold = self.ccd_solved_manifolds.first()?;
+        let event = manifold.ccd_event?;
+        if !event.time.is_finite()
+            || event.time < 0.0
+            || manifold.len() == 0
+            || (0..2)
+                .any(|side| event.states[0][side].transform() != event.states[1][side].transform())
+            || manifold.points().iter().any(|point| {
+                point.velocity_impulse.is_none()
+                    || point.velocity_points.is_none()
+                    || point.velocity_transforms
+                        != Some([
+                            event.states[0][0].transform(),
+                            event.states[0][1].transform(),
+                        ])
+            })
+        {
+            return None;
+        }
+        Some(manifold)
+    }
+
     /// Discard every tentative CCD solve for pairs being replayed. Multiple
     /// impacts for a pair are retained until that pair actually replays.
     pub(crate) fn discard_replayed_ccd_solves(&mut self) {
