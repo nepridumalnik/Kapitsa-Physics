@@ -88,8 +88,8 @@ impl Weld {
         &self.desc
     }
 
-    /// Optional independently configured impulse limits. These are not yet
-    /// used by automatic fracture; see `PhysicsWorld::set_weld_impulse_strength`.
+    /// Optional independently configured impulse limits; see
+    /// `PhysicsWorld::set_weld_impulse_strength` for supported impact cases.
     pub fn impulse_strength(&self) -> Option<super::impulse::ImpulseStrength> {
         self.impulse_strength
     }

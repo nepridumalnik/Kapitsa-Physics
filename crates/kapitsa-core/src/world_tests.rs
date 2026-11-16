@@ -822,6 +822,115 @@ fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
 }
 
 #[test]
+fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::cluster::{
+        ClusterPartDesc, WeldDesc, WeldStiffness, WeldStrength, impulse::ImpulseStrength,
+    };
+    use crate::joint::JointFrame;
+    for sharded in [false, true] {
+        for (limit, ccd) in [(1.0, false), (100.0, false), (1.0, true)] {
+            let mut world = PhysicsWorld::new();
+            world.set_error_policy(crate::world::ErrorPolicy::Strict);
+            let wall = world.add_body(RigidBody::new_static(Transform::identity()))?;
+            world.add_collider(wall, collider(0.5))?;
+            let mass = MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?;
+            let (position, speed, dt) = if ccd {
+                (-5.0, 1000.0, 0.01)
+            } else {
+                (-1.2, 10.0, 0.02)
+            };
+            let mut moving =
+                RigidBody::new_dynamic(Transform::new(Vec3::X * position, Quat::IDENTITY)?, mass)?;
+            moving.set_linear_velocity(Vec3::X * speed)?;
+            if ccd {
+                moving.set_ccd_mode(CcdMode::Continuous);
+            }
+            let body = world.add_body(moving)?;
+            let root = world.enable_cluster(body)?;
+            let child = world.add_cluster_part(
+                root,
+                ClusterPartDesc {
+                    local_transform: Transform::identity(),
+                    mass,
+                    colliders: Vec::new(),
+                    linear_velocity: Vec3::X * speed,
+                    angular_velocity: Vec3::ZERO,
+                },
+                WeldDesc {
+                    frame_a: JointFrame::IDENTITY,
+                    frame_b: JointFrame::IDENTITY,
+                    strength: WeldStrength::Breakable {
+                        max_force: Some(1e6),
+                        max_torque: None,
+                    },
+                    stiffness: WeldStiffness {
+                        linear: 1.0,
+                        angular: 1.0,
+                    },
+                },
+            )?;
+            world.add_part_collider(root, collider(0.5))?;
+            let weld = world.cluster(body).ok_or("cluster")?.welds()[0];
+            world.set_weld_impulse_strength(
+                weld,
+                Some(ImpulseStrength {
+                    max_linear: Some(limit),
+                    max_angular: None,
+                }),
+            )?;
+            world
+                .set_automatic_weld_failure(Some((1e-8, 1e-8)))
+                .map_err(|e| format!("{e:?}"))?;
+            let before = world.body(body).ok_or("body")?.motion();
+            let rejected = if sharded {
+                world.step_with_shards(
+                    dt,
+                    &mut [Vec::new(), Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )
+            } else {
+                world.step(dt)
+            };
+            assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+            assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+            assert!(world.weld(weld).is_some());
+            assert!(world.contact_impulses().is_empty());
+            world
+                .set_automatic_weld_impulse_tolerances(Some((1e-8, 1e-8)))
+                .map_err(|e| format!("{e:?}"))?;
+            if ccd {
+                let rejected = world.step(dt);
+                assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+                assert_eq!(world.body(body).ok_or("body")?.motion(), before);
+                assert!(world.weld(weld).is_some());
+                world.set_error_policy(crate::world::ErrorPolicy::Realtime);
+                world.step(dt)?;
+                assert!(world.weld(weld).is_some());
+                assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
+                continue;
+            }
+            if sharded {
+                world.step_with_shards(
+                    dt,
+                    &mut [Vec::new(), Vec::new()],
+                    &crate::execution::SequentialExecutor,
+                    1,
+                )?;
+            } else {
+                world.step(dt)?;
+            }
+            assert_eq!(world.weld(weld).is_none(), limit == 1.0);
+            assert_eq!(world.part_body(child) != Some(body), limit == 1.0);
+            assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 0);
+            assert_eq!(world.validate_clusters(), Ok(()));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn replay_discards_only_affected_ccd_solves() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = PhysicsWorld::new();
     let mut colliders = Vec::new();

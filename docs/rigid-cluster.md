@@ -181,11 +181,12 @@ errors still fail the step. Currently certification requires a dynamic cluster w
 accumulated body forces, only part-targeted persistent force sources,
 certified part-owned aerodynamic loads, and gravity sampled uniformly at the cluster center of mass, with
 no joints or chunks in the world. Gravity gradients across the cluster are not
-modeled. A cluster may have colliders if it has no discrete or solved CCD
-contact manifolds and no CCD clipping during the step. Contacts on unrelated
-bodies do not invalidate it. If manifold ownership cannot be resolved, all
-cluster certificates are rejected. Absence of contact is not inferred from an
-empty impulse log. Contact and CCD forces remain unsupported.
+modeled. A cluster may have colliders; contact-free clusters can be checked,
+and one narrowly supported discrete contact can be checked using the separate
+impulse criterion described below. Contacts on unrelated bodies do not
+invalidate a contact-free cluster. If manifold ownership cannot be resolved,
+all cluster certificates are rejected. Absence of contact is not inferred from
+an empty impulse log. CCD forces remain unsupported.
 Low-level shard commits do not perform automatic weld failure.
 
 The separate diagnostic `part_hull_weld_reactions` also accepts part-owned
@@ -216,8 +217,8 @@ owner must be a part in the certified tree. The owner wrenches are evaluated
 about the assembly COM and incorporated into the pending weld balance. Missing
 staging is rejected, including when COM density is zero. Part-owned voxel wave
 loads use the existing part hull wrench snapshot; mesh wave-source geometry is
-geometry-only. Contacting collider geometry, joints and other unsupported paths
-remain excluded as described above.
+geometry-only. Joints and unsupported contact paths remain excluded as
+described above.
 This certifies attribution of the implemented Mach >= 5 impact approximation,
 not experimental accuracy of the pressure model.
 
@@ -228,9 +229,8 @@ policy, not an impact, fracture propagation, or within-step failure-time model.
 The contact snapshot records velocity-solver impulses, including warm-start and
 friction, but a discrete impulse is not an instantaneous force at the start of
 the step. CCD impacts can occur at different times and `ClipIsland` may alter
-velocity without a physical impulse. Contact-enabled weld failure therefore
-also needs a specified impulse-to-strength policy and a complete account of all
-accepted solver and CCD paths; zero omitted points alone is not sufficient.
+velocity without a physical impulse. Zero omitted points alone is not sufficient
+to certify the full impulse ledger.
 Each `ContactImpulse` additionally carries optional body transforms from its
 velocity solve, before positional correction. These are diagnostic witnesses,
 not a certificate of simultaneous impacts or complete velocity changes.
@@ -238,21 +238,26 @@ For a single-point discrete solver island without joints, CCD solves or clipping
 `isolated_velocity_states` also records before/after states when position
 projection did not change either pose. The record is committed with the contact
 snapshot and retained on failure. It does not by itself certify all physical
-load paths or enable fracture; CCD events are deliberately excluded.
+load paths; CCD events are deliberately excluded.
 
 `cluster::impulse::tree_impulse_reactions` provides a separate fixed-pose,
 simultaneous impulse-balance primitive. The caller supplies a complete per-part
 external ledger and the corresponding changes of assembly COM and angular
 velocities; it checks total momentum balance and returns parent-on-child impulse
 reactions. Its tolerances are in N·s and N·m·s, not N or N·m. It does not
-certify contact snapshots or process sequential CCD impacts, and is not yet
-connected to automatic weld fracture. `ImpulseStrength` supplies separate
+certify contact snapshots or process sequential CCD impacts. `ImpulseStrength` supplies separate
 linear and angular impulse limits; angular reactions must first be shifted to
 the weld anchor with `ImpulseReaction::at_anchor`. It does not derive impulse
 limits from force limits.
 `PhysicsWorld::set_weld_impulse_strength` stores optional limits on breakable
-welds, preserving them through cluster topology changes. These limits are
-configuration metadata only: automatic fracture does not yet evaluate them.
+welds, preserving them through cluster topology changes.
 `set_automatic_weld_impulse_tolerances` separately stores absolute momentum
 balance tolerances in N·s and N·m·s; these are not force-balance tolerances.
-The setting is not yet used by automatic fracture and does not enable it.
+With automatic weld failure enabled, a configured tolerance permits checks for
+one discrete, single-point isolated contact with a recorded owner and solver
+states, no omitted impulses, CCD solves or clipping, and no pose change during
+position projection. The force ledger must also be certified. The solver's
+momentum change is checked against the attributed impulse at the contact pose;
+force and impulse candidates are committed together. An unset per-weld impulse
+limit disables that weld's impulse criterion. Unsupported cases retain strict
+refusal or realtime diagnostic skipping; sequential CCD fracture is unsupported.

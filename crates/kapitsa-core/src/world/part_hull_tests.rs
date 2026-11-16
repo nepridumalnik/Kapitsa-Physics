@@ -954,7 +954,7 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
     world.add_force_source_for_part(child, Vec3::ZERO, Vec3::X * 10.0)?;
     let staged = world.with_force_source_updates(|world| {
         let candidates = world
-            .pending_weld_failure_candidates(body, 1e-12, 1e-12)
+            .pending_weld_failure_candidates(body, 1e-12, 1e-12, false)
             .map_err(|_| StepError::InvalidDeltaTime)?;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].reaction.force, -Vec3::X * 5.0);

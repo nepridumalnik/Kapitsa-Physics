@@ -876,10 +876,10 @@ impl PhysicsWorld {
     /// Configure absolute linear and angular impulse-balance tolerances in
     /// N·s and N·m·s respectively. `None` clears the configuration (default).
     ///
-    /// This only stores tolerances for future automatic impact checks; it does
-    /// not enable such checks or change the handling of contacts. Both values
-    /// must be finite and nonnegative. An invalid update preserves the previous
-    /// configuration.
+    /// Together with automatic weld failure and per-weld impulse limits, this
+    /// enables checks for supported isolated discrete contacts. Unsupported
+    /// contact and CCD paths remain incomplete. Both values must be finite and
+    /// nonnegative. An invalid update preserves the previous configuration.
     pub fn set_automatic_weld_impulse_tolerances(
         &mut self,
         tolerances: Option<(f64, f64)>,
@@ -966,12 +966,21 @@ impl PhysicsWorld {
         body: BodyId,
         force_tolerance: f64,
         moment_tolerance: f64,
+        collision_accounted: bool,
     ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
+        let mut state = *self
+            .cluster_load_states_pending
+            .iter()
+            .find(|state| state.body == body)
+            .ok_or(WeldBalanceError::IncompleteLoads)?;
+        if collision_accounted {
+            state.collision_loads_uncertified = false;
+        }
         let reactions = Self::part_source_weld_reactions_from_snapshot(
             body,
             force_tolerance,
             moment_tolerance,
-            &self.cluster_load_states_pending,
+            std::slice::from_ref(&state),
             &self.cluster_load_parts_pending,
             &self.cluster_load_welds_pending,
             &self.part_force_source_pending,

@@ -45,6 +45,142 @@ pub(super) enum WeldSplitPreparationError {
 }
 
 impl PhysicsWorld {
+    fn pending_contact_weld_impulses(
+        &self,
+        state: &super::ClusterLoadState,
+    ) -> Result<Vec<WeldId>, super::WeldBalanceError> {
+        use super::WeldBalanceError as Error;
+        use crate::cluster::{
+            balance::prepare_tree,
+            impulse::{PartImpulse, tree_impulse_reactions},
+            motion::world_properties,
+        };
+
+        let (linear_tolerance, angular_tolerance) = self
+            .automatic_weld_impulse_tolerances
+            .ok_or(Error::IncompleteLoads)?;
+        let context = &self.collision_system.context;
+        if !context.ccd_solved_manifolds.is_empty()
+            || (!context.ccd_clipped_bodies.is_empty()
+                && context.ccd_clipped_bodies.len() != context.predicted_states.len())
+            || context.manifolds.iter().any(|manifold| {
+                self.collider_body(manifold.pair.a).is_none()
+                    || self.collider_body(manifold.pair.b).is_none()
+            })
+        {
+            return Err(Error::IncompleteLoads);
+        }
+        let mut matching = self.contact_impulses_pending.iter().filter_map(|contact| {
+            let a = self.collider_body(contact.pair.a);
+            let b = self.collider_body(contact.pair.b);
+            if a == Some(state.body) {
+                Some((contact, 0))
+            } else if b == Some(state.body) {
+                Some((contact, 1))
+            } else {
+                None
+            }
+        });
+        let (contact, side) = matching.next().ok_or(Error::IncompleteLoads)?;
+        if matching.next().is_some()
+            || contact.ccd
+            || self.contact_impulses_omitted_pending != 0
+            || self.contact_ccd_clipped_pending
+        {
+            return Err(Error::IncompleteLoads);
+        }
+        let states = contact
+            .isolated_velocity_states
+            .ok_or(Error::IncompleteLoads)?;
+        let part_id = contact.parts[side].ok_or(Error::IncompleteLoads)?;
+        let before = states[0][side];
+        let after = states[1][side];
+        let mut impact_state = *state;
+        impact_state.state = before;
+        let tree = prepare_tree(
+            &impact_state,
+            &self.cluster_load_parts_pending,
+            &self.cluster_load_welds_pending,
+        )?;
+        let mass = state.mass.ok_or(Error::IncompleteLoads)?;
+        let (origin, _) = world_properties(mass, before.transform()).map_err(Error::Physics)?;
+        let delta_linear = after
+            .linear_velocity()
+            .checked_sub(before.linear_velocity())
+            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        let delta_angular = after
+            .angular_velocity()
+            .checked_sub(before.angular_velocity())
+            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        let impulse = if side == 0 {
+            contact.impulse_on_b.checked_mul_scalar(-1.0)
+        } else {
+            Some(contact.impulse_on_b)
+        }
+        .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        let angular = contact.points[side]
+            .checked_sub(origin)
+            .and_then(|arm| arm.checked_cross(impulse))
+            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+        let mut inputs = Vec::new();
+        let mut parents = Vec::new();
+        inputs
+            .try_reserve_exact(tree.len())
+            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
+        parents
+            .try_reserve_exact(tree.len())
+            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
+        let mut found = false;
+        for part in &tree {
+            let hit = part.part == part_id;
+            found |= hit;
+            inputs.push(PartImpulse {
+                mass: part.mass,
+                pose: part.pose,
+                linear: if hit { impulse } else { Vec3::ZERO },
+                angular: if hit { angular } else { Vec3::ZERO },
+            });
+            parents.push(part.parent);
+        }
+        if !found {
+            return Err(Error::IncompleteLoads);
+        }
+        let reactions = tree_impulse_reactions(
+            &inputs,
+            &parents,
+            origin,
+            delta_linear,
+            delta_angular,
+            origin,
+            linear_tolerance,
+            angular_tolerance,
+        )?;
+        let mut candidates = Vec::new();
+        candidates
+            .try_reserve(tree.len().saturating_sub(1))
+            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
+        for (part, reaction) in tree.iter().zip(reactions).skip(1) {
+            let id = part.weld.ok_or(Error::InvalidTree)?;
+            let weld = self.weld(id).ok_or(Error::InvalidTree)?;
+            let Some(strength) = weld.impulse_strength() else {
+                continue;
+            };
+            let frame = if weld.part_a() == part.part {
+                weld.desc().frame_a
+            } else if weld.part_b() == part.part {
+                weld.desc().frame_b
+            } else {
+                return Err(Error::InvalidTree);
+            };
+            let reaction =
+                reaction.at_anchor(origin, part.pose.transform_point(frame.local_anchor))?;
+            if strength.exceeded_by(reaction)? {
+                candidates.push(id);
+            }
+        }
+        Ok(candidates)
+    }
+
     /// Prepare all breakable clusters from the active step's pending snapshots
     /// and final staged predictions. No topology or body state is changed.
     pub(super) fn prepare_pending_weld_splits(
@@ -74,12 +210,36 @@ impl PhysicsWorld {
             }) {
                 continue;
             }
-            let candidates = match self.pending_weld_failure_candidates(
-                state.body,
-                force_tolerance,
-                moment_tolerance,
-            ) {
-                Ok(candidates) => candidates,
+            let evaluation = (|| {
+                let mut welds = if state.collision_loads_uncertified {
+                    self.pending_contact_weld_impulses(state)?
+                } else {
+                    Vec::new()
+                };
+                let candidates = self.pending_weld_failure_candidates(
+                    state.body,
+                    force_tolerance,
+                    moment_tolerance,
+                    state.collision_loads_uncertified,
+                )?;
+                welds.try_reserve(candidates.len()).map_err(|_| {
+                    super::WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded)
+                })?;
+                let mut seen = HashSet::new();
+                seen.try_reserve(welds.len().saturating_add(candidates.len()))
+                    .map_err(|_| {
+                        super::WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded)
+                    })?;
+                seen.extend(welds.iter().copied());
+                for candidate in candidates {
+                    if seen.insert(candidate.reaction.weld) {
+                        welds.push(candidate.reaction.weld);
+                    }
+                }
+                Ok::<_, super::WeldBalanceError>(welds)
+            })();
+            let welds = match evaluation {
+                Ok(welds) => welds,
                 Err(super::WeldBalanceError::IncompleteLoads)
                     if self.error_policy == super::ErrorPolicy::Realtime =>
                 {
@@ -103,14 +263,9 @@ impl PhysicsWorld {
                 }
                 Err(error) => return Err(WeldSplitPreparationError::Balance(error)),
             };
-            if candidates.is_empty() {
+            if welds.is_empty() {
                 continue;
             }
-            let mut welds = Vec::new();
-            welds.try_reserve_exact(candidates.len()).map_err(|_| {
-                WeldSplitPreparationError::Cluster(ClusterError::StorageCapacityExceeded)
-            })?;
-            welds.extend(candidates.iter().map(|candidate| candidate.reaction.weld));
             let predicted = self
                 .collision_system
                 .context
@@ -2091,8 +2246,9 @@ impl PhysicsWorld {
     /// Stores independent impulse limits on a weld, or clears them with `None`.
     ///
     /// Linear and angular limits are in N·s and N·m·s. This configuration is
-    /// currently metadata only: automatic fracture does not evaluate it yet.
-    /// An unbreakable weld cannot be given impulse limits. Invalid input leaves
+    /// checked only for supported isolated discrete contacts when automatic
+    /// weld failure and impulse-balance tolerances are configured. An
+    /// unbreakable weld cannot be given impulse limits. Invalid input leaves
     /// both the existing limits and prepared step results unchanged.
     pub fn set_weld_impulse_strength(
         &mut self,
