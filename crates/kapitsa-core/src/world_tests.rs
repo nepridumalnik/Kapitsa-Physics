@@ -1108,7 +1108,13 @@ fn real_ccd_solver_event_has_checkable_witness() -> Result<(), Box<dyn std::erro
     moving.set_linear_velocity(Vec3::X * 1000.0)?;
     moving.set_ccd_mode(CcdMode::Continuous);
     let body = world.add_body(moving)?;
-    world.add_collider(body, collider(0.5))?;
+    world.add_collider(
+        body,
+        Collider::new(
+            Shape::Sphere(Sphere::new(0.5)?),
+            Transform::new(Vec3::Y * 0.25, Quat::IDENTITY)?,
+        ),
+    )?;
     let dt = 0.01;
     world.collision_system.begin_step();
     world.prepare_joint_collision_pairs()?;
@@ -1144,6 +1150,7 @@ fn real_ccd_solver_event_has_checkable_witness() -> Result<(), Box<dyn std::erro
     // The test body's inertia is identity about its center of mass.
     let angular_delta =
         event.states[1][side].angular_velocity() - event.states[0][side].angular_velocity();
+    assert!(angular_impulse.length() > 1.0);
     assert!((angular_impulse - angular_delta).length() < 1e-8);
     Ok(())
 }
