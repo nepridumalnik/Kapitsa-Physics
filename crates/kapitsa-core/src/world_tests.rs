@@ -826,6 +826,7 @@ fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
 #[case::linear_intact(100.0, false, false, false, false, false)]
 #[case::ccd(1.0, true, false, false, false, false)]
 #[case::ccd_multiple_manifolds(1.0, true, false, false, false, true)]
+#[case::ccd_with_force(3.0, true, false, false, false, false)]
 #[case::multipoint_break(1.0, false, true, false, false, false)]
 #[case::multipoint_intact(100.0, false, true, false, false, false)]
 #[case::angular_break(1.0, false, false, true, true, false)]
@@ -891,6 +892,9 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
     let mut moving =
         RigidBody::new_dynamic(Transform::new(Vec3::X * position, Quat::IDENTITY)?, mass)?;
     moving.set_linear_velocity(Vec3::X * speed)?;
+    if limit == 3.0 {
+        moving.apply_force(Vec3::X * 2.0)?;
+    }
     if ccd {
         moving.set_ccd_mode(CcdMode::Continuous);
     }
@@ -998,7 +1002,11 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
         let event = impact.ccd_event.ok_or("ccd event")?;
         assert!(event.time > 0.0 && event.time <= dt);
         let side = if impact.parts[0] == Some(root) { 0 } else { 1 };
-        assert!((event.states[0][side].linear_velocity().x - speed).abs() < 1e-8);
+        if limit == 3.0 {
+            assert!(event.states[0][side].linear_velocity().x > speed);
+        } else {
+            assert!((event.states[0][side].linear_velocity().x - speed).abs() < 1e-8);
+        }
         assert!(event.states[1][side].linear_velocity().x < speed);
         if !multi_manifold {
             let mut impulse = Vec3::ZERO;
