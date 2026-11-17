@@ -44,6 +44,30 @@ pub struct PhysicsClient {
 }
 
 impl PhysicsClient {
+    /// Replaces the world atmosphere in queue order, including while paused.
+    /// Use a validated spherical atmosphere to update its world-space center.
+    pub async fn set_atmosphere(
+        &self,
+        atmosphere: kapitsa_core::aerodynamics::Atmosphere,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetAtmosphere { atmosphere })
+                .await?,
+        )
+    }
+
+    /// Replaces the validated point-mass gravity field in queue order.
+    /// `None` disables that field; separately registered fields are unchanged.
+    pub async fn set_central_gravity(
+        &self,
+        gravity: Option<kapitsa_core::gravity::CentralGravity>,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetCentralGravity { gravity })
+                .await?,
+        )
+    }
+
     /// Adds a gravity field and returns its world-scoped ID.
     pub async fn add_gravity(
         &self,

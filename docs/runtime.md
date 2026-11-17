@@ -1,5 +1,12 @@
 # Simulation runtime
 
+The running world's environment can be updated through
+`PhysicsClient::set_atmosphere` and `PhysicsClient::set_central_gravity`.
+Both take validated core values and apply in command-queue order, including
+while paused. They also exist as `PhysicsCommand` variants for single-command
+submission; they are not atomic body-motion batch commands.
+Replacing central gravity does not remove separately registered gravity fields.
+
 `kapitsa` exposes one clock-driven `Simulation`. The host application provides
 the Tokio runtime; Kapitsa creates its worker pool internally. Construction
 outside Tokio returns `SimulationError::MissingRuntime`.

@@ -281,6 +281,14 @@ pub enum PhysicsCommand {
     SetCollisionConfig {
         config: CollisionConfig,
     },
+    /// Replaces the validated world atmosphere at this position in the command queue.
+    SetAtmosphere {
+        atmosphere: kapitsa_core::aerodynamics::Atmosphere,
+    },
+    /// Moves, replaces or disables the world's point-mass gravity field.
+    SetCentralGravity {
+        gravity: Option<kapitsa_core::gravity::CentralGravity>,
+    },
     /// Sets continuous collision detection for a body.
     SetCcdMode {
         id: BodyId,
@@ -982,6 +990,8 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::SetForceSource { .. }
         | PhysicsCommand::SetForceSourceEnabled { .. }
         | PhysicsCommand::SetCollisionConfig { .. }
+        | PhysicsCommand::SetAtmosphere { .. }
+        | PhysicsCommand::SetCentralGravity { .. }
         | PhysicsCommand::SetColliderFilter { .. }
         | PhysicsCommand::SetColliderMode { .. }
         | PhysicsCommand::SetSkinPose { .. }
@@ -1061,6 +1071,8 @@ fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result
         | PhysicsCommand::SetForceSource { .. }
         | PhysicsCommand::SetForceSourceEnabled { .. }
         | PhysicsCommand::SetCollisionConfig { .. }
+        | PhysicsCommand::SetAtmosphere { .. }
+        | PhysicsCommand::SetCentralGravity { .. }
         | PhysicsCommand::SetColliderFilter { .. }
         | PhysicsCommand::SetColliderMode { .. }
         | PhysicsCommand::SetSkinPose { .. }
@@ -1291,6 +1303,14 @@ pub(crate) fn apply_command(
                 return Err(PhysicsClientError::Cluster(ClusterError::ManagedMass));
             }
             world.edit_body(id, |body| apply_body_command(body, &command))?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetAtmosphere { atmosphere } => {
+            world.set_atmosphere(atmosphere);
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetCentralGravity { gravity } => {
+            world.set_central_gravity(gravity);
             PhysicsCommandResult::Done
         }
         PhysicsCommand::SetCollisionConfig { config } => {
