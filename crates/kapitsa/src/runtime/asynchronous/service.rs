@@ -43,6 +43,7 @@ struct ServiceTaskOutput {
 struct RuntimeControl {
     stop: watch::Receiver<bool>,
     time_multiplier: watch::Receiver<f64>,
+    time_horizon: watch::Receiver<Option<Duration>>,
 }
 
 #[derive(Clone)]
@@ -93,6 +94,7 @@ pub struct Simulation {
     command_tx: watch::Sender<Option<mpsc::Sender<CommandRequest>>>,
     command_rx: watch::Receiver<Option<mpsc::Sender<CommandRequest>>>,
     time_multiplier_tx: watch::Sender<f64>,
+    time_horizon_tx: watch::Sender<Option<Duration>>,
     snapshot_tx: watch::Sender<Arc<PhysicsSnapshot>>,
     snapshot_rx: watch::Receiver<Arc<PhysicsSnapshot>>,
     collision_events_tx: broadcast::Sender<CollisionEventBatch>,
@@ -164,9 +166,18 @@ pub struct SimulationBuilder {
     mesh_sound_speed: Option<f64>,
     config: SimulationConfig,
     invalid_worker_count: bool,
+    time_horizon: Option<Duration>,
 }
 
 impl SimulationBuilder {
+    /// Limits world advancement to an absolute simulation time, in seconds since creation.
+    /// Commands continue to be processed at the horizon. The default is no limit.
+    /// Use zero to populate the world before permitting motion.
+    pub fn time_horizon(mut self, horizon: Duration) -> Self {
+        self.time_horizon = Some(horizon);
+        self
+    }
+
     /// Selects the error policy for the simulation's physics world.
     pub fn error_policy(mut self, policy: ErrorPolicy) -> Self {
         self.config.error_policy = policy;
@@ -246,6 +257,7 @@ impl SimulationBuilder {
                 .map_err(SimulationError::InvalidMeshSoundSpeed)?;
         }
         let mut simulation = Simulation::new_with_world(world, self.config)?;
+        simulation.set_time_horizon(self.time_horizon);
         simulation.start()?;
         Ok(simulation)
     }
@@ -273,6 +285,7 @@ impl SimulationBuilder {
             StepRunner::new_with_executor(world, self.config, RayonExecutor::from_pool(pool))?;
         let mut simulation = Simulation::from_runner(runner, runtime)?;
         simulation.owned_runtime = Some(owned_runtime);
+        simulation.set_time_horizon(self.time_horizon);
         simulation.start()?;
         Ok(simulation)
     }
@@ -388,6 +401,7 @@ impl Simulation {
         let (metrics_tx, metrics_rx) = watch::channel(simulation.metrics().clone());
         let (command_tx, command_rx) = watch::channel(None);
         let (time_multiplier_tx, _) = watch::channel(1.0);
+        let (time_horizon_tx, _) = watch::channel(None);
         let (snapshot_tx, snapshot_rx) = watch::channel(initial_snapshot);
         let (collision_events_tx, _) = broadcast::channel(COLLISION_EVENT_BATCH_CAPACITY);
         let (joint_break_events_tx, _) = broadcast::channel(JOINT_BREAK_EVENT_BATCH_CAPACITY);
@@ -400,6 +414,7 @@ impl Simulation {
             command_tx,
             command_rx,
             time_multiplier_tx,
+            time_horizon_tx,
             snapshot_tx,
             snapshot_rx,
             collision_events_tx,
@@ -466,6 +481,7 @@ impl Simulation {
         let mut simulation_time = self.simulation_time;
         let buffer_pool = Arc::clone(&self.buffer_pool);
         let time_multiplier = self.time_multiplier_tx.subscribe();
+        let time_horizon = self.time_horizon_tx.subscribe();
         self.stop = Some(stop_tx);
         self.task = Some(self.runtime.spawn(async move {
             let result = run_simulation(
@@ -474,6 +490,7 @@ impl Simulation {
                 RuntimeControl {
                     stop: stop_rx,
                     time_multiplier,
+                    time_horizon,
                 },
                 &metrics_tx,
                 &snapshot_tx,
@@ -541,6 +558,21 @@ impl Simulation {
 
     pub fn metrics(&self) -> SimulationMetrics {
         self.metrics_rx.borrow().clone()
+    }
+
+    /// Sets the latest permitted absolute simulation time; `None` removes the limit.
+    /// This does not rewind completed or in-flight work. At a horizon the world
+    /// keeps processing client commands without advancing physics or accumulating
+    /// wall-time debt. Fixed intervals are never shortened to fit the horizon.
+    pub fn set_time_horizon(&self, horizon: Option<Duration>) {
+        self.time_horizon_tx.send_if_modified(|current| {
+            if *current == horizon {
+                false
+            } else {
+                *current = horizon;
+                true
+            }
+        });
     }
 
     /// Changes the requested simulation-time rate without changing timestep policy.
@@ -648,6 +680,7 @@ async fn run_simulation_loop(
     let RuntimeControl {
         mut stop,
         mut time_multiplier,
+        mut time_horizon,
     } = controls;
     let step_duration = simulation.config().step_budget();
     let adaptive_policy = matches!(
@@ -663,9 +696,42 @@ async fn run_simulation_loop(
     let mut time_updates_open = true;
     let mut accumulator = Duration::ZERO;
     let mut reusable_snapshot = None;
+    let mut was_horizon_reached = false;
+    let minimum_interval = match simulation.config().time_step_policy {
+        TimeStepPolicy::Fixed => step_duration,
+        TimeStepPolicy::Adaptive(config) => config.minimum_step,
+    };
 
     loop {
-        if current_multiplier == 0.0 && commands.pending.is_some() {
+        let available = time_horizon
+            .borrow()
+            .map(|horizon| horizon.saturating_sub(*simulation_time));
+        let horizon_reached = available.is_some_and(|remaining| remaining < minimum_interval);
+        if let Some(remaining) = available {
+            accumulator = accumulator.min(remaining);
+        }
+        let effective_multiplier = if horizon_reached {
+            0.0
+        } else {
+            current_multiplier
+        };
+        if horizon_reached {
+            accumulator = Duration::ZERO;
+            previous = Instant::now();
+            if !was_horizon_reached {
+                simulation.set_runtime_status(SimulationState::Running, Duration::ZERO);
+                publish_runtime_metrics(
+                    simulation,
+                    metrics,
+                    current_multiplier,
+                    0.0,
+                    false,
+                    load_speed,
+                );
+            }
+        }
+        was_horizon_reached = horizon_reached;
+        if effective_multiplier == 0.0 && commands.pending.is_some() {
             apply_queued_commands(simulation, commands)?;
             let step = simulation.metrics().total_steps;
             for result in &mut commands.pending_results {
@@ -680,13 +746,13 @@ async fn run_simulation_loop(
             continue;
         }
         let (mut ready_step, mut step_limited) =
-            choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
+            choose_runtime_step(simulation, accumulator, effective_multiplier, step_duration)?;
         if current_multiplier != 0.0 && step_limited && has_queued_request(commands) {
             apply_queued_commands(simulation, commands)?;
             (ready_step, step_limited) =
                 choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
         }
-        let has_ready_step = current_multiplier != 0.0
+        let has_ready_step = effective_multiplier != 0.0
             && (ready_step.is_some()
                 || (adaptive_policy && step_limited && commands.pending.is_some()));
         let remaining = if adaptive_policy {
@@ -695,9 +761,9 @@ async fn run_simulation_loop(
             step_duration.saturating_sub(accumulator)
         };
         let scheduler_multiplier = if adaptive_policy {
-            if current_multiplier > 0.0 { 1.0 } else { 0.0 }
+            if effective_multiplier > 0.0 { 1.0 } else { 0.0 }
         } else {
-            current_multiplier * load_speed
+            effective_multiplier * load_speed
         };
         let step_deadline_reached = tokio::select! {
             biased;
@@ -712,7 +778,7 @@ async fn run_simulation_loop(
                 add_scaled_elapsed(
                     &mut accumulator,
                     now.duration_since(previous),
-                    current_multiplier * load_speed,
+                    effective_multiplier * load_speed,
                 )?;
                 previous = now;
                 match changed {
@@ -725,14 +791,22 @@ async fn run_simulation_loop(
                 }
                 false
             }
+            changed = time_horizon.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                time_horizon.borrow_and_update();
+                previous = Instant::now();
+                continue;
+            }
             request = commands.receiver.recv(),
-                if (current_multiplier == 0.0 || (adaptive_policy && step_limited)) && commands.pending.is_none() && !commands.receiver.is_closed() =>
+                if (effective_multiplier == 0.0 || (adaptive_policy && step_limited)) && commands.pending.is_none() && !commands.receiver.is_closed() =>
             {
                 let now = Instant::now();
                 add_scaled_elapsed(
                     &mut accumulator,
                     now.duration_since(previous),
-                    current_multiplier * load_speed,
+                    effective_multiplier * load_speed,
                 )?;
                 previous = now;
                 commands.pending = request;
@@ -747,7 +821,7 @@ async fn run_simulation_loop(
         if stopping(&stop) {
             break;
         }
-        if current_multiplier == 0.0 {
+        if current_multiplier == 0.0 || horizon_reached {
             continue;
         }
 
@@ -765,6 +839,9 @@ async fn run_simulation_loop(
         for _ in 0..max_catch_up_steps {
             if stopping(&stop) {
                 break;
+            }
+            if let Some(horizon) = *time_horizon.borrow() {
+                accumulator = accumulator.min(horizon.saturating_sub(*simulation_time));
             }
             let (physics_step, limited) =
                 choose_runtime_step(simulation, accumulator, current_multiplier, step_duration)?;
@@ -802,6 +879,12 @@ async fn run_simulation_loop(
                 }
                 break;
             };
+            if time_horizon
+                .borrow()
+                .is_some_and(|horizon| physics_step > horizon.saturating_sub(*simulation_time))
+            {
+                break;
+            }
             let next_simulation_time = simulation_time
                 .checked_add(physics_step)
                 .ok_or(SimulationError::SimulationTimeOverflow)?;
@@ -1236,6 +1319,8 @@ mod tests {
         for rayon in [false, true] {
             let builder = super::Simulation::builder()
                 .atmosphere(atmosphere)
+                .frequency(100)
+                .time_horizon(Duration::ZERO)
                 .mesh_sound_speed(295.0);
             let mut simulation = if rayon {
                 builder.spawn_on_rayon(std::sync::Arc::new(
@@ -1244,6 +1329,23 @@ mod tests {
             } else {
                 builder.spawn_on_tokio(&tokio::runtime::Handle::current())?
             };
+            let mut client = simulation.client();
+            client.set_atmosphere(Atmosphere::Vacuum).await?;
+            assert_eq!(client.snapshot().simulation_time(), Duration::ZERO);
+            client.set_atmosphere(atmosphere).await?;
+            let gravity = kapitsa_core::gravity::CentralGravity::new(Vec3::ZERO, 1000.0)?;
+            client.set_central_gravity(Some(gravity)).await?;
+            let horizon = Duration::from_millis(20);
+            simulation.set_time_multiplier(1000.0)?;
+            simulation.set_time_horizon(Some(horizon));
+            while client.snapshot().simulation_time() < horizon {
+                tokio::time::timeout(Duration::from_secs(5), client.next_snapshot()).await??;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert_eq!(client.snapshot().simulation_time(), horizon);
+            assert_eq!(client.snapshot().step(), 2);
+            client.set_central_gravity(None).await?;
+            assert_eq!(client.snapshot().simulation_time(), horizon);
             simulation.stop().await?;
             let runner = simulation
                 .simulation
@@ -1251,6 +1353,7 @@ mod tests {
                 .ok_or("missing stopped simulation")?;
             assert_eq!(runner.world()?.atmosphere(), atmosphere);
             assert_eq!(runner.world()?.mesh_sound_speed(), 295.0);
+            assert_eq!(runner.world()?.central_gravity(), None);
         }
         Ok(())
     }
@@ -2141,6 +2244,7 @@ mod tests {
         let mut adaptive = config(100);
         adaptive.time_step_policy = TimeStepPolicy::Adaptive(AdaptiveTimeStepConfig::default());
         let mut simulation = Simulation::new_from_config(adaptive).expect("simulation");
+        simulation.set_time_horizon(Some(Duration::from_millis(50)));
         simulation.set_time_multiplier(5.0).expect("adaptive warp");
         simulation.start().expect("start");
         tokio::task::yield_now().await;

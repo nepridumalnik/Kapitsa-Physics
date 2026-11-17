@@ -1,5 +1,15 @@
 # Simulation runtime
 
+`Simulation::builder().time_horizon(Duration::ZERO)` starts the real world
+service with motion gated while bodies and terrain are registered through its
+client. `Simulation::set_time_horizon(Some(target))` permits autonomous world
+advancement up to an absolute simulation time. `None` removes the limit.
+The runtime retains ownership of scheduling, integration and snapshot publication.
+Fixed intervals are not shortened to fit a target. Adaptive intervals respect
+the configured minimum; a smaller remainder waits for an extended horizon.
+At the limit, commands and queries continue and waiting time adds no catch-up
+debt. A changed limit does not undo an already completed or in-flight interval.
+
 The running world's environment can be updated through
 `PhysicsClient::set_atmosphere` and `PhysicsClient::set_central_gravity`.
 Both take validated core values and apply in command-queue order, including
