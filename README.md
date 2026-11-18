@@ -8,11 +8,11 @@ For a project within the workspace:
 
 ```toml
 [dependencies]
-kapitsa = { path = "../kapitsa" }
+kapitsa = { path = "../kapitsa", features = ["service"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Set the path to `crates/kapitsa` according to your project's location. The example below requires a Tokio runtime.
+Set the path to `crates/kapitsa` according to your project's location. The example below requires a Tokio runtime and the `service` feature.
 
 ## Creating and Controlling a Simulation
 

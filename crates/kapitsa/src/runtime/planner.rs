@@ -1,9 +1,12 @@
+use crate::runtime::constants::{DEFAULT_SCALE_DOWN_AT, DEFAULT_SCALE_UP_AT, DEFAULT_SMOOTHING};
+#[cfg(feature = "service")]
 use crate::runtime::constants::{
-    DEFAULT_SCALE_DOWN_AT, DEFAULT_SCALE_UP_AT, DEFAULT_SMOOTHING, EARLY_WARNING_AT,
-    MIN_SCALE_DOWN_STEPS, MIN_SCALE_UP_STEPS, REQUIRED_SPEEDUP, SCALE_DOWN_HYSTERESIS,
-    SCALE_UP_HYSTERESIS, SIGNIFICANT_LOAD_INCREASE, STABILIZATION_STEPS, WORKER_PROBE_STEPS,
+    EARLY_WARNING_AT, MIN_SCALE_DOWN_STEPS, MIN_SCALE_UP_STEPS, REQUIRED_SPEEDUP,
+    SCALE_DOWN_HYSTERESIS, SCALE_UP_HYSTERESIS, SIGNIFICANT_LOAD_INCREASE, STABILIZATION_STEPS,
+    WORKER_PROBE_STEPS,
 };
 use std::num::NonZeroUsize;
+#[cfg(feature = "service")]
 use std::time::Duration;
 
 /// Worker pool limits and adaptive thresholds.
@@ -47,6 +50,7 @@ impl WorkerConfig {
         Ok(())
     }
 
+    #[cfg(feature = "service")]
     pub(crate) fn resolve_max_workers(&self, available: usize) -> usize {
         self.max_workers
             .map(NonZeroUsize::get)
@@ -82,6 +86,7 @@ impl std::fmt::Display for WorkerConfigError {
 impl std::error::Error for WorkerConfigError {}
 
 /// Current adaptive worker and step-budget status.
+#[cfg(feature = "service")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdaptiveStatus {
     pub active_workers: usize,
@@ -91,6 +96,7 @@ pub struct AdaptiveStatus {
     pub smoothed_step_duration: Duration,
 }
 
+#[cfg(feature = "service")]
 struct WorkerProbe {
     previous_workers: usize,
     candidate_workers: usize,
@@ -99,12 +105,14 @@ struct WorkerProbe {
     candidate_samples: usize,
 }
 
+#[cfg(feature = "service")]
 struct RejectedIncrease {
     candidate_workers: usize,
     baseline_seconds: f64,
 }
 
 /// Adapts active Rayon work while keeping the fixed pool size unchanged.
+#[cfg(feature = "service")]
 pub struct AdaptiveScheduler {
     config: WorkerConfig,
     max_workers: usize,
@@ -119,6 +127,7 @@ pub struct AdaptiveScheduler {
     rejected_increase: Option<RejectedIncrease>,
 }
 
+#[cfg(feature = "service")]
 impl AdaptiveScheduler {
     #[cfg(test)]
     pub fn new(config: WorkerConfig, max_workers: usize) -> Result<Self, WorkerConfigError> {
@@ -300,7 +309,7 @@ impl AdaptiveScheduler {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "service"))]
 mod tests {
     use std::time::Duration;
 

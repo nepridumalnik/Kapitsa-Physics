@@ -1,16 +1,20 @@
 //! Simulation runtime configuration and execution APIs.
 
+#[cfg(feature = "service")]
 mod adaptive_step;
+#[cfg(feature = "service")]
 mod asynchronous;
 mod config;
 mod constants;
+#[cfg(feature = "service")]
 mod engine;
+#[cfg(feature = "parallel")]
 mod executor;
 pub mod metrics;
 #[cfg(test)]
 mod modular_rocket_fixture;
 mod planner;
-#[cfg(test)]
+#[cfg(all(test, feature = "service"))]
 mod sync;
 
 #[cfg(all(test, feature = "bench-internals"))]
@@ -58,6 +62,17 @@ mod bench_counter_tests {
     }
 }
 
+pub use config::{
+    AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, TimeStepPolicy,
+};
+#[cfg(feature = "parallel")]
+pub use executor::RayonExecutor;
+#[cfg(feature = "service")]
+pub use executor::{RayonPool, RayonPoolError};
+pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
+pub use planner::{WorkerConfig, WorkerConfigError};
+
+#[cfg(feature = "service")]
 pub use asynchronous::{
     BatchId, ChunkClientError, CollisionEventBatch, CollisionEventStreamError, CollisionEvents,
     JointBreakEventBatch, JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError,
@@ -65,12 +80,6 @@ pub use asynchronous::{
     PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
     PhysicsSnapshot, PhysicsSubmitError, Simulation, SimulationBuilder, SimulationError,
 };
-pub use config::{
-    AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, TimeStepPolicy,
-};
-pub use executor::{RayonExecutor, RayonPool, RayonPoolError};
-pub use metrics::{SimulationMetrics, SimulationState, StepMeasurement, StepStats};
-pub use planner::{WorkerConfig, WorkerConfigError};
 
 #[cfg(test)]
 mod modular_rocket_stability_tests;

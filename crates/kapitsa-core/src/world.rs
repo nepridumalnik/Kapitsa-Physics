@@ -1990,6 +1990,26 @@ impl PhysicsWorld {
         self.bodies.get(id.dense).map(|entry| &entry.body)
     }
 
+    /// Returns the body's committed kinematic state, or `None` for an invalid ID.
+    pub fn body_state(&self, id: BodyId) -> Option<&BodyState> {
+        self.body(id).map(|body| body.state())
+    }
+
+    /// Returns the world transform of the body's local origin in meters.
+    pub fn body_transform(&self, id: BodyId) -> Option<Transform> {
+        self.body_state(id).map(BodyState::transform)
+    }
+
+    /// Returns the world-space linear velocity of the body's center of mass, in m/s.
+    pub fn body_linear_velocity(&self, id: BodyId) -> Option<Vec3> {
+        self.body_state(id).map(BodyState::linear_velocity)
+    }
+
+    /// Returns the world-space angular velocity in rad/s.
+    pub fn body_angular_velocity(&self, id: BodyId) -> Option<Vec3> {
+        self.body_state(id).map(BodyState::angular_velocity)
+    }
+
     /// Returns mutable access only for bodies whose mass is not cluster-managed.
     pub fn body_mut(&mut self, id: BodyId) -> Option<&mut RigidBody> {
         if id.world != self.world_id || self.bodies.get(id.dense)?.cluster.is_some() {
@@ -2857,9 +2877,7 @@ impl PhysicsWorld {
             .iter()
             .zip(&context.predicted_states)
         {
-            if *clipped
-                && let Some(&index) = indices.get(body)
-            {
+            if *clipped && let Some(&index) = indices.get(body) {
                 self.cluster_load_states_pending[index].invalidate_collision_loads();
             }
         }

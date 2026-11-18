@@ -29,6 +29,7 @@ pub struct Collider {
     filter: CollisionFilter,
     material: Option<MaterialId>,
     mode: CollisionMode,
+    user_data: u64,
     skin_pose: Option<SkinPose>,
     mesh_bvh: Option<Box<TriangleBvh>>,
 }
@@ -85,9 +86,22 @@ impl Collider {
             filter: CollisionFilter::default(),
             material: None,
             mode: CollisionMode::Solid,
+            user_data: 0,
             skin_pose: None,
             mesh_bvh: None,
         }
+    }
+
+    /// Returns the application-defined value stored with this collider.
+    pub fn user_data(&self) -> u64 {
+        self.user_data
+    }
+
+    /// Stores an application-defined value on this collider.
+    ///
+    /// The engine never interprets this value.
+    pub fn set_user_data(&mut self, user_data: u64) {
+        self.user_data = user_data;
     }
 
     pub fn shape(&self) -> &Shape {

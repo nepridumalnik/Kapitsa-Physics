@@ -11,25 +11,55 @@ keywords = ["physics", "simulation", "gamedev", "space", "rigid-body"]
 categories = ["game-development", "simulation"]
 
 [features]
-bench-internals = ["kapitsa-core/bench-internals"]
+default = []
+service = ["dep:tokio", "parallel"]
+parallel = ["dep:rayon"]
+bench-internals = ["kapitsa-core/bench-internals", "parallel"]
 
 [dependencies]
 kapitsa-core.workspace = true
 kapitsa-math.workspace = true
-rayon = { version = "1.12.0" }
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
-
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
+rayon = { version = "1.12.0", optional = true }
+tokio = { version = "1", optional = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "test-util",
+] }
 
 [[test]]
 name = "async_marshalling"
+required-features = ["service"]
 
 [[test]]
 name = "collision_runtime"
+required-features = ["service"]
 
 [[test]]
 name = "rayon_tokio_spawn"
+required-features = ["service"]
+
+[[test]]
+name = "client_chunks"
+required-features = ["service"]
+
+[[test]]
+name = "material_cluster_client"
+required-features = ["service"]
+
+[[test]]
+name = "chunk_streaming_support"
+required-features = ["bench-internals"]
+
+[[example]]
+name = "quick_start"
+required-features = ["service"]
+
+[[example]]
+name = "rocket_flight"
+required-features = ["service"]
 
 [[bench]]
 name = "collisions"
@@ -38,6 +68,7 @@ harness = false
 [[bench]]
 name = "parallel_step"
 harness = false
+required-features = ["service"]
 
 [[bench]]
 name = "large_modular_rocket"
@@ -47,4 +78,4 @@ required-features = ["bench-internals"]
 [[bench]]
 name = "chunk_streaming"
 harness = false
-required-features = ["bench-internals"]
+required-features = ["service", "bench-internals"]

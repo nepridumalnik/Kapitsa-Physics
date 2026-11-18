@@ -316,7 +316,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "bench-internals")))]
+#[cfg(all(test, not(feature = "bench-internals"), feature = "service"))]
 mod time_warp_tests {
     use std::{
         error::Error,

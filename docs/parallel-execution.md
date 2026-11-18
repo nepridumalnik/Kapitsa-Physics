@@ -1,5 +1,10 @@
 # Step task execution
 
+The executor APIs are enabled by the `parallel` feature. `RayonPool` additionally
+requires `service`, because it hosts long-lived Rayon workers on a Tokio blocking
+pool; with only `parallel`, build a Rayon pool and use `RayonExecutor::from_pool`.
+Without `parallel`, host-driven world steps use the sequential executor.
+
 `kapitsa::execution::StepExecutor` supports borrowed independent chunks and
 `join(left, right)`. A branch may call the same executor recursively. Returning
 from an operation joins its children; results express dependencies through normal

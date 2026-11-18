@@ -1,18 +1,21 @@
-use std::{
-    panic::{AssertUnwindSafe, catch_unwind},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+#[cfg(feature = "service")]
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use kapitsa_core::execution::{ExecutionError, StepExecutor};
-use rayon::{ThreadPool, ThreadPoolBuilder};
+use rayon::ThreadPool;
+#[cfg(feature = "service")]
+use rayon::ThreadPoolBuilder;
+#[cfg(feature = "service")]
 use tokio::runtime::Handle;
-#[cfg(test)]
+#[cfg(all(test, feature = "service"))]
 use tokio::sync::mpsc as async_mpsc;
 
 /// Owns a Rayon pool whose long-lived workers run on a host Tokio blocking pool.
+#[cfg(feature = "service")]
 pub struct RayonPool {
     pool: Option<Arc<ThreadPool>>,
     #[cfg(test)]
@@ -33,6 +36,7 @@ pub struct RayonExecutor {
     spare_workers: Arc<AtomicUsize>,
 }
 
+#[cfg(feature = "service")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RayonPoolError {
     InvalidWorkerCount,
@@ -45,6 +49,7 @@ pub enum RayonPoolError {
     PoolAlreadyShutDown,
 }
 
+#[cfg(feature = "service")]
 impl std::fmt::Display for RayonPoolError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
@@ -61,8 +66,10 @@ impl std::fmt::Display for RayonPoolError {
     }
 }
 
+#[cfg(feature = "service")]
 impl std::error::Error for RayonPoolError {}
 
+#[cfg(feature = "service")]
 impl RayonPool {
     /// Creates a fixed-size pool using the supplied host runtime for worker threads.
     pub fn new(handle: &Handle, worker_count: usize) -> Result<Self, RayonPoolError> {
@@ -319,7 +326,7 @@ fn validate_chunk_layout(length: usize, chunk_sizes: &[usize]) -> Result<(), Exe
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "service"))]
 mod tests {
     use std::{
         sync::{

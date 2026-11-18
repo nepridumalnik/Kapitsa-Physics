@@ -31,6 +31,7 @@ use crate::{mass::MassProperties, transform::Transform};
 #[derive(Debug)]
 pub struct RigidBody {
     motion: BodyMotion,
+    user_data: u64,
     aerodynamics: crate::aerodynamics::Aerodynamics,
     pub(crate) aerodynamic_geometry_identity: Option<std::sync::Arc<()>>,
     pub(crate) aerodynamic_surfaces: Vec<crate::aerodynamics::AerodynamicSurface>,
@@ -58,6 +59,7 @@ impl RigidBody {
     pub(crate) fn from_motion(motion: BodyMotion) -> Self {
         Self {
             motion,
+            user_data: 0,
             aerodynamics: crate::aerodynamics::Aerodynamics::None,
             aerodynamic_geometry_identity: None,
             aerodynamic_surfaces: Vec::new(),
@@ -65,6 +67,19 @@ impl RigidBody {
             base_pressure_triangles: None,
             potential_sphere: None,
         }
+    }
+
+    /// Returns the application-defined value stored with this body.
+    pub fn user_data(&self) -> u64 {
+        self.user_data
+    }
+
+    /// Stores an application-defined value on this body.
+    ///
+    /// The engine never interprets this value. It is not part of [`BodyMotion`]
+    /// and is reset when a body is rebuilt from motion.
+    pub fn set_user_data(&mut self, user_data: u64) {
+        self.user_data = user_data;
     }
 
     pub fn aerodynamics(&self) -> &crate::aerodynamics::Aerodynamics {

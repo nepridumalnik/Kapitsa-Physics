@@ -240,7 +240,7 @@ fn average_duration(durations: &VecDeque<Duration>) -> Duration {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "service"))]
 mod tests {
     #[cfg(feature = "bench-internals")]
     use std::time::Instant;

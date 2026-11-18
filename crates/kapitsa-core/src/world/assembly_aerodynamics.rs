@@ -1569,7 +1569,13 @@ mod tests {
         };
         use kapitsa_math::Quat;
 
-        type RotatedAssemblySetup = (PhysicsWorld, BodyId, PartId, PartId, crate::world::ColliderId);
+        type RotatedAssemblySetup = (
+            PhysicsWorld,
+            BodyId,
+            PartId,
+            PartId,
+            crate::world::ColliderId,
+        );
 
         fn setup() -> Result<RotatedAssemblySetup, Box<dyn std::error::Error>> {
             let mut world = PhysicsWorld::new();

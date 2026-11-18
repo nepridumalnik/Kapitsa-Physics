@@ -4,7 +4,10 @@ mod runtime;
 extern crate self as kapitsa;
 
 pub mod execution {
-    pub use crate::runtime::{RayonExecutor, RayonPool, RayonPoolError};
+    #[cfg(feature = "parallel")]
+    pub use crate::runtime::RayonExecutor;
+    #[cfg(feature = "service")]
+    pub use crate::runtime::{RayonPool, RayonPoolError};
     pub use kapitsa_core::execution::{ExecutionError, SequentialExecutor, StepExecutor};
 }
 
@@ -87,7 +90,8 @@ pub mod transform {
 
 pub mod world {
     pub use kapitsa_core::world::{
-        AddChunkBatchError, AddChunkError, ChunkId, ChunkOperationError, RemoveChunkBatchError,
+        AddChunkBatchError, AddChunkError, ChunkId, ChunkOperationError, PhysicsWorld,
+        RemoveChunkBatchError,
     };
     pub use kapitsa_core::world::{
         BodyId, ClusterError, ColliderId, ErrorPolicy, ForceSource, ForceSourceError,
@@ -113,17 +117,20 @@ pub use kapitsa_core::{
     world::{
         AddChunkBatchError, AddChunkError, BodyId, ChunkId, ChunkOperationError, ClusterError,
         ColliderId, ErrorPolicy, ForceSourceId, GravityId, JointId, JointTarget, PartId,
-        RemoveChunkBatchError, StepDiagnostics, StepError, WeldId, WorldError,
+        PhysicsWorld, RemoveChunkBatchError, StepDiagnostics, StepError, WeldId, WorldError,
     },
 };
 
 pub use runtime::{
-    AdaptiveTimeStepConfig, BatchId, ChunkClientError, CollisionEventBatch,
-    CollisionEventStreamError, CollisionEvents, ConfigError, JointBreakEventBatch,
-    JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError, PhysicsBatchResult,
-    PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient, PhysicsClientError,
-    PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult, PhysicsSnapshot,
-    PhysicsSubmitError, SchedulerConfig, Simulation, SimulationBuilder, SimulationConfig,
-    SimulationError, SimulationMetrics, SimulationState, StepMeasurement, StepStats,
-    TimeStepPolicy, WorkerConfig, WorkerConfigError,
+    AdaptiveTimeStepConfig, ConfigError, SchedulerConfig, SimulationConfig, SimulationMetrics,
+    SimulationState, StepMeasurement, StepStats, TimeStepPolicy, WorkerConfig, WorkerConfigError,
+};
+
+#[cfg(feature = "service")]
+pub use runtime::{
+    BatchId, ChunkClientError, CollisionEventBatch, CollisionEventStreamError, CollisionEvents,
+    JointBreakEventBatch, JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError,
+    PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
+    PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
+    PhysicsSnapshot, PhysicsSubmitError, Simulation, SimulationBuilder, SimulationError,
 };

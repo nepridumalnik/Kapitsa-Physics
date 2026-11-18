@@ -1,5 +1,10 @@
 # Simulation runtime
 
+`kapitsa` is synchronous by default. `PhysicsWorld` is the primitive: the host
+creates bodies and colliders, calls `step`, and reads committed state directly. The
+clock-driven service described here is enabled by the `service` feature, which also
+enables `parallel`. A build without `service` does not depend on Tokio.
+
 `Simulation::builder().time_horizon(Duration::ZERO)` starts the real world
 service with motion gated while bodies and terrain are registered through its
 client. `Simulation::set_time_horizon(Some(target))` permits autonomous world

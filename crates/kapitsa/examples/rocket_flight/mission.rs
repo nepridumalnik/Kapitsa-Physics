@@ -40,7 +40,6 @@ pub struct FlightReference {
     pub specific_energy: f64,
 }
 
-
 impl HeadlessFlight {
     pub fn new() -> MissionResult<Self> {
         let mut world = PhysicsWorld::new();
