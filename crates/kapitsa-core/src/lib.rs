@@ -1,4 +1,4 @@
-#![doc = include_str!("../../../docs/collisions.md")]
+#![doc = include_str!("../README.md")]
 
 pub mod aabb;
 pub mod aerodynamics;
