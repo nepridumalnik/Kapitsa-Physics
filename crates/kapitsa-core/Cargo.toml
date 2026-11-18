@@ -1,15 +1,21 @@
 [package]
 name = "kapitsa-core"
+description = "Synchronous rigid-body physics core for the Kapitsa engine. Provides the physics world, shapes, colliders, contacts, joints, clusters, and gravity in f64."
 edition = "2024"
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["physics", "simulation", "rigid-body", "collision", "space"]
+categories = ["game-development", "simulation"]
 
 [features]
 bench-internals = []
 bench-detailed-timing = ["bench-internals"]
 
 [dependencies]
-kapitsa-math = { path = "../kapitsa-math" }
+kapitsa-math.workspace = true
 robust = "1.2.0"
 
 [dev-dependencies]

@@ -1,15 +1,21 @@
 [package]
 name = "kapitsa"
+description = "Asynchronous simulation runtime and public API for the Kapitsa physics engine. Builds on kapitsa-core and provides the simulation builder, physics client, snapshots, and command queue."
 edition = "2024"
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["physics", "simulation", "gamedev", "space", "rigid-body"]
+categories = ["game-development", "simulation"]
 
 [features]
 bench-internals = ["kapitsa-core/bench-internals"]
 
 [dependencies]
-kapitsa-core = { path = "../kapitsa-core" }
-kapitsa-math = { path = "../kapitsa-math" }
+kapitsa-core.workspace = true
+kapitsa-math.workspace = true
 rayon = { version = "1.12.0" }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
