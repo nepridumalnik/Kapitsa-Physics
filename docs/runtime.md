@@ -149,7 +149,8 @@ its force sources too.
 
 Snapshots are immutable and may skip intermediate steps. Collision events are
 published in bounded batches and report their committed step. Lagging event
-subscribers receive an explicit `CollisionEventStreamError::Lagged` result.
+subscribers receive an `Error` with `lagged_batches()` set to the number of discarded
+batches.
 Joint breaks are available from `PhysicsWorld::joint_events()` and through
 `PhysicsClient::subscribe_joint_break_events()`. A break event reports the joint
 ID and measured force/torque; the runtime publishes it only after the successful

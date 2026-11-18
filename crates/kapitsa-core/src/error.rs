@@ -103,6 +103,7 @@ pub struct Error {
     cause: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     command_index: Option<usize>,
     failed_step: Option<u64>,
+    lagged_batches: Option<u64>,
 }
 
 impl Error {
@@ -114,6 +115,7 @@ impl Error {
             cause: None,
             command_index: None,
             failed_step: None,
+            lagged_batches: None,
         }
     }
 
@@ -128,6 +130,7 @@ impl Error {
             cause: Some(Box::new(cause)),
             command_index: None,
             failed_step: None,
+            lagged_batches: None,
         }
     }
 
@@ -146,6 +149,11 @@ impl Error {
         self.failed_step
     }
 
+    /// Number of discarded stream batches, if applicable.
+    pub fn lagged_batches(&self) -> Option<u64> {
+        self.lagged_batches
+    }
+
     /// Adds command-index context.
     pub fn with_command_index(mut self, command_index: usize) -> Self {
         self.command_index = Some(command_index);
@@ -155,6 +163,12 @@ impl Error {
     /// Adds failed-step context.
     pub fn with_failed_step(mut self, step: u64) -> Self {
         self.failed_step = Some(step);
+        self
+    }
+
+    /// Adds discarded-stream-batch context.
+    pub fn with_lagged_batches(mut self, missed_batches: u64) -> Self {
+        self.lagged_batches = Some(missed_batches);
         self
     }
 

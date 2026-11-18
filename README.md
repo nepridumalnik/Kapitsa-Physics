@@ -243,7 +243,7 @@ client.remove_gravity(gravity).await?;
 
 `client.raycast`, `sweep`, and `overlaps` perform spatial queries. `QueryFilter` restricts the candidates. State queries and spatial queries are processed at their position in the queue before integration of the corresponding step. Creating and updating materials and clusters also works while paused.
 
-`subscribe_collision_events()` and `subscribe_joint_break_events()` create subscriptions. The streams are bounded: a slow consumer receives a `Lagged` error with the number of skipped batches.
+`subscribe_collision_events()` and `subscribe_joint_break_events()` create subscriptions. The streams are bounded: a slow consumer receives an `Error` whose `lagged_batches()` reports the number of skipped batches.
 
 `client.commands()` creates a command buffer; `try_submit` enqueues it without waiting and returns a batch ID. The queue is bounded, so when full, it returns the batch with an error, allowing it to be resubmitted. Results are available through `subscribe_batch_results`. The buffer supports the body, force, and joint operations listed in `PhysicsCommandBuffer`; newer material and cluster operations are executed as separate commands. Regular client methods wait for confirmation that changes have been applied and state has been published.
 

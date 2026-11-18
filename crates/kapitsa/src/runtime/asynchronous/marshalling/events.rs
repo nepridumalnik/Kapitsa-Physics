@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use kapitsa_core::{collision::CollisionEvent, joint::JointBreakEvent};
+use kapitsa_core::{Error, collision::CollisionEvent, joint::JointBreakEvent};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use super::PhysicsClientError;
@@ -34,7 +34,7 @@ impl CollisionEventBatch {
 
 /// Failure returned while receiving collision event batches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CollisionEventStreamError {
+pub(crate) enum CollisionEventStreamError {
     /// The bounded event channel discarded this many earlier batches.
     Lagged { missed_batches: u64 },
     /// The simulation stopped before another batch was received.
@@ -88,7 +88,7 @@ impl JointBreakEventBatch {
 
 /// Failure returned while receiving joint break event batches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JointBreakEventStreamError {
+pub(crate) enum JointBreakEventStreamError {
     Lagged { missed_batches: u64 },
     NotRunning,
     ChannelClosed,
@@ -133,7 +133,7 @@ pub struct PhysicsBatchResult {
 
 /// Failure returned while receiving command-buffer results.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PhysicsBatchResultStreamError {
+pub(crate) enum PhysicsBatchResultStreamError {
     Lagged { missed_results: u64 },
     NotRunning,
     ChannelClosed,
@@ -171,9 +171,7 @@ impl PhysicsBatchResults {
     }
 
     /// Waits for the next result and reports any results lost to channel lag.
-    pub async fn next_result(
-        &mut self,
-    ) -> Result<PhysicsBatchResult, PhysicsBatchResultStreamError> {
+    pub async fn next_result(&mut self) -> Result<PhysicsBatchResult, Error> {
         loop {
             if self.running.borrow().is_none() {
                 return self.try_result_after_stop();
@@ -182,15 +180,16 @@ impl PhysicsBatchResults {
                 result = self.receiver.recv() => match result {
                     Ok(result) => return Ok(result),
                     Err(broadcast::error::RecvError::Lagged(missed_results)) => {
-                        return Err(PhysicsBatchResultStreamError::Lagged { missed_results });
+                        return Err(Error::from(PhysicsBatchResultStreamError::Lagged { missed_results })
+                            .with_lagged_batches(missed_results));
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        return Err(PhysicsBatchResultStreamError::ChannelClosed);
+                        return Err(PhysicsBatchResultStreamError::ChannelClosed.into());
                     }
                 },
                 changed = self.running.changed() => {
                     if changed.is_err() {
-                        return Err(PhysicsBatchResultStreamError::ChannelClosed);
+                        return Err(PhysicsBatchResultStreamError::ChannelClosed.into());
                     }
                     if self.running.borrow().is_none() {
                         return self.try_result_after_stop();
@@ -200,19 +199,18 @@ impl PhysicsBatchResults {
         }
     }
 
-    fn try_result_after_stop(
-        &mut self,
-    ) -> Result<PhysicsBatchResult, PhysicsBatchResultStreamError> {
+    fn try_result_after_stop(&mut self) -> Result<PhysicsBatchResult, Error> {
         match self.receiver.try_recv() {
             Ok(result) => Ok(result),
-            Err(broadcast::error::TryRecvError::Lagged(missed_results)) => {
-                Err(PhysicsBatchResultStreamError::Lagged { missed_results })
-            }
+            Err(broadcast::error::TryRecvError::Lagged(missed_results)) => Err(Error::from(
+                PhysicsBatchResultStreamError::Lagged { missed_results },
+            )
+            .with_lagged_batches(missed_results)),
             Err(broadcast::error::TryRecvError::Empty) => {
-                Err(PhysicsBatchResultStreamError::NotRunning)
+                Err(PhysicsBatchResultStreamError::NotRunning.into())
             }
             Err(broadcast::error::TryRecvError::Closed) => {
-                Err(PhysicsBatchResultStreamError::ChannelClosed)
+                Err(PhysicsBatchResultStreamError::ChannelClosed.into())
             }
         }
     }
@@ -239,19 +237,20 @@ impl JointBreakEvents {
     }
 
     /// Waits for the next committed joint-break batch and reports lost batches.
-    pub async fn next_batch(&mut self) -> Result<JointBreakEventBatch, JointBreakEventStreamError> {
+    pub async fn next_batch(&mut self) -> Result<JointBreakEventBatch, Error> {
         loop {
             if self.running.borrow().is_none() {
                 return match self.receiver.try_recv() {
                     Ok(batch) => Ok(batch),
-                    Err(broadcast::error::TryRecvError::Lagged(missed_batches)) => {
-                        Err(JointBreakEventStreamError::Lagged { missed_batches })
-                    }
+                    Err(broadcast::error::TryRecvError::Lagged(missed_batches)) => Err(
+                        Error::from(JointBreakEventStreamError::Lagged { missed_batches })
+                            .with_lagged_batches(missed_batches),
+                    ),
                     Err(broadcast::error::TryRecvError::Empty) => {
-                        Err(JointBreakEventStreamError::NotRunning)
+                        Err(JointBreakEventStreamError::NotRunning.into())
                     }
                     Err(broadcast::error::TryRecvError::Closed) => {
-                        Err(JointBreakEventStreamError::ChannelClosed)
+                        Err(JointBreakEventStreamError::ChannelClosed.into())
                     }
                 };
             }
@@ -259,15 +258,16 @@ impl JointBreakEvents {
                 batch = self.receiver.recv() => match batch {
                     Ok(batch) => return Ok(batch),
                     Err(broadcast::error::RecvError::Lagged(missed_batches)) => {
-                        return Err(JointBreakEventStreamError::Lagged { missed_batches });
+                        return Err(Error::from(JointBreakEventStreamError::Lagged { missed_batches })
+                            .with_lagged_batches(missed_batches));
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        return Err(JointBreakEventStreamError::ChannelClosed);
+                        return Err(JointBreakEventStreamError::ChannelClosed.into());
                     }
                 },
                 changed = self.running.changed() => {
                     if changed.is_err() {
-                        return Err(JointBreakEventStreamError::ChannelClosed);
+                        return Err(JointBreakEventStreamError::ChannelClosed.into());
                     }
                     if self.running.borrow().is_none() {
                         continue;
@@ -291,19 +291,20 @@ impl CollisionEvents {
     /// Returns `Lagged` with the number of discarded batches instead of hiding loss.
     /// A stopped simulation returns `NotRunning`; the same subscription can be
     /// used again after the simulation restarts.
-    pub async fn next_batch(&mut self) -> Result<CollisionEventBatch, CollisionEventStreamError> {
+    pub async fn next_batch(&mut self) -> Result<CollisionEventBatch, Error> {
         loop {
             if self.running.borrow().is_none() {
                 return match self.receiver.try_recv() {
                     Ok(batch) => Ok(batch),
-                    Err(broadcast::error::TryRecvError::Lagged(missed_batches)) => {
-                        Err(CollisionEventStreamError::Lagged { missed_batches })
-                    }
+                    Err(broadcast::error::TryRecvError::Lagged(missed_batches)) => Err(
+                        Error::from(CollisionEventStreamError::Lagged { missed_batches })
+                            .with_lagged_batches(missed_batches),
+                    ),
                     Err(broadcast::error::TryRecvError::Empty) => {
-                        Err(CollisionEventStreamError::NotRunning)
+                        Err(CollisionEventStreamError::NotRunning.into())
                     }
                     Err(broadcast::error::TryRecvError::Closed) => {
-                        Err(CollisionEventStreamError::ChannelClosed)
+                        Err(CollisionEventStreamError::ChannelClosed.into())
                     }
                 };
             }
@@ -311,18 +312,19 @@ impl CollisionEvents {
                 batch = self.receiver.recv() => match batch {
                     Ok(batch) => return Ok(batch),
                     Err(broadcast::error::RecvError::Lagged(missed_batches)) => {
-                        return Err(CollisionEventStreamError::Lagged { missed_batches });
+                        return Err(Error::from(CollisionEventStreamError::Lagged { missed_batches })
+                            .with_lagged_batches(missed_batches));
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        return Err(CollisionEventStreamError::ChannelClosed);
+                        return Err(CollisionEventStreamError::ChannelClosed.into());
                     }
                 },
                 changed = self.running.changed() => {
                     if changed.is_err() {
-                        return Err(CollisionEventStreamError::ChannelClosed);
+                        return Err(CollisionEventStreamError::ChannelClosed.into());
                     }
                     if self.running.borrow().is_none() {
-                        return Err(CollisionEventStreamError::NotRunning);
+                        return Err(CollisionEventStreamError::NotRunning.into());
                     }
                 }
             }
@@ -340,11 +342,11 @@ mod tests {
     use tokio::sync::{broadcast, mpsc, watch};
 
     use super::{
-        CollisionEventBatch, CollisionEventStreamError, CollisionEvents, JointBreakEventBatch,
-        JointBreakEventStreamError, JointBreakEvents, PhysicsBatchResult,
-        PhysicsBatchResultStreamError, PhysicsBatchResults,
+        CollisionEventBatch, CollisionEvents, JointBreakEventBatch, JointBreakEvents,
+        PhysicsBatchResult, PhysicsBatchResults,
     };
     use crate::runtime::asynchronous::marshalling::BatchId;
+    use kapitsa_core::ErrorKind;
 
     type RunningState = Option<mpsc::Sender<super::CommandRequest>>;
 
@@ -364,10 +366,8 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(
-            subscription.next_batch().await,
-            Err(CollisionEventStreamError::Lagged { missed_batches: 2 })
-        );
+        let error = subscription.next_batch().await.expect_err("lagged batch");
+        assert_eq!(error.lagged_batches(), Some(2));
         assert_eq!(subscription.next_batch().await.unwrap().step(), 3);
     }
 
@@ -377,10 +377,12 @@ mod tests {
         let (running_tx, running_rx) = running_state();
         let mut subscription = CollisionEvents::new(receiver, running_rx);
         running_tx.send_replace(None);
-        assert_eq!(
-            subscription.next_batch().await,
-            Err(CollisionEventStreamError::NotRunning)
-        );
+        let error = subscription
+            .next_batch()
+            .await
+            .expect_err("stopped subscription");
+        assert_eq!(error.kind(), ErrorKind::Runtime);
+        assert!(error.to_string().contains("not running"));
 
         let (commands, _receiver) = mpsc::channel(1);
         running_tx.send_replace(Some(commands));
@@ -405,10 +407,11 @@ mod tests {
                 .expect("subscriber exists");
         }
 
-        assert_eq!(
-            subscription.next_result().await,
-            Err(PhysicsBatchResultStreamError::Lagged { missed_results: 2 })
-        );
+        let error = subscription
+            .next_result()
+            .await
+            .expect_err("lagged result batch");
+        assert_eq!(error.lagged_batches(), Some(2));
         let result = subscription.next_result().await.expect("latest result");
         assert_eq!(result.batch_id.get(), 3);
         assert_eq!(result.step, 3);
@@ -425,10 +428,11 @@ mod tests {
                 .expect("subscriber exists");
         }
 
-        assert_eq!(
-            subscription.next_batch().await,
-            Err(JointBreakEventStreamError::Lagged { missed_batches: 2 })
-        );
+        let error = subscription
+            .next_batch()
+            .await
+            .expect_err("lagged joint batch");
+        assert_eq!(error.lagged_batches(), Some(2));
         assert_eq!(subscription.next_batch().await.unwrap().step(), 3);
     }
 
@@ -450,6 +454,7 @@ mod tests {
         results.send(expected).expect("subscriber exists");
         running_tx.send_replace(None);
 
-        assert_eq!(next.await, Ok(expected));
+        let actual = next.await.expect("published result");
+        assert_eq!(actual, expected);
     }
 }

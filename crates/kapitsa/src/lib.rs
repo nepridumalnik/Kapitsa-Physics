@@ -134,9 +134,8 @@ pub use runtime::{
 
 #[cfg(feature = "service")]
 pub use runtime::{
-    BatchId, ChunkClientError, CollisionEventBatch, CollisionEventStreamError, CollisionEvents,
-    JointBreakEventBatch, JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError,
-    PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
+    BatchId, ChunkClientError, CollisionEventBatch, CollisionEvents, JointBreakEventBatch,
+    JointBreakEvents, PhysicsBatchError, PhysicsBatchResult, PhysicsBatchResults, PhysicsClient,
     PhysicsClientError, PhysicsSnapshot, PhysicsSubmitError, Simulation, SimulationBuilder,
     SimulationError,
 };

@@ -398,15 +398,15 @@ async fn runtime_fixture(
                         .collisions
                         .fetch_add(batch.events().len() as u64, Ordering::Relaxed);
                 }
-                Err(crate::runtime::CollisionEventStreamError::Lagged { missed_batches }) => {
-                    listener_counts
-                        .lost_batches
-                        .fetch_add(missed_batches, Ordering::Relaxed);
+                Err(error) => {
+                    if let Some(missed_batches) = error.lagged_batches() {
+                        listener_counts
+                            .lost_batches
+                            .fetch_add(missed_batches, Ordering::Relaxed);
+                    } else {
+                        break;
+                    }
                 }
-                Err(
-                    crate::runtime::CollisionEventStreamError::NotRunning
-                    | crate::runtime::CollisionEventStreamError::ChannelClosed,
-                ) => break,
             }
         }
     });
