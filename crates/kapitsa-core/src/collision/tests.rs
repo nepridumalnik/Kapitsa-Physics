@@ -101,7 +101,7 @@ fn world_keeps_previous_config_when_update_is_invalid() {
     };
     assert_eq!(
         world.set_collision_config(invalid),
-        Err(CollisionError::InvalidConfig)
+        Err(crate::Error::from(CollisionError::InvalidConfig))
     );
     assert_eq!(world.collision_config(), original);
     assert!(world.collision_events().is_empty());

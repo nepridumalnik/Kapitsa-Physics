@@ -100,7 +100,13 @@ impl ChunkBuilder {
             .map_err(|_| ChunkBuildError::CapacityExceeded)?;
         for mesh in self.meshes {
             let mut collider = Collider::new(Shape::TriangleMesh(mesh), transform);
-            collider.prepare().map_err(ChunkBuildError::Preparation)?;
+            collider.prepare().map_err(|error| {
+                let cause = error
+                    .downcast_ref::<CollisionError>()
+                    .copied()
+                    .unwrap_or(CollisionError::GeometryBounds);
+                ChunkBuildError::Preparation(cause)
+            })?;
             colliders.push(collider);
         }
         Ok(Chunk {

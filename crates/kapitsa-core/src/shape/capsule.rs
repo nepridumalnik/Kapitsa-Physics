@@ -49,6 +49,6 @@ impl Capsule {
             self.start.min(self.end) - radius,
             self.start.max(self.end) + radius,
         )
-        .map_err(BoundsError::InvalidBounds)
+        .map_err(BoundsError::from_unified)
     }
 }

@@ -6,7 +6,7 @@ fn mesh_preparation_on_worker_is_idempotent() -> Result<(), Box<dyn Error>> {
     let worker = std::thread::spawn(move || {
         let mut collider = Collider::new(Shape::TriangleMesh(mesh), Transform::identity());
         collider.prepare()?;
-        Ok::<_, crate::collision::CollisionError>(collider)
+        Ok::<_, crate::Error>(collider)
     });
     let mut collider = worker.join().map_err(|_| "preparation worker failed")??;
     let first = collider.query_bvh().ok_or("missing BVH")? as *const _;

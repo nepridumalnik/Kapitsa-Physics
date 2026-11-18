@@ -71,3 +71,12 @@ impl From<AabbError> for BoundsError {
         Self::InvalidBounds(error)
     }
 }
+
+impl BoundsError {
+    pub(crate) fn from_unified(error: crate::Error) -> Self {
+        match error.downcast_ref::<AabbError>() {
+            Some(error) => Self::InvalidBounds(*error),
+            None => Self::InvalidGeometry,
+        }
+    }
+}

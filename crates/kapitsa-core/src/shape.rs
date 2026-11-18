@@ -118,13 +118,18 @@ impl Shape {
                     max(center.y + radius)?,
                     max(center.z + radius)?,
                 ),
-            )?;
+            )
+            .map_err(BoundsError::from_unified)?;
 
             return Ok(Some(bounds));
         }
 
         self.local_bounds()?
-            .map(|bounds| bounds.transformed(transform).map_err(BoundsError::from))
+            .map(|bounds| {
+                bounds
+                    .transformed(transform)
+                    .map_err(BoundsError::from_unified)
+            })
             .transpose()
     }
 }

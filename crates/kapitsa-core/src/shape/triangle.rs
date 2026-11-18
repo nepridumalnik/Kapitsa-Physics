@@ -39,6 +39,6 @@ impl Triangle {
         let [first, second, third] = self.vertices;
         let min = first.min(second).min(third);
         let max = first.max(second).max(third);
-        Aabb::new(min, max).map_err(BoundsError::InvalidBounds)
+        Aabb::new(min, max).map_err(BoundsError::from_unified)
     }
 }

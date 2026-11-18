@@ -1438,7 +1438,7 @@ pub(crate) fn apply_command_inner(
         PhysicsCommand::SetCollisionConfig { config } => {
             world
                 .set_collision_config(config)
-                .map_err(WorldError::Collision)?;
+                .map_err(CommandError::from_unified)?;
             PhysicsCommandResult::Done
         }
         PhysicsCommand::SetColliderFilter { id, filter } => {

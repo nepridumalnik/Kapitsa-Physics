@@ -68,6 +68,6 @@ impl TaperedCylinder {
             (self.start - start_radius).min(self.end - end_radius),
             (self.start + start_radius).max(self.end + end_radius),
         )
-        .map_err(BoundsError::InvalidBounds)
+        .map_err(BoundsError::from_unified)
     }
 }

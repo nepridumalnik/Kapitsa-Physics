@@ -1880,8 +1880,10 @@ impl PhysicsWorld {
         self.gravity_fields.remove(id.dense)
     }
 
-    pub fn set_collision_config(&mut self, config: CollisionConfig) -> Result<(), CollisionError> {
-        self.collision_system.set_config(config)
+    pub fn set_collision_config(&mut self, config: CollisionConfig) -> Result<(), Error> {
+        self.collision_system
+            .set_config(config)
+            .map_err(Error::from)
     }
 
     pub fn collision_events(&self) -> &[CollisionEvent] {

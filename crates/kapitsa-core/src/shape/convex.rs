@@ -122,6 +122,6 @@ impl Convex {
         let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
             (min.min(vertex), max.max(vertex))
         });
-        Aabb::new(min, max).map_err(BoundsError::InvalidBounds)
+        Aabb::new(min, max).map_err(BoundsError::from_unified)
     }
 }

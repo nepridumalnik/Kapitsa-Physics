@@ -1,6 +1,6 @@
 use crate::{
     Error,
-    aabb::Aabb,
+    aabb::{Aabb, AabbError},
     collision::{
         CollisionError,
         mesh::{BvhRefitScratch, TriangleBvh},
@@ -76,8 +76,8 @@ impl Collider {
     /// This synchronous operation is idempotent and can be run on a worker
     /// thread before the collider is inserted into a world. Prepared mesh
     /// geometry remains available when the collider is removed from the world.
-    pub fn prepare(&mut self) -> Result<(), CollisionError> {
-        self.prepare_query_geometry()
+    pub fn prepare(&mut self) -> Result<(), Error> {
+        self.prepare_query_geometry().map_err(Error::from)
     }
 
     pub fn new(shape: Shape, local_transform: Transform) -> Self {
@@ -161,7 +161,10 @@ impl Collider {
                 .bounds
                 .transformed(&transform)
                 .map(Some)
-                .map_err(|error| crate::Error::from(BoundsError::from(error)));
+                .map_err(|error| match error.downcast_ref::<AabbError>() {
+                    Some(error) => Error::from(BoundsError::from(*error)),
+                    None => error,
+                });
         }
         self.shape
             .world_bounds(&transform)
@@ -326,7 +329,10 @@ fn points_bounds(points: &[Vec3]) -> Result<Aabb, BoundsError> {
     let (min, max) = rest.iter().fold((first, first), |(min, max), &point| {
         (min.min(point), max.max(point))
     });
-    Aabb::new(min, max).map_err(BoundsError::from)
+    Aabb::new(min, max).map_err(|error| match error.downcast_ref::<AabbError>() {
+        Some(error) => BoundsError::from(*error),
+        None => BoundsError::InvalidGeometry,
+    })
 }
 
 #[cfg(test)]

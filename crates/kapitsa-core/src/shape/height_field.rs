@@ -81,6 +81,6 @@ impl HeightField {
             Vec3::new(0.0, 0.0, min_height),
             Vec3::new(span.x, span.y, max_height),
         )
-        .map_err(BoundsError::InvalidBounds)
+        .map_err(BoundsError::from_unified)
     }
 }

@@ -965,7 +965,7 @@ pub(crate) mod tests {
     fn invalid_ray_is_rejected_before_it_can_be_submitted() {
         assert_eq!(
             Ray::new(Vec3::ZERO, Vec3::ZERO, 1.0),
-            Err(QueryError::InvalidInput)
+            Err(kapitsa_core::Error::from(QueryError::InvalidInput))
         );
     }
 

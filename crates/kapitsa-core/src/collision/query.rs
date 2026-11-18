@@ -24,9 +24,9 @@ pub struct Ray {
 }
 
 impl Ray {
-    pub fn new(origin: Vec3, direction: Vec3, max_distance: f64) -> Result<Self, QueryError> {
+    pub fn new(origin: Vec3, direction: Vec3, max_distance: f64) -> Result<Self, crate::Error> {
         if !origin.is_finite() || !max_distance.is_finite() || max_distance < 0.0 {
-            return Err(QueryError::InvalidInput);
+            return Err(crate::Error::from(QueryError::InvalidInput));
         }
         let direction = direction.try_normalize().ok_or(QueryError::InvalidInput)?;
         Ok(Self {

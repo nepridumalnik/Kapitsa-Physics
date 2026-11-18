@@ -9,6 +9,8 @@ use crate::{
 };
 use kapitsa_math::Vec3;
 
+use crate::Error;
+
 impl PhysicsWorld {
     pub fn raycast(&self, ray: Ray, filter: QueryFilter) -> Result<Option<RayHit>, QueryError> {
         self.raycast_with_scratch(ray, filter, &mut QueryScratch::default())
@@ -62,7 +64,7 @@ impl PhysicsWorld {
         transform: crate::transform::Transform,
         displacement: Vec3,
         filter: QueryFilter,
-    ) -> Result<Option<ShapeHit>, QueryError> {
+    ) -> Result<Option<ShapeHit>, Error> {
         self.sweep_with_scratch(
             shape,
             transform,
@@ -80,13 +82,13 @@ impl PhysicsWorld {
         displacement: Vec3,
         filter: QueryFilter,
         scratch: &mut QueryScratch,
-    ) -> Result<Option<ShapeHit>, QueryError> {
+    ) -> Result<Option<ShapeHit>, Error> {
         scratch.clear();
         if !shape.is_convex() {
-            return Err(QueryError::UnsupportedQueryShape);
+            return Err(Error::from(QueryError::UnsupportedQueryShape));
         }
         if !displacement.is_finite() {
-            return Err(QueryError::InvalidInput);
+            return Err(Error::from(QueryError::InvalidInput));
         }
         let end_translation = transform
             .translation()
@@ -142,7 +144,7 @@ impl PhysicsWorld {
             };
             let position = hit.point_a * 0.5 + hit.point_b * 0.5;
             if !position.is_finite() || !hit.normal.is_finite() || !hit.toi.is_finite() {
-                return Err(QueryError::ArithmeticOverflow);
+                return Err(Error::from(QueryError::ArithmeticOverflow));
             }
             if closest.is_none_or(|current: ShapeHit| {
                 hit.toi < current.toi || (hit.toi == current.toi && collider_id < current.collider)
@@ -165,7 +167,7 @@ impl PhysicsWorld {
         transform: crate::transform::Transform,
         filter: QueryFilter,
         output: &mut Vec<OverlapHit>,
-    ) -> Result<(), QueryError> {
+    ) -> Result<(), Error> {
         self.overlaps_with_scratch(
             shape,
             transform,
@@ -183,10 +185,10 @@ impl PhysicsWorld {
         filter: QueryFilter,
         output: &mut Vec<OverlapHit>,
         scratch: &mut QueryScratch,
-    ) -> Result<(), QueryError> {
+    ) -> Result<(), Error> {
         scratch.clear();
         if !shape.is_convex() {
-            return Err(QueryError::UnsupportedQueryShape);
+            return Err(Error::from(QueryError::UnsupportedQueryShape));
         }
         let bounds = shape
             .world_bounds(&transform)
@@ -237,7 +239,7 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn query_candidates(&self, bounds: Aabb, scratch: &mut QueryScratch) -> Result<(), QueryError> {
+    fn query_candidates(&self, bounds: Aabb, scratch: &mut QueryScratch) -> Result<(), Error> {
         let candidates = &mut scratch.colliders;
         if self.query_index_dirty || self.query_index.is_none() {
             candidates
