@@ -9,6 +9,7 @@ pub mod collision;
 pub mod command;
 mod constraint;
 pub mod containers;
+pub mod error;
 pub mod execution;
 pub mod gravity;
 pub mod hydrodynamics;
@@ -20,4 +21,5 @@ pub mod shape;
 pub mod transform;
 pub mod world;
 
+pub use error::{Error, ErrorKind};
 pub use gravity::{CentralGravity, GravityError};

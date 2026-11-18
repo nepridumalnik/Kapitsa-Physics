@@ -108,6 +108,27 @@ pub enum BalanceError {
     Physics(ClusterError),
 }
 
+impl std::fmt::Display for BalanceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncompleteLoads => formatter.write_str("weld load snapshot is incomplete"),
+            Self::InvalidTree => formatter.write_str("weld tree topology is invalid"),
+            Self::InvalidTolerance => formatter.write_str("weld balance tolerance is invalid"),
+            Self::Unbalanced => formatter.write_str("weld loads do not balance"),
+            Self::Physics(error) => write!(formatter, "weld balance physics error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BalanceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Physics(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// Parent-on-child reaction in world coordinates, at the child's weld anchor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeldReaction {

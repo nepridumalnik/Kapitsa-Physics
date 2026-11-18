@@ -1,4 +1,5 @@
 mod runtime;
+mod unified_error;
 
 #[cfg(test)]
 extern crate self as kapitsa;
@@ -101,6 +102,7 @@ pub mod world {
 }
 
 pub use kapitsa_core::{
+    Error, ErrorKind,
     chunk::{Chunk, ChunkBuildError, ChunkBuilder},
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{
