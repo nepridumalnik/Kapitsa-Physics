@@ -410,7 +410,7 @@ fn part_wings_later_failure_rolls_back_and_primary_transfer_rejects_atomically()
                 id,
                 MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY)?
             ),
-            Err(ClusterError::InvalidMass)
+            Err(crate::Error::from(ClusterError::InvalidMass))
         );
         assert_eq!(world.body(id).ok_or("body")?.motion(), before);
         assert!(

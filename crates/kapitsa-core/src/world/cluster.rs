@@ -1,4 +1,6 @@
 use kapitsa_math::Vec3;
+
+use crate::Error;
 use std::collections::{HashMap, HashSet};
 
 use super::{
@@ -355,6 +357,14 @@ impl PhysicsWorld {
     pub fn add_part_collider(
         &mut self,
         part: PartId,
+        collider: crate::collider::Collider,
+    ) -> Result<ColliderId, Error> {
+        self.add_part_collider_inner(part, collider)
+            .map_err(Error::from)
+    }
+    fn add_part_collider_inner(
+        &mut self,
+        part: PartId,
         mut collider: crate::collider::Collider,
     ) -> Result<ColliderId, ClusterError> {
         let part_entry = self.cluster_part(part).ok_or(ClusterError::InvalidPartId)?;
@@ -388,6 +398,15 @@ impl PhysicsWorld {
         part: PartId,
         collider: ColliderId,
         part_local_transform: Transform,
+    ) -> Result<(), Error> {
+        self.set_part_collider_transform_inner(part, collider, part_local_transform)
+            .map_err(Error::from)
+    }
+    fn set_part_collider_transform_inner(
+        &mut self,
+        part: PartId,
+        collider: ColliderId,
+        part_local_transform: Transform,
     ) -> Result<(), ClusterError> {
         let owner = self.cluster_part(part).ok_or(ClusterError::InvalidPartId)?;
         if !owner.colliders().contains(&collider) {
@@ -416,6 +435,12 @@ impl PhysicsWorld {
     pub fn remove_part_collider(
         &mut self,
         id: ColliderId,
+    ) -> Result<crate::collider::Collider, Error> {
+        self.remove_part_collider_inner(id).map_err(Error::from)
+    }
+    fn remove_part_collider_inner(
+        &mut self,
+        id: ColliderId,
     ) -> Result<crate::collider::Collider, ClusterError> {
         let body = self.collider_body(id).ok_or(ClusterError::InvalidPartId)?;
         self.cluster(body).ok_or(ClusterError::NotClustered)?;
@@ -442,18 +467,29 @@ impl PhysicsWorld {
     /// Existing colliders become owned by the identity-transform root part.
     /// Static and kinematic bodies can use [`Self::enable_cluster_with_mass`]
     /// because they do not carry mass properties in `RigidBody`.
-    pub fn enable_cluster(&mut self, body: BodyId) -> Result<PartId, ClusterError> {
+    pub fn enable_cluster(&mut self, body: BodyId) -> Result<PartId, Error> {
+        self.enable_cluster_inner(body).map_err(Error::from)
+    }
+    fn enable_cluster_inner(&mut self, body: BodyId) -> Result<PartId, ClusterError> {
         let mass = self
             .body(body)
             .ok_or(ClusterError::InvalidBodyId)?
             .physics()
             .mass()
             .ok_or(ClusterError::InvalidMass)?;
-        self.enable_cluster_with_mass(body, mass)
+        self.enable_cluster_with_mass_inner(body, mass)
     }
 
     /// Converts an existing body into a one-part cluster with explicit root mass.
     pub fn enable_cluster_with_mass(
+        &mut self,
+        body: BodyId,
+        mass: MassProperties,
+    ) -> Result<PartId, Error> {
+        self.enable_cluster_with_mass_inner(body, mass)
+            .map_err(Error::from)
+    }
+    fn enable_cluster_with_mass_inner(
         &mut self,
         body: BodyId,
         mass: MassProperties,
@@ -592,6 +628,15 @@ impl PhysicsWorld {
     /// They must already agree with the receiving body's rigid velocity field;
     /// a different incoming state belongs to the explicit merge operation.
     pub fn add_cluster_part(
+        &mut self,
+        parent: PartId,
+        desc: crate::cluster::ClusterPartDesc,
+        weld_desc: crate::cluster::WeldDesc,
+    ) -> Result<PartId, Error> {
+        self.add_cluster_part_inner(parent, desc, weld_desc)
+            .map_err(Error::from)
+    }
+    fn add_cluster_part_inner(
         &mut self,
         parent: PartId,
         mut desc: crate::cluster::ClusterPartDesc,
@@ -825,7 +870,10 @@ impl PhysicsWorld {
     ///
     /// The remaining parts must stay connected. Removing the final part is
     /// rejected so the owning body cannot outlive an empty cluster.
-    pub fn destroy_cluster_part(&mut self, part: PartId) -> Result<(), ClusterError> {
+    pub fn destroy_cluster_part(&mut self, part: PartId) -> Result<(), Error> {
+        self.destroy_cluster_part_inner(part).map_err(Error::from)
+    }
+    fn destroy_cluster_part_inner(&mut self, part: PartId) -> Result<(), ClusterError> {
         let body = self
             .cluster_part(part)
             .ok_or(ClusterError::InvalidPartId)?
@@ -1025,12 +1073,18 @@ impl PhysicsWorld {
     }
 
     /// Backward-compatible alias for [`Self::destroy_cluster_part`].
-    pub fn remove_cluster_part(&mut self, part: PartId) -> Result<(), ClusterError> {
-        self.destroy_cluster_part(part)
+    pub fn remove_cluster_part(&mut self, part: PartId) -> Result<(), Error> {
+        self.remove_cluster_part_inner(part).map_err(Error::from)
+    }
+    fn remove_cluster_part_inner(&mut self, part: PartId) -> Result<(), ClusterError> {
+        self.destroy_cluster_part_inner(part)
     }
 
     /// Removes one weld and splits the graph when that edge disconnects it.
-    pub fn break_weld(&mut self, weld: WeldId) -> Result<Vec<BodyId>, ClusterError> {
+    pub fn break_weld(&mut self, weld: WeldId) -> Result<Vec<BodyId>, Error> {
+        self.break_weld_inner(weld).map_err(Error::from)
+    }
+    fn break_weld_inner(&mut self, weld: WeldId) -> Result<Vec<BodyId>, ClusterError> {
         let weld_entry = self.weld(weld).ok_or(ClusterError::InvalidWeldId)?;
         let body = self
             .cluster_part(weld_entry.part_a())
@@ -1044,7 +1098,10 @@ impl PhysicsWorld {
     }
 
     /// Removes all welds incident to a part and splits any resulting components.
-    pub fn detach_part(&mut self, part: PartId) -> Result<Vec<BodyId>, ClusterError> {
+    pub fn detach_part(&mut self, part: PartId) -> Result<Vec<BodyId>, Error> {
+        self.detach_part_inner(part).map_err(Error::from)
+    }
+    fn detach_part_inner(&mut self, part: PartId) -> Result<Vec<BodyId>, ClusterError> {
         let body = self
             .cluster_part(part)
             .ok_or(ClusterError::InvalidPartId)?
@@ -1067,6 +1124,15 @@ impl PhysicsWorld {
 
     /// Merges two existing clusters into the first body's cluster.
     pub fn merge_clusters(
+        &mut self,
+        first: BodyId,
+        second: BodyId,
+        weld_desc: crate::cluster::WeldDesc,
+    ) -> Result<(), Error> {
+        self.merge_clusters_inner(first, second, weld_desc)
+            .map_err(Error::from)
+    }
+    fn merge_clusters_inner(
         &mut self,
         first: BodyId,
         second: BodyId,
@@ -1931,6 +1997,15 @@ impl PhysicsWorld {
         part: PartId,
         mass: MassProperties,
         mode: MassChangeMode,
+    ) -> Result<(), Error> {
+        self.set_part_mass_checked(part, mass, mode)
+            .map_err(Error::from)
+    }
+    fn set_part_mass_checked(
+        &mut self,
+        part: PartId,
+        mass: MassProperties,
+        mode: MassChangeMode,
     ) -> Result<(), ClusterError> {
         if mode == MassChangeMode::ConserveRemainingMomentum {
             return Err(ClusterError::InvalidMotion);
@@ -1940,6 +2015,15 @@ impl PhysicsWorld {
 
     /// Changes a dynamic cluster's mass with explicitly supplied signed impulses.
     pub fn set_part_mass_with_transfer(
+        &mut self,
+        part: PartId,
+        mass: MassProperties,
+        transfer: MassTransfer,
+    ) -> Result<(), Error> {
+        self.set_part_mass_with_transfer_inner(part, mass, transfer)
+            .map_err(Error::from)
+    }
+    fn set_part_mass_with_transfer_inner(
         &mut self,
         part: PartId,
         mass: MassProperties,
@@ -2304,6 +2388,14 @@ impl PhysicsWorld {
         &mut self,
         weld: WeldId,
         strength: Option<crate::cluster::impulse::ImpulseStrength>,
+    ) -> Result<(), Error> {
+        self.set_weld_impulse_strength_inner(weld, strength)
+            .map_err(Error::from)
+    }
+    fn set_weld_impulse_strength_inner(
+        &mut self,
+        weld: WeldId,
+        strength: Option<crate::cluster::impulse::ImpulseStrength>,
     ) -> Result<(), ClusterError> {
         let entry = self.weld(weld).ok_or(ClusterError::InvalidWeldId)?;
         if let Some(value) = strength
@@ -2334,7 +2426,10 @@ impl PhysicsWorld {
         Some(self.cluster_part(part)?.body())
     }
 
-    pub fn validate_clusters(&self) -> Result<(), ClusterError> {
+    pub fn validate_clusters(&self) -> Result<(), Error> {
+        self.validate_clusters_inner().map_err(Error::from)
+    }
+    fn validate_clusters_inner(&self) -> Result<(), ClusterError> {
         let mut all_parts = HashSet::new();
         let mut all_welds = HashSet::new();
         let mut all_colliders = HashSet::new();

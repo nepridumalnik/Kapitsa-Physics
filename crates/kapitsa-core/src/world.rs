@@ -2100,16 +2100,16 @@ impl PhysicsWorld {
     }
 
     /// Replaces body state while protecting cluster-managed physical properties.
-    pub fn replace_body_state(&mut self, id: BodyId, body: RigidBody) -> Result<(), ClusterError> {
+    pub fn replace_body_state(&mut self, id: BodyId, body: RigidBody) -> Result<(), Error> {
         if id.world != self.world_id {
-            return Err(ClusterError::InvalidBodyId);
+            return Err(Error::from(ClusterError::InvalidBodyId));
         }
         let entry = self
             .bodies
             .get(id.dense)
-            .ok_or(ClusterError::InvalidBodyId)?;
+            .ok_or_else(|| Error::from(ClusterError::InvalidBodyId))?;
         if entry.cluster.is_some() && entry.body.physics() != body.physics() {
-            return Err(ClusterError::ManagedMass);
+            return Err(Error::from(ClusterError::ManagedMass));
         }
         if entry.cluster.is_some()
             && matches!(
@@ -2119,13 +2119,13 @@ impl PhysicsWorld {
                     | crate::aerodynamics::Aerodynamics::Colliders
             )
         {
-            return Err(ClusterError::UnsupportedGeometry);
+            return Err(Error::from(ClusterError::UnsupportedGeometry));
         }
         self.invalidate_body_edit(id);
         let entry = self
             .bodies
             .get_mut(id.dense)
-            .ok_or(ClusterError::InvalidBodyId)?;
+            .ok_or_else(|| Error::from(ClusterError::InvalidBodyId))?;
         entry.body = body;
         Ok(())
     }

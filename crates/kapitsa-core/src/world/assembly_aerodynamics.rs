@@ -1183,7 +1183,7 @@ mod tests {
         let before = world.body(id).ok_or("body")?.motion();
         assert_eq!(
             world.merge_clusters(id, other_id, weld()),
-            Err(ClusterError::UnsupportedGeometry)
+            Err(crate::Error::from(ClusterError::UnsupportedGeometry))
         );
         assert_eq!(world.body(id).ok_or("body")?.motion(), before);
         assert!(world.body(other_id).is_some());
@@ -2014,7 +2014,7 @@ mod tests {
                 let before = world.body(first).ok_or("body")?.motion();
                 assert_eq!(
                     world.merge_clusters(first, second, weld()),
-                    Err(ClusterError::UnsupportedGeometry)
+                    Err(crate::Error::from(ClusterError::UnsupportedGeometry))
                 );
                 assert_eq!(world.bodies().count(), 2);
                 assert_eq!(world.body(first).ok_or("body")?.motion(), before);
@@ -2144,7 +2144,7 @@ mod tests {
             incompatible.set_aerodynamics(crate::aerodynamics::Aerodynamics::Mesh(plate()?));
             assert_eq!(
                 world.replace_body_state(id, incompatible),
-                Err(ClusterError::UnsupportedGeometry)
+                Err(crate::Error::from(ClusterError::UnsupportedGeometry))
             );
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
             let result = if sharded {
@@ -2382,7 +2382,7 @@ mod tests {
             )?;
             assert_eq!(
                 world.set_part_collider_transform(foreign_owner, collider, Transform::identity()),
-                Err(ClusterError::InvalidTopology)
+                Err(crate::Error::from(ClusterError::InvalidTopology))
             );
             assert!(
                 world

@@ -1040,7 +1040,8 @@ fn base_pressure_load_delta_and_configuration_lifecycle() -> Result<(), Box<dyn 
                     let before = world.body(id).unwrap().motion();
                     assert!(matches!(
                         world.enable_cluster(id),
-                        Err(super::ClusterError::UnsupportedGeometry)
+                        Err(error) if error.downcast_ref::<super::ClusterError>()
+                            == Some(&super::ClusterError::UnsupportedGeometry)
                     ));
                     assert_eq!(world.body(id).unwrap().motion(), before);
                     assert_eq!(

@@ -191,7 +191,8 @@ fn dynamic_mesh_rejection_and_cluster_guard_keep_chunk_ownership() -> Result<(),
     world.add_chunk(body, error.chunk)?;
     assert!(matches!(
         world.enable_cluster_with_mass(body, mass),
-        Err(crate::world::ClusterError::UnsupportedGeometry)
+        Err(error) if error.downcast_ref::<crate::world::ClusterError>()
+            == Some(&crate::world::ClusterError::UnsupportedGeometry)
     ));
     Ok(())
 }
