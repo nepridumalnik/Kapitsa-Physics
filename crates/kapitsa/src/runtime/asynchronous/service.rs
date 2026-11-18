@@ -167,6 +167,7 @@ pub struct SimulationBuilder {
     config: SimulationConfig,
     invalid_worker_count: bool,
     time_horizon: Option<Duration>,
+    central_gravity: Option<kapitsa_core::gravity::CentralGravity>,
 }
 
 impl SimulationBuilder {
@@ -188,6 +189,15 @@ impl SimulationBuilder {
     /// The configuration is validated when the simulation is spawned.
     pub fn config(mut self, config: SimulationConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Sets a central point-mass gravity field on the world before it starts.
+    ///
+    /// The value uses `μ = GM`; separate gravity fields can still be added
+    /// through the client after startup.
+    pub fn central_gravity(mut self, gravity: kapitsa_core::gravity::CentralGravity) -> Self {
+        self.central_gravity = Some(gravity);
         self
     }
 
@@ -251,6 +261,7 @@ impl SimulationBuilder {
         let _entered = runtime.enter();
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(self.atmosphere);
+        world.set_central_gravity(self.central_gravity);
         if let Some(sound_speed) = self.mesh_sound_speed {
             world
                 .set_mesh_sound_speed(sound_speed)
@@ -275,6 +286,7 @@ impl SimulationBuilder {
             .map_err(SimulationError::InvalidConfig)?;
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(self.atmosphere);
+        world.set_central_gravity(self.central_gravity);
         if let Some(sound_speed) = self.mesh_sound_speed {
             world
                 .set_mesh_sound_speed(sound_speed)
@@ -2170,12 +2182,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runtime_config_applies_central_gravity() {
-        let mut config = config(1_000);
-        config.central_gravity =
-            Some(CentralGravity::new(Vec3::ZERO, 100.0).expect("valid central gravity"));
-        let mut simulation = Simulation::new_from_config(config).expect("simulation");
+        let mut simulation = Simulation::new_from_config(config(1_000)).expect("simulation");
         let client = simulation.client();
         simulation.start().expect("start");
+        client
+            .set_central_gravity(Some(
+                CentralGravity::new(Vec3::ZERO, 100.0).expect("valid central gravity"),
+            ))
+            .await
+            .expect("central gravity command");
         let mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
         let body = RigidBody::new_dynamic(
             Transform::new(Vec3::Y * 10.0, kapitsa_math::Quat::IDENTITY).expect("transform"),

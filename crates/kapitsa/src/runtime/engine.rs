@@ -45,9 +45,6 @@ impl<E: StepExecutor> StepEngine<E> {
     ) -> Self {
         executor.set_parallelism(1);
         world.set_error_policy(config.error_policy);
-        if let Some(gravity) = config.central_gravity {
-            world.set_central_gravity(Some(gravity));
-        }
         let step_budget = config.step_budget();
         let metrics = SimulationMetrics {
             step_budget,
@@ -430,16 +427,15 @@ mod tests {
         let mut pool = RayonPool::new(&Handle::current(), 4).unwrap();
         for workers in [1, 4] {
             let (mut reference, reference_ids) = world_with_force_sources();
-            let (world, ids) = world_with_force_sources();
+            let (mut world, ids) = world_with_force_sources();
+            world.set_central_gravity(Some(
+                CentralGravity::new(Vec3::new(8.0, 0.0, 0.0), 1.0).unwrap(),
+            ));
             let original: Vec<_> = ids
                 .iter()
                 .map(|id| world.body(*id).unwrap().motion())
                 .collect();
-            let config = SimulationConfig {
-                tick_rate: 120,
-                central_gravity: Some(CentralGravity::new(Vec3::new(8.0, 0.0, 0.0), 1.0).unwrap()),
-                ..SimulationConfig::default()
-            };
+            let config = SimulationConfig::builder().tick_rate(120).build();
             let mut engine = StepEngine::new(world, config, pool.executor().unwrap()).unwrap();
             engine.set_parallelism(workers, Some(4));
             assert_eq!(
@@ -463,14 +459,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn changing_worker_count_preserves_bits_over_many_gravity_steps() {
         let (mut reference, reference_ids) = world_with_force_sources();
-        let (world, ids) = world_with_force_sources();
+        let (mut world, ids) = world_with_force_sources();
         let gravity = CentralGravity::new(Vec3::new(-100.0, 0.0, 0.0), 10_000.0).unwrap();
         reference.set_central_gravity(Some(gravity));
-        let config = SimulationConfig {
-            tick_rate: 120,
-            central_gravity: Some(gravity),
-            ..SimulationConfig::default()
-        };
+        world.set_central_gravity(Some(gravity));
+        let config = SimulationConfig::builder().tick_rate(120).build();
         let mut pool = RayonPool::new(&Handle::current(), 4).unwrap();
         let mut engine = StepEngine::new(world, config, pool.executor().unwrap()).unwrap();
         for tick in 0..120 {
@@ -527,15 +520,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sharded_step_matches_sequential_with_gravity_and_force_sources() {
         let (mut sequential_world, sequential_bodies) = world_with_force_sources();
-        let (sharded_world, sharded_bodies) = world_with_force_sources();
+        let (mut sharded_world, sharded_bodies) = world_with_force_sources();
         let gravity =
             CentralGravity::new(Vec3::new(-100.0, 0.0, 0.0), 10_000.0).expect("gravity field");
         sequential_world.set_central_gravity(Some(gravity));
-        let config = SimulationConfig {
-            tick_rate: 10,
-            central_gravity: Some(gravity),
-            ..SimulationConfig::default()
-        };
+        sharded_world.set_central_gravity(Some(gravity));
+        let config = SimulationConfig::builder().tick_rate(10).build();
         sequential_world
             .step(config.fixed_step_seconds())
             .expect("sequential step");
@@ -734,12 +724,12 @@ mod tests {
                 )?;
             }
 
-            let config = SimulationConfig {
-                tick_rate: 120,
-                central_gravity: with_gravity
-                    .then(|| CentralGravity::new(Vec3::ZERO, 1_000.0).expect("valid gravity")),
-                ..SimulationConfig::default()
-            };
+            if with_gravity {
+                world.set_central_gravity(Some(
+                    CentralGravity::new(Vec3::ZERO, 1_000.0).expect("valid gravity"),
+                ));
+            }
+            let config = SimulationConfig::builder().tick_rate(120).build();
             let executor = pool.executor().expect("Rayon executor");
             let mut engine = StepEngine::new(world, config, executor)?;
             engine.set_parallelism(4, Some(4));

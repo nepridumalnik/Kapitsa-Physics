@@ -7,7 +7,7 @@ mod spec;
 use kapitsa::aerodynamics::{Aerodynamics, Atmosphere};
 use kapitsa::{
     BodyId, ColliderId, ForceSourceId, JointId, PhysicsBatchResults, PhysicsClient,
-    PhysicsCommandBuffer, PhysicsSnapshot, Simulation, SimulationConfig, TimeStepPolicy,
+    PhysicsCommandBuffer, PhysicsSnapshot, Simulation, SimulationConfig,
     collision::{CollisionEventKind, CollisionPair},
     math::Vec3,
     rigid_body::BodyState,
@@ -124,18 +124,16 @@ pub(crate) async fn run_with_aerodynamics(
     config: FlightConfig,
     aerodynamics: Option<FlightAerodynamics>,
 ) -> Result<Vec<SceneFrame>, Box<dyn Error>> {
-    let physics_config = SimulationConfig {
-        tick_rate: spec::TICK_RATE,
-        max_catch_up_steps: 1,
-        central_gravity: Some(spec::gravity()?),
-        time_step_policy: TimeStepPolicy::Fixed,
-        ..SimulationConfig::default()
-    };
+    let physics_config = SimulationConfig::builder()
+        .tick_rate(spec::TICK_RATE)
+        .max_catch_up_steps(1)
+        .build();
     let atmosphere = aerodynamics
         .as_ref()
         .map_or(Atmosphere::Vacuum, |a| a.atmosphere);
     let mut simulation = Simulation::builder()
         .config(physics_config)
+        .central_gravity(spec::gravity()?)
         .atmosphere(atmosphere)
         .spawn_on_tokio(&tokio::runtime::Handle::current())?;
     simulation.set_time_multiplier(config.warp)?;

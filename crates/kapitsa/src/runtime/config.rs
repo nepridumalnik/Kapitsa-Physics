@@ -4,22 +4,21 @@ use crate::runtime::constants::{
 };
 use std::time::Duration;
 
-use kapitsa_core::{gravity::CentralGravity, world::ErrorPolicy};
+use kapitsa_core::world::ErrorPolicy;
 
 use super::planner::{WorkerConfig, WorkerConfigError};
 
 /// Shared timestep and batching settings.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimulationConfig {
     /// Policy for explicitly supported approximations during physics steps.
-    pub error_policy: ErrorPolicy,
-    pub tick_rate: u32,
-    pub max_catch_up_steps: usize,
-    pub time_step_policy: TimeStepPolicy,
-    pub scheduler: SchedulerConfig,
-    pub workers: WorkerConfig,
-    /// Optional point-mass field configured as `μ = GM`.
-    pub central_gravity: Option<CentralGravity>,
+    pub(crate) error_policy: ErrorPolicy,
+    pub(crate) tick_rate: u32,
+    pub(crate) max_catch_up_steps: usize,
+    pub(crate) time_step_policy: TimeStepPolicy,
+    pub(crate) scheduler: SchedulerConfig,
+    pub(crate) workers: WorkerConfig,
 }
 
 impl Default for SimulationConfig {
@@ -31,12 +30,81 @@ impl Default for SimulationConfig {
             time_step_policy: TimeStepPolicy::Fixed,
             scheduler: SchedulerConfig::default(),
             workers: WorkerConfig::default(),
-            central_gravity: None,
         }
     }
 }
 
+/// Builder for [`SimulationConfig`]. Defaults match [`SimulationConfig::default`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SimulationConfigBuilder {
+    config: SimulationConfig,
+}
+
+impl SimulationConfigBuilder {
+    pub fn error_policy(mut self, value: ErrorPolicy) -> Self {
+        self.config.error_policy = value;
+        self
+    }
+
+    pub fn tick_rate(mut self, value: u32) -> Self {
+        self.config.tick_rate = value;
+        self
+    }
+
+    pub fn max_catch_up_steps(mut self, value: usize) -> Self {
+        self.config.max_catch_up_steps = value;
+        self
+    }
+
+    pub fn time_step_policy(mut self, value: TimeStepPolicy) -> Self {
+        self.config.time_step_policy = value;
+        self
+    }
+
+    pub fn scheduler(mut self, value: SchedulerConfig) -> Self {
+        self.config.scheduler = value;
+        self
+    }
+
+    pub fn workers(mut self, value: WorkerConfig) -> Self {
+        self.config.workers = value;
+        self
+    }
+
+    pub fn build(self) -> SimulationConfig {
+        self.config
+    }
+}
+
 impl SimulationConfig {
+    pub fn builder() -> SimulationConfigBuilder {
+        SimulationConfigBuilder::default()
+    }
+
+    pub fn error_policy(&self) -> ErrorPolicy {
+        self.error_policy
+    }
+
+    pub fn tick_rate(&self) -> u32 {
+        self.tick_rate
+    }
+
+    pub fn max_catch_up_steps(&self) -> usize {
+        self.max_catch_up_steps
+    }
+
+    pub fn time_step_policy(&self) -> TimeStepPolicy {
+        self.time_step_policy
+    }
+
+    pub fn scheduler(&self) -> SchedulerConfig {
+        self.scheduler.clone()
+    }
+
+    pub fn workers(&self) -> WorkerConfig {
+        self.workers.clone()
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.tick_rate == 0 || self.tick_rate > MAX_TICK_RATE {
             return Err(ConfigError::InvalidTickRate);
@@ -72,14 +140,15 @@ pub enum TimeStepPolicy {
 }
 
 /// Accuracy and safety bounds used by the adaptive Time Warp policy.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdaptiveTimeStepConfig {
     /// Refuse a smaller step and report the requested warp as unattainable.
-    pub minimum_step: Duration,
+    pub(crate) minimum_step: Duration,
     /// Absolute safety cap; physics estimates can choose a smaller step.
-    pub maximum_step: Duration,
+    pub(crate) maximum_step: Duration,
     /// Dimensionless safety factor for motion, acceleration, and joint bounds, in `(0, 1]`.
-    pub relative_error_tolerance: f64,
+    pub(crate) relative_error_tolerance: f64,
 }
 
 impl Default for AdaptiveTimeStepConfig {
@@ -92,7 +161,50 @@ impl Default for AdaptiveTimeStepConfig {
     }
 }
 
+/// Builder for [`AdaptiveTimeStepConfig`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AdaptiveTimeStepConfigBuilder {
+    config: AdaptiveTimeStepConfig,
+}
+
+impl AdaptiveTimeStepConfigBuilder {
+    pub fn minimum_step(mut self, value: Duration) -> Self {
+        self.config.minimum_step = value;
+        self
+    }
+
+    pub fn maximum_step(mut self, value: Duration) -> Self {
+        self.config.maximum_step = value;
+        self
+    }
+
+    pub fn relative_error_tolerance(mut self, value: f64) -> Self {
+        self.config.relative_error_tolerance = value;
+        self
+    }
+
+    pub fn build(self) -> AdaptiveTimeStepConfig {
+        self.config
+    }
+}
+
 impl AdaptiveTimeStepConfig {
+    pub fn builder() -> AdaptiveTimeStepConfigBuilder {
+        AdaptiveTimeStepConfigBuilder::default()
+    }
+
+    pub fn minimum_step(&self) -> Duration {
+        self.minimum_step
+    }
+
+    pub fn maximum_step(&self) -> Duration {
+        self.maximum_step
+    }
+
+    pub fn relative_error_tolerance(&self) -> f64 {
+        self.relative_error_tolerance
+    }
+
     fn validate(self) -> Result<(), ConfigError> {
         if self.minimum_step.is_zero()
             || self.maximum_step < self.minimum_step
@@ -107,10 +219,11 @@ impl AdaptiveTimeStepConfig {
 }
 
 /// Shared task batching settings used by runtime executors.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchedulerConfig {
-    pub min_batch_size: usize,
-    pub max_batches_per_worker: usize,
+    pub(crate) min_batch_size: usize,
+    pub(crate) max_batches_per_worker: usize,
 }
 
 impl Default for SchedulerConfig {
@@ -122,7 +235,41 @@ impl Default for SchedulerConfig {
     }
 }
 
+/// Builder for [`SchedulerConfig`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SchedulerConfigBuilder {
+    config: SchedulerConfig,
+}
+
+impl SchedulerConfigBuilder {
+    pub fn min_batch_size(mut self, value: usize) -> Self {
+        self.config.min_batch_size = value;
+        self
+    }
+
+    pub fn max_batches_per_worker(mut self, value: usize) -> Self {
+        self.config.max_batches_per_worker = value;
+        self
+    }
+
+    pub fn build(self) -> SchedulerConfig {
+        self.config
+    }
+}
+
 impl SchedulerConfig {
+    pub fn builder() -> SchedulerConfigBuilder {
+        SchedulerConfigBuilder::default()
+    }
+
+    pub fn min_batch_size(&self) -> usize {
+        self.min_batch_size
+    }
+
+    pub fn max_batches_per_worker(&self) -> usize {
+        self.max_batches_per_worker
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.min_batch_size == 0 {
             return Err(ConfigError::ZeroBatchSize);

@@ -896,10 +896,7 @@ mod tests {
         let material = world
             .add_material(PhysicsMaterial::default())
             .expect("material");
-        let config = CollisionConfig {
-            contact_offset: 0.02,
-            ..CollisionConfig::default()
-        };
+        let config = CollisionConfig::builder().contact_offset(0.02).build();
 
         let server = tokio::spawn(async move {
             for _ in 0..5 {

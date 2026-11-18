@@ -95,15 +95,17 @@ impl Drop for AllocationTracking {
 }
 
 fn simulation() -> Simulation {
-    Simulation::new_from_config(SimulationConfig {
-        tick_rate: 10,
-        max_catch_up_steps: 2,
-        workers: WorkerConfig {
-            max_workers: NonZeroUsize::new(1),
-            ..WorkerConfig::default()
-        },
-        ..SimulationConfig::default()
-    })
+    Simulation::new_from_config(
+        SimulationConfig::builder()
+            .tick_rate(10)
+            .max_catch_up_steps(2)
+            .workers(
+                WorkerConfig::builder()
+                    .max_workers(NonZeroUsize::new(1))
+                    .build(),
+            )
+            .build(),
+    )
     .expect("valid simulation configuration")
 }
 
@@ -384,11 +386,9 @@ async fn many_short_command_batches_are_processed_in_fifo_order() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_publishes_results_for_accepted_but_unapplied_batches() {
-    let mut simulation = Simulation::new_from_config(SimulationConfig {
-        tick_rate: 2,
-        ..SimulationConfig::default()
-    })
-    .expect("simulation");
+    let mut simulation =
+        Simulation::new_from_config(SimulationConfig::builder().tick_rate(2).build())
+            .expect("simulation");
     let client = simulation.client();
     let mut results = client.subscribe_batch_results();
     simulation.start().expect("start");
@@ -615,15 +615,17 @@ async fn benchmark_runtime_completion_latency() {
     const CYCLES_PER_SAMPLE: usize = 20;
     const SAMPLE_COUNT: usize = 5;
 
-    let mut simulation = Simulation::new_from_config(SimulationConfig {
-        tick_rate: 1_000,
-        max_catch_up_steps: 2,
-        workers: WorkerConfig {
-            max_workers: NonZeroUsize::new(1),
-            ..WorkerConfig::default()
-        },
-        ..SimulationConfig::default()
-    })
+    let mut simulation = Simulation::new_from_config(
+        SimulationConfig::builder()
+            .tick_rate(1_000)
+            .max_catch_up_steps(2)
+            .workers(
+                WorkerConfig::builder()
+                    .max_workers(NonZeroUsize::new(1))
+                    .build(),
+            )
+            .build(),
+    )
     .expect("valid simulation configuration");
     let client = simulation.client();
     let mut results = client.subscribe_batch_results();

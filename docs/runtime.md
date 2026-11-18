@@ -109,13 +109,13 @@ point, then delivered when that step attempt finishes. A query result is a read
 of that earlier state, not a claim about the published post-step snapshot; a
 query error remains distinct from a later integration error.
 
-`SimulationConfig::central_gravity` optionally enables a point-mass field with
-`CentralGravity::new(center, μ)`, where `μ = GM` is in m³/s². The field acts on
-dynamic bodies at their world-space center of mass; static and kinematic bodies
-are unaffected. The physical step stays fixed at `1 / tick_rate`. A body at the
-field center, non-finite input, or an unrepresentable acceleration fails the
-step atomically with a typed gravity cause. `PhysicsWorld` also exposes
-`set_central_gravity` for synchronous world stepping.
+`Simulation::builder().central_gravity(CentralGravity::new(center, μ))` optionally
+enables a point-mass field, where `μ = GM` is in m³/s². The client can update it with
+`PhysicsClient::set_central_gravity`, and `PhysicsWorld` exposes the same setter for
+synchronous stepping. The field acts on dynamic bodies at their world-space center of
+mass; static and kinematic bodies are unaffected. The physical step stays fixed at
+`1 / tick_rate`. A body at the field center, non-finite input, or an unrepresentable
+acceleration fails the step atomically with a typed gravity cause.
 
 `Simulation::set_time_multiplier()` changes scheduler pacing while the
 simulation is running. It accepts finite non-negative values; zero pauses new

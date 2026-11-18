@@ -39,7 +39,7 @@ sequential default `join` until they override it.
 
 The adaptive scheduler starts at one worker. It measures elapsed step time,
 smoothed with EWMA, against `1 / tick_rate` seconds: 8.333333 ms at 120 Hz.
-The existing default tick rate remains 60 Hz; set `SimulationConfig.tick_rate`
+The existing default tick rate remains 60 Hz; set `SimulationConfig::builder().tick_rate(120)`
 to 120 for the 120 Hz budget. Sustained utilization at or above 70% probes
 `min(workers * 2, max_workers)`; at or below 30% it selects
 `max(workers / 2, 1)`. The existing stabilization windows and speedup probe

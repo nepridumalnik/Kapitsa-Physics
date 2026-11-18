@@ -1,15 +1,16 @@
 use super::CollisionError;
 
 /// Numerical and iteration limits for collision processing.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CollisionConfig {
-    pub velocity_iterations: u32,
-    pub position_iterations: u32,
-    pub contact_offset: f64,
-    pub penetration_slop: f64,
-    pub restitution_threshold: f64,
-    pub max_ccd_impacts: u32,
-    pub ccd_limit_policy: CcdLimitPolicy,
+    pub(crate) velocity_iterations: u32,
+    pub(crate) position_iterations: u32,
+    pub(crate) contact_offset: f64,
+    pub(crate) penetration_slop: f64,
+    pub(crate) restitution_threshold: f64,
+    pub(crate) max_ccd_impacts: u32,
+    pub(crate) ccd_limit_policy: CcdLimitPolicy,
 }
 
 /// Action taken when a continuous body reaches its per-step impact budget.
@@ -22,7 +23,86 @@ pub enum CcdLimitPolicy {
     AbortStep,
 }
 
+/// Builder for [`CollisionConfig`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CollisionConfigBuilder {
+    config: CollisionConfig,
+}
+
+impl CollisionConfigBuilder {
+    pub fn velocity_iterations(mut self, value: u32) -> Self {
+        self.config.velocity_iterations = value;
+        self
+    }
+
+    pub fn position_iterations(mut self, value: u32) -> Self {
+        self.config.position_iterations = value;
+        self
+    }
+
+    pub fn contact_offset(mut self, value: f64) -> Self {
+        self.config.contact_offset = value;
+        self
+    }
+
+    pub fn penetration_slop(mut self, value: f64) -> Self {
+        self.config.penetration_slop = value;
+        self
+    }
+
+    pub fn restitution_threshold(mut self, value: f64) -> Self {
+        self.config.restitution_threshold = value;
+        self
+    }
+
+    pub fn max_ccd_impacts(mut self, value: u32) -> Self {
+        self.config.max_ccd_impacts = value;
+        self
+    }
+
+    pub fn ccd_limit_policy(mut self, value: CcdLimitPolicy) -> Self {
+        self.config.ccd_limit_policy = value;
+        self
+    }
+
+    pub fn build(self) -> CollisionConfig {
+        self.config
+    }
+}
+
 impl CollisionConfig {
+    pub fn builder() -> CollisionConfigBuilder {
+        CollisionConfigBuilder::default()
+    }
+
+    pub fn velocity_iterations(&self) -> u32 {
+        self.velocity_iterations
+    }
+
+    pub fn position_iterations(&self) -> u32 {
+        self.position_iterations
+    }
+
+    pub fn contact_offset(&self) -> f64 {
+        self.contact_offset
+    }
+
+    pub fn penetration_slop(&self) -> f64 {
+        self.penetration_slop
+    }
+
+    pub fn restitution_threshold(&self) -> f64 {
+        self.restitution_threshold
+    }
+
+    pub fn max_ccd_impacts(&self) -> u32 {
+        self.max_ccd_impacts
+    }
+
+    pub fn ccd_limit_policy(&self) -> CcdLimitPolicy {
+        self.ccd_limit_policy
+    }
+
     pub(crate) const fn default_const() -> Self {
         Self {
             velocity_iterations: 8,

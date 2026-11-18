@@ -10,16 +10,17 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 /// Worker pool limits and adaptive thresholds.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkerConfig {
     /// Fixed Rayon pool size; `None` uses the host's available parallelism.
-    pub max_workers: Option<NonZeroUsize>,
+    pub(crate) max_workers: Option<NonZeroUsize>,
     /// Smoothed step-time ratio that starts a scale-up probe. Defaults to `0.70`.
-    pub scale_up_at: f64,
+    pub(crate) scale_up_at: f64,
     /// Smoothed step-time ratio that permits scaling down. Defaults to `0.30`.
-    pub scale_down_at: f64,
+    pub(crate) scale_down_at: f64,
     /// EWMA weight for the latest completed step, in `(0, 1]`.
-    pub smoothing: f64,
+    pub(crate) smoothing: f64,
 }
 
 impl Default for WorkerConfig {
@@ -33,7 +34,59 @@ impl Default for WorkerConfig {
     }
 }
 
+/// Builder for [`WorkerConfig`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorkerConfigBuilder {
+    config: WorkerConfig,
+}
+
+impl WorkerConfigBuilder {
+    pub fn max_workers(mut self, value: Option<NonZeroUsize>) -> Self {
+        self.config.max_workers = value;
+        self
+    }
+
+    pub fn scale_up_at(mut self, value: f64) -> Self {
+        self.config.scale_up_at = value;
+        self
+    }
+
+    pub fn scale_down_at(mut self, value: f64) -> Self {
+        self.config.scale_down_at = value;
+        self
+    }
+
+    pub fn smoothing(mut self, value: f64) -> Self {
+        self.config.smoothing = value;
+        self
+    }
+
+    pub fn build(self) -> WorkerConfig {
+        self.config
+    }
+}
+
 impl WorkerConfig {
+    pub fn builder() -> WorkerConfigBuilder {
+        WorkerConfigBuilder::default()
+    }
+
+    pub fn max_workers(&self) -> Option<NonZeroUsize> {
+        self.max_workers
+    }
+
+    pub fn scale_up_at(&self) -> f64 {
+        self.scale_up_at
+    }
+
+    pub fn scale_down_at(&self) -> f64 {
+        self.scale_down_at
+    }
+
+    pub fn smoothing(&self) -> f64 {
+        self.smoothing
+    }
+
     pub fn validate(&self) -> Result<(), WorkerConfigError> {
         if !self.scale_up_at.is_finite() || self.scale_up_at <= 0.0 || self.scale_up_at > 1.0 {
             return Err(WorkerConfigError::InvalidScaleUpThreshold);
