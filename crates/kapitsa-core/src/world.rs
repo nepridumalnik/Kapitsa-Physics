@@ -1829,7 +1829,7 @@ impl PhysicsWorld {
     }
 
     /// Adds an independently managed gravity field.
-    pub fn add_gravity(&mut self, gravity: impl Into<Gravity>) -> Result<GravityId, WorldError> {
+    pub fn add_gravity(&mut self, gravity: impl Into<Gravity>) -> Result<GravityId, Error> {
         if self.world_id == 0 {
             self.world_id = allocate_world_id(&NEXT_WORLD_ID)?;
         }
@@ -1893,8 +1893,8 @@ impl PhysicsWorld {
         &self.joint_events
     }
 
-    pub fn add_material(&mut self, material: PhysicsMaterial) -> Result<MaterialId, WorldError> {
-        self.materials.insert(material).map_err(WorldError::from)
+    pub fn add_material(&mut self, material: PhysicsMaterial) -> Result<MaterialId, Error> {
+        self.materials.insert(material).map_err(Error::from)
     }
 
     pub fn material(&self, id: MaterialId) -> Option<&PhysicsMaterial> {
@@ -1931,20 +1931,20 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    pub fn remove_material(&mut self, id: MaterialId) -> Result<PhysicsMaterial, WorldError> {
+    pub fn remove_material(&mut self, id: MaterialId) -> Result<PhysicsMaterial, Error> {
         if !self.materials.contains(id) {
-            return Err(WorldError::InvalidMaterialId);
+            return Err(Error::from(WorldError::InvalidMaterialId));
         }
         if self
             .colliders
             .iter()
             .any(|(_, entry)| entry.collider.material() == Some(id))
         {
-            return Err(WorldError::MaterialInUse);
+            return Err(Error::from(WorldError::MaterialInUse));
         }
         self.materials
             .remove(id)
-            .ok_or(WorldError::InvalidMaterialId)
+            .ok_or_else(|| Error::from(WorldError::InvalidMaterialId))
     }
 
     pub fn set_collider_material(
@@ -2014,7 +2014,7 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    pub fn add_body(&mut self, body: RigidBody) -> Result<BodyId, WorldError> {
+    pub fn add_body(&mut self, body: RigidBody) -> Result<BodyId, Error> {
         if self.world_id == 0 {
             self.world_id = allocate_world_id(&NEXT_WORLD_ID)?;
         }
@@ -2273,31 +2273,31 @@ impl PhysicsWorld {
     }
 
     /// Replaces a joint's settings while retaining its ID and attached bodies.
-    pub fn update_joint(&mut self, id: JointId, joint: Joint) -> Result<(), WorldError> {
+    pub fn update_joint(&mut self, id: JointId, joint: Joint) -> Result<(), Error> {
         joint.validate()?;
         if id.world != self.world_id {
-            return Err(WorldError::InvalidJointId);
+            return Err(Error::from(WorldError::InvalidJointId));
         }
         let entry = self
             .joints
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidJointId)?;
+            .ok_or_else(|| Error::from(WorldError::InvalidJointId))?;
         entry.joint = joint;
         self.collision_system.invalidate_joint_warm_start(id);
         Ok(())
     }
 
     /// Replaces a joint using frames expressed in the current target spaces.
-    pub fn update_joint_targets(&mut self, id: JointId, joint: Joint) -> Result<(), WorldError> {
+    pub fn update_joint_targets(&mut self, id: JointId, joint: Joint) -> Result<(), Error> {
         joint.validate()?;
         if id.world != self.world_id {
-            return Err(WorldError::InvalidJointId);
+            return Err(Error::from(WorldError::InvalidJointId));
         }
         let (target_a, target_b) = self
             .joints
             .get(id.dense)
             .map(|entry| (entry.target_a, entry.target_b))
-            .ok_or(WorldError::InvalidJointId)?;
+            .ok_or_else(|| Error::from(WorldError::InvalidJointId))?;
         let (_, frame_a_target) = self.resolve_joint_target(target_a)?;
         let (_, frame_b_target) = self.resolve_joint_target(target_b)?;
         let frame_a = transform_joint_frame(frame_a_target, joint.common().frame_a)
@@ -2307,20 +2307,20 @@ impl PhysicsWorld {
         let entry = self
             .joints
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidJointId)?;
+            .ok_or_else(|| Error::from(WorldError::InvalidJointId))?;
         entry.joint = joint.with_frames(frame_a, frame_b);
         self.collision_system.invalidate_joint_warm_start(id);
         Ok(())
     }
 
     /// Enables or disables a live joint without changing its settings.
-    pub fn set_joint_enabled(&mut self, id: JointId, enabled: bool) -> Result<(), WorldError> {
+    pub fn set_joint_enabled(&mut self, id: JointId, enabled: bool) -> Result<(), Error> {
         if id.world != self.world_id {
-            return Err(WorldError::InvalidJointId);
+            return Err(Error::from(WorldError::InvalidJointId));
         }
         self.joints
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidJointId)?
+            .ok_or_else(|| Error::from(WorldError::InvalidJointId))?
             .joint
             .set_enabled(enabled);
         if !enabled {

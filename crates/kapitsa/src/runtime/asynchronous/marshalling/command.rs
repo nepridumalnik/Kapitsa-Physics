@@ -22,6 +22,7 @@ impl From<CommandError> for PhysicsClientError {
             CommandError::TooManyCommands { max_commands } => {
                 Self::TooManyCommands { max_commands }
             }
+            CommandError::Unified(error) => Self::Unified(error),
         }
     }
 }

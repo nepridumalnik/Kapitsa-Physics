@@ -1,6 +1,8 @@
 // Scene matrices intentionally flatten independent axes into rstest case arguments.
 #![allow(clippy::too_many_arguments)]
 
+use crate::Error;
+
 use crate::world::WorldStepTyped;
 
 use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
@@ -2974,7 +2976,7 @@ fn world_sets_skin_pose_and_rejects_non_skin_colliders() {
 }
 
 #[test]
-fn stores_each_body_type_and_assigns_ids() -> Result<(), WorldError> {
+fn stores_each_body_type_and_assigns_ids() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let static_id = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let kinematic_id = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
@@ -3001,7 +3003,7 @@ fn stores_each_body_type_and_assigns_ids() -> Result<(), WorldError> {
 }
 
 #[test]
-fn body_and_collider_ids_are_scoped_to_their_worlds() -> Result<(), WorldError> {
+fn body_and_collider_ids_are_scoped_to_their_worlds() -> Result<(), Error> {
     let mut first_world = PhysicsWorld::new();
     let mut second_world = PhysicsWorld::new();
     let first_body = first_world.add_body(RigidBody::new_static(Transform::identity()))?;
@@ -3063,7 +3065,7 @@ fn material_ids_are_scoped_to_world_storage_and_in_use_materials_are_retained() 
         .expect("assign valid material");
     assert_eq!(
         first_world.remove_material(material_id),
-        Err(WorldError::MaterialInUse)
+        Err(Error::from(WorldError::MaterialInUse))
     );
     assert_eq!(first_world.material(material_id), Some(&material));
     first_world
@@ -3072,7 +3074,7 @@ fn material_ids_are_scoped_to_world_storage_and_in_use_materials_are_retained() 
     assert_eq!(first_world.remove_material(material_id), Ok(material));
     assert_eq!(
         first_world.remove_material(material_id),
-        Err(WorldError::InvalidMaterialId)
+        Err(Error::from(WorldError::InvalidMaterialId))
     );
 }
 
@@ -3190,7 +3192,7 @@ fn invalid_material_fails_shard_commit_before_any_body_changes() {
 }
 
 #[test]
-fn world_id_survives_moves_and_removing_all_bodies() -> Result<(), WorldError> {
+fn world_id_survives_moves_and_removing_all_bodies() -> Result<(), Error> {
     fn move_world(world: PhysicsWorld) -> PhysicsWorld {
         world
     }
@@ -3223,7 +3225,7 @@ fn world_id_allocator_reports_exhaustion_without_wrapping() {
 }
 
 #[test]
-fn body_mut_updates_the_stored_body() -> Result<(), WorldError> {
+fn body_mut_updates_the_stored_body() -> Result<(), Error> {
     let mut world = PhysicsWorld::default();
     let id = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
     let body = world.body_mut(id).ok_or(WorldError::InvalidBodyId)?;
@@ -3267,7 +3269,7 @@ fn dense_pool_errors_preserve_their_variant() {
 }
 
 #[test]
-fn adds_multiple_colliders_and_tracks_each_owner() -> Result<(), WorldError> {
+fn adds_multiple_colliders_and_tracks_each_owner() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let first_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let second_body = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
@@ -3284,7 +3286,7 @@ fn adds_multiple_colliders_and_tracks_each_owner() -> Result<(), WorldError> {
 }
 
 #[test]
-fn collider_mut_changes_only_the_collider() -> Result<(), WorldError> {
+fn collider_mut_changes_only_the_collider() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
     let original_body = world
@@ -3333,7 +3335,7 @@ fn invalid_body_rejects_collider_without_changing_world() -> Result<(), DensePoo
 }
 
 #[test]
-fn removing_colliders_in_arbitrary_order_updates_body_links() -> Result<(), WorldError> {
+fn removing_colliders_in_arbitrary_order_updates_body_links() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let first = world.add_collider(body, collider(1.0))?;
@@ -3354,7 +3356,7 @@ fn removing_colliders_in_arbitrary_order_updates_body_links() -> Result<(), Worl
 }
 
 #[test]
-fn removed_collider_slot_reuses_generation_without_reviving_old_id() -> Result<(), WorldError> {
+fn removed_collider_slot_reuses_generation_without_reviving_old_id() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let stale = world.add_collider(body, collider(1.0))?;
@@ -3371,7 +3373,7 @@ fn removed_collider_slot_reuses_generation_without_reviving_old_id() -> Result<(
 }
 
 #[test]
-fn body_state_is_unchanged_when_colliders_are_added_or_removed() -> Result<(), WorldError> {
+fn body_state_is_unchanged_when_colliders_are_added_or_removed() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(dynamic_body())?;
     let original_body = world
@@ -3405,7 +3407,7 @@ fn invalid_collider_ids_are_rejected() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn removing_body_without_colliders_returns_it_and_invalidates_its_id() -> Result<(), WorldError> {
+fn removing_body_without_colliders_returns_it_and_invalidates_its_id() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let original = world
@@ -3427,7 +3429,7 @@ fn removing_body_without_colliders_returns_it_and_invalidates_its_id() -> Result
 }
 
 #[test]
-fn removing_body_cascades_one_and_many_colliders() -> Result<(), WorldError> {
+fn removing_body_cascades_one_and_many_colliders() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let single_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let many_body = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
@@ -3457,7 +3459,7 @@ fn removing_body_cascades_one_and_many_colliders() -> Result<(), WorldError> {
 }
 
 #[test]
-fn iterators_cover_empty_and_populated_worlds() -> Result<(), WorldError> {
+fn iterators_cover_empty_and_populated_worlds() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     assert_eq!(world.bodies().count(), 0);
     assert_eq!(world.colliders().count(), 0);
@@ -3497,7 +3499,7 @@ fn iterators_cover_empty_and_populated_worlds() -> Result<(), WorldError> {
 }
 
 #[test]
-fn colliders_of_iterates_only_the_requested_body_list() -> Result<(), WorldError> {
+fn colliders_of_iterates_only_the_requested_body_list() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let first_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let second_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
@@ -3524,7 +3526,7 @@ fn colliders_of_iterates_only_the_requested_body_list() -> Result<(), WorldError
 }
 
 #[test]
-fn bodies_mut_visits_each_body_once() -> Result<(), WorldError> {
+fn bodies_mut_visits_each_body_once() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let first = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
     let second = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
@@ -3548,7 +3550,7 @@ fn bodies_mut_visits_each_body_once() -> Result<(), WorldError> {
 }
 
 #[test]
-fn deleting_body_and_reusing_slots_does_not_revive_old_ids() -> Result<(), WorldError> {
+fn deleting_body_and_reusing_slots_does_not_revive_old_ids() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let old_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let old_collider = world.add_collider(old_body, collider(1.0))?;
@@ -3573,7 +3575,7 @@ fn deleting_body_and_reusing_slots_does_not_revive_old_ids() -> Result<(), World
 }
 
 #[test]
-fn step_advances_each_body_type_and_clears_accumulated_forces() -> Result<(), WorldError> {
+fn step_advances_each_body_type_and_clears_accumulated_forces() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let static_id = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let mut kinematic = RigidBody::new_kinematic(Transform::identity());
@@ -4198,7 +4200,7 @@ fn force_source_step_error_preserves_existing_body_forces() {
 }
 
 #[test]
-fn invalid_timestep_preserves_all_body_state_and_forces() -> Result<(), WorldError> {
+fn invalid_timestep_preserves_all_body_state_and_forces() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let mut body = dynamic_body();
     body.set_linear_velocity(Vec3::X).expect("finite velocity");
@@ -4214,7 +4216,7 @@ fn invalid_timestep_preserves_all_body_state_and_forces() -> Result<(), WorldErr
 }
 
 #[test]
-fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), WorldError> {
+fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let mut first = dynamic_body();
     first.set_linear_velocity(Vec3::Y).expect("finite velocity");
@@ -4271,8 +4273,8 @@ fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), World
 }
 
 #[test]
-fn repeated_steps_are_deterministic_and_reuse_the_scratch_buffer() -> Result<(), WorldError> {
-    fn make_world() -> Result<(PhysicsWorld, BodyId), WorldError> {
+fn repeated_steps_are_deterministic_and_reuse_the_scratch_buffer() -> Result<(), Error> {
+    fn make_world() -> Result<(PhysicsWorld, BodyId), Error> {
         let mut world = PhysicsWorld::new();
         let mut body = dynamic_body();
         body.set_linear_velocity(Vec3::new(1.0, -2.0, 0.5))
@@ -4339,7 +4341,7 @@ fn ccd_swept_bounds_cover_offset_com_rotation_arcs() {
 }
 
 #[test]
-fn skinned_mesh_bounds_track_pose_for_static_and_kinematic_bodies() -> Result<(), WorldError> {
+fn skinned_mesh_bounds_track_pose_for_static_and_kinematic_bodies() -> Result<(), Error> {
     for body_type in [BodyType::Static, BodyType::Kinematic] {
         let mut world = PhysicsWorld::new();
         let mesh_body = match body_type {
@@ -4769,7 +4771,7 @@ fn incomplete_step_shards_do_not_change_the_world() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn step_errors_expose_the_integration_cause() -> Result<(), WorldError> {
+fn step_errors_expose_the_integration_cause() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let mut body = dynamic_body();
     body.apply_force(Vec3::X * f64::MAX).expect("finite force");

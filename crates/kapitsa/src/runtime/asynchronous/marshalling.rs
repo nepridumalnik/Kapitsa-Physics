@@ -29,13 +29,14 @@ pub use snapshot::PhysicsSnapshot;
 use std::fmt;
 
 use kapitsa_core::{
+    Error,
     collision::QueryError,
     rigid_body::BodyError,
     world::{ClusterError, ForceSourceError, StepError, WorldError},
 };
 
 /// Failure returned while submitting or completing a physics command.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PhysicsClientError {
     NotRunning,
     ChannelClosed,
@@ -55,6 +56,7 @@ pub(crate) enum PhysicsClientError {
         max_commands: usize,
     },
     UnexpectedResult,
+    Unified(Error),
 }
 
 impl fmt::Display for PhysicsClientError {
@@ -81,6 +83,7 @@ impl fmt::Display for PhysicsClientError {
             Self::UnexpectedResult => {
                 formatter.write_str("physics command returned an unexpected result")
             }
+            Self::Unified(error) => error.fmt(formatter),
         }
     }
 }
@@ -94,6 +97,7 @@ impl std::error::Error for PhysicsClientError {
             Self::Query(error) => Some(error),
             Self::ForceSource(error) => Some(error),
             Self::StepFailedAfterApply { cause, .. } => Some(cause),
+            Self::Unified(error) => Some(error),
             Self::NotRunning
             | Self::ChannelClosed
             | Self::UnsupportedBatchCommand

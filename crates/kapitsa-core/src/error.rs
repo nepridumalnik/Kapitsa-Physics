@@ -190,6 +190,18 @@ impl Error {
     }
 }
 
+impl PartialEq for Error {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.message == other.message
+            && self.command_index == other.command_index
+            && self.failed_step == other.failed_step
+            && self.lagged_batches == other.lagged_batches
+    }
+}
+
+impl Eq for Error {}
+
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)

@@ -6,6 +6,8 @@ use std::collections::HashMap;
 
 use kapitsa_math::{Affine3, Vec3};
 
+use crate::Error;
+
 use crate::{
     cluster::{
         ClusterPart, ClusterPartDesc, MassChangeMode, MassTransfer, RigidCluster, Weld, WeldDesc,
@@ -32,7 +34,7 @@ pub const MAX_COMMANDS_PER_BATCH: usize = 128;
 pub const SMALL_STAGING_LINEAR_SEARCH_LIMIT: usize = 64;
 
 /// Failure returned while applying one command to a world.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandError {
     World(WorldError),
     Body(BodyError),
@@ -45,6 +47,8 @@ pub enum CommandError {
     TooManyCommands {
         max_commands: usize,
     },
+    /// A unified engine error that has no narrower command variant.
+    Unified(Error),
 }
 
 impl std::fmt::Display for CommandError {
@@ -62,6 +66,7 @@ impl std::fmt::Display for CommandError {
                 formatter,
                 "command batch exceeds the maximum of {max_commands} commands"
             ),
+            Self::Unified(error) => error.fmt(formatter),
         }
     }
 }
@@ -74,8 +79,37 @@ impl std::error::Error for CommandError {
             Self::Cluster(error) => Some(error),
             Self::Query(error) => Some(error),
             Self::ForceSource(error) => Some(error),
+            Self::Unified(error) => Some(error),
             Self::UnsupportedBatchCommand | Self::TooManyCommands { .. } => None,
         }
+    }
+}
+
+impl CommandError {
+    /// Converts a unified error, recovering a typed command variant when possible.
+    pub fn from_unified(error: Error) -> Self {
+        if let Some(error) = error.downcast_ref::<WorldError>() {
+            return Self::World(*error);
+        }
+        if let Some(error) = error.downcast_ref::<BodyError>() {
+            return Self::Body(*error);
+        }
+        if let Some(error) = error.downcast_ref::<ClusterError>() {
+            return Self::Cluster(*error);
+        }
+        if let Some(error) = error.downcast_ref::<QueryError>() {
+            return Self::Query(*error);
+        }
+        if let Some(error) = error.downcast_ref::<ForceSourceError>() {
+            return Self::ForceSource(*error);
+        }
+        Self::Unified(error)
+    }
+}
+
+impl From<Error> for CommandError {
+    fn from(error: Error) -> Self {
+        Self::from_unified(error)
     }
 }
 
@@ -114,7 +148,7 @@ impl From<ForceSourceError> for CommandError {
 }
 
 /// A batch failure with the index of the command that rejected it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandBatchError {
     /// `None` when the whole buffer was rejected before per-command validation.
     pub command_index: Option<usize>,
@@ -900,7 +934,7 @@ fn apply_command_batch_staged(
                 .update_joint(joint.id, joint.joint)
                 .map_err(|error| CommandBatchError {
                     command_index: Some(joint.command_index),
-                    error: CommandError::World(error),
+                    error: CommandError::from_unified(error),
                 })?;
         }
     }

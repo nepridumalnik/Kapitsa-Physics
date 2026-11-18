@@ -28,7 +28,7 @@ fn chunk(x: f64, count: usize) -> Result<Chunk, Box<dyn Error>> {
     Ok(builder.build(Transform::new(Vec3::new(x, 0.0, 0.0), Quat::IDENTITY)?)?)
 }
 
-fn body(world: &mut PhysicsWorld) -> Result<BodyId, WorldError> {
+fn body(world: &mut PhysicsWorld) -> Result<BodyId, crate::Error> {
     world.add_body(RigidBody::new_static(Transform::identity()))
 }
 
