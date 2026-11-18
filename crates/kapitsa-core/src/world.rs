@@ -1951,17 +1951,17 @@ impl PhysicsWorld {
         &mut self,
         id: ColliderId,
         material: Option<MaterialId>,
-    ) -> Result<(), WorldError> {
+    ) -> Result<(), Error> {
         if id.world != self.world_id || self.colliders.get(id.dense).is_none() {
-            return Err(WorldError::InvalidColliderId);
+            return Err(Error::from(WorldError::InvalidColliderId));
         }
         if material.is_some_and(|material| !self.materials.contains(material)) {
-            return Err(WorldError::InvalidMaterialId);
+            return Err(Error::from(WorldError::InvalidMaterialId));
         }
         let entry = self
             .colliders
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidColliderId)?;
+            .ok_or_else(|| Error::from(WorldError::InvalidColliderId))?;
         entry.collider.set_material(material);
         self.collision_system.mark_spatial_dirty();
         self.collision_system.invalidate_collider_contacts(id);
@@ -2076,22 +2076,22 @@ impl PhysicsWorld {
     pub fn edit_body(
         &mut self,
         id: BodyId,
-        edit: impl FnOnce(&mut BodyMotion) -> Result<(), crate::rigid_body::BodyError>,
-    ) -> Result<(), ClusterError> {
+        edit: impl FnOnce(&mut BodyMotion) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let entry = self
             .bodies
             .get(id.dense)
             .filter(|_| id.world == self.world_id)
-            .ok_or(ClusterError::InvalidBodyId)?;
+            .ok_or_else(|| Error::from(ClusterError::InvalidBodyId))?;
         let mut motion = entry.body.motion();
-        edit(&mut motion).map_err(ClusterError::Body)?;
+        edit(&mut motion)?;
         if entry.cluster.is_some() && entry.body.physics() != motion.physics() {
-            return Err(ClusterError::ManagedMass);
+            return Err(Error::from(ClusterError::ManagedMass));
         }
         self.invalidate_body_edit(id);
         self.bodies
             .get_mut(id.dense)
-            .ok_or(ClusterError::InvalidBodyId)?
+            .ok_or_else(|| Error::from(ClusterError::InvalidBodyId))?
             .body
             .set_motion(motion);
         Ok(())
@@ -3209,7 +3209,7 @@ impl PhysicsWorld {
                 if let Some(indices) = &mut self.force_source_body_indices {
                     indices.clear();
                 }
-                return Err((source_id, ForceSourceError::from(error)));
+                return Err((source_id, force_source_error(error)));
             }
         }
 
@@ -5963,19 +5963,16 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    pub fn add_collider(
-        &mut self,
-        body: BodyId,
-        collider: Collider,
-    ) -> Result<ColliderId, WorldError> {
+    pub fn add_collider(&mut self, body: BodyId, collider: Collider) -> Result<ColliderId, Error> {
         if self
             .bodies
             .get(body.dense)
             .is_some_and(|entry| entry.cluster.is_some())
         {
-            return Err(WorldError::InvalidBodyId);
+            return Err(Error::from(WorldError::InvalidBodyId));
         }
         self.add_collider_internal(body, collider)
+            .map_err(Error::from)
     }
 
     fn add_collider_internal(
@@ -6559,4 +6556,11 @@ mod tests;
 #[cfg(test)]
 fn test_atmosphere(state: crate::aerodynamics::AtmosphericState) -> Atmosphere {
     crate::aerodynamics::atmosphere::test_atmosphere(state)
+}
+
+fn force_source_error(error: crate::Error) -> ForceSourceError {
+    match error.downcast_ref::<crate::rigid_body::BodyError>() {
+        Some(error) => ForceSourceError::from(*error),
+        None => ForceSourceError::NonFiniteValue,
+    }
 }

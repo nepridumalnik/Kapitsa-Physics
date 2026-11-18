@@ -642,7 +642,7 @@ impl PhysicsWorld {
         let prepared_body = if original.physics().body_type() == BodyType::Dynamic {
             let old_center = original
                 .world_center_of_mass()
-                .map_err(ClusterError::Body)?
+                .map_err(map_body_to_cluster)?
                 .ok_or(ClusterError::InvalidMass)?;
             let new_center = body_pose.transform_point(aggregate.center_of_mass());
             if !new_center.is_finite() {
@@ -661,15 +661,15 @@ impl PhysicsWorld {
                 .and_then(|shift| original.forces().torque().checked_add(shift))
                 .ok_or(ClusterError::ArithmeticOverflow)?;
             let mut prepared = original;
-            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+            prepared.set_mass(aggregate).map_err(map_body_to_cluster)?;
             prepared
                 .set_linear_velocity(velocity)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             prepared
                 .set_angular_velocity(omega)
-                .map_err(ClusterError::Body)?;
-            prepared.apply_force(force).map_err(ClusterError::Body)?;
-            prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
+            prepared.apply_force(force).map_err(map_body_to_cluster)?;
+            prepared.apply_torque(torque).map_err(map_body_to_cluster)?;
             Some(prepared)
         } else {
             None
@@ -678,7 +678,7 @@ impl PhysicsWorld {
         if original.physics().body_type() == BodyType::Dynamic {
             let old_center = original
                 .world_center_of_mass()
-                .map_err(ClusterError::Body)?
+                .map_err(map_body_to_cluster)?
                 .ok_or(ClusterError::InvalidMass)?;
             let part_center = part_pose.transform_point(desc.mass.center_of_mass());
             let expected_linear = part_center
@@ -928,7 +928,7 @@ impl PhysicsWorld {
         if original.physics().body_type() == BodyType::Dynamic {
             let old_center = original
                 .world_center_of_mass()
-                .map_err(ClusterError::Body)?
+                .map_err(map_body_to_cluster)?
                 .ok_or(ClusterError::InvalidMass)?;
             let (velocity, omega) = velocity_field(
                 old_center,
@@ -942,16 +942,16 @@ impl PhysicsWorld {
                 .and_then(|offset| offset.checked_cross(force))
                 .and_then(|shift| original.forces().torque().checked_add(shift))
                 .ok_or(ClusterError::ArithmeticOverflow)?;
-            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+            prepared.set_mass(aggregate).map_err(map_body_to_cluster)?;
             prepared
                 .set_linear_velocity(velocity)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             prepared
                 .set_angular_velocity(omega)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             if original.physics().mass() != Some(aggregate) {
-                prepared.apply_force(force).map_err(ClusterError::Body)?;
-                prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+                prepared.apply_force(force).map_err(map_body_to_cluster)?;
+                prepared.apply_torque(torque).map_err(map_body_to_cluster)?;
             }
         }
 
@@ -1255,7 +1255,7 @@ impl PhysicsWorld {
                 .ok_or(ClusterError::InvalidMass)?;
             let origin = first_body
                 .world_center_of_mass()
-                .map_err(ClusterError::Body)?
+                .map_err(map_body_to_cluster)?
                 .ok_or(ClusterError::InvalidMass)?;
             let (second_center, second_inertia) = world_properties(second_mass, second_pose)?;
             let second_p = second_body
@@ -1307,15 +1307,15 @@ impl PhysicsWorld {
                         .and_then(|shift| value.checked_add(shift))
                 })
                 .ok_or(ClusterError::ArithmeticOverflow)?;
-            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+            prepared.set_mass(aggregate).map_err(map_body_to_cluster)?;
             prepared
                 .set_linear_velocity(velocity)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             prepared
                 .set_angular_velocity(omega)
-                .map_err(ClusterError::Body)?;
-            prepared.apply_force(force).map_err(ClusterError::Body)?;
-            prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
+            prepared.apply_force(force).map_err(map_body_to_cluster)?;
+            prepared.apply_torque(torque).map_err(map_body_to_cluster)?;
         }
 
         for &(part, _) in &transformed_parts {
@@ -1600,7 +1600,7 @@ impl PhysicsWorld {
             if original.physics().body_type() == BodyType::Dynamic {
                 let old_center = original
                     .world_center_of_mass()
-                    .map_err(ClusterError::Body)?
+                    .map_err(map_body_to_cluster)?
                     .ok_or(ClusterError::InvalidMass)?;
                 let new_center = original
                     .state()
@@ -1615,13 +1615,13 @@ impl PhysicsWorld {
                     original.state().angular_velocity(),
                     new_center,
                 )?;
-                prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+                prepared.set_mass(aggregate).map_err(map_body_to_cluster)?;
                 prepared
                     .set_linear_velocity(velocity)
-                    .map_err(ClusterError::Body)?;
+                    .map_err(map_body_to_cluster)?;
                 prepared
                     .set_angular_velocity(omega)
-                    .map_err(ClusterError::Body)?;
+                    .map_err(map_body_to_cluster)?;
             }
             prepared_bodies.push(prepared);
         }
@@ -1997,7 +1997,7 @@ impl PhysicsWorld {
         if original.physics().body_type() == BodyType::Dynamic {
             let old_center = original
                 .world_center_of_mass()
-                .map_err(ClusterError::Body)?
+                .map_err(map_body_to_cluster)?
                 .ok_or(ClusterError::InvalidMass)?;
             let (velocity, omega) = if let Some(transfer) = transfer {
                 let old_mass = original.physics().mass().ok_or(ClusterError::InvalidMass)?;
@@ -2028,16 +2028,16 @@ impl PhysicsWorld {
                 .and_then(|shift| original.forces().torque().checked_add(shift))
                 .ok_or(ClusterError::ArithmeticOverflow)?;
             let aggregate_changed = original.physics().mass() != Some(aggregate);
-            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+            prepared.set_mass(aggregate).map_err(map_body_to_cluster)?;
             prepared
                 .set_linear_velocity(velocity)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             prepared
                 .set_angular_velocity(omega)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             if aggregate_changed {
-                prepared.apply_force(force).map_err(ClusterError::Body)?;
-                prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+                prepared.apply_force(force).map_err(map_body_to_cluster)?;
+                prepared.apply_torque(torque).map_err(map_body_to_cluster)?;
             }
         }
         let prepared_surfaces = self.prepare_cluster_surface_rebase(body, &original, &prepared)?;
@@ -2481,3 +2481,10 @@ fn map_cluster_world_error(error: super::WorldError) -> ClusterError {
 #[cfg(test)]
 #[path = "cluster_tests.rs"]
 mod tests;
+
+fn map_body_to_cluster(error: crate::Error) -> ClusterError {
+    match error.downcast_ref::<crate::rigid_body::BodyError>() {
+        Some(error) => ClusterError::Body(*error),
+        None => ClusterError::Body(crate::rigid_body::BodyError::NonFiniteValue),
+    }
+}

@@ -446,9 +446,9 @@ fn transform_overflow_is_preserved() {
 
     assert_eq!(
         collider.world_bounds(&parent),
-        Err(ColliderError::Transform(
+        Err(crate::Error::from(ColliderError::Transform(
             TransformError::CompositionOverflow
-        ))
+        )))
     );
 }
 

@@ -1,3 +1,4 @@
+use crate::Error;
 use kapitsa_math::{CholeskyError, Vec3};
 
 use crate::{
@@ -160,7 +161,7 @@ pub(crate) fn effective_cross_mass_at(
                 .ok_or(ConstraintError::ArithmeticOverflow)?;
         let center = body
             .world_center_of_mass()
-            .map_err(map_body_error)?
+            .map_err(map_unified_body_error)?
             .unwrap_or(body.state().transform().translation());
         let offset = position
             .checked_sub(center)
@@ -251,7 +252,7 @@ pub(crate) fn effective_cross_mass_cached(
 pub(crate) fn point_velocity(body: &BodyMotion, position: Vec3) -> Result<Vec3, ConstraintError> {
     let center = body
         .world_center_of_mass()
-        .map_err(map_body_error)?
+        .map_err(map_unified_body_error)?
         .unwrap_or(body.state().transform().translation());
     let offset = position
         .checked_sub(center)
@@ -280,7 +281,7 @@ pub(crate) fn apply_point_impulse(
     impulse: Vec3,
 ) -> Result<(), ConstraintError> {
     body.apply_impulse_at_point(impulse, point)
-        .map_err(map_body_error)
+        .map_err(map_unified_body_error)
 }
 
 pub(crate) fn apply_point_position_impulse(
@@ -289,7 +290,7 @@ pub(crate) fn apply_point_position_impulse(
     impulse: Vec3,
 ) -> Result<(), ConstraintError> {
     body.apply_position_impulse(impulse, point)
-        .map_err(map_body_error)
+        .map_err(map_unified_body_error)
 }
 
 pub(crate) fn apply_generalized_impulse_cached(
@@ -298,7 +299,7 @@ pub(crate) fn apply_generalized_impulse_cached(
     impulse: Jacobian,
 ) -> Result<(), ConstraintError> {
     body.apply_constraint_impulse_cached(impulse.linear, impulse.angular, mass)
-        .map_err(map_body_error)
+        .map_err(map_unified_body_error)
 }
 
 pub(crate) fn apply_generalized_impulse(
@@ -306,7 +307,7 @@ pub(crate) fn apply_generalized_impulse(
     impulse: Jacobian,
 ) -> Result<(), ConstraintError> {
     body.apply_constraint_impulse(impulse.linear, impulse.angular)
-        .map_err(map_body_error)
+        .map_err(map_unified_body_error)
 }
 
 pub(crate) fn apply_generalized_position_impulse(
@@ -314,7 +315,7 @@ pub(crate) fn apply_generalized_position_impulse(
     impulse: Jacobian,
 ) -> Result<(), ConstraintError> {
     body.apply_constraint_position_impulse(impulse.linear, impulse.angular)
-        .map_err(map_body_error)
+        .map_err(map_unified_body_error)
 }
 
 pub(crate) fn apply_generalized_position_impulse_cached(
@@ -323,7 +324,7 @@ pub(crate) fn apply_generalized_position_impulse_cached(
     impulse: Jacobian,
 ) -> Result<(), ConstraintError> {
     body.apply_constraint_position_impulse_cached(impulse.linear, impulse.angular, mass)
-        .map_err(map_body_error)
+        .map_err(map_unified_body_error)
 }
 
 fn map_body_error(error: crate::rigid_body::BodyError) -> ConstraintError {
@@ -335,6 +336,13 @@ fn map_body_error(error: crate::rigid_body::BodyError) -> ConstraintError {
         | crate::rigid_body::BodyError::StaticBodyCannotHaveVelocity => {
             ConstraintError::InvalidMass
         }
+    }
+}
+
+fn map_unified_body_error(error: Error) -> ConstraintError {
+    match error.downcast_ref::<crate::rigid_body::BodyError>() {
+        Some(error) => map_body_error(*error),
+        None => ConstraintError::ArithmeticOverflow,
     }
 }
 

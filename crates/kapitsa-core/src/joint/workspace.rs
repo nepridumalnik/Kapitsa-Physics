@@ -1138,12 +1138,15 @@ fn reaction_for_joint(
     let com_world = side_body
         .body()
         .world_center_of_mass()
-        .map_err(|error| match error {
-            BodyError::ArithmeticOverflow => CollisionError::ArithmeticOverflow,
-            BodyError::BodyMustBeDynamic
-            | BodyError::StaticBodyCannotHaveVelocity
-            | BodyError::NonFiniteValue
-            | BodyError::InvalidInertiaTensor => CollisionError::InvalidContact,
+        .map_err(|error| match error.downcast_ref::<BodyError>() {
+            Some(BodyError::ArithmeticOverflow) => CollisionError::ArithmeticOverflow,
+            Some(
+                BodyError::BodyMustBeDynamic
+                | BodyError::StaticBodyCannotHaveVelocity
+                | BodyError::NonFiniteValue
+                | BodyError::InvalidInertiaTensor,
+            )
+            | None => CollisionError::InvalidContact,
         })?
         .unwrap_or_else(|| side_body.state().transform().translation());
     let anchor_world = body_a

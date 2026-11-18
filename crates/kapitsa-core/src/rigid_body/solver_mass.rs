@@ -1,3 +1,4 @@
+use crate::Error;
 use kapitsa_math::{CholeskyError, Mat3, Quat, Vec3};
 
 use crate::{
@@ -243,12 +244,12 @@ impl BodyMotion {
         linear_impulse: Vec3,
         angular_impulse: Vec3,
         cached: SolverMass,
-    ) -> Result<(), BodyError> {
+    ) -> Result<(), Error> {
         if self.physics.body_type != BodyType::Dynamic {
             return Ok(());
         }
         if !linear_impulse.is_finite() || !angular_impulse.is_finite() {
-            return Err(BodyError::NonFiniteValue);
+            return Err(Error::from(BodyError::NonFiniteValue));
         }
         if linear_impulse == Vec3::ZERO && angular_impulse == Vec3::ZERO {
             return Ok(());
@@ -297,12 +298,12 @@ impl BodyMotion {
         linear_impulse: Vec3,
         angular_impulse: Vec3,
         cached: SolverMass,
-    ) -> Result<(), BodyError> {
+    ) -> Result<(), Error> {
         if self.physics.body_type != BodyType::Dynamic {
-            return Err(BodyError::BodyMustBeDynamic);
+            return Err(Error::from(BodyError::BodyMustBeDynamic));
         }
         if !linear_impulse.is_finite() || !angular_impulse.is_finite() {
-            return Err(BodyError::NonFiniteValue);
+            return Err(Error::from(BodyError::NonFiniteValue));
         }
         let delta_linear_velocity = linear_impulse
             .checked_mul_scalar(cached.inverse_mass)

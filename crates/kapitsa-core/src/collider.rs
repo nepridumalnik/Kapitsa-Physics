@@ -1,4 +1,5 @@
 use crate::{
+    Error,
     aabb::Aabb,
     collision::{
         CollisionError,
@@ -151,21 +152,20 @@ impl Collider {
         self.mode = mode;
     }
 
-    pub fn world_bounds(
-        &self,
-        parent_transform: &Transform,
-    ) -> Result<Option<Aabb>, ColliderError> {
-        let transform = parent_transform.compose(&self.local_transform)?;
+    pub fn world_bounds(&self, parent_transform: &Transform) -> Result<Option<Aabb>, Error> {
+        let transform = parent_transform
+            .compose(&self.local_transform)
+            .map_err(|error| Error::from(ColliderError::Transform(error)))?;
         if let Some(pose) = &self.skin_pose {
             return pose
                 .bounds
                 .transformed(&transform)
                 .map(Some)
-                .map_err(|error| ColliderError::Bounds(BoundsError::from(error)));
+                .map_err(|error| crate::Error::from(BoundsError::from(error)));
         }
         self.shape
             .world_bounds(&transform)
-            .map_err(ColliderError::from)
+            .map_err(crate::Error::from)
     }
 
     pub(crate) fn local_bounds(&self) -> Result<Option<Aabb>, CollisionError> {

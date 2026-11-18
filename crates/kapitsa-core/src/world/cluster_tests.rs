@@ -1,4 +1,5 @@
 use super::*;
+use crate::Error;
 use crate::world::WorldStepTyped;
 use crate::{
     aerodynamics::{AerodynamicProperties, AerodynamicTarget, Aerodynamics},
@@ -438,7 +439,7 @@ fn managed_body_mutation_is_validated() {
     };
     assert_eq!(
         world.edit_body(body, |body| body.set_mass(replacement_mass)),
-        Err(ClusterError::ManagedMass)
+        Err(Error::from(ClusterError::ManagedMass))
     );
     assert_eq!(
         world.replace_body_state(body, RigidBody::new_static(Transform::identity())),

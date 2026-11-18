@@ -4533,15 +4533,16 @@ fn map_constraint_error(error: constraint::ConstraintError) -> CollisionError {
     }
 }
 
-pub(super) fn map_rigid_body_error(error: crate::rigid_body::BodyError) -> CollisionError {
-    match error {
-        crate::rigid_body::BodyError::ArithmeticOverflow
-        | crate::rigid_body::BodyError::NonFiniteValue => CollisionError::ArithmeticOverflow,
-        crate::rigid_body::BodyError::InvalidInertiaTensor => CollisionError::NonConvergent,
-        crate::rigid_body::BodyError::BodyMustBeDynamic
-        | crate::rigid_body::BodyError::StaticBodyCannotHaveVelocity => {
-            CollisionError::InvalidContact
-        }
+pub(super) fn map_rigid_body_error(error: crate::Error) -> CollisionError {
+    match error.downcast_ref::<crate::rigid_body::BodyError>() {
+        Some(crate::rigid_body::BodyError::ArithmeticOverflow)
+        | Some(crate::rigid_body::BodyError::NonFiniteValue) => CollisionError::ArithmeticOverflow,
+        Some(crate::rigid_body::BodyError::InvalidInertiaTensor) => CollisionError::NonConvergent,
+        Some(
+            crate::rigid_body::BodyError::BodyMustBeDynamic
+            | crate::rigid_body::BodyError::StaticBodyCannotHaveVelocity,
+        ) => CollisionError::InvalidContact,
+        None => CollisionError::ArithmeticOverflow,
     }
 }
 

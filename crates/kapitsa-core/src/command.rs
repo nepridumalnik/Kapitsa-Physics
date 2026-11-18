@@ -95,7 +95,7 @@ impl CommandError {
             return Self::Body(*error);
         }
         if let Some(error) = error.downcast_ref::<ClusterError>() {
-            return Self::Cluster(*error);
+            return Self::from(*error);
         }
         if let Some(error) = error.downcast_ref::<QueryError>() {
             return Self::Query(*error);
@@ -1119,7 +1119,7 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
     }
 }
 
-fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result<(), BodyError> {
+fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result<(), Error> {
     match command {
         PhysicsCommand::SetTransform { transform, .. } => body.set_transform(*transform)?,
         PhysicsCommand::SetLinearVelocity { velocity, .. } => {

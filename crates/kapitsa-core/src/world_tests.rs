@@ -3023,7 +3023,7 @@ fn body_and_collider_ids_are_scoped_to_their_worlds() -> Result<(), Error> {
     assert!(second_world.colliders_of(first_body).is_none());
     assert_eq!(
         second_world.add_collider(first_body, collider(3.0)),
-        Err(WorldError::InvalidBodyId)
+        Err(Error::from(WorldError::InvalidBodyId))
     );
     assert!(second_world.remove_body(first_body).is_none());
     assert_eq!(second_world.body_count(), 1);
@@ -3058,7 +3058,7 @@ fn material_ids_are_scoped_to_world_storage_and_in_use_materials_are_retained() 
         .expect("insert collider");
     assert_eq!(
         first_world.set_collider_material(collider_id, Some(other_material_id)),
-        Err(WorldError::InvalidMaterialId)
+        Err(Error::from(WorldError::InvalidMaterialId))
     );
     first_world
         .set_collider_material(collider_id, Some(material_id))
@@ -3093,7 +3093,7 @@ fn add_collider_rejects_a_material_from_another_world_before_insertion() {
 
     assert_eq!(
         world.add_collider(body, prepared),
-        Err(WorldError::InvalidMaterialId)
+        Err(Error::from(WorldError::InvalidMaterialId))
     );
     assert_eq!(world.collider_count(), 0);
 
@@ -3118,9 +3118,9 @@ fn dynamic_bodies_reject_surface_geometry_but_allow_convex_shapes() {
     );
     assert_eq!(
         world.add_collider(dynamic, Collider::new(triangle, Transform::identity())),
-        Err(WorldError::Collision(
+        Err(Error::from(WorldError::Collision(
             crate::collision::CollisionError::UnsupportedDynamicGeometry
-        ))
+        )))
     );
     assert!(world.add_collider(dynamic, collider(1.0)).is_ok());
 
@@ -3327,7 +3327,7 @@ fn invalid_body_rejects_collider_without_changing_world() -> Result<(), DensePoo
 
     assert_eq!(
         world.add_collider(stale_body, collider(1.0)),
-        Err(WorldError::InvalidBodyId)
+        Err(Error::from(WorldError::InvalidBodyId))
     );
     assert_eq!(world.body_count(), 1);
     assert_eq!(world.collider_count(), 0);
