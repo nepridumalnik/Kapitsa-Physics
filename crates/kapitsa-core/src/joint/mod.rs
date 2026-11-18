@@ -57,6 +57,7 @@ pub(crate) use workspace::JointWorkspace;
 // Inline Copy settings avoid per-joint heap allocations in the solver path.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Joint {
     Fixed(FixedJoint),
     Hinge(HingeJoint),

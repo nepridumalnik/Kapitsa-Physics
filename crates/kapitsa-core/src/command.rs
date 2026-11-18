@@ -137,6 +137,7 @@ impl std::error::Error for CommandBatchError {
 }
 
 /// An operation applied to the simulation world at a physics-step boundary.
+#[non_exhaustive]
 pub enum PhysicsCommand {
     /// Adds a material and returns its ID.
     AddMaterial {

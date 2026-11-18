@@ -5,6 +5,7 @@ use super::CollisionPair;
 
 /// Change in the interaction state for a collider pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum CollisionEventKind {
     Begin,
     Persist,

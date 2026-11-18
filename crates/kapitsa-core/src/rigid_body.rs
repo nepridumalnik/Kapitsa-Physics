@@ -13,6 +13,7 @@ pub use state::BodyState;
 
 /// Continuous collision detection policy for a rigid body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CcdMode {
     Discrete,
     Continuous,

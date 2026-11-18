@@ -64,6 +64,7 @@ impl SimulationConfig {
 
 /// Selects fixed-step compatibility or physics-bounded adaptive stepping.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub enum TimeStepPolicy {
     #[default]
     Fixed,

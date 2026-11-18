@@ -2194,6 +2194,7 @@ fn run_scenario(
                 CollisionEventKind::End => surface_ends += 1,
                 CollisionEventKind::Impact => surface_impacts += 1,
                 CollisionEventKind::Persist => {}
+                _ => {}
             }
         }
 

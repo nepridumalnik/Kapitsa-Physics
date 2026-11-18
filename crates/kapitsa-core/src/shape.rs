@@ -42,6 +42,7 @@ pub use tapered_cylinder::TaperedCylinder;
 pub use triangle::Triangle;
 pub use triangle_mesh::TriangleMesh;
 
+#[non_exhaustive]
 pub enum Shape {
     Sphere(Sphere),
     Cuboid(Cuboid),

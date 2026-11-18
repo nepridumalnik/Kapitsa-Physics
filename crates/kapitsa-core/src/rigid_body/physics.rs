@@ -2,6 +2,7 @@ use crate::mass::MassProperties;
 
 /// Motion model used by a rigid body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BodyType {
     Static,
     Kinematic,
