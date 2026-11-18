@@ -77,8 +77,8 @@ pub use asynchronous::{
     BatchId, ChunkClientError, CollisionEventBatch, CollisionEventStreamError, CollisionEvents,
     JointBreakEventBatch, JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError,
     PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
-    PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
-    PhysicsSnapshot, PhysicsSubmitError, Simulation, SimulationBuilder, SimulationError,
+    PhysicsClientError, PhysicsSnapshot, PhysicsSubmitError, Simulation, SimulationBuilder,
+    SimulationError,
 };
 
 #[cfg(test)]

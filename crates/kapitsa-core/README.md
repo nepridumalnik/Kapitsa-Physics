@@ -8,8 +8,10 @@ The crate models static, kinematic, and dynamic bodies with `f64` positions,
 velocities, and mass properties. It provides convex and surface shapes, colliders with
 filtering and materials, discrete and continuous collision detection, contact
 resolution, joints, weld-based clusters, spatial queries, collision events, uniform and
-point-source gravity, and aerodynamic load evaluation. There is no implicit gravity:
-apply forces or set initial velocities when building a scene.
+point-source gravity, and aerodynamic load evaluation. The `command` module owns the
+Tokio-free command buffer and the atomic apply path used by both host-driven loops and
+the async service. There is no implicit gravity: apply forces or set initial velocities
+when building a scene.
 
 ```rust
 use kapitsa_core::{

@@ -49,6 +49,9 @@ pub enum PhysicsClientError {
         cause: StepError,
     },
     UnsupportedBatchCommand,
+    TooManyCommands {
+        max_commands: usize,
+    },
     UnexpectedResult,
 }
 
@@ -69,6 +72,10 @@ impl fmt::Display for PhysicsClientError {
             Self::UnsupportedBatchCommand => {
                 formatter.write_str("command cannot be used in an atomic body batch")
             }
+            Self::TooManyCommands { max_commands } => write!(
+                formatter,
+                "command batch exceeds the maximum of {max_commands} commands"
+            ),
             Self::UnexpectedResult => {
                 formatter.write_str("physics command returned an unexpected result")
             }
@@ -88,6 +95,7 @@ impl std::error::Error for PhysicsClientError {
             Self::NotRunning
             | Self::ChannelClosed
             | Self::UnsupportedBatchCommand
+            | Self::TooManyCommands { .. }
             | Self::UnexpectedResult => None,
         }
     }

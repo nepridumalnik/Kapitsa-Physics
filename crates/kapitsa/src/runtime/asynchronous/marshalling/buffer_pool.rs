@@ -41,8 +41,8 @@ impl CommandBufferPool {
     }
 
     pub(crate) fn recycle(&self, mut buffer: PhysicsCommandBuffer) {
-        buffer.commands.clear();
-        let command_bytes = command_buffer_bytes(buffer.commands.capacity());
+        buffer.clear();
+        let command_bytes = command_buffer_bytes(buffer.capacity());
         if command_bytes == 0 {
             return;
         }
@@ -57,7 +57,7 @@ impl CommandBufferPool {
         }
 
         state.retained_bytes += command_bytes;
-        state.buffers.push(std::mem::take(&mut buffer.commands));
+        state.buffers.push(buffer.take_commands());
     }
 
     #[cfg(test)]
@@ -100,7 +100,7 @@ mod tests {
             .add_body(RigidBody::new_dynamic(Transform::identity(), mass).expect("body"))
             .expect("body ID");
         buffer.set_linear_velocity(body, Vec3::X);
-        let capacity = buffer.commands.capacity();
+        let capacity = buffer.capacity();
 
         pool.recycle(buffer);
 
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(commands.capacity(), capacity);
         assert_eq!(pool.stats(), (0, list_bytes));
 
-        let mut reused = PhysicsCommandBuffer { commands };
+        let mut reused = PhysicsCommandBuffer::from_commands(commands);
         reused.set_linear_velocity(body, Vec3::Y);
         pool.recycle(reused);
         let commands = pool.take();

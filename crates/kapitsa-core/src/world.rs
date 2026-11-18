@@ -745,12 +745,60 @@ impl StepDiagnostics {
     }
 }
 
+/// Committed results of a physics step.
+///
+/// The view borrows the world and remains valid until the world is mutated
+/// again. Obtain it from [`PhysicsWorld::fetch_results`].
+#[derive(Clone, Copy)]
+pub struct StepResults<'a> {
+    world: &'a PhysicsWorld,
+}
+
+impl<'a> StepResults<'a> {
+    /// Collision lifecycle events published by the step.
+    pub fn collision_events(&self) -> &'a [CollisionEvent] {
+        self.world.collision_events()
+    }
+
+    /// Joint-break events published by the step.
+    pub fn joint_events(&self) -> &'a [JointBreakEvent] {
+        self.world.joint_events()
+    }
+
+    /// Approximations and fallbacks applied during the step.
+    pub fn diagnostics(&self) -> StepDiagnostics {
+        self.world.step_diagnostics()
+    }
+
+    /// Solver contact impulses recorded for the step.
+    pub fn contact_impulses(&self) -> &'a [ContactImpulse] {
+        self.world.contact_impulses()
+    }
+
+    /// Number of contact points omitted from the impulse report.
+    pub fn contact_impulses_omitted_points(&self) -> usize {
+        self.world.contact_impulses_omitted_points()
+    }
+
+    /// Whether CCD clipped any recorded contact impulses.
+    pub fn contact_impulses_ccd_clipped(&self) -> bool {
+        self.world.contact_impulses_ccd_clipped()
+    }
+
+    /// The world that produced these results.
+    pub fn world(&self) -> &'a PhysicsWorld {
+        self.world
+    }
+}
+
 /// Owns rigid bodies and colliders and assigns IDs scoped to this world instance.
 pub struct PhysicsWorld {
     world_id: u64,
     error_policy: ErrorPolicy,
     step_diagnostics: StepDiagnostics,
     pending_step_diagnostics: StepDiagnostics,
+    staged_step_result: Option<Result<(), StepError>>,
+    pub(crate) command_scratch: Option<crate::command::BatchScratch>,
     body_revision: u64,
     automatic_weld_failure: Option<(f64, f64)>,
     automatic_weld_impulse_tolerances: Option<(f64, f64)>,
@@ -1454,6 +1502,8 @@ impl PhysicsWorld {
                 weld_incomplete_load_clusters: 0,
                 weld_collision_load_clusters: 0,
             },
+            staged_step_result: None,
+            command_scratch: None,
             body_revision: 0,
             automatic_weld_failure: None,
             automatic_weld_impulse_tolerances: None,
@@ -2447,8 +2497,34 @@ impl PhysicsWorld {
     }
 
     /// Advances every body by one fixed timestep, atomically committing the results.
+    ///
+    /// This is the convenience form of [`Self::simulate`] followed by
+    /// [`Self::fetch_results`].
     pub fn step(&mut self, dt: f64) -> Result<(), StepError> {
-        self.step_with_executor(dt, &SequentialExecutor, 1)
+        self.simulate(dt);
+        self.fetch_results().map(|_| ())
+    }
+
+    /// Runs one fixed step and stages its outcome for [`Self::fetch_results`].
+    ///
+    /// The synchronous core completes the step before returning. The staged
+    /// outcome keeps the launch/fetch split explicit so a host may move the work
+    /// to a worker thread and join it later. A failed step rolls the world back
+    /// atomically; its error is reported by `fetch_results`.
+    pub fn simulate(&mut self, dt: f64) {
+        let result = self.step_with_executor(dt, &SequentialExecutor, 1);
+        self.staged_step_result = Some(result);
+    }
+
+    /// Returns the view of the most recently committed step results.
+    ///
+    /// On a successful [`Self::simulate`], the returned value exposes collision
+    /// events, joint-break events, diagnostics, and contact impulses. A failed
+    /// staged step returns its error and publishes no new result view. Calling
+    /// this without a preceding `simulate` returns the current committed view.
+    pub fn fetch_results(&mut self) -> Result<StepResults<'_>, StepError> {
+        let staged = self.staged_step_result.take().unwrap_or(Ok(()));
+        staged.map(|()| StepResults { world: self })
     }
 
     /// Advances one step using the supplied statically dispatched task executor.

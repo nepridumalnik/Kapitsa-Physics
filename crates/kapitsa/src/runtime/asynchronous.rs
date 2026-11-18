@@ -25,8 +25,7 @@ pub use marshalling::{
     BatchId, ChunkClientError, CollisionEventBatch, CollisionEventStreamError, CollisionEvents,
     JointBreakEventBatch, JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError,
     PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
-    PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
-    PhysicsSnapshot, PhysicsSubmitError,
+    PhysicsClientError, PhysicsSnapshot, PhysicsSubmitError,
 };
 pub use service::{Simulation, SimulationBuilder, SimulationError};
 

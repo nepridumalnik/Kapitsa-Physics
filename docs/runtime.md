@@ -5,6 +5,11 @@ creates bodies and colliders, calls `step`, and reads committed state directly. 
 clock-driven service described here is enabled by the `service` feature, which also
 enables `parallel`. A build without `service` does not depend on Tokio.
 
+Host-driven loops can use `PhysicsWorld::commands()` to build a command buffer and
+`PhysicsWorld::apply()` to apply it atomically; applying never steps the world or
+publishes a snapshot. `simulate(dt)` stages one step and `fetch_results()` returns
+the committed `StepResults`; `step(dt)` is the convenience composition of both.
+
 `Simulation::builder().time_horizon(Duration::ZERO)` starts the real world
 service with motion gated while bodies and terrain are registered through its
 client. `Simulation::set_time_horizon(Some(target))` permits autonomous world

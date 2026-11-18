@@ -91,7 +91,7 @@ pub mod transform {
 pub mod world {
     pub use kapitsa_core::world::{
         AddChunkBatchError, AddChunkError, ChunkId, ChunkOperationError, PhysicsWorld,
-        RemoveChunkBatchError,
+        RemoveChunkBatchError, StepResults,
     };
     pub use kapitsa_core::world::{
         BodyId, ClusterError, ColliderId, ErrorPolicy, ForceSource, ForceSourceError,
@@ -107,6 +107,9 @@ pub use kapitsa_core::{
         CcdLimitPolicy, CollisionConfig, CollisionError, CollisionEvent, CollisionEventKind,
         CollisionPair, ContactInfo,
     },
+    command::{
+        CommandBatchError, CommandError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
+    },
     gravity::{CentralGravity, Gravity, GravityError, SphericalGravity, UniformGravity},
     joint::{Joint, JointBreakEvent},
     mass::MassProperties,
@@ -117,7 +120,8 @@ pub use kapitsa_core::{
     world::{
         AddChunkBatchError, AddChunkError, BodyId, ChunkId, ChunkOperationError, ClusterError,
         ColliderId, ErrorPolicy, ForceSourceId, GravityId, JointId, JointTarget, PartId,
-        PhysicsWorld, RemoveChunkBatchError, StepDiagnostics, StepError, WeldId, WorldError,
+        PhysicsWorld, RemoveChunkBatchError, StepDiagnostics, StepError, StepResults, WeldId,
+        WorldError,
     },
 };
 
@@ -131,6 +135,6 @@ pub use runtime::{
     BatchId, ChunkClientError, CollisionEventBatch, CollisionEventStreamError, CollisionEvents,
     JointBreakEventBatch, JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError,
     PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
-    PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
-    PhysicsSnapshot, PhysicsSubmitError, Simulation, SimulationBuilder, SimulationError,
+    PhysicsClientError, PhysicsSnapshot, PhysicsSubmitError, Simulation, SimulationBuilder,
+    SimulationError,
 };

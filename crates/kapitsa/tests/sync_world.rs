@@ -32,7 +32,10 @@ fn synchronous_world_steps_and_exposes_state_without_a_runtime()
         Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
     )?;
 
-    assert_eq!(world.body(ball).map(RigidBody::user_data), Some(0x00ba_1100));
+    assert_eq!(
+        world.body(ball).map(RigidBody::user_data),
+        Some(0x00ba_1100)
+    );
     assert_eq!(
         world.collider(floor_collider).map(Collider::user_data),
         Some(0x00f1_0000)
@@ -40,6 +43,13 @@ fn synchronous_world_steps_and_exposes_state_without_a_runtime()
 
     world.step(1.0 / 60.0)?;
     world.step(1.0 / 60.0)?;
+
+    let mut commands = world.commands();
+    commands.set_linear_velocity(ball, Vec3::new(1.0, 0.0, 0.0));
+    world.apply(&commands)?;
+    world.simulate(1.0 / 60.0);
+    let results = world.fetch_results()?;
+    assert_eq!(results.diagnostics(), world.step_diagnostics());
 
     let state = world.body_state(ball).ok_or("dynamic body is missing")?;
     let transform = world

@@ -1094,7 +1094,7 @@ fn apply_queued_commands(
             }
             CommandRequest::Batch { id, buffer } => {
                 let result =
-                    apply_command_batch(world, &buffer.commands, &mut commands.batch_scratch);
+                    apply_command_batch(world, buffer.commands(), &mut commands.batch_scratch);
                 commands.buffer_pool.recycle(buffer);
                 commands
                     .pending_results
@@ -1797,7 +1797,7 @@ mod tests {
         let mut buffer = client.commands();
         buffer.reserve(15);
         buffer.set_linear_velocity(body, Vec3::X);
-        let capacity = buffer.commands.capacity();
+        let capacity = buffer.capacity();
         let batch_id = client.try_submit(buffer).expect("accepted batch");
         simulation.stop().await.expect("stop");
 
@@ -1809,7 +1809,7 @@ mod tests {
         simulation.start().expect("restart");
         let reused = client.commands();
         assert!(reused.is_empty());
-        assert_eq!(reused.commands.capacity(), capacity);
+        assert_eq!(reused.capacity(), capacity);
         drop(reused);
         simulation.stop().await.expect("second stop");
     }
@@ -1833,7 +1833,7 @@ mod tests {
         let mut first = client.commands();
         first.reserve(15);
         first.set_linear_velocity(body, Vec3::X);
-        let first_capacity = first.commands.capacity();
+        let first_capacity = first.capacity();
         let first_id = client.try_submit(first).expect("accepted batch");
         tokio::time::advance(Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
@@ -1843,7 +1843,7 @@ mod tests {
         assert_eq!(simulation.buffer_pool.stats().0, 1);
 
         let mut second = client.commands();
-        assert_eq!(second.commands.capacity(), first_capacity);
+        assert_eq!(second.capacity(), first_capacity);
         second.set_linear_velocity(body, Vec3::new(f64::NAN, 0.0, 0.0));
         let second_id = client.try_submit(second).expect("accepted invalid batch");
         tokio::time::advance(Duration::from_millis(10)).await;

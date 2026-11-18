@@ -30,9 +30,8 @@ use super::{
     PhysicsSnapshot, Simulation, SimulationEvents, apply_queued_commands, publish_command_results,
     publish_runtime_metrics, wait_for_scaled_step,
 };
-use crate::runtime::{
-    PhysicsBatchResults, PhysicsCommandBuffer, PhysicsSubmitError, SimulationConfig, WorkerConfig,
-};
+use crate::runtime::{PhysicsBatchResults, PhysicsSubmitError, SimulationConfig, WorkerConfig};
+use kapitsa_core::command::PhysicsCommandBuffer;
 
 mod mission {
     include!(concat!(
@@ -1109,7 +1108,7 @@ fn benchmark_rocket_flight_runtime_queue_pressure() -> Result<(), Box<dyn std::e
             }
             if overflow.is_none() {
                 overflow_len = buffer.len();
-                overflow_capacity = buffer.commands.capacity();
+                overflow_capacity = buffer.capacity();
                 overflow = Some(buffer);
             }
         }

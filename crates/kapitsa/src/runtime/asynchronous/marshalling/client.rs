@@ -123,9 +123,7 @@ impl PhysicsClient {
 
     /// Creates an empty command buffer for nonblocking submission.
     pub fn commands(&self) -> PhysicsCommandBuffer {
-        PhysicsCommandBuffer {
-            commands: self.buffer_pool.take(),
-        }
+        PhysicsCommandBuffer::from_commands(self.buffer_pool.take())
     }
 
     /// Attempts to enqueue a complete command buffer without waiting.
@@ -832,7 +830,7 @@ mod tests {
             let Some(CommandRequest::Batch { buffer, .. }) = receiver.recv().await else {
                 panic!("source updates arrive as one command batch");
             };
-            apply_command_batch(&mut world, &buffer.commands, &mut BatchScratch::default())
+            apply_command_batch(&mut world, buffer.commands(), &mut BatchScratch::default())
                 .expect("source update batch");
             let configured = world.force_source(source).expect("source remains live");
             assert_eq!(configured.local_point(), Vec3::Y);
@@ -1108,7 +1106,7 @@ mod tests {
             panic!("expected QueueFull");
         };
         assert_eq!(buffer.len(), 2);
-        assert_eq!(buffer.commands.capacity(), 2);
+        assert_eq!(buffer.capacity(), 2);
 
         let _ = take_single_request(receiver.recv().await.expect("queued command"));
         let id = client.try_submit(buffer).expect("retry accepted");
@@ -1121,7 +1119,7 @@ mod tests {
         };
         assert_eq!(queued_id, id);
         assert_eq!(buffer.len(), 2);
-        assert_eq!(buffer.commands.capacity(), 2);
+        assert_eq!(buffer.capacity(), 2);
     }
 
     #[test]
@@ -1133,13 +1131,13 @@ mod tests {
             .expect("body ID");
         let mut returned = PhysicsCommandBuffer::with_capacity(12);
         returned.set_linear_velocity(body, Vec3::X);
-        let capacity = returned.commands.capacity();
+        let capacity = returned.capacity();
         let empty_pool_stats = harness.buffer_pool.stats();
         harness.buffer_pool.recycle(returned);
 
         let buffer = harness.client.commands();
         assert!(buffer.is_empty());
-        assert_eq!(buffer.commands.capacity(), capacity);
+        assert_eq!(buffer.capacity(), capacity);
         assert_eq!(harness.buffer_pool.stats(), empty_pool_stats);
     }
 

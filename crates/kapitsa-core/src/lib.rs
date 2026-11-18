@@ -6,6 +6,7 @@ pub mod chunk;
 pub mod cluster;
 pub mod collider;
 pub mod collision;
+pub mod command;
 mod constraint;
 pub mod containers;
 pub mod execution;

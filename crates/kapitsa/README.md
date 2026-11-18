@@ -62,6 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+`world.commands()` builds an ordered command buffer; `world.apply(&commands)`
+applies it atomically without stepping. `simulate(dt)` and `fetch_results()` expose
+the launch/fetch split, and `step(dt)` is their convenience composition.
+
 See the [repository README](https://github.com/nepridumalnik/Kapitsa-Physics#readme)
 for the full guide: bodies and state, colliders and shapes, streaming mesh chunks,
 joints and clusters, materials and gravity, queries and events, and aerodynamics.
