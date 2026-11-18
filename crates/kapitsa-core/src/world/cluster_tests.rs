@@ -1,4 +1,5 @@
 use super::*;
+use crate::world::WorldStepTyped;
 use crate::{
     aerodynamics::{AerodynamicProperties, AerodynamicTarget, Aerodynamics},
     cluster::{
@@ -203,7 +204,7 @@ fn rotated_cluster_surface_uses_part_position_for_velocity_and_torque() {
     world.set_atmosphere(crate::world::test_atmosphere(
         crate::aerodynamics::AtmosphericState::new(1.0, Vec3::ZERO).unwrap(),
     ));
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
     let state = world.body(body).unwrap().state();
     assert!(state.linear_velocity().x > 0.0);
     assert!(state.angular_velocity().z < 1.0);
@@ -921,7 +922,7 @@ fn part_force_source_snapshot_commits_only_after_full_step()
                     2,
                 )
             } else {
-                world.step(1e-6)
+                world.step_typed(1e-6)
             }
         };
         step(&mut world)?;
@@ -986,7 +987,7 @@ fn part_gravity_snapshot_balances_uniform_field_and_rolls_back()
                     2,
                 )
             } else {
-                world.step(1e-6)
+                world.step_typed(1e-6)
             }
         };
         step(&mut world)?;

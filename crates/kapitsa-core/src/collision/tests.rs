@@ -1,3 +1,4 @@
+use crate::world::WorldStepTyped;
 use crate::{
     collider::{Collider, CollisionMode},
     collision::{
@@ -160,7 +161,7 @@ fn world_step_resolves_solid_contacts_and_publishes_lifecycle_events() {
         )
         .unwrap();
 
-    world.step(0.02).unwrap();
+    world.step_typed(0.02).unwrap();
 
     assert!(world.body(ball).unwrap().state().linear_velocity().y > 0.0);
     assert!(
@@ -188,7 +189,7 @@ fn world_step_resolves_solid_contacts_and_publishes_lifecycle_events() {
             .any(|event| event.kind == CollisionEventKind::Impact && event.pair == pair)
     );
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
     assert!(
         world
             .collision_events()
@@ -201,7 +202,7 @@ fn world_step_resolves_solid_contacts_and_publishes_lifecycle_events() {
         .unwrap()
         .set_transform(Transform::new(Vec3::new(0.0, 10.0, 0.0), Quat::IDENTITY).unwrap())
         .unwrap();
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
     assert!(world.collision_events().iter().any(|event| {
         event.kind == CollisionEventKind::End && event.pair == pair && event.contact.is_none()
     }));
@@ -231,7 +232,7 @@ fn world_step_resolves_overlapping_dynamic_spheres() {
         .unwrap();
     let right_collider = world.add_collider(right, make_collider()).unwrap();
 
-    world.step(1.0 / 60.0).unwrap();
+    world.step_typed(1.0 / 60.0).unwrap();
 
     let pair = CollisionPair::new(left_collider, right_collider).unwrap();
     assert!(world.collision_events().iter().any(|event| {
@@ -263,7 +264,7 @@ fn continuous_dynamic_spheres_resolve_relative_toi() {
     let right = world.add_body(right_body).unwrap();
     let right_collider = world.add_collider(right, make_collider()).unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     assert!(world.body(left).unwrap().state().linear_velocity().x < 0.0);
     assert!(world.body(right).unwrap().state().linear_velocity().x > 0.0);
@@ -309,7 +310,7 @@ fn independent_ccd_islands_evaluate_only_their_own_candidates() {
             .unwrap();
     }
 
-    world.step(1.0 / 60.0).unwrap();
+    world.step_typed(1.0 / 60.0).unwrap();
     let metrics = world.collision_step_metrics();
     assert_eq!(metrics.ccd_island_count, 2);
     assert_eq!(metrics.ccd_initial_candidate_count, 2);
@@ -389,7 +390,7 @@ fn ccd_resweep_only_visits_live_colliders_attached_to_the_changed_body() {
                 .unwrap();
         }
 
-        world.step(1.0 / 60.0).unwrap();
+        world.step_typed(1.0 / 60.0).unwrap();
 
         let metrics = world.collision_step_metrics();
         assert_eq!(
@@ -539,7 +540,7 @@ fn continuous_rebound_refreshes_candidates_for_the_remaining_step() {
         .unwrap();
     world.set_collider_material(sphere, Some(material)).unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     let wall_pair = CollisionPair::new(wall, sphere).unwrap();
     let target_pair = CollisionPair::new(target, sphere).unwrap();
@@ -638,7 +639,7 @@ fn continuous_rebound_reschedules_a_new_cross_island_pair() {
             .unwrap();
     }
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     let wall_pair = CollisionPair::new(wall, first_collider).unwrap();
     let dynamic_pair = CollisionPair::new(first_collider, second_collider).unwrap();
@@ -770,7 +771,7 @@ fn continuous_rebound_locally_replays_a_cascade_of_dynamic_islands() {
             .unwrap();
     }
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     let expected_pairs = [
         CollisionPair::new(wall, first_collider).unwrap(),
@@ -860,7 +861,7 @@ fn continuous_rebound_replays_an_already_completed_island() {
         })
         .unwrap();
     assert_eq!(
-        world.step(0.01),
+        world.step_typed(0.01),
         Err(crate::world::StepError::Collision(
             CollisionError::CcdLimitExceeded
         ))
@@ -875,7 +876,7 @@ fn continuous_rebound_replays_an_already_completed_island() {
         })
         .unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     let expected_pairs = [
         CollisionPair::new(left_wall, rebound_collider).unwrap(),
@@ -932,7 +933,7 @@ fn world_step_reports_sensor_overlap_without_changing_motion() {
         )
         .unwrap();
 
-    world.step(0.02).unwrap();
+    world.step_typed(0.02).unwrap();
 
     assert_eq!(
         world.body(ball).unwrap().state().linear_velocity(),
@@ -983,19 +984,19 @@ fn collision_mode_changes_restart_the_pair_lifecycle_and_failed_steps_preserve_e
         .unwrap();
     let pair = CollisionPair::new(plane, sphere).unwrap();
 
-    world.step(1.0 / 60.0).unwrap();
+    world.step_typed(1.0 / 60.0).unwrap();
     assert_eq!(world.collision_events().len(), 1);
     assert_eq!(world.collision_events()[0].kind, CollisionEventKind::Begin);
     assert!(!world.collision_events()[0].sensor);
     let committed_events = world.collision_events().to_vec();
 
     assert_eq!(
-        world.step(0.0),
+        world.step_typed(0.0),
         Err(crate::world::StepError::InvalidDeltaTime)
     );
     assert_eq!(world.collision_events(), committed_events);
 
-    world.step(1.0 / 60.0).unwrap();
+    world.step_typed(1.0 / 60.0).unwrap();
     assert_eq!(world.collision_events().len(), 1);
     assert_eq!(
         world.collision_events()[0].kind,
@@ -1011,7 +1012,7 @@ fn collision_mode_changes_restart_the_pair_lifecycle_and_failed_steps_preserve_e
     body.set_transform(Transform::new(Vec3::new(0.0, 0.4, 0.0), Quat::IDENTITY).unwrap())
         .unwrap();
     body.set_linear_velocity(Vec3::ZERO).unwrap();
-    world.step(1.0 / 60.0).unwrap();
+    world.step_typed(1.0 / 60.0).unwrap();
     let events = world
         .collision_events()
         .iter()
@@ -1031,7 +1032,7 @@ fn collision_mode_changes_restart_the_pair_lifecycle_and_failed_steps_preserve_e
     body.set_transform(Transform::new(Vec3::new(0.0, 0.4, 0.0), Quat::IDENTITY).unwrap())
         .unwrap();
     body.set_linear_velocity(Vec3::ZERO).unwrap();
-    world.step(1.0 / 60.0).unwrap();
+    world.step_typed(1.0 / 60.0).unwrap();
     let events = world
         .collision_events()
         .iter()
@@ -1082,7 +1083,7 @@ fn world_step_resolves_contacts_against_triangle_mesh() {
         )
         .unwrap();
 
-    world.step(0.02).unwrap();
+    world.step_typed(0.02).unwrap();
 
     assert!(world.body(ball).unwrap().state().linear_velocity().y > 0.0);
     let pair = CollisionPair::new(mesh_collider, sphere).unwrap();
@@ -1127,7 +1128,7 @@ fn world_step_resolves_contacts_against_height_field() {
         )
         .unwrap();
 
-    world.step(0.02).unwrap();
+    world.step_typed(0.02).unwrap();
 
     assert!(world.body(ball).unwrap().state().linear_velocity().y > 0.0);
     let pair = CollisionPair::new(field_collider, sphere).unwrap();
@@ -1173,7 +1174,7 @@ fn world_step_resolves_contacts_against_level_set() {
         )
         .unwrap();
 
-    world.step(0.02).unwrap();
+    world.step_typed(0.02).unwrap();
 
     assert!(world.body(ball).unwrap().state().linear_velocity().y > 0.0);
     let pair = CollisionPair::new(field_collider, sphere).unwrap();
@@ -1236,7 +1237,7 @@ fn world_step_uses_the_current_skinned_mesh_pose() {
         )
         .unwrap();
 
-    world.step(0.02).unwrap();
+    world.step_typed(0.02).unwrap();
 
     assert!(world.body(ball).unwrap().state().linear_velocity().y > 0.0);
     let pair = CollisionPair::new(mesh_collider, sphere).unwrap();
@@ -1265,7 +1266,7 @@ fn continuous_body_does_not_tunnel_through_a_plane() {
         )
         .unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     assert!(
         world
@@ -1316,7 +1317,7 @@ fn continuous_sphere_hits_a_thin_cuboid() {
         )
         .unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     assert!(
         world
@@ -1368,7 +1369,7 @@ fn continuous_pure_rotation_detects_a_full_turn_between_equal_endpoint_poses() {
         )
         .unwrap();
 
-    world.step(1.0).unwrap();
+    world.step_typed(1.0).unwrap();
 
     let pair = CollisionPair::new(target, rod_collider).unwrap();
     assert!(world.collision_events().iter().any(|event| {
@@ -1425,7 +1426,7 @@ fn continuous_rotation_with_offset_center_of_mass_sweeps_the_collider_arc() {
         )
         .unwrap();
 
-    world.step(1.0).unwrap();
+    world.step_typed(1.0).unwrap();
 
     let pair = CollisionPair::new(target, collider).unwrap();
     assert!(
@@ -1471,7 +1472,7 @@ fn continuous_dynamic_body_responds_to_a_moving_kinematic_cuboid() {
         )
         .unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     let pair = CollisionPair::new(wall, sphere).unwrap();
     assert!(
@@ -1514,7 +1515,7 @@ fn continuous_capsule_does_not_tunnel_through_a_plane() {
         )
         .unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     assert!(
         world
@@ -1566,7 +1567,7 @@ fn continuous_body_resolves_relative_motion_against_a_discrete_dynamic_body() {
     let left_collider = world.add_collider(left, shape()).unwrap();
     let right_collider = world.add_collider(right, shape()).unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     let left_state = world.body(left).unwrap().state();
     let right_state = world.body(right).unwrap().state();
@@ -1602,7 +1603,7 @@ fn continuous_sensor_reports_a_transient_crossing_without_response() {
         )
         .unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     assert!(
         world
@@ -1644,7 +1645,7 @@ fn continuous_sensor_reports_a_transient_crossing_without_response() {
         .unwrap()
         .set_linear_velocity(Vec3::ZERO)
         .unwrap();
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
     assert!(world.collision_events().is_empty());
 }
 
@@ -1675,7 +1676,7 @@ fn ccd_impact_limit_failure_preserves_the_world_state_and_events() {
     let before_events = world.collision_events().to_vec();
 
     assert_eq!(
-        world.step(0.01),
+        world.step_typed(0.01),
         Err(crate::world::StepError::Collision(
             CollisionError::CcdLimitExceeded
         ))
@@ -1710,7 +1711,7 @@ fn ccd_impact_limit_clips_the_connected_island_at_the_contact() {
         })
         .unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     let state = world.body(ball).unwrap().state();
     assert!(state.transform().translation().y >= -0.500_001);
@@ -1769,7 +1770,7 @@ fn ccd_budget_clips_only_the_contacting_body_in_a_hundred_body_island() {
         })
         .unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     let clipped = world.body(bodies[0]).unwrap().state();
     assert_eq!(clipped.linear_velocity(), Vec3::ZERO);
@@ -1857,7 +1858,7 @@ fn two_ccd_bodies_with_exhausted_budgets_clip_at_their_shared_contact() {
         })
         .unwrap();
 
-    world.step(0.02).unwrap();
+    world.step_typed(0.02).unwrap();
 
     for body in [left, right] {
         let state = world.body(body).unwrap().state();
@@ -1918,7 +1919,7 @@ fn ccd_budget_clip_keeps_moving_kinematic_trajectories() {
         })
         .unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     for (body, expected_x) in kinematic_bodies.into_iter().zip([7.0, -7.0]) {
         assert_eq!(
@@ -2002,7 +2003,7 @@ fn ccd_budget_clips_a_newly_connected_dynamic_pair() {
         })
         .unwrap();
 
-    world.step(0.01).unwrap();
+    world.step_typed(0.01).unwrap();
 
     for body in [first, second] {
         let state = world.body(body).unwrap().state();

@@ -594,7 +594,7 @@ impl PhysicsClient {
 
     /// Waits for a publication not yet observed by this client.
     ///
-    /// Intermediate snapshots may be skipped. Returns [`PhysicsClientError::NotRunning`]
+    /// Intermediate snapshots may be skipped. Returns an error whose message reports
     /// when the simulation stops before publishing another snapshot.
     pub async fn next_snapshot(&mut self) -> Result<Arc<PhysicsSnapshot>, Error> {
         if self.command_tx.borrow().is_none() {

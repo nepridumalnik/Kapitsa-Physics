@@ -1,4 +1,5 @@
 use super::*;
+use crate::world::WorldStepTyped;
 use kapitsa_math::Quat;
 
 fn visibility_triangle(a: Vec3, b: Vec3, c: Vec3) -> SurfaceTriangle {
@@ -1549,7 +1550,7 @@ fn voxel_slender_sections_apply_and_reject_rotation_in_world_steps()
                     1,
                 )?;
             } else {
-                world.step(1e-4)?;
+                world.step_typed(1e-4)?;
             }
             let motion = world.body(id).ok_or("body")?.motion();
             assert!(motion.state().angular_velocity().length() > 0.0);
@@ -1561,7 +1562,7 @@ fn voxel_slender_sections_apply_and_reject_rotation_in_world_steps()
             let failed = if sharded {
                 world.step_with_shards(1e-4, &mut [Vec::new()], &SequentialExecutor, 1)
             } else {
-                world.step(1e-4)
+                world.step_typed(1e-4)
             };
             assert!(matches!(
                 failed,
@@ -1626,7 +1627,7 @@ fn quasi_steady_voxel_sections_advance_rotating_body() -> Result<(), Box<dyn std
                         1,
                     )?;
                 } else {
-                    world.step(1e-4)?;
+                    world.step_typed(1e-4)?;
                 }
             }
             let motion = world.body(id).ok_or("body")?.motion();

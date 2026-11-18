@@ -1,3 +1,4 @@
+use crate::world::WorldStepTyped;
 use kapitsa_math::{Mat3, Vec3};
 
 use crate::{
@@ -59,7 +60,7 @@ fn potential_sphere_world_steps_validate_geometry_and_rollback()
                         1,
                     )
                 } else {
-                    world.step(0.001)
+                    world.step_typed(0.001)
                 };
                 if case == 0 {
                     result?;
@@ -125,7 +126,7 @@ fn potential_sphere_revalidates_collider_and_rejects_unprepared_paths()
             })
         ));
         assert!(world.enable_cluster(id).is_err());
-        world.step(0.001)?;
+        world.step_typed(0.001)?;
         world.remove_collider(collider).ok_or("missing collider")?;
         world.add_collider(
             id,
@@ -140,7 +141,7 @@ fn potential_sphere_revalidates_collider_and_rejects_unprepared_paths()
                 1,
             )
         } else {
-            world.step(0.001)
+            world.step_typed(0.001)
         };
         assert!(matches!(
             result,
@@ -151,7 +152,7 @@ fn potential_sphere_revalidates_collider_and_rejects_unprepared_paths()
         ));
         assert_eq!(world.body(id).unwrap().motion(), before);
         world.set_aerodynamics(id, Aerodynamics::None)?;
-        world.step(0.001)?;
+        world.step_typed(0.001)?;
     }
     Ok(())
 }
@@ -198,7 +199,7 @@ fn existing_mesh_and_collider_models_reject_subsonic_flow_without_state_change()
                     1,
                 )
             } else {
-                world.step(0.001)
+                world.step_typed(0.001)
             };
             assert!(
                 matches!(result, Err(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::Pressure(PressureError::UnsupportedMach) }) if body_id == id),
@@ -270,7 +271,7 @@ fn spherical_vacuum_skips_collider_preparation() -> Result<(), Box<dyn std::erro
                         1,
                     )?;
                 } else {
-                    world.step(0.01)?;
+                    world.step_typed(0.01)?;
                 }
                 let body = world.body(id).ok_or("body")?;
                 if surface_in_air {
@@ -318,7 +319,7 @@ fn vacuum_skips_aerodynamics_in_both_world_paths() {
                 )
                 .unwrap();
         } else {
-            world.step(1e-310).unwrap();
+            world.step_typed(1e-310).unwrap();
         }
         assert_eq!(
             world.body(id).unwrap().state().linear_velocity(),
@@ -358,7 +359,7 @@ fn lift_trajectory(dt: f64, steps: usize, sharded: bool, drag: f64) -> Vec3 {
                 )
                 .unwrap();
         } else {
-            world.step(dt).unwrap();
+            world.step_typed(dt).unwrap();
         }
     }
     world.body(id).unwrap().state().linear_velocity()
@@ -416,7 +417,7 @@ fn offset_lift_preserves_energy_with_rotation_and_wind() {
                     )
                     .unwrap();
             } else {
-                world.step(0.001).unwrap();
+                world.step_typed(0.001).unwrap();
             }
         }
         let state = world.body(id).unwrap().state();
@@ -494,7 +495,7 @@ fn lift_energy_drift_converges_for_anisotropic_inertia() {
         };
         let initial = energy(&world);
         for _ in 0..steps {
-            world.step(dt).unwrap();
+            world.step_typed(dt).unwrap();
         }
         (energy(&world) - initial).abs()
     }
@@ -529,7 +530,7 @@ fn atmosphere_without_surfaces_does_not_evaluate_relative_wind() {
                 )
                 .unwrap();
         } else {
-            world.step(1e-310).unwrap();
+            world.step_typed(1e-310).unwrap();
         }
         results.push(world.body(id).unwrap().motion());
     }
@@ -554,7 +555,7 @@ fn aerodynamic_drag_is_applied_during_world_step() {
         )
         .unwrap();
 
-    world.step(0.1).unwrap();
+    world.step_typed(0.1).unwrap();
 
     assert_eq!(
         world.body(body_id).unwrap().state().linear_velocity(),
@@ -580,7 +581,7 @@ fn aerodynamic_drag_produces_torque_at_an_offset_point() {
         )
         .unwrap();
 
-    world.step(0.1).unwrap();
+    world.step_typed(0.1).unwrap();
 
     let angular_velocity = world.body(body_id).unwrap().state().angular_velocity();
     assert!(angular_velocity.z > 0.0);
@@ -602,7 +603,7 @@ fn body_can_combine_multiple_aerodynamic_surfaces() {
     assert_eq!(world.add_aerodynamic_surface(body_id, surface).unwrap(), 1);
     assert_eq!(world.aerodynamic_surfaces(body_id).unwrap().len(), 2);
 
-    world.step(0.1).unwrap();
+    world.step_typed(0.1).unwrap();
 
     assert_eq!(
         world.body(body_id).unwrap().state().linear_velocity(),
@@ -628,7 +629,7 @@ fn strong_drag_does_not_reverse_linear_velocity_in_one_step() {
         )
         .unwrap();
 
-    world.step(0.5).unwrap();
+    world.step_typed(0.5).unwrap();
 
     assert_eq!(
         world.body(body_id).unwrap().state().linear_velocity(),
@@ -696,7 +697,7 @@ fn failed_step_restores_body_after_aerodynamics_and_gravity_preparation() {
     ));
     let before = world.body(body_id).unwrap().motion();
 
-    assert!(world.step(0.1).is_err());
+    assert!(world.step_typed(0.1).is_err());
     assert_eq!(world.body(body_id).unwrap().motion(), before);
 }
 
@@ -716,7 +717,7 @@ fn wind_accelerates_a_stationary_body() {
             Aerodynamics::Simple(AerodynamicProperties::new(1.0, 1.0, Vec3::ZERO).unwrap()),
         )
         .unwrap();
-    world.step(0.5).unwrap();
+    world.step_typed(0.5).unwrap();
     let velocity = world.body(body).unwrap().state().linear_velocity().x;
     assert!(velocity > 0.0 && velocity <= 10.0);
 }
@@ -752,7 +753,7 @@ fn altitude_wind_profile_changes_world_drag() {
             .unwrap();
         ids.push(id);
     }
-    world.step(0.1).unwrap();
+    world.step_typed(0.1).unwrap();
     assert_eq!(
         world.body(ids[0]).unwrap().state().linear_velocity(),
         Vec3::ZERO
@@ -776,7 +777,7 @@ fn rotating_body_experiences_drag_at_an_offset() {
             Aerodynamics::Simple(AerodynamicProperties::new(1.0, 1.0, Vec3::X).unwrap()),
         )
         .unwrap();
-    world.step(0.1).unwrap();
+    world.step_typed(0.1).unwrap();
     assert!(world.body(body).unwrap().state().angular_velocity().z < 1.0);
 }
 
@@ -798,7 +799,7 @@ fn many_surfaces_cannot_reverse_motion_under_large_drag() {
             )
             .unwrap();
     }
-    world.step(0.5).unwrap();
+    world.step_typed(0.5).unwrap();
     let velocity = world.body(body).unwrap().state().linear_velocity().x;
     assert!((-1e-12..=10.0).contains(&velocity));
 }
@@ -833,7 +834,7 @@ fn geometry_modes_preserve_mesh_in_vacuum_and_reject_air_atomically() {
                     )
                     .unwrap();
             } else {
-                world.step(0.1).unwrap();
+                world.step_typed(0.1).unwrap();
             }
             if mesh_mode {
                 let Aerodynamics::Mesh(mesh) = world.body(id).unwrap().aerodynamics() else {
@@ -853,7 +854,7 @@ fn geometry_modes_preserve_mesh_in_vacuum_and_reject_air_atomically() {
                     1,
                 )
             } else {
-                world.step(0.1)
+                world.step_typed(0.1)
             };
             if mesh_mode {
                 assert_eq!(result, Ok(()));
@@ -901,7 +902,7 @@ fn base_pressure_without_primary_model_is_rejected_in_both_step_paths()
                 1,
             )
         } else {
-            world.step(1e-5)
+            world.step_typed(1e-5)
         };
         assert!(
             matches!(result, Err(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::UnsupportedModel }) if body_id == id),
@@ -966,7 +967,7 @@ fn unchecked_base_pressure_is_rejected_in_both_step_paths() -> Result<(), Box<dy
                         1,
                     )
                 } else {
-                    world.step(1e-5)
+                    world.step_typed(1e-5)
                 };
                 assert!(matches!(
                     result,
@@ -1056,7 +1057,7 @@ fn base_pressure_load_delta_and_configuration_lifecycle() -> Result<(), Box<dyn 
                         1,
                     )?;
                 } else {
-                    world.step(1e-5)?;
+                    world.step_typed(1e-5)?;
                 }
                 motions.push(world.body(id).unwrap().motion());
                 if enabled {
@@ -1169,7 +1170,7 @@ fn collider_edits_clear_only_collider_based_base_patches() -> Result<(), Box<dyn
                 patch.1,
             )]);
             world.add_collider(id, make_collider())?;
-            world.step(1e-5)?;
+            world.step_typed(1e-5)?;
         }
     }
     Ok(())
@@ -1218,7 +1219,7 @@ fn mesh_base_triangle_selection_validates_indices_and_applies_load()
                 1,
             )?;
         } else {
-            world.step(1e-5)?;
+            world.step_typed(1e-5)?;
         }
         assert!(
             (world.body(id).unwrap().state().linear_velocity().x - (2000.0 - 8e-5)).abs() < 1e-10
@@ -1284,7 +1285,7 @@ fn collider_base_triangle_selection_uses_owned_geometry_and_invalidates()
                 1,
             )?;
         } else {
-            world.step(1e-5)?;
+            world.step_typed(1e-5)?;
         }
         assert!(
             (world.body(id).unwrap().state().linear_velocity().x - (2000.0 - 0.00048)).abs() < 1e-9
@@ -1368,7 +1369,7 @@ fn selected_base_rejects_blocked_geometry_without_changing_motion()
                         1,
                     )
                 } else {
-                    world.step(1e-5)
+                    world.step_typed(1e-5)
                 };
                 assert!(
                     matches!(
@@ -1419,7 +1420,7 @@ fn base_visibility_is_rechecked_after_flow_reversal() -> Result<(), Box<dyn std:
                 1,
             )?;
         } else {
-            world.step(1e-5)?;
+            world.step_typed(1e-5)?;
         }
         world
             .body_mut(id)
@@ -1434,7 +1435,7 @@ fn base_visibility_is_rechecked_after_flow_reversal() -> Result<(), Box<dyn std:
                 1,
             )
         } else {
-            world.step(1e-5)
+            world.step_typed(1e-5)
         };
         assert!(matches!(
             result,
@@ -1503,7 +1504,7 @@ fn coincident_base_sources_are_rejected_before_loads() -> Result<(), Box<dyn std
                     1,
                 )
             } else {
-                world.step(1e-5)
+                world.step_typed(1e-5)
             };
             assert!(
                 matches!(
@@ -1580,7 +1581,7 @@ fn base_visibility_tracks_rotation_on_mesh_and_colliders() -> Result<(), Box<dyn
                         1,
                     )
                 } else {
-                    world.step(1e-8)
+                    world.step_typed(1e-8)
                 }
             };
             step(&mut world)?;
@@ -1710,7 +1711,7 @@ fn base_pressure_outside_mach_domain_rolls_back_world_step()
                     1,
                 )
             } else {
-                world.step(1e-5)
+                world.step_typed(1e-5)
             };
             assert!(matches!(
                 result,
@@ -1764,7 +1765,7 @@ fn mesh_uses_atmosphere_sound_speed_in_world_paths() {
                     1,
                 )
             } else {
-                world.step(0.001)
+                world.step_typed(0.001)
             };
             assert!(result.is_ok(), "{result:?}");
             assert!(world.body(id).unwrap().state().linear_velocity().x < 100.0);
@@ -1804,7 +1805,7 @@ fn mesh_pressure_errors_preserve_cause_and_motion_in_all_world_paths() {
                     1,
                 )
             } else {
-                world.step(0.1)
+                world.step_typed(0.1)
             };
             assert_eq!(
                 result,
@@ -1861,7 +1862,7 @@ fn wing_world_loads_and_failures_match_between_step_paths() {
                     1,
                 )
             } else {
-                world.step(1e-4)
+                world.step_typed(1e-4)
             };
             if speed == 50.0 {
                 result.unwrap();
@@ -1936,7 +1937,7 @@ fn full_angle_polar_runs_reverse_flow_in_both_world_paths() -> Result<(), Box<dy
                 1,
             )?;
         } else {
-            world.step(1e-4)?;
+            world.step_typed(1e-4)?;
         }
         let motion = world.body(id).ok_or("body")?.motion();
         assert!(world.body(id).ok_or("body")?.state().linear_velocity().x > -50.0);
@@ -1973,7 +1974,7 @@ fn wing_trajectory_converges_with_timestep() {
             AtmosphericState::new(1.2, Vec3::ZERO).unwrap(),
         ));
         for _ in 0..steps {
-            world.step(0.1 / steps as f64).unwrap();
+            world.step_typed(0.1 / steps as f64).unwrap();
         }
         let velocity = world.body(id).unwrap().state().linear_velocity();
         assert!(velocity.length_squared() < 2525.0);
@@ -2037,7 +2038,7 @@ fn hull_world_parity_and_cluster_transfer_preserve_model() {
                 )
                 .unwrap();
         } else {
-            world.step(1e-4).unwrap();
+            world.step_typed(1e-4).unwrap();
         }
         let b = world.body(id).unwrap();
         assert!(b.state().linear_velocity().x < 50.0);
@@ -2100,7 +2101,7 @@ fn data_driven_hull_steps_continuously_across_mach_one() {
                     )
                     .unwrap();
             } else {
-                world.step(1e-5).unwrap();
+                world.step_typed(1e-5).unwrap();
             }
             let final_speed = world.body(id).unwrap().state().linear_velocity().x;
             assert!(final_speed < initial);
@@ -2162,7 +2163,7 @@ fn data_driven_hull_body_part_dispatch_and_range_failure_rollback() {
                     1,
                 )
             } else {
-                world.step(1e-6)
+                world.step_typed(1e-6)
             };
             assert_eq!(
                 result,
@@ -2195,7 +2196,7 @@ fn data_driven_hull_body_part_dispatch_and_range_failure_rollback() {
                     )
                     .unwrap();
             } else {
-                world.step(1e-6).unwrap();
+                world.step_typed(1e-6).unwrap();
             }
             let state = world.body(id).unwrap().state();
             assert!(state.linear_velocity().x < 350.0);
@@ -2270,7 +2271,7 @@ fn normal_hull_table_range_failure_rolls_back_body_and_part_loads() {
                         1,
                     )
                 } else {
-                    world.step(1e-6)
+                    world.step_typed(1e-6)
                 };
                 assert_eq!(
                     result,
@@ -2294,7 +2295,7 @@ fn normal_hull_table_range_failure_rolls_back_body_and_part_loads() {
                         .unwrap()
                         .set_aerodynamics(Aerodynamics::Hull(vec![sections[0].clone()]));
                 }
-                world.step(1e-6).unwrap();
+                world.step_typed(1e-6).unwrap();
                 assert!(world.body(id).unwrap().state().linear_velocity().y < 340.0);
             }
         }
@@ -2326,7 +2327,7 @@ fn hull_sections_sample_spatial_density_independently() {
     let mut world = PhysicsWorld::new();
     let id = world.add_body(body).unwrap();
     world.set_atmosphere(atmosphere);
-    world.step(1e-5).unwrap();
+    world.step_typed(1e-5).unwrap();
     // Equal point sampling at COM would incorrectly cancel this torque.
     assert!(world.body(id).unwrap().state().angular_velocity().z < 0.0);
 }
@@ -2358,7 +2359,7 @@ fn hull_later_section_error_rolls_back_all_loads() {
                 1,
             )
         } else {
-            world.step(1e-4)
+            world.step_typed(1e-4)
         };
         assert_eq!(
             result,
@@ -2375,7 +2376,7 @@ fn hull_later_section_error_rolls_back_all_loads() {
             .body_mut(id)
             .unwrap()
             .set_aerodynamics(Aerodynamics::Hull(vec![sections[0].clone()]));
-        world.step(1e-4).unwrap();
+        world.step_typed(1e-4).unwrap();
         assert!(world.body(id).unwrap().state().linear_velocity().x < 50.0);
     }
 }
@@ -2421,7 +2422,7 @@ fn later_wing_failure_rolls_back_earlier_loads() {
                 1,
             )
         } else {
-            world.step(1e-4)
+            world.step_typed(1e-4)
         };
         assert_eq!(
             result,
@@ -2435,7 +2436,7 @@ fn later_wing_failure_rolls_back_earlier_loads() {
             .body_mut(id)
             .unwrap()
             .set_aerodynamics(Aerodynamics::Wings(vec![valid]));
-        world.step(1e-4).unwrap();
+        world.step_typed(1e-4).unwrap();
         assert!(world.body(id).unwrap().state().linear_velocity().z > -5.0);
     }
 }
@@ -2480,7 +2481,7 @@ fn symmetric_wings_sum_loads_and_cancel_roll_moment() {
                 )
                 .unwrap();
         } else {
-            world.step(1e-4).unwrap();
+            world.step_typed(1e-4).unwrap();
         }
         let body = world.body(id).unwrap();
         assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
@@ -2641,7 +2642,7 @@ fn collider_pressure_cache_invalidation_and_sharded_parity()
                         1,
                     )
                 } else {
-                    world.step(0.00001)
+                    world.step_typed(0.00001)
                 }
             };
             step(&mut world)?;
@@ -2844,7 +2845,7 @@ fn sphere_samples_surface_position_in_both_world_paths() -> Result<(), Box<dyn s
                     1,
                 )?;
             } else {
-                world.step(0.01)?;
+                world.step_typed(0.01)?;
             }
             let body = world.body(id).ok_or("missing body")?;
             if offset == 0.0 {
@@ -2920,7 +2921,7 @@ fn mesh_zero_translation_preserves_rest_and_resolves_rotational_loads()
                         1,
                     )?;
                 } else {
-                    world.step(1e-8)?;
+                    world.step_typed(1e-8)?;
                 }
                 let state = world.body(id).ok_or("body")?.state();
                 if rotating {
@@ -2964,7 +2965,7 @@ fn nonzero_unrepresentable_mesh_flow_is_not_silently_treated_as_rest()
                 1,
             )
         } else {
-            world.step(1e-8)
+            world.step_typed(1e-8)
         };
         assert!(
             matches!(result, Err(crate::world::StepError::Aerodynamics { .. })),
@@ -3015,7 +3016,7 @@ fn wave_drag_is_applied_to_body_and_cluster() -> Result<(), Box<dyn std::error::
                     1,
                 )?;
             } else {
-                world.step(1e-4)?;
+                world.step_typed(1e-4)?;
             }
             let velocity = world
                 .body(id)
@@ -3079,7 +3080,7 @@ fn wave_transition_world_and_rollback() -> Result<(), Box<dyn std::error::Error>
                         1,
                     )
                 } else {
-                    world.step(1e-4)
+                    world.step_typed(1e-4)
                 };
                 if in_range {
                     result?;
@@ -3135,7 +3136,7 @@ fn ndarc_wing_crosses_mach_one_in_world_steps() -> Result<(), Box<dyn std::error
                         1,
                     )?;
                 } else {
-                    world.step(1e-5)?;
+                    world.step_typed(1e-5)?;
                 }
                 let result = world.body(id).ok_or("body")?.state().linear_velocity();
                 assert!(result.x < speed && result.x > 0.0);
@@ -3206,7 +3207,7 @@ fn automatic_voxel_wave_tracks_primary_geometry_and_step_paths()
                 1,
             )?;
         } else {
-            world.step(1e-5)?;
+            world.step_typed(1e-5)?;
         }
         let first = world.body(id).ok_or("body")?.state().linear_velocity().x;
         assert!(first < 680.0 && first > 0.0);
@@ -3214,7 +3215,7 @@ fn automatic_voxel_wave_tracks_primary_geometry_and_step_paths()
         let body = world.body_mut(id).ok_or("body")?;
         body.set_linear_velocity(Vec3::X * 680.0)?;
         body.set_aerodynamics(Aerodynamics::VoxelWave(model(2.0)?));
-        world.step(1e-5)?;
+        world.step_typed(1e-5)?;
         let changed = world.body(id).ok_or("body")?.state().linear_velocity().x;
         assert!(changed < first, "first={first}, changed={changed}");
         world
@@ -3222,7 +3223,7 @@ fn automatic_voxel_wave_tracks_primary_geometry_and_step_paths()
             .ok_or("body")?
             .set_linear_velocity(Vec3::X * 100.0)?;
         let before = world.body(id).ok_or("body")?.motion();
-        let error = world.step(1e-5);
+        let error = world.step_typed(1e-5);
         assert!(matches!(
             error,
             Err(crate::world::StepError::Aerodynamics {
@@ -3276,14 +3277,14 @@ fn automatic_voxel_wave_skips_vacuum_and_rolls_back_invalid_geometry()
     let mut world = PhysicsWorld::new();
     let id = world.add_body(body)?;
     AerodynamicsTask.execute(&world)?;
-    world.step(1e-5)?;
+    world.step_typed(1e-5)?;
     world.set_atmosphere(super::test_atmosphere(AtmosphericState::new(
         1.2,
         Vec3::ZERO,
     )?));
     let before = world.body(id).ok_or("body")?.motion();
     assert!(matches!(
-        world.step(1e-5),
+        world.step_typed(1e-5),
         Err(crate::world::StepError::Aerodynamics {
             cause: AerodynamicsError::Geometry(GeometryError::InvalidConfig),
             ..

@@ -1,4 +1,5 @@
 use super::*;
+use crate::world::WorldStepTyped;
 use crate::{
     constraint::SolverBody,
     joint::{BallJoint, Joint, JointCommon, JointConstraint, JointFrame},
@@ -699,7 +700,7 @@ fn constrained_failure_rolls_back_other_eligible_and_legacy_islands() {
     world.add_force_source(forced, Vec3::ZERO, Vec3::Y).unwrap();
     let original: Vec<_> = world.bodies().map(|(_, body)| body.motion()).collect();
     assert_eq!(
-        world.step(1.0),
+        world.step_typed(1.0),
         Err(crate::world::StepError::Collision(
             crate::collision::CollisionError::NonConvergent
         ))
@@ -724,7 +725,7 @@ fn constrained_geometric_degeneracy_is_an_explicit_atomic_error() {
     let mut world = world_from_graph(bodies, joints);
     let original: Vec<_> = world.bodies().map(|(_, body)| body.motion()).collect();
     assert_eq!(
-        world.step(1.0 / 120.0),
+        world.step_typed(1.0 / 120.0),
         Err(crate::world::StepError::Collision(
             crate::collision::CollisionError::NonConvergent
         ))

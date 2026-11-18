@@ -1,4 +1,5 @@
 use super::*;
+use crate::world::WorldStepTyped;
 use crate::{
     chunk::ChunkBuilder,
     collider::Collider,
@@ -136,7 +137,7 @@ fn streamed_queries_sweeps_and_steps_find_only_registered_meshes() -> Result<(),
     let sphere = Shape::Sphere(Sphere::new(0.5)?);
     for _ in 0..5 {
         let ids = world.add_chunk_batch(body, vec![chunk(0.0, 1)?, chunk(20.0, 1)?])?;
-        world.step(0.02)?;
+        world.step_typed(0.02)?;
         assert!(world.raycast(ray, QueryFilter::default())?.is_some());
         assert!(
             world
@@ -160,7 +161,7 @@ fn streamed_queries_sweeps_and_steps_find_only_registered_meshes() -> Result<(),
                 )?
                 .is_none()
         );
-        world.step(0.02)?;
+        world.step_typed(0.02)?;
         let ids = world.add_chunk_batch(body, removed)?;
         world.remove_chunk_batch(ids)?;
     }
@@ -203,7 +204,7 @@ fn continuous_dynamic_sphere_hits_streamed_mesh() -> Result<(), Box<dyn Error>> 
         rocket,
         Collider::new(Shape::Sphere(Sphere::new(0.5)?), Transform::identity()),
     )?;
-    world.step(0.02)?;
+    world.step_typed(0.02)?;
     assert!(
         world
             .body(rocket)
@@ -215,7 +216,7 @@ fn continuous_dynamic_sphere_hits_streamed_mesh() -> Result<(), Box<dyn Error>> 
             >= 0.49
     );
     assert!(world.remove_chunk(id).is_some());
-    world.step(0.02)?;
+    world.step_typed(0.02)?;
     Ok(())
 }
 
@@ -255,7 +256,7 @@ fn allocation_failure_during_registration_returns_every_prepared_mesh() -> Resul
         assert_eq!(world.colliders_of(body).ok_or("missing body")?.count(), 1);
         let ids = world.add_chunk_batch(body, error.chunks)?;
         assert_eq!(ids.len(), 2);
-        world.step(0.02)?;
+        world.step_typed(0.02)?;
     }
     Ok(())
 }

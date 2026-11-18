@@ -1,4 +1,6 @@
 use kapitsa_math::{Affine3, Vec3};
+
+use crate::Error;
 use std::{
     collections::HashMap,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -2500,7 +2502,7 @@ impl PhysicsWorld {
     ///
     /// This is the convenience form of [`Self::simulate`] followed by
     /// [`Self::fetch_results`].
-    pub fn step(&mut self, dt: f64) -> Result<(), StepError> {
+    pub fn step(&mut self, dt: f64) -> Result<(), Error> {
         self.simulate(dt);
         self.fetch_results().map(|_| ())
     }
@@ -2522,9 +2524,11 @@ impl PhysicsWorld {
     /// events, joint-break events, diagnostics, and contact impulses. A failed
     /// staged step returns its error and publishes no new result view. Calling
     /// this without a preceding `simulate` returns the current committed view.
-    pub fn fetch_results(&mut self) -> Result<StepResults<'_>, StepError> {
+    pub fn fetch_results(&mut self) -> Result<StepResults<'_>, Error> {
         let staged = self.staged_step_result.take().unwrap_or(Ok(()));
-        staged.map(|()| StepResults { world: self })
+        staged
+            .map(|()| StepResults { world: self })
+            .map_err(Error::from)
     }
 
     /// Advances one step using the supplied statically dispatched task executor.
@@ -6320,6 +6324,24 @@ impl PhysicsWorld {
 impl Default for PhysicsWorld {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Test helper that keeps typed step expectations after the public step surface
+/// moved to the unified error.
+#[cfg(test)]
+pub(crate) trait WorldStepTyped {
+    fn step_typed(&mut self, dt: f64) -> Result<(), StepError>;
+}
+
+#[cfg(test)]
+impl WorldStepTyped for PhysicsWorld {
+    fn step_typed(&mut self, dt: f64) -> Result<(), StepError> {
+        self.step(dt)
+            .map_err(|error| match error.downcast_ref::<StepError>() {
+                Some(error) => *error,
+                None => StepError::InvalidDeltaTime,
+            })
     }
 }
 

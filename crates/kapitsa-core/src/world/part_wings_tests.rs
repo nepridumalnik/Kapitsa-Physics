@@ -1,4 +1,5 @@
 use super::*;
+use crate::world::WorldStepTyped;
 use crate::{
     aerodynamics::{
         Aerodynamics, AtmosphericState,
@@ -35,7 +36,7 @@ fn advance(world: &mut PhysicsWorld, sharded: bool) -> Result<(), StepError> {
             1,
         )
     } else {
-        world.step(1e-5)
+        world.step_typed(1e-5)
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::world::WorldStepTyped;
 use kapitsa_math::{Mat3, Quat, Vec3};
 
 use crate::{
@@ -51,7 +52,7 @@ fn pair_world() -> (PhysicsWorld, [BodyId; 2], JointId) {
 
 fn step_route(world: &mut PhysicsWorld, route: usize, dt: f64) -> Result<(), StepError> {
     match route {
-        0 => world.step(dt),
+        0 => world.step_typed(dt),
         1 => world.step_with_executor(dt, &super::ScopedThreadExecutor, 4),
         2 => world.step_with_shards(dt, &mut [Vec::new(), Vec::new()], &SequentialExecutor, 2),
         3 => {
@@ -97,7 +98,7 @@ fn free_ball_pair_numerical_failures_are_atomic() {
     for overflow in [false, true] {
         for route in 0..4 {
             let (mut world, ids, joint) = pair_world();
-            world.step(1.0 / 120.0).unwrap();
+            world.step_typed(1.0 / 120.0).unwrap();
             for id in ids {
                 let body = world.body_mut(id).unwrap();
                 if overflow {
@@ -193,7 +194,7 @@ fn free_ball_pair_rejects_unsupported_configurations_without_mutation() {
                 .collect::<Vec<_>>(),
             original
         );
-        world.step(1.0 / 120.0).unwrap();
+        world.step_typed(1.0 / 120.0).unwrap();
         assert_eq!(
             world.collision_system.constrained_island_count(),
             0,
@@ -239,7 +240,7 @@ fn free_ball_pair_preserves_pending_collision_events_across_failure_and_commit()
             sensor.set_mode(CollisionMode::Sensor);
             world.add_collider(id, sensor).unwrap()
         });
-        world.step(1.0 / 120.0).unwrap();
+        world.step_typed(1.0 / 120.0).unwrap();
         assert_eq!(world.collision_events().len(), 1);
         assert_eq!(world.collision_events()[0].kind, CollisionEventKind::Begin);
         let events = world.collision_events().to_vec();
@@ -276,11 +277,11 @@ fn free_ball_pair_preserves_pending_collision_events_across_failure_and_commit()
 fn free_ball_pair_warm_steps_do_not_allocate() {
     let (mut world, _, _) = pair_world();
     for _ in 0..32 {
-        world.step(1.0 / 120.0).unwrap();
+        world.step_typed(1.0 / 120.0).unwrap();
     }
     let (allocations, bytes) = super::tracked_world_allocations(|| {
         for _ in 0..600 {
-            world.step(1.0 / 120.0).unwrap();
+            world.step_typed(1.0 / 120.0).unwrap();
         }
     });
     println!("free Ball pair: 600 warmed steps, {allocations} allocations, {bytes} bytes");
@@ -326,11 +327,11 @@ fn constrained_large_warm_steps_do_not_allocate() {
                 .unwrap();
         }
         for _ in 0..8 {
-            world.step(1.0 / 120.0).unwrap();
+            world.step_typed(1.0 / 120.0).unwrap();
         }
         let (allocations, bytes) = super::tracked_world_allocations(|| {
             for _ in 0..16 {
-                world.step(1.0 / 120.0).unwrap();
+                world.step_typed(1.0 / 120.0).unwrap();
             }
         });
         println!("constrained n={count} warmed_steps=16 allocations={allocations} bytes={bytes}");

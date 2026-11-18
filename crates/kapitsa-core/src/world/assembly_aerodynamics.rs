@@ -921,6 +921,7 @@ fn evaluate_pressure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::WorldStepTyped;
     use crate::{
         aerodynamics::AtmosphericState,
         cluster::{WeldDesc, WeldStiffness, WeldStrength},
@@ -1014,7 +1015,7 @@ mod tests {
                 },
             )?;
             world.set_part_voxel_wave(child, Some(wave_model()?))?;
-            world.step(1e-7)?;
+            world.step_typed(1e-7)?;
             let reactions = world
                 .part_aerodynamic_weld_reactions(body, 1e-8, 1e-8)
                 .map_err(|e| format!("{e:?}"))?;
@@ -1030,7 +1031,7 @@ mod tests {
                     1,
                 )?;
             } else {
-                world.step(1e-7)?;
+                world.step_typed(1e-7)?;
             }
             assert!(world.cluster(body).ok_or("cluster")?.welds().is_empty());
             assert_ne!(world.cluster_part(child).ok_or("part")?.body(), body);
@@ -1077,7 +1078,7 @@ mod tests {
                         1,
                     )?;
                 } else {
-                    world.step(1e-6)?;
+                    world.step_typed(1e-6)?;
                 }
                 let speed = world.body(id).ok_or("body")?.state().linear_velocity().x;
                 assert!(speed < 680.0 && speed > 0.0);
@@ -1121,7 +1122,7 @@ mod tests {
             },
         )?;
         world.set_part_wave_source_mesh(part, Some(plate()?))?;
-        world.step(1e-6)?;
+        world.step_typed(1e-6)?;
         let cache = world
             .assembly_aerodynamics
             .as_mut()
@@ -1150,7 +1151,7 @@ mod tests {
             vec![[0, 1, 2]],
         )?;
         world.set_part_wave_source_mesh(part, Some(changed_mesh))?;
-        world.step(1e-6)?;
+        world.step_typed(1e-6)?;
         let cache = world
             .assembly_aerodynamics
             .as_mut()
@@ -1246,7 +1247,7 @@ mod tests {
                     1,
                 )?;
             } else {
-                world.step(1e-8)?;
+                world.step_typed(1e-8)?;
             }
             assert!(world.body(id).ok_or("body")?.state().linear_velocity().x < 680.0);
         }
@@ -1290,7 +1291,7 @@ mod tests {
         let collider_id = world.add_part_collider(part, collider)?;
         world.set_part_wave_source_colliders(part, true)?;
         assert!(world.part_uses_aerodynamic_colliders(part));
-        world.step(1e-7)?;
+        world.step_typed(1e-7)?;
         let cache = world
             .assembly_aerodynamics
             .as_mut()
@@ -1314,7 +1315,7 @@ mod tests {
             collider_id,
             Transform::new(Vec3::X, kapitsa_math::Quat::IDENTITY)?,
         )?;
-        world.step(1e-7)?;
+        world.step_typed(1e-7)?;
         let cache = world
             .assembly_aerodynamics
             .as_mut()
@@ -1337,7 +1338,7 @@ mod tests {
         world.remove_part_collider(collider_id)?;
         let before_motion = world.body(id).ok_or("body")?.motion();
         assert!(matches!(
-            world.step(1e-7),
+            world.step_typed(1e-7),
             Err(StepError::Aerodynamics {
                 cause: AerodynamicsError::UnsupportedModel,
                 ..
@@ -1378,7 +1379,7 @@ mod tests {
                 },
             )?;
             world.set_part_wave_source_mesh(source, Some(plate()?))?;
-            world.step(1e-7)?;
+            world.step_typed(1e-7)?;
             let huge = TriangleMesh::new(
                 vec![Vec3::ZERO, Vec3::X * 1e8, Vec3::Y * 1e8],
                 vec![[0, 1, 2]],
@@ -1388,7 +1389,7 @@ mod tests {
             let result = if sharded {
                 world.step_with_shards(1e-7, &mut [Vec::new()], &SequentialExecutor, 1)
             } else {
-                world.step(1e-7)
+                world.step_typed(1e-7)
             };
             assert!(matches!(
                 result,
@@ -1399,7 +1400,7 @@ mod tests {
             ));
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
             world.set_part_wave_source_mesh(source, Some(plate()?))?;
-            world.step(1e-7)?;
+            world.step_typed(1e-7)?;
             assert!(
                 world.body(id).ok_or("body")?.state().linear_velocity().x
                     < before.state().linear_velocity().x
@@ -1449,7 +1450,7 @@ mod tests {
                     1,
                 )?;
             } else {
-                world.step(1e-6)?;
+                world.step_typed(1e-6)?;
             }
             let velocity = world.body(id).ok_or("body")?.state().linear_velocity();
             assert!(velocity.y < 680.0 && velocity.y > 0.0);
@@ -1501,7 +1502,7 @@ mod tests {
                         1,
                     )?;
                 } else {
-                    world.step(1e-4)?;
+                    world.step_typed(1e-4)?;
                 }
                 gains.push(world.body(id).ok_or("body")?.state().linear_velocity().z + 5.0);
             }
@@ -1541,18 +1542,18 @@ mod tests {
         collider.set_mode(crate::collider::CollisionMode::Sensor);
         let collider_id = world.add_part_collider(part, collider)?;
         world.set_part_wave_source_colliders(part, true)?;
-        world.step(1e-4)?;
+        world.step_typed(1e-4)?;
         let blocked = world.body(id).ok_or("body")?.state().linear_velocity().z;
         world.set_part_collider_transform(
             part,
             collider_id,
             Transform::new(Vec3::Y * 10.0, kapitsa_math::Quat::IDENTITY)?,
         )?;
-        world.step(1e-4)?;
+        world.step_typed(1e-4)?;
         let clear = world.body(id).ok_or("body")?.state().linear_velocity().z;
         assert!(clear > blocked);
         world.set_part_aerodynamic_wings(part, vec![wing(Vec3::Y * 10.0)?])?;
-        world.step(1e-4)?;
+        world.step_typed(1e-4)?;
         let blocked_again = world.body(id).ok_or("body")?.state().linear_velocity().z;
         assert!((blocked_again - clear).abs() < 1e-12);
         Ok(())
@@ -1628,7 +1629,7 @@ mod tests {
             let (mut reference, reference_id, reference_root, reference_part, reference_collider) =
                 setup()?;
             for world in [&mut warmed, &mut reference] {
-                world.step(1e-5)?;
+                world.step_typed(1e-5)?;
             }
             assert!(
                 warmed
@@ -1736,7 +1737,7 @@ mod tests {
             collider.set_mode(crate::collider::CollisionMode::Sensor);
             world.add_part_collider(part, collider)?;
             world.set_part_wave_source_colliders(part, true)?;
-            world.step(1e-4)?;
+            world.step_typed(1e-4)?;
             assert!(
                 world
                     .body(id)
@@ -1748,12 +1749,12 @@ mod tests {
             );
             if projection {
                 for _ in 0..10 {
-                    world.step(1e-4)?;
+                    world.step_typed(1e-4)?;
                 }
             } else {
                 let before = world.body(id).ok_or("body")?.motion();
                 assert!(matches!(
-                    world.step(1e-4),
+                    world.step_typed(1e-4),
                     Err(StepError::Aerodynamics {
                         cause: AerodynamicsError::Wing(WingError::UnsupportedFlow),
                         ..
@@ -1801,7 +1802,7 @@ mod tests {
                 source.triangles().to_vec(),
             )?;
             world.set_part_wave_source_mesh(part, Some(distant))?;
-            world.step(1e-4)?;
+            world.step_typed(1e-4)?;
             let wing = WingSurface::new(
                 FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?,
                 Transform::identity(),
@@ -1813,7 +1814,7 @@ mod tests {
             let result = if sharded {
                 world.step_with_shards(1e-4, &mut [Vec::new()], &SequentialExecutor, 1)
             } else {
-                world.step(1e-4)
+                world.step_typed(1e-4)
             };
             assert!(matches!(
                 result,
@@ -1824,7 +1825,7 @@ mod tests {
             ));
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
             world.set_part_aerodynamic_wings(part, vec![valid])?;
-            world.step(1e-4)?;
+            world.step_typed(1e-4)?;
             assert_ne!(world.body(id).ok_or("body")?.motion(), before);
         }
         Ok(())
@@ -1890,7 +1891,7 @@ mod tests {
                     1,
                 )?;
             } else {
-                world.step(1e-7)?;
+                world.step_typed(1e-7)?;
             }
             assert!(world.body(id).ok_or("body")?.state().linear_velocity().x < 2000.0);
         }
@@ -1926,7 +1927,7 @@ mod tests {
             },
         )?;
         world.set_part_wave_source_mesh(source, Some(plate()?))?;
-        world.step(1e-7)?;
+        world.step_typed(1e-7)?;
         let weld_id = *world
             .cluster(id)
             .ok_or("cluster")?
@@ -1950,7 +1951,7 @@ mod tests {
             .state()
             .linear_velocity()
             .x;
-        world.step(1e-7)?;
+        world.step_typed(1e-7)?;
         assert!(
             world
                 .body(wave_body)
@@ -2029,7 +2030,7 @@ mod tests {
                     let failed = if sharded {
                         world.step_with_shards(1e-5, &mut [Vec::new()], &SequentialExecutor, 1)
                     } else {
-                        world.step(1e-5)
+                        world.step_typed(1e-5)
                     };
                     assert_eq!(
                         failed,
@@ -2047,7 +2048,7 @@ mod tests {
                 if sharded {
                     world.step_with_shards(1e-5, &mut [Vec::new()], &SequentialExecutor, 1)?;
                 } else {
-                    world.step(1e-5)?;
+                    world.step_typed(1e-5)?;
                 }
                 let velocity = world
                     .body(first)
@@ -2112,7 +2113,7 @@ mod tests {
                 if sharded {
                     world.step_with_shards(1e-5, &mut [Vec::new()], &SequentialExecutor, 1)?;
                 } else {
-                    world.step(1e-5)?;
+                    world.step_typed(1e-5)?;
                 }
                 assert_eq!(world.bodies().count(), 2);
             }
@@ -2149,7 +2150,7 @@ mod tests {
             let result = if sharded {
                 world.step_with_shards(1e-5, &mut [Vec::new()], &SequentialExecutor, 1)
             } else {
-                world.step(1e-5)
+                world.step_typed(1e-5)
             };
             assert_eq!(
                 result,
@@ -2167,7 +2168,7 @@ mod tests {
             }
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
             world.set_part_aerodynamic_mesh(part, None)?;
-            world.step(1e-5)?;
+            world.step_typed(1e-5)?;
             world.remove_body(id).ok_or("remove body")?;
             assert!(world.part_aerodynamic_mesh(part).is_none());
             assert!(
@@ -2207,7 +2208,7 @@ mod tests {
             } else {
                 world.set_part_aerodynamic_mesh(part, Some(plate()?))?;
             }
-            world.step(1e-5)?;
+            world.step_typed(1e-5)?;
             let cached = world
                 .assembly_aerodynamics
                 .as_mut()
@@ -2244,7 +2245,7 @@ mod tests {
                 world.set_part_aerodynamic_colliders(part, true)?;
             }
             world.add_body(RigidBody::new_static(Transform::identity()))?;
-            world.step(1e-5)?;
+            world.step_typed(1e-5)?;
             let instances: Vec<_> = sources
                 .iter()
                 .map(|(part, mesh, local)| GeometryInstance {
@@ -2299,7 +2300,7 @@ mod tests {
                     ),
                 )?;
             }
-            world.step(1e-5)?;
+            world.step_typed(1e-5)?;
             let speed = world.body(id).ok_or("body")?.state().linear_velocity().x;
             let part = world.enable_cluster(id)?;
             assert!(matches!(
@@ -2318,7 +2319,7 @@ mod tests {
             } else {
                 assert!(world.part_uses_aerodynamic_colliders(part));
             }
-            world.step(1e-5)?;
+            world.step_typed(1e-5)?;
             let actual = world.body(id).ok_or("body")?.state().linear_velocity().x;
             let expected = speed - 0.001 * speed * speed * 1e-5 / 100.0;
             assert!(
@@ -2362,7 +2363,7 @@ mod tests {
                 if sharded {
                     world.step_with_shards(1e-5, &mut [Vec::new()], &SequentialExecutor, 1)
                 } else {
-                    world.step(1e-5)
+                    world.step_typed(1e-5)
                 }
             };
             step(&mut world)?;
@@ -2483,7 +2484,7 @@ mod tests {
                 },
             )?;
             world.set_part_aerodynamic_mesh(child, Some(plate()?))?;
-            world.step(1e-8)?;
+            world.step_typed(1e-8)?;
             let previous = world.owner_mesh_pressure(body).ok_or("pressure")?.to_vec();
             let reactions = world
                 .part_aerodynamic_weld_reactions(body, 1e-8, 1e-8)
@@ -2500,7 +2501,7 @@ mod tests {
             let failed = if sharded {
                 world.step_with_shards(1e-8, &mut [Vec::new(), Vec::new()], &SequentialExecutor, 1)
             } else {
-                world.step(1e-8)
+                world.step_typed(1e-8)
             };
             assert!(failed.is_err());
             assert_eq!(world.owner_mesh_pressure(body), Some(previous.as_slice()));
@@ -2516,7 +2517,7 @@ mod tests {
             let unsupported = if sharded {
                 world.step_with_shards(1e-8, &mut [Vec::new(), Vec::new()], &SequentialExecutor, 1)
             } else {
-                world.step(1e-8)
+                world.step_typed(1e-8)
             };
             assert!(matches!(
                 unsupported,
@@ -2547,7 +2548,7 @@ mod tests {
                     1,
                 )?;
             } else {
-                world.step(1e-8)?;
+                world.step_typed(1e-8)?;
             }
             assert!(world.cluster(body).ok_or("cluster")?.welds().is_empty());
             assert_ne!(world.cluster_part(child).ok_or("part")?.body(), body);
@@ -2592,7 +2593,7 @@ mod tests {
                     1,
                 )?;
             } else {
-                world.step(0.01)?;
+                world.step_typed(0.01)?;
             }
             let reactions = world
                 .part_aerodynamic_weld_reactions(body, 1e-9, 1e-9)
@@ -2690,7 +2691,7 @@ mod tests {
                 if sharded {
                     world.step_with_shards(1e-8, &mut [Vec::new()], &SequentialExecutor, 1)?;
                 } else {
-                    world.step(1e-8)?;
+                    world.step_typed(1e-8)?;
                 }
                 let published = world
                     .owner_mesh_pressure(id)
@@ -2712,7 +2713,7 @@ mod tests {
                 let failed = if sharded {
                     world.step_with_shards(1e-8, &mut [Vec::new()], &SequentialExecutor, 1)
                 } else {
-                    world.step(1e-8)
+                    world.step_typed(1e-8)
                 };
                 assert!(failed.is_err());
                 assert_eq!(world.owner_mesh_pressure(id), Some(published.as_slice()));
@@ -2721,7 +2722,7 @@ mod tests {
                 if sharded {
                     world.step_with_shards(1e-8, &mut [Vec::new()], &SequentialExecutor, 1)?;
                 } else {
-                    world.step(1e-8)?;
+                    world.step_typed(1e-8)?;
                 }
                 assert!(world.owner_mesh_pressure(id).is_none());
             }
@@ -2768,7 +2769,7 @@ mod tests {
             let other_part = world.enable_cluster(other_id)?;
             world.set_part_aerodynamic_mesh(other_part, Some(plate()?))?;
             let step = |world: &mut PhysicsWorld| match mode {
-                0 => world.step(1e-8),
+                0 => world.step_typed(1e-8),
                 1 => world.step_with_executor(1e-8, &ScopedThreadExecutor, 2),
                 _ => world.step_with_shards(
                     1e-8,

@@ -1,4 +1,5 @@
 use super::PhysicsWorld;
+use crate::world::WorldStepTyped;
 use crate::{
     execution::SequentialExecutor,
     gravity::{CentralGravity, SphericalGravity, UniformGravity},
@@ -32,7 +33,7 @@ fn fields_add_update_remove_and_work_with_shards() {
                 .step_with_shards(0.1, &mut [Vec::new()], &SequentialExecutor, 1)
                 .unwrap();
         } else {
-            world.step(0.1).unwrap();
+            world.step_typed(0.1).unwrap();
         }
         let velocity = world.body(id).unwrap().state().linear_velocity();
         assert!((velocity - Vec3::new(0.1, 0.1, 0.0)).length() < 1e-12);
@@ -45,7 +46,7 @@ fn fields_add_update_remove_and_work_with_shards() {
                 .update_gravity(second, UniformGravity::new(Vec3::X).unwrap())
                 .is_err()
         );
-        world.step(0.1).unwrap();
+        world.step_typed(0.1).unwrap();
         assert!((world.body(id).unwrap().state().linear_velocity() - velocity).length() < 1e-12);
     }
 }
@@ -92,7 +93,7 @@ fn legacy_and_managed_gravity_are_summed() {
     world
         .add_gravity(UniformGravity::new(Vec3::Y).unwrap())
         .unwrap();
-    world.step(0.1).unwrap();
+    world.step_typed(0.1).unwrap();
     let velocity = world.body(id).unwrap().state().linear_velocity();
     assert!((velocity - Vec3::new(0.1, 0.1, 0.0)).length() < 1e-12);
 }
@@ -111,7 +112,7 @@ fn gravity_failure_rolls_back_a_step() {
         let result = if shards {
             world.step_with_shards(0.1, &mut [Vec::new()], &SequentialExecutor, 1)
         } else {
-            world.step(0.1)
+            world.step_typed(0.1)
         };
         assert!(result.is_err());
         assert_eq!(
@@ -119,7 +120,7 @@ fn gravity_failure_rolls_back_a_step() {
             Vec3::ZERO
         );
         world.remove_gravity(bad).unwrap();
-        world.step(0.1).unwrap();
+        world.step_typed(0.1).unwrap();
         assert!(
             (world.body(id).unwrap().state().linear_velocity() - Vec3::X * 0.1).length() < 1e-12
         );
