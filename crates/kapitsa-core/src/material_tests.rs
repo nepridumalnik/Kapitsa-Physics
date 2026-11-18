@@ -5,7 +5,7 @@ use crate::containers::DensePoolError;
 use super::{MaterialStorage, PhysicsMaterial, PhysicsMaterialError};
 
 #[test]
-fn creates_material_with_valid_parameters() -> Result<(), PhysicsMaterialError> {
+fn creates_material_with_valid_parameters() -> Result<(), crate::Error> {
     let material = PhysicsMaterial::new(0.8, 0.3, 0.6, 2.5)?;
 
     assert_eq!(material.friction(), 0.8);
@@ -29,19 +29,23 @@ fn default_uses_chaos_material_values() {
 fn rejects_nan_for_each_parameter() {
     assert_eq!(
         PhysicsMaterial::new(f64::NAN, 0.0, 0.5, 1.0),
-        Err(PhysicsMaterialError::NonFiniteFriction)
+        Err(crate::Error::from(PhysicsMaterialError::NonFiniteFriction))
     );
     assert_eq!(
         PhysicsMaterial::new(0.5, f64::NAN, 0.5, 1.0),
-        Err(PhysicsMaterialError::NonFiniteStaticFriction)
+        Err(crate::Error::from(
+            PhysicsMaterialError::NonFiniteStaticFriction
+        ))
     );
     assert_eq!(
         PhysicsMaterial::new(0.5, 0.0, f64::NAN, 1.0),
-        Err(PhysicsMaterialError::NonFiniteRestitution)
+        Err(crate::Error::from(
+            PhysicsMaterialError::NonFiniteRestitution
+        ))
     );
     assert_eq!(
         PhysicsMaterial::new(0.5, 0.0, 0.5, f64::NAN),
-        Err(PhysicsMaterialError::NonFiniteDensity)
+        Err(crate::Error::from(PhysicsMaterialError::NonFiniteDensity))
     );
 }
 
@@ -85,7 +89,7 @@ fn rejects_positive_and_negative_infinity_for_each_parameter() {
     for (parameters, expected) in cases {
         assert_eq!(
             PhysicsMaterial::new(parameters[0], parameters[1], parameters[2], parameters[3]),
-            Err(expected)
+            Err(crate::Error::from(expected))
         );
     }
 }
@@ -94,11 +98,13 @@ fn rejects_positive_and_negative_infinity_for_each_parameter() {
 fn rejects_negative_friction_coefficients() {
     assert_eq!(
         PhysicsMaterial::new(-0.1, 0.0, 0.5, 1.0),
-        Err(PhysicsMaterialError::NegativeFriction)
+        Err(crate::Error::from(PhysicsMaterialError::NegativeFriction))
     );
     assert_eq!(
         PhysicsMaterial::new(0.5, -0.1, 0.5, 1.0),
-        Err(PhysicsMaterialError::NegativeStaticFriction)
+        Err(crate::Error::from(
+            PhysicsMaterialError::NegativeStaticFriction
+        ))
     );
 }
 
@@ -106,11 +112,15 @@ fn rejects_negative_friction_coefficients() {
 fn rejects_restitution_outside_unit_interval() {
     assert_eq!(
         PhysicsMaterial::new(0.5, 0.0, -0.1, 1.0),
-        Err(PhysicsMaterialError::RestitutionOutOfRange)
+        Err(crate::Error::from(
+            PhysicsMaterialError::RestitutionOutOfRange
+        ))
     );
     assert_eq!(
         PhysicsMaterial::new(0.5, 0.0, 1.1, 1.0),
-        Err(PhysicsMaterialError::RestitutionOutOfRange)
+        Err(crate::Error::from(
+            PhysicsMaterialError::RestitutionOutOfRange
+        ))
     );
 }
 
@@ -118,16 +128,16 @@ fn rejects_restitution_outside_unit_interval() {
 fn rejects_non_positive_density() {
     assert_eq!(
         PhysicsMaterial::new(0.5, 0.0, 0.5, 0.0),
-        Err(PhysicsMaterialError::NonPositiveDensity)
+        Err(crate::Error::from(PhysicsMaterialError::NonPositiveDensity))
     );
     assert_eq!(
         PhysicsMaterial::new(0.5, 0.0, 0.5, -1.0),
-        Err(PhysicsMaterialError::NonPositiveDensity)
+        Err(crate::Error::from(PhysicsMaterialError::NonPositiveDensity))
     );
 }
 
 #[test]
-fn accepts_boundaries_without_friction_ordering() -> Result<(), PhysicsMaterialError> {
+fn accepts_boundaries_without_friction_ordering() -> Result<(), crate::Error> {
     let material = PhysicsMaterial::new(0.8, 0.0, 0.0, f64::MIN_POSITIVE)?;
     let maximum_restitution = PhysicsMaterial::new(0.0, 0.5, 1.0, 1.0)?;
 

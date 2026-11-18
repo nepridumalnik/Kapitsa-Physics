@@ -19,30 +19,38 @@ impl PhysicsMaterial {
         static_friction: f64,
         restitution: f64,
         density: f64,
-    ) -> Result<Self, PhysicsMaterialError> {
+    ) -> Result<Self, crate::Error> {
         if !friction.is_finite() {
-            return Err(PhysicsMaterialError::NonFiniteFriction);
+            return Err(crate::Error::from(PhysicsMaterialError::NonFiniteFriction));
         }
         if !static_friction.is_finite() {
-            return Err(PhysicsMaterialError::NonFiniteStaticFriction);
+            return Err(crate::Error::from(
+                PhysicsMaterialError::NonFiniteStaticFriction,
+            ));
         }
         if !restitution.is_finite() {
-            return Err(PhysicsMaterialError::NonFiniteRestitution);
+            return Err(crate::Error::from(
+                PhysicsMaterialError::NonFiniteRestitution,
+            ));
         }
         if !density.is_finite() {
-            return Err(PhysicsMaterialError::NonFiniteDensity);
+            return Err(crate::Error::from(PhysicsMaterialError::NonFiniteDensity));
         }
         if friction < 0.0 {
-            return Err(PhysicsMaterialError::NegativeFriction);
+            return Err(crate::Error::from(PhysicsMaterialError::NegativeFriction));
         }
         if static_friction < 0.0 {
-            return Err(PhysicsMaterialError::NegativeStaticFriction);
+            return Err(crate::Error::from(
+                PhysicsMaterialError::NegativeStaticFriction,
+            ));
         }
         if !(0.0..=1.0).contains(&restitution) {
-            return Err(PhysicsMaterialError::RestitutionOutOfRange);
+            return Err(crate::Error::from(
+                PhysicsMaterialError::RestitutionOutOfRange,
+            ));
         }
         if density <= 0.0 {
-            return Err(PhysicsMaterialError::NonPositiveDensity);
+            return Err(crate::Error::from(PhysicsMaterialError::NonPositiveDensity));
         }
 
         Ok(Self {
