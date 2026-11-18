@@ -100,7 +100,7 @@ impl fmt::Display for ErrorKind {
 pub struct Error {
     kind: ErrorKind,
     message: String,
-    cause: Option<Box<dyn std::error::Error + 'static>>,
+    cause: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     command_index: Option<usize>,
     failed_step: Option<u64>,
 }
@@ -120,7 +120,7 @@ impl Error {
     /// Creates an error from a typed cause, using its display text as the message.
     pub fn from_source<E>(kind: ErrorKind, cause: E) -> Self
     where
-        E: std::error::Error + 'static,
+        E: std::error::Error + Send + Sync + 'static,
     {
         Self {
             kind,
@@ -180,6 +180,11 @@ impl std::error::Error for Error {
             .map(|cause| cause.as_ref() as &(dyn std::error::Error + 'static))
     }
 }
+
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Error>();
+};
 
 macro_rules! impl_error_from {
     ($ty:ty, $kind:ident) => {
@@ -246,6 +251,12 @@ mod tests {
                 .is_some()
         );
         assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn unified_error_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Error>();
     }
 
     #[test]
