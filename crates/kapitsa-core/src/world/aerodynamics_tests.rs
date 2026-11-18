@@ -2587,7 +2587,9 @@ fn cluster_rejects_unsupported_geometry_without_mutating_state() {
     ));
     assert_eq!(
         world.set_aerodynamics(body, Aerodynamics::Mesh(mesh)),
-        Err(crate::world::WorldError::UnsupportedAerodynamics)
+        Err(crate::Error::from(
+            crate::world::WorldError::UnsupportedAerodynamics
+        ))
     );
     assert!(matches!(
         world.body(body).unwrap().aerodynamics(),
@@ -2597,7 +2599,9 @@ fn cluster_rejects_unsupported_geometry_without_mutating_state() {
     assert_eq!(world.cluster_part(part).unwrap().body(), body);
     assert_eq!(
         world.set_aerodynamics(body, Aerodynamics::Colliders),
-        Err(crate::world::WorldError::UnsupportedAerodynamics)
+        Err(crate::Error::from(
+            crate::world::WorldError::UnsupportedAerodynamics
+        ))
     );
 }
 

@@ -12,7 +12,7 @@ use kapitsa_math::Vec3;
 use crate::Error;
 
 impl PhysicsWorld {
-    pub fn raycast(&self, ray: Ray, filter: QueryFilter) -> Result<Option<RayHit>, QueryError> {
+    pub fn raycast(&self, ray: Ray, filter: QueryFilter) -> Result<Option<RayHit>, Error> {
         self.raycast_with_scratch(ray, filter, &mut QueryScratch::default())
     }
 
@@ -22,7 +22,7 @@ impl PhysicsWorld {
         ray: Ray,
         filter: QueryFilter,
         scratch: &mut QueryScratch,
-    ) -> Result<Option<RayHit>, QueryError> {
+    ) -> Result<Option<RayHit>, Error> {
         scratch.clear();
         ray.validate()?;
         let mut closest = None;

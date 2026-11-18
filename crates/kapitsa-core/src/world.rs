@@ -1668,9 +1668,9 @@ impl PhysicsWorld {
         &mut self,
         id: BodyId,
         aerodynamics: crate::aerodynamics::Aerodynamics,
-    ) -> Result<(), WorldError> {
+    ) -> Result<(), Error> {
         if id.world != self.world_id {
-            return Err(WorldError::InvalidBodyId);
+            return Err(Error::from(WorldError::InvalidBodyId));
         }
         if self.cluster(id).is_some()
             && matches!(
@@ -1680,12 +1680,12 @@ impl PhysicsWorld {
                     | crate::aerodynamics::Aerodynamics::Colliders
             )
         {
-            return Err(WorldError::UnsupportedAerodynamics);
+            return Err(Error::from(WorldError::UnsupportedAerodynamics));
         }
         let entry = self
             .bodies
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidBodyId)?;
+            .ok_or_else(|| Error::from(WorldError::InvalidBodyId))?;
         entry.body.set_aerodynamics(aerodynamics);
         entry.mesh_aerodynamics = None;
         entry.collider_aerodynamic_mesh = None;
@@ -1975,14 +1975,14 @@ impl PhysicsWorld {
         &mut self,
         id: ColliderId,
         mode: crate::collider::CollisionMode,
-    ) -> Result<(), WorldError> {
+    ) -> Result<(), Error> {
         if id.world != self.world_id {
-            return Err(WorldError::InvalidColliderId);
+            return Err(Error::from(WorldError::InvalidColliderId));
         }
         let entry = self
             .colliders
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidColliderId)?;
+            .ok_or_else(|| Error::from(WorldError::InvalidColliderId))?;
         if entry.collider.mode() != mode {
             entry.collider.set_mode(mode);
             self.collision_system.invalidate_collider_contacts(id);
@@ -1995,14 +1995,14 @@ impl PhysicsWorld {
         &mut self,
         body: BodyId,
         config: crate::aerodynamics::ColliderTessellation,
-    ) -> Result<(), WorldError> {
+    ) -> Result<(), Error> {
         if body.world != self.world_id {
-            return Err(WorldError::InvalidBodyId);
+            return Err(Error::from(WorldError::InvalidBodyId));
         }
         let entry = self
             .bodies
             .get_mut(body.dense)
-            .ok_or(WorldError::InvalidBodyId)?;
+            .ok_or_else(|| Error::from(WorldError::InvalidBodyId))?;
         if entry.collider_tessellation != config {
             entry.collider_tessellation = config;
             entry.collider_aerodynamic_mesh = None;
@@ -2174,9 +2174,9 @@ impl PhysicsWorld {
         body_a: BodyId,
         body_b: BodyId,
         joint: Joint,
-    ) -> Result<JointId, WorldError> {
+    ) -> Result<JointId, Error> {
         if body_a == body_b || self.body(body_a).is_none() || self.body(body_b).is_none() {
-            return Err(WorldError::InvalidJointBodies);
+            return Err(Error::from(WorldError::InvalidJointBodies));
         }
         joint.validate_typed()?;
         let dense = self
@@ -2201,11 +2201,11 @@ impl PhysicsWorld {
         target_a: JointTarget,
         target_b: JointTarget,
         joint: Joint,
-    ) -> Result<JointId, WorldError> {
+    ) -> Result<JointId, Error> {
         let (body_a, frame_a) = self.resolve_joint_target(target_a)?;
         let (body_b, frame_b) = self.resolve_joint_target(target_b)?;
         if target_a == target_b {
-            return Err(WorldError::InvalidJointBodies);
+            return Err(Error::from(WorldError::InvalidJointBodies));
         }
         joint.validate_typed()?;
         let frame_a = transform_joint_frame(frame_a, joint.common().frame_a)
@@ -2368,12 +2368,12 @@ impl PhysicsWorld {
         body: BodyId,
         local_point: Vec3,
         local_force: Vec3,
-    ) -> Result<ForceSourceId, ForceSourceError> {
+    ) -> Result<ForceSourceId, Error> {
         let Some(body_state) = self.body(body) else {
-            return Err(ForceSourceError::InvalidBodyId);
+            return Err(Error::from(ForceSourceError::InvalidBodyId));
         };
         if body_state.physics().body_type() != BodyType::Dynamic {
-            return Err(ForceSourceError::BodyMustBeDynamic);
+            return Err(Error::from(ForceSourceError::BodyMustBeDynamic));
         }
         validate_force_source_values(local_point, local_force)?;
         let dense = self
@@ -2398,22 +2398,22 @@ impl PhysicsWorld {
         part: PartId,
         local_point: Vec3,
         local_force: Vec3,
-    ) -> Result<ForceSourceId, ForceSourceError> {
+    ) -> Result<ForceSourceId, Error> {
         let part_entry = self
             .cluster_part(part)
-            .ok_or(ForceSourceError::InvalidPartId)?;
+            .ok_or_else(|| Error::from(ForceSourceError::InvalidPartId))?;
         let body = part_entry.body();
         let Some(cluster) = self.cluster(body) else {
-            return Err(ForceSourceError::InvalidPartId);
+            return Err(Error::from(ForceSourceError::InvalidPartId));
         };
         if !cluster.parts().contains(&part) {
-            return Err(ForceSourceError::InvalidPartId);
+            return Err(Error::from(ForceSourceError::InvalidPartId));
         }
         let Some(body_state) = self.body(body) else {
-            return Err(ForceSourceError::InvalidBodyId);
+            return Err(Error::from(ForceSourceError::InvalidBodyId));
         };
         if body_state.physics().body_type() != BodyType::Dynamic {
-            return Err(ForceSourceError::BodyMustBeDynamic);
+            return Err(Error::from(ForceSourceError::BodyMustBeDynamic));
         }
         validate_force_source_values(local_point, local_force)?;
         let dense = self
@@ -2458,11 +2458,11 @@ impl PhysicsWorld {
         id: ForceSourceId,
         local_point: Vec3,
         local_force: Vec3,
-    ) -> Result<(), ForceSourceError> {
+    ) -> Result<(), Error> {
         validate_force_source_values(local_point, local_force)?;
         let source = self
             .force_source_mut(id)
-            .ok_or(ForceSourceError::InvalidForceSourceId)?;
+            .ok_or_else(|| Error::from(ForceSourceError::InvalidForceSourceId))?;
         source.local_point = local_point;
         source.local_force = local_force;
         Ok(())
@@ -6057,18 +6057,14 @@ impl PhysicsWorld {
     ///
     /// The pose is fixed for each physics step. Changes between steps are
     /// discrete, and CCD does not interpolate unknown bone trajectories.
-    pub fn set_skin_pose(
-        &mut self,
-        id: ColliderId,
-        matrices: &[Affine3],
-    ) -> Result<(), CollisionError> {
+    pub fn set_skin_pose(&mut self, id: ColliderId, matrices: &[Affine3]) -> Result<(), Error> {
         if id.world != self.world_id {
-            return Err(CollisionError::InvalidSkinPose);
+            return Err(Error::from(CollisionError::InvalidSkinPose));
         }
         let entry = self
             .colliders
             .get_mut(id.dense)
-            .ok_or(CollisionError::InvalidSkinPose)?;
+            .ok_or_else(|| Error::from(CollisionError::InvalidSkinPose))?;
         entry.collider.set_skin_pose(matrices)?;
         self.mark_query_index_dirty();
         self.collision_system.mark_spatial_dirty();

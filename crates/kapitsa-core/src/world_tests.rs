@@ -2045,7 +2045,7 @@ fn joint_ids_validate_world_and_generation_and_body_removal_cascades() {
         .expect("foreign body");
     assert_eq!(
         world.add_joint(body_a, foreign_body, joint),
-        Err(WorldError::InvalidJointBodies)
+        Err(Error::from(WorldError::InvalidJointBodies))
     );
     assert_eq!(other_world.joint(joint_id), None);
 
@@ -2967,11 +2967,11 @@ fn world_sets_skin_pose_and_rejects_non_skin_colliders() {
     let sphere_id = world.add_collider(body, collider(1.0)).unwrap();
     assert_eq!(
         world.set_skin_pose(sphere_id, &[]),
-        Err(CollisionError::InvalidSkinPose)
+        Err(Error::from(CollisionError::InvalidSkinPose))
     );
     assert_eq!(
         world.set_skin_pose(skinned_id, &[]),
-        Err(CollisionError::InvalidSkinPose)
+        Err(Error::from(CollisionError::InvalidSkinPose))
     );
 }
 
@@ -3710,7 +3710,7 @@ fn indexed_force_sources_preserve_first_touch_and_accumulation_order() {
     assert_eq!(world.force_source(stale_source), None);
     assert_eq!(
         world.add_force_source(bodies[1], Vec3::ZERO, Vec3::X),
-        Err(ForceSourceError::InvalidBodyId)
+        Err(Error::from(ForceSourceError::InvalidBodyId))
     );
     let replacement = world.add_body(dynamic_body()).expect("replacement body");
     assert_eq!(replacement.index(), bodies[1].index());
@@ -4163,13 +4163,13 @@ fn force_source_setup_rejects_static_bodies_and_non_finite_values() {
         .expect("body");
     assert_eq!(
         world.add_force_source(static_body, Vec3::ZERO, Vec3::X),
-        Err(ForceSourceError::BodyMustBeDynamic)
+        Err(Error::from(ForceSourceError::BodyMustBeDynamic))
     );
 
     let dynamic = world.add_body(dynamic_body()).expect("dynamic body");
     assert_eq!(
         world.add_force_source(dynamic, Vec3::ZERO, Vec3::splat(f64::NAN)),
-        Err(ForceSourceError::NonFiniteValue)
+        Err(Error::from(ForceSourceError::NonFiniteValue))
     );
 }
 

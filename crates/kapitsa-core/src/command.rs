@@ -915,10 +915,14 @@ fn apply_command_batch_staged(
     for source in &scratch.updated_force_sources {
         world
             .set_force_source(source.id, source.local_point, source.local_force)
-            .and_then(|()| world.set_force_source_enabled(source.id, source.enabled))
+            .and_then(|()| {
+                world
+                    .set_force_source_enabled(source.id, source.enabled)
+                    .map_err(Error::from)
+            })
             .map_err(|error| CommandBatchError {
                 command_index: Some(source.command_index),
-                error: CommandError::ForceSource(error),
+                error: CommandError::from_unified(error),
             })?;
     }
 
@@ -1455,7 +1459,7 @@ pub(crate) fn apply_command_inner(
         PhysicsCommand::SetSkinPose { id, matrices } => {
             world
                 .set_skin_pose(id, &matrices)
-                .map_err(WorldError::Collision)?;
+                .map_err(CommandError::from_unified)?;
             PhysicsCommandResult::Done
         }
         PhysicsCommand::SetColliderMaterial { id, material } => {
