@@ -50,14 +50,17 @@ impl MaterialStorage {
         }
     }
 
-    pub fn insert(&mut self, material: PhysicsMaterial) -> Result<MaterialId, DensePoolError> {
+    pub fn insert(&mut self, material: PhysicsMaterial) -> Result<MaterialId, crate::Error> {
         if self.storage_id == 0 {
-            self.storage_id = allocate_storage_id()?;
+            self.storage_id = allocate_storage_id().map_err(crate::Error::from)?;
         }
-        self.materials.insert(material).map(|dense| MaterialId {
-            storage: self.storage_id,
-            dense,
-        })
+        self.materials
+            .insert(material)
+            .map(|dense| MaterialId {
+                storage: self.storage_id,
+                dense,
+            })
+            .map_err(crate::Error::from)
     }
 
     pub fn get(&self, id: MaterialId) -> Option<&PhysicsMaterial> {

@@ -68,7 +68,7 @@ fn part_hull_accessor_and_late_failure_preserve_configuration() {
         .expect("foreign part");
     assert_eq!(
         world.set_part_aerodynamic_hull(foreign_part, hull),
-        Err(ClusterError::InvalidPartId)
+        Err(crate::Error::from(ClusterError::InvalidPartId))
     );
     assert_eq!(
         world.part_aerodynamic_hull(part),

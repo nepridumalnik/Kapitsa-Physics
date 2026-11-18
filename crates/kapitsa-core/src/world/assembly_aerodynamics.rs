@@ -2,6 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use kapitsa_math::Vec3;
 
+use crate::Error;
+
 use super::{BodyEntry, BodyId, ClusterError, PartId, PhysicsWorld, StepError};
 use crate::{
     aerodynamics::{
@@ -73,6 +75,14 @@ impl PhysicsWorld {
         &mut self,
         part: PartId,
         wings: Vec<crate::aerodynamics::wing::WingSurface>,
+    ) -> Result<(), Error> {
+        self.set_part_aerodynamic_wings_inner(part, wings)
+            .map_err(Error::from)
+    }
+    fn set_part_aerodynamic_wings_inner(
+        &mut self,
+        part: PartId,
+        wings: Vec<crate::aerodynamics::wing::WingSurface>,
     ) -> Result<(), ClusterError> {
         let body = self
             .cluster_part(part)
@@ -98,6 +108,14 @@ impl PhysicsWorld {
     /// Sections are additive to wings and the body's primary aerodynamics.
     /// No shape inference or coefficient changes are performed.
     pub fn set_part_aerodynamic_hull(
+        &mut self,
+        part: PartId,
+        sections: Vec<crate::aerodynamics::hull::HullSection>,
+    ) -> Result<(), Error> {
+        self.set_part_aerodynamic_hull_inner(part, sections)
+            .map_err(Error::from)
+    }
+    fn set_part_aerodynamic_hull_inner(
         &mut self,
         part: PartId,
         sections: Vec<crate::aerodynamics::hull::HullSection>,
@@ -130,6 +148,14 @@ impl PhysicsWorld {
         &mut self,
         part: PartId,
         mesh: Option<TriangleMesh>,
+    ) -> Result<(), Error> {
+        self.set_part_aerodynamic_mesh_inner(part, mesh)
+            .map_err(Error::from)
+    }
+    fn set_part_aerodynamic_mesh_inner(
+        &mut self,
+        part: PartId,
+        mesh: Option<TriangleMesh>,
     ) -> Result<(), ClusterError> {
         let body = self
             .cluster_part(part)
@@ -157,6 +183,14 @@ impl PhysicsWorld {
     /// `false` disables collider mode, preserving any already selected Mesh.
     /// Unsupported or empty geometry is an explicit preparation error in air.
     pub fn set_part_aerodynamic_colliders(
+        &mut self,
+        part: PartId,
+        enabled: bool,
+    ) -> Result<(), Error> {
+        self.set_part_aerodynamic_colliders_inner(part, enabled)
+            .map_err(Error::from)
+    }
+    fn set_part_aerodynamic_colliders_inner(
         &mut self,
         part: PartId,
         enabled: bool,
@@ -228,6 +262,14 @@ impl PhysicsWorld {
         &mut self,
         part: PartId,
         model: Option<crate::aerodynamics::wave::VoxelWave>,
+    ) -> Result<(), Error> {
+        self.set_part_voxel_wave_inner(part, model)
+            .map_err(Error::from)
+    }
+    fn set_part_voxel_wave_inner(
+        &mut self,
+        part: PartId,
+        model: Option<crate::aerodynamics::wave::VoxelWave>,
     ) -> Result<(), ClusterError> {
         let body = self
             .cluster_part(part)
@@ -267,6 +309,14 @@ impl PhysicsWorld {
         &mut self,
         part: PartId,
         mesh: Option<TriangleMesh>,
+    ) -> Result<(), Error> {
+        self.set_part_wave_source_mesh_inner(part, mesh)
+            .map_err(Error::from)
+    }
+    fn set_part_wave_source_mesh_inner(
+        &mut self,
+        part: PartId,
+        mesh: Option<TriangleMesh>,
     ) -> Result<(), ClusterError> {
         if self.cluster_part(part).is_none() {
             return Err(ClusterError::InvalidPartId);
@@ -290,6 +340,14 @@ impl PhysicsWorld {
     /// Selects part-owned colliders as geometry-only input to the wave union.
     /// `false` removes only this mode; it leaves other geometry selections intact.
     pub fn set_part_wave_source_colliders(
+        &mut self,
+        part: PartId,
+        enabled: bool,
+    ) -> Result<(), Error> {
+        self.set_part_wave_source_colliders_inner(part, enabled)
+            .map_err(Error::from)
+    }
+    fn set_part_wave_source_colliders_inner(
         &mut self,
         part: PartId,
         enabled: bool,

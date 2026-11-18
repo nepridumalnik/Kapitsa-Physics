@@ -1896,7 +1896,7 @@ impl PhysicsWorld {
     }
 
     pub fn add_material(&mut self, material: PhysicsMaterial) -> Result<MaterialId, Error> {
-        self.materials.insert(material).map_err(Error::from)
+        self.materials.insert(material)
     }
 
     pub fn material(&self, id: MaterialId) -> Option<&PhysicsMaterial> {

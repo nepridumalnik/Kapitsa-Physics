@@ -1,7 +1,5 @@
 use std::error::Error;
 
-use crate::containers::DensePoolError;
-
 use super::{MaterialStorage, PhysicsMaterial, PhysicsMaterialError};
 
 #[test]
@@ -161,7 +159,7 @@ fn material_storage_starts_empty() {
 }
 
 #[test]
-fn material_storage_inserts_and_gets_materials() -> Result<(), DensePoolError> {
+fn material_storage_inserts_and_gets_materials() -> Result<(), crate::Error> {
     let mut storage = MaterialStorage::new();
     let material = PhysicsMaterial::default();
     let id = storage.insert(material)?;
@@ -187,7 +185,7 @@ fn material_storage_updates_materials() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn material_storage_removes_and_reuses_slots() -> Result<(), DensePoolError> {
+fn material_storage_removes_and_reuses_slots() -> Result<(), crate::Error> {
     let mut storage = MaterialStorage::new();
     let old_id = storage.insert(PhysicsMaterial::default())?;
 
@@ -237,7 +235,7 @@ fn material_storage_exposes_dense_values() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn material_storage_length_tracks_insertions_and_removals() -> Result<(), DensePoolError> {
+fn material_storage_length_tracks_insertions_and_removals() -> Result<(), crate::Error> {
     let mut storage = MaterialStorage::new();
     let first = storage.insert(PhysicsMaterial::default())?;
     let second = storage.insert(PhysicsMaterial::default())?;
