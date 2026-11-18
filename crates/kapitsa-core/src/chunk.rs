@@ -3,6 +3,7 @@
 use std::fmt;
 
 use crate::{
+    Error,
     aabb::Aabb,
     collider::Collider,
     collision::CollisionError,
@@ -81,23 +82,27 @@ impl ChunkBuilder {
         Self::default()
     }
 
-    pub fn add_mesh(&mut self, mesh: TriangleMesh) -> Result<(), ChunkBuildError> {
-        let bounds = mesh.local_bounds().map_err(ChunkBuildError::Bounds)?;
+    pub fn add_mesh(&mut self, mesh: TriangleMesh) -> Result<(), Error> {
+        let bounds = mesh
+            .local_bounds()
+            .map_err(|error| Error::from(ChunkBuildError::Bounds(error)))?;
         self.meshes
             .try_reserve(1)
-            .map_err(|_| ChunkBuildError::CapacityExceeded)?;
+            .map_err(|_| Error::from(ChunkBuildError::CapacityExceeded))?;
         self.meshes.push(mesh);
         self.bounds = Some(self.bounds.map_or(bounds, |current| current.union(&bounds)));
         Ok(())
     }
 
     /// Builds the BVH of each mesh synchronously, independently of a world.
-    pub fn build(self, transform: Transform) -> Result<Chunk, ChunkBuildError> {
-        let bounds = self.bounds.ok_or(ChunkBuildError::Empty)?;
+    pub fn build(self, transform: Transform) -> Result<Chunk, Error> {
+        let bounds = self
+            .bounds
+            .ok_or_else(|| Error::from(ChunkBuildError::Empty))?;
         let mut colliders = Vec::new();
         colliders
             .try_reserve_exact(self.meshes.len())
-            .map_err(|_| ChunkBuildError::CapacityExceeded)?;
+            .map_err(|_| Error::from(ChunkBuildError::CapacityExceeded))?;
         for mesh in self.meshes {
             let mut collider = Collider::new(Shape::TriangleMesh(mesh), transform);
             collider.prepare().map_err(|error| {
@@ -125,9 +130,13 @@ mod tests {
 
     #[test]
     fn rejects_empty_chunks() {
+        let error = match ChunkBuilder::new().build(Transform::identity()) {
+            Ok(_) => panic!("empty chunk must be rejected"),
+            Err(error) => error,
+        };
         assert!(matches!(
-            ChunkBuilder::new().build(Transform::identity()),
-            Err(ChunkBuildError::Empty)
+            error.downcast_ref::<ChunkBuildError>(),
+            Some(ChunkBuildError::Empty)
         ));
     }
 
