@@ -136,5 +136,5 @@ pub use runtime::{
 pub use runtime::{
     BatchId, ChunkClientError, CollisionEventBatch, CollisionEvents, JointBreakEventBatch,
     JointBreakEvents, PhysicsBatchResult, PhysicsBatchResults, PhysicsClient, PhysicsSnapshot,
-    PhysicsSubmitError, Simulation, SimulationBuilder, SimulationError,
+    PhysicsSubmitError, Simulation, SimulationBuilder,
 };

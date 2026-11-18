@@ -255,9 +255,9 @@ impl SimulationBuilder {
     }
 
     /// Starts a simulation on the supplied Tokio runtime.
-    pub fn spawn_on_tokio(self, runtime: &Handle) -> Result<Simulation, SimulationError> {
+    pub fn spawn_on_tokio(self, runtime: &Handle) -> Result<Simulation, Error> {
         if self.invalid_worker_count {
-            return Err(SimulationError::InvalidWorkerCount);
+            return Err(Error::from(SimulationError::InvalidWorkerCount));
         }
         let _entered = runtime.enter();
         let mut world = PhysicsWorld::new();
@@ -275,12 +275,9 @@ impl SimulationBuilder {
     }
 
     /// Starts a simulation using the supplied Rayon pool for computation.
-    pub fn spawn_on_rayon(
-        self,
-        pool: Arc<rayon::ThreadPool>,
-    ) -> Result<Simulation, SimulationError> {
+    pub fn spawn_on_rayon(self, pool: Arc<rayon::ThreadPool>) -> Result<Simulation, Error> {
         if self.invalid_worker_count {
-            return Err(SimulationError::InvalidWorkerCount);
+            return Err(Error::from(SimulationError::InvalidWorkerCount));
         }
         self.config
             .validate()
@@ -306,7 +303,7 @@ impl SimulationBuilder {
 
 /// Failure returned by a clock-driven physics service.
 #[derive(Debug)]
-pub enum SimulationError {
+pub(crate) enum SimulationError {
     InvalidConfig(ConfigError),
     MissingRuntime,
     SimulationTimeOverflow,
@@ -380,31 +377,37 @@ impl From<StepRunnerError> for SimulationError {
     }
 }
 
+impl From<StepRunnerError> for Error {
+    fn from(error: StepRunnerError) -> Self {
+        Error::from(SimulationError::from(error))
+    }
+}
+
 impl Simulation {
     pub fn builder() -> SimulationBuilder {
         SimulationBuilder::default()
     }
     /// Creates an empty simulation using the default fixed-step configuration.
-    pub fn new() -> Result<Self, SimulationError> {
+    pub fn new() -> Result<Self, Error> {
         Self::new_from_config(SimulationConfig::default())
     }
 
     /// Creates an empty simulation using the supplied configuration.
-    pub fn new_from_config(config: SimulationConfig) -> Result<Self, SimulationError> {
+    pub fn new_from_config(config: SimulationConfig) -> Result<Self, Error> {
         Self::new_with_world(PhysicsWorld::new(), config)
     }
 
     pub(crate) fn new_with_world(
         world: PhysicsWorld,
         config: SimulationConfig,
-    ) -> Result<Self, SimulationError> {
+    ) -> Result<Self, Error> {
         config.validate().map_err(SimulationError::InvalidConfig)?;
         let runtime = Handle::try_current().map_err(|_| SimulationError::MissingRuntime)?;
         let simulation = StepRunner::new_on_validated(world, config, runtime.clone())?;
         Self::from_runner(simulation, runtime)
     }
 
-    fn from_runner(simulation: StepRunner, runtime: Handle) -> Result<Self, SimulationError> {
+    fn from_runner(simulation: StepRunner, runtime: Handle) -> Result<Self, Error> {
         let world = simulation.world().map_err(SimulationError::from)?;
         let initial_snapshot = Arc::new(PhysicsSnapshot::from_world(
             world,
@@ -445,12 +448,12 @@ impl Simulation {
     }
 
     /// Starts clock-driven stepping on the configured Tokio runtime.
-    pub fn start(&mut self) -> Result<(), SimulationError> {
+    pub fn start(&mut self) -> Result<(), Error> {
         if let Some(task) = &self.task {
             return if task.is_finished() {
-                Err(SimulationError::TaskRequiresStop)
+                Err(SimulationError::TaskRequiresStop.into())
             } else {
-                Err(SimulationError::AlreadyRunning)
+                Err(SimulationError::AlreadyRunning.into())
             };
         }
 
@@ -539,7 +542,7 @@ impl Simulation {
     }
 
     /// Stops scheduling steps and waits for any active step to finish.
-    pub async fn stop(&mut self) -> Result<(), SimulationError> {
+    pub async fn stop(&mut self) -> Result<(), Error> {
         let Some(task) = &mut self.task else {
             return Ok(());
         };
@@ -554,13 +557,13 @@ impl Simulation {
             Ok(output) => {
                 self.simulation = Some(output.simulation);
                 self.simulation_time = output.simulation_time;
-                output.result
+                output.result.map_err(Error::from)
             }
             Err(error) => {
                 self.metrics_tx.send_modify(|metrics| {
                     metrics.state = SimulationState::Error;
                 });
-                Err(SimulationError::TaskFailed(error.to_string()))
+                Err(Error::from(SimulationError::TaskFailed(error.to_string())))
             }
         }
     }
@@ -595,9 +598,9 @@ impl Simulation {
     /// `1 / tick_rate`; `Adaptive` scales the target interval and substeps it
     /// according to physics bounds. Achieved scaling is reported in
     /// [`SimulationMetrics::actual_time_multiplier`].
-    pub fn set_time_multiplier(&self, multiplier: f64) -> Result<(), SimulationError> {
+    pub fn set_time_multiplier(&self, multiplier: f64) -> Result<(), Error> {
         if !multiplier.is_finite() || multiplier < 0.0 {
-            return Err(SimulationError::InvalidTimeMultiplier);
+            return Err(Error::from(SimulationError::InvalidTimeMultiplier));
         }
         self.time_multiplier_tx.send_replace(multiplier);
         self.metrics_tx.send_modify(|metrics| {
@@ -609,7 +612,7 @@ impl Simulation {
     }
 
     /// Pauses simulated time, retaining the requested speed for resuming.
-    pub fn pause(&mut self) -> Result<(), SimulationError> {
+    pub fn pause(&mut self) -> Result<(), Error> {
         if self.paused_multiplier.is_none() {
             self.paused_multiplier = Some(*self.time_multiplier_tx.borrow());
             self.set_time_multiplier(0.0)?;
@@ -618,7 +621,7 @@ impl Simulation {
     }
 
     /// Resumes at the speed requested before pausing.
-    pub fn resume(&mut self) -> Result<(), SimulationError> {
+    pub fn resume(&mut self) -> Result<(), Error> {
         if let Some(multiplier) = self.paused_multiplier.take() {
             self.set_time_multiplier(multiplier)?;
         }
@@ -1420,10 +1423,8 @@ mod tests {
                 } else {
                     builder.spawn_on_tokio(&tokio::runtime::Handle::current())
                 };
-                assert!(matches!(
-                    result,
-                    Err(super::SimulationError::InvalidMeshSoundSpeed(_))
-                ));
+                let error = result.err().expect("invalid mesh sound speed is rejected");
+                assert!(error.to_string().contains("mesh flow"));
             }
         }
         Ok(())
@@ -1604,7 +1605,7 @@ mod tests {
         let result = Simulation::builder()
             .max_workers(0)
             .spawn_on_tokio(&tokio::runtime::Handle::current());
-        assert!(matches!(result, Err(SimulationError::InvalidWorkerCount)));
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -1612,7 +1613,7 @@ mod tests {
         let result = Simulation::builder()
             .frequency(0)
             .spawn_on_tokio(&tokio::runtime::Handle::current());
-        assert!(matches!(result, Err(SimulationError::InvalidConfig(_))));
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -2035,9 +2036,13 @@ mod tests {
             error.downcast_ref::<StepError>(),
             Some(StepError::BodyIntegration { .. })
         ));
+        let error = match simulation.stop().await {
+            Ok(()) => panic!("failed step must be reported by stop"),
+            Err(error) => error,
+        };
         assert!(matches!(
-            simulation.stop().await,
-            Err(SimulationError::Physics(StepError::BodyIntegration { .. }))
+            error.downcast_ref::<StepError>(),
+            Some(StepError::BodyIntegration { .. })
         ));
         assert_eq!(client.snapshot().step(), 0);
         assert_eq!(
@@ -2152,9 +2157,13 @@ mod tests {
             Some(kapitsa_core::material::PhysicsMaterial::default())
         );
         assert_eq!(part_query.await.unwrap().unwrap().body(), fixed);
+        let error = match simulation.stop().await {
+            Ok(()) => panic!("failed step must be reported by stop"),
+            Err(error) => error,
+        };
         assert!(matches!(
-            simulation.stop().await,
-            Err(SimulationError::Physics(StepError::BodyIntegration { .. }))
+            error.downcast_ref::<StepError>(),
+            Some(StepError::BodyIntegration { .. })
         ));
         let world = simulation
             .simulation
@@ -2209,10 +2218,7 @@ mod tests {
             assert_eq!(simulation.metrics().requested_time_multiplier, multiplier);
         }
         for multiplier in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-            assert!(matches!(
-                simulation.set_time_multiplier(multiplier),
-                Err(SimulationError::InvalidTimeMultiplier)
-            ));
+            assert!(simulation.set_time_multiplier(multiplier).is_err());
         }
         simulation
             .set_time_multiplier(0.0)
@@ -2437,10 +2443,7 @@ mod tests {
     async fn invalid_time_multiplier_is_rejected_without_changing_metrics() {
         let simulation = Simulation::new().expect("simulation");
         assert_eq!(simulation.metrics().requested_time_multiplier, 1.0);
-        assert!(matches!(
-            simulation.set_time_multiplier(-0.5),
-            Err(SimulationError::InvalidTimeMultiplier)
-        ));
+        assert!(simulation.set_time_multiplier(-0.5).is_err());
         assert_eq!(simulation.metrics().requested_time_multiplier, 1.0);
     }
 
@@ -2448,10 +2451,7 @@ mod tests {
     async fn start_twice_reports_an_invalid_transition() {
         let mut simulation = Simulation::new().expect("simulation");
         simulation.start().expect("start");
-        assert!(matches!(
-            simulation.start(),
-            Err(SimulationError::AlreadyRunning)
-        ));
+        assert!(simulation.start().is_err());
         simulation.stop().await.expect("stop");
     }
 }

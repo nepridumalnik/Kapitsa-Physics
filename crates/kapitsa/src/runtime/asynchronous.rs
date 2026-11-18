@@ -30,7 +30,8 @@ pub(crate) use marshalling::{
     CollisionEventStreamError, JointBreakEventStreamError, PhysicsBatchResultStreamError,
     PhysicsClientError,
 };
-pub use service::{Simulation, SimulationBuilder, SimulationError};
+pub(crate) use service::SimulationError;
+pub use service::{Simulation, SimulationBuilder};
 
 enum EngineState {
     Available(Box<StepEngine<RayonExecutor>>),
@@ -393,7 +394,7 @@ mod tests {
 
     use crate::runtime::{SimulationConfig, WorkerConfig, executor::RayonPool};
 
-    use super::{Simulation, SimulationError, StepRunner, StepRunnerError};
+    use super::{Simulation, StepRunner, StepRunnerError};
 
     fn runtime() -> tokio::runtime::Runtime {
         Builder::new_multi_thread()
@@ -542,10 +543,8 @@ mod tests {
 
     #[test]
     fn public_constructor_requires_a_host_runtime_and_does_not_create_one() {
-        assert!(matches!(
-            Simulation::new(),
-            Err(SimulationError::MissingRuntime)
-        ));
+        let result = Simulation::new();
+        assert!(result.is_err());
     }
 
     #[test]

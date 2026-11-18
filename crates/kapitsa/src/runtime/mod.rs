@@ -76,12 +76,12 @@ pub use planner::{WorkerConfig, WorkerConfigError};
 pub use asynchronous::{
     BatchId, ChunkClientError, CollisionEventBatch, CollisionEvents, JointBreakEventBatch,
     JointBreakEvents, PhysicsBatchResult, PhysicsBatchResults, PhysicsClient, PhysicsSnapshot,
-    PhysicsSubmitError, Simulation, SimulationBuilder, SimulationError,
+    PhysicsSubmitError, Simulation, SimulationBuilder,
 };
 #[cfg(feature = "service")]
 pub(crate) use asynchronous::{
     CollisionEventStreamError, JointBreakEventStreamError, PhysicsBatchResultStreamError,
-    PhysicsClientError,
+    PhysicsClientError, SimulationError,
 };
 
 #[cfg(test)]
