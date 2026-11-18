@@ -2178,7 +2178,7 @@ impl PhysicsWorld {
         if body_a == body_b || self.body(body_a).is_none() || self.body(body_b).is_none() {
             return Err(WorldError::InvalidJointBodies);
         }
-        joint.validate()?;
+        joint.validate_typed()?;
         let dense = self
             .joints
             .insert(JointEntry {
@@ -2207,7 +2207,7 @@ impl PhysicsWorld {
         if target_a == target_b {
             return Err(WorldError::InvalidJointBodies);
         }
-        joint.validate()?;
+        joint.validate_typed()?;
         let frame_a = transform_joint_frame(frame_a, joint.common().frame_a)
             .map_err(|_| WorldError::InvalidJointTarget)?;
         let frame_b = transform_joint_frame(frame_b, joint.common().frame_b)
@@ -2276,7 +2276,7 @@ impl PhysicsWorld {
 
     /// Replaces a joint's settings while retaining its ID and attached bodies.
     pub fn update_joint(&mut self, id: JointId, joint: Joint) -> Result<(), Error> {
-        joint.validate()?;
+        joint.validate_typed()?;
         if id.world != self.world_id {
             return Err(Error::from(WorldError::InvalidJointId));
         }
@@ -2291,7 +2291,7 @@ impl PhysicsWorld {
 
     /// Replaces a joint using frames expressed in the current target spaces.
     pub fn update_joint_targets(&mut self, id: JointId, joint: Joint) -> Result<(), Error> {
-        joint.validate()?;
+        joint.validate_typed()?;
         if id.world != self.world_id {
             return Err(Error::from(WorldError::InvalidJointId));
         }

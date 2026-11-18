@@ -141,17 +141,21 @@ impl Joint {
     }
 
     /// Validates all common and type-specific settings before storage or solving.
-    pub fn validate(&self) -> Result<(), JointError> {
-        self.common().validate()?;
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        self.validate_typed().map_err(crate::Error::from)
+    }
+
+    pub(crate) fn validate_typed(&self) -> Result<(), JointError> {
+        self.common().validate_typed()?;
         match self {
             Self::Fixed(_) => {}
             Self::Hinge(joint) => {
                 validate_limit(joint.angle_limit)?;
-                joint.drive.validate()?;
+                joint.drive.validate_typed()?;
             }
             Self::Slider(joint) => {
                 validate_limit(joint.translation_limit)?;
-                joint.drive.validate()?;
+                joint.drive.validate_typed()?;
             }
             Self::Ball(joint) => {
                 if joint.swing_limit.is_some_and(|angle| {
@@ -164,8 +168,8 @@ impl Joint {
             Self::Cylindrical(joint) => {
                 validate_limit(joint.translation_limit)?;
                 validate_limit(joint.angle_limit)?;
-                joint.translation_drive.validate()?;
-                joint.angular_drive.validate()?;
+                joint.translation_drive.validate_typed()?;
+                joint.angular_drive.validate_typed()?;
             }
             Self::Planar(joint) => {
                 for limit in joint.translation_limits {
@@ -173,11 +177,11 @@ impl Joint {
                 }
                 validate_limit(joint.rotation_limit)?;
                 for drive in joint.translation_drives {
-                    drive.validate()?;
+                    drive.validate_typed()?;
                 }
-                joint.rotation_drive.validate()?;
+                joint.rotation_drive.validate_typed()?;
             }
-            Self::Distance(joint) => joint.distance_limit.validate()?,
+            Self::Distance(joint) => joint.distance_limit.validate_typed()?,
             Self::Spring(joint) => {
                 if !joint.rest_length.is_finite() || joint.rest_length < 0.0 {
                     return Err(JointError::InvalidLimit);
@@ -196,14 +200,14 @@ impl Joint {
                 }) {
                     return Err(JointError::InvalidLimit);
                 }
-                joint.twist_limit.validate()?;
+                joint.twist_limit.validate_typed()?;
             }
             Self::D6(joint) => {
                 for motion in joint.linear_motion.into_iter().chain(joint.angular_motion) {
                     motion.validate()?;
                 }
                 for drive in joint.linear_drives.into_iter().chain(joint.angular_drives) {
-                    drive.validate()?;
+                    drive.validate_typed()?;
                 }
             }
         }
@@ -274,7 +278,7 @@ impl Joint {
 
 fn validate_limit(limit: Option<JointLimit>) -> Result<(), JointError> {
     if let Some(limit) = limit {
-        limit.validate()?;
+        limit.validate_typed()?;
     }
     Ok(())
 }
@@ -313,22 +317,28 @@ mod tests {
     #[test]
     fn joint_validation_rejects_bad_frames_limits_and_drives() {
         let invalid_frame = JointFrame::new(Vec3::new(f64::NAN, 0.0, 0.0), Quat::IDENTITY);
-        assert_eq!(invalid_frame.validate(), Err(JointError::InvalidFrame));
+        let error = invalid_frame.validate().expect_err("invalid frame");
+        assert_eq!(
+            error.downcast_ref::<JointError>(),
+            Some(&JointError::InvalidFrame)
+        );
 
         let common = common();
         let mut hinge = HingeJoint::new(common);
         hinge.angle_limit = Some(JointLimit::new(1.0, -1.0));
+        let error = Joint::Hinge(hinge).validate().expect_err("invalid limit");
         assert_eq!(
-            Joint::Hinge(hinge).validate(),
-            Err(JointError::InvalidLimit)
+            error.downcast_ref::<JointError>(),
+            Some(&JointError::InvalidLimit)
         );
 
         let mut slider = SliderJoint::new(common);
         slider.drive.enabled = true;
         slider.drive.max_force = f64::INFINITY;
+        let error = Joint::Slider(slider).validate().expect_err("invalid drive");
         assert_eq!(
-            Joint::Slider(slider).validate(),
-            Err(JointError::InvalidDrive)
+            error.downcast_ref::<JointError>(),
+            Some(&JointError::InvalidDrive)
         );
     }
 }

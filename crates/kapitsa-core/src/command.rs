@@ -823,7 +823,7 @@ fn apply_command_batch_staged(
                 if staged.removed {
                     return Err(invalid_joint_batch_command(command_index));
                 }
-                if let Err(error) = joint.validate() {
+                if let Err(error) = joint.validate_typed() {
                     return Err(CommandBatchError {
                         command_index: Some(command_index),
                         error: CommandError::World(WorldError::Joint(error)),

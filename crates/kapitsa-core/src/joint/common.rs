@@ -22,7 +22,11 @@ impl JointFrame {
         }
     }
 
-    pub fn validate(self) -> Result<(), JointError> {
+    pub fn validate(self) -> Result<(), crate::Error> {
+        self.validate_typed().map_err(crate::Error::from)
+    }
+
+    pub(crate) fn validate_typed(self) -> Result<(), JointError> {
         if !self.local_anchor.is_finite() || !self.local_rotation.is_normalized() {
             return Err(JointError::InvalidFrame);
         }
@@ -42,7 +46,11 @@ impl JointLimit {
         Self { lower, upper }
     }
 
-    pub fn validate(self) -> Result<(), JointError> {
+    pub fn validate(self) -> Result<(), crate::Error> {
+        self.validate_typed().map_err(crate::Error::from)
+    }
+
+    pub(crate) fn validate_typed(self) -> Result<(), JointError> {
         if !self.lower.is_finite() || !self.upper.is_finite() || self.lower > self.upper {
             return Err(JointError::InvalidLimit);
         }
@@ -72,7 +80,11 @@ impl JointDrive {
         max_force: 0.0,
     };
 
-    pub fn validate(self) -> Result<(), JointError> {
+    pub fn validate(self) -> Result<(), crate::Error> {
+        self.validate_typed().map_err(crate::Error::from)
+    }
+
+    pub(crate) fn validate_typed(self) -> Result<(), JointError> {
         if !self.target_position.is_finite()
             || !self.target_velocity.is_finite()
             || !self.stiffness.is_finite()
@@ -119,9 +131,13 @@ impl JointCommon {
         }
     }
 
-    pub fn validate(self) -> Result<(), JointError> {
-        self.frame_a.validate()?;
-        self.frame_b.validate()?;
+    pub fn validate(self) -> Result<(), crate::Error> {
+        self.validate_typed().map_err(crate::Error::from)
+    }
+
+    pub(crate) fn validate_typed(self) -> Result<(), JointError> {
+        self.frame_a.validate_typed()?;
+        self.frame_b.validate_typed()?;
         if !self.compliance.is_finite() || self.compliance < 0.0 {
             return Err(JointError::InvalidStiffness);
         }
@@ -148,7 +164,7 @@ pub enum JointMotion {
 impl JointMotion {
     pub(crate) fn validate(self) -> Result<(), JointError> {
         if let Self::Limited(limit) = self {
-            limit.validate()?;
+            limit.validate_typed()?;
         }
         Ok(())
     }
