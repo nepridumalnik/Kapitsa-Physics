@@ -129,7 +129,9 @@ pub(crate) fn apply_chunk(world: &mut PhysicsWorld, command: ChunkCommand) -> Ch
             let result = match input.try_reserve_exact(ids.len()) {
                 Ok(()) => {
                     input.extend_from_slice(&ids);
-                    world.remove_chunk_batch(input)
+                    world
+                        .remove_chunk_batch(input)
+                        .map_err(chunk_operation_error)
                 }
                 Err(_) => Err(ChunkOperationError::World(
                     WorldError::DensePoolCapacityExceeded,
@@ -151,4 +153,13 @@ pub(crate) fn apply_chunk(world: &mut PhysicsWorld, command: ChunkCommand) -> Ch
             Ok(Some(colliders))
         })()),
     }
+}
+
+fn chunk_operation_error(error: kapitsa_core::Error) -> ChunkOperationError {
+    error
+        .downcast_ref::<ChunkOperationError>()
+        .copied()
+        .unwrap_or(ChunkOperationError::World(
+            WorldError::DensePoolCapacityExceeded,
+        ))
 }

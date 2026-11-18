@@ -1,7 +1,7 @@
 use std::{collections::HashSet, fmt};
 
 use super::{BodyId, ChunkId, ColliderEntry, ColliderId, PhysicsWorld, WorldError};
-use crate::{chunk::Chunk, collision::CollisionError, rigid_body::BodyType};
+use crate::{Error, chunk::Chunk, collision::CollisionError, rigid_body::BodyType};
 
 pub(super) struct ChunkEntry {
     body: BodyId,
@@ -485,10 +485,7 @@ impl PhysicsWorld {
 
     /// Validates every ID (including duplicates) before removing any geometry.
     /// Returned chunks keep their original mesh order, transforms and BVHs.
-    pub fn remove_chunk_batch(
-        &mut self,
-        ids: Vec<ChunkId>,
-    ) -> Result<Vec<Chunk>, RemoveChunkBatchError> {
+    pub fn remove_chunk_batch(&mut self, ids: Vec<ChunkId>) -> Result<Vec<Chunk>, Error> {
         let mut seen = HashSet::new();
         seen.try_reserve(ids.len()).map_err(|_| capacity())?;
         let mut result = Vec::new();
@@ -497,7 +494,7 @@ impl PhysicsWorld {
             .map_err(|_| capacity())?;
         for &id in &ids {
             if !seen.insert(id) {
-                return Err(ChunkOperationError::DuplicateChunkId);
+                return Err(Error::from(ChunkOperationError::DuplicateChunkId));
             }
             self.validate_chunk_removal(id)?;
         }

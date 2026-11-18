@@ -73,12 +73,16 @@ fn batch_preserves_bvhs_order_and_rejects_stale_and_foreign_ids() -> Result<(), 
     let mut foreign = PhysicsWorld::new();
     let foreign_body = self::body(&mut foreign)?;
     let foreign_id = foreign.add_chunk(foreign_body, chunk(0.0, 1)?)?;
+    let error = match world.remove_chunk_batch(vec![
+        *replacements.first().ok_or("missing replacement")?,
+        foreign_id,
+    ]) {
+        Ok(_) => return Err("foreign chunk removal must fail".into()),
+        Err(error) => error,
+    };
     assert!(matches!(
-        world.remove_chunk_batch(vec![
-            *replacements.first().ok_or("missing replacement")?,
-            foreign_id
-        ]),
-        Err(ChunkOperationError::InvalidChunkId)
+        error.downcast_ref::<ChunkOperationError>(),
+        Some(ChunkOperationError::InvalidChunkId)
     ));
     assert_eq!(world.chunk_count(), 2);
     Ok(())
@@ -89,10 +93,14 @@ fn invalid_batches_are_atomic_and_keep_input_ownership() -> Result<(), Box<dyn E
     let mut world = PhysicsWorld::new();
     let body = body(&mut world)?;
     let id = world.add_chunk(body, chunk(0.0, 1)?)?;
-    assert_eq!(
-        world.remove_chunk_batch(vec![id, id]).err(),
+    let error = match world.remove_chunk_batch(vec![id, id]) {
+        Ok(_) => return Err("duplicate chunk removal must fail".into()),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.downcast_ref::<ChunkOperationError>(),
         Some(ChunkOperationError::DuplicateChunkId)
-    );
+    ));
     assert_eq!(world.chunk_count(), 1);
     let mut other = PhysicsWorld::new();
     let other_body = self::body(&mut other)?;
