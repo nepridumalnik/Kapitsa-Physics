@@ -640,6 +640,7 @@ impl PhysicsCommandBuffer {
 }
 
 /// Successful result returned by a physics command.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicsCommandResult {
     /// The command completed without returning a newly allocated ID.

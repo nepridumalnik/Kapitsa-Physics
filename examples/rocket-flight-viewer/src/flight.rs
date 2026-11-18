@@ -167,7 +167,7 @@ pub(crate) async fn run_with_aerodynamics(
             loop {
                 let snapshot = match snapshots.next_snapshot().await {
                     Ok(snapshot) => snapshot,
-                    Err(kapitsa::PhysicsClientError::NotRunning) => return Ok(()),
+                    Err(error) if error.to_string().contains("not running") => return Ok(()),
                     Err(error) => return Err(error.to_string()),
                 };
                 if let Some(frame) = sampler.observe(&snapshot, bodies).map_err(|error| error.to_string())? {

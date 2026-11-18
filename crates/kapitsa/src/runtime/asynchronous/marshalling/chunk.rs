@@ -1,7 +1,7 @@
 use std::fmt;
 
-use super::PhysicsClientError;
 use kapitsa_core::{
+    Error,
     chunk::Chunk,
     world::{
         AddChunkBatchError, AddChunkError, BodyId, ChunkId, ChunkOperationError, ColliderId,
@@ -12,7 +12,7 @@ use kapitsa_core::{
 /// A chunk operation's failure, preserving its input or applied output when available.
 pub enum ChunkClientError<I, O> {
     /// The service did not accept the operation; its original input is returned.
-    NotSubmitted { cause: PhysicsClientError, input: I },
+    NotSubmitted { cause: Error, input: I },
     /// Validation or reservation failed before the world was changed.
     Rejected {
         cause: ChunkOperationError,
@@ -109,7 +109,7 @@ impl ChunkOutcome {
 pub(crate) enum ChunkReply {
     NotSubmitted {
         command: ChunkCommand,
-        cause: PhysicsClientError,
+        cause: Error,
     },
     Completed {
         outcome: ChunkOutcome,

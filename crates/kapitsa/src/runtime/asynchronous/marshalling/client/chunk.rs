@@ -1,4 +1,5 @@
 use kapitsa_core::{
+    Error,
     chunk::Chunk,
     world::{BodyId, ChunkId, ChunkOperationError, ColliderId, StepError},
 };
@@ -25,13 +26,13 @@ fn finish<I, O>(
 }
 
 impl PhysicsClient {
-    async fn request_chunk(&self, command: ChunkCommand) -> Result<ChunkReply, PhysicsClientError> {
+    async fn request_chunk(&self, command: ChunkCommand) -> Result<ChunkReply, Error> {
         let sender = match self.command_tx.borrow().clone() {
             Some(sender) => sender,
             None => {
                 return Ok(ChunkReply::NotSubmitted {
                     command,
-                    cause: PhysicsClientError::NotRunning,
+                    cause: PhysicsClientError::NotRunning.into(),
                 });
             }
         };
@@ -42,7 +43,7 @@ impl PhysicsClient {
             Err(_) => {
                 return Ok(ChunkReply::NotSubmitted {
                     command,
-                    cause: PhysicsClientError::ChannelClosed,
+                    cause: PhysicsClientError::ChannelClosed.into(),
                 });
             }
         };
@@ -50,7 +51,7 @@ impl PhysicsClient {
         permit.send(CommandRequest::Chunk { command, reply });
         response
             .await
-            .map_err(|_| PhysicsClientError::ChannelClosed)
+            .map_err(|_| Error::from(PhysicsClientError::ChannelClosed))
     }
 
     /// Registers a prepared chunk at a simulation boundary.
@@ -149,41 +150,38 @@ impl PhysicsClient {
     }
 
     /// Reads the number of registered chunks at this request's FIFO position.
-    pub async fn chunk_count(&self) -> Result<usize, PhysicsClientError> {
+    pub async fn chunk_count(&self) -> Result<usize, Error> {
         match self.request_chunk(ChunkCommand::Count).await? {
             ChunkReply::NotSubmitted { cause, .. } => Err(cause),
             ChunkReply::Completed {
                 outcome: ChunkOutcome::Count(value),
                 ..
             } => Ok(value),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
     /// Resolves a chunk's owning body at this request's FIFO position.
-    pub async fn chunk_body(&self, id: ChunkId) -> Result<Option<BodyId>, PhysicsClientError> {
+    pub async fn chunk_body(&self, id: ChunkId) -> Result<Option<BodyId>, Error> {
         match self.request_chunk(ChunkCommand::Body { id }).await? {
             ChunkReply::NotSubmitted { cause, .. } => Err(cause),
             ChunkReply::Completed {
                 outcome: ChunkOutcome::Body(value),
                 ..
             } => Ok(value),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
     /// Reads IDs of the colliders owned by a registered chunk.
-    pub async fn chunk_colliders(
-        &self,
-        id: ChunkId,
-    ) -> Result<Option<Vec<ColliderId>>, PhysicsClientError> {
+    pub async fn chunk_colliders(&self, id: ChunkId) -> Result<Option<Vec<ColliderId>>, Error> {
         match self.request_chunk(ChunkCommand::Colliders { id }).await? {
             ChunkReply::NotSubmitted { cause, .. } => Err(cause),
             ChunkReply::Completed {
                 outcome: ChunkOutcome::Colliders(value),
                 ..
             } => value.map_err(Into::into),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 }
@@ -255,10 +253,9 @@ mod tests {
             .first()
             .and_then(|collider| collider.mesh_bvh_serial());
         match client.add_chunk(body, chunk).await {
-            Err(ChunkClientError::NotSubmitted {
-                cause: PhysicsClientError::ChannelClosed,
-                input,
-            }) => {
+            Err(ChunkClientError::NotSubmitted { cause, input })
+                if cause.to_string().contains("closed") =>
+            {
                 assert_eq!(input.colliders().len(), 1);
                 #[cfg(feature = "bench-internals")]
                 assert_eq!(

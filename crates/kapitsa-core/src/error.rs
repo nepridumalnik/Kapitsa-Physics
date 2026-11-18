@@ -5,7 +5,7 @@
 //! through [`Error::kind`]. Structured runtime context such as a command index or
 //! a failed step attempt is available through typed accessors.
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use crate::{
     aabb::AabbError,
@@ -27,7 +27,10 @@ use crate::{
     rigid_body::{BodyError, IntegrationError},
     shape::{BoundsError, ShapeError},
     transform::TransformError,
-    world::{AddChunkBatchError, AddChunkError, ChunkOperationError, StepError, WorldError},
+    world::{
+        AddChunkBatchError, AddChunkError, ChunkOperationError, ForceSourceError, StepError,
+        WorldError,
+    },
 };
 
 /// Broad failure domain of an [`Error`].
@@ -96,11 +99,11 @@ impl fmt::Display for ErrorKind {
 /// [`Error::downcast_ref`]. Structured context that callers previously matched
 /// directly is available through [`Error::command_index`] and
 /// [`Error::failed_step`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Error {
     kind: ErrorKind,
     message: String,
-    cause: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    cause: Option<Arc<dyn std::error::Error + Send + Sync + 'static>>,
     command_index: Option<usize>,
     failed_step: Option<u64>,
     lagged_batches: Option<u64>,
@@ -127,7 +130,7 @@ impl Error {
         Self {
             kind,
             message: cause.to_string(),
-            cause: Some(Box::new(cause)),
+            cause: Some(Arc::new(cause)),
             command_index: None,
             failed_step: None,
             lagged_batches: None,
@@ -169,6 +172,12 @@ impl Error {
     /// Adds discarded-stream-batch context.
     pub fn with_lagged_batches(mut self, missed_batches: u64) -> Self {
         self.lagged_batches = Some(missed_batches);
+        self
+    }
+
+    /// Reclassifies the error domain while preserving its cause.
+    pub fn with_kind(mut self, kind: ErrorKind) -> Self {
+        self.kind = kind;
         self
     }
 
@@ -232,6 +241,7 @@ impl_error_from!(DensePoolError, ResourceExhausted);
 impl_error_from!(ExecutionError, Runtime);
 impl_error_from!(GravityError, Gravity);
 impl_error_from!(JointError, Joint);
+impl_error_from!(ForceSourceError, Validation);
 impl_error_from!(MassError, Validation);
 impl_error_from!(PhysicsMaterialError, Material);
 impl_error_from!(BodyError, Validation);

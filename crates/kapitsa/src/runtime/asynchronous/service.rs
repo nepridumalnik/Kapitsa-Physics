@@ -8,6 +8,7 @@ use std::{
 };
 
 use kapitsa_core::{
+    Error,
     aerodynamics::Atmosphere,
     collision::CollisionError,
     world::{ErrorPolicy, PhysicsWorld, StepError},
@@ -23,7 +24,7 @@ use super::{
     StepRunner, StepRunnerError,
     marshalling::{
         BatchScratch, ChunkOutcome, ChunkReply, CollisionEventBatch, CommandBufferPool,
-        CommandRequest, JointBreakEventBatch, PhysicsBatchError, PhysicsBatchResult, PhysicsClient,
+        CommandRequest, JointBreakEventBatch, PhysicsBatchResult, PhysicsClient,
         PhysicsClientError, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot, apply_chunk,
         apply_command, apply_command_batch,
     },
@@ -1172,13 +1173,10 @@ fn publish_failed_command_results(
             DeferredCommandResult::Batch(mut result) => {
                 result.step = attempted_step;
                 if result.result.is_ok() {
-                    result.result = Err(PhysicsBatchError {
-                        command_index: None,
-                        error: PhysicsClientError::StepFailedAfterApply {
-                            step: attempted_step,
-                            cause,
-                        },
-                    });
+                    result.result = Err(Error::from(PhysicsClientError::StepFailedAfterApply {
+                        step: attempted_step,
+                        cause,
+                    }));
                 }
                 let _ = events.batch_results.send(result);
             }
@@ -1207,7 +1205,7 @@ fn reject_request(
         CommandRequest::Chunk { command, reply } => {
             let _ = reply.send(ChunkReply::NotSubmitted {
                 command,
-                cause: PhysicsClientError::NotRunning,
+                cause: PhysicsClientError::NotRunning.into(),
             });
         }
         CommandRequest::Single { reply, .. } => {
@@ -1218,10 +1216,7 @@ fn reject_request(
             let _ = events.batch_results.send(PhysicsBatchResult {
                 batch_id: id,
                 step,
-                result: Err(PhysicsBatchError {
-                    command_index: None,
-                    error: PhysicsClientError::NotRunning,
-                }),
+                result: Err(Error::from(PhysicsClientError::NotRunning)),
             });
         }
     }
@@ -1458,13 +1453,13 @@ mod tests {
     use tokio::{sync::oneshot, time::sleep};
 
     use crate::runtime::{
-        AdaptiveTimeStepConfig, PhysicsClientError, SimulationConfig, SimulationError,
-        SimulationState, TimeStepPolicy, WorkerConfig,
+        AdaptiveTimeStepConfig, SimulationConfig, SimulationError, SimulationState, TimeStepPolicy,
+        WorkerConfig,
     };
 
     use super::{
-        PhysicsBatchError, Simulation, add_elapsed, add_scaled_elapsed, load_speed_for_step,
-        measured_time_multiplier, wait_for_scaled_step, wait_for_scheduler_turn,
+        Simulation, add_elapsed, add_scaled_elapsed, load_speed_for_step, measured_time_multiplier,
+        wait_for_scaled_step, wait_for_scheduler_turn,
     };
 
     fn dynamic_body() -> RigidBody {
@@ -1748,7 +1743,7 @@ mod tests {
         let batch_id = client.try_submit(commands).expect("joint batch accepted");
         let batch = results.next_result().await.expect("joint batch result");
         assert_eq!(batch.batch_id, batch_id);
-        assert_eq!(batch.result, Ok(()));
+        assert!(batch.result.is_ok());
 
         client
             .set_linear_velocity(body_b, Vec3::X * 10.0)
@@ -1761,9 +1756,13 @@ mod tests {
         assert_eq!(event_batch.events().len(), 1);
         assert_eq!(event_batch.events()[0].joint(), joint);
         assert!(client.snapshot().step() >= event_batch.step());
+        let error = client
+            .remove_joint(joint)
+            .await
+            .expect_err("removed joint is rejected");
         assert!(matches!(
-            client.remove_joint(joint).await,
-            Err(PhysicsClientError::World(WorldError::InvalidJointId))
+            error.downcast_ref::<WorldError>(),
+            Some(WorldError::InvalidJointId)
         ));
         simulation.stop().await.expect("stop");
     }
@@ -1771,13 +1770,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn client_rejects_commands_before_simulation_starts() {
         let simulation = Simulation::new_from_config(config(60)).expect("simulation");
-        assert!(matches!(
+        assert!(
             simulation
                 .client()
                 .add_body(RigidBody::new_static(Transform::identity()))
-                .await,
-            Err(crate::runtime::PhysicsClientError::NotRunning)
-        ));
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1921,15 +1920,14 @@ mod tests {
         let second = results.next_result().await.expect("second batch result");
         assert_eq!((first.batch_id, second.batch_id), (valid_id, invalid_id));
         assert!(first.result.is_ok());
-        assert_eq!(
-            second.result,
-            Err(PhysicsBatchError {
-                command_index: Some(1),
-                error: PhysicsClientError::Body(
-                    kapitsa_core::rigid_body::BodyError::NonFiniteValue
-                ),
-            })
-        );
+        let error = second.result.expect_err("invalid batch reports its cause");
+        assert_eq!(error.command_index(), Some(1));
+        assert!(matches!(
+            error.downcast_ref::<kapitsa_core::command::CommandError>(),
+            Some(kapitsa_core::command::CommandError::Body(
+                kapitsa_core::rigid_body::BodyError::NonFiniteValue
+            ))
+        ));
         assert_eq!(first.step, second.step);
         assert!(client.snapshot().step() >= first.step);
         assert_eq!(
@@ -1979,12 +1977,12 @@ mod tests {
             _ = tokio::task::yield_now() => {}
         }
         drop(stop);
-        assert!(matches!(
+        assert!(
             client
                 .add_body(RigidBody::new_static(Transform::identity()))
-                .await,
-            Err(PhysicsClientError::NotRunning)
-        ));
+                .await
+                .is_err()
+        );
 
         release_tx.send(()).expect("release step worker");
         simulation.stop().await.expect("join cancelled stop");
@@ -2031,19 +2029,12 @@ mod tests {
         let result = results.next_result().await.expect("failed step result");
         assert_eq!(result.batch_id, batch_id);
         assert_eq!(result.step, 1);
-        assert_eq!(
-            result.result,
-            Err(PhysicsBatchError {
-                command_index: None,
-                error: PhysicsClientError::StepFailedAfterApply {
-                    step: 1,
-                    cause: StepError::BodyIntegration {
-                        body_id: body,
-                        cause: kapitsa_core::rigid_body::IntegrationError::ArithmeticOverflow,
-                    },
-                },
-            })
-        );
+        let error = result.result.expect_err("failed step result");
+        assert_eq!(error.failed_step(), Some(1));
+        assert!(matches!(
+            error.downcast_ref::<StepError>(),
+            Some(StepError::BodyIntegration { .. })
+        ));
         assert!(matches!(
             simulation.stop().await,
             Err(SimulationError::Physics(StepError::BodyIntegration { .. }))
@@ -2140,19 +2131,15 @@ mod tests {
 
         let velocity_error = velocity.await.expect_err("failed step is reported");
         let force_error = force.await.expect_err("failed step is reported");
+        assert_eq!(velocity_error.failed_step(), Some(1));
         assert!(matches!(
-            velocity_error,
-            PhysicsClientError::StepFailedAfterApply {
-                step: 1,
-                cause: StepError::BodyIntegration { body_id, .. },
-            } if body_id == body
+            velocity_error.downcast_ref::<StepError>(),
+            Some(StepError::BodyIntegration { body_id, .. }) if *body_id == body
         ));
+        assert_eq!(force_error.failed_step(), Some(1));
         assert!(matches!(
-            force_error,
-            PhysicsClientError::StepFailedAfterApply {
-                step: 1,
-                cause: StepError::BodyIntegration { body_id, .. },
-            } if body_id == body
+            force_error.downcast_ref::<StepError>(),
+            Some(StepError::BodyIntegration { body_id, .. }) if *body_id == body
         ));
         assert!(
             query

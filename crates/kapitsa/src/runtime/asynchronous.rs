@@ -23,11 +23,12 @@ mod service;
 
 pub use marshalling::{
     BatchId, ChunkClientError, CollisionEventBatch, CollisionEvents, JointBreakEventBatch,
-    JointBreakEvents, PhysicsBatchError, PhysicsBatchResult, PhysicsBatchResults, PhysicsClient,
-    PhysicsClientError, PhysicsSnapshot, PhysicsSubmitError,
+    JointBreakEvents, PhysicsBatchResult, PhysicsBatchResults, PhysicsClient, PhysicsSnapshot,
+    PhysicsSubmitError,
 };
 pub(crate) use marshalling::{
     CollisionEventStreamError, JointBreakEventStreamError, PhysicsBatchResultStreamError,
+    PhysicsClientError,
 };
 pub use service::{Simulation, SimulationBuilder, SimulationError};
 

@@ -3,7 +3,6 @@ use std::{fmt, sync::Arc};
 use kapitsa_core::{Error, collision::CollisionEvent, joint::JointBreakEvent};
 use tokio::sync::{broadcast, mpsc, watch};
 
-use super::PhysicsClientError;
 use super::command::{BatchId, CommandRequest};
 
 /// Collision events committed by one physics step.
@@ -111,24 +110,15 @@ impl fmt::Display for JointBreakEventStreamError {
 
 impl std::error::Error for JointBreakEventStreamError {}
 
-/// A batch failure. `command_index` is `None` when the package was not rejected
-/// by an individual command, such as stopping before apply or a failed step
-/// after successful apply.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PhysicsBatchError {
-    pub command_index: Option<usize>,
-    pub error: PhysicsClientError,
-}
-
 /// Outcome of an accepted command buffer after its step boundary.
 ///
 /// An `Ok(())` result guarantees that the snapshot for `step` has already been
 /// published. The latest snapshot may have advanced beyond this step.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct PhysicsBatchResult {
     pub batch_id: BatchId,
     pub step: u64,
-    pub result: Result<(), PhysicsBatchError>,
+    pub result: Result<(), Error>,
 }
 
 /// Failure returned while receiving command-buffer results.
@@ -451,10 +441,12 @@ mod tests {
             step: 7,
             result: Ok(()),
         };
-        results.send(expected).expect("subscriber exists");
+        results.send(expected.clone()).expect("subscriber exists");
         running_tx.send_replace(None);
 
         let actual = next.await.expect("published result");
-        assert_eq!(actual, expected);
+        assert_eq!(actual.batch_id, expected.batch_id);
+        assert_eq!(actual.step, expected.step);
+        assert!(actual.result.is_ok());
     }
 }

@@ -4,8 +4,8 @@ use kapitsa::math::{Mat3, Quat, Vec3};
 use kapitsa::query::{QueryFilter, Ray};
 use kapitsa::shape::TriangleMesh;
 use kapitsa::{
-    Chunk, ChunkBuilder, ChunkClientError, MassProperties, PhysicsClientError, RigidBody,
-    Simulation, Transform, WorldError,
+    Chunk, ChunkBuilder, ChunkClientError, MassProperties, RigidBody, Simulation, Transform,
+    WorldError,
 };
 
 fn chunk(x: f64, meshes: usize) -> Result<Chunk, Box<dyn Error>> {
@@ -55,10 +55,14 @@ async fn paused_client_registers_queries_unloads_and_reuses_chunks() -> Result<(
         .ok_or("missing chunk")?;
     assert_eq!(first_colliders.len(), 1);
     let collider = *first_colliders.first().ok_or("missing collider")?;
-    assert!(matches!(
-        client.remove_collider(collider).await,
-        Err(PhysicsClientError::World(WorldError::InvalidColliderId))
-    ));
+    let error = client
+        .remove_collider(collider)
+        .await
+        .expect_err("chunk-owned collider is rejected");
+    assert_eq!(
+        error.downcast_ref::<WorldError>(),
+        Some(&WorldError::InvalidColliderId)
+    );
     let ray = Ray::new(Vec3::new(-1.0, 3.0, -1.0), -Vec3::Y, 6.0)?;
     assert!(client.raycast(ray, QueryFilter::default()).await?.is_some());
     let removed = client.remove_chunk_batch(ids.clone()).await?;
@@ -158,10 +162,11 @@ async fn rejection_and_stopped_service_return_prepared_chunks() -> Result<(), Bo
     assert_eq!(client.chunk_count().await?, 0);
     simulation.stop().await?;
     let recovered = match client.add_chunk_batch(dynamic, recovered).await {
-        Err(ChunkClientError::NotSubmitted {
-            cause: PhysicsClientError::NotRunning,
-            input,
-        }) => input,
+        Err(ChunkClientError::NotSubmitted { cause, input })
+            if cause.to_string().contains("not running") =>
+        {
+            input
+        }
         _ => return Err("stopped service did not return the batch".into()),
     };
     assert_eq!(recovered.len(), 2);

@@ -100,8 +100,8 @@ async fn stopping_before_application_returns_chunk_to_caller() -> Result<(), Box
                     body: returned,
                     chunk,
                 },
-            cause: crate::PhysicsClientError::NotRunning,
-        } => {
+            cause,
+        } if cause.to_string().contains("not running") => {
             assert_eq!(returned, body);
             assert_eq!(chunk.colliders().len(), 1);
         }

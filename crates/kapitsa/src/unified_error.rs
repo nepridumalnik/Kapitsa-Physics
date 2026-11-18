@@ -20,29 +20,31 @@ impl From<WorkerConfigError> for Error {
 mod service_errors {
     use super::{Error, ErrorKind};
     use crate::runtime::{
-        CollisionEventStreamError, JointBreakEventStreamError, PhysicsBatchError,
-        PhysicsBatchResultStreamError, PhysicsClientError, PhysicsSubmitError, RayonPoolError,
-        SimulationError,
+        CollisionEventStreamError, JointBreakEventStreamError, PhysicsBatchResultStreamError,
+        PhysicsClientError, PhysicsSubmitError, RayonPoolError, SimulationError,
     };
 
     impl From<PhysicsClientError> for Error {
         fn from(error: PhysicsClientError) -> Self {
             match error {
+                PhysicsClientError::World(error) => {
+                    Error::from(error).with_kind(ErrorKind::Runtime)
+                }
+                PhysicsClientError::Body(error) => Error::from(error).with_kind(ErrorKind::Runtime),
+                PhysicsClientError::Cluster(error) => {
+                    Error::from(error).with_kind(ErrorKind::Runtime)
+                }
+                PhysicsClientError::Query(error) => {
+                    Error::from(error).with_kind(ErrorKind::Runtime)
+                }
+                PhysicsClientError::ForceSource(error) => {
+                    Error::from(error).with_kind(ErrorKind::Runtime)
+                }
                 PhysicsClientError::StepFailedAfterApply { step, cause } => {
                     Error::from_source(ErrorKind::Runtime, cause).with_failed_step(step)
                 }
                 other => Error::from_source(ErrorKind::Runtime, other),
             }
-        }
-    }
-
-    impl From<PhysicsBatchError> for Error {
-        fn from(error: PhysicsBatchError) -> Self {
-            let mut unified = Error::from(error.error);
-            if let Some(index) = error.command_index {
-                unified = unified.with_command_index(index);
-            }
-            unified
         }
     }
 

@@ -97,7 +97,7 @@ published. The result's `step` identifies that publication; the latest snapshot
 may have a greater step because snapshots can skip intermediate steps.
 
 Command validation failures preserve the original error and command index, and
-the batch makes no partial changes. `PhysicsClientError::StepFailedAfterApply`
+the batch makes no partial changes. An `Error` with `failed_step()` set
 means the command or batch did change the world, but the following physical step
 failed; it includes the failed attempt number and `StepError` cause. Those
 changes are not automatically rolled back, and no snapshot for the failed step

@@ -2,13 +2,12 @@ use kapitsa_core::world::PhysicsWorld;
 use tokio::sync::oneshot;
 
 use super::PhysicsClientError;
-use super::events::PhysicsBatchError;
 
 pub(crate) use kapitsa_core::command::BatchScratch;
 #[cfg(test)]
 pub(crate) use kapitsa_core::command::SMALL_STAGING_LINEAR_SEARCH_LIMIT;
 pub use kapitsa_core::command::{
-    CommandBatchError, CommandError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
+    CommandError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
 };
 
 impl From<CommandError> for PhysicsClientError {
@@ -23,15 +22,6 @@ impl From<CommandError> for PhysicsClientError {
             CommandError::TooManyCommands { max_commands } => {
                 Self::TooManyCommands { max_commands }
             }
-        }
-    }
-}
-
-impl From<CommandBatchError> for PhysicsBatchError {
-    fn from(error: CommandBatchError) -> Self {
-        Self {
-            command_index: error.command_index,
-            error: error.error.into(),
         }
     }
 }
@@ -51,10 +41,10 @@ pub(crate) fn apply_command_batch(
     world: &mut PhysicsWorld,
     commands: &[PhysicsCommand],
     scratch: &mut BatchScratch,
-) -> Result<(), PhysicsBatchError> {
+) -> Result<(), kapitsa_core::Error> {
     world
         .apply_commands(commands, scratch)
-        .map_err(PhysicsBatchError::from)
+        .map_err(kapitsa_core::Error::from)
 }
 
 /// Correlates an accepted command buffer with its asynchronous result.
@@ -169,8 +159,8 @@ pub(crate) mod tests {
 
     use super::super::PhysicsClientError;
     use super::{
-        BatchScratch, PhysicsCommand, PhysicsCommandResult, SMALL_STAGING_LINEAR_SEARCH_LIMIT,
-        apply_command, apply_command_batch,
+        BatchScratch, CommandError, PhysicsCommand, PhysicsCommandResult,
+        SMALL_STAGING_LINEAR_SEARCH_LIMIT, apply_command, apply_command_batch,
     };
 
     #[allow(dead_code)] // Mirrors the staging record for the allocation-control test.
@@ -1079,10 +1069,10 @@ pub(crate) mod tests {
             ];
             let error = apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
                 .expect_err("metadata cannot join atomic motion batch");
-            assert_eq!(error.command_index, Some(1));
+            assert_eq!(error.command_index(), Some(1));
             assert!(matches!(
-                error.error,
-                PhysicsClientError::UnsupportedBatchCommand
+                error.downcast_ref::<CommandError>(),
+                Some(CommandError::UnsupportedBatchCommand)
             ));
             assert_eq!(
                 world.body(body).expect("body").state().linear_velocity(),
@@ -1144,11 +1134,11 @@ pub(crate) mod tests {
         let error = apply_command_batch(&mut world, &commands, &mut scratch)
             .expect_err("static mass rejected");
 
-        assert_eq!(error.command_index, Some(1));
-        assert_eq!(
-            error.error,
-            PhysicsClientError::Body(BodyError::BodyMustBeDynamic)
-        );
+        assert_eq!(error.command_index(), Some(1));
+        assert!(matches!(
+            error.downcast_ref::<CommandError>(),
+            Some(CommandError::Body(BodyError::BodyMustBeDynamic))
+        ));
         assert_eq!(
             world
                 .body(dynamic)
@@ -1333,7 +1323,7 @@ pub(crate) mod tests {
         let error = apply_command_batch(&mut world, &commands, &mut BatchScratch::default())
             .expect_err("static velocity mutation is invalid");
 
-        assert_eq!(error.command_index, Some(1));
+        assert_eq!(error.command_index(), Some(1));
         assert!(world.joint(id).expect("unchanged joint").common().enabled);
         assert_eq!(
             world
@@ -1413,11 +1403,13 @@ pub(crate) mod tests {
         let error =
             apply_command_batch(&mut world, &commands, &mut scratch).expect_err("foreign source");
 
-        assert_eq!(error.command_index, Some(2));
-        assert_eq!(
-            error.error,
-            PhysicsClientError::ForceSource(ForceSourceError::InvalidForceSourceId)
-        );
+        assert_eq!(error.command_index(), Some(2));
+        assert!(matches!(
+            error.downcast_ref::<CommandError>(),
+            Some(CommandError::ForceSource(
+                ForceSourceError::InvalidForceSourceId
+            ))
+        ));
         let source = world.force_source(source).expect("unchanged source");
         assert_eq!(source.local_point(), Vec3::ZERO);
         assert_eq!(source.local_force(), Vec3::X);
