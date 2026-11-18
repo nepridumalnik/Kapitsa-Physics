@@ -1569,16 +1569,9 @@ mod tests {
         };
         use kapitsa_math::Quat;
 
-        fn setup() -> Result<
-            (
-                PhysicsWorld,
-                BodyId,
-                PartId,
-                PartId,
-                crate::world::ColliderId,
-            ),
-            Box<dyn std::error::Error>,
-        > {
+        type RotatedAssemblySetup = (PhysicsWorld, BodyId, PartId, PartId, crate::world::ColliderId);
+
+        fn setup() -> Result<RotatedAssemblySetup, Box<dyn std::error::Error>> {
             let mut world = PhysicsWorld::new();
             world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
                 1.2,

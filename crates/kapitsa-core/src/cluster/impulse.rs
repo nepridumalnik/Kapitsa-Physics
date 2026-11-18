@@ -88,6 +88,7 @@ impl ImpulseStrength {
 /// verified against absolute tolerances in N·s and N·m·s. Remaining entries
 /// are parent-on-child impulses. This solves ideal rigid constraints, not
 /// impact duration, fracture propagation, contact generation, or strength.
+#[allow(clippy::too_many_arguments)] // The velocity change and both tolerances are independent physical inputs.
 pub fn tree_impulse_reactions(
     parts: &[PartImpulse],
     parents: &[usize],

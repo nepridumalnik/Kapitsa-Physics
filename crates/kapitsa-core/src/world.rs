@@ -1141,6 +1141,7 @@ impl PhysicsWorld {
     }
 
     /// All slices must belong to the same evaluation-time transaction.
+    #[allow(clippy::too_many_arguments)] // Internal transaction snapshot; all slices are evaluated together.
     fn part_source_weld_reactions_from_snapshot(
         body: BodyId,
         force_tolerance: f64,
@@ -2856,10 +2857,10 @@ impl PhysicsWorld {
             .iter()
             .zip(&context.predicted_states)
         {
-            if *clipped {
-                if let Some(&index) = indices.get(body) {
-                    self.cluster_load_states_pending[index].invalidate_collision_loads();
-                }
+            if *clipped
+                && let Some(&index) = indices.get(body)
+            {
+                self.cluster_load_states_pending[index].invalidate_collision_loads();
             }
         }
         for manifold in context
@@ -4328,12 +4329,13 @@ impl PhysicsWorld {
             self.owner_pressure_owners.dedup();
             let map = self.owner_pressure.get_or_insert_with(HashMap::new);
             map.try_reserve(1).map_err(|_| error())?;
-            if !map.contains_key(&update.id) {
-                let workspace = crate::aerodynamics::pressure::OwnerPressureWorkspace::new(&[])
-                    .ok_or_else(error)?;
-                map.insert(update.id, workspace);
-            }
-            let workspace = map.get_mut(&update.id).ok_or_else(error)?;
+            let workspace = match map.entry(update.id) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
+                    crate::aerodynamics::pressure::OwnerPressureWorkspace::new(&[])
+                        .ok_or_else(error)?,
+                ),
+            };
             workspace
                 .configure_pending(&self.owner_pressure_owners)
                 .and_then(|()| workspace.prepare(patches, flow))

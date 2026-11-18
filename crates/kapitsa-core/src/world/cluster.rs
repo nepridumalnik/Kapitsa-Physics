@@ -17,13 +17,16 @@ use crate::{
     transform::Transform,
 };
 
+/// Rebind of one part's owned colliders after a split.
+type PartRebind = (usize, PartId, Vec<(ColliderId, Transform)>);
+
 /// Prepared against an unchanged world; commit must immediately follow it.
 pub(super) struct PreparedWeldSplit {
     body: BodyId,
     removed_welds: Vec<WeldId>,
     entries: Vec<BodyEntry>,
     prepared_bodies: Vec<BodyMotion>,
-    part_rebinds: Vec<(usize, PartId, Vec<(ColliderId, Transform)>)>,
+    part_rebinds: Vec<PartRebind>,
     part_components: HashMap<PartId, usize>,
     root_aerodynamics: Vec<AerodynamicSurface>,
     root_cluster: RigidCluster,
@@ -2303,8 +2306,8 @@ impl PhysicsWorld {
         strength: Option<crate::cluster::impulse::ImpulseStrength>,
     ) -> Result<(), ClusterError> {
         let entry = self.weld(weld).ok_or(ClusterError::InvalidWeldId)?;
-        if let Some(value) = strength {
-            if matches!(
+        if let Some(value) = strength
+            && (matches!(
                 entry.desc().strength,
                 crate::cluster::WeldStrength::Unbreakable
             ) || value
@@ -2312,10 +2315,9 @@ impl PhysicsWorld {
                     linear: Vec3::ZERO,
                     angular: Vec3::ZERO,
                 })
-                .is_err()
-            {
-                return Err(ClusterError::InvalidWeld);
-            }
+                .is_err())
+        {
+            return Err(ClusterError::InvalidWeld);
         }
         if entry.impulse_strength() == strength {
             return Ok(());

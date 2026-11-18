@@ -150,6 +150,7 @@ pub(crate) fn take_nonzero_contact_warm_starts() -> usize {
     NONZERO_CONTACT_WARM_STARTS.with(|count| count.replace(0))
 }
 
+#[allow(clippy::large_enum_variant)] // Boxed joints would add indirection to every solver iteration.
 enum ColoredConstraintKind {
     Contact(SolverManifold),
     Joint(JointConstraint),

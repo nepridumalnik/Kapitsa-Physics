@@ -1088,13 +1088,13 @@ fn harris_subsonic_equation_type_diagnostic() -> Result<(), String> {
                     let hyperbolic = lambda < 0.0;
                     negative += usize::from(hyperbolic);
                     count += 1;
-                    if let Some((previous_x, previous_hyperbolic)) = previous {
-                        if previous_hyperbolic != hyperbolic {
-                            transitions += 1;
-                            println!(
-                                "transition mach={mach} intervals={intervals} r={r:.9} x_bracket=[{previous_x:.9},{x:.9}] from_hyperbolic={previous_hyperbolic}"
-                            );
-                        }
+                    if let Some((previous_x, previous_hyperbolic)) = previous
+                        && previous_hyperbolic != hyperbolic
+                    {
+                        transitions += 1;
+                        println!(
+                            "transition mach={mach} intervals={intervals} r={r:.9} x_bracket=[{previous_x:.9},{x:.9}] from_hyperbolic={previous_hyperbolic}"
+                        );
                     }
                     previous = Some((x, hyperbolic));
                 }

@@ -1,3 +1,6 @@
+// Scene matrices intentionally flatten independent axes into rstest case arguments.
+#![allow(clippy::too_many_arguments)]
+
 use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
 
 use super::{
@@ -821,6 +824,7 @@ fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // rstest cases deliberately exercise seven independent scene parameters.
 #[rstest::rstest]
 #[case::linear_break(1.0, false, false, false, false, false)]
 #[case::linear_intact(100.0, false, false, false, false, false)]

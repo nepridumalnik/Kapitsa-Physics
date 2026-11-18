@@ -1514,21 +1514,20 @@ impl CollisionSystem {
                         .state();
                     if before_a.transform() == after_a.transform()
                         && before_b.transform() == after_b.transform()
-                    {
-                        if original.manifold.points().iter().all(|point| {
+                        && original.manifold.points().iter().all(|point| {
                             point.velocity_impulse.is_some()
                                 && point.velocity_points.is_some()
                                 && point.velocity_transforms
                                     == Some([before_a.transform(), before_b.transform()])
-                        }) {
-                            for index in 0..original.manifold.len() {
-                                original
-                                    .manifold
-                                    .point_mut(index)
-                                    .ok_or(CollisionError::InvalidContact)?
-                                    .isolated_velocity_states =
-                                    Some([[before_a, before_b], [after_a, after_b]]);
-                            }
+                        })
+                    {
+                        for index in 0..original.manifold.len() {
+                            original
+                                .manifold
+                                .point_mut(index)
+                                .ok_or(CollisionError::InvalidContact)?
+                                .isolated_velocity_states =
+                                Some([[before_a, before_b], [after_a, after_b]]);
                         }
                     }
                 }

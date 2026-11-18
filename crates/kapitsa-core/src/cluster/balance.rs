@@ -284,6 +284,7 @@ pub(crate) fn reaction_moment_at_anchor(
 /// Parents must precede children; the root is index zero. This ordering allows
 /// a linear reverse traversal without adjacency allocations. `force_tolerance`
 /// and `moment_tolerance` are absolute tolerances in N and N·m respectively.
+#[allow(clippy::too_many_arguments)] // The physical reference frame and both tolerances are independent inputs.
 pub(crate) fn tree_reactions(
     parts: &[PartBalanceInput],
     parents: &[usize],
