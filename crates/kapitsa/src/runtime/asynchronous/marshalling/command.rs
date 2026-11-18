@@ -126,6 +126,11 @@ pub enum PhysicsCommand {
         body: BodyId,
         config: kapitsa_core::aerodynamics::ColliderTessellation,
     },
+    /// Replaces a body's primary aerodynamic model.
+    SetAerodynamics {
+        body: BodyId,
+        model: kapitsa_core::aerodynamics::Aerodynamics,
+    },
     /// Removes a part-owned collider.
     RemovePartCollider {
         id: ColliderId,
@@ -964,6 +969,7 @@ fn body_command_id(command: &PhysicsCommand) -> Option<BodyId> {
         | PhysicsCommand::SetPartWaveSourceColliders { .. }
         | PhysicsCommand::SetPartColliderTransform { .. }
         | PhysicsCommand::SetColliderTessellation { .. }
+        | PhysicsCommand::SetAerodynamics { .. }
         | PhysicsCommand::RemovePartCollider { .. }
         | PhysicsCommand::DestroyClusterPart { .. }
         | PhysicsCommand::BreakWeld { .. }
@@ -1045,6 +1051,7 @@ fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result
         | PhysicsCommand::SetPartWaveSourceColliders { .. }
         | PhysicsCommand::SetPartColliderTransform { .. }
         | PhysicsCommand::SetColliderTessellation { .. }
+        | PhysicsCommand::SetAerodynamics { .. }
         | PhysicsCommand::RemovePartCollider { .. }
         | PhysicsCommand::DestroyClusterPart { .. }
         | PhysicsCommand::BreakWeld { .. }
@@ -1173,6 +1180,10 @@ pub(crate) fn apply_command(
         }
         PhysicsCommand::SetColliderTessellation { body, config } => {
             world.set_collider_tessellation(body, config)?;
+            PhysicsCommandResult::Done
+        }
+        PhysicsCommand::SetAerodynamics { body, model } => {
+            world.set_aerodynamics(body, model)?;
             PhysicsCommandResult::Done
         }
         PhysicsCommand::RemovePartCollider { id } => {
@@ -1818,6 +1829,47 @@ pub(crate) mod tests {
                 }
             ),
             Err(PhysicsClientError::World(WorldError::InvalidBodyId))
+        ));
+    }
+
+    #[test]
+    fn set_aerodynamics_replaces_the_body_model() {
+        use kapitsa_core::aerodynamics::{AerodynamicProperties, Aerodynamics};
+
+        let mut world = PhysicsWorld::new();
+        let PhysicsCommandResult::Body(body) = apply_command(
+            &mut world,
+            PhysicsCommand::AddBody {
+                body: dynamic_body(),
+            },
+        )
+        .expect("add body") else {
+            panic!("add body must return its ID");
+        };
+        let simple = Aerodynamics::Simple(
+            AerodynamicProperties::new(2.0, 1.0, Vec3::ZERO).expect("simple aero"),
+        );
+        assert_done(apply_command(
+            &mut world,
+            PhysicsCommand::SetAerodynamics {
+                body,
+                model: simple,
+            },
+        ));
+        assert!(matches!(
+            world.body(body).expect("body").aerodynamics(),
+            Aerodynamics::Simple(_)
+        ));
+        assert_done(apply_command(
+            &mut world,
+            PhysicsCommand::SetAerodynamics {
+                body,
+                model: Aerodynamics::Colliders,
+            },
+        ));
+        assert!(matches!(
+            world.body(body).expect("body").aerodynamics(),
+            Aerodynamics::Colliders
         ));
     }
 

@@ -228,6 +228,18 @@ impl PhysicsClient {
         )
     }
 
+    /// Replaces the body's primary aerodynamic model.
+    pub async fn set_aerodynamics(
+        &self,
+        body: BodyId,
+        model: kapitsa_core::aerodynamics::Aerodynamics,
+    ) -> Result<(), PhysicsClientError> {
+        expect_done(
+            self.submit(PhysicsCommand::SetAerodynamics { body, model })
+                .await?,
+        )
+    }
+
     /// Removes a collider owned by a cluster part.
     pub async fn remove_part_collider(&self, id: ColliderId) -> Result<(), PhysicsClientError> {
         expect_done(
