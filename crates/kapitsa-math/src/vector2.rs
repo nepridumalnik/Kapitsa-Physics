@@ -3,28 +3,38 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 /// A two-dimensional vector with `f64` components.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec2 {
+    /// X component.
     pub x: f64,
+    /// Y component.
     pub y: f64,
 }
 
 impl Vec2 {
+    /// Zero vector.
     pub const ZERO: Self = Self::splat(0.0);
+    /// Vector with all components equal to one.
     pub const ONE: Self = Self::splat(1.0);
+    /// Unit vector along x.
     pub const X: Self = Self::new(1.0, 0.0);
+    /// Unit vector along y.
     pub const Y: Self = Self::new(0.0, 1.0);
 
+    /// Creates a vector from components.
     pub const fn new(x: f64, y: f64) -> Self {
         Self { x, y }
     }
 
+    /// Creates a vector with both components equal to `value`.
     pub const fn splat(value: f64) -> Self {
         Self::new(value, value)
     }
 
+    /// Returns `true` when every component is finite.
     pub const fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite()
     }
 
+    /// Returns the smallest component.
     pub fn min_element(self) -> f64 {
         self.x.min(self.y)
     }

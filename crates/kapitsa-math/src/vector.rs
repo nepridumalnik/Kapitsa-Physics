@@ -3,30 +3,42 @@ use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssi
 /// A three-dimensional vector with `f64` components.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec3 {
+    /// X component.
     pub x: f64,
+    /// Y component.
     pub y: f64,
+    /// Z component.
     pub z: f64,
 }
 
 impl Vec3 {
+    /// Zero vector.
     pub const ZERO: Self = Self::splat(0.0);
+    /// Vector with all components equal to one.
     pub const ONE: Self = Self::splat(1.0);
+    /// Unit vector along x.
     pub const X: Self = Self::new(1.0, 0.0, 0.0);
+    /// Unit vector along y.
     pub const Y: Self = Self::new(0.0, 1.0, 0.0);
+    /// Unit vector along z.
     pub const Z: Self = Self::new(0.0, 0.0, 1.0);
 
+    /// Creates a vector from components.
     pub const fn new(x: f64, y: f64, z: f64) -> Self {
         Self { x, y, z }
     }
 
+    /// Creates a vector with all components equal to `value`.
     pub const fn splat(value: f64) -> Self {
         Self::new(value, value, value)
     }
 
+    /// Returns the dot product.
     pub const fn dot(self, rhs: Self) -> f64 {
         self.x * rhs.x + self.y * rhs.y + self.z * rhs.z
     }
 
+    /// Returns the cross product.
     pub const fn cross(self, rhs: Self) -> Self {
         Self::new(
             self.y * rhs.z - self.z * rhs.y,
@@ -35,6 +47,7 @@ impl Vec3 {
         )
     }
 
+    /// Returns the squared length.
     pub const fn length_squared(self) -> f64 {
         self.dot(self)
     }
@@ -67,55 +80,67 @@ impl Vec3 {
         Some(scaled / length)
     }
 
+    /// Returns `true` when every component is finite.
     pub const fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
     }
 
+    /// Returns the component-wise absolute value.
     pub fn abs(self) -> Self {
         Self::new(self.x.abs(), self.y.abs(), self.z.abs())
     }
 
+    /// Returns the component-wise minimum.
     pub fn min(self, rhs: Self) -> Self {
         Self::new(self.x.min(rhs.x), self.y.min(rhs.y), self.z.min(rhs.z))
     }
 
+    /// Returns the component-wise maximum.
     pub fn max(self, rhs: Self) -> Self {
         Self::new(self.x.max(rhs.x), self.y.max(rhs.y), self.z.max(rhs.z))
     }
 
+    /// Returns the largest component.
     pub fn max_element(self) -> f64 {
         self.x.max(self.y).max(self.z)
     }
 
+    /// Returns the smallest component.
     pub fn min_element(self) -> f64 {
         self.x.min(self.y).min(self.z)
     }
 
+    /// Adds two vectors, returning `None` on non-finite overflow.
     pub fn checked_add(self, rhs: Self) -> Option<Self> {
         let result = self + rhs;
         result.is_finite().then_some(result)
     }
 
+    /// Subtracts two vectors, returning `None` on non-finite overflow.
     pub fn checked_sub(self, rhs: Self) -> Option<Self> {
         let result = self - rhs;
         result.is_finite().then_some(result)
     }
 
+    /// Scales a vector, returning `None` on non-finite overflow.
     pub fn checked_mul_scalar(self, scalar: f64) -> Option<Self> {
         let result = self * scalar;
         (scalar.is_finite() && result.is_finite()).then_some(result)
     }
 
+    /// Returns a finite dot product or `None`.
     pub fn checked_dot(self, rhs: Self) -> Option<f64> {
         let result = self.dot(rhs);
         (self.is_finite() && rhs.is_finite() && result.is_finite()).then_some(result)
     }
 
+    /// Returns a finite cross product or `None`.
     pub fn checked_cross(self, rhs: Self) -> Option<Self> {
         let result = self.cross(rhs);
         (self.is_finite() && rhs.is_finite() && result.is_finite()).then_some(result)
     }
 
+    /// Returns a finite length or `None`.
     pub fn checked_length(self) -> Option<f64> {
         let result = self.length();
         result.is_finite().then_some(result)

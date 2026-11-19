@@ -8,19 +8,26 @@ use crate::{Mat3, Vec3};
 /// `a`. Rotations use a right-handed coordinate system and angles are radians.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Quat {
+    /// Rotation axis x component.
     pub x: f64,
+    /// Rotation axis y component.
     pub y: f64,
+    /// Rotation axis z component.
     pub z: f64,
+    /// Scalar component.
     pub w: f64,
 }
 
 impl Quat {
+    /// Identity rotation.
     pub const IDENTITY: Self = Self::new(0.0, 0.0, 0.0, 1.0);
 
+    /// Creates a quaternion from `(x, y, z, w)`.
     pub const fn new(x: f64, y: f64, z: f64, w: f64) -> Self {
         Self { x, y, z, w }
     }
 
+    /// Creates a rotation around a unit axis.
     pub fn from_axis_angle(axis: Vec3, angle: f64) -> Option<Self> {
         if !angle.is_finite() {
             return None;
@@ -31,18 +38,22 @@ impl Quat {
         Some(Self::new(axis.x * sin, axis.y * sin, axis.z * sin, cos))
     }
 
+    /// Returns the conjugate (inverse for unit quaternions).
     pub const fn conjugate(self) -> Self {
         Self::new(-self.x, -self.y, -self.z, self.w)
     }
 
+    /// Returns the squared norm.
     pub const fn length_squared(self) -> f64 {
         self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
     }
 
+    /// Returns the norm.
     pub fn length(self) -> f64 {
         self.x.hypot(self.y).hypot(self.z).hypot(self.w)
     }
 
+    /// Normalises the quaternion, returning `None` for invalid or zero input.
     pub fn try_normalize(self) -> Option<Self> {
         if !self.is_finite() {
             return None;
@@ -77,10 +88,12 @@ impl Quat {
         ))
     }
 
+    /// Returns `true` when every component is finite.
     pub const fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite() && self.z.is_finite() && self.w.is_finite()
     }
 
+    /// Returns `true` when the norm is unit length within tolerance.
     pub fn is_normalized(self) -> bool {
         self.is_finite() && (self.length() - 1.0).abs() <= 8.0 * f64::EPSILON
     }
