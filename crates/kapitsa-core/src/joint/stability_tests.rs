@@ -886,9 +886,9 @@ fn colored_solver_failure_rolls_back_direct_body_updates() {
 
     assert_eq!(
         world.step_with_executor(DT, &executor, 4),
-        Err(StepError::Collision(
+        Err(crate::Error::from(StepError::Collision(
             crate::collision::CollisionError::WorkerFailed
-        ))
+        )))
     );
     assert_eq!(executor.calls.load(std::sync::atomic::Ordering::Relaxed), 5);
     for (id, state) in original_states {

@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use kapitsa_core::{
+    Error,
     collision::CollisionError,
     execution::StepExecutor,
     rigid_body::BodyType,
@@ -109,7 +110,7 @@ impl<E: StepExecutor> StepEngine<E> {
     }
 
     #[cfg(test)]
-    pub(crate) fn step(&mut self, task_wait_duration: Duration) -> Result<StepStats, StepError> {
+    pub(crate) fn step(&mut self, task_wait_duration: Duration) -> Result<StepStats, Error> {
         self.step_with_dt(task_wait_duration, self.config.fixed_step_seconds())
     }
 
@@ -117,9 +118,9 @@ impl<E: StepExecutor> StepEngine<E> {
         &mut self,
         task_wait_duration: Duration,
         physics_dt: f64,
-    ) -> Result<StepStats, StepError> {
-        let physics_step =
-            Duration::try_from_secs_f64(physics_dt).map_err(|_| StepError::InvalidDeltaTime)?;
+    ) -> Result<StepStats, Error> {
+        let physics_step = Duration::try_from_secs_f64(physics_dt)
+            .map_err(|_| Error::from(StepError::InvalidDeltaTime))?;
         let started = Instant::now();
         let result = self.run_step(physics_dt);
         let step_duration = started.elapsed();
@@ -182,7 +183,7 @@ impl<E: StepExecutor> StepEngine<E> {
         })
     }
 
-    fn run_step(&mut self, physics_dt: f64) -> Result<(), StepError> {
+    fn run_step(&mut self, physics_dt: f64) -> Result<(), Error> {
         kapitsa_core::hydrodynamics::HydrodynamicsTask.execute(&self.world);
         let body_count = self.world.body_count();
         let worker_count = self.active_workers.min(body_count).max(1);
@@ -216,7 +217,11 @@ impl<E: StepExecutor> StepEngine<E> {
         if self.bucket_buffers.len() < bucket_count {
             self.bucket_buffers
                 .try_reserve(bucket_count - self.bucket_buffers.len())
-                .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+                .map_err(|_| {
+                    Error::from(StepError::Collision(
+                        CollisionError::SpatialIndexCapacityExceeded,
+                    ))
+                })?;
             self.bucket_buffers.resize_with(bucket_count, Vec::new);
         }
         let buckets = &mut self.bucket_buffers[..bucket_count];
@@ -440,10 +445,12 @@ mod tests {
             engine.set_parallelism(workers, Some(4));
             assert_eq!(
                 engine.step(Duration::ZERO),
-                Err(kapitsa_core::world::StepError::Gravity {
-                    body_id: ids[2],
-                    cause: kapitsa_core::gravity::GravityError::AtFieldCenter,
-                })
+                Err(kapitsa_core::Error::from(
+                    kapitsa_core::world::StepError::Gravity {
+                        body_id: ids[2],
+                        cause: kapitsa_core::gravity::GravityError::AtFieldCenter,
+                    }
+                ))
             );
             for (id, before) in ids.iter().zip(&original) {
                 assert_eq!(&engine.world().body(*id).unwrap().motion(), before);

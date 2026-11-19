@@ -5,6 +5,10 @@ use crate::Error;
 
 use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
 
+fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepError> {
+    result.as_ref().err().and_then(|error| error.downcast_ref())
+}
+
 use super::{
     BodyId, BodyStep, ColliderId, ForceSourceError, ForceSourceId, PhysicsWorld, StepError,
     WorldError, allocate_world_id, upsert_interaction,
@@ -965,7 +969,10 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
     } else {
         world.step(dt)
     };
-    assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+    assert!(matches!(
+        step_cause(&rejected),
+        Some(StepError::WeldBalance(_))
+    ));
     assert_eq!(world.body(body).ok_or("body")?.motion(), before);
     assert!(world.weld(weld).is_some());
     assert!(world.contact_impulses().is_empty());
@@ -983,7 +990,10 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
         } else {
             world.step(dt)
         };
-        assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+        assert!(matches!(
+            step_cause(&rejected),
+            Some(StepError::WeldBalance(_))
+        ));
         assert_eq!(world.body(body).ok_or("body")?.motion(), before);
         assert!(world.weld(weld).is_some());
         assert!(world.contact_impulses().is_empty());
@@ -1473,7 +1483,7 @@ impl StepExecutor for FailingExecutor {
     }
 }
 
-fn step_with_shards(world: &mut PhysicsWorld, dt: f64) -> Result<(), StepError> {
+fn step_with_shards(world: &mut PhysicsWorld, dt: f64) -> Result<(), Error> {
     let mut shards: [Vec<BodyStep>; 4] = std::array::from_fn(|_| Vec::new());
     world.step_with_shards(dt, &mut shards, &ScopedThreadExecutor, 4)
 }
@@ -1993,8 +2003,8 @@ fn physics_step_metrics_are_empty_after_a_failed_step() {
         .expect("finite velocity");
 
     assert!(matches!(
-        world.step(2.0),
-        Err(StepError::BodyIntegration { .. })
+        step_cause(&world.step(2.0)),
+        Some(StepError::BodyIntegration { .. })
     ));
     let metrics = world.physics_step_metrics();
     assert_eq!(
@@ -2398,11 +2408,11 @@ fn central_gravity_errors_are_reported_without_partial_body_changes() {
     ));
 
     assert!(matches!(
-        world.step(1.0),
-        Err(StepError::BodyIntegration {
+        step_cause(&world.step(1.0)),
+        Some(StepError::BodyIntegration {
             body_id,
             cause: IntegrationError::ArithmeticOverflow,
-        }) if body_id == second
+        }) if *body_id == second
     ));
     let first = world.body(first).expect("first body");
     assert_eq!(first.state().linear_velocity(), Vec3::ZERO);
@@ -2417,10 +2427,10 @@ fn central_gravity_errors_are_reported_without_partial_body_changes() {
     ));
     assert_eq!(
         at_center.step(0.1),
-        Err(StepError::Gravity {
+        Err(crate::Error::from(StepError::Gravity {
             body_id: center_body,
             cause: GravityError::AtFieldCenter,
-        })
+        }))
     );
     assert_eq!(
         at_center
@@ -3144,7 +3154,9 @@ fn invalid_material_fails_step_without_changing_body_or_forces() {
 
     assert_eq!(
         world.step(0.1),
-        Err(StepError::Collision(CollisionError::InvalidMaterial))
+        Err(crate::Error::from(StepError::Collision(
+            CollisionError::InvalidMaterial
+        )))
     );
     assert_eq!(world.body(body_id).map(RigidBody::motion), Some(original));
     assert!(world.collision_events().is_empty());
@@ -3172,7 +3184,9 @@ fn invalid_material_fails_shard_commit_before_any_body_changes() {
 
     assert_eq!(
         world.commit_step_shards(&shards),
-        Err(StepError::Collision(CollisionError::InvalidMaterial))
+        Err(crate::Error::from(StepError::Collision(
+            CollisionError::InvalidMaterial
+        )))
     );
     assert_eq!(world.body(body_id).map(RigidBody::motion), Some(original));
 }
@@ -3785,11 +3799,11 @@ fn indexed_force_source_step_failure_rolls_back_and_keeps_capacity() {
         .collect::<Vec<_>>();
 
     assert!(matches!(
-        world.step(2.0),
-        Err(StepError::BodyIntegration {
+        step_cause(&world.step(2.0)),
+        Some(StepError::BodyIntegration {
             body_id,
             cause: IntegrationError::ArithmeticOverflow,
-        }) if body_id == bodies[0]
+        }) if *body_id == bodies[0]
     ));
     assert!(
         originals
@@ -3843,10 +3857,10 @@ fn sharded_force_source_preparation_error_leaves_world_unchanged_and_can_retry()
 
     assert_eq!(
         step_with_shards(&mut world, 0.1),
-        Err(StepError::ForceSource {
+        Err(crate::Error::from(StepError::ForceSource {
             source_id: invalid_source,
             cause: ForceSourceError::InvalidBodyId,
-        })
+        }))
     );
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -3882,7 +3896,7 @@ fn sharded_fill_error_rolls_back_force_sources_and_can_retry() {
 
     assert_eq!(
         world.step_with_shards(0.1, &mut no_shards, &ScopedThreadExecutor, 4),
-        Err(StepError::InvalidStepResults)
+        Err(crate::Error::from(StepError::InvalidStepResults))
     );
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -3911,10 +3925,10 @@ fn sharded_gravity_error_rolls_back_force_sources_and_can_retry() {
 
     assert_eq!(
         step_with_shards(&mut world, 0.1),
-        Err(StepError::Gravity {
+        Err(crate::Error::from(StepError::Gravity {
             body_id: bodies[0],
             cause: GravityError::AtFieldCenter,
-        })
+        }))
     );
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -3966,7 +3980,13 @@ fn sharded_collision_preparation_error_rolls_back_force_sources_and_can_retry() 
         .collect::<Vec<_>>();
 
     let error = step_with_shards(&mut world, 0.1).expect_err("invalid spatial bounds");
-    assert!(matches!(error, StepError::Collision(_)), "{error:?}");
+    assert!(
+        matches!(
+            error.downcast_ref::<StepError>(),
+            Some(StepError::Collision(_))
+        ),
+        "{error:?}"
+    );
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
     assert!(world.gravity_body_updates.is_empty());
@@ -4002,11 +4022,11 @@ fn sharded_integration_error_rolls_back_force_sources_and_can_retry() {
         .collect::<Vec<_>>();
 
     assert!(matches!(
-        step_with_shards(&mut world, 1.0),
-        Err(StepError::BodyIntegration {
+        step_cause(&step_with_shards(&mut world, 1.0)),
+        Some(StepError::BodyIntegration {
             body_id,
             cause: IntegrationError::ArithmeticOverflow,
-        }) if body_id == bodies[3]
+        }) if *body_id == bodies[3]
     ));
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -4048,7 +4068,9 @@ fn sharded_executor_error_rolls_back_force_sources_and_can_retry() {
 
     assert_eq!(
         world.step_with_shards(0.1, &mut shards, &failing_executor, 4),
-        Err(StepError::Collision(CollisionError::WorkerFailed))
+        Err(crate::Error::from(StepError::Collision(
+            CollisionError::WorkerFailed
+        )))
     );
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -4089,7 +4111,9 @@ fn sharded_collision_solver_error_rolls_back_force_sources_and_can_retry() {
 
     assert_eq!(
         world.step_with_shards(0.1, &mut shards, &failing_executor, 4),
-        Err(StepError::Collision(CollisionError::WorkerFailed))
+        Err(crate::Error::from(StepError::Collision(
+            CollisionError::WorkerFailed
+        )))
     );
     assert_eq!(failing_executor.calls.load(Ordering::Relaxed), 2);
     assert_bodies_match(&world, &bodies, &originals);
@@ -4174,10 +4198,10 @@ fn force_source_step_error_preserves_existing_body_forces() {
 
     assert_eq!(
         world.step(0.1),
-        Err(StepError::ForceSource {
+        Err(crate::Error::from(StepError::ForceSource {
             source_id: source,
             cause: ForceSourceError::ArithmeticOverflow,
-        })
+        }))
     );
     assert_eq!(
         world.body(body).expect("body").forces().force(),
@@ -4195,7 +4219,10 @@ fn invalid_timestep_preserves_all_body_state_and_forces() -> Result<(), Error> {
     let original = world.body(id).ok_or(WorldError::InvalidBodyId)?.motion();
 
     for dt in [0.0, -0.1, f64::NAN, f64::INFINITY] {
-        assert_eq!(world.step(dt), Err(StepError::InvalidDeltaTime));
+        assert_eq!(
+            world.step(dt),
+            Err(crate::Error::from(StepError::InvalidDeltaTime))
+        );
         assert_eq!(world.body(id).map(RigidBody::motion), Some(original));
     }
     Ok(())
@@ -4225,10 +4252,10 @@ fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), Error
 
     assert_eq!(
         world.step(2.0),
-        Err(StepError::BodyIntegration {
+        Err(crate::Error::from(StepError::BodyIntegration {
             body_id: failing_id,
             cause: IntegrationError::ArithmeticOverflow,
-        })
+        }))
     );
     assert_eq!(
         world.body(first_id).map(RigidBody::motion),
@@ -4431,7 +4458,7 @@ fn step_shards_are_balanced_and_commit_the_same_states() -> Result<(), Box<dyn s
     }
     assert_eq!(
         sequential_world.commit_step_shards(&shards),
-        Err(StepError::InvalidStepResults)
+        Err(crate::Error::from(StepError::InvalidStepResults))
     );
     parallel_world.commit_step_shards(&shards)?;
     sequential_world.step(0.125)?;
@@ -4707,7 +4734,9 @@ fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn
     }
     assert_eq!(
         world.commit_step_shards_with_executor(&shards, &ScopedThreadExecutor, 4),
-        Err(StepError::Collision(CollisionError::CcdLimitExceeded))
+        Err(crate::Error::from(StepError::Collision(
+            CollisionError::CcdLimitExceeded
+        )))
     );
 
     for (&id, expected) in body_ids.iter().zip(before) {
@@ -4743,7 +4772,7 @@ fn incomplete_step_shards_do_not_change_the_world() -> Result<(), Box<dyn std::e
 
     assert_eq!(
         world.commit_step_shards(&shards),
-        Err(StepError::InvalidStepResults)
+        Err(crate::Error::from(StepError::InvalidStepResults))
     );
     assert_eq!(
         world.body(first_id).map(RigidBody::motion),
@@ -5129,7 +5158,7 @@ fn benchmark_force_source_update_scaling() {
     }
 }
 #[test]
-fn step_diagnostics_publish_only_on_success() -> Result<(), super::StepError> {
+fn step_diagnostics_publish_only_on_success() -> Result<(), crate::Error> {
     use super::{PhysicsWorld, StepDiagnostics, StepError};
 
     let mut world = PhysicsWorld::new();
@@ -5144,11 +5173,14 @@ fn step_diagnostics_publish_only_on_success() -> Result<(), super::StepError> {
     })?;
     assert!(world.step_diagnostics().used_fallback());
     assert_eq!(world.step_diagnostics(), clipped);
-    let failed: Result<(), StepError> = world.with_force_source_updates(|world| {
+    let failed: Result<(), crate::Error> = world.with_force_source_updates(|world| {
         world.pending_step_diagnostics = StepDiagnostics::default();
-        Err(StepError::InvalidStepResults)
+        Err(crate::Error::from(StepError::InvalidStepResults))
     });
-    assert_eq!(failed, Err(StepError::InvalidStepResults));
+    assert_eq!(
+        failed,
+        Err(crate::Error::from(StepError::InvalidStepResults))
+    );
     assert_eq!(world.step_diagnostics(), clipped);
     world.step(0.01)?;
     assert_eq!(world.step_diagnostics(), StepDiagnostics::default());

@@ -312,7 +312,7 @@ pub(crate) enum SimulationError {
     InvalidMeshSoundSpeed(kapitsa_core::aerodynamics::pressure::PressureError),
     AlreadyRunning,
     TaskRequiresStop,
-    Physics(kapitsa_core::world::StepError),
+    Physics(kapitsa_core::Error),
     WorkerPoolInitializationFailed,
     WorldUnavailable,
     WorldLost,
@@ -1149,12 +1149,12 @@ fn publish_failed_command_results(
     commands: &mut CommandQueue,
     events: &SimulationEvents,
     attempted_step: u64,
-    cause: StepError,
+    cause: kapitsa_core::Error,
 ) {
     for pending in commands.pending_results.drain(..) {
         match pending {
             DeferredCommandResult::Chunk { reply, outcome } => {
-                let step_failure = outcome.applied().then_some((attempted_step, cause));
+                let step_failure = outcome.applied().then(|| (attempted_step, cause.clone()));
                 let _ = reply.send(ChunkReply::Completed {
                     outcome,
                     step_failure,
@@ -1168,7 +1168,7 @@ fn publish_failed_command_results(
                 if result.is_ok() && !is_read_only_query {
                     result = Err(PhysicsClientError::StepFailedAfterApply {
                         step: attempted_step,
-                        cause,
+                        cause: cause.clone(),
                     });
                 }
                 let _ = reply.send(result);
@@ -1178,7 +1178,7 @@ fn publish_failed_command_results(
                 if result.result.is_ok() {
                     result.result = Err(Error::from(PhysicsClientError::StepFailedAfterApply {
                         step: attempted_step,
-                        cause,
+                        cause: cause.clone(),
                     }));
                 }
                 let _ = events.batch_results.send(result);
@@ -1187,14 +1187,16 @@ fn publish_failed_command_results(
     }
 }
 
-fn step_error_for_result(error: &StepRunnerError) -> StepError {
+fn step_error_for_result(error: &StepRunnerError) -> kapitsa_core::Error {
     match error {
-        StepRunnerError::Physics(error) => *error,
+        StepRunnerError::Physics(error) => error.clone(),
         StepRunnerError::InvalidConfig(_)
         | StepRunnerError::InvalidWorkerConfig(_)
         | StepRunnerError::RayonPool(_)
         | StepRunnerError::WorldUnavailable
-        | StepRunnerError::WorldLost => StepError::Collision(CollisionError::WorkerFailed),
+        | StepRunnerError::WorldLost => {
+            kapitsa_core::Error::from(StepError::Collision(CollisionError::WorkerFailed))
+        }
     }
 }
 

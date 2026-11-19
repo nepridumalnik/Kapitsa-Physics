@@ -49,7 +49,7 @@ fn pair_world() -> (PhysicsWorld, [BodyId; 2], JointId) {
     (world, ids, joint)
 }
 
-fn step_route(world: &mut PhysicsWorld, route: usize, dt: f64) -> Result<(), StepError> {
+fn step_route(world: &mut PhysicsWorld, route: usize, dt: f64) -> Result<(), crate::Error> {
     match route {
         0 => world.step(dt),
         1 => world.step_with_executor(dt, &super::ScopedThreadExecutor, 4),
@@ -112,7 +112,10 @@ fn free_ball_pair_numerical_failures_are_atomic() {
             let dt = if overflow { 1.0e100 } else { 1.0 };
             let error = step_route(&mut world, route, dt).unwrap_err();
             if !overflow {
-                assert_eq!(error, StepError::Collision(CollisionError::NonConvergent));
+                assert_eq!(
+                    error,
+                    crate::Error::from(StepError::Collision(CollisionError::NonConvergent))
+                );
             }
             assert_eq!(ids.map(|id| world.body(id).unwrap().motion()), original);
             assert_eq!(*world.joint(joint).unwrap(), original_joint);
@@ -218,7 +221,7 @@ fn free_ball_pair_rejects_stale_shards_before_any_commit() {
     let original = ids.map(|id| world.body(id).unwrap().motion());
     assert_eq!(
         world.commit_step_shards(&shards),
-        Err(StepError::InvalidStepResults)
+        Err(crate::Error::from(StepError::InvalidStepResults))
     );
     assert_eq!(ids.map(|id| world.body(id).unwrap().motion()), original);
 }
@@ -256,7 +259,9 @@ fn free_ball_pair_preserves_pending_collision_events_across_failure_and_commit()
         }
         assert_eq!(
             step_route(&mut world, route, 1.0),
-            Err(StepError::Collision(CollisionError::NonConvergent))
+            Err(crate::Error::from(StepError::Collision(
+                CollisionError::NonConvergent
+            )))
         );
         assert_eq!(world.collision_events(), events);
         for (id, body) in ids.into_iter().zip(original) {

@@ -460,14 +460,16 @@ pub(super) fn prepare(
     colliders: &DensePool<super::ColliderEntry>,
     caches: &mut Option<HashMap<BodyId, AssemblyAerodynamics>>,
     atmosphere: Atmosphere,
-) -> Result<Option<PreparedAssembly>, StepError> {
+) -> Result<Option<PreparedAssembly>, Error> {
     let error = || StepError::Aerodynamics {
         body_id,
         cause: AerodynamicsError::ArithmeticOverflow,
     };
-    let geometry_error = |cause| StepError::Aerodynamics {
-        body_id,
-        cause: AerodynamicsError::Geometry(cause),
+    let geometry_error = |cause| {
+        Error::from(StepError::Aerodynamics {
+            body_id,
+            cause: AerodynamicsError::Geometry(cause),
+        })
     };
     let Some(geometry) = geometry else {
         return Ok(None);
@@ -490,10 +492,10 @@ pub(super) fn prepare(
         match geometry.get(&part) {
             Some(PartGeometry::Wave(model)) => {
                 if wave_model.replace((part, model.as_ref())).is_some() {
-                    return Err(StepError::Aerodynamics {
+                    return Err(Error::from(StepError::Aerodynamics {
                         body_id,
                         cause: AerodynamicsError::UnsupportedModel,
-                    });
+                    }));
                 }
             }
             Some(PartGeometry::Mesh(_) | PartGeometry::Colliders) => pressure_enabled = true,
@@ -508,7 +510,7 @@ pub(super) fn prepare(
             .ok_or_else(error)?;
         let state = atmosphere
             .state_at(center)
-            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
         (state.density() != 0.0).then_some(state.wind_velocity())
     } else {
         None
@@ -528,7 +530,7 @@ pub(super) fn prepare(
         let point = transform.transform_point(model.section.local_transform().translation());
         let state = atmosphere
             .state_at(point)
-            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
         (state.density() != 0.0).then_some((part, model, local))
     } else {
         None
@@ -553,17 +555,17 @@ pub(super) fn prepare(
             let point = transform.transform_point(wing.local_transform().translation());
             let state = atmosphere
                 .state_at(point)
-                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
             if state.density() == 0.0 {
                 continue;
             }
             if wing_requests.len() >= 1_000_000 {
-                return Err(StepError::Aerodynamics {
+                return Err(Error::from(StepError::Aerodynamics {
                     body_id,
                     cause: AerodynamicsError::Wing(
                         crate::aerodynamics::wing::WingError::ShieldingBudgetExceeded,
                     ),
-                });
+                }));
             }
             wing_requests
                 .try_reserve(1)
@@ -622,7 +624,7 @@ pub(super) fn prepare(
             caches.get_mut(&body_id).ok_or_else(error)?,
         )
         .map(Some)
-        .map_err(|cause| StepError::Aerodynamics { body_id, cause });
+        .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }));
     }
     let mut sources = Vec::new();
     let mut collider_parts = Vec::new();
@@ -652,10 +654,10 @@ pub(super) fn prepare(
                     .filter(|p| p.body() == body_id)
                     .ok_or_else(error)?;
                 if owner.colliders().len() > entry.collider_tessellation.max_triangles() {
-                    return Err(StepError::Aerodynamics {
+                    return Err(Error::from(StepError::Aerodynamics {
                         body_id,
                         cause: AerodynamicsError::TessellationBudgetExceeded,
-                    });
+                    }));
                 }
                 let mut attached = Vec::new();
                 attached
@@ -674,15 +676,15 @@ pub(super) fn prepare(
                     attached,
                     entry.collider_tessellation,
                 )
-                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
                 collider_triangle_count = collider_triangle_count
                     .checked_add(mesh.triangles().len())
                     .ok_or_else(error)?;
                 if collider_triangle_count > entry.collider_tessellation.max_triangles() {
-                    return Err(StepError::Aerodynamics {
+                    return Err(Error::from(StepError::Aerodynamics {
                         body_id,
                         cause: AerodynamicsError::TessellationBudgetExceeded,
-                    });
+                    }));
                 }
                 collider_parts
                     .try_reserve(1)
@@ -735,7 +737,7 @@ pub(super) fn prepare(
         &wing_requests,
         &mut candidate,
     )
-    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+    .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
     caches.insert(body_id, candidate);
     Ok(Some(prepared))
 }
@@ -988,6 +990,10 @@ mod tests {
         rigid_body::RigidBody,
     };
     use kapitsa_math::Mat3;
+
+    fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepError> {
+        result.as_ref().err().and_then(|error| error.downcast_ref())
+    }
 
     fn weld() -> WeldDesc {
         WeldDesc {
@@ -1395,8 +1401,8 @@ mod tests {
         world.remove_part_collider(collider_id)?;
         let before_motion = world.body(id).ok_or("body")?.motion();
         assert!(matches!(
-            world.step(1e-7),
-            Err(StepError::Aerodynamics {
+            step_cause(&world.step(1e-7)),
+            Some(StepError::Aerodynamics {
                 cause: AerodynamicsError::UnsupportedModel,
                 ..
             })
@@ -1449,8 +1455,8 @@ mod tests {
                 world.step(1e-7)
             };
             assert!(matches!(
-                result,
-                Err(StepError::Aerodynamics {
+                step_cause(&result),
+                Some(StepError::Aerodynamics {
                     cause: AerodynamicsError::Geometry(GeometryError::CellBudgetExceeded),
                     ..
                 })
@@ -1811,8 +1817,8 @@ mod tests {
             } else {
                 let before = world.body(id).ok_or("body")?.motion();
                 assert!(matches!(
-                    world.step(1e-4),
-                    Err(StepError::Aerodynamics {
+                    step_cause(&world.step(1e-4)),
+                    Some(StepError::Aerodynamics {
                         cause: AerodynamicsError::Wing(WingError::UnsupportedFlow),
                         ..
                     })
@@ -1874,8 +1880,8 @@ mod tests {
                 world.step(1e-4)
             };
             assert!(matches!(
-                result,
-                Err(StepError::Aerodynamics {
+                step_cause(&result),
+                Some(StepError::Aerodynamics {
                     cause: AerodynamicsError::Wing(WingError::ShieldingBudgetExceeded),
                     ..
                 })
@@ -2091,10 +2097,10 @@ mod tests {
                     };
                     assert_eq!(
                         failed,
-                        Err(StepError::Aerodynamics {
+                        Err(Error::from(StepError::Aerodynamics {
                             body_id: first,
                             cause: AerodynamicsError::TessellationBudgetExceeded
-                        })
+                        }))
                     );
                     assert_eq!(world.body(first).ok_or("body")?.motion(), before);
                 } else {
@@ -2211,14 +2217,14 @@ mod tests {
             };
             assert_eq!(
                 result,
-                Err(StepError::Aerodynamics {
+                Err(Error::from(StepError::Aerodynamics {
                     body_id: id,
                     cause: AerodynamicsError::Geometry(GeometryError::CellBudgetExceeded)
-                })
+                }))
             );
-            if let Err(StepError::Aerodynamics { cause, .. }) = result {
+            if let Some(StepError::Aerodynamics { cause, .. }) = step_cause(&result) {
                 assert_eq!(
-                    std::error::Error::source(&cause)
+                    std::error::Error::source(cause)
                         .and_then(|source| source.downcast_ref::<GeometryError>()),
                     Some(&GeometryError::CellBudgetExceeded)
                 );
@@ -2492,10 +2498,10 @@ mod tests {
             )?;
             assert_eq!(
                 step(&mut world),
-                Err(StepError::Aerodynamics {
+                Err(Error::from(StepError::Aerodynamics {
                     body_id: id,
                     cause: AerodynamicsError::UnsupportedModel
-                })
+                }))
             );
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
             world.remove_part_collider(unsupported)?;
@@ -2577,8 +2583,8 @@ mod tests {
                 world.step(1e-8)
             };
             assert!(matches!(
-                unsupported,
-                Err(StepError::Aerodynamics {
+                step_cause(&unsupported),
+                Some(StepError::Aerodynamics {
                     cause: AerodynamicsError::Pressure(
                         crate::aerodynamics::pressure::PressureError::UnsupportedMach
                     ),

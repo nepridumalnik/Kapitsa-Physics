@@ -1,6 +1,10 @@
 use super::*;
 use kapitsa_math::Quat;
 
+fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepError> {
+    result.as_ref().err().and_then(|error| error.downcast_ref())
+}
+
 fn visibility_triangle(a: Vec3, b: Vec3, c: Vec3) -> SurfaceTriangle {
     let normal = (b - a).cross(c - a).try_normalize().unwrap();
     SurfaceTriangle {
@@ -1564,8 +1568,8 @@ fn voxel_slender_sections_apply_and_reject_rotation_in_world_steps()
                 world.step(1e-4)
             };
             assert!(matches!(
-                failed,
-                Err(StepError::Aerodynamics {
+                step_cause(&failed),
+                Some(StepError::Aerodynamics {
                     cause: AerodynamicsError::Hull(HullError::UnsupportedSlenderRotation),
                     ..
                 })

@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use kapitsa_core::{
+    Error,
     execution::{ExecutionError, SequentialExecutor, StepExecutor},
-    world::{PhysicsWorld, StepError},
+    world::PhysicsWorld,
 };
 
 use super::{
@@ -56,7 +57,7 @@ impl Simulation {
     }
 
     /// Runs exactly one fixed physics step before returning.
-    pub fn step(&mut self) -> Result<StepStats, StepError> {
+    pub fn step(&mut self) -> Result<StepStats, Error> {
         self.engine.step(Duration::ZERO)
     }
 

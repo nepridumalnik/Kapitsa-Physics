@@ -9,6 +9,10 @@ use crate::{
     world::PhysicsWorld,
 };
 
+fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepError> {
+    result.as_ref().err().and_then(|error| error.downcast_ref())
+}
+
 #[test]
 fn potential_sphere_world_steps_validate_geometry_and_rollback()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -75,7 +79,7 @@ fn potential_sphere_world_steps_validate_geometry_and_rollback()
                         _ => PressureError::InvalidPatch,
                     };
                     assert!(
-                        matches!(result, Err(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::Pressure(error) }) if body_id == id && error == expected),
+                        matches!(step_cause(&result), Some(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::Pressure(error) }) if *body_id == id && *error == expected),
                         "collider={collider_mode} sharded={sharded} case={case}: {result:?}"
                     );
                     assert_eq!(world.body(id).unwrap().motion(), before);
@@ -111,15 +115,15 @@ fn potential_sphere_revalidates_collider_and_rejects_unprepared_paths()
             Collider::new(Shape::Sphere(Sphere::new(1.0)?), Transform::identity()),
         )?;
         assert!(matches!(
-            AerodynamicsTask.execute(&world),
-            Err(super::StepError::Aerodynamics {
+            step_cause(&AerodynamicsTask.execute(&world)),
+            Some(super::StepError::Aerodynamics {
                 cause: AerodynamicsError::UnsupportedModel,
                 ..
             })
         ));
         assert!(matches!(
-            world.fill_step_shards(&mut [Vec::new()]),
-            Err(super::StepError::Aerodynamics {
+            step_cause(&world.fill_step_shards(&mut [Vec::new()])),
+            Some(super::StepError::Aerodynamics {
                 cause: AerodynamicsError::UnsupportedModel,
                 ..
             })
@@ -143,8 +147,8 @@ fn potential_sphere_revalidates_collider_and_rejects_unprepared_paths()
             world.step(0.001)
         };
         assert!(matches!(
-            result,
-            Err(super::StepError::Aerodynamics {
+            step_cause(&result),
+            Some(super::StepError::Aerodynamics {
                 cause: AerodynamicsError::Pressure(PressureError::InvalidPatch),
                 ..
             })
@@ -201,7 +205,7 @@ fn existing_mesh_and_collider_models_reject_subsonic_flow_without_state_change()
                 world.step(0.001)
             };
             assert!(
-                matches!(result, Err(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::Pressure(PressureError::UnsupportedMach) }) if body_id == id),
+                matches!(step_cause(&result), Some(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::Pressure(PressureError::UnsupportedMach) }) if *body_id == id),
                 "collider={collider_mode}, sharded={sharded}: {result:?}"
             );
             assert_eq!(world.body(id).unwrap().motion(), before);
@@ -860,10 +864,10 @@ fn geometry_modes_preserve_mesh_in_vacuum_and_reject_air_atomically() {
             } else {
                 assert_eq!(
                     result,
-                    Err(StepError::Aerodynamics {
+                    Err(crate::Error::from(StepError::Aerodynamics {
                         body_id: id,
                         cause: AerodynamicsError::UnsupportedModel,
-                    })
+                    }))
                 );
                 assert_eq!(world.body(id).unwrap().motion(), before);
             }
@@ -904,7 +908,7 @@ fn base_pressure_without_primary_model_is_rejected_in_both_step_paths()
             world.step(1e-5)
         };
         assert!(
-            matches!(result, Err(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::UnsupportedModel }) if body_id == id),
+            matches!(step_cause(&result), Some(super::StepError::Aerodynamics { body_id, cause: AerodynamicsError::UnsupportedModel }) if *body_id == id),
             "sharded={sharded}: {result:?}"
         );
         assert_eq!(world.body(id).unwrap().motion(), before);
@@ -969,8 +973,8 @@ fn unchecked_base_pressure_is_rejected_in_both_step_paths() -> Result<(), Box<dy
                     world.step(1e-5)
                 };
                 assert!(matches!(
-                    result,
-                    Err(super::StepError::Aerodynamics {
+                    step_cause(&result),
+                    Some(super::StepError::Aerodynamics {
                         cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
                         ..
                     })
@@ -1373,8 +1377,8 @@ fn selected_base_rejects_blocked_geometry_without_changing_motion()
                 };
                 assert!(
                     matches!(
-                        result,
-                        Err(super::StepError::Aerodynamics {
+                        step_cause(&result),
+                        Some(super::StepError::Aerodynamics {
                             cause: AerodynamicsError::Pressure(PressureError::BaseNotFullyVisible),
                             ..
                         })
@@ -1438,8 +1442,8 @@ fn base_visibility_is_rechecked_after_flow_reversal() -> Result<(), Box<dyn std:
             world.step(1e-5)
         };
         assert!(matches!(
-            result,
-            Err(super::StepError::Aerodynamics {
+            step_cause(&result),
+            Some(super::StepError::Aerodynamics {
                 cause: AerodynamicsError::Pressure(PressureError::BaseNotFullyVisible),
                 ..
             })
@@ -1508,8 +1512,8 @@ fn coincident_base_sources_are_rejected_before_loads() -> Result<(), Box<dyn std
             };
             assert!(
                 matches!(
-                    result,
-                    Err(super::StepError::Aerodynamics {
+                    step_cause(&result),
+                    Some(super::StepError::Aerodynamics {
                         cause: AerodynamicsError::Pressure(PressureError::BaseNotFullyVisible),
                         ..
                     })
@@ -1595,8 +1599,8 @@ fn base_visibility_tracks_rotation_on_mesh_and_colliders() -> Result<(), Box<dyn
             let result = step(&mut world);
             assert!(
                 matches!(
-                    result,
-                    Err(super::StepError::Aerodynamics {
+                    step_cause(&result),
+                    Some(super::StepError::Aerodynamics {
                         cause: AerodynamicsError::Pressure(PressureError::BaseNotFullyVisible),
                         ..
                     })
@@ -1645,10 +1649,10 @@ fn preflight_rejects_unchecked_base_pressure_without_mutating_world()
         let before = world.body(id).unwrap().motion();
         assert_eq!(
             AerodynamicsTask.execute(&world),
-            Err(super::StepError::Aerodynamics {
+            Err(crate::Error::from(super::StepError::Aerodynamics {
                 body_id: id,
                 cause: AerodynamicsError::UnsupportedModel
-            })
+            }))
         );
         assert_eq!(world.body(id).unwrap().motion(), before);
     }
@@ -1714,8 +1718,8 @@ fn base_pressure_outside_mach_domain_rolls_back_world_step()
                 world.step(1e-5)
             };
             assert!(matches!(
-                result,
-                Err(super::StepError::Aerodynamics {
+                step_cause(&result),
+                Some(super::StepError::Aerodynamics {
                     cause: crate::aerodynamics::AerodynamicsError::Pressure(
                         PressureError::UnsupportedMach
                     ),
@@ -1809,10 +1813,10 @@ fn mesh_pressure_errors_preserve_cause_and_motion_in_all_world_paths() {
             };
             assert_eq!(
                 result,
-                Err(StepError::Aerodynamics {
+                Err(crate::Error::from(StepError::Aerodynamics {
                     body_id: id,
                     cause: AerodynamicsError::Pressure(PressureError::UnsupportedMach),
-                })
+                }))
             );
             assert_eq!(world.body(id).unwrap().motion(), before);
             let error = AerodynamicsError::Pressure(PressureError::UnsupportedMach);
@@ -1880,10 +1884,10 @@ fn wing_world_loads_and_failures_match_between_step_paths() {
             } else {
                 assert_eq!(
                     result,
-                    Err(super::StepError::Aerodynamics {
+                    Err(crate::Error::from(super::StepError::Aerodynamics {
                         body_id: id,
                         cause: AerodynamicsError::Wing(WingError::UnsupportedFlow)
-                    })
+                    }))
                 );
                 assert_eq!(world.body(id).unwrap().motion(), before);
             }
@@ -2167,10 +2171,10 @@ fn data_driven_hull_body_part_dispatch_and_range_failure_rollback() {
             };
             assert_eq!(
                 result,
-                Err(super::StepError::Aerodynamics {
+                Err(crate::Error::from(super::StepError::Aerodynamics {
                     body_id: id,
                     cause: AerodynamicsError::Hull(HullError::UnsupportedMach),
-                })
+                }))
             );
             assert_eq!(world.body(id).unwrap().motion(), before);
             if let Some(root) = root {
@@ -2275,10 +2279,10 @@ fn normal_hull_table_range_failure_rolls_back_body_and_part_loads() {
                 };
                 assert_eq!(
                     result,
-                    Err(super::StepError::Aerodynamics {
+                    Err(crate::Error::from(super::StepError::Aerodynamics {
                         body_id: id,
                         cause: AerodynamicsError::Hull(HullError::UnsupportedMach),
-                    })
+                    }))
                 );
                 assert_eq!(world.body(id).unwrap().motion(), before);
                 if let Some(root) = root {
@@ -2363,10 +2367,10 @@ fn hull_later_section_error_rolls_back_all_loads() {
         };
         assert_eq!(
             result,
-            Err(super::StepError::Aerodynamics {
+            Err(crate::Error::from(super::StepError::Aerodynamics {
                 body_id: id,
                 cause: AerodynamicsError::Hull(HullError::UnsupportedMach)
-            })
+            }))
         );
         assert_eq!(world.body(id).unwrap().motion(), before);
         assert!(
@@ -2426,10 +2430,10 @@ fn later_wing_failure_rolls_back_earlier_loads() {
         };
         assert_eq!(
             result,
-            Err(super::StepError::Aerodynamics {
+            Err(crate::Error::from(super::StepError::Aerodynamics {
                 body_id: id,
                 cause: AerodynamicsError::Wing(WingError::UnsupportedFlow)
-            })
+            }))
         );
         assert_eq!(world.body(id).unwrap().motion(), before);
         world
@@ -2561,8 +2565,8 @@ fn changing_aerodynamics_invalidates_prepared_motion() {
     let before = world.body(id).unwrap().motion();
     world.set_aerodynamics(id, Aerodynamics::Colliders).unwrap();
     assert!(matches!(
-        world.commit_step_shards(&shards),
-        Err(StepError::InvalidStepResults)
+        step_cause(&world.commit_step_shards(&shards)),
+        Some(StepError::InvalidStepResults)
     ));
     assert_eq!(world.body(id).unwrap().motion(), before);
     assert!(matches!(
@@ -2772,10 +2776,10 @@ fn collider_pressure_cache_invalidation_and_sharded_parity()
             )?;
             assert_eq!(
                 step(&mut world),
-                Err(crate::world::StepError::Aerodynamics {
+                Err(crate::Error::from(crate::world::StepError::Aerodynamics {
                     body_id: id,
                     cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel
-                })
+                }))
             );
             assert_eq!(before, world.body(id).ok_or("body")?.motion());
         }
@@ -2972,7 +2976,10 @@ fn nonzero_unrepresentable_mesh_flow_is_not_silently_treated_as_rest()
             world.step(1e-8)
         };
         assert!(
-            matches!(result, Err(crate::world::StepError::Aerodynamics { .. })),
+            matches!(
+                step_cause(&result),
+                Some(crate::world::StepError::Aerodynamics { .. })
+            ),
             "result={result:?}"
         );
         assert_eq!(world.body(id).ok_or("body")?.motion(), before);
@@ -3091,8 +3098,8 @@ fn wave_transition_world_and_rollback() -> Result<(), Box<dyn std::error::Error>
                     assert!(world.body(id).ok_or("body")?.state().linear_velocity().x < speed);
                 } else {
                     assert!(matches!(
-                        result,
-                        Err(crate::world::StepError::Aerodynamics {
+                        step_cause(&result),
+                        Some(crate::world::StepError::Aerodynamics {
                             cause: AerodynamicsError::Hull(HullError::Wave(
                                 WaveDragError::UnsupportedMach
                             )),
@@ -3229,8 +3236,8 @@ fn automatic_voxel_wave_tracks_primary_geometry_and_step_paths()
         let before = world.body(id).ok_or("body")?.motion();
         let error = world.step(1e-5);
         assert!(matches!(
-            error,
-            Err(crate::world::StepError::Aerodynamics {
+            step_cause(&error),
+            Some(crate::world::StepError::Aerodynamics {
                 cause: AerodynamicsError::Hull(HullError::UnsupportedMach),
                 ..
             })
@@ -3288,8 +3295,8 @@ fn automatic_voxel_wave_skips_vacuum_and_rolls_back_invalid_geometry()
     )?));
     let before = world.body(id).ok_or("body")?.motion();
     assert!(matches!(
-        world.step(1e-5),
-        Err(crate::world::StepError::Aerodynamics {
+        step_cause(&world.step(1e-5)),
+        Some(crate::world::StepError::Aerodynamics {
             cause: AerodynamicsError::Geometry(GeometryError::InvalidConfig),
             ..
         })

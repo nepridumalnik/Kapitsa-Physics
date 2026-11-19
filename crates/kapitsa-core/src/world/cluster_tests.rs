@@ -1596,15 +1596,15 @@ fn pending_weld_split_plan_uses_staged_loads_and_prediction()
     let result = world.with_force_source_updates(|world| {
         let motion = world
             .body(body)
-            .ok_or(StepError::InvalidStepResults)?
+            .ok_or_else(|| crate::Error::from(StepError::InvalidStepResults))?
             .motion();
-        let predicted =
-            crate::rigid_body::predict(&motion, 0.01).map_err(|_| StepError::InvalidStepResults)?;
+        let predicted = crate::rigid_body::predict(&motion, 0.01)
+            .map_err(|_| crate::Error::from(StepError::InvalidStepResults))?;
         world.collision_system.begin_step();
         world.collision_system.stage_prediction(body, predicted);
         let plans = world
             .prepare_pending_weld_splits(1e-12, 1e-12)
-            .map_err(|_| StepError::InvalidStepResults)?;
+            .map_err(|_| crate::Error::from(StepError::InvalidStepResults))?;
         assert_eq!(plans.len(), 1);
         assert_eq!(
             plans[0].prepared_bodies[0].state().linear_velocity(),
@@ -1612,7 +1612,7 @@ fn pending_weld_split_plan_uses_staged_loads_and_prediction()
         );
         assert_eq!(world.part_body(child), Some(body));
         world.collision_system.abort_step();
-        Err::<(), _>(StepError::InvalidDeltaTime)
+        Err::<(), crate::Error>(crate::Error::from(StepError::InvalidDeltaTime))
     });
     assert!(result.is_err());
     assert_eq!(world.part_body(child), Some(body));

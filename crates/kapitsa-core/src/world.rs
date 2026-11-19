@@ -14,6 +14,7 @@ use std::time::Instant;
 
 mod aerodynamics {
     use super::{BodyId, PartId, PhysicsWorld, StepError};
+    use crate::Error;
     use crate::aerodynamics::{AerodynamicProperties, Atmosphere};
 
     /// Identifies the rigid object that owns an aerodynamic surface.
@@ -68,7 +69,7 @@ mod aerodynamics {
     pub struct AerodynamicsTask;
 
     impl AerodynamicsTask {
-        pub fn execute(self, world: &PhysicsWorld) -> Result<(), StepError> {
+        pub fn execute(self, world: &PhysicsWorld) -> Result<(), Error> {
             let atmosphere = world.atmosphere;
             if matches!(atmosphere, Atmosphere::Vacuum) {
                 return Ok(());
@@ -97,10 +98,10 @@ mod aerodynamics {
                 if !entry.body.base_pressure_patches.is_empty()
                     || entry.body.potential_sphere.is_some()
                 {
-                    return Err(StepError::Aerodynamics {
+                    return Err(Error::from(StepError::Aerodynamics {
                         body_id,
                         cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
-                    });
+                    }));
                 }
                 let patches = super::assembly_aerodynamics::prepare(
                     body_id,
@@ -513,14 +514,14 @@ pub enum JointTarget {
 
 struct GravityBodyUpdate {
     id: BodyId,
-    error: Option<StepError>,
+    error: Option<Error>,
     original: BodyMotion,
     prepared: BodyMotion,
 }
 
 struct AerodynamicsBodyUpdate {
     id: BodyId,
-    error: Option<StepError>,
+    error: Option<Error>,
     original: BodyMotion,
     prepared: BodyMotion,
     loads: PreparedAerodynamicLoads,
@@ -799,7 +800,7 @@ pub struct PhysicsWorld {
     error_policy: ErrorPolicy,
     step_diagnostics: StepDiagnostics,
     pending_step_diagnostics: StepDiagnostics,
-    staged_step_result: Option<Result<(), StepError>>,
+    staged_step_result: Option<Result<(), Error>>,
     pub(crate) command_scratch: Option<crate::command::BatchScratch>,
     body_revision: u64,
     automatic_weld_failure: Option<(f64, f64)>,
@@ -866,14 +867,14 @@ pub struct PhysicsWorld {
 
 /// Opaque copied body data used to predict and atomically commit a world step.
 #[doc(hidden)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct BodyStep {
     body_id: BodyId,
     source: BodyMotion,
     body_revision: u64,
     predicted: Option<BodyState>,
     dt: Option<f64>,
-    error: Option<StepError>,
+    error: Option<Error>,
     prepared: BodyMotion,
 }
 
@@ -882,7 +883,7 @@ impl BodyStep {
         self.body_id
     }
 
-    pub fn integrate(&mut self, dt: f64) -> Result<(), StepError> {
+    pub fn integrate(&mut self, dt: f64) -> Result<(), Error> {
         self.predicted = None;
         self.dt = None;
         self.error = None;
@@ -893,8 +894,8 @@ impl BodyStep {
                     body_id: self.body_id,
                     cause,
                 };
-                self.error = Some(error);
-                return Err(error);
+                self.error = Some(Error::from(error));
+                return Err(Error::from(error));
             }
         };
         self.predicted = Some(predicted);
@@ -1063,7 +1064,7 @@ impl PhysicsWorld {
 
     fn stage_automatic_weld_splits(
         &mut self,
-    ) -> Result<Option<cluster::InsertedWeldSplits>, StepError> {
+    ) -> Result<Option<cluster::InsertedWeldSplits>, Error> {
         let Some((force, moment)) = self.automatic_weld_failure else {
             return Ok(None);
         };
@@ -1082,7 +1083,7 @@ impl PhysicsWorld {
         }
         self.insert_weld_split_bodies(plans)
             .map(Some)
-            .map_err(StepError::WeldSplit)
+            .map_err(|error| Error::from(StepError::WeldSplit(error)))
     }
     /// Calculates instantaneous parent-on-child weld reactions from the last
     /// successful full-step snapshot. Currently only force-free
@@ -2504,7 +2505,7 @@ impl PhysicsWorld {
     ///
     /// This is the convenience form of [`Self::simulate`] followed by
     /// [`Self::fetch_results`].
-    pub fn step(&mut self, dt: f64) -> Result<(), StepError> {
+    pub fn step(&mut self, dt: f64) -> Result<(), Error> {
         self.simulate(dt);
         self.fetch_results().map(|_| ())
     }
@@ -2526,7 +2527,7 @@ impl PhysicsWorld {
     /// events, joint-break events, diagnostics, and contact impulses. A failed
     /// staged step returns its error and publishes no new result view. Calling
     /// this without a preceding `simulate` returns the current committed view.
-    pub fn fetch_results(&mut self) -> Result<StepResults<'_>, StepError> {
+    pub fn fetch_results(&mut self) -> Result<StepResults<'_>, Error> {
         let staged = self.staged_step_result.take().unwrap_or(Ok(()));
         staged.map(|()| StepResults { world: self })
     }
@@ -2537,7 +2538,7 @@ impl PhysicsWorld {
         dt: f64,
         executor: &E,
         worker_count: usize,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         if worker_count <= 1 {
             return self.step_with_executor_inner(dt, executor, worker_count);
         }
@@ -2550,7 +2551,9 @@ impl PhysicsWorld {
                 self.rollback_gravity_updates();
                 self.rollback_aerodynamics_updates();
                 self.rollback_force_source_updates();
-                Err(StepError::Collision(CollisionError::WorkerFailed))
+                Err(Error::from(StepError::Collision(
+                    CollisionError::WorkerFailed,
+                )))
             }
         }
     }
@@ -2560,9 +2563,9 @@ impl PhysicsWorld {
         dt: f64,
         executor: &E,
         worker_count: usize,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         if !dt.is_finite() || dt <= 0.0 {
-            return Err(StepError::InvalidDeltaTime);
+            return Err(Error::from(StepError::InvalidDeltaTime));
         }
         self.with_force_source_updates(|world| {
             world.prepare_aerodynamics_updates(executor, worker_count, dt)?;
@@ -2573,14 +2576,14 @@ impl PhysicsWorld {
 
     fn with_force_source_updates<T>(
         &mut self,
-        operation: impl FnOnce(&mut Self) -> Result<T, StepError>,
-    ) -> Result<T, StepError> {
+        operation: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         self.pending_step_diagnostics = StepDiagnostics::default();
         self.contact_impulses_pending.clear();
         self.contact_impulses_omitted_pending = 0;
         self.contact_ccd_clipped_pending = false;
         self.validate_collision_inputs()
-            .map_err(StepError::Collision)?;
+            .map_err(|error| Error::from(StepError::Collision(error)))?;
         self.cluster_load_states_pending.clear();
         let cluster_count = self
             .bodies
@@ -2720,7 +2723,7 @@ impl PhysicsWorld {
             });
         }
         if let Err((source_id, cause)) = self.prepare_force_source_updates() {
-            return Err(StepError::ForceSource { source_id, cause });
+            return Err(Error::from(StepError::ForceSource { source_id, cause }));
         }
 
         let result = operation(self);
@@ -2790,7 +2793,7 @@ impl PhysicsWorld {
         shards: &mut [Vec<BodyStep>],
         executor: &E,
         worker_count: usize,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         if self.body_count() == 0 {
             return self.step_with_executor_inner(dt, executor, worker_count);
         }
@@ -2804,7 +2807,9 @@ impl PhysicsWorld {
                 self.rollback_gravity_updates();
                 self.rollback_aerodynamics_updates();
                 self.rollback_force_source_updates();
-                Err(StepError::Collision(CollisionError::WorkerFailed))
+                Err(Error::from(StepError::Collision(
+                    CollisionError::WorkerFailed,
+                )))
             }
         }
     }
@@ -2815,14 +2820,14 @@ impl PhysicsWorld {
         shards: &mut [Vec<BodyStep>],
         executor: &E,
         worker_count: usize,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         if !dt.is_finite() || dt <= 0.0 {
-            return Err(StepError::InvalidDeltaTime);
+            return Err(Error::from(StepError::InvalidDeltaTime));
         }
 
         self.with_force_source_updates(|world| {
             if shards.is_empty() {
-                return Err(StepError::InvalidStepResults);
+                return Err(Error::from(StepError::InvalidStepResults));
             }
             // Prepare persistent aerodynamic forces through the same path as the
             // ordinary step.  In particular, Mesh requires prepared surface
@@ -2849,14 +2854,14 @@ impl PhysicsWorld {
         dt: f64,
         executor: &E,
         worker_count: usize,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         self.collision_system.begin_step();
         #[cfg(feature = "bench-internals")]
         self.collision_system
             .record_energy_before_integration(self.energy_components());
         if let Err(error) = self.prepare_joint_collision_pairs() {
             self.collision_system.abort_step();
-            return Err(StepError::Collision(error));
+            return Err(Error::from(StepError::Collision(error)));
         }
 
         #[cfg(feature = "bench-internals")]
@@ -2878,7 +2883,7 @@ impl PhysicsWorld {
                 }
                 Err(cause) => {
                     self.collision_system.abort_step();
-                    return Err(StepError::BodyIntegration { body_id, cause });
+                    return Err(Error::from(StepError::BodyIntegration { body_id, cause }));
                 }
             }
         }
@@ -2889,19 +2894,19 @@ impl PhysicsWorld {
         let worker_count = worker_count.max(1);
         if let Err(error) = self.prepare_collision_candidates(dt, worker_count, executor) {
             self.collision_system.abort_step();
-            return Err(StepError::Collision(error));
+            return Err(Error::from(StepError::Collision(error)));
         }
         if let Err(error) = self.process_collision_candidates(worker_count, executor, dt) {
             self.collision_system.abort_step();
-            return Err(StepError::Collision(error));
+            return Err(Error::from(StepError::Collision(error)));
         }
         if let Err(error) = self.prepare_joint_break_commit() {
             self.collision_system.abort_step();
-            return Err(StepError::Collision(error));
+            return Err(Error::from(StepError::Collision(error)));
         }
         if let Err(error) = self.stage_contact_impulses() {
             self.collision_system.abort_step();
-            return Err(StepError::Collision(error));
+            return Err(Error::from(StepError::Collision(error)));
         }
         let splits = match self.stage_automatic_weld_splits() {
             Ok(splits) => splits,
@@ -3241,7 +3246,7 @@ impl PhysicsWorld {
         body: &mut BodyMotion,
         parts: &DensePool<ClusterPart>,
         inputs: AerodynamicsInputs<'_>,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         let AerodynamicsInputs {
             mesh_sound_speed,
             cluster,
@@ -3271,10 +3276,10 @@ impl PhysicsWorld {
                         | crate::aerodynamics::Aerodynamics::Colliders
                 ))
         {
-            return Err(StepError::Aerodynamics {
+            return Err(Error::from(StepError::Aerodynamics {
                 body_id,
                 cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
-            });
+            }));
         }
         let error = || StepError::Aerodynamics {
             body_id,
@@ -3371,17 +3376,17 @@ impl PhysicsWorld {
                 .state_at(point)
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             if state.density() != 0.0 {
-                return Err(StepError::Aerodynamics {
+                return Err(Error::from(StepError::Aerodynamics {
                     body_id,
                     cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
-                });
+                }));
             }
         }
         for section in primary_hull.iter().chain(voxel_wave) {
             let transform = body.state().transform();
             let point = transform.transform_point(section.local_transform().translation());
             if !point.is_finite() {
-                return Err(error());
+                return Err(Error::from(error()));
             }
             let state = atmosphere
                 .state_at(point)
@@ -3425,7 +3430,7 @@ impl PhysicsWorld {
                                  visibility: Option<crate::aerodynamics::wing::WingVisibility>,
                                  visibility_required: bool,
                                  owner: Option<PartId>|
-         -> Result<(), StepError> {
+         -> Result<(), Error> {
             let transform = body
                 .state()
                 .transform()
@@ -3437,19 +3442,19 @@ impl PhysicsWorld {
                 .transform_point(body.physics().mass().ok_or_else(error)?.center_of_mass());
             let point = transform.transform_point(surface.local_transform().translation());
             if !point.is_finite() {
-                return Err(error());
+                return Err(Error::from(error()));
             }
             let atmosphere = atmosphere
                 .state_at(point)
                 .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             if atmosphere.density() != 0.0 {
                 if visibility_required && visibility.is_none() {
-                    return Err(StepError::Aerodynamics {
+                    return Err(Error::from(StepError::Aerodynamics {
                         body_id,
                         cause: crate::aerodynamics::AerodynamicsError::Wing(
                             crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
                         ),
-                    });
+                    }));
                 }
                 let flow = crate::aerodynamics::pressure::PressureFlow {
                     atmosphere,
@@ -3543,7 +3548,7 @@ impl PhysicsWorld {
             for section in part.aerodynamic_hull.iter().chain(derived) {
                 let point = part_transform.transform_point(section.local_transform().translation());
                 if !point.is_finite() {
-                    return Err(error());
+                    return Err(Error::from(error()));
                 }
                 let state = atmosphere
                     .state_at(point)
@@ -3732,7 +3737,7 @@ impl PhysicsWorld {
                 })
                 .ok_or_else(error)?;
             if !power.is_finite() || !curvature.is_finite() {
-                return Err(error());
+                return Err(Error::from(error()));
             }
             if curvature > 0.0 {
                 scale = (-power / dt / curvature).clamp(0.0, 1.0);
@@ -3855,7 +3860,7 @@ impl PhysicsWorld {
             let rate = (curvature / metric).sqrt();
             let half_angle = 0.5 * dt * rate;
             if !half_angle.is_finite() {
-                return Err(error());
+                return Err(Error::from(error()));
             }
             let (factor, damping) = if half_angle <= 1.0 {
                 let factor = 1.0 / (1.0 + half_angle * half_angle);
@@ -3908,7 +3913,7 @@ impl PhysicsWorld {
         body: &BodyMotion,
         atmosphere: Atmosphere,
         cache: &mut crate::aerodynamics::cache::PreparedGeometryCache,
-    ) -> Result<Option<crate::aerodynamics::hull::HullSection>, StepError> {
+    ) -> Result<Option<crate::aerodynamics::hull::HullSection>, Error> {
         if body.physics().body_type() != BodyType::Dynamic {
             return Ok(None);
         }
@@ -3950,7 +3955,7 @@ impl PhysicsWorld {
         executor: &E,
         workers: usize,
         dt: f64,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         self.recycle_aerodynamics_updates();
         self.part_hull_pending.clear();
         self.part_wing_pending.clear();
@@ -3983,10 +3988,10 @@ impl PhysicsWorld {
                 dense: dense_id,
             };
             if self.aerodynamics_body_updates.try_reserve(1).is_err() {
-                return Err(StepError::Aerodynamics {
+                return Err(Error::from(StepError::Aerodynamics {
                     body_id,
                     cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                });
+                }));
             }
             if entry.mesh_aerodynamics.as_ref().is_some_and(|prepared| {
                 match (
@@ -4054,10 +4059,10 @@ impl PhysicsWorld {
                         body_id,
                         cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
                     })?
-                    .ok_or(StepError::Aerodynamics {
+                    .ok_or(Error::from(StepError::Aerodynamics {
                         body_id,
                         cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                    })?;
+                    }))?;
                 Some(
                     atmosphere
                         .state_at(center)
@@ -4103,10 +4108,10 @@ impl PhysicsWorld {
                         || mesh_patches.is_some()
                         || assembly_wave.is_some()
                     {
-                        return Err(StepError::Aerodynamics {
+                        return Err(Error::from(StepError::Aerodynamics {
                             body_id,
                             cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
-                        });
+                        }));
                     }
                     // A strict work budget limits the quadratic convexity check.
                     const SPHERE_MESH_WORK_LIMIT: usize = 100_000_000;
@@ -4129,10 +4134,10 @@ impl PhysicsWorld {
                     if !entry.body.base_pressure_patches.is_empty()
                         && entry.body.base_pressure_triangles.is_none()
                     {
-                        return Err(StepError::Aerodynamics {
+                        return Err(Error::from(StepError::Aerodynamics {
                             body_id,
                             cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
-                        });
+                        }));
                     }
                     let config = entry
                         .mesh_aerodynamics
@@ -4178,10 +4183,10 @@ impl PhysicsWorld {
                         .state()
                         .linear_velocity()
                         .checked_sub(primary_atmosphere.wind_velocity())
-                        .ok_or(StepError::Aerodynamics {
+                        .ok_or(Error::from(StepError::Aerodynamics {
                             body_id,
                             cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                        })?;
+                        }))?;
                     let direction = entry
                         .body
                         .state()
@@ -4189,10 +4194,10 @@ impl PhysicsWorld {
                         .rotation()
                         .conjugate()
                         .rotate_vector(relative)
-                        .ok_or(StepError::Aerodynamics {
+                        .ok_or(Error::from(StepError::Aerodynamics {
                             body_id,
                             cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                        })?;
+                        }))?;
                     let inverse = entry.body.state().transform().inverse().map_err(|_| {
                         StepError::Aerodynamics {
                             body_id,
@@ -4204,10 +4209,10 @@ impl PhysicsWorld {
                         .body
                         .physics()
                         .mass()
-                        .ok_or(StepError::Aerodynamics {
+                        .ok_or(Error::from(StepError::Aerodynamics {
                             body_id,
                             cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
-                        })?
+                        }))?
                         .center_of_mass();
                     if let Some(selected) = entry
                         .body
@@ -4337,7 +4342,7 @@ impl PhysicsWorld {
         if let Some(error) = self
             .aerodynamics_body_updates
             .iter()
-            .find_map(|update| update.error)
+            .find_map(|update| update.error.clone())
         {
             return Err(error);
         }
@@ -4449,7 +4454,7 @@ impl PhysicsWorld {
                 })?
                 != update.applied_mesh_pressure
             {
-                return Err(StepError::InvalidStepResults);
+                return Err(Error::from(StepError::InvalidStepResults));
             }
         }
 
@@ -4506,7 +4511,7 @@ impl PhysicsWorld {
         fields: &DensePool<Gravity>,
         body_id: BodyId,
         body: &BodyMotion,
-    ) -> Result<Vec3, StepError> {
+    ) -> Result<Vec3, Error> {
         if gravity.is_none() && fields.is_empty() {
             return Ok(Vec3::ZERO);
         }
@@ -4519,10 +4524,10 @@ impl PhysicsWorld {
                 body_id,
                 cause: GravityError::ArithmeticOverflow,
             })?
-            .ok_or(StepError::Gravity {
+            .ok_or(Error::from(StepError::Gravity {
                 body_id,
                 cause: GravityError::ArithmeticOverflow,
-            })?;
+            }))?;
         let mut acceleration = match gravity {
             Some(gravity) => gravity
                 .acceleration_at(center)
@@ -4533,21 +4538,27 @@ impl PhysicsWorld {
             let next = field
                 .acceleration_at(center)
                 .map_err(|cause| StepError::Gravity { body_id, cause })?;
-            acceleration = acceleration.checked_add(next).ok_or(StepError::Gravity {
+            acceleration =
+                acceleration
+                    .checked_add(next)
+                    .ok_or(Error::from(StepError::Gravity {
+                        body_id,
+                        cause: GravityError::ArithmeticOverflow,
+                    }))?;
+        }
+        let mass = body
+            .physics()
+            .mass()
+            .ok_or(Error::from(StepError::Gravity {
                 body_id,
                 cause: GravityError::ArithmeticOverflow,
-            })?;
-        }
-        let mass = body.physics().mass().ok_or(StepError::Gravity {
-            body_id,
-            cause: GravityError::ArithmeticOverflow,
-        })?;
+            }))?;
         acceleration
             .checked_mul_scalar(mass.mass())
-            .ok_or(StepError::Gravity {
+            .ok_or(Error::from(StepError::Gravity {
                 body_id,
                 cause: GravityError::ArithmeticOverflow,
-            })
+            }))
     }
 
     fn apply_gravity(
@@ -4555,7 +4566,7 @@ impl PhysicsWorld {
         fields: &DensePool<Gravity>,
         body_id: BodyId,
         body: &mut BodyMotion,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         let force = Self::gravity_force_for_body(gravity, fields, body_id, body)?;
         if force != Vec3::ZERO {
             body.apply_force(force).map_err(|_| StepError::Gravity {
@@ -4570,7 +4581,7 @@ impl PhysicsWorld {
         &mut self,
         executor: &E,
         workers: usize,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         self.gravity_body_updates.clear();
         self.part_gravity_pending.clear();
         if self.central_gravity.is_none() && self.gravity_fields.is_empty() {
@@ -4587,10 +4598,10 @@ impl PhysicsWorld {
             }
             if self.gravity_body_updates.try_reserve(1).is_err() {
                 self.gravity_body_updates.clear();
-                return Err(StepError::Gravity {
+                return Err(Error::from(StepError::Gravity {
                     body_id,
                     cause: GravityError::StorageCapacityExceeded,
-                });
+                }));
             }
             self.gravity_body_updates.push(GravityBodyUpdate {
                 id: body_id,
@@ -4618,7 +4629,7 @@ impl PhysicsWorld {
         if let Some(error) = self
             .gravity_body_updates
             .iter()
-            .find_map(|update| update.error)
+            .find_map(|update| update.error.clone())
         {
             self.gravity_body_updates.clear();
             return Err(error);
@@ -5645,7 +5656,7 @@ impl PhysicsWorld {
     /// This low-level helper does not prepare persistent force sources. Use
     /// [`Self::step_with_shards`] to execute a complete step.
     #[doc(hidden)]
-    pub fn fill_step_shards(&self, shards: &mut [Vec<BodyStep>]) -> Result<(), StepError> {
+    pub fn fill_step_shards(&self, shards: &mut [Vec<BodyStep>]) -> Result<(), Error> {
         self.fill_step_shards_with_executor(shards, &SequentialExecutor)
     }
 
@@ -5653,7 +5664,7 @@ impl PhysicsWorld {
         &self,
         shards: &mut [Vec<BodyStep>],
         executor: &E,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         self.fill_step_shards_with_executor_at_dt(shards, executor, None, true)
     }
 
@@ -5663,9 +5674,9 @@ impl PhysicsWorld {
         executor: &E,
         dt: Option<f64>,
         apply_aerodynamics: bool,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         if shards.is_empty() {
-            return Err(StepError::InvalidStepResults);
+            return Err(Error::from(StepError::InvalidStepResults));
         }
         for shard in shards.iter_mut() {
             shard.clear();
@@ -5731,10 +5742,10 @@ impl PhysicsWorld {
                                 .iter()
                                 .find(|update| update.id == step.body_id);
                             if staged.is_none() && entry.body.potential_sphere.is_some() {
-                                step.error = Some(StepError::Aerodynamics {
+                                step.error = Some(Error::from(StepError::Aerodynamics {
                                     body_id: step.body_id,
                                     cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
-                                });
+                                }));
                                 continue;
                             }
                             let mut temporary_cache =
@@ -5817,7 +5828,7 @@ impl PhysicsWorld {
                     }
                 })
                 .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
-            if let Some(error) = shards.iter().flatten().find_map(|step| step.error) {
+            if let Some(error) = shards.iter().flatten().find_map(|step| step.error.clone()) {
                 return Err(error);
             }
         }
@@ -5826,7 +5837,7 @@ impl PhysicsWorld {
 
     /// Validates all shard results before committing any body state.
     #[doc(hidden)]
-    pub fn commit_step_shards(&mut self, shards: &[Vec<BodyStep>]) -> Result<(), StepError> {
+    pub fn commit_step_shards(&mut self, shards: &[Vec<BodyStep>]) -> Result<(), Error> {
         self.commit_step_shards_with_workers(shards, shards.len().max(1))
     }
 
@@ -5838,7 +5849,7 @@ impl PhysicsWorld {
         &mut self,
         shards: &[Vec<BodyStep>],
         _worker_count: usize,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         self.commit_step_shards_with_executor(shards, &SequentialExecutor, 1)
     }
 
@@ -5852,7 +5863,7 @@ impl PhysicsWorld {
         shards: &[Vec<BodyStep>],
         executor: &E,
         worker_count: usize,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         self.commit_step_shards_inner(shards, executor, worker_count, false)
     }
 
@@ -5862,14 +5873,14 @@ impl PhysicsWorld {
         executor: &E,
         worker_count: usize,
         full_step: bool,
-    ) -> Result<(), StepError> {
+    ) -> Result<(), Error> {
         let mut steps = shards.iter().flatten();
         let mut step_dt = None;
         for (dense_id, entry) in self.bodies.iter() {
             let Some(step) = steps.next() else {
-                return Err(StepError::InvalidStepResults);
+                return Err(Error::from(StepError::InvalidStepResults));
             };
-            if let Some(error) = step.error {
+            if let Some(error) = step.error.clone() {
                 return Err(error);
             }
             if step.body_id
@@ -5882,27 +5893,27 @@ impl PhysicsWorld {
                 || step.predicted.is_none()
                 || step.dt.is_none_or(|dt| !dt.is_finite() || dt <= 0.0)
             {
-                return Err(StepError::InvalidStepResults);
+                return Err(Error::from(StepError::InvalidStepResults));
             }
             if step_dt.is_some_and(|dt| Some(dt) != step.dt) {
-                return Err(StepError::InvalidStepResults);
+                return Err(Error::from(StepError::InvalidStepResults));
             }
             step_dt = step.dt;
         }
         let dt = step_dt.unwrap_or(0.0);
         if steps.next().is_some() {
-            return Err(StepError::InvalidStepResults);
+            return Err(Error::from(StepError::InvalidStepResults));
         }
 
         self.validate_collision_inputs()
-            .map_err(StepError::Collision)?;
+            .map_err(|error| Error::from(StepError::Collision(error)))?;
         self.prepare_gravity_updates(executor, worker_count)?;
         self.collision_system.begin_step();
         if let Err(error) = self.prepare_joint_collision_pairs() {
             self.collision_system.abort_step();
             self.rollback_gravity_updates();
             self.rollback_aerodynamics_updates();
-            return Err(StepError::Collision(error));
+            return Err(Error::from(StepError::Collision(error)));
         }
         for step in shards.iter().flatten() {
             if let Some(state) = step.predicted {
@@ -5914,25 +5925,25 @@ impl PhysicsWorld {
             self.collision_system.abort_step();
             self.rollback_gravity_updates();
             self.rollback_aerodynamics_updates();
-            return Err(StepError::Collision(error));
+            return Err(Error::from(StepError::Collision(error)));
         }
         if let Err(error) = self.process_collision_candidates(worker_count, executor, dt) {
             self.collision_system.abort_step();
             self.rollback_gravity_updates();
             self.rollback_aerodynamics_updates();
-            return Err(StepError::Collision(error));
+            return Err(Error::from(StepError::Collision(error)));
         }
         if let Err(error) = self.prepare_joint_break_commit() {
             self.collision_system.abort_step();
             self.rollback_gravity_updates();
             self.rollback_aerodynamics_updates();
-            return Err(StepError::Collision(error));
+            return Err(Error::from(StepError::Collision(error)));
         }
         if let Err(error) = self.stage_contact_impulses() {
             self.collision_system.abort_step();
             self.rollback_gravity_updates();
             self.rollback_aerodynamics_updates();
-            return Err(StepError::Collision(error));
+            return Err(Error::from(StepError::Collision(error)));
         }
         let splits = if full_step {
             match self.stage_automatic_weld_splits() {

@@ -32,7 +32,7 @@ use kapitsa_core::{
     Error,
     collision::QueryError,
     rigid_body::BodyError,
-    world::{ClusterError, ForceSourceError, StepError, WorldError},
+    world::{ClusterError, ForceSourceError, WorldError},
 };
 
 /// Failure returned while submitting or completing a physics command.
@@ -49,7 +49,7 @@ pub(crate) enum PhysicsClientError {
     /// publishing a snapshot. `step` is the failed step attempt.
     StepFailedAfterApply {
         step: u64,
-        cause: StepError,
+        cause: Error,
     },
     UnsupportedBatchCommand,
     TooManyCommands {

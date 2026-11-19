@@ -1,7 +1,7 @@
 use kapitsa_core::{
     Error,
     chunk::Chunk,
-    world::{BodyId, ChunkId, ChunkOperationError, ColliderId, StepError},
+    world::{BodyId, ChunkId, ChunkOperationError, ColliderId},
 };
 use tokio::sync::oneshot;
 
@@ -10,7 +10,7 @@ use super::{CommandRequest, PhysicsClient, PhysicsClientError};
 
 fn finish<I, O>(
     result: Result<O, (ChunkOperationError, I)>,
-    failure: Option<(u64, StepError)>,
+    failure: Option<(u64, Error)>,
 ) -> Result<O, ChunkClientError<I, O>> {
     match result {
         Err((cause, input)) => Err(ChunkClientError::Rejected { cause, input }),
@@ -84,6 +84,8 @@ impl PhysicsClient {
     }
 
     /// Atomically registers all prepared chunks on one body, preserving input order.
+    // The failure type intentionally owns the caller's chunk inputs.
+    #[allow(clippy::result_large_err)]
     pub async fn add_chunk_batch(
         &self,
         body: BodyId,
@@ -132,6 +134,8 @@ impl PhysicsClient {
     }
 
     /// Atomically removes all IDs; returned chunks follow the input order.
+    // The failure type intentionally owns both the caller's IDs and removed chunks.
+    #[allow(clippy::result_large_err)]
     pub async fn remove_chunk_batch(
         &self,
         ids: Vec<ChunkId>,
@@ -189,7 +193,9 @@ impl PhysicsClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kapitsa_core::{chunk::ChunkBuilder, shape::TriangleMesh, transform::Transform};
+    use kapitsa_core::{
+        chunk::ChunkBuilder, shape::TriangleMesh, transform::Transform, world::StepError,
+    };
     use kapitsa_math::Vec3;
     use std::error::Error;
 
@@ -201,13 +207,19 @@ mod tests {
             vec![[0, 1, 2]],
         )?)?;
         let chunk = builder.build(Transform::identity())?;
-        let result = finish::<(), _>(Ok(Some(chunk)), Some((17, StepError::InvalidDeltaTime)));
+        let result = finish::<(), _>(
+            Ok(Some(chunk)),
+            Some((17, kapitsa_core::Error::from(StepError::InvalidDeltaTime))),
+        );
         match result {
             Err(ChunkClientError::StepFailedAfterApply {
                 step: 17,
-                cause: StepError::InvalidDeltaTime,
+                cause,
                 output: Some(chunk),
-            }) => assert_eq!(chunk.colliders().len(), 1),
+            }) => {
+                assert!(cause.downcast_ref::<StepError>().is_some());
+                assert_eq!(chunk.colliders().len(), 1);
+            }
             _ => return Err("applied removal result was lost".into()),
         }
         Ok(())

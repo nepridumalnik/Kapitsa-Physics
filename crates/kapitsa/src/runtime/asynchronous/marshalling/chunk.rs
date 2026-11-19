@@ -5,7 +5,7 @@ use kapitsa_core::{
     chunk::Chunk,
     world::{
         AddChunkBatchError, AddChunkError, BodyId, ChunkId, ChunkOperationError, ColliderId,
-        PhysicsWorld, StepError, WorldError,
+        PhysicsWorld, WorldError,
     },
 };
 
@@ -20,11 +20,7 @@ pub enum ChunkClientError<I, O> {
     },
     /// The operation was applied, but the subsequent simulation step failed.
     /// The actual output is returned because the world mutation was not rolled back.
-    StepFailedAfterApply {
-        step: u64,
-        cause: StepError,
-        output: O,
-    },
+    StepFailedAfterApply { step: u64, cause: Error, output: O },
     /// The response channel closed after enqueueing; the operation's outcome is unknown.
     ResponseLost,
 }
@@ -113,7 +109,7 @@ pub(crate) enum ChunkReply {
     },
     Completed {
         outcome: ChunkOutcome,
-        step_failure: Option<(u64, StepError)>,
+        step_failure: Option<(u64, Error)>,
     },
 }
 

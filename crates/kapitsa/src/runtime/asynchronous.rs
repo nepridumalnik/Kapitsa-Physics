@@ -5,6 +5,7 @@ use std::{
 };
 
 use kapitsa_core::{
+    Error,
     collision::CollisionError,
     world::{PhysicsWorld, StepError},
 };
@@ -44,7 +45,7 @@ enum EngineState {
 
 struct StepOutput {
     engine: Box<StepEngine<RayonExecutor>>,
-    result: Result<StepStats, StepError>,
+    result: Result<StepStats, Error>,
 }
 
 /// Error returned by the Tokio backed simulation.
@@ -53,7 +54,7 @@ enum StepRunnerError {
     InvalidConfig(ConfigError),
     InvalidWorkerConfig(WorkerConfigError),
     RayonPool(RayonPoolError),
-    Physics(StepError),
+    Physics(Error),
     WorldUnavailable,
     WorldLost,
 }
@@ -105,8 +106,8 @@ impl From<WorkerConfigError> for StepRunnerError {
     }
 }
 
-impl From<StepError> for StepRunnerError {
-    fn from(error: StepError) -> Self {
+impl From<Error> for StepRunnerError {
+    fn from(error: Error) -> Self {
         Self::Physics(error)
     }
 }
@@ -308,7 +309,9 @@ impl StepRunner {
                     engine.step_with_dt(Duration::ZERO, physics_dt)
                 })) {
                     Ok(result) => result,
-                    Err(_) => Err(StepError::Collision(CollisionError::WorkerFailed)),
+                    Err(_) => Err(Error::from(StepError::Collision(
+                        CollisionError::WorkerFailed,
+                    ))),
                 };
                 let _ = result_sender.send(StepOutput { engine, result });
             })?;
@@ -631,7 +634,8 @@ mod tests {
 
             assert!(matches!(
                 simulation.step().await,
-                Err(StepRunnerError::Physics(StepError::BodyIntegration { .. }))
+                Err(StepRunnerError::Physics(error))
+                    if error.downcast_ref::<StepError>().is_some()
             ));
             assert!(
                 simulation

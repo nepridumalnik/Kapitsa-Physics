@@ -41,7 +41,7 @@ mod service_errors {
                     Error::from(error).with_kind(ErrorKind::Runtime)
                 }
                 PhysicsClientError::StepFailedAfterApply { step, cause } => {
-                    Error::from_source(ErrorKind::Runtime, cause).with_failed_step(step)
+                    cause.with_kind(ErrorKind::Runtime).with_failed_step(step)
                 }
                 other => Error::from_source(ErrorKind::Runtime, other),
             }
@@ -57,7 +57,7 @@ mod service_errors {
     impl From<SimulationError> for Error {
         fn from(error: SimulationError) -> Self {
             match error {
-                SimulationError::Physics(error) => Error::from(error),
+                SimulationError::Physics(error) => error,
                 SimulationError::InvalidConfig(error) => Error::from(error),
                 other => Error::from_source(ErrorKind::Runtime, other),
             }
@@ -99,7 +99,7 @@ mod tests {
     fn step_failure_keeps_attempt_and_typed_cause() {
         let error = kapitsa_core::Error::from(PhysicsClientError::StepFailedAfterApply {
             step: 7,
-            cause: StepError::InvalidDeltaTime,
+            cause: StepError::InvalidDeltaTime.into(),
         });
         assert_eq!(error.kind(), ErrorKind::Runtime);
         assert_eq!(error.failed_step(), Some(7));

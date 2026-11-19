@@ -26,7 +26,7 @@ fn weld() -> WeldDesc {
         },
     }
 }
-fn advance(world: &mut PhysicsWorld, sharded: bool) -> Result<(), StepError> {
+fn advance(world: &mut PhysicsWorld, sharded: bool) -> Result<(), crate::Error> {
     if sharded {
         world.step_with_shards(
             1e-5,
@@ -422,12 +422,12 @@ fn part_wings_later_failure_rolls_back_and_primary_transfer_rejects_atomically()
         );
         assert_eq!(
             advance(&mut world, sharded),
-            Err(StepError::Aerodynamics {
+            Err(crate::Error::from(StepError::Aerodynamics {
                 body_id: id,
                 cause: crate::aerodynamics::AerodynamicsError::Wing(
                     crate::aerodynamics::wing::WingError::UnsupportedFlow
                 )
-            })
+            }))
         );
         assert_eq!(world.body(id).ok_or("body")?.motion(), before);
         world.set_part_aerodynamic_wings(root, vec![good])?;

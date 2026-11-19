@@ -8,6 +8,10 @@ use crate::{
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
 
+fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepError> {
+    result.as_ref().err().and_then(|error| error.downcast_ref())
+}
+
 fn section(point: Vec3) -> HullSection {
     HullSection::new(
         Transform::new(point, Quat::IDENTITY).expect("test transform"),
@@ -357,8 +361,8 @@ fn automatic_failure_certifies_only_uncorrected_part_surfaces()
         };
         let before = *world.body(body).ok_or("body")?.state();
         assert!(matches!(
-            step(&mut world, 1.0),
-            Err(StepError::WeldBalance(_))
+            step_cause(&step(&mut world, 1.0)),
+            Some(StepError::WeldBalance(_))
         ));
         assert_eq!(*world.body(body).ok_or("body")?.state(), before);
         assert!(world.weld(weld).is_some());
@@ -519,7 +523,10 @@ fn automatic_weld_failure_multiple_clusters_is_atomic_on_rejection()
                 world.step(0.01)
             }
         };
-        assert!(matches!(step(&mut world), Err(StepError::WeldBalance(_))));
+        assert!(matches!(
+            step_cause(&step(&mut world)),
+            Some(StepError::WeldBalance(_))
+        ));
         assert_eq!(world.body_count(), 2);
         for (body, _, child, weld) in &clusters {
             assert_eq!(
@@ -532,8 +539,8 @@ fn automatic_weld_failure_multiple_clusters_is_atomic_on_rejection()
         world.remove_force_source(unsupported)?;
         world.weld_split_fail_after = Some(1);
         assert!(matches!(
-            step(&mut world),
-            Err(StepError::WeldSplit(ClusterError::StorageCapacityExceeded))
+            step_cause(&step(&mut world)),
+            Some(StepError::WeldSplit(ClusterError::StorageCapacityExceeded))
         ));
         assert_eq!(world.body_count(), 2);
         for (body, _, child, weld) in &clusters {
@@ -639,7 +646,10 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
         } else {
             world.step(0.01)
         };
-        assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+        assert!(matches!(
+            step_cause(&rejected),
+            Some(StepError::WeldBalance(_))
+        ));
         assert_eq!(*world.body(body).ok_or("body")?.state(), before);
         assert!(world.weld(weld).is_some());
         world.remove_force_source(unsupported)?;
@@ -660,7 +670,10 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
         } else {
             world.step(0.01)
         };
-        assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+        assert!(matches!(
+            step_cause(&rejected),
+            Some(StepError::WeldBalance(_))
+        ));
         assert!(world.weld(weld).is_some());
         world.remove_part_collider(own_collider)?;
         world.add_gravity(crate::gravity::UniformGravity::new(Vec3::Y * -10.0)?)?;
@@ -955,10 +968,10 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
     let staged = world.with_force_source_updates(|world| {
         let candidates = world
             .pending_weld_failure_candidates(body, 1e-12, 1e-12, false)
-            .map_err(|_| StepError::InvalidDeltaTime)?;
+            .map_err(|_| crate::Error::from(StepError::InvalidDeltaTime))?;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].reaction.force, -Vec3::X * 5.0);
-        Err::<(), _>(StepError::InvalidDeltaTime)
+        Err::<(), crate::Error>(crate::Error::from(StepError::InvalidDeltaTime))
     });
     assert!(staged.is_err());
     assert!(
