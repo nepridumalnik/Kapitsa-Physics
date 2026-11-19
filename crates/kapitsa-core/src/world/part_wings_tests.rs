@@ -424,9 +424,9 @@ fn part_wings_later_failure_rolls_back_and_primary_transfer_rejects_atomically()
             advance(&mut world, sharded),
             Err(crate::Error::from(StepError::Aerodynamics {
                 body_id: id,
-                cause: crate::aerodynamics::AerodynamicsError::Wing(
+                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Wing(
                     crate::aerodynamics::wing::WingError::UnsupportedFlow
-                )
+                ))
             }))
         );
         assert_eq!(world.body(id).ok_or("body")?.motion(), before);

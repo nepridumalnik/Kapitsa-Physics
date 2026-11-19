@@ -5,6 +5,15 @@ fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepEr
     result.as_ref().err().and_then(|error| error.downcast_ref())
 }
 
+fn aero_cause(
+    result: &Result<(), crate::Error>,
+) -> Option<&crate::aerodynamics::AerodynamicsError> {
+    match step_cause(result)? {
+        crate::world::StepError::Aerodynamics { cause, .. } => cause.downcast_ref(),
+        _ => None,
+    }
+}
+
 fn visibility_triangle(a: Vec3, b: Vec3, c: Vec3) -> SurfaceTriangle {
     let normal = (b - a).cross(c - a).try_normalize().unwrap();
     SurfaceTriangle {
@@ -1514,7 +1523,7 @@ fn voxel_slender_sections_apply_and_reject_rotation_in_world_steps()
         execution::SequentialExecutor,
         mass::MassProperties,
         rigid_body::RigidBody,
-        world::{PhysicsWorld, StepError},
+        world::PhysicsWorld,
     };
     use kapitsa_math::Mat3;
     let mesh = cube();
@@ -1568,11 +1577,10 @@ fn voxel_slender_sections_apply_and_reject_rotation_in_world_steps()
                 world.step(1e-4)
             };
             assert!(matches!(
-                step_cause(&failed),
-                Some(StepError::Aerodynamics {
-                    cause: AerodynamicsError::Hull(HullError::UnsupportedSlenderRotation),
-                    ..
-                })
+                aero_cause(&failed),
+                Some(AerodynamicsError::Hull(
+                    HullError::UnsupportedSlenderRotation
+                ))
             ));
             assert_eq!(world.body(id).ok_or("body")?.motion(), motion);
         }

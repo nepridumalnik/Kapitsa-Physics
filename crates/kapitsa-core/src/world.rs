@@ -100,7 +100,9 @@ mod aerodynamics {
                 {
                     return Err(Error::from(StepError::Aerodynamics {
                         body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                        cause: crate::Error::from(
+                            crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                        ),
                     }));
                 }
                 let patches = super::assembly_aerodynamics::prepare(
@@ -3278,12 +3280,12 @@ impl PhysicsWorld {
         {
             return Err(Error::from(StepError::Aerodynamics {
                 body_id,
-                cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::UnsupportedModel),
             }));
         }
         let error = || StepError::Aerodynamics {
             body_id,
-            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+            cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow),
         };
         let center = body
             .world_center_of_mass()
@@ -3310,7 +3312,10 @@ impl PhysicsWorld {
             Some(
                 atmosphere
                     .state_at(center)
-                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
+                    .map_err(|cause| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::Error::from(cause),
+                    })?,
             )
             .filter(|state| state.density() != 0.0)
         } else {
@@ -3340,7 +3345,7 @@ impl PhysicsWorld {
             }
             .map_err(|cause| StepError::Aerodynamics {
                 body_id,
-                cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Pressure(cause)),
             })?;
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;
@@ -3355,7 +3360,9 @@ impl PhysicsWorld {
                         .evaluate_base(flow, base)
                         .map_err(|cause| StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                            ),
                         })?;
                 body.apply_force(wrench.force).map_err(|_| error())?;
                 body.apply_torque(wrench.moment).map_err(|_| error())?;
@@ -3374,11 +3381,16 @@ impl PhysicsWorld {
                 .transform_point(model.section.local_transform().translation());
             let state = atmosphere
                 .state_at(point)
-                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::Error::from(cause),
+                })?;
             if state.density() != 0.0 {
                 return Err(Error::from(StepError::Aerodynamics {
                     body_id,
-                    cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                    cause: crate::Error::from(
+                        crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                    ),
                 }));
             }
         }
@@ -3390,7 +3402,10 @@ impl PhysicsWorld {
             }
             let state = atmosphere
                 .state_at(point)
-                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::Error::from(cause),
+                })?;
             let wrench = section
                 .evaluate(crate::aerodynamics::pressure::PressureFlow {
                     atmosphere: state,
@@ -3402,7 +3417,7 @@ impl PhysicsWorld {
                 })
                 .map_err(|cause| StepError::Aerodynamics {
                     body_id,
-                    cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
+                    cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Hull(cause)),
                 })?;
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;
@@ -3444,16 +3459,20 @@ impl PhysicsWorld {
             if !point.is_finite() {
                 return Err(Error::from(error()));
             }
-            let atmosphere = atmosphere
-                .state_at(point)
-                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            let atmosphere =
+                atmosphere
+                    .state_at(point)
+                    .map_err(|cause| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::Error::from(cause),
+                    })?;
             if atmosphere.density() != 0.0 {
                 if visibility_required && visibility.is_none() {
                     return Err(Error::from(StepError::Aerodynamics {
                         body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::Wing(
+                        cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Wing(
                             crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
-                        ),
+                        )),
                     }));
                 }
                 let flow = crate::aerodynamics::pressure::PressureFlow {
@@ -3469,7 +3488,9 @@ impl PhysicsWorld {
                         .evaluate_with_visibility(flow, visibility)
                         .map_err(|cause| StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::Wing(cause),
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::Wing(cause),
+                            ),
                         })?;
                 body.apply_force(wrench.force).map_err(|_| error())?;
                 body.apply_torque(wrench.moment).map_err(|_| error())?;
@@ -3550,9 +3571,13 @@ impl PhysicsWorld {
                 if !point.is_finite() {
                     return Err(Error::from(error()));
                 }
-                let state = atmosphere
-                    .state_at(point)
-                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                let state =
+                    atmosphere
+                        .state_at(point)
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::Error::from(cause),
+                        })?;
                 let wrench = section
                     .evaluate(crate::aerodynamics::pressure::PressureFlow {
                         atmosphere: state,
@@ -3564,7 +3589,9 @@ impl PhysicsWorld {
                     })
                     .map_err(|cause| StepError::Aerodynamics {
                         body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
+                        cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Hull(
+                            cause,
+                        )),
                     })?;
                 body.apply_force(wrench.force).map_err(|_| error())?;
                 body.apply_torque(wrench.moment).map_err(|_| error())?;
@@ -3606,9 +3633,13 @@ impl PhysicsWorld {
             }
             .filter(|point| point.is_finite())
             .ok_or_else(error)?;
-            let local_atmosphere = atmosphere
-                .state_at(point)
-                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            let local_atmosphere =
+                atmosphere
+                    .state_at(point)
+                    .map_err(|cause| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::Error::from(cause),
+                    })?;
             if local_atmosphere.density() == 0.0 {
                 if let Some(entries) = raw_simple_surfaces.as_deref_mut() {
                     entries.try_reserve(1).map_err(|_| error())?;
@@ -3642,7 +3673,10 @@ impl PhysicsWorld {
                     point_velocity,
                     Vec3::ZERO,
                 )
-                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                .map_err(|cause| StepError::Aerodynamics {
+                    body_id,
+                    cause: crate::Error::from(cause),
+                })?;
             drag = drag.checked_add(surface_drag).ok_or_else(error)?;
             let surface_drag_torque = offset.checked_cross(surface_drag).ok_or_else(error)?;
             drag_torque = drag_torque
@@ -3697,7 +3731,10 @@ impl PhysicsWorld {
         }
         let center_wind = atmosphere
             .state_at(center)
-            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?
+            .map_err(|cause| StepError::Aerodynamics {
+                body_id,
+                cause: crate::Error::from(cause),
+            })?
             .wind_velocity();
         let mut scale = 1.0_f64;
         if let Some(dt) = dt {
@@ -3923,7 +3960,10 @@ impl PhysicsWorld {
             .transform_point(model.section.local_transform().translation());
         let state = atmosphere
             .state_at(point)
-            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+            .map_err(|cause| StepError::Aerodynamics {
+                body_id,
+                cause: crate::Error::from(cause),
+            })?;
         if state.density() == 0.0 {
             return Ok(None);
         }
@@ -3939,13 +3979,13 @@ impl PhysicsWorld {
             )
             .map_err(|cause| StepError::Aerodynamics {
                 body_id,
-                cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Geometry(cause)),
             })?;
         let section = cache
             .configure_voxel_wave_drag(model.section.clone(), model.axis, model.smoothing_radius)
             .map_err(|cause| StepError::Aerodynamics {
                 body_id,
-                cause: crate::aerodynamics::AerodynamicsError::Hull(cause),
+                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Hull(cause)),
             })?;
         Ok(Some(section))
     }
@@ -3990,7 +4030,9 @@ impl PhysicsWorld {
             if self.aerodynamics_body_updates.try_reserve(1).is_err() {
                 return Err(Error::from(StepError::Aerodynamics {
                     body_id,
-                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    cause: crate::Error::from(
+                        crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    ),
                 }));
             }
             if entry.mesh_aerodynamics.as_ref().is_some_and(|prepared| {
@@ -4057,16 +4099,23 @@ impl PhysicsWorld {
                     .world_center_of_mass()
                     .map_err(|_| StepError::Aerodynamics {
                         body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        cause: crate::Error::from(
+                            crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        ),
                     })?
                     .ok_or(Error::from(StepError::Aerodynamics {
                         body_id,
-                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        cause: crate::Error::from(
+                            crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        ),
                     }))?;
                 Some(
                     atmosphere
                         .state_at(center)
-                        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::Error::from(cause),
+                        })?,
                 )
                 .filter(|state| state.density() != 0.0)
             } else {
@@ -4091,7 +4140,10 @@ impl PhysicsWorld {
                         attached,
                         entry.collider_tessellation,
                     )
-                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
+                    .map_err(|cause| StepError::Aerodynamics {
+                        body_id,
+                        cause: crate::Error::from(cause),
+                    })?,
                 );
             }
             let mesh = match entry.body.aerodynamics() {
@@ -4110,7 +4162,9 @@ impl PhysicsWorld {
                     {
                         return Err(Error::from(StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                            ),
                         }));
                     }
                     // A strict work budget limits the quadratic convexity check.
@@ -4127,7 +4181,9 @@ impl PhysicsWorld {
                         )
                         .map_err(|cause| StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                            ),
                         })?,
                     );
                 } else {
@@ -4136,7 +4192,9 @@ impl PhysicsWorld {
                     {
                         return Err(Error::from(StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                            ),
                         }));
                     }
                     let config = entry
@@ -4175,7 +4233,9 @@ impl PhysicsWorld {
                     let geometry = prepared.cache.prepare(key, mesh, config).map_err(|cause| {
                         StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                            ),
                         }
                     })?;
                     let relative = entry
@@ -4185,7 +4245,9 @@ impl PhysicsWorld {
                         .checked_sub(primary_atmosphere.wind_velocity())
                         .ok_or(Error::from(StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                            ),
                         }))?;
                     let direction = entry
                         .body
@@ -4196,12 +4258,16 @@ impl PhysicsWorld {
                         .rotate_vector(relative)
                         .ok_or(Error::from(StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                            ),
                         }))?;
                     let inverse = entry.body.state().transform().inverse().map_err(|_| {
                         StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                            ),
                         }
                     })?;
                     let omega = inverse.transform_vector(entry.body.state().angular_velocity());
@@ -4211,7 +4277,9 @@ impl PhysicsWorld {
                         .mass()
                         .ok_or(Error::from(StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                            ),
                         }))?
                         .center_of_mass();
                     if let Some(selected) = entry
@@ -4225,7 +4293,10 @@ impl PhysicsWorld {
                             mesh,
                             config.max_patch_work,
                         )
-                        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
+                        .map_err(|cause| StepError::Aerodynamics {
+                            body_id,
+                            cause: crate::Error::from(cause),
+                        })?;
                         let visible = geometry
                             .surface_patches_with_flow(
                                 &[crate::aerodynamics::geometry::GeometryInstance {
@@ -4244,14 +4315,18 @@ impl PhysicsWorld {
                             )
                             .map_err(|cause| StepError::Aerodynamics {
                                 body_id,
-                                cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                                cause: crate::Error::from(
+                                    crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                                ),
                             })?;
                         crate::aerodynamics::pressure::verify_full_base_visibility(
                             selected, &visible,
                         )
                         .map_err(|cause| StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                            cause: crate::Error::from(
+                                crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                            ),
                         })?;
                     }
                     mesh_patches = Some(
@@ -4270,7 +4345,7 @@ impl PhysicsWorld {
                         )
                         .map_err(|cause| StepError::Aerodynamics {
                             body_id,
-                            cause: crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                            cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Geometry(cause)),
                         })?,
                 );
                 }
@@ -4352,7 +4427,9 @@ impl PhysicsWorld {
                 .try_reserve(update.part_hull_wrenches.len())
                 .map_err(|_| StepError::Aerodynamics {
                     body_id: update.id,
-                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    cause: crate::Error::from(
+                        crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    ),
                 })?;
             self.part_hull_pending
                 .extend_from_slice(&update.part_hull_wrenches);
@@ -4360,7 +4437,9 @@ impl PhysicsWorld {
                 .try_reserve(update.part_wing_wrenches.len())
                 .map_err(|_| StepError::Aerodynamics {
                     body_id: update.id,
-                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    cause: crate::Error::from(
+                        crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    ),
                 })?;
             self.part_wing_pending
                 .extend_from_slice(&update.part_wing_wrenches);
@@ -4368,7 +4447,9 @@ impl PhysicsWorld {
                 self.simple_surface_pending.try_reserve(1).map_err(|_| {
                     StepError::Aerodynamics {
                         body_id: update.id,
-                        cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        cause: crate::Error::from(
+                            crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                        ),
                     }
                 })?;
                 self.simple_surface_pending.push(correction);
@@ -4377,7 +4458,9 @@ impl PhysicsWorld {
                 .try_reserve(update.raw_simple_surfaces.len())
                 .map_err(|_| StepError::Aerodynamics {
                     body_id: update.id,
-                    cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    cause: crate::Error::from(
+                        crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                    ),
                 })?;
             self.raw_simple_pending
                 .extend_from_slice(&update.raw_simple_surfaces);
@@ -4394,7 +4477,9 @@ impl PhysicsWorld {
             };
             let error = || StepError::Aerodynamics {
                 body_id: update.id,
-                cause: crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                cause: crate::Error::from(
+                    crate::aerodynamics::AerodynamicsError::ArithmeticOverflow,
+                ),
             };
             let center = update
                 .original
@@ -4405,7 +4490,7 @@ impl PhysicsWorld {
                 .state_at(center)
                 .map_err(|cause| StepError::Aerodynamics {
                     body_id: update.id,
-                    cause,
+                    cause: crate::Error::from(cause),
                 })?;
             if state.density() == 0.0 {
                 continue;
@@ -4444,13 +4529,17 @@ impl PhysicsWorld {
                 .and_then(|()| workspace.prepare(patches, flow))
                 .map_err(|cause| StepError::Aerodynamics {
                     body_id: update.id,
-                    cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                    cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Pressure(
+                        cause,
+                    )),
                 })?;
             if workspace
                 .staged_total()
                 .map_err(|cause| StepError::Aerodynamics {
                     body_id: update.id,
-                    cause: crate::aerodynamics::AerodynamicsError::Pressure(cause),
+                    cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Pressure(
+                        cause,
+                    )),
                 })?
                 != update.applied_mesh_pressure
             {
@@ -5744,7 +5833,9 @@ impl PhysicsWorld {
                             if staged.is_none() && entry.body.potential_sphere.is_some() {
                                 step.error = Some(Error::from(StepError::Aerodynamics {
                                     body_id: step.body_id,
-                                    cause: crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                    cause: crate::Error::from(
+                                        crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                                    ),
                                 }));
                                 continue;
                             }

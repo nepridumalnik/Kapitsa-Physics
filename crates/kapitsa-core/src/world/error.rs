@@ -1,6 +1,5 @@
 use std::fmt;
 
-use crate::aerodynamics::AerodynamicsError;
 use crate::collision::CollisionError;
 use crate::containers::DensePoolError;
 use crate::rigid_body::BodyError;
@@ -123,7 +122,7 @@ pub enum StepError {
     },
     Aerodynamics {
         body_id: BodyId,
-        cause: AerodynamicsError,
+        cause: crate::Error,
     },
 }
 
