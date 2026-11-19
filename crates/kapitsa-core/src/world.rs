@@ -415,6 +415,19 @@ pub enum SimpleSurfaceAttributionError {
     InconsistentSnapshot,
 }
 
+impl std::fmt::Display for SimpleSurfaceAttributionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::CorrectedAggregate => "corrected simple-surface aggregate is inconsistent",
+            Self::BodyTarget => "simple-surface attribution targets a body directly",
+            Self::InconsistentSnapshot => "simple-surface snapshot is inconsistent",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for SimpleSurfaceAttributionError {}
+
 impl SimpleSurfaceCorrection {
     /// Checks whether this body's raw simple-surface snapshot can be used as
     /// the applied per-part surface contributions, without allocating or
@@ -424,15 +437,19 @@ impl SimpleSurfaceCorrection {
     pub fn check_part_attribution(
         &self,
         raw: &[RawSimpleSurfaceWrench],
-    ) -> Result<(), SimpleSurfaceAttributionError> {
+    ) -> Result<(), crate::Error> {
         if self.raw_drag != self.applied_drag || self.raw_lift != self.applied_lift {
-            return Err(SimpleSurfaceAttributionError::CorrectedAggregate);
+            return Err(crate::Error::from(
+                SimpleSurfaceAttributionError::CorrectedAggregate,
+            ));
         }
         if raw
             .iter()
             .any(|entry| entry.body == self.body && entry.target == AerodynamicTarget::Body)
         {
-            return Err(SimpleSurfaceAttributionError::BodyTarget);
+            return Err(crate::Error::from(
+                SimpleSurfaceAttributionError::BodyTarget,
+            ));
         }
         let mut drag_force = Vec3::ZERO;
         let mut drag_moment = Vec3::ZERO;
@@ -441,18 +458,18 @@ impl SimpleSurfaceCorrection {
         let mut found = false;
         for entry in raw.iter().filter(|entry| entry.body == self.body) {
             found = true;
-            drag_force = drag_force
-                .checked_add(entry.drag.force)
-                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
-            drag_moment = drag_moment
-                .checked_add(entry.drag.moment)
-                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
-            lift_force = lift_force
-                .checked_add(entry.lift.force)
-                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
-            lift_moment = lift_moment
-                .checked_add(entry.lift.moment)
-                .ok_or(SimpleSurfaceAttributionError::InconsistentSnapshot)?;
+            drag_force = drag_force.checked_add(entry.drag.force).ok_or_else(|| {
+                crate::Error::from(SimpleSurfaceAttributionError::InconsistentSnapshot)
+            })?;
+            drag_moment = drag_moment.checked_add(entry.drag.moment).ok_or_else(|| {
+                crate::Error::from(SimpleSurfaceAttributionError::InconsistentSnapshot)
+            })?;
+            lift_force = lift_force.checked_add(entry.lift.force).ok_or_else(|| {
+                crate::Error::from(SimpleSurfaceAttributionError::InconsistentSnapshot)
+            })?;
+            lift_moment = lift_moment.checked_add(entry.lift.moment).ok_or_else(|| {
+                crate::Error::from(SimpleSurfaceAttributionError::InconsistentSnapshot)
+            })?;
         }
         if !found
             || drag_force != self.raw_drag.force
@@ -460,7 +477,9 @@ impl SimpleSurfaceCorrection {
             || lift_force != self.raw_lift.force
             || lift_moment != self.raw_lift.moment
         {
-            return Err(SimpleSurfaceAttributionError::InconsistentSnapshot);
+            return Err(crate::Error::from(
+                SimpleSurfaceAttributionError::InconsistentSnapshot,
+            ));
         }
         Ok(())
     }
@@ -930,11 +949,11 @@ impl PhysicsWorld {
     pub fn set_automatic_weld_failure(
         &mut self,
         tolerances: Option<(f64, f64)>,
-    ) -> Result<(), WeldBalanceError> {
+    ) -> Result<(), crate::Error> {
         if tolerances.is_some_and(|(force, moment)| {
             !force.is_finite() || force < 0.0 || !moment.is_finite() || moment < 0.0
         }) {
-            return Err(WeldBalanceError::InvalidTolerance);
+            return Err(crate::Error::from(WeldBalanceError::InvalidTolerance));
         }
         self.automatic_weld_failure = tolerances;
         Ok(())
@@ -950,11 +969,11 @@ impl PhysicsWorld {
     pub fn set_automatic_weld_impulse_tolerances(
         &mut self,
         tolerances: Option<(f64, f64)>,
-    ) -> Result<(), WeldBalanceError> {
+    ) -> Result<(), crate::Error> {
         if tolerances.is_some_and(|(linear, angular)| {
             !linear.is_finite() || linear < 0.0 || !angular.is_finite() || angular < 0.0
         }) {
-            return Err(WeldBalanceError::InvalidTolerance);
+            return Err(crate::Error::from(WeldBalanceError::InvalidTolerance));
         }
         self.automatic_weld_impulse_tolerances = tolerances;
         Ok(())
@@ -973,7 +992,7 @@ impl PhysicsWorld {
         body: BodyId,
         force_tolerance: f64,
         moment_tolerance: f64,
-    ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
+    ) -> Result<Vec<WeldFailureCandidate>, crate::Error> {
         let reactions = self.part_source_weld_reactions(body, force_tolerance, moment_tolerance)?;
         Self::weld_failure_candidates_from_reactions(reactions, &self.cluster_load_welds_published)
     }
@@ -981,7 +1000,7 @@ impl PhysicsWorld {
     fn weld_failure_candidates_from_reactions(
         reactions: Vec<WeldReaction>,
         snapshot_welds: &[ClusterLoadWeld],
-    ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
+    ) -> Result<Vec<WeldFailureCandidate>, crate::Error> {
         use crate::cluster::WeldStrength;
         let mut welds = HashMap::new();
         welds.try_reserve(snapshot_welds.len()).map_err(|_| {
@@ -989,7 +1008,7 @@ impl PhysicsWorld {
         })?;
         for weld in snapshot_welds {
             if welds.insert(weld.weld, weld.value).is_some() {
-                return Err(WeldBalanceError::InvalidTree);
+                return Err(crate::Error::from(WeldBalanceError::InvalidTree));
             }
         }
         let mut candidates = Vec::new();
@@ -999,7 +1018,7 @@ impl PhysicsWorld {
         for reaction in reactions {
             let weld = welds
                 .get(&reaction.weld)
-                .ok_or(WeldBalanceError::InvalidTree)?;
+                .ok_or_else(|| crate::Error::from(WeldBalanceError::InvalidTree))?;
             let WeldStrength::Breakable {
                 max_force,
                 max_torque,
@@ -1010,8 +1029,8 @@ impl PhysicsWorld {
             let force = reaction.force.length();
             let torque = reaction.moment.length();
             if !force.is_finite() || !torque.is_finite() {
-                return Err(WeldBalanceError::Physics(crate::Error::from(
-                    ClusterError::ArithmeticOverflow,
+                return Err(crate::Error::from(WeldBalanceError::Physics(
+                    crate::Error::from(ClusterError::ArithmeticOverflow),
                 )));
             }
             let force_exceeded = max_force.is_some_and(|limit| force > limit);
@@ -1036,12 +1055,12 @@ impl PhysicsWorld {
         force_tolerance: f64,
         moment_tolerance: f64,
         collision_accounted: bool,
-    ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
+    ) -> Result<Vec<WeldFailureCandidate>, crate::Error> {
         let mut state = *self
             .cluster_load_states_pending
             .iter()
             .find(|state| state.body == body)
-            .ok_or(WeldBalanceError::IncompleteLoads)?;
+            .ok_or_else(|| crate::Error::from(WeldBalanceError::IncompleteLoads))?;
         if collision_accounted {
             state.collision_loads_uncertified = false;
         }
@@ -1099,14 +1118,14 @@ impl PhysicsWorld {
         body: BodyId,
         force_tolerance: f64,
         moment_tolerance: f64,
-    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+    ) -> Result<Vec<WeldReaction>, crate::Error> {
         let state = self
             .cluster_load_states_published
             .iter()
             .find(|state| state.body == body)
-            .ok_or(WeldBalanceError::IncompleteLoads)?;
+            .ok_or_else(|| crate::Error::from(WeldBalanceError::IncompleteLoads))?;
         if !state.force_free_certified || state.collision_loads_uncertified {
-            return Err(WeldBalanceError::IncompleteLoads);
+            return Err(crate::Error::from(WeldBalanceError::IncompleteLoads));
         }
         self.part_source_weld_reactions(body, force_tolerance, moment_tolerance)
     }
@@ -1121,7 +1140,7 @@ impl PhysicsWorld {
         body: BodyId,
         force_tolerance: f64,
         moment_tolerance: f64,
-    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+    ) -> Result<Vec<WeldReaction>, crate::Error> {
         Self::part_source_weld_reactions_from_snapshot(
             body,
             force_tolerance,
@@ -1147,7 +1166,7 @@ impl PhysicsWorld {
         body: BodyId,
         force_tolerance: f64,
         moment_tolerance: f64,
-    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+    ) -> Result<Vec<WeldReaction>, crate::Error> {
         Self::part_source_weld_reactions_from_snapshot(
             body,
             force_tolerance,
@@ -1174,7 +1193,7 @@ impl PhysicsWorld {
         body: BodyId,
         force_tolerance: f64,
         moment_tolerance: f64,
-    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+    ) -> Result<Vec<WeldReaction>, crate::Error> {
         Self::part_source_weld_reactions_from_snapshot(
             body,
             force_tolerance,
@@ -1216,7 +1235,7 @@ impl PhysicsWorld {
             )],
         >,
         load_mode: WeldLoadMode,
-    ) -> Result<Vec<WeldReaction>, WeldBalanceError> {
+    ) -> Result<Vec<WeldReaction>, crate::Error> {
         use crate::cluster::balance::{
             RecordedPartLoads, prepare_recorded_loads, prepare_tree, reaction_moment_at_anchor,
             tree_reactions,
@@ -1224,7 +1243,7 @@ impl PhysicsWorld {
         let state = states
             .iter()
             .find(|state| state.body == body)
-            .ok_or(WeldBalanceError::IncompleteLoads)?;
+            .ok_or_else(|| crate::Error::from(WeldBalanceError::IncompleteLoads))?;
         if state.collision_loads_uncertified
             || !match load_mode {
                 WeldLoadMode::Sources => state.part_sources_certified,
@@ -1232,10 +1251,12 @@ impl PhysicsWorld {
                 WeldLoadMode::PartAerodynamics => state.part_surfaces_certified,
             }
         {
-            return Err(WeldBalanceError::IncompleteLoads);
+            return Err(crate::Error::from(WeldBalanceError::IncompleteLoads));
         }
         let tree = prepare_tree(state, parts, snapshot_welds)?;
-        let mass = state.mass.ok_or(WeldBalanceError::IncompleteLoads)?;
+        let mass = state
+            .mass
+            .ok_or_else(|| crate::Error::from(WeldBalanceError::IncompleteLoads))?;
         let (center, inertia) =
             crate::cluster::motion::world_properties(mass, state.state.transform())
                 .map_err(WeldBalanceError::Physics)?;
@@ -1254,7 +1275,8 @@ impl PhysicsWorld {
         )?;
         if state.part_geometry && !state.vacuum {
             use crate::aerodynamics::geometry::GeometryOwner;
-            let pressure = pressure.ok_or(WeldBalanceError::IncompleteLoads)?;
+            let pressure =
+                pressure.ok_or_else(|| crate::Error::from(WeldBalanceError::IncompleteLoads))?;
             let mut indices = HashMap::new();
             indices.try_reserve(tree.len()).map_err(|_| {
                 WeldBalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
@@ -1264,9 +1286,11 @@ impl PhysicsWorld {
             }
             for (owner, wrench) in pressure {
                 let GeometryOwner::Part(part) = owner else {
-                    return Err(WeldBalanceError::IncompleteLoads);
+                    return Err(crate::Error::from(WeldBalanceError::IncompleteLoads));
                 };
-                let index = *indices.get(part).ok_or(WeldBalanceError::InvalidTree)?;
+                let index = *indices
+                    .get(part)
+                    .ok_or_else(|| crate::Error::from(WeldBalanceError::InvalidTree))?;
                 let input = &mut inputs[index];
                 input.external_force = input.external_force.checked_add(wrench.force).ok_or(
                     WeldBalanceError::Physics(crate::Error::from(ClusterError::ArithmeticOverflow)),
@@ -1282,12 +1306,14 @@ impl PhysicsWorld {
         {
             let (corrections, raw) = simple;
             let mut matching = corrections.iter().filter(|item| item.body == body);
-            let correction = matching.next().ok_or(WeldBalanceError::IncompleteLoads)?;
+            let correction = matching
+                .next()
+                .ok_or_else(|| crate::Error::from(WeldBalanceError::IncompleteLoads))?;
             if matching.next().is_some()
                 || raw.iter().filter(|item| item.body == body).count() != state.part_surface_count
                 || correction.check_part_attribution(raw).is_err()
             {
-                return Err(WeldBalanceError::IncompleteLoads);
+                return Err(crate::Error::from(WeldBalanceError::IncompleteLoads));
             }
             let mut indices = HashMap::new();
             indices.try_reserve(tree.len()).map_err(|_| {
@@ -1298,10 +1324,11 @@ impl PhysicsWorld {
             }
             for load in raw.iter().filter(|item| item.body == body) {
                 let AerodynamicTarget::Part(part) = load.target else {
-                    return Err(WeldBalanceError::IncompleteLoads);
+                    return Err(crate::Error::from(WeldBalanceError::IncompleteLoads));
                 };
-                let input =
-                    &mut inputs[*indices.get(&part).ok_or(WeldBalanceError::InvalidTree)?];
+                let input = &mut inputs[*indices
+                    .get(&part)
+                    .ok_or_else(|| crate::Error::from(WeldBalanceError::InvalidTree))?];
                 for wrench in [load.drag, load.lift] {
                     input.external_force = input.external_force.checked_add(wrench.force).ok_or(
                         WeldBalanceError::Physics(crate::Error::from(
@@ -1377,18 +1404,22 @@ impl PhysicsWorld {
         })?;
         for weld in snapshot_welds {
             if welds.insert(weld.weld, weld.value).is_some() {
-                return Err(WeldBalanceError::InvalidTree);
+                return Err(crate::Error::from(WeldBalanceError::InvalidTree));
             }
         }
         for (index, part) in tree.iter().enumerate().skip(1) {
-            let weld_id = part.weld.ok_or(WeldBalanceError::InvalidTree)?;
-            let weld = welds.get(&weld_id).ok_or(WeldBalanceError::InvalidTree)?;
+            let weld_id = part
+                .weld
+                .ok_or_else(|| crate::Error::from(WeldBalanceError::InvalidTree))?;
+            let weld = welds
+                .get(&weld_id)
+                .ok_or_else(|| crate::Error::from(WeldBalanceError::InvalidTree))?;
             let frame = if weld.part_a() == part.part {
                 weld.desc().frame_a
             } else if weld.part_b() == part.part {
                 weld.desc().frame_b
             } else {
-                return Err(WeldBalanceError::InvalidTree);
+                return Err(crate::Error::from(WeldBalanceError::InvalidTree));
             };
             let anchor = part.pose.transform_point(frame.local_anchor);
             let (force, moment) = reactions[index];
@@ -1609,12 +1640,11 @@ impl PhysicsWorld {
     /// Must be finite and positive and match the configured atmospheric medium.
     /// The compatibility default is 340 m/s; density alone cannot determine it.
     /// This changes Mach classification without invalidating local geometry.
-    pub fn set_mesh_sound_speed(
-        &mut self,
-        sound_speed: f64,
-    ) -> Result<(), crate::aerodynamics::pressure::PressureError> {
+    pub fn set_mesh_sound_speed(&mut self, sound_speed: f64) -> Result<(), crate::Error> {
         if !sound_speed.is_finite() || sound_speed <= 0.0 {
-            return Err(crate::aerodynamics::pressure::PressureError::InvalidSoundSpeed);
+            return Err(crate::Error::from(
+                crate::aerodynamics::pressure::PressureError::InvalidSoundSpeed,
+            ));
         }
         self.mesh_sound_speed = sound_speed;
         Ok(())

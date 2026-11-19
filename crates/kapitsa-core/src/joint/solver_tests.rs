@@ -696,7 +696,7 @@ fn residual_applies_unilateral_kkt_conditions_and_rejects_overflow() {
     overflow_row.target_velocity = f64::MAX;
     assert_eq!(
         measure_prepared_rows(&[overflow_row], &fast_bodies, 0.01),
-        Err(CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(CollisionError::ArithmeticOverflow))
     );
 }
 

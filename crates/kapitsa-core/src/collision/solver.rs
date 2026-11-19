@@ -384,12 +384,11 @@ fn measure_joint_residual(
 ) -> Result<(), crate::Error> {
     #[cfg(feature = "bench-internals")]
     if !full_diagnostics {
-        return JointSolver::measure_residual_light(joint_workspace, bodies, joints, dt)
-            .map_err(crate::Error::from);
+        return JointSolver::measure_residual_light(joint_workspace, bodies, joints, dt);
     }
     #[cfg(not(feature = "bench-internals"))]
     let _ = full_diagnostics;
-    JointSolver::measure_residual(joint_workspace, bodies, joints, dt).map_err(crate::Error::from)
+    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)
 }
 
 #[cfg(feature = "bench-internals")]
@@ -3064,7 +3063,6 @@ fn effective_cross_mass(
         measurement,
         impulse,
     )
-    .map_err(|error| crate::Error::from(map_constraint_error(error)))
 }
 
 fn relative_velocity(
@@ -3074,7 +3072,6 @@ fn relative_velocity(
     position_b: Vec3,
 ) -> Result<Vec3, crate::Error> {
     constraint::relative_velocity_at(body_a, body_b, position_a, position_b)
-        .map_err(|error| crate::Error::from(map_constraint_error(error)))
 }
 
 fn apply_pair_impulse<B: SolverBodyAccess + ?Sized>(
@@ -3103,15 +3100,13 @@ fn apply_pair_impulse<B: SolverBodyAccess + ?Sized>(
         let body = bodies
             .get_dynamic_mut(body_a)
             .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
-        constraint::apply_point_impulse(&mut body.body, point_a, -impulse)
-            .map_err(map_constraint_error)?;
+        constraint::apply_point_impulse(&mut body.body, point_a, -impulse)?;
     }
     if dynamic_b {
         let body = bodies
             .get_dynamic_mut(body_b)
             .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
-        constraint::apply_point_impulse(&mut body.body, point_b, impulse)
-            .map_err(map_constraint_error)?;
+        constraint::apply_point_impulse(&mut body.body, point_b, impulse)?;
     }
     Ok(())
 }
@@ -3142,15 +3137,13 @@ fn apply_pair_position_impulse<B: SolverBodyAccess + ?Sized>(
         let body = bodies
             .get_dynamic_mut(body_a)
             .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
-        constraint::apply_point_position_impulse(&mut body.body, point_a, -impulse)
-            .map_err(map_constraint_error)?;
+        constraint::apply_point_position_impulse(&mut body.body, point_a, -impulse)?;
     }
     if dynamic_b {
         let body = bodies
             .get_dynamic_mut(body_b)
             .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
-        constraint::apply_point_position_impulse(&mut body.body, point_b, impulse)
-            .map_err(map_constraint_error)?;
+        constraint::apply_point_position_impulse(&mut body.body, point_b, impulse)?;
     }
     Ok(())
 }
@@ -3226,16 +3219,6 @@ fn validate_contact(contact: ContactPoint) -> Result<(), crate::Error> {
         return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     Ok(())
-}
-
-fn map_constraint_error(error: crate::constraint::ConstraintError) -> CollisionError {
-    match error {
-        crate::constraint::ConstraintError::InvalidMass => CollisionError::InvalidContact,
-        crate::constraint::ConstraintError::ArithmeticOverflow => {
-            CollisionError::ArithmeticOverflow
-        }
-        crate::constraint::ConstraintError::NonConvergent => CollisionError::NonConvergent,
-    }
 }
 
 #[cfg(test)]

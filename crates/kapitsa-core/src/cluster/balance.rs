@@ -42,10 +42,10 @@ pub(crate) fn prepare_recorded_loads(
     loads: RecordedPartLoads<'_>,
     body_center: Vec3,
     origin: Vec3,
-) -> Result<Vec<PartBalanceInput>, BalanceError> {
+) -> Result<Vec<PartBalanceInput>, crate::Error> {
     if !body_center.is_finite() || !origin.is_finite() {
-        return Err(BalanceError::Physics(crate::Error::from(
-            ClusterError::InvalidMotion,
+        return Err(crate::Error::from(BalanceError::Physics(
+            crate::Error::from(ClusterError::InvalidMotion),
         )));
     }
     let capacity_error =
@@ -60,43 +60,43 @@ pub(crate) fn prepare_recorded_loads(
         .map_err(|_| capacity_error())?;
     for part in tree {
         if indices.insert(part.part, inputs.len()).is_some() {
-            return Err(BalanceError::InvalidTree);
+            return Err(crate::Error::from(BalanceError::InvalidTree));
         }
         inputs.push(part.incomplete_balance_input());
     }
-    let offset = body_center
-        .checked_sub(origin)
-        .ok_or(BalanceError::Physics(crate::Error::from(
+    let offset = body_center.checked_sub(origin).ok_or_else(|| {
+        crate::Error::from(BalanceError::Physics(crate::Error::from(
             ClusterError::ArithmeticOverflow,
-        )))?;
-    let mut add = |part, force: Vec3, moment: Vec3| -> Result<(), BalanceError> {
-        let index = *indices.get(&part).ok_or(BalanceError::InvalidTree)?;
+        )))
+    })?;
+    let mut add = |part, force: Vec3, moment: Vec3| -> Result<(), crate::Error> {
+        let index = *indices
+            .get(&part)
+            .ok_or_else(|| crate::Error::from(BalanceError::InvalidTree))?;
         if !force.is_finite() || !moment.is_finite() {
-            return Err(BalanceError::Physics(crate::Error::from(
-                ClusterError::InvalidMotion,
+            return Err(crate::Error::from(BalanceError::Physics(
+                crate::Error::from(ClusterError::InvalidMotion),
             )));
         }
         let shifted = offset
             .checked_cross(force)
             .and_then(|shift| moment.checked_add(shift))
-            .ok_or(BalanceError::Physics(crate::Error::from(
-                ClusterError::ArithmeticOverflow,
-            )))?;
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
         let input = &mut inputs[index];
-        input.external_force =
-            input
-                .external_force
-                .checked_add(force)
-                .ok_or(BalanceError::Physics(crate::Error::from(
-                    ClusterError::ArithmeticOverflow,
-                )))?;
-        input.external_moment =
-            input
-                .external_moment
-                .checked_add(shifted)
-                .ok_or(BalanceError::Physics(crate::Error::from(
-                    ClusterError::ArithmeticOverflow,
-                )))?;
+        input.external_force = input.external_force.checked_add(force).ok_or_else(|| {
+            crate::Error::from(BalanceError::Physics(crate::Error::from(
+                ClusterError::ArithmeticOverflow,
+            )))
+        })?;
+        input.external_moment = input.external_moment.checked_add(shifted).ok_or_else(|| {
+            crate::Error::from(BalanceError::Physics(crate::Error::from(
+                ClusterError::ArithmeticOverflow,
+            )))
+        })?;
         Ok(())
     };
     for load in loads.sources.iter().filter(|load| load.body == state.body) {
@@ -184,9 +184,9 @@ impl TreePart {
 pub(crate) fn prepare_force_free_inputs(
     state: &ClusterLoadState,
     tree: &[TreePart],
-) -> Result<Vec<PartBalanceInput>, BalanceError> {
+) -> Result<Vec<PartBalanceInput>, crate::Error> {
     if !state.force_free_certified || state.collision_loads_uncertified {
-        return Err(BalanceError::IncompleteLoads);
+        return Err(crate::Error::from(BalanceError::IncompleteLoads));
     }
     let mut inputs = Vec::new();
     inputs.try_reserve_exact(tree.len()).map_err(|_| {
@@ -206,7 +206,7 @@ pub(crate) fn prepare_tree(
     state: &ClusterLoadState,
     parts: &[ClusterLoadPart],
     welds: &[ClusterLoadWeld],
-) -> Result<Vec<TreePart>, BalanceError> {
+) -> Result<Vec<TreePart>, crate::Error> {
     let capacity_error =
         || BalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded));
     let mut indices = HashMap::new();
@@ -219,11 +219,13 @@ pub(crate) fn prepare_tree(
         .map_err(|_| capacity_error())?;
     for part in parts.iter().filter(|part| part.body == state.body) {
         if indices.insert(part.part, selected.len()).is_some() {
-            return Err(BalanceError::InvalidTree);
+            return Err(crate::Error::from(BalanceError::InvalidTree));
         }
         selected.push(part);
     }
-    let root = *indices.get(&state.root).ok_or(BalanceError::InvalidTree)?;
+    let root = *indices
+        .get(&state.root)
+        .ok_or_else(|| crate::Error::from(BalanceError::InvalidTree))?;
     let mut adjacency = Vec::new();
     adjacency
         .try_reserve_exact(selected.len())
@@ -245,11 +247,11 @@ pub(crate) fn prepare_tree(
                 adjacency[b].push((a, weld.weld));
                 edge_count += 1;
             }
-            _ => return Err(BalanceError::InvalidTree),
+            _ => return Err(crate::Error::from(BalanceError::InvalidTree)),
         }
     }
     if edge_count != selected.len() - 1 {
-        return Err(BalanceError::InvalidTree);
+        return Err(crate::Error::from(BalanceError::InvalidTree));
     }
     let mut seen = Vec::new();
     seen.try_reserve_exact(selected.len())
@@ -292,7 +294,7 @@ pub(crate) fn prepare_tree(
         cursor += 1;
     }
     if result.len() != selected.len() {
-        return Err(BalanceError::InvalidTree);
+        return Err(crate::Error::from(BalanceError::InvalidTree));
     }
     Ok(result)
 }
@@ -305,22 +307,24 @@ pub(crate) fn reaction_moment_at_anchor(
     moment_at_origin: Vec3,
     origin: Vec3,
     anchor: Vec3,
-) -> Result<Vec3, BalanceError> {
+) -> Result<Vec3, crate::Error> {
     if [force, moment_at_origin, origin, anchor]
         .iter()
         .any(|value| !value.is_finite())
     {
-        return Err(BalanceError::Physics(crate::Error::from(
-            ClusterError::InvalidMotion,
+        return Err(crate::Error::from(BalanceError::Physics(
+            crate::Error::from(ClusterError::InvalidMotion),
         )));
     }
     anchor
         .checked_sub(origin)
         .and_then(|offset| offset.checked_cross(force))
         .and_then(|shift| moment_at_origin.checked_sub(shift))
-        .ok_or(BalanceError::Physics(crate::Error::from(
-            ClusterError::ArithmeticOverflow,
-        )))
+        .ok_or_else(|| {
+            crate::Error::from(BalanceError::Physics(crate::Error::from(
+                ClusterError::ArithmeticOverflow,
+            )))
+        })
 }
 
 /// Reaction exerted by each parent on its child, with moment about `origin`.
@@ -338,23 +342,23 @@ pub(crate) fn tree_reactions(
     origin: Vec3,
     force_tolerance: f64,
     moment_tolerance: f64,
-) -> Result<Vec<(Vec3, Vec3)>, BalanceError> {
+) -> Result<Vec<(Vec3, Vec3)>, crate::Error> {
     if parts.is_empty()
         || parents.len() != parts.len()
         || parents[0] != 0
         || parents.iter().enumerate().skip(1).any(|(i, &p)| p >= i)
     {
-        return Err(BalanceError::InvalidTree);
+        return Err(crate::Error::from(BalanceError::InvalidTree));
     }
     if !force_tolerance.is_finite()
         || force_tolerance < 0.0
         || !moment_tolerance.is_finite()
         || moment_tolerance < 0.0
     {
-        return Err(BalanceError::InvalidTolerance);
+        return Err(crate::Error::from(BalanceError::InvalidTolerance));
     }
     if parts.iter().any(|part| !part.loads_complete) {
-        return Err(BalanceError::IncompleteLoads);
+        return Err(crate::Error::from(BalanceError::IncompleteLoads));
     }
     let mut reactions = Vec::new();
     reactions.try_reserve_exact(parts.len()).map_err(|_| {
@@ -362,8 +366,8 @@ pub(crate) fn tree_reactions(
     })?;
     for part in parts {
         if !part.external_force.is_finite() || !part.external_moment.is_finite() {
-            return Err(BalanceError::Physics(crate::Error::from(
-                ClusterError::InvalidMotion,
+            return Err(crate::Error::from(BalanceError::Physics(
+                crate::Error::from(ClusterError::InvalidMotion),
             )));
         }
         let (force, moment) = part_momentum_rate(
@@ -377,43 +381,45 @@ pub(crate) fn tree_reactions(
         )
         .map_err(BalanceError::Physics)?;
         reactions.push((
-            force
-                .checked_sub(part.external_force)
-                .ok_or(BalanceError::Physics(crate::Error::from(
+            force.checked_sub(part.external_force).ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
                     ClusterError::ArithmeticOverflow,
-                )))?,
-            moment
-                .checked_sub(part.external_moment)
-                .ok_or(BalanceError::Physics(crate::Error::from(
+                )))
+            })?,
+            moment.checked_sub(part.external_moment).ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
                     ClusterError::ArithmeticOverflow,
-                )))?,
+                )))
+            })?,
         ));
     }
     for child in (1..parts.len()).rev() {
         let parent = parents[child];
-        reactions[parent].0 =
-            reactions[parent]
-                .0
-                .checked_add(reactions[child].0)
-                .ok_or(BalanceError::Physics(crate::Error::from(
+        reactions[parent].0 = reactions[parent]
+            .0
+            .checked_add(reactions[child].0)
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
                     ClusterError::ArithmeticOverflow,
-                )))?;
-        reactions[parent].1 =
-            reactions[parent]
-                .1
-                .checked_add(reactions[child].1)
-                .ok_or(BalanceError::Physics(crate::Error::from(
+                )))
+            })?;
+        reactions[parent].1 = reactions[parent]
+            .1
+            .checked_add(reactions[child].1)
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
                     ClusterError::ArithmeticOverflow,
-                )))?;
+                )))
+            })?;
     }
     let (force, moment) = reactions[0];
     if !force.length().is_finite() || !moment.length().is_finite() {
-        return Err(BalanceError::Physics(crate::Error::from(
-            ClusterError::ArithmeticOverflow,
+        return Err(crate::Error::from(BalanceError::Physics(
+            crate::Error::from(ClusterError::ArithmeticOverflow),
         )));
     }
     if force.length() > force_tolerance || moment.length() > moment_tolerance {
-        return Err(BalanceError::Unbalanced);
+        return Err(crate::Error::from(BalanceError::Unbalanced));
     }
     Ok(reactions)
 }
@@ -460,12 +466,18 @@ mod tests {
         parts[2].loads_complete = false;
         assert_eq!(
             solve(&parts, &[0, 0, 1]),
-            Err(BalanceError::IncompleteLoads)
+            Err(crate::Error::from(BalanceError::IncompleteLoads))
         );
         parts[2].loads_complete = true;
-        assert_eq!(solve(&parts, &[0, 2, 1]), Err(BalanceError::InvalidTree));
+        assert_eq!(
+            solve(&parts, &[0, 2, 1]),
+            Err(crate::Error::from(BalanceError::InvalidTree))
+        );
         parts[0].external_force = Vec3::ZERO;
-        assert_eq!(solve(&parts, &[0, 0, 1]), Err(BalanceError::Unbalanced));
+        assert_eq!(
+            solve(&parts, &[0, 0, 1]),
+            Err(crate::Error::from(BalanceError::Unbalanced))
+        );
         Ok(())
     }
 
@@ -518,8 +530,8 @@ mod tests {
                 Vec3::ZERO,
                 Vec3::new(f64::NAN, 0.0, 0.0)
             ),
-            Err(BalanceError::Physics(crate::Error::from(
-                ClusterError::InvalidMotion
+            Err(crate::Error::from(BalanceError::Physics(
+                crate::Error::from(ClusterError::InvalidMotion)
             )))
         );
         let mut shifted = parts;

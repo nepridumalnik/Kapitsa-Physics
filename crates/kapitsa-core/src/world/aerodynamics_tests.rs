@@ -2872,7 +2872,9 @@ fn mesh_sound_speed_rejects_invalid_changes() -> Result<(), Box<dyn std::error::
     for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert_eq!(
             world.set_mesh_sound_speed(invalid),
-            Err(crate::aerodynamics::pressure::PressureError::InvalidSoundSpeed)
+            Err(crate::Error::from(
+                crate::aerodynamics::pressure::PressureError::InvalidSoundSpeed
+            ))
         );
         assert_eq!(world.mesh_sound_speed(), 123.0);
     }

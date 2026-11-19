@@ -45,7 +45,7 @@ pub(super) struct InsertedWeldSplits {
 
 #[derive(Debug)]
 pub(super) enum WeldSplitPreparationError {
-    Balance(super::WeldBalanceError),
+    Balance(crate::Error),
     Cluster(crate::Error),
 }
 
@@ -53,8 +53,8 @@ impl PhysicsWorld {
     fn pending_contact_weld_impulses(
         &self,
         state: &super::ClusterLoadState,
-    ) -> Result<Vec<WeldId>, super::WeldBalanceError> {
-        use super::WeldBalanceError as Error;
+    ) -> Result<Vec<WeldId>, crate::Error> {
+        use super::WeldBalanceError as BalanceError;
         use crate::cluster::{
             balance::prepare_tree,
             impulse::{PartImpulse, tree_impulse_reactions},
@@ -63,7 +63,7 @@ impl PhysicsWorld {
 
         let (linear_tolerance, angular_tolerance) = self
             .automatic_weld_impulse_tolerances
-            .ok_or(Error::IncompleteLoads)?;
+            .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
         let context = &self.collision_system.context;
         if !context.ccd_solved_manifolds.is_empty()
             || (!context.ccd_clipped_bodies.is_empty()
@@ -73,7 +73,7 @@ impl PhysicsWorld {
                     || self.collider_body(manifold.pair.b).is_none()
             })
         {
-            return Err(Error::IncompleteLoads);
+            return Err(crate::Error::from(BalanceError::IncompleteLoads));
         }
         let mut matching = self.contact_impulses_pending.iter().filter_map(|contact| {
             let a = self.collider_body(contact.pair.a);
@@ -86,23 +86,25 @@ impl PhysicsWorld {
                 None
             }
         });
-        let (contact, side) = matching.next().ok_or(Error::IncompleteLoads)?;
+        let (contact, side) = matching
+            .next()
+            .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
         if contact.ccd
             || self.contact_impulses_omitted_pending != 0
             || self.contact_ccd_clipped_pending
         {
-            return Err(Error::IncompleteLoads);
+            return Err(crate::Error::from(BalanceError::IncompleteLoads));
         }
         let states = contact
             .isolated_velocity_states
-            .ok_or(Error::IncompleteLoads)?;
+            .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
         let other_body = self
             .collider_body(if side == 0 {
                 contact.pair.b
             } else {
                 contact.pair.a
             })
-            .ok_or(Error::IncompleteLoads)?;
+            .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
         let before = states[0][side];
         let after = states[1][side];
         let mut impact_state = *state;
@@ -112,31 +114,38 @@ impl PhysicsWorld {
             &self.cluster_load_parts_pending,
             &self.cluster_load_welds_pending,
         )?;
-        let mass = state.mass.ok_or(Error::IncompleteLoads)?;
-        let (origin, _) = world_properties(mass, before.transform()).map_err(Error::Physics)?;
+        let mass = state
+            .mass
+            .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
+        let (origin, _) =
+            world_properties(mass, before.transform()).map_err(BalanceError::Physics)?;
         let delta_linear = after
             .linear_velocity()
             .checked_sub(before.linear_velocity())
-            .ok_or(Error::Physics(crate::Error::from(
-                ClusterError::ArithmeticOverflow,
-            )))?;
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
         let delta_angular = after
             .angular_velocity()
             .checked_sub(before.angular_velocity())
-            .ok_or(Error::Physics(crate::Error::from(
-                ClusterError::ArithmeticOverflow,
-            )))?;
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
         let mut inputs = Vec::new();
         let mut parents = Vec::new();
         let mut indices = HashMap::new();
         inputs.try_reserve_exact(tree.len()).map_err(|_| {
-            Error::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+            BalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
         })?;
         parents.try_reserve_exact(tree.len()).map_err(|_| {
-            Error::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+            BalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
         })?;
         indices.try_reserve(tree.len()).map_err(|_| {
-            Error::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+            BalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
         })?;
         for (index, part) in tree.iter().enumerate() {
             indices.insert(part.part, index);
@@ -152,7 +161,7 @@ impl PhysicsWorld {
         for (point, point_side) in std::iter::once((contact, side)).chain(matching) {
             let point_states = point
                 .isolated_velocity_states
-                .ok_or(Error::IncompleteLoads)?;
+                .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
             let point_other = self.collider_body(if point_side == 0 {
                 point.pair.b
             } else {
@@ -163,43 +172,50 @@ impl PhysicsWorld {
                 || point_states[0][point_side] != before
                 || point_states[1][point_side] != after
             {
-                return Err(Error::IncompleteLoads);
+                return Err(crate::Error::from(BalanceError::IncompleteLoads));
             }
-            let part = point.parts[point_side].ok_or(Error::IncompleteLoads)?;
-            let index = *indices.get(&part).ok_or(Error::IncompleteLoads)?;
+            let part = point.parts[point_side]
+                .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
+            let index = *indices
+                .get(&part)
+                .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
             let contribution = if point_side == 0 {
                 point.impulse_on_b.checked_mul_scalar(-1.0)
             } else {
                 Some(point.impulse_on_b)
             }
-            .ok_or(Error::Physics(crate::Error::from(
-                ClusterError::ArithmeticOverflow,
-            )))?;
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
             let moment = point.points[point_side]
                 .checked_sub(origin)
                 .and_then(|arm| arm.checked_cross(contribution))
-                .ok_or(Error::Physics(crate::Error::from(
-                    ClusterError::ArithmeticOverflow,
-                )))?;
+                .ok_or_else(|| {
+                    crate::Error::from(BalanceError::Physics(crate::Error::from(
+                        ClusterError::ArithmeticOverflow,
+                    )))
+                })?;
             inputs[index].linear =
                 inputs[index]
                     .linear
                     .checked_add(contribution)
-                    .ok_or(Error::Physics(crate::Error::from(
-                        ClusterError::ArithmeticOverflow,
-                    )))?;
-            inputs[index].angular =
-                inputs[index]
-                    .angular
-                    .checked_add(moment)
-                    .ok_or(Error::Physics(crate::Error::from(
-                        ClusterError::ArithmeticOverflow,
-                    )))?;
-            count = count
-                .checked_add(1)
-                .ok_or(Error::Physics(crate::Error::from(
+                    .ok_or_else(|| {
+                        crate::Error::from(BalanceError::Physics(crate::Error::from(
+                            ClusterError::ArithmeticOverflow,
+                        )))
+                    })?;
+            inputs[index].angular = inputs[index].angular.checked_add(moment).ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
                     ClusterError::ArithmeticOverflow,
-                )))?;
+                )))
+            })?;
+            count = count.checked_add(1).ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
         }
         let expected = context
             .manifolds
@@ -209,11 +225,13 @@ impl PhysicsWorld {
                     || self.collider_body(manifold.pair.b) == Some(state.body)
             })
             .try_fold(0usize, |count, manifold| count.checked_add(manifold.len()))
-            .ok_or(Error::Physics(crate::Error::from(
-                ClusterError::ArithmeticOverflow,
-            )))?;
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
         if expected != count {
-            return Err(Error::IncompleteLoads);
+            return Err(crate::Error::from(BalanceError::IncompleteLoads));
         }
         let reactions = tree_impulse_reactions(
             &inputs,
@@ -229,11 +247,15 @@ impl PhysicsWorld {
         candidates
             .try_reserve(tree.len().saturating_sub(1))
             .map_err(|_| {
-                Error::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+                BalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
             })?;
         for (part, reaction) in tree.iter().zip(reactions).skip(1) {
-            let id = part.weld.ok_or(Error::InvalidTree)?;
-            let weld = self.weld(id).ok_or(Error::InvalidTree)?;
+            let id = part
+                .weld
+                .ok_or_else(|| crate::Error::from(BalanceError::InvalidTree))?;
+            let weld = self
+                .weld(id)
+                .ok_or_else(|| crate::Error::from(BalanceError::InvalidTree))?;
             let Some(strength) = weld.impulse_strength() else {
                 continue;
             };
@@ -242,7 +264,7 @@ impl PhysicsWorld {
             } else if weld.part_b() == part.part {
                 weld.desc().frame_b
             } else {
-                return Err(Error::InvalidTree);
+                return Err(crate::Error::from(BalanceError::InvalidTree));
             };
             let reaction =
                 reaction.at_anchor(origin, part.pose.transform_point(frame.local_anchor))?;
@@ -297,16 +319,16 @@ impl PhysicsWorld {
                     state.collision_loads_uncertified,
                 )?;
                 welds.try_reserve(candidates.len()).map_err(|_| {
-                    super::WeldBalanceError::Physics(crate::Error::from(
+                    crate::Error::from(super::WeldBalanceError::Physics(crate::Error::from(
                         ClusterError::StorageCapacityExceeded,
-                    ))
+                    )))
                 })?;
                 let mut seen = HashSet::new();
                 seen.try_reserve(welds.len().saturating_add(candidates.len()))
                     .map_err(|_| {
-                        super::WeldBalanceError::Physics(crate::Error::from(
+                        crate::Error::from(super::WeldBalanceError::Physics(crate::Error::from(
                             ClusterError::StorageCapacityExceeded,
-                        ))
+                        )))
                     })?;
                 seen.extend(welds.iter().copied());
                 for candidate in candidates {
@@ -314,12 +336,14 @@ impl PhysicsWorld {
                         welds.push(candidate.reaction.weld);
                     }
                 }
-                Ok::<_, super::WeldBalanceError>(welds)
+                Ok::<_, crate::Error>(welds)
             })();
             let welds = match evaluation {
                 Ok(welds) => welds,
-                Err(super::WeldBalanceError::IncompleteLoads)
-                    if self.error_policy == super::ErrorPolicy::Realtime =>
+                Err(error)
+                    if error.downcast_ref::<super::WeldBalanceError>()
+                        == Some(&super::WeldBalanceError::IncompleteLoads)
+                        && self.error_policy == super::ErrorPolicy::Realtime =>
                 {
                     self.pending_step_diagnostics.weld_incomplete_load_clusters = self
                         .pending_step_diagnostics

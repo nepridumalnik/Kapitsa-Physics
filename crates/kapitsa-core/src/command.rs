@@ -776,7 +776,7 @@ pub fn apply_command_batch(
     world: &mut PhysicsWorld,
     commands: &[PhysicsCommand],
     scratch: &mut BatchScratch,
-) -> Result<(), CommandBatchError> {
+) -> Result<(), crate::Error> {
     scratch.clear();
     let result = apply_command_batch_staged(world, commands, scratch);
     scratch.clear();
@@ -787,7 +787,7 @@ fn apply_command_batch_staged(
     world: &mut PhysicsWorld,
     commands: &[PhysicsCommand],
     scratch: &mut BatchScratch,
-) -> Result<(), CommandBatchError> {
+) -> Result<(), crate::Error> {
     for (command_index, command) in commands.iter().enumerate() {
         if let PhysicsCommand::SetForceSource {
             id,
@@ -797,10 +797,10 @@ fn apply_command_batch_staged(
         {
             let source_index = staged_force_source_index(world, scratch, *id, command_index)?;
             if !local_point.is_finite() || !local_force.is_finite() {
-                return Err(CommandBatchError {
+                return Err(crate::Error::from(CommandBatchError {
                     command_index: Some(command_index),
                     error: CommandError::ForceSource(ForceSourceError::NonFiniteValue),
-                });
+                }));
             }
             let source = &mut scratch.updated_force_sources[source_index];
             source.local_point = *local_point;
@@ -820,13 +820,15 @@ fn apply_command_batch_staged(
                 let index = staged_joint_index(world, scratch, *id, command_index)?;
                 let staged = &mut scratch.updated_joints[index];
                 if staged.removed {
-                    return Err(invalid_joint_batch_command(command_index));
+                    return Err(crate::Error::from(invalid_joint_batch_command(
+                        command_index,
+                    )));
                 }
                 if let Err(error) = joint.validate() {
-                    return Err(CommandBatchError {
+                    return Err(crate::Error::from(CommandBatchError {
                         command_index: Some(command_index),
                         error: CommandError::from_unified(error),
-                    });
+                    }));
                 }
                 staged.joint = *joint;
                 staged.command_index = command_index;
@@ -836,7 +838,9 @@ fn apply_command_batch_staged(
                 let index = staged_joint_index(world, scratch, *id, command_index)?;
                 let staged = &mut scratch.updated_joints[index];
                 if staged.removed {
-                    return Err(invalid_joint_batch_command(command_index));
+                    return Err(crate::Error::from(invalid_joint_batch_command(
+                        command_index,
+                    )));
                 }
                 staged.joint.set_enabled(*enabled);
                 staged.command_index = command_index;
@@ -846,7 +850,9 @@ fn apply_command_batch_staged(
                 let index = staged_joint_index(world, scratch, *id, command_index)?;
                 let staged = &mut scratch.updated_joints[index];
                 if staged.removed {
-                    return Err(invalid_joint_batch_command(command_index));
+                    return Err(crate::Error::from(invalid_joint_batch_command(
+                        command_index,
+                    )));
                 }
                 staged.removed = true;
                 staged.command_index = command_index;
@@ -857,17 +863,17 @@ fn apply_command_batch_staged(
         }
 
         let Some(id) = body_command_id(command) else {
-            return Err(CommandBatchError {
+            return Err(crate::Error::from(CommandBatchError {
                 command_index: Some(command_index),
                 error: CommandError::UnsupportedBatchCommand,
-            });
+            }));
         };
 
         if matches!(command, PhysicsCommand::SetMass { .. }) && world.cluster(id).is_some() {
-            return Err(CommandBatchError {
+            return Err(crate::Error::from(CommandBatchError {
                 command_index: Some(command_index),
                 error: CommandError::Cluster(ClusterError::ManagedMass),
-            });
+            }));
         }
 
         let body_index = if scratch.updated_bodies.len() <= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
@@ -882,10 +888,10 @@ fn apply_command_batch_staged(
             Some(index) => index,
             None => {
                 let Some(body) = world.body(id).map(RigidBody::motion) else {
-                    return Err(CommandBatchError {
+                    return Err(crate::Error::from(CommandBatchError {
                         command_index: Some(command_index),
                         error: CommandError::World(WorldError::InvalidBodyId),
-                    });
+                    }));
                 };
                 let index = scratch.updated_bodies.len();
                 if index >= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
@@ -904,10 +910,10 @@ fn apply_command_batch_staged(
         };
 
         if let Err(error) = apply_body_command(&mut scratch.updated_bodies[body_index].1, command) {
-            return Err(CommandBatchError {
+            return Err(crate::Error::from(CommandBatchError {
                 command_index: Some(command_index),
                 error: error.into(),
-            });
+            }));
         }
     }
 
@@ -946,9 +952,11 @@ fn apply_command_batch_staged(
                 *motion = *body;
                 Ok(())
             })
-            .map_err(|error| CommandBatchError {
-                command_index: None,
-                error: error.into(),
+            .map_err(|error| {
+                crate::Error::from(CommandBatchError {
+                    command_index: None,
+                    error: error.into(),
+                })
             })?;
     }
     Ok(())
@@ -959,7 +967,7 @@ fn staged_force_source_index(
     scratch: &mut BatchScratch,
     id: ForceSourceId,
     command_index: usize,
-) -> Result<usize, CommandBatchError> {
+) -> Result<usize, crate::Error> {
     let source_index = if scratch.updated_force_sources.len() <= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
         scratch
             .updated_force_sources
@@ -972,10 +980,10 @@ fn staged_force_source_index(
         return Ok(index);
     }
     let Some(source) = world.force_source(id) else {
-        return Err(CommandBatchError {
+        return Err(crate::Error::from(CommandBatchError {
             command_index: Some(command_index),
             error: CommandError::ForceSource(ForceSourceError::InvalidForceSourceId),
-        });
+        }));
     };
     let source: ForceSource = *source;
     let index = scratch.updated_force_sources.len();
@@ -1004,7 +1012,7 @@ fn staged_joint_index(
     scratch: &mut BatchScratch,
     id: JointId,
     command_index: usize,
-) -> Result<usize, CommandBatchError> {
+) -> Result<usize, crate::Error> {
     let index = if scratch.updated_joints.len() <= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
         scratch
             .updated_joints
@@ -1017,7 +1025,9 @@ fn staged_joint_index(
         return Ok(index);
     }
     let Some(joint) = world.joint(id).copied() else {
-        return Err(invalid_joint_batch_command(command_index));
+        return Err(crate::Error::from(invalid_joint_batch_command(
+            command_index,
+        )));
     };
     let index = scratch.updated_joints.len();
     if index >= SMALL_STAGING_LINEAR_SEARCH_LIMIT {
@@ -1206,7 +1216,7 @@ fn apply_body_command(body: &mut BodyMotion, command: &PhysicsCommand) -> Result
 pub(crate) fn apply_command_inner(
     world: &mut PhysicsWorld,
     command: PhysicsCommand,
-) -> Result<PhysicsCommandResult, CommandError> {
+) -> Result<PhysicsCommandResult, crate::Error> {
     let result = match command {
         PhysicsCommand::AddJointTargets {
             target_a,
@@ -1418,10 +1428,12 @@ pub(crate) fn apply_command_inner(
         | PhysicsCommand::ApplyImpulseAtPoint { .. }
         | PhysicsCommand::ClearForces { .. }) => {
             let Some(id) = body_command_id(&command) else {
-                return Err(CommandError::UnsupportedBatchCommand);
+                return Err(crate::Error::from(CommandError::UnsupportedBatchCommand));
             };
             if matches!(command, PhysicsCommand::SetMass { .. }) && world.cluster(id).is_some() {
-                return Err(CommandError::Cluster(ClusterError::ManagedMass));
+                return Err(crate::Error::from(CommandError::Cluster(
+                    ClusterError::ManagedMass,
+                )));
             }
             world.edit_body(id, |body| apply_body_command(body, &command))?;
             PhysicsCommandResult::Done
@@ -1494,14 +1506,14 @@ impl PhysicsWorld {
     /// Validation follows buffer order and reports the rejecting command index.
     /// No partial mutation is committed on failure. This method never steps the
     /// world or publishes a snapshot; call [`PhysicsWorld::step`] afterwards.
-    pub fn apply(&mut self, commands: &PhysicsCommandBuffer) -> Result<(), CommandBatchError> {
+    pub fn apply(&mut self, commands: &PhysicsCommandBuffer) -> Result<(), crate::Error> {
         if commands.commands.len() > PhysicsCommandBuffer::MAX_COMMANDS {
-            return Err(CommandBatchError {
+            return Err(crate::Error::from(CommandBatchError {
                 command_index: None,
                 error: CommandError::TooManyCommands {
                     max_commands: PhysicsCommandBuffer::MAX_COMMANDS,
                 },
-            });
+            }));
         }
         if commands.commands.is_empty() {
             return Ok(());
@@ -1521,7 +1533,7 @@ impl PhysicsWorld {
         &mut self,
         commands: &[PhysicsCommand],
         scratch: &mut BatchScratch,
-    ) -> Result<(), CommandBatchError> {
+    ) -> Result<(), crate::Error> {
         if commands.is_empty() {
             return Ok(());
         }
@@ -1532,7 +1544,7 @@ impl PhysicsWorld {
     pub fn apply_command(
         &mut self,
         command: PhysicsCommand,
-    ) -> Result<PhysicsCommandResult, CommandError> {
+    ) -> Result<PhysicsCommandResult, crate::Error> {
         apply_command_inner(self, command)
     }
 }

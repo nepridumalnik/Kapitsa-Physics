@@ -104,7 +104,7 @@ pub enum StepError {
     InvalidDeltaTime,
     InvalidStepResults,
     /// Automatic weld failure could not certify or balance this step.
-    WeldBalance(super::WeldBalanceError),
+    WeldBalance(crate::Error),
     /// Preparing or committing a weld split failed.
     WeldSplit(crate::Error),
     Collision(crate::Error),

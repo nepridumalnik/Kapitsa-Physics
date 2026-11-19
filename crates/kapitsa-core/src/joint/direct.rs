@@ -11,7 +11,7 @@ use crate::{
 
 use super::{
     row::ConstraintRow,
-    solver::{SolverMassCacheStats, map_rigid_body_error, row_velocity},
+    solver::{SolverMassCacheStats, row_velocity},
 };
 
 type RowTerm = (usize, Vec3, Vec3);
@@ -79,7 +79,7 @@ impl DirectVelocityScratch {
         slots: &mut [SolverMassSlot],
         mass_cache: bool,
         cache_stats: &mut SolverMassCacheStats,
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         if rows.is_empty()
             || rows.iter().any(|row| {
                 !row.position_enabled
@@ -99,7 +99,7 @@ impl DirectVelocityScratch {
         reset_nested(&mut self.terms, bodies.len())?;
         for (index, row) in rows.iter().enumerate() {
             if !row.is_valid(bodies.len()) {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             for (body, other, linear, angular) in [
                 (row.body_a, row.body_b, row.linear_a, row.angular_a),
@@ -140,7 +140,7 @@ impl DirectVelocityScratch {
             let mass = if mass_cache {
                 let (mass, status) = slots
                     .get_mut(index)
-                    .ok_or(CollisionError::InvalidContact)?
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                     .resolve(body.body())?;
                 cache_stats.record(status);
                 mass
@@ -174,7 +174,7 @@ impl DirectVelocityScratch {
                 return Ok(false);
             }
             if !pivot.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             if pivot <= f64::MIN_POSITIVE {
                 return Ok(false);
@@ -190,7 +190,7 @@ impl DirectVelocityScratch {
                 let factor = value / pivot;
                 self.rhs[target] -= factor * self.rhs[row];
                 if !factor.is_finite() || !self.rhs[target].is_finite() {
-                    return Err(CollisionError::ArithmeticOverflow);
+                    return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                 }
                 for &(column, other) in &self.remaining[i..] {
                     add_entry(&mut self.matrix[target], column, -factor * other)?;
@@ -207,7 +207,7 @@ impl DirectVelocityScratch {
             }
             self.solution[row] = (self.rhs[row] - cross) / self.diagonal[row];
             if !self.solution[row].is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
         }
         grow(&mut self.generalized, bodies.len())?;
@@ -220,7 +220,7 @@ impl DirectVelocityScratch {
             self.generalized[row.body_b].0 += row.linear_b * impulse;
             self.generalized[row.body_b].1 += row.angular_b * impulse;
             if !(row.accumulated_impulse + impulse).is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
         }
         self.candidate.clear();
@@ -234,8 +234,7 @@ impl DirectVelocityScratch {
         {
             if body.body().physics().body_type() == BodyType::Dynamic {
                 body.body_mut()
-                    .apply_constraint_impulse_cached(linear, angular, mass)
-                    .map_err(map_rigid_body_error)?;
+                    .apply_constraint_impulse_cached(linear, angular, mass)?;
             }
         }
         // Do not commit an ill-conditioned solution. Fallback leaves both the
@@ -271,7 +270,7 @@ impl DirectVelocityScratch {
     }
 }
 
-fn kinetic_energy(bodies: &[SolverBody]) -> Result<f64, CollisionError> {
+fn kinetic_energy(bodies: &[SolverBody]) -> Result<f64, crate::Error> {
     let mut total = 0.0;
     for body in bodies {
         if body.body().physics().body_type() != BodyType::Dynamic {
@@ -281,41 +280,41 @@ fn kinetic_energy(bodies: &[SolverBody]) -> Result<f64, CollisionError> {
             .body()
             .physics()
             .mass()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let state = body.state();
         let omega = state
             .transform()
             .rotation()
             .conjugate()
             .rotate_vector(state.angular_velocity())
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let spin = mass
             .inertia()
             .checked_mul_vector(omega)
             .and_then(|momentum| omega.checked_dot(momentum))
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let speed_squared = state
             .linear_velocity()
             .checked_dot(state.linear_velocity())
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         total += 0.5 * (mass.mass() * speed_squared + spin);
         if !total.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
     }
     Ok(total)
 }
 
-fn grow<T>(values: &mut Vec<T>, required: usize) -> Result<(), CollisionError> {
+fn grow<T>(values: &mut Vec<T>, required: usize) -> Result<(), crate::Error> {
     if values.capacity() < required {
         values
             .try_reserve(required - values.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     }
     Ok(())
 }
 
-fn reset_nested<T>(values: &mut Vec<Vec<T>>, required: usize) -> Result<(), CollisionError> {
+fn reset_nested<T>(values: &mut Vec<Vec<T>>, required: usize) -> Result<(), crate::Error> {
     grow(values, required)?;
     if values.len() < required {
         values.resize_with(required, Vec::new);
@@ -330,17 +329,17 @@ fn add_entry(
     entries: &mut Vec<MatrixEntry>,
     column: usize,
     value: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     match entries.binary_search_by_key(&column, |entry| entry.0) {
         Ok(index) => {
             entries[index].1 += value;
             if !entries[index].1.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
         }
         Err(index) => {
             if !value.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             grow(entries, entries.len() + 1)?;
             entries.insert(index, (column, value));

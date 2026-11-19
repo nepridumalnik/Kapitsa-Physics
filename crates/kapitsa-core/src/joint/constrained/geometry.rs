@@ -35,20 +35,20 @@ pub(crate) fn write_equality_rows(
     joint: JointConstraint,
     bodies: &[MomentumBody],
     out: &mut [EqualityRow; MAX_EQUALITY_ROWS],
-) -> Result<usize, CollisionError> {
+) -> Result<usize, crate::Error> {
     use crate::joint::{
         JointMotion,
         solver::{fixed_rotation_coefficient, fixed_rotation_row_axis, relative_rotation_error},
     };
     if !joint.joint.supports_free_bilateral() || joint.body_a == joint.body_b {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let a = *bodies
         .get(joint.body_a)
-        .ok_or(CollisionError::InvalidContact)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     let b = *bodies
         .get(joint.body_b)
-        .ok_or(CollisionError::InvalidContact)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     let common = joint.joint.common();
     let pa = a.anchor(common.frame_a.local_anchor)?;
     let pb = b.anchor(common.frame_b.local_anchor)?;
@@ -86,7 +86,9 @@ pub(crate) fn write_equality_rows(
         }
         Joint::Distance(distance_joint) => {
             let distance = super::length(delta)?;
-            let axis = delta.try_normalize().ok_or(CollisionError::NonConvergent)?;
+            let axis = delta
+                .try_normalize()
+                .ok_or_else(|| crate::Error::from(CollisionError::NonConvergent))?;
             out[0] = EqualityRow {
                 a: joint.body_a,
                 b: joint.body_b,
@@ -103,7 +105,7 @@ pub(crate) fn write_equality_rows(
             return Ok(1);
         }
         Joint::ConeTwist(joint) => cone = Some(joint),
-        _ => return Err(CollisionError::InvalidContact),
+        _ => return Err(crate::Error::from(CollisionError::InvalidContact)),
     }
     let mut count = 0;
     for (locked, local_axis) in linear.into_iter().zip([Vec3::X, Vec3::Y, Vec3::Z]) {
@@ -127,12 +129,12 @@ pub(crate) fn write_equality_rows(
     if let Some(cone) = cone {
         let relative = (frame_a.conjugate() * frame_b)
             .try_normalize()
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let norm_squared = relative.w * relative.w + relative.z * relative.z;
         if norm_squared <= (64.0 * f64::EPSILON).powi(2)
             && (cone.swing_limit.contains(&0.0) || cone.twist_limit.lower == cone.twist_limit.upper)
         {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         let norm = norm_squared.sqrt();
         let vector = Vec3::new(relative.x, relative.y, relative.z);
@@ -176,7 +178,7 @@ pub(crate) fn write_equality_rows(
                 .rem_euclid(std::f64::consts::TAU)
                 - std::f64::consts::PI;
             if value.abs() >= std::f64::consts::PI - 1.0e-10 {
-                return Err(CollisionError::NonConvergent);
+                return Err(crate::Error::from(CollisionError::NonConvergent));
             }
             let gradient = Vec3::Z * (2.0 * relative.w / norm_squared);
             let scalar = -2.0 * relative.z / norm_squared;
@@ -197,7 +199,7 @@ pub(crate) fn write_equality_rows(
     } else if align {
         let z = rotate(frame_b, Vec3::Z)?;
         if rotate(frame_a, Vec3::Z)?.dot(z) <= 1.0e-10 {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         for axis in [Vec3::X, Vec3::Y] {
             let axis = rotate(frame_a, axis)?;
@@ -215,7 +217,7 @@ pub(crate) fn write_equality_rows(
     } else if angular.iter().any(|locked| *locked) {
         let error = relative_rotation_error(target, frame_b)?;
         if super::length(error)? >= std::f64::consts::PI - 1.0e-10 {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         let coefficient = fixed_rotation_coefficient(error)?;
         for ((locked, axis), value) in angular
@@ -239,7 +241,7 @@ pub(crate) fn write_equality_rows(
         }
     }
     if out[..count].iter().any(|row| !row.value.is_finite()) {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(count)
 }

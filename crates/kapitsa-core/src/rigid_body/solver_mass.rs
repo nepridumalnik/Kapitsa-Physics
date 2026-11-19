@@ -23,37 +23,37 @@ impl SolverMass {
         center: Vec3::ZERO,
     };
 
-    pub(crate) fn from_body(body: &BodyMotion) -> Result<Self, CollisionError> {
+    pub(crate) fn from_body(body: &BodyMotion) -> Result<Self, crate::Error> {
         if body.physics().body_type() != BodyType::Dynamic {
             return Ok(Self::STATIC);
         }
         let mass = body
             .physics()
             .mass()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let rotation = body.state().transform().rotation();
         let inverse_local_inertia = inverse_spd(mass.inertia())?;
         let x = rotation
             .rotate_vector(Vec3::X)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let y = rotation
             .rotate_vector(Vec3::Y)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let z = rotation
             .rotate_vector(Vec3::Z)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let rotation = Mat3::from_cols(x, y, z);
         let inverse_inertia = rotation
             .checked_mul_matrix(inverse_local_inertia)
             .and_then(|matrix| matrix.checked_mul_matrix(rotation.transpose()))
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let center = body
             .world_center_of_mass()
-            .map_err(|_| CollisionError::ArithmeticOverflow)?
-            .ok_or(CollisionError::InvalidContact)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let inverse_mass = 1.0 / mass.mass();
         if !inverse_mass.is_finite() || inverse_mass <= 0.0 {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         Ok(Self {
             inverse_mass,
@@ -63,7 +63,7 @@ impl SolverMass {
     }
 
     /// For generalized Jacobian J=(linear, angular): J M^-1 J^T.
-    pub(crate) fn diagonal(self, linear: Vec3, angular: Vec3) -> Result<f64, CollisionError> {
+    pub(crate) fn diagonal(self, linear: Vec3, angular: Vec3) -> Result<f64, crate::Error> {
         self.cross(linear, angular, linear, angular)
     }
 
@@ -73,23 +73,23 @@ impl SolverMass {
         angular_a: Vec3,
         linear_b: Vec3,
         angular_b: Vec3,
-    ) -> Result<f64, CollisionError> {
+    ) -> Result<f64, crate::Error> {
         let angular_response = self
             .inverse_inertia
             .checked_mul_vector(angular_b)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let linear_term = self.inverse_mass
             * linear_a
                 .checked_dot(linear_b)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let angular_term = angular_a
             .checked_dot(angular_response)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let value = linear_term + angular_term;
         value
             .is_finite()
             .then_some(value)
-            .ok_or(CollisionError::ArithmeticOverflow)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
     }
 }
 
@@ -139,7 +139,7 @@ impl SolverMassSlot {
     pub(crate) fn resolve(
         &mut self,
         body: &BodyMotion,
-    ) -> Result<(SolverMass, SolverMassCacheStatus), CollisionError> {
+    ) -> Result<(SolverMass, SolverMassCacheStatus), crate::Error> {
         if body.physics().body_type() != BodyType::Dynamic {
             if self.cached_mass.is_some()
                 || self.cached_transform.is_some()
@@ -160,7 +160,7 @@ impl SolverMassSlot {
         let mass = body
             .physics()
             .mass()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         if self.cached_mass != Some(mass) {
             self.inverse_local_inertia = inverse_spd(mass.inertia())?;
             self.cached_mass = Some(mass);
@@ -178,22 +178,22 @@ impl SolverMassSlot {
             let rotation = transform
                 .rotation()
                 .to_mat3()
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             rotation
                 .checked_mul_matrix(self.inverse_local_inertia)
                 .and_then(|matrix| matrix.checked_mul_matrix(rotation.transpose()))
-                .ok_or(CollisionError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
         } else {
             self.resolved.inverse_inertia
         };
         let inverse_mass = 1.0 / mass.mass();
         if !inverse_mass.is_finite() || inverse_mass <= 0.0 {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let center = body
             .world_center_of_mass()
-            .map_err(|_| CollisionError::ArithmeticOverflow)?
-            .ok_or(CollisionError::InvalidContact)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         self.resolved = SolverMass {
             inverse_mass,
             inverse_inertia,
@@ -212,7 +212,7 @@ impl SolverMassSlot {
     }
 }
 
-pub(crate) fn inverse_spd(matrix: Mat3) -> Result<Mat3, CollisionError> {
+pub(crate) fn inverse_spd(matrix: Mat3) -> Result<Mat3, crate::Error> {
     let x = matrix.solve_spd(Vec3::X).map_err(map_cholesky_error)?;
     let y = matrix.solve_spd(Vec3::Y).map_err(map_cholesky_error)?;
     let z = matrix.solve_spd(Vec3::Z).map_err(map_cholesky_error)?;
@@ -220,16 +220,16 @@ pub(crate) fn inverse_spd(matrix: Mat3) -> Result<Mat3, CollisionError> {
     inverse
         .is_finite()
         .then_some(inverse)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
-fn map_cholesky_error(error: CholeskyError) -> CollisionError {
+fn map_cholesky_error(error: CholeskyError) -> crate::Error {
     match error {
         CholeskyError::NonFiniteInput | CholeskyError::ResultOutOfRange => {
-            CollisionError::ArithmeticOverflow
+            crate::Error::from(CollisionError::ArithmeticOverflow)
         }
         CholeskyError::NotSymmetric | CholeskyError::NotPositiveDefinite => {
-            CollisionError::InvalidContact
+            crate::Error::from(CollisionError::InvalidContact)
         }
     }
 }

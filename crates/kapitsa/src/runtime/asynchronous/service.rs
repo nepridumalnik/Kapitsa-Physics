@@ -309,7 +309,7 @@ pub(crate) enum SimulationError {
     SimulationTimeOverflow,
     InvalidTimeMultiplier,
     InvalidWorkerCount,
-    InvalidMeshSoundSpeed(kapitsa_core::aerodynamics::pressure::PressureError),
+    InvalidMeshSoundSpeed(kapitsa_core::Error),
     AlreadyRunning,
     TaskRequiresStop,
     Physics(kapitsa_core::Error),

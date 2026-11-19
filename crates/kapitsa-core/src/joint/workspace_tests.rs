@@ -283,7 +283,7 @@ fn constraint_estimate_reaction_mode_is_inactive() {
 
     assert_eq!(
         workspace.collect_break_events(&joints, &bodies, 1.0, ReactionMode::ConstraintEstimate),
-        Err(CollisionError::InvalidConfig)
+        Err(crate::Error::from(CollisionError::InvalidConfig))
     );
     assert!(workspace.break_events().is_empty());
 }

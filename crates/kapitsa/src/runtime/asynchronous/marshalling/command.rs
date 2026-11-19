@@ -43,9 +43,7 @@ pub(crate) fn apply_command_batch(
     commands: &[PhysicsCommand],
     scratch: &mut BatchScratch,
 ) -> Result<(), kapitsa_core::Error> {
-    world
-        .apply_commands(commands, scratch)
-        .map_err(kapitsa_core::Error::from)
+    world.apply_commands(commands, scratch)
 }
 
 /// Correlates an accepted command buffer with its asynchronous result.

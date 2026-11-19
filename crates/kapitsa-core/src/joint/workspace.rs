@@ -290,11 +290,11 @@ impl JointWorkspace {
     pub(crate) fn ensure_solver_mass_slots(
         &mut self,
         body_count: usize,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if body_count > self.solver_mass_slots.len() {
             self.solver_mass_slots
                 .try_reserve(body_count - self.solver_mass_slots.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.solver_mass_slots
                 .resize_with(body_count, SolverMassSlot::default);
         } else {
@@ -333,11 +333,11 @@ impl JointWorkspace {
     pub(crate) fn ensure_fixed_velocity_operators(
         &mut self,
         joint_index: usize,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if joint_index >= self.fixed_velocity_operators.len() {
             self.fixed_velocity_operators
                 .try_reserve(joint_index + 1 - self.fixed_velocity_operators.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.fixed_velocity_operators
                 .resize_with(joint_index + 1, FixedBlockVelocityOperators::default);
         }
@@ -365,19 +365,19 @@ impl JointWorkspace {
 
     pub(crate) fn preparing_fixed_row_blocks_mut(
         &mut self,
-    ) -> Result<FixedRowBlocksMut<'_>, CollisionError> {
+    ) -> Result<FixedRowBlocksMut<'_>, crate::Error> {
         let (rows, slots) = (&mut self.preparing_rows, &mut self.solver_mass_slots);
         let rows: &mut [ConstraintRow; 6] = rows
             .as_mut_slice()
             .try_into()
-            .map_err(|_| CollisionError::InvalidContact)?;
+            .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
         let (anchor_rows, frame_rows) = rows.split_at_mut(3);
         let anchor_rows = anchor_rows
             .try_into()
-            .map_err(|_| CollisionError::InvalidContact)?;
+            .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
         let frame_rows = frame_rows
             .try_into()
-            .map_err(|_| CollisionError::InvalidContact)?;
+            .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
         Ok((anchor_rows, frame_rows, slots))
     }
 
@@ -426,7 +426,7 @@ impl JointWorkspace {
         cache: &mut JointImpulseCache,
         joints: &[JointConstraint],
         dt: f64,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let mut row_start = 0;
         for (joint_index, joint) in joints.iter().copied().enumerate() {
             if self
@@ -434,7 +434,7 @@ impl JointWorkspace {
                 .get(row_start)
                 .is_some_and(|owner| *owner < joint_index)
             {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             let row_end = self
                 .row_joint_indices
@@ -442,12 +442,12 @@ impl JointWorkspace {
             let rows = self
                 .rows
                 .get(row_start..row_end)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             cache.stage_joint(joint.id, joint.joint, dt, rows)?;
             row_start = row_end;
         }
         if row_start != self.rows.len() {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         Ok(())
     }
@@ -494,11 +494,11 @@ impl JointWorkspace {
         &mut self,
         start: usize,
         end: usize,
-    ) -> Result<(&mut [ConstraintRow], &mut [SolverMassSlot]), CollisionError> {
+    ) -> Result<(&mut [ConstraintRow], &mut [SolverMassSlot]), crate::Error> {
         let rows = self
             .rows
             .get_mut(start..end)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         Ok((rows, &mut self.solver_mass_slots))
     }
 
@@ -510,11 +510,11 @@ impl JointWorkspace {
         &mut self,
         joint_index: usize,
         geometry: FixedJointGeometryCache,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if joint_index >= self.fixed_geometry.len() {
             self.fixed_geometry
                 .try_reserve(joint_index + 1 - self.fixed_geometry.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.fixed_geometry.resize(joint_index + 1, None);
         }
         self.fixed_geometry[joint_index] = Some(geometry);
@@ -548,8 +548,10 @@ impl JointWorkspace {
         &self.solver_calls
     }
 
-    pub(crate) fn finish_joint_prepare(&mut self) -> Result<(), CollisionError> {
-        let joint_id = self.active_joint_id.ok_or(CollisionError::InvalidContact)?;
+    pub(crate) fn finish_joint_prepare(&mut self) -> Result<(), crate::Error> {
+        let joint_id = self
+            .active_joint_id
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let new_count = self.preparing_rows.len();
         let old_count = self.previous_row_end - self.previous_row_start;
         if new_count == old_count {
@@ -576,10 +578,10 @@ impl JointWorkspace {
             let additional = new_count - old_count;
             self.rows
                 .try_reserve(additional)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.row_joint_indices
                 .try_reserve(additional)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         self.rows.splice(
             self.previous_row_start..self.previous_row_end,
@@ -635,7 +637,7 @@ impl JointWorkspace {
         destination_joint_index: usize,
         joint_id: crate::world::JointId,
         body_indices: [usize; 2],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let start = source
             .row_joint_indices
             .partition_point(|&owner| owner < source_joint_index);
@@ -645,13 +647,13 @@ impl JointWorkspace {
         let rows = source
             .rows
             .get(start..end)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         #[cfg(feature = "bench-internals")]
         let prepared_rows_before_merge = self.metrics.prepared_rows;
         self.begin_joint_prepare(destination_joint_index, joint_id);
         self.preparing_rows
             .try_reserve(rows.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         for row in rows.iter().copied() {
             let mut row = row;
             row.body_a = body_indices[0];
@@ -992,11 +994,11 @@ impl JointWorkspace {
         set_joint_id(&mut self.preparing_joint_ids, index, id);
     }
 
-    fn update_joint_id(&mut self, id: crate::world::JointId) -> Result<(), CollisionError> {
+    fn update_joint_id(&mut self, id: crate::world::JointId) -> Result<(), crate::Error> {
         if self.active_joint_index >= self.joint_ids.len() {
             self.joint_ids
                 .try_reserve(self.active_joint_index + 1 - self.joint_ids.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.joint_ids.resize(self.active_joint_index + 1, None);
         }
         self.joint_ids[self.active_joint_index] = Some(id);
@@ -1009,7 +1011,7 @@ impl JointWorkspace {
         bodies: &[crate::constraint::SolverBody],
         dt: f64,
         mode: ReactionMode,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         self.break_events.clear();
         if !joints.iter().any(|joint| {
             let common = joint.joint.common();
@@ -1018,16 +1020,16 @@ impl JointWorkspace {
             return Ok(());
         }
         if mode != ReactionMode::VelocityOnly {
-            return Err(CollisionError::InvalidConfig);
+            return Err(crate::Error::from(CollisionError::InvalidConfig));
         }
 
         self.reactions.clear();
         self.reactions
             .try_reserve(joints.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.break_events
             .try_reserve(joints.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         for joint in joints {
             let common = joint.joint.common();
             let reaction = if common.enabled
@@ -1044,7 +1046,7 @@ impl JointWorkspace {
             let Some(reaction) = self
                 .reactions
                 .get_mut(*joint_index)
-                .ok_or(CollisionError::InvalidContact)?
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
             else {
                 continue;
             };
@@ -1055,7 +1057,7 @@ impl JointWorkspace {
             reaction.force_impulse += linear_jacobian * row.accumulated_impulse;
             reaction.torque_com_impulse += angular_jacobian * row.accumulated_impulse;
             if !reaction.force_impulse.is_finite() || !reaction.torque_com_impulse.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
         }
 
@@ -1074,7 +1076,7 @@ impl JointWorkspace {
             let force = wrench.force.length();
             let torque = wrench.torque.length();
             if !force.is_finite() || !torque.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             if common
                 .break_force
@@ -1117,13 +1119,13 @@ impl JointWorkspace {
 fn reaction_for_joint(
     joint: JointConstraint,
     bodies: &[crate::constraint::SolverBody],
-) -> Result<Option<JointReaction>, CollisionError> {
+) -> Result<Option<JointReaction>, crate::Error> {
     let body_a = bodies
         .get(joint.body_a)
-        .ok_or(CollisionError::InvalidContact)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     let body_b = bodies
         .get(joint.body_b)
-        .ok_or(CollisionError::InvalidContact)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     let side = if body_a.body().physics().body_type() == BodyType::Dynamic {
         ReactionSide::A
     } else if body_b.body().physics().body_type() == BodyType::Dynamic {
@@ -1154,7 +1156,7 @@ fn reaction_for_joint(
         .transform()
         .transform_point(joint.joint.common().frame_a.local_anchor);
     if !com_world.is_finite() || !anchor_world.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     Ok(Some(JointReaction {

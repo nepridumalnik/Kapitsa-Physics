@@ -18,6 +18,7 @@ use crate::{
     collider::ColliderError,
     collision::{CollisionError, QueryError},
     command::{CommandBatchError, CommandError},
+    constraint::ConstraintError,
     containers::DensePoolError,
     execution::ExecutionError,
     gravity::GravityError,
@@ -27,6 +28,7 @@ use crate::{
     rigid_body::{BodyError, IntegrationError},
     shape::{BoundsError, ShapeError},
     transform::TransformError,
+    world::SimpleSurfaceAttributionError,
     world::{
         AddChunkBatchError, AddChunkError, ChunkOperationError, ForceSourceError, StepError,
         WorldError,
@@ -245,8 +247,10 @@ impl_error_from!(ChunkBuildError, Chunk);
 impl_error_from!(ChunkOperationError, Chunk);
 impl_error_from!(ClusterError, Cluster);
 impl_error_from!(BalanceError, Cluster);
+impl_error_from!(SimpleSurfaceAttributionError, Validation);
 impl_error_from!(ColliderError, Validation);
 impl_error_from!(CollisionError, Collision);
+impl_error_from!(ConstraintError, Runtime);
 impl_error_from!(QueryError, Query);
 impl_error_from!(CommandError, Validation);
 impl_error_from!(DensePoolError, ResourceExhausted);

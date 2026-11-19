@@ -107,6 +107,14 @@ impl std::error::Error for PhysicsClientError {
     }
 }
 
+impl From<Error> for PhysicsClientError {
+    fn from(error: Error) -> Self {
+        Self::from(
+            crate::runtime::asynchronous::marshalling::command::CommandError::from_unified(error),
+        )
+    }
+}
+
 impl From<WorldError> for PhysicsClientError {
     fn from(error: WorldError) -> Self {
         Self::World(error)
