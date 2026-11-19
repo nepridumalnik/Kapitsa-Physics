@@ -1,9 +1,20 @@
+//! Public facade for the Kapitsa physics engine.
+//!
+//! Re-exports the synchronous world, math primitives, runtime configuration,
+//! and (with the `service` feature) the asynchronous simulation client.
+#![deny(missing_docs)]
+
+// Runtime internals are documented incrementally; the published facade modules below
+// are checked with `deny(missing_docs)`.
+#[allow(missing_docs)]
 mod runtime;
+#[allow(missing_docs)]
 mod unified_error;
 
 #[cfg(test)]
 extern crate self as kapitsa;
 
+/// Execution strategies for stepping and parallel work.
 pub mod execution {
     #[cfg(feature = "parallel")]
     pub use crate::runtime::RayonExecutor;
@@ -12,6 +23,7 @@ pub mod execution {
     pub use kapitsa_core::execution::{ExecutionError, SequentialExecutor, StepExecutor};
 }
 
+/// Aerodynamic models, atmospheres, and force inputs.
 pub mod aerodynamics {
     pub use kapitsa_core::aerodynamics::{
         AerodynamicForce, AerodynamicProperties, AerodynamicSurface, AerodynamicTarget,
@@ -21,22 +33,27 @@ pub mod aerodynamics {
     };
 }
 
+/// Fluid and hydrodynamic tasks applied to a world.
 pub mod hydrodynamics {
     pub use kapitsa_core::hydrodynamics::HydrodynamicsTask;
 }
 
+/// Axis-aligned bounding boxes.
 pub mod aabb {
     pub use kapitsa_core::aabb::{Aabb, AabbError};
 }
 
+/// Collider shapes, filters, and collision modes.
 pub mod collider {
     pub use kapitsa_core::collider::{Collider, ColliderError, CollisionFilter, CollisionMode};
 }
 
+/// Chunk geometry assembly and registration.
 pub mod chunk {
     pub use kapitsa_core::chunk::{Chunk, ChunkBuildError, ChunkBuilder};
 }
 
+/// Collision detection, contacts, and query types.
 pub mod collision {
     pub use kapitsa_core::collision::{
         CcdLimitPolicy, CollisionConfig, CollisionError, CollisionEvent, CollisionEventKind,
@@ -44,6 +61,7 @@ pub mod collision {
     };
 }
 
+/// Rigid clusters, welds, and mass transfer.
 pub mod cluster {
     pub use kapitsa_core::cluster::{
         ClusterPart, ClusterPartDesc, MassChangeMode, MassTransfer, RigidCluster, Weld, WeldDesc,
@@ -52,12 +70,14 @@ pub mod cluster {
     pub use kapitsa_core::world::{ClusterError, PartId, WeldId};
 }
 
+/// Gravitational fields and parameters.
 pub mod gravity {
     pub use kapitsa_core::gravity::{
         CentralGravity, Gravity, GravityError, SphericalGravity, UniformGravity,
     };
 }
 
+/// Joint types, frames, limits, drives, and break events.
 pub mod joint {
     pub use kapitsa_core::joint::{
         BallJoint, ConeTwistJoint, CylindricalJoint, D6Joint, DistanceJoint, FixedJoint,
@@ -66,22 +86,27 @@ pub mod joint {
     };
 }
 
+/// Mass, center of mass, and inertia properties.
 pub mod mass {
     pub use kapitsa_core::mass::{MassError, MassProperties};
 }
 
+/// Physics material properties and material storage.
 pub mod material {
     pub use kapitsa_core::material::{MaterialId, PhysicsMaterial, PhysicsMaterialError};
 }
 
+/// Vector, matrix, quaternion, and affine primitives.
 pub mod math {
     pub use kapitsa_math::{Affine3, Mat3, Quat, Vec2, Vec3};
 }
 
+/// Ray casts, sweeps, and overlap queries.
 pub mod query {
     pub use kapitsa_core::collision::{OverlapHit, QueryError, QueryFilter, Ray, RayHit, ShapeHit};
 }
 
+/// Rigid body state, forces, and integration modes.
 pub mod rigid_body {
     pub use kapitsa_core::rigid_body::{
         BodyError, BodyForces, BodyPhysics, BodyState, BodyType, CcdMode, IntegrationError,
@@ -89,6 +114,7 @@ pub mod rigid_body {
     };
 }
 
+/// Collision shapes and their bounds.
 pub mod shape {
     pub use kapitsa_core::shape::{
         BoneInfluence, BoundsError, Capsule, Convex, Cuboid, Cylinder, HeightField, LevelSet,
@@ -97,10 +123,12 @@ pub mod shape {
     };
 }
 
+/// Rigid transforms with translation and rotation.
 pub mod transform {
     pub use kapitsa_core::transform::{Transform, TransformError};
 }
 
+/// The synchronous physics world and its identifiers.
 pub mod world {
     pub use kapitsa_core::world::{
         AddChunkBatchError, AddChunkError, ChunkId, ChunkOperationError, PhysicsWorld,
@@ -167,6 +195,7 @@ pub use runtime::{
 ///     .expect("valid body");
 /// assert!(world.body(body).is_some());
 /// ```
+/// Common imports for typical simulation code.
 pub mod prelude {
     pub use crate::{
         Error, ErrorKind,

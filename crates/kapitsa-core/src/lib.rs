@@ -6,8 +6,10 @@ pub mod chunk;
 pub mod cluster;
 pub mod collider;
 pub mod collision;
+#[doc(hidden)]
 pub mod command;
 mod constraint;
+#[doc(hidden)]
 pub mod containers;
 pub mod error;
 pub mod execution;
