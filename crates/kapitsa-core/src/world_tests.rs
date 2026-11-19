@@ -3,6 +3,32 @@
 
 use crate::Error;
 
+#[test]
+fn weld_balance_failure_preserves_its_source() {
+    let cause = Error::from(super::WeldBalanceError::InvalidTolerance);
+    let error = super::StepError::WeldBalance(cause.clone());
+    assert_eq!(
+        std::error::Error::source(&error).map(ToString::to_string),
+        Some(cause.to_string())
+    );
+}
+
+#[test]
+fn world_storage_errors_are_classified_as_resource_exhaustion() {
+    assert_eq!(
+        Error::from(super::WorldError::DensePoolIdentifierExhausted).kind(),
+        crate::ErrorKind::ResourceExhausted
+    );
+    assert_eq!(
+        Error::from(super::WorldError::DensePoolCapacityExceeded).kind(),
+        crate::ErrorKind::ResourceExhausted
+    );
+    assert_eq!(
+        Error::from(super::WorldError::InvalidBodyId).kind(),
+        crate::ErrorKind::Validation
+    );
+}
+
 use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
 
 fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepError> {

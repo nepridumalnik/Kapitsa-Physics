@@ -266,7 +266,20 @@ impl_error_from!(BoundsError, Validation);
 impl_error_from!(ShapeError, Validation);
 impl_error_from!(TransformError, Validation);
 impl_error_from!(StepError, Step);
-impl_error_from!(WorldError, Validation);
+impl From<WorldError> for Error {
+    fn from(error: WorldError) -> Self {
+        let kind = match &error {
+            WorldError::DensePoolIndexOverflow
+            | WorldError::DensePoolCapacityExceeded
+            | WorldError::DensePoolInvalidFreeList
+            | WorldError::DensePoolIdentifierExhausted
+            | WorldError::WorldIdExhausted => ErrorKind::ResourceExhausted,
+            WorldError::Collision(_) => ErrorKind::Collision,
+            _ => ErrorKind::Validation,
+        };
+        Self::from_source(kind, error)
+    }
+}
 
 impl From<CommandBatchError> for Error {
     fn from(error: CommandBatchError) -> Self {

@@ -156,7 +156,8 @@ impl std::error::Error for StepError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Collision(error) => Some(error),
-            Self::InvalidDeltaTime | Self::InvalidStepResults | Self::WeldBalance(_) => None,
+            Self::InvalidDeltaTime | Self::InvalidStepResults => None,
+            Self::WeldBalance(error) => Some(error),
             Self::WeldSplit(error) => Some(error),
             Self::BodyIntegration { cause, .. } => Some(cause),
             Self::ForceSource { cause, .. } => Some(cause),
@@ -172,6 +173,7 @@ pub enum WorldError {
     DensePoolIndexOverflow,
     DensePoolCapacityExceeded,
     DensePoolInvalidFreeList,
+    DensePoolIdentifierExhausted,
     WorldIdExhausted,
     InvalidBodyId,
     InvalidAerodynamicSurface,
@@ -193,6 +195,9 @@ impl fmt::Display for WorldError {
             Self::DensePoolIndexOverflow => formatter.write_str("world storage index exceeds u32"),
             Self::DensePoolCapacityExceeded => {
                 formatter.write_str("world storage capacity could not be reserved")
+            }
+            Self::DensePoolIdentifierExhausted => {
+                formatter.write_str("world storage identifier space is exhausted")
             }
             Self::DensePoolInvalidFreeList => {
                 formatter.write_str("world storage free list is invalid")
@@ -232,6 +237,7 @@ impl std::error::Error for WorldError {
             Self::DensePoolIndexOverflow
             | Self::DensePoolCapacityExceeded
             | Self::DensePoolInvalidFreeList
+            | Self::DensePoolIdentifierExhausted
             | Self::WorldIdExhausted
             | Self::InvalidBodyId
             | Self::InvalidAerodynamicSurface
@@ -253,7 +259,7 @@ impl From<DensePoolError> for WorldError {
             DensePoolError::IndexOverflow => Self::DensePoolIndexOverflow,
             DensePoolError::CapacityExceeded => Self::DensePoolCapacityExceeded,
             DensePoolError::InvalidFreeList => Self::DensePoolInvalidFreeList,
-            DensePoolError::IdentifierExhausted => Self::DensePoolCapacityExceeded,
+            DensePoolError::IdentifierExhausted => Self::DensePoolIdentifierExhausted,
         }
     }
 }

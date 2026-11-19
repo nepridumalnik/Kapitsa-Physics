@@ -8,10 +8,9 @@ use std::{
 };
 
 use kapitsa_core::{
-    Error,
+    Error, ErrorKind,
     aerodynamics::Atmosphere,
-    collision::CollisionError,
-    world::{ErrorPolicy, PhysicsWorld, StepError},
+    world::{ErrorPolicy, PhysicsWorld},
 };
 use tokio::{
     runtime::Handle,
@@ -125,7 +124,7 @@ impl Drop for OwnedRuntime {
 
 impl OwnedRuntime {
     fn start() -> Result<(Self, Handle), SimulationError> {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<Handle, Error>>(1);
         let (shutdown, stopped) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
             .name("kapitsa-clock".into())
@@ -142,14 +141,18 @@ impl OwnedRuntime {
                         }
                     }
                     Err(error) => {
-                        let _ = sender.send(Err(error.to_string()));
+                        let _ = sender.send(Err(Error::from_source(ErrorKind::Runtime, error)));
                     }
                 }
             })
-            .map_err(|error| SimulationError::TaskFailed(error.to_string()))?;
+            .map_err(|error| {
+                SimulationError::TaskFailed(Error::from_source(ErrorKind::Runtime, error))
+            })?;
         let runtime = receiver
             .recv()
-            .map_err(|error| SimulationError::TaskFailed(error.to_string()))?
+            .map_err(|error| {
+                SimulationError::TaskFailed(Error::from_source(ErrorKind::Runtime, error))
+            })?
             .map_err(SimulationError::TaskFailed)?;
         Ok((
             Self {
@@ -320,7 +323,7 @@ pub(crate) enum SimulationError {
     WorkerPoolInitializationFailed,
     WorldUnavailable,
     WorldLost,
-    TaskFailed(String),
+    TaskFailed(Error),
 }
 
 impl std::fmt::Display for SimulationError {
@@ -567,7 +570,7 @@ impl Simulation {
                 self.metrics_tx.send_modify(|metrics| {
                     metrics.state = SimulationState::Error;
                 });
-                Err(Error::from(SimulationError::TaskFailed(error.to_string())))
+                Err(Error::from_source(ErrorKind::Runtime, error))
             }
         }
     }
@@ -1194,13 +1197,18 @@ fn publish_failed_command_results(
 fn step_error_for_result(error: &StepRunnerError) -> kapitsa_core::Error {
     match error {
         StepRunnerError::Physics(error) => error.clone(),
-        StepRunnerError::InvalidConfig(_)
-        | StepRunnerError::InvalidWorkerConfig(_)
-        | StepRunnerError::RayonPool(_)
-        | StepRunnerError::WorldUnavailable
-        | StepRunnerError::WorldLost => kapitsa_core::Error::from(StepError::Collision(
-            crate::Error::from(CollisionError::WorkerFailed),
-        )),
+        StepRunnerError::InvalidConfig(error) => kapitsa_core::Error::from(*error),
+        StepRunnerError::InvalidWorkerConfig(error) => kapitsa_core::Error::from(*error),
+        StepRunnerError::RayonPool(error) => {
+            kapitsa_core::Error::from_source(ErrorKind::Runtime, *error)
+        }
+        StepRunnerError::WorldUnavailable => kapitsa_core::Error::new(
+            ErrorKind::Runtime,
+            "the physics world is unavailable while a step is in flight",
+        ),
+        StepRunnerError::WorldLost => {
+            kapitsa_core::Error::new(ErrorKind::Runtime, "the in-flight physics world was lost")
+        }
     }
 }
 
@@ -1316,6 +1324,24 @@ mod chunk_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_step_reports_runner_cause_instead_of_collision_failure() {
+        use super::{StepRunnerError, step_error_for_result};
+
+        let error = step_error_for_result(&StepRunnerError::RayonPool(
+            crate::runtime::RayonPoolError::BuildFailed,
+        ));
+        assert_eq!(error.kind(), kapitsa_core::ErrorKind::Runtime);
+        assert_eq!(
+            error.downcast_ref::<crate::runtime::RayonPoolError>(),
+            Some(&crate::runtime::RayonPoolError::BuildFailed)
+        );
+
+        let lost = step_error_for_result(&StepRunnerError::WorldLost);
+        assert_eq!(lost.kind(), kapitsa_core::ErrorKind::Runtime);
+        assert!(lost.to_string().contains("world was lost"));
+    }
+
     #[tokio::test]
     async fn builder_installs_atmosphere_on_both_executors()
     -> Result<(), Box<dyn std::error::Error>> {

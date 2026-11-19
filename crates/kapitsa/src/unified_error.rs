@@ -57,7 +57,7 @@ mod service_errors {
     impl From<SimulationError> for Error {
         fn from(error: SimulationError) -> Self {
             match error {
-                SimulationError::Physics(error) => error,
+                SimulationError::Physics(error) | SimulationError::TaskFailed(error) => error,
                 SimulationError::InvalidConfig(error) => Error::from(error),
                 other => Error::from_source(ErrorKind::Runtime, other),
             }
