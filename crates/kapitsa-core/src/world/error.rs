@@ -3,7 +3,6 @@ use std::fmt;
 use crate::aerodynamics::AerodynamicsError;
 use crate::collision::CollisionError;
 use crate::containers::DensePoolError;
-use crate::gravity::GravityError;
 use crate::rigid_body::{BodyError, IntegrationError};
 
 use super::{BodyId, ForceSourceId};
@@ -120,7 +119,7 @@ pub enum StepError {
     },
     Gravity {
         body_id: BodyId,
-        cause: GravityError,
+        cause: crate::Error,
     },
     Aerodynamics {
         body_id: BodyId,

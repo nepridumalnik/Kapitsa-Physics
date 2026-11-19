@@ -4522,11 +4522,11 @@ impl PhysicsWorld {
             .world_center_of_mass()
             .map_err(|_| StepError::Gravity {
                 body_id,
-                cause: GravityError::ArithmeticOverflow,
+                cause: crate::Error::from(GravityError::ArithmeticOverflow),
             })?
             .ok_or(Error::from(StepError::Gravity {
                 body_id,
-                cause: GravityError::ArithmeticOverflow,
+                cause: crate::Error::from(GravityError::ArithmeticOverflow),
             }))?;
         let mut acceleration = match gravity {
             Some(gravity) => gravity
@@ -4543,7 +4543,7 @@ impl PhysicsWorld {
                     .checked_add(next)
                     .ok_or(Error::from(StepError::Gravity {
                         body_id,
-                        cause: GravityError::ArithmeticOverflow,
+                        cause: crate::Error::from(GravityError::ArithmeticOverflow),
                     }))?;
         }
         let mass = body
@@ -4551,13 +4551,13 @@ impl PhysicsWorld {
             .mass()
             .ok_or(Error::from(StepError::Gravity {
                 body_id,
-                cause: GravityError::ArithmeticOverflow,
+                cause: crate::Error::from(GravityError::ArithmeticOverflow),
             }))?;
         acceleration
             .checked_mul_scalar(mass.mass())
             .ok_or(Error::from(StepError::Gravity {
                 body_id,
-                cause: GravityError::ArithmeticOverflow,
+                cause: crate::Error::from(GravityError::ArithmeticOverflow),
             }))
     }
 
@@ -4571,7 +4571,7 @@ impl PhysicsWorld {
         if force != Vec3::ZERO {
             body.apply_force(force).map_err(|_| StepError::Gravity {
                 body_id,
-                cause: GravityError::ArithmeticOverflow,
+                cause: crate::Error::from(GravityError::ArithmeticOverflow),
             })?;
         }
         Ok(())
@@ -4600,7 +4600,7 @@ impl PhysicsWorld {
                 self.gravity_body_updates.clear();
                 return Err(Error::from(StepError::Gravity {
                     body_id,
-                    cause: GravityError::StorageCapacityExceeded,
+                    cause: crate::Error::from(GravityError::StorageCapacityExceeded),
                 }));
             }
             self.gravity_body_updates.push(GravityBodyUpdate {
@@ -4644,7 +4644,7 @@ impl PhysicsWorld {
             };
             let error = || StepError::Gravity {
                 body_id: update.id,
-                cause: GravityError::ArithmeticOverflow,
+                cause: crate::Error::from(GravityError::ArithmeticOverflow),
             };
             let transform = update.original.state().transform();
             let center = update
@@ -4677,7 +4677,7 @@ impl PhysicsWorld {
                 .try_reserve(cluster.parts().len())
                 .map_err(|_| StepError::Gravity {
                     body_id: update.id,
-                    cause: GravityError::StorageCapacityExceeded,
+                    cause: crate::Error::from(GravityError::StorageCapacityExceeded),
                 })?;
             for &part_id in cluster.parts() {
                 let part = self

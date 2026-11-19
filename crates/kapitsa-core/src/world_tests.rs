@@ -2429,7 +2429,7 @@ fn central_gravity_errors_are_reported_without_partial_body_changes() {
         at_center.step(0.1),
         Err(crate::Error::from(StepError::Gravity {
             body_id: center_body,
-            cause: GravityError::AtFieldCenter,
+            cause: crate::Error::from(GravityError::AtFieldCenter),
         }))
     );
     assert_eq!(
@@ -3927,7 +3927,7 @@ fn sharded_gravity_error_rolls_back_force_sources_and_can_retry() {
         step_with_shards(&mut world, 0.1),
         Err(crate::Error::from(StepError::Gravity {
             body_id: bodies[0],
-            cause: GravityError::AtFieldCenter,
+            cause: crate::Error::from(GravityError::AtFieldCenter),
         }))
     );
     assert_bodies_match(&world, &bodies, &originals);

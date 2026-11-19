@@ -16,7 +16,7 @@ pub enum Gravity {
 }
 
 impl Gravity {
-    pub fn acceleration_at(self, position: Vec3) -> Result<Vec3, GravityError> {
+    pub fn acceleration_at(self, position: Vec3) -> Result<Vec3, crate::Error> {
         match self {
             Self::Uniform(field) => field.acceleration_at(position),
             Self::Central(field) => field.acceleration_at(position),
@@ -50,12 +50,14 @@ pub struct CentralGravity {
 
 impl CentralGravity {
     /// Creates a central field. A zero parameter is a valid disabled field.
-    pub fn new(center: Vec3, gravitational_parameter: f64) -> Result<Self, GravityError> {
+    pub fn new(center: Vec3, gravitational_parameter: f64) -> Result<Self, crate::Error> {
         if !center.is_finite() {
-            return Err(GravityError::NonFiniteCenter);
+            return Err(crate::Error::from(GravityError::NonFiniteCenter));
         }
         if !gravitational_parameter.is_finite() || gravitational_parameter < 0.0 {
-            return Err(GravityError::InvalidGravitationalParameter);
+            return Err(crate::Error::from(
+                GravityError::InvalidGravitationalParameter,
+            ));
         }
         Ok(Self {
             center,
@@ -73,9 +75,9 @@ impl CentralGravity {
     }
 
     /// Evaluates acceleration at a world-space position in m/s².
-    pub fn acceleration_at(self, position: Vec3) -> Result<Vec3, GravityError> {
+    pub fn acceleration_at(self, position: Vec3) -> Result<Vec3, crate::Error> {
         if !position.is_finite() {
-            return Err(GravityError::NonFinitePosition);
+            return Err(crate::Error::from(GravityError::NonFinitePosition));
         }
         if self.gravitational_parameter == 0.0 {
             return Ok(Vec3::ZERO);
@@ -83,21 +85,21 @@ impl CentralGravity {
 
         let offset = position
             .checked_sub(self.center)
-            .ok_or(GravityError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(GravityError::ArithmeticOverflow))?;
         let radius = offset.length();
         if radius == 0.0 {
-            return Err(GravityError::AtFieldCenter);
+            return Err(crate::Error::from(GravityError::AtFieldCenter));
         }
         if !radius.is_finite() {
-            return Err(GravityError::ArithmeticOverflow);
+            return Err(crate::Error::from(GravityError::ArithmeticOverflow));
         }
         let direction = offset
             .try_normalize()
-            .ok_or(GravityError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(GravityError::ArithmeticOverflow))?;
         let magnitude = self.gravitational_parameter / radius / radius;
         direction
             .checked_mul_scalar(-magnitude)
-            .ok_or(GravityError::ArithmeticOverflow)
+            .ok_or_else(|| crate::Error::from(GravityError::ArithmeticOverflow))
     }
 }
 
@@ -157,33 +159,39 @@ mod tests {
     fn validates_parameters_and_handles_singular_and_overflow_positions() {
         assert_eq!(
             CentralGravity::new(Vec3::ZERO, f64::NAN),
-            Err(GravityError::InvalidGravitationalParameter)
+            Err(crate::Error::from(
+                GravityError::InvalidGravitationalParameter
+            ))
         );
         assert_eq!(
             CentralGravity::new(Vec3::ZERO, f64::INFINITY),
-            Err(GravityError::InvalidGravitationalParameter)
+            Err(crate::Error::from(
+                GravityError::InvalidGravitationalParameter
+            ))
         );
         assert_eq!(
             CentralGravity::new(Vec3::ZERO, -1.0),
-            Err(GravityError::InvalidGravitationalParameter)
+            Err(crate::Error::from(
+                GravityError::InvalidGravitationalParameter
+            ))
         );
         assert_eq!(
             CentralGravity::new(Vec3::new(f64::NAN, 0.0, 0.0), 1.0),
-            Err(GravityError::NonFiniteCenter)
+            Err(crate::Error::from(GravityError::NonFiniteCenter))
         );
         let gravity = CentralGravity::new(Vec3::ZERO, 1.0).expect("valid field");
         assert_eq!(
             gravity.acceleration_at(Vec3::ZERO),
-            Err(GravityError::AtFieldCenter)
+            Err(crate::Error::from(GravityError::AtFieldCenter))
         );
         assert_eq!(
             gravity.acceleration_at(Vec3::new(f64::INFINITY, 0.0, 0.0)),
-            Err(GravityError::NonFinitePosition)
+            Err(crate::Error::from(GravityError::NonFinitePosition))
         );
         let strong = CentralGravity::new(Vec3::ZERO, f64::MAX).expect("valid field");
         assert_eq!(
             strong.acceleration_at(Vec3::new(1.0e-200, 0.0, 0.0)),
-            Err(GravityError::ArithmeticOverflow)
+            Err(crate::Error::from(GravityError::ArithmeticOverflow))
         );
     }
 }

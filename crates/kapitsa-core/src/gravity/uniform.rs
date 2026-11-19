@@ -8,9 +8,9 @@ pub struct UniformGravity {
 }
 
 impl UniformGravity {
-    pub fn new(acceleration: Vec3) -> Result<Self, GravityError> {
+    pub fn new(acceleration: Vec3) -> Result<Self, crate::Error> {
         if !acceleration.is_finite() {
-            return Err(GravityError::InvalidAcceleration);
+            return Err(crate::Error::from(GravityError::InvalidAcceleration));
         }
         Ok(Self { acceleration })
     }
@@ -19,9 +19,9 @@ impl UniformGravity {
         self.acceleration
     }
 
-    pub fn acceleration_at(self, position: Vec3) -> Result<Vec3, GravityError> {
+    pub fn acceleration_at(self, position: Vec3) -> Result<Vec3, crate::Error> {
         if !position.is_finite() {
-            return Err(GravityError::NonFinitePosition);
+            return Err(crate::Error::from(GravityError::NonFinitePosition));
         }
         Ok(self.acceleration)
     }

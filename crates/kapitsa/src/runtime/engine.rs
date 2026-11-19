@@ -448,7 +448,9 @@ mod tests {
                 Err(kapitsa_core::Error::from(
                     kapitsa_core::world::StepError::Gravity {
                         body_id: ids[2],
-                        cause: kapitsa_core::gravity::GravityError::AtFieldCenter,
+                        cause: kapitsa_core::Error::from(
+                            kapitsa_core::gravity::GravityError::AtFieldCenter
+                        ),
                     }
                 ))
             );
