@@ -35,7 +35,7 @@ impl fmt::Display for IntegrationError {
 impl std::error::Error for IntegrationError {}
 
 /// Predicts a body's state without mutating the source body.
-pub(crate) fn predict(body: &BodyMotion, dt: f64) -> Result<BodyState, IntegrationError> {
+pub(crate) fn predict(body: &BodyMotion, dt: f64) -> Result<BodyState, crate::Error> {
     predict_from_state(body, *body.state(), dt)
 }
 
@@ -44,9 +44,9 @@ pub(crate) fn predict_from_state(
     body: &BodyMotion,
     state: BodyState,
     dt: f64,
-) -> Result<BodyState, IntegrationError> {
+) -> Result<BodyState, crate::Error> {
     if !dt.is_finite() || dt <= 0.0 {
-        return Err(IntegrationError::InvalidDeltaTime);
+        return Err(crate::Error::from(IntegrationError::InvalidDeltaTime));
     }
 
     if state.is_sleeping() {
@@ -66,9 +66,9 @@ pub(crate) fn trajectory_bounds(
     start: BodyState,
     end: BodyState,
     dt: f64,
-) -> Result<TrajectoryBounds, IntegrationError> {
+) -> Result<TrajectoryBounds, crate::Error> {
     if !dt.is_finite() || dt <= 0.0 {
-        return Err(IntegrationError::InvalidDeltaTime);
+        return Err(crate::Error::from(IntegrationError::InvalidDeltaTime));
     }
     if start.is_sleeping() || body.physics().body_type() == BodyType::Static {
         return Ok(TrajectoryBounds {
@@ -81,27 +81,27 @@ pub(crate) fn trajectory_bounds(
         .linear_velocity()
         .checked_sub(start.linear_velocity())
         .and_then(Vec3::checked_length)
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let angular_delta = end
         .angular_velocity()
         .checked_sub(start.angular_velocity())
         .and_then(Vec3::checked_length)
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let linear_speed_bound = start
         .linear_velocity()
         .checked_length()
-        .ok_or(IntegrationError::ArithmeticOverflow)?
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?
         + 2.0 * linear_delta;
     let angular_speed_bound = start
         .angular_velocity()
         .checked_length()
-        .ok_or(IntegrationError::ArithmeticOverflow)?
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?
         + 2.0 * angular_delta;
     let rotation = angular_speed_bound * dt;
     let center_of_mass_radius = if let Some(mass) = body.physics().mass() {
         mass.center_of_mass()
             .checked_length()
-            .ok_or(IntegrationError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?
     } else {
         0.0
     };
@@ -111,7 +111,7 @@ pub(crate) fn trajectory_bounds(
         || !rotation.is_finite()
         || !translation.is_finite()
     {
-        return Err(IntegrationError::ArithmeticOverflow);
+        return Err(crate::Error::from(IntegrationError::ArithmeticOverflow));
     }
     Ok(TrajectoryBounds {
         translation,
@@ -123,36 +123,36 @@ fn predict_kinematic(
     body: &BodyMotion,
     state: BodyState,
     dt: f64,
-) -> Result<BodyState, IntegrationError> {
+) -> Result<BodyState, crate::Error> {
     let rotation = state
         .transform
         .rotation()
         .integrate_world_angular_velocity(state.angular_velocity, dt)
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let translation_delta = state
         .linear_velocity
         .checked_mul_scalar(dt)
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let translation = if let Some(mass) = body.physics().mass() {
         let center = world_center_of_mass(state.transform, mass.center_of_mass())?
             .checked_add(translation_delta)
-            .ok_or(IntegrationError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
         center
             .checked_sub(
                 rotation
                     .rotate_vector(mass.center_of_mass())
-                    .ok_or(IntegrationError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?,
             )
-            .ok_or(IntegrationError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?
     } else {
         state
             .transform
             .translation()
             .checked_add(translation_delta)
-            .ok_or(IntegrationError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?
     };
-    let transform =
-        Transform::new(translation, rotation).map_err(|_| IntegrationError::ArithmeticOverflow)?;
+    let transform = Transform::new(translation, rotation)
+        .map_err(|_| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
 
     Ok(BodyState { transform, ..state })
 }
@@ -161,24 +161,24 @@ fn predict_dynamic(
     body: &BodyMotion,
     state: BodyState,
     dt: f64,
-) -> Result<BodyState, IntegrationError> {
+) -> Result<BodyState, crate::Error> {
     let physics = body.physics();
     let mass = physics
         .mass()
-        .ok_or(IntegrationError::MissingMassProperties)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::MissingMassProperties))?;
 
     let linear_acceleration = body.forces().force() / mass.mass();
     if !linear_acceleration.is_finite() {
-        return Err(IntegrationError::ArithmeticOverflow);
+        return Err(crate::Error::from(IntegrationError::ArithmeticOverflow));
     }
     let linear_velocity = state
         .linear_velocity
         .checked_add(
             linear_acceleration
                 .checked_mul_scalar(dt)
-                .ok_or(IntegrationError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?,
         )
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
 
     let rotation = state.transform.rotation();
     let local_inertia = mass.inertia();
@@ -190,12 +190,12 @@ fn predict_dynamic(
         .checked_add(
             initial_angular_acceleration
                 .checked_mul_scalar(dt * 0.5)
-                .ok_or(IntegrationError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?,
         )
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let midpoint_rotation = rotation
         .integrate_world_angular_velocity(midpoint_angular_velocity, dt * 0.5)
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let midpoint_angular_acceleration = world_angular_acceleration(
         midpoint_rotation,
         midpoint_angular_velocity,
@@ -207,29 +207,29 @@ fn predict_dynamic(
         .checked_add(
             midpoint_angular_acceleration
                 .checked_mul_scalar(dt)
-                .ok_or(IntegrationError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?,
         )
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let new_rotation = rotation
         .integrate_world_angular_velocity(midpoint_angular_velocity, dt)
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
 
     let center_of_mass = world_center_of_mass(state.transform, mass.center_of_mass())?;
     let new_center_of_mass = center_of_mass
         .checked_add(
             linear_velocity
                 .checked_mul_scalar(dt)
-                .ok_or(IntegrationError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?,
         )
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let rotated_local_center = new_rotation
         .rotate_vector(mass.center_of_mass())
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let translation = new_center_of_mass
         .checked_sub(rotated_local_center)
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let transform = Transform::new(translation, new_rotation)
-        .map_err(|_| IntegrationError::ArithmeticOverflow)?;
+        .map_err(|_| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
 
     Ok(BodyState {
         transform,
@@ -244,45 +244,42 @@ fn world_angular_acceleration(
     angular_velocity: Vec3,
     local_inertia: Mat3,
     torque: Vec3,
-) -> Result<Vec3, IntegrationError> {
+) -> Result<Vec3, crate::Error> {
     let rotation_matrix = rotation
         .to_mat3()
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let world_inertia = rotation_matrix
         .checked_mul_matrix(local_inertia)
         .and_then(|rotated| rotated.checked_mul_matrix(rotation_matrix.transpose()))
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let angular_momentum = world_inertia
         .checked_mul_vector(angular_velocity)
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let gyroscopic_torque = angular_velocity
         .checked_cross(angular_momentum)
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     let net_torque = torque
         .checked_sub(gyroscopic_torque)
-        .ok_or(IntegrationError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))?;
     solve_spd(world_inertia, net_torque)
 }
 
-fn world_center_of_mass(
-    transform: Transform,
-    local_center: Vec3,
-) -> Result<Vec3, IntegrationError> {
+fn world_center_of_mass(transform: Transform, local_center: Vec3) -> Result<Vec3, crate::Error> {
     transform
         .rotation()
         .rotate_vector(local_center)
         .and_then(|center| center.checked_add(transform.translation()))
-        .ok_or(IntegrationError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(IntegrationError::ArithmeticOverflow))
 }
 
-fn solve_spd(matrix: Mat3, rhs: Vec3) -> Result<Vec3, IntegrationError> {
+fn solve_spd(matrix: Mat3, rhs: Vec3) -> Result<Vec3, crate::Error> {
     match matrix.solve_spd(rhs) {
         Ok(solution) => Ok(solution),
         Err(CholeskyError::NotSymmetric | CholeskyError::NotPositiveDefinite) => {
-            Err(IntegrationError::InvalidInertiaTensor)
+            Err(crate::Error::from(IntegrationError::InvalidInertiaTensor))
         }
         Err(CholeskyError::NonFiniteInput | CholeskyError::ResultOutOfRange) => {
-            Err(IntegrationError::ArithmeticOverflow)
+            Err(crate::Error::from(IntegrationError::ArithmeticOverflow))
         }
     }
 }
@@ -545,7 +542,10 @@ mod tests {
         let body = body(mass(Vec3::ZERO, Mat3::IDENTITY));
 
         for dt in [0.0, -0.1, f64::NAN, f64::INFINITY] {
-            assert_eq!(predict(&body, dt), Err(IntegrationError::InvalidDeltaTime));
+            assert_eq!(
+                predict(&body, dt),
+                Err(crate::Error::from(IntegrationError::InvalidDeltaTime))
+            );
         }
     }
 
@@ -557,7 +557,7 @@ mod tests {
 
         assert_eq!(
             predict(&body, 2.0),
-            Err(IntegrationError::ArithmeticOverflow)
+            Err(crate::Error::from(IntegrationError::ArithmeticOverflow))
         );
         assert_eq!(body.motion(), original);
     }

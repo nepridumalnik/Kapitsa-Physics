@@ -2409,10 +2409,10 @@ fn central_gravity_errors_are_reported_without_partial_body_changes() {
 
     assert!(matches!(
         step_cause(&world.step(1.0)),
-        Some(StepError::BodyIntegration {
-            body_id,
-            cause: IntegrationError::ArithmeticOverflow,
-        }) if *body_id == second
+        Some(StepError::BodyIntegration { body_id, cause })
+            if *body_id == second
+                && cause.downcast_ref::<IntegrationError>()
+                    == Some(&IntegrationError::ArithmeticOverflow)
     ));
     let first = world.body(first).expect("first body");
     assert_eq!(first.state().linear_velocity(), Vec3::ZERO);
@@ -3800,10 +3800,10 @@ fn indexed_force_source_step_failure_rolls_back_and_keeps_capacity() {
 
     assert!(matches!(
         step_cause(&world.step(2.0)),
-        Some(StepError::BodyIntegration {
-            body_id,
-            cause: IntegrationError::ArithmeticOverflow,
-        }) if *body_id == bodies[0]
+        Some(StepError::BodyIntegration { body_id, cause })
+            if *body_id == bodies[0]
+                && cause.downcast_ref::<IntegrationError>()
+                    == Some(&IntegrationError::ArithmeticOverflow)
     ));
     assert!(
         originals
@@ -4023,10 +4023,10 @@ fn sharded_integration_error_rolls_back_force_sources_and_can_retry() {
 
     assert!(matches!(
         step_cause(&step_with_shards(&mut world, 1.0)),
-        Some(StepError::BodyIntegration {
-            body_id,
-            cause: IntegrationError::ArithmeticOverflow,
-        }) if *body_id == bodies[3]
+        Some(StepError::BodyIntegration { body_id, cause })
+            if *body_id == bodies[3]
+                && cause.downcast_ref::<IntegrationError>()
+                    == Some(&IntegrationError::ArithmeticOverflow)
     ));
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -4254,7 +4254,7 @@ fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), Error
         world.step(2.0),
         Err(crate::Error::from(StepError::BodyIntegration {
             body_id: failing_id,
-            cause: IntegrationError::ArithmeticOverflow,
+            cause: crate::Error::from(IntegrationError::ArithmeticOverflow),
         }))
     );
     assert_eq!(
