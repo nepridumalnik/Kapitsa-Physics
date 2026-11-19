@@ -544,7 +544,7 @@ async fn voxel_wave_commands_work_in_both_runtime_executors()
         hull::HullSection,
         wave::VoxelWave,
     };
-    fn mesh() -> Result<kapitsa::shape::TriangleMesh, kapitsa::shape::ShapeError> {
+    fn mesh() -> Result<kapitsa::shape::TriangleMesh, kapitsa::Error> {
         kapitsa::shape::TriangleMesh::new(vec![Vec3::ZERO, Vec3::Y, Vec3::Z], vec![[0, 1, 2]])
     }
     fn model() -> Result<VoxelWave, Box<dyn std::error::Error>> {

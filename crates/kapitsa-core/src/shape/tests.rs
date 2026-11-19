@@ -9,6 +9,14 @@ use super::{
     TriangleMesh,
 };
 
+fn assert_shape_error<T>(result: Result<T, crate::Error>, expected: ShapeError) {
+    let error = match result {
+        Ok(_) => panic!("expected shape error"),
+        Err(error) => error,
+    };
+    assert_eq!(error.downcast_ref::<ShapeError>(), Some(&expected));
+}
+
 fn expected_aabb(min: Vec3, max: Vec3) -> Aabb {
     Aabb::new(min, max).expect("valid test bounds")
 }
@@ -62,7 +70,7 @@ fn sphere_accepts_positive_finite_radius() {
 #[case::nan(f64::NAN, ShapeError::NonFiniteParameter)]
 #[case::infinity(f64::INFINITY, ShapeError::NonFiniteParameter)]
 fn sphere_rejects_invalid_radius(#[case] radius: f64, #[case] error: ShapeError) {
-    assert_eq!(Sphere::new(radius).err(), Some(error));
+    assert_shape_error(Sphere::new(radius), error);
 }
 
 #[rstest]
@@ -77,7 +85,7 @@ fn cuboid_stores_size_and_half_extents() {
 #[case::negative_component(Vec3::new(1.0, -1.0, 1.0), ShapeError::InvalidDimension)]
 #[case::infinite_component(Vec3::splat(f64::INFINITY), ShapeError::NonFiniteParameter)]
 fn cuboid_rejects_invalid_size(#[case] size: Vec3, #[case] error: ShapeError) {
-    assert_eq!(Cuboid::from_vec(size).err(), Some(error));
+    assert_shape_error(Cuboid::from_vec(size), error);
 }
 
 #[rstest]
@@ -107,7 +115,7 @@ fn plane_rejects_invalid_equation(
     #[case] distance: f64,
     #[case] error: ShapeError,
 ) {
-    assert_eq!(Plane::from_vec(normal, distance).err(), Some(error));
+    assert_shape_error(Plane::from_vec(normal, distance), error);
 }
 
 #[rstest]
@@ -124,7 +132,7 @@ fn capsule_rejects_invalid_geometry(
     #[case] radius: f64,
     #[case] error: ShapeError,
 ) {
-    assert_eq!(Capsule::new(start, end, radius).err(), Some(error));
+    assert_shape_error(Capsule::new(start, end, radius), error);
 }
 
 #[rstest]
@@ -141,7 +149,7 @@ fn cylinder_rejects_invalid_geometry(
     #[case] radius: f64,
     #[case] error: ShapeError,
 ) {
-    assert_eq!(Cylinder::new(start, end, radius).err(), Some(error));
+    assert_shape_error(Cylinder::new(start, end, radius), error);
 }
 
 #[rstest]
@@ -159,9 +167,9 @@ fn tapered_cylinder_rejects_invalid_geometry(
     #[case] end: Vec3,
     #[case] error: ShapeError,
 ) {
-    assert_eq!(
-        TaperedCylinder::new(Vec3::ZERO, end, start_radius, end_radius).err(),
-        Some(error)
+    assert_shape_error(
+        TaperedCylinder::new(Vec3::ZERO, end, start_radius, end_radius),
+        error,
     );
 }
 
@@ -180,9 +188,9 @@ fn tapered_capsule_rejects_invalid_geometry(
     #[case] end_radius: f64,
     #[case] error: ShapeError,
 ) {
-    assert_eq!(
-        TaperedCapsule::new(start, end, start_radius, end_radius).err(),
-        Some(error)
+    assert_shape_error(
+        TaperedCapsule::new(start, end, start_radius, end_radius),
+        error,
     );
 }
 
@@ -205,7 +213,7 @@ fn triangle_rejects_invalid_vertices(
     #[case] c: Vec3,
     #[case] error: ShapeError,
 ) {
-    assert_eq!(Triangle::new(a, b, c).err(), Some(error));
+    assert_shape_error(Triangle::new(a, b, c), error);
 }
 
 #[rstest]
@@ -223,7 +231,7 @@ fn triangle_mesh_rejects_invalid_triangles(
     #[case] triangles: Vec<[usize; 3]>,
     #[case] error: ShapeError,
 ) {
-    assert_eq!(TriangleMesh::new(vertices, triangles).err(), Some(error));
+    assert_shape_error(TriangleMesh::new(vertices, triangles), error);
 }
 
 #[test]
@@ -234,7 +242,7 @@ fn triangle_mesh_distinguishes_non_finite_vertices_and_area_overflow() {
             vec![[0, 1, 2]],
         )
         .err(),
-        Some(ShapeError::NonFiniteParameter)
+        Some(crate::Error::from(ShapeError::NonFiniteParameter))
     );
     assert_eq!(
         TriangleMesh::new(
@@ -242,7 +250,7 @@ fn triangle_mesh_distinguishes_non_finite_vertices_and_area_overflow() {
             vec![[0, 1, 2]],
         )
         .err(),
-        Some(ShapeError::ArithmeticOverflow)
+        Some(crate::Error::from(ShapeError::ArithmeticOverflow))
     );
 }
 
@@ -260,7 +268,7 @@ fn convex_rejects_inward_tetrahedron(tetrahedron: (Vec<Vec3>, Vec<[usize; 3]>)) 
     }
     assert_eq!(
         Convex::new(vertices, faces).err(),
-        Some(ShapeError::InvalidTopology)
+        Some(crate::Error::from(ShapeError::InvalidTopology))
     );
 }
 
@@ -271,14 +279,14 @@ fn convex_rejects_open_or_mixed_winding(tetrahedron: (Vec<Vec3>, Vec<[usize; 3]>
     open_faces.pop();
     assert_eq!(
         Convex::new(vertices.clone(), open_faces).err(),
-        Some(ShapeError::InvalidTopology)
+        Some(crate::Error::from(ShapeError::InvalidTopology))
     );
 
     let mut mixed_faces = faces;
     mixed_faces[0].swap(1, 2);
     assert_eq!(
         Convex::new(vertices, mixed_faces).err(),
-        Some(ShapeError::InvalidTopology)
+        Some(crate::Error::from(ShapeError::InvalidTopology))
     );
 }
 
@@ -289,7 +297,7 @@ fn convex_rejects_non_finite_vertices(tetrahedron: (Vec<Vec3>, Vec<[usize; 3]>))
 
     assert_eq!(
         Convex::new(vertices, faces).err(),
-        Some(ShapeError::NonFiniteParameter)
+        Some(crate::Error::from(ShapeError::NonFiniteParameter))
     );
 }
 
@@ -310,9 +318,9 @@ fn height_field_rejects_invalid_grid(
     #[case] heights: Vec<f64>,
     #[case] error: ShapeError,
 ) {
-    assert_eq!(
-        HeightField::from_vec(rows, columns, grid_spacing, heights).err(),
-        Some(error)
+    assert_shape_error(
+        HeightField::from_vec(rows, columns, grid_spacing, heights),
+        error,
     );
 }
 
@@ -320,15 +328,15 @@ fn height_field_rejects_invalid_grid(
 fn height_field_distinguishes_non_finite_data_and_span_overflow() {
     assert_eq!(
         HeightField::from_vec(2, 2, Vec2::new(f64::NAN, 1.0), vec![0.0; 4]).err(),
-        Some(ShapeError::NonFiniteParameter)
+        Some(crate::Error::from(ShapeError::NonFiniteParameter))
     );
     assert_eq!(
         HeightField::from_vec(2, 2, Vec2::ONE, vec![f64::INFINITY; 4]).err(),
-        Some(ShapeError::NonFiniteParameter)
+        Some(crate::Error::from(ShapeError::NonFiniteParameter))
     );
     assert_eq!(
         HeightField::from_vec(3, 2, Vec2::splat(f64::MAX), vec![0.0; 6]).err(),
-        Some(ShapeError::ArithmeticOverflow)
+        Some(crate::Error::from(ShapeError::ArithmeticOverflow))
     );
 }
 
@@ -348,9 +356,9 @@ fn level_set_rejects_invalid_grid(
     #[case] signed_distances: Vec<f64>,
     #[case] error: ShapeError,
 ) {
-    assert_eq!(
-        LevelSet::from_vec(Vec3::ZERO, dimensions, grid_spacing, signed_distances).err(),
-        Some(error)
+    assert_shape_error(
+        LevelSet::from_vec(Vec3::ZERO, dimensions, grid_spacing, signed_distances),
+        error,
     );
 }
 
@@ -358,11 +366,11 @@ fn level_set_rejects_invalid_grid(
 fn level_set_distinguishes_non_finite_data_and_coordinate_overflow() {
     assert_eq!(
         LevelSet::from_vec(Vec3::splat(f64::NAN), [2, 2, 2], Vec3::ONE, vec![0.0; 8]).err(),
-        Some(ShapeError::NonFiniteParameter)
+        Some(crate::Error::from(ShapeError::NonFiniteParameter))
     );
     assert_eq!(
         LevelSet::from_vec(Vec3::ZERO, [2, 2, 2], Vec3::ONE, vec![f64::NAN; 8]).err(),
-        Some(ShapeError::NonFiniteParameter)
+        Some(crate::Error::from(ShapeError::NonFiniteParameter))
     );
     assert_eq!(
         LevelSet::from_vec(
@@ -372,7 +380,7 @@ fn level_set_distinguishes_non_finite_data_and_coordinate_overflow() {
             vec![0.0; 8],
         )
         .err(),
-        Some(ShapeError::ArithmeticOverflow)
+        Some(crate::Error::from(ShapeError::ArithmeticOverflow))
     );
 }
 
@@ -407,7 +415,7 @@ fn skinned_triangle_mesh_rejects_invalid_bone_names(
             vec![Affine3::IDENTITY],
         )
         .err(),
-        Some(ShapeError::InvalidBoneNames)
+        Some(crate::Error::from(ShapeError::InvalidBoneNames))
     );
 }
 
@@ -425,7 +433,7 @@ fn skinned_triangle_mesh_rejects_mismatched_arrays(
             vec![Affine3::IDENTITY],
         )
         .err(),
-        Some(ShapeError::DataLengthMismatch)
+        Some(crate::Error::from(ShapeError::DataLengthMismatch))
     );
 }
 
@@ -444,7 +452,7 @@ fn skinned_triangle_mesh_rejects_invalid_influence_indices(triangle_mesh: Triang
             vec![Affine3::IDENTITY],
         )
         .err(),
-        Some(ShapeError::InvalidInfluenceIndex)
+        Some(crate::Error::from(ShapeError::InvalidInfluenceIndex))
     );
 }
 
@@ -468,7 +476,7 @@ fn skinned_triangle_mesh_rejects_duplicate_influence_indices(triangle_mesh: Tria
             vec![Affine3::IDENTITY],
         )
         .err(),
-        Some(ShapeError::InvalidInfluenceIndex)
+        Some(crate::Error::from(ShapeError::InvalidInfluenceIndex))
     );
 }
 
@@ -487,7 +495,7 @@ fn skinned_triangle_mesh_rejects_invalid_weight_totals(triangle_mesh: TriangleMe
             vec![Affine3::IDENTITY],
         )
         .err(),
-        Some(ShapeError::InvalidWeight)
+        Some(crate::Error::from(ShapeError::InvalidWeight))
     );
 }
 
@@ -505,7 +513,7 @@ fn skinned_triangle_mesh_rejects_non_finite_transforms(
             vec![Affine3::IDENTITY],
         )
         .err(),
-        Some(ShapeError::NonFiniteTransform)
+        Some(crate::Error::from(ShapeError::NonFiniteTransform))
     );
 }
 
@@ -516,7 +524,7 @@ fn skinned_triangle_mesh_rejects_non_finite_transforms(
 fn bone_influence_rejects_invalid_weight(#[case] weight: f64) {
     assert_eq!(
         BoneInfluence::new(0, weight).err(),
-        Some(ShapeError::InvalidWeight)
+        Some(crate::Error::from(ShapeError::InvalidWeight))
     );
 }
 

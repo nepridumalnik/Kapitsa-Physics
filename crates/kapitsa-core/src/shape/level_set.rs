@@ -17,26 +17,26 @@ impl LevelSet {
         dimensions: [usize; 3],
         grid_spacing: Vec3,
         signed_distances: Vec<f64>,
-    ) -> Result<Self, ShapeError> {
+    ) -> Result<Self, crate::Error> {
         let count = dimensions[0]
             .checked_mul(dimensions[1])
-            .ok_or(ShapeError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(ShapeError::ArithmeticOverflow))?
             .checked_mul(dimensions[2])
-            .ok_or(ShapeError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(ShapeError::ArithmeticOverflow))?;
         if dimensions.iter().any(|&dimension| dimension < 2) {
-            return Err(ShapeError::InvalidGridDimensions);
+            return Err(crate::Error::from(ShapeError::InvalidGridDimensions));
         }
         if count != signed_distances.len() {
-            return Err(ShapeError::DataLengthMismatch);
+            return Err(crate::Error::from(ShapeError::DataLengthMismatch));
         }
         if !origin.is_finite() || !grid_spacing.is_finite() {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
         if grid_spacing.min_element() <= 0.0 {
-            return Err(ShapeError::InvalidDimension);
+            return Err(crate::Error::from(ShapeError::InvalidDimension));
         }
         if !signed_distances.iter().all(|distance| distance.is_finite()) {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
 
         let span = Vec3::new(
@@ -45,7 +45,7 @@ impl LevelSet {
             (dimensions[2] - 1) as f64,
         );
         if !(origin + grid_spacing * span).is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
 
         Ok(Self {

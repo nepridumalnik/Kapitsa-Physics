@@ -47,7 +47,7 @@ fn assert_mat3_close(actual: Mat3, expected: Mat3) {
 }
 
 #[test]
-fn creates_valid_mass_properties() -> Result<(), MassError> {
+fn creates_valid_mass_properties() -> Result<(), crate::Error> {
     let center = Vec3::new(1.0, -2.0, 3.0);
     let inertia = Mat3::from_cols(
         Vec3::new(2.0, 0.25, 0.0),
@@ -73,7 +73,7 @@ fn rejects_invalid_mass_values() {
     ] {
         assert_eq!(
             MassProperties::new(mass, Vec3::ZERO, Mat3::IDENTITY),
-            Err(expected)
+            Err(expected.into())
         );
     }
 }
@@ -82,11 +82,11 @@ fn rejects_invalid_mass_values() {
 fn rejects_non_finite_center_of_mass() {
     assert_eq!(
         MassProperties::new(1.0, Vec3::new(f64::NAN, 0.0, 0.0), Mat3::IDENTITY),
-        Err(MassError::NonFiniteCenterOfMass)
+        Err(crate::Error::from(MassError::NonFiniteCenterOfMass))
     );
     assert_eq!(
         MassProperties::new(1.0, Vec3::new(0.0, f64::INFINITY, 0.0), Mat3::IDENTITY),
-        Err(MassError::NonFiniteCenterOfMass)
+        Err(crate::Error::from(MassError::NonFiniteCenterOfMass))
     );
 }
 
@@ -96,7 +96,7 @@ fn rejects_non_finite_inertia() {
 
     assert_eq!(
         MassProperties::new(1.0, Vec3::ZERO, inertia),
-        Err(MassError::NonFiniteInertia)
+        Err(crate::Error::from(MassError::NonFiniteInertia))
     );
 }
 
@@ -111,16 +111,16 @@ fn rejects_asymmetric_and_non_positive_definite_inertia() {
 
     assert_eq!(
         MassProperties::new(1.0, Vec3::ZERO, asymmetric),
-        Err(MassError::NonSymmetricInertia)
+        Err(crate::Error::from(MassError::NonSymmetricInertia))
     );
     assert_eq!(
         MassProperties::new(1.0, Vec3::ZERO, invalid),
-        Err(MassError::NonPositiveDefiniteInertia)
+        Err(crate::Error::from(MassError::NonPositiveDefiniteInertia))
     );
 }
 
 #[test]
-fn accepts_f64_rounding_in_symmetric_components() -> Result<(), MassError> {
+fn accepts_f64_rounding_in_symmetric_components() -> Result<(), crate::Error> {
     let inertia = Mat3::from_cols(
         Vec3::new(2.0, 0.2, 0.0),
         Vec3::new(0.2 + f64::EPSILON, 3.0, 0.0),
@@ -136,7 +136,7 @@ fn accepts_f64_rounding_in_symmetric_components() -> Result<(), MassError> {
 }
 
 #[test]
-fn preserves_mass_and_density_beyond_single_precision_range() -> Result<(), MassError> {
+fn preserves_mass_and_density_beyond_single_precision_range() -> Result<(), crate::Error> {
     let density = 1.0e100;
     let shape = Shape::Sphere(Sphere::new(1.0).expect("valid unit sphere"));
     let properties = MassProperties::from_shape(&shape, density)?;
@@ -155,12 +155,12 @@ fn rejects_positive_definite_but_physically_impossible_inertia() {
 
     assert_eq!(
         MassProperties::new(1.0, Vec3::ZERO, inertia),
-        Err(MassError::NonPhysicalInertia)
+        Err(crate::Error::from(MassError::NonPhysicalInertia))
     );
 }
 
 #[test]
-fn accepts_physical_inertia_boundaries() -> Result<(), MassError> {
+fn accepts_physical_inertia_boundaries() -> Result<(), crate::Error> {
     for inertia in [
         Mat3::from_diagonal(Vec3::new(2.0, 2.0, 4.0)),
         Mat3::IDENTITY,
@@ -171,7 +171,7 @@ fn accepts_physical_inertia_boundaries() -> Result<(), MassError> {
 }
 
 #[test]
-fn physical_inertia_validation_is_scale_independent() -> Result<(), MassError> {
+fn physical_inertia_validation_is_scale_independent() -> Result<(), crate::Error> {
     let smallest = f64::from_bits(1);
     let largest = f64::MAX / 4.0;
 
@@ -183,7 +183,7 @@ fn physical_inertia_validation_is_scale_independent() -> Result<(), MassError> {
 }
 
 #[test]
-fn computes_unit_sphere_mass_and_inertia() -> Result<(), MassError> {
+fn computes_unit_sphere_mass_and_inertia() -> Result<(), crate::Error> {
     let shape = Shape::Sphere(Sphere::new(1.0).expect("valid unit sphere"));
     let properties = MassProperties::from_shape(&shape, 1.0)?;
     let expected_mass = (4.0 / 3.0) * std::f64::consts::PI;
@@ -207,7 +207,7 @@ fn computes_unit_sphere_mass_and_inertia() -> Result<(), MassError> {
 }
 
 #[test]
-fn computes_cuboid_mass_and_inertia_for_different_side_lengths() -> Result<(), MassError> {
+fn computes_cuboid_mass_and_inertia_for_different_side_lengths() -> Result<(), crate::Error> {
     let shape = Shape::Cuboid(Cuboid::new(2.0, 4.0, 6.0).expect("valid cuboid"));
     let properties = MassProperties::from_shape(&shape, 2.0)?;
     let inertia = properties.inertia();
@@ -221,7 +221,7 @@ fn computes_cuboid_mass_and_inertia_for_different_side_lengths() -> Result<(), M
 }
 
 #[test]
-fn density_scales_sphere_mass_and_inertia() -> Result<(), MassError> {
+fn density_scales_sphere_mass_and_inertia() -> Result<(), crate::Error> {
     let shape = Shape::Sphere(Sphere::new(1.0).expect("valid sphere"));
     let unit_density = MassProperties::from_shape(&shape, 1.0)?;
     let triple_density = MassProperties::from_shape(&shape, 3.0)?;
@@ -240,15 +240,15 @@ fn rejects_invalid_density() {
 
     assert_eq!(
         MassProperties::from_shape(&shape, f64::NAN),
-        Err(MassError::NonFiniteDensity)
+        Err(crate::Error::from(MassError::NonFiniteDensity))
     );
     assert_eq!(
         MassProperties::from_shape(&shape, 0.0),
-        Err(MassError::NonPositiveDensity)
+        Err(crate::Error::from(MassError::NonPositiveDensity))
     );
     assert_eq!(
         MassProperties::from_shape(&shape, -1.0),
-        Err(MassError::NonPositiveDensity)
+        Err(crate::Error::from(MassError::NonPositiveDensity))
     );
 }
 
@@ -262,15 +262,15 @@ fn rejects_overflow_and_positive_mass_underflow() {
 
     assert_eq!(
         MassProperties::from_shape(&large_sphere, f64::MAX),
-        Err(MassError::ArithmeticOverflow)
+        Err(crate::Error::from(MassError::ArithmeticOverflow))
     );
     assert_eq!(
         MassProperties::from_shape(&large_cuboid, f64::MAX),
-        Err(MassError::ArithmeticOverflow)
+        Err(crate::Error::from(MassError::ArithmeticOverflow))
     );
     assert_eq!(
         MassProperties::from_shape(&tiny_sphere, f64::from_bits(1)),
-        Err(MassError::ArithmeticOverflow)
+        Err(crate::Error::from(MassError::ArithmeticOverflow))
     );
 }
 
@@ -280,12 +280,12 @@ fn rejects_unsupported_shapes() {
 
     assert_eq!(
         MassProperties::from_shape(&shape, 1.0),
-        Err(MassError::UnsupportedShape)
+        Err(crate::Error::from(MassError::UnsupportedShape))
     );
 }
 
 #[test]
-fn combines_identical_bodies_at_identical_transforms() -> Result<(), MassError> {
+fn combines_identical_bodies_at_identical_transforms() -> Result<(), crate::Error> {
     let body = properties(
         2.0,
         Vec3::ZERO,
@@ -302,7 +302,7 @@ fn combines_identical_bodies_at_identical_transforms() -> Result<(), MassError> 
 }
 
 #[test]
-fn combines_symmetric_spheres_about_the_origin() -> Result<(), MassError> {
+fn combines_symmetric_spheres_about_the_origin() -> Result<(), crate::Error> {
     let shape = Shape::Sphere(Sphere::new(1.0).expect("valid sphere"));
     let sphere = MassProperties::from_shape(&shape, 1.0)?;
     let left = transform(-2.0 * Vec3::X, Quat::IDENTITY);
@@ -329,7 +329,7 @@ fn combines_symmetric_spheres_about_the_origin() -> Result<(), MassError> {
 }
 
 #[test]
-fn combines_different_masses_at_the_expected_center() -> Result<(), MassError> {
+fn combines_different_masses_at_the_expected_center() -> Result<(), crate::Error> {
     let first = properties(1.0, Vec3::ZERO, Mat3::IDENTITY);
     let second = properties(3.0, Vec3::ZERO, Mat3::IDENTITY);
     let parts = [
@@ -348,7 +348,7 @@ fn combines_different_masses_at_the_expected_center() -> Result<(), MassError> {
 }
 
 #[test]
-fn applies_the_parallel_axis_theorem() -> Result<(), MassError> {
+fn applies_the_parallel_axis_theorem() -> Result<(), crate::Error> {
     let body = properties(2.0, Vec3::ZERO, Mat3::IDENTITY);
     let offset = 1.5 * Vec3::X;
     let combined = MassProperties::combine(&[
@@ -364,7 +364,7 @@ fn applies_the_parallel_axis_theorem() -> Result<(), MassError> {
 }
 
 #[test]
-fn rotates_cuboid_inertia_by_ninety_degrees() -> Result<(), MassError> {
+fn rotates_cuboid_inertia_by_ninety_degrees() -> Result<(), crate::Error> {
     let shape = Shape::Cuboid(Cuboid::new(2.0, 4.0, 6.0).expect("valid cuboid"));
     let cuboid = MassProperties::from_shape(&shape, 2.0)?;
     let rotation = transform(Vec3::ZERO, rotation_z(std::f64::consts::FRAC_PI_2));
@@ -377,7 +377,7 @@ fn rotates_cuboid_inertia_by_ninety_degrees() -> Result<(), MassError> {
 }
 
 #[test]
-fn arbitrary_rotation_creates_off_diagonal_inertia() -> Result<(), MassError> {
+fn arbitrary_rotation_creates_off_diagonal_inertia() -> Result<(), crate::Error> {
     let body = properties(
         1.0,
         Vec3::ZERO,
@@ -395,7 +395,7 @@ fn arbitrary_rotation_creates_off_diagonal_inertia() -> Result<(), MassError> {
 }
 
 #[test]
-fn push_matches_combine_without_modifying_parts() -> Result<(), MassError> {
+fn push_matches_combine_without_modifying_parts() -> Result<(), crate::Error> {
     let first = properties(
         2.0,
         Vec3::new(0.2, -0.5, 0.1),
@@ -425,7 +425,7 @@ fn push_matches_combine_without_modifying_parts() -> Result<(), MassError> {
 }
 
 #[test]
-fn set_combined_replaces_existing_properties() -> Result<(), MassError> {
+fn set_combined_replaces_existing_properties() -> Result<(), crate::Error> {
     let first = properties(1.0, Vec3::ZERO, Mat3::IDENTITY);
     let second = properties(2.0, Vec3::ZERO, Mat3::from_diagonal(Vec3::splat(2.0)));
     let parts = [
@@ -448,11 +448,11 @@ fn empty_composition_and_failed_updates_preserve_existing_properties() {
 
     assert_eq!(
         MassProperties::combine(&[]),
-        Err(MassError::EmptyComposition)
+        Err(crate::Error::from(MassError::EmptyComposition))
     );
     assert_eq!(
         properties.set_combined(&[]),
-        Err(MassError::EmptyComposition)
+        Err(crate::Error::from(MassError::EmptyComposition))
     );
     assert_eq!(properties, original);
 }
@@ -464,7 +464,7 @@ fn overflow_does_not_modify_the_existing_properties() {
 
     assert_eq!(
         accumulated.push(&large, &Transform::identity()),
-        Err(MassError::ArithmeticOverflow)
+        Err(crate::Error::from(MassError::ArithmeticOverflow))
     );
     assert_eq!(accumulated, large);
 
@@ -472,7 +472,7 @@ fn overflow_does_not_modify_the_existing_properties() {
     let far_away = transform(Vec3::splat(f64::MAX), Quat::IDENTITY);
     assert_eq!(
         MassProperties::combine(&[(ordinary, Transform::identity()), (ordinary, far_away)]),
-        Err(MassError::ArithmeticOverflow)
+        Err(crate::Error::from(MassError::ArithmeticOverflow))
     );
 
     let mut replacement = ordinary;
@@ -481,7 +481,7 @@ fn overflow_does_not_modify_the_existing_properties() {
             (large, Transform::identity()),
             (large, Transform::identity()),
         ]),
-        Err(MassError::ArithmeticOverflow)
+        Err(crate::Error::from(MassError::ArithmeticOverflow))
     );
     assert_eq!(replacement, ordinary);
 }

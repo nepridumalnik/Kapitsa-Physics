@@ -17,24 +17,24 @@ impl TaperedCylinder {
         end: Vec3,
         start_radius: f64,
         end_radius: f64,
-    ) -> Result<Self, ShapeError> {
+    ) -> Result<Self, crate::Error> {
         if !start.is_finite()
             || !end.is_finite()
             || !start_radius.is_finite()
             || !end_radius.is_finite()
         {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
 
         let length = (end - start).length();
         if !length.is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
         if length <= 0.0 {
-            return Err(ShapeError::DegenerateGeometry);
+            return Err(crate::Error::from(ShapeError::DegenerateGeometry));
         }
         if start_radius <= 0.0 || end_radius <= 0.0 {
-            return Err(ShapeError::InvalidDimension);
+            return Err(crate::Error::from(ShapeError::InvalidDimension));
         }
 
         Ok(Self {

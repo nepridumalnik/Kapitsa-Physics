@@ -17,20 +17,20 @@ pub struct MassProperties {
 }
 
 impl MassProperties {
-    pub fn new(mass: f64, center_of_mass: Vec3, inertia: Mat3) -> Result<Self, MassError> {
+    pub fn new(mass: f64, center_of_mass: Vec3, inertia: Mat3) -> Result<Self, crate::Error> {
         if !mass.is_finite() {
-            return Err(MassError::NonFiniteMass);
+            return Err(crate::Error::from(MassError::NonFiniteMass));
         }
         if mass <= 0.0 {
-            return Err(MassError::NonPositiveMass);
+            return Err(crate::Error::from(MassError::NonPositiveMass));
         }
         if !center_of_mass.is_finite() {
-            return Err(MassError::NonFiniteCenterOfMass);
+            return Err(crate::Error::from(MassError::NonFiniteCenterOfMass));
         }
 
         let inertia = symmetrize_inertia(inertia)?;
         if !is_physically_realizable(inertia) {
-            return Err(MassError::NonPhysicalInertia);
+            return Err(crate::Error::from(MassError::NonPhysicalInertia));
         }
 
         Ok(Self {
@@ -52,18 +52,18 @@ impl MassProperties {
         self.inertia
     }
 
-    pub fn from_shape(shape: &Shape, density: f64) -> Result<Self, MassError> {
+    pub fn from_shape(shape: &Shape, density: f64) -> Result<Self, crate::Error> {
         if !density.is_finite() {
-            return Err(MassError::NonFiniteDensity);
+            return Err(crate::Error::from(MassError::NonFiniteDensity));
         }
         if density <= 0.0 {
-            return Err(MassError::NonPositiveDensity);
+            return Err(crate::Error::from(MassError::NonPositiveDensity));
         }
 
         let (mass, diagonal) = match shape {
             Shape::Sphere(sphere) => sphere_mass_properties(sphere, density),
             Shape::Cuboid(cuboid) => cuboid_mass_properties(cuboid, density),
-            _ => return Err(MassError::UnsupportedShape),
+            _ => return Err(crate::Error::from(MassError::UnsupportedShape)),
         };
         if !mass.is_finite()
             || mass <= 0.0
@@ -71,7 +71,7 @@ impl MassProperties {
                 .iter()
                 .any(|value| !value.is_finite() || *value <= 0.0)
         {
-            return Err(MassError::ArithmeticOverflow);
+            return Err(crate::Error::from(MassError::ArithmeticOverflow));
         }
 
         let inertia = Mat3::from_diagonal(Vec3::new(diagonal[0], diagonal[1], diagonal[2]));
@@ -79,25 +79,25 @@ impl MassProperties {
     }
 
     /// Adds a part after transforming it into this body's local coordinate system.
-    pub fn push(&mut self, part: &Self, transform: &Transform) -> Result<(), MassError> {
+    pub fn push(&mut self, part: &Self, transform: &Transform) -> Result<(), crate::Error> {
         let rotation = rotation_matrix(transform)?;
         let part_center = rotation
             .checked_mul_vector(part.center_of_mass)
             .and_then(|center| center.checked_add(transform.translation()))
-            .ok_or(MassError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(MassError::ArithmeticOverflow))?;
         let part_inertia = rotation
             .checked_mul_matrix(part.inertia)
             .and_then(|rotated| rotated.checked_mul_matrix(rotation.transpose()))
-            .ok_or(MassError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(MassError::ArithmeticOverflow))?;
         let total_mass = self.mass + part.mass;
         if !total_mass.is_finite() || total_mass <= 0.0 {
-            return Err(MassError::ArithmeticOverflow);
+            return Err(crate::Error::from(MassError::ArithmeticOverflow));
         }
 
         let center =
             self.center_of_mass * (self.mass / total_mass) + part_center * (part.mass / total_mass);
         if !center.is_finite() {
-            return Err(MassError::ArithmeticOverflow);
+            return Err(crate::Error::from(MassError::ArithmeticOverflow));
         }
 
         let self_offset = self.center_of_mass - center;
@@ -107,7 +107,7 @@ impl MassProperties {
             + part_inertia
             + parallel_axis(part.mass, part_offset);
         if !inertia.is_finite() {
-            return Err(MassError::ArithmeticOverflow);
+            return Err(crate::Error::from(MassError::ArithmeticOverflow));
         }
 
         let next = Self::new(total_mass, center, inertia)?;
@@ -116,9 +116,9 @@ impl MassProperties {
     }
 
     /// Combines parts transformed into one common coordinate system.
-    pub fn combine(parts: &[(Self, Transform)]) -> Result<Self, MassError> {
+    pub fn combine(parts: &[(Self, Transform)]) -> Result<Self, crate::Error> {
         let Some((first, transform)) = parts.first() else {
-            return Err(MassError::EmptyComposition);
+            return Err(crate::Error::from(MassError::EmptyComposition));
         };
 
         let mut combined = transformed(first, transform)?;
@@ -129,16 +129,16 @@ impl MassProperties {
     }
 
     /// Replaces these properties with the combination of the supplied parts.
-    pub fn set_combined(&mut self, parts: &[(Self, Transform)]) -> Result<(), MassError> {
+    pub fn set_combined(&mut self, parts: &[(Self, Transform)]) -> Result<(), crate::Error> {
         let combined = Self::combine(parts)?;
         *self = combined;
         Ok(())
     }
 }
 
-fn symmetrize_inertia(inertia: Mat3) -> Result<Mat3, MassError> {
+fn symmetrize_inertia(inertia: Mat3) -> Result<Mat3, crate::Error> {
     if !inertia.is_finite() {
-        return Err(MassError::NonFiniteInertia);
+        return Err(crate::Error::from(MassError::NonFiniteInertia));
     }
 
     let mut rows = inertia_rows(inertia);
@@ -149,7 +149,7 @@ fn symmetrize_inertia(inertia: Mat3) -> Result<Mat3, MassError> {
     let tolerance = 32.0 * f64::EPSILON * scale;
     for (row, column) in [(0, 1), (0, 2), (1, 2)] {
         if (rows[row][column] - rows[column][row]).abs() > tolerance {
-            return Err(MassError::NonSymmetricInertia);
+            return Err(crate::Error::from(MassError::NonSymmetricInertia));
         }
         let average = rows[row][column] * 0.5 + rows[column][row] * 0.5;
         rows[row][column] = average;
@@ -159,10 +159,12 @@ fn symmetrize_inertia(inertia: Mat3) -> Result<Mat3, MassError> {
     let symmetric = Mat3::from_rows(rows);
     match symmetric.solve_spd(Vec3::ZERO) {
         Ok(_) => Ok(symmetric),
-        Err(CholeskyError::NotPositiveDefinite) => Err(MassError::NonPositiveDefiniteInertia),
-        Err(CholeskyError::NotSymmetric) => Err(MassError::NonSymmetricInertia),
+        Err(CholeskyError::NotPositiveDefinite) => {
+            Err(crate::Error::from(MassError::NonPositiveDefiniteInertia))
+        }
+        Err(CholeskyError::NotSymmetric) => Err(crate::Error::from(MassError::NonSymmetricInertia)),
         Err(CholeskyError::NonFiniteInput | CholeskyError::ResultOutOfRange) => {
-            Err(MassError::ArithmeticOverflow)
+            Err(crate::Error::from(MassError::ArithmeticOverflow))
         }
     }
 }
@@ -259,11 +261,11 @@ fn cuboid_mass_properties(cuboid: &Cuboid, density: f64) -> (f64, [f64; 3]) {
     (mass, inertia)
 }
 
-fn rotation_matrix(transform: &Transform) -> Result<Mat3, MassError> {
+fn rotation_matrix(transform: &Transform) -> Result<Mat3, crate::Error> {
     transform
         .rotation()
         .to_mat3()
-        .ok_or(MassError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(MassError::ArithmeticOverflow))
 }
 
 fn inertia_rows(inertia: Mat3) -> [[f64; 3]; 3] {
@@ -281,16 +283,19 @@ fn parallel_axis(mass: f64, offset: Vec3) -> Mat3 {
     (Mat3::IDENTITY * distance_squared - outer_product) * mass
 }
 
-fn transformed(part: &MassProperties, transform: &Transform) -> Result<MassProperties, MassError> {
+fn transformed(
+    part: &MassProperties,
+    transform: &Transform,
+) -> Result<MassProperties, crate::Error> {
     let rotation = rotation_matrix(transform)?;
     let center = rotation
         .checked_mul_vector(part.center_of_mass)
         .and_then(|center| center.checked_add(transform.translation()))
-        .ok_or(MassError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(MassError::ArithmeticOverflow))?;
     let inertia = rotation
         .checked_mul_matrix(part.inertia)
         .and_then(|rotated| rotated.checked_mul_matrix(rotation.transpose()))
-        .ok_or(MassError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(MassError::ArithmeticOverflow))?;
     MassProperties::new(part.mass, center, inertia)
 }
 

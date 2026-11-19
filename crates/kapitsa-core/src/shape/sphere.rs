@@ -8,12 +8,12 @@ pub struct Sphere {
 }
 
 impl Sphere {
-    pub fn new(radius: f64) -> Result<Self, ShapeError> {
+    pub fn new(radius: f64) -> Result<Self, crate::Error> {
         if !radius.is_finite() {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
         if radius <= 0.0 {
-            return Err(ShapeError::InvalidDimension);
+            return Err(crate::Error::from(ShapeError::InvalidDimension));
         }
 
         Ok(Self { radius })

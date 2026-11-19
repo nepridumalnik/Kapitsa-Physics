@@ -16,30 +16,30 @@ impl TriangleMesh {
             + self.triangles.capacity() * std::mem::size_of::<[usize; 3]>()
     }
 
-    pub fn new(vertices: Vec<Vec3>, triangles: Vec<[usize; 3]>) -> Result<Self, ShapeError> {
+    pub fn new(vertices: Vec<Vec3>, triangles: Vec<[usize; 3]>) -> Result<Self, crate::Error> {
         if vertices.len() < 3 || triangles.is_empty() {
-            return Err(ShapeError::InvalidTopology);
+            return Err(crate::Error::from(ShapeError::InvalidTopology));
         }
         if !vertices.iter().all(|vertex| vertex.is_finite()) {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
 
         for &[a, b, c] in &triangles {
             if a >= vertices.len() || b >= vertices.len() || c >= vertices.len() {
-                return Err(ShapeError::InvalidTopology);
+                return Err(crate::Error::from(ShapeError::InvalidTopology));
             }
             if a == b || b == c || c == a {
-                return Err(ShapeError::InvalidTopology);
+                return Err(crate::Error::from(ShapeError::InvalidTopology));
             }
 
             let area_squared = (vertices[b] - vertices[a])
                 .cross(vertices[c] - vertices[a])
                 .length_squared();
             if !area_squared.is_finite() {
-                return Err(ShapeError::ArithmeticOverflow);
+                return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
             }
             if area_squared <= 0.0 {
-                return Err(ShapeError::DegenerateGeometry);
+                return Err(crate::Error::from(ShapeError::DegenerateGeometry));
             }
         }
 

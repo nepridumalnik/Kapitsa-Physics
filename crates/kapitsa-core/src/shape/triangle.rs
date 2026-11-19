@@ -9,23 +9,23 @@ pub struct Triangle {
 }
 
 impl Triangle {
-    pub fn new(a: Vec3, b: Vec3, c: Vec3) -> Result<Self, ShapeError> {
+    pub fn new(a: Vec3, b: Vec3, c: Vec3) -> Result<Self, crate::Error> {
         Self::from_vertices([a, b, c])
     }
 
-    pub fn from_vertices(vertices: [Vec3; 3]) -> Result<Self, ShapeError> {
+    pub fn from_vertices(vertices: [Vec3; 3]) -> Result<Self, crate::Error> {
         if !vertices.iter().all(|vertex| vertex.is_finite()) {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
 
         let area_squared = (vertices[1] - vertices[0])
             .cross(vertices[2] - vertices[0])
             .length_squared();
         if !area_squared.is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
         if area_squared <= 0.0 {
-            return Err(ShapeError::DegenerateGeometry);
+            return Err(crate::Error::from(ShapeError::DegenerateGeometry));
         }
 
         Ok(Self { vertices })

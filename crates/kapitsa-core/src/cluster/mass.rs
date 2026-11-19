@@ -5,10 +5,11 @@ use crate::{
 
 use super::ClusterError;
 
-fn map_mass_error(error: MassError) -> ClusterError {
-    match error {
-        MassError::ArithmeticOverflow => ClusterError::ArithmeticOverflow,
-        other => ClusterError::Mass(crate::Error::from(other)),
+fn map_mass_error(error: crate::Error) -> ClusterError {
+    if error.downcast_ref::<MassError>() == Some(&MassError::ArithmeticOverflow) {
+        ClusterError::ArithmeticOverflow
+    } else {
+        ClusterError::Mass(error)
     }
 }
 
@@ -72,11 +73,11 @@ mod tests {
             )))
         );
         assert_eq!(
-            map_mass_error(MassError::ArithmeticOverflow),
+            map_mass_error(MassError::ArithmeticOverflow.into()),
             ClusterError::ArithmeticOverflow
         );
         assert_eq!(
-            map_mass_error(MassError::NonPhysicalInertia),
+            map_mass_error(MassError::NonPhysicalInertia.into()),
             ClusterError::Mass(crate::Error::from(MassError::NonPhysicalInertia))
         );
     }

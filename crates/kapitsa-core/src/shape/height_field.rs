@@ -17,28 +17,28 @@ impl HeightField {
         columns: usize,
         grid_spacing: Vec2,
         heights: Vec<f64>,
-    ) -> Result<Self, ShapeError> {
+    ) -> Result<Self, crate::Error> {
         let count = rows
             .checked_mul(columns)
-            .ok_or(ShapeError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(ShapeError::ArithmeticOverflow))?;
         if rows < 2 || columns < 2 {
-            return Err(ShapeError::InvalidGridDimensions);
+            return Err(crate::Error::from(ShapeError::InvalidGridDimensions));
         }
         if count != heights.len() {
-            return Err(ShapeError::DataLengthMismatch);
+            return Err(crate::Error::from(ShapeError::DataLengthMismatch));
         }
         if !grid_spacing.is_finite() {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
         if grid_spacing.min_element() <= 0.0 {
-            return Err(ShapeError::InvalidDimension);
+            return Err(crate::Error::from(ShapeError::InvalidDimension));
         }
         let span = grid_spacing * Vec2::new((columns - 1) as f64, (rows - 1) as f64);
         if !span.is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
         if !heights.iter().all(|height| height.is_finite()) {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
 
         Ok(Self {

@@ -1007,7 +1007,7 @@ mod tests {
         }
     }
 
-    fn plate() -> Result<TriangleMesh, crate::shape::ShapeError> {
+    fn plate() -> Result<TriangleMesh, crate::Error> {
         TriangleMesh::new(
             vec![
                 Vec3::new(0.0, -0.5, -0.5),

@@ -18,26 +18,26 @@ impl TaperedCapsule {
         end: Vec3,
         start_radius: f64,
         end_radius: f64,
-    ) -> Result<Self, ShapeError> {
+    ) -> Result<Self, crate::Error> {
         if !start.is_finite()
             || !end.is_finite()
             || !start_radius.is_finite()
             || !end_radius.is_finite()
         {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
 
         if start_radius <= 0.0 || end_radius <= 0.0 {
-            return Err(ShapeError::InvalidDimension);
+            return Err(crate::Error::from(ShapeError::InvalidDimension));
         }
 
         let length = (end - start).length();
         let radius_difference = (start_radius - end_radius).abs();
         if !length.is_finite() || !radius_difference.is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
         if length <= 0.0 || radius_difference >= length {
-            return Err(ShapeError::DegenerateGeometry);
+            return Err(crate::Error::from(ShapeError::DegenerateGeometry));
         }
 
         Ok(Self {
