@@ -12,7 +12,7 @@ use crate::{
 };
 use kapitsa_math::{Mat3, Quat};
 
-fn wing(local: Transform) -> Result<WingSurface, crate::aerodynamics::wing::WingError> {
+fn wing(local: Transform) -> Result<WingSurface, crate::Error> {
     WingSurface::new(FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.2)?, local, 1.0)
 }
 fn weld() -> WeldDesc {
@@ -425,7 +425,7 @@ fn part_wings_later_failure_rolls_back_and_primary_transfer_rejects_atomically()
             Err(crate::Error::from(StepError::Aerodynamics {
                 body_id: id,
                 cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Wing(
-                    crate::aerodynamics::wing::WingError::UnsupportedFlow
+                    crate::Error::from(crate::aerodynamics::wing::WingError::UnsupportedFlow)
                 ))
             }))
         );

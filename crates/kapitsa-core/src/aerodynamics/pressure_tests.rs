@@ -11,14 +11,14 @@ fn closed_mesh_preparation_rejects_open_reversed_and_disconnected_surfaces() {
     let open = TriangleMesh::new(vertices.clone(), faces[..3].to_vec()).unwrap();
     assert_eq!(
         closed_mesh_pressure_patches(&open),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     let mut reversed = faces.clone();
     reversed[0].swap(0, 1);
     let reversed = TriangleMesh::new(vertices.clone(), reversed).unwrap();
     assert_eq!(
         closed_mesh_pressure_patches(&reversed),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     let mut all_vertices = vertices.clone();
     all_vertices.extend(vertices.iter().map(|v| *v + Vec3::ONE * 3.0));
@@ -27,7 +27,7 @@ fn closed_mesh_preparation_rejects_open_reversed_and_disconnected_surfaces() {
     let disconnected = TriangleMesh::new(all_vertices, all_faces).unwrap();
     assert_eq!(
         closed_mesh_pressure_patches(&disconnected),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
 }
 
@@ -49,45 +49,42 @@ fn closed_mesh_weld_is_exact_and_rejects_duplicate_faces() {
     let cracked = TriangleMesh::new(vertices.clone(), triangles.clone()).unwrap();
     assert_eq!(
         closed_mesh_pressure_patches(&cracked),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     vertices[0] = points[0];
     triangles.push(triangles[0]);
     let duplicate = TriangleMesh::new(vertices, triangles).unwrap();
     assert_eq!(
         closed_mesh_pressure_patches(&duplicate),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
 }
 
 #[test]
 fn base_source_uniqueness_obeys_work_limit_and_triangle_permutations() {
-    use crate::{
-        aerodynamics::{AerodynamicsError, geometry::GeometryError},
-        shape::TriangleMesh,
-    };
+    use crate::{aerodynamics::geometry::GeometryError, shape::TriangleMesh};
     let vertices = vec![Vec3::ZERO, Vec3::Y, Vec3::Z, Vec3::X];
     let mesh = TriangleMesh::new(vertices.clone(), vec![[0, 1, 2], [0, 2, 3]]).unwrap();
     let selected = [[vertices[2], vertices[1], vertices[0]]];
     assert_eq!(
         verify_unique_base_sources(&selected, &mesh, 1),
-        Err(AerodynamicsError::Geometry(
-            GeometryError::WorkBudgetExceeded
+        Err(crate::aerodynamics::AerodynamicsError::Geometry(
+            crate::Error::from(GeometryError::WorkBudgetExceeded)
         ))
     );
     assert_eq!(verify_unique_base_sources(&selected, &mesh, 2), Ok(()));
     let absent = [[vertices[1], vertices[2], vertices[3]]];
     assert_eq!(
         verify_unique_base_sources(&absent, &mesh, 2),
-        Err(AerodynamicsError::Pressure(
-            PressureError::BaseNotFullyVisible
+        Err(crate::aerodynamics::AerodynamicsError::Pressure(
+            crate::Error::from(PressureError::BaseNotFullyVisible)
         ))
     );
     let duplicate = TriangleMesh::new(vertices, vec![[0, 1, 2], [2, 1, 0]]).unwrap();
     assert_eq!(
         verify_unique_base_sources(&selected, &duplicate, 2),
-        Err(AerodynamicsError::Pressure(
-            PressureError::BaseNotFullyVisible
+        Err(crate::aerodynamics::AerodynamicsError::Pressure(
+            crate::Error::from(PressureError::BaseNotFullyVisible)
         ))
     );
 }
@@ -119,11 +116,11 @@ fn signed_surface_cp_applies_pressure_suction_moment_and_mach_bounds() {
     }
     assert_eq!(
         patch.evaluate_surface(subsonic, SurfacePressure::new(1.0, 0.0, 0.49).unwrap()),
-        Err(PressureError::UnsupportedMach)
+        Err(crate::Error::from(PressureError::UnsupportedMach))
     );
     assert_eq!(
         SurfacePressure::new(f64::NAN, 0.0, 1.0),
-        Err(PressureError::InvalidCoefficient)
+        Err(crate::Error::from(PressureError::InvalidCoefficient))
     );
 }
 
@@ -162,14 +159,14 @@ fn potential_sphere_matches_inviscid_stagnation_and_equator() {
             linear_velocity: Vec3::X * 20.01,
             ..state
         }),
-        Err(PressureError::UnsupportedMach)
+        Err(crate::Error::from(PressureError::UnsupportedMach))
     );
     assert_eq!(
         side.evaluate_potential_sphere(PressureFlow {
             angular_velocity: Vec3::Z,
             ..state
         }),
-        Err(PressureError::InvalidMotion)
+        Err(crate::Error::from(PressureError::InvalidMotion))
     );
 }
 
@@ -197,11 +194,11 @@ fn potential_cylinder_restricts_geometry_and_motion() -> Result<(), Box<dyn std:
     );
     assert_eq!(
         cap.evaluate_potential_cylinder(state, Vec3::Z),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     assert_eq!(
         front.evaluate_potential_cylinder(state, Vec3::ZERO),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     let inclined = front.evaluate_potential_cylinder(
         PressureFlow {
@@ -227,7 +224,7 @@ fn potential_cylinder_restricts_geometry_and_motion() -> Result<(), Box<dyn std:
             },
             Vec3::Z
         ),
-        Err(PressureError::InvalidMotion)
+        Err(crate::Error::from(PressureError::InvalidMotion))
     );
     assert_eq!(
         front.evaluate_potential_cylinder(
@@ -237,7 +234,7 @@ fn potential_cylinder_restricts_geometry_and_motion() -> Result<(), Box<dyn std:
             },
             Vec3::Z
         ),
-        Err(PressureError::UnsupportedMach)
+        Err(crate::Error::from(PressureError::UnsupportedMach))
     );
     Ok(())
 }
@@ -268,7 +265,7 @@ fn explicit_base_pressure_has_correct_force_moment_and_domain() {
             },
             base
         ),
-        Err(PressureError::UnsupportedMach)
+        Err(crate::Error::from(PressureError::UnsupportedMach))
     );
     assert_eq!(
         patch.evaluate_base(
@@ -278,7 +275,7 @@ fn explicit_base_pressure_has_correct_force_moment_and_domain() {
             },
             base
         ),
-        Err(PressureError::UnsupportedMach)
+        Err(crate::Error::from(PressureError::UnsupportedMach))
     );
     assert_eq!(
         patch
@@ -300,7 +297,7 @@ fn base_pressure_rejects_invalid_coefficients_and_domains() {
     ] {
         assert_eq!(
             BasePressure::new(cp, min, max),
-            Err(PressureError::InvalidCoefficient)
+            Err(crate::Error::from(PressureError::InvalidCoefficient))
         );
     }
 }
@@ -316,7 +313,7 @@ fn base_pressure_rejects_unrepresentable_mach_without_computing_force() {
     };
     assert_eq!(
         patch.evaluate_base(extreme, base),
-        Err(PressureError::ArithmeticOverflow)
+        Err(crate::Error::from(PressureError::ArithmeticOverflow))
     );
 }
 
@@ -326,7 +323,7 @@ fn base_pressure_rejects_windward_surface_in_local_flow() {
     let windward = PressurePatch::new(Vec3::ZERO, Vec3::X, 1.0).unwrap();
     assert_eq!(
         windward.evaluate_base(flow(), base),
-        Err(PressureError::InvalidBaseOrientation)
+        Err(crate::Error::from(PressureError::InvalidBaseOrientation))
     );
     let rotating = PressurePatch::new(Vec3::Y, -Vec3::X, 1.0).unwrap();
     let reversed = PressureFlow {
@@ -336,7 +333,7 @@ fn base_pressure_rejects_windward_surface_in_local_flow() {
     };
     assert_eq!(
         rotating.evaluate_base(reversed, base),
-        Err(PressureError::InvalidBaseOrientation)
+        Err(crate::Error::from(PressureError::InvalidBaseOrientation))
     );
 }
 
@@ -451,7 +448,7 @@ fn limits_vacuum_zero_speed_and_mach_boundary() {
             linear_velocity: Vec3::X * 499.0,
             ..flow()
         }),
-        Err(PressureError::UnsupportedMach)
+        Err(crate::Error::from(PressureError::UnsupportedMach))
     );
     assert!(
         p.evaluate(PressureFlow {
@@ -485,11 +482,11 @@ fn limits_vacuum_zero_speed_and_mach_boundary() {
 fn rejects_invalid_input_and_overflow_without_mutation() {
     assert_eq!(
         PressurePatch::new(Vec3::ZERO, Vec3::ZERO, 1.0),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     assert_eq!(
         PressurePatch::new(Vec3::ZERO, Vec3::X, -1.0),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     let p = PressurePatch::new(Vec3::Y, Vec3::X, 1.0).unwrap();
     assert_eq!(
@@ -497,20 +494,20 @@ fn rejects_invalid_input_and_overflow_without_mutation() {
             sound_speed: 0.0,
             ..flow()
         }),
-        Err(PressureError::InvalidSoundSpeed)
+        Err(crate::Error::from(PressureError::InvalidSoundSpeed))
     );
     assert_eq!(
         p.evaluate(PressureFlow {
             angular_velocity: Vec3::splat(f64::NAN),
             ..flow()
         }),
-        Err(PressureError::InvalidMotion)
+        Err(crate::Error::from(PressureError::InvalidMotion))
     );
     assert_eq!(
         p.evaluate(PressureFlow {
             linear_velocity: Vec3::X * f64::MAX,
             ..flow()
         }),
-        Err(PressureError::ArithmeticOverflow)
+        Err(crate::Error::from(PressureError::ArithmeticOverflow))
     );
 }

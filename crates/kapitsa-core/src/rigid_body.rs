@@ -129,7 +129,7 @@ impl RigidBody {
         &mut self,
         center: Vec3,
         radius: f64,
-    ) -> Result<(), crate::aerodynamics::pressure::PressureError> {
+    ) -> Result<(), crate::Error> {
         use crate::aerodynamics::{Aerodynamics, pressure::PressureError};
         if !center.is_finite()
             || !radius.is_finite()
@@ -139,7 +139,7 @@ impl RigidBody {
                 Aerodynamics::Mesh(_) | Aerodynamics::Colliders
             )
         {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         }
         self.potential_sphere = Some((center, radius));
         Ok(())
@@ -188,10 +188,10 @@ impl RigidBody {
         &mut self,
         indices: &[usize],
         base: crate::aerodynamics::pressure::BasePressure,
-    ) -> Result<(), crate::aerodynamics::pressure::PressureError> {
+    ) -> Result<(), crate::Error> {
         use crate::aerodynamics::{Aerodynamics, pressure::PressureError};
         let Aerodynamics::Mesh(mesh) = &self.aerodynamics else {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         };
         let patches = Self::base_triangles_from_mesh(mesh, indices, base)?;
         let triangles = indices
@@ -212,31 +212,31 @@ impl RigidBody {
             crate::aerodynamics::pressure::PressurePatch,
             crate::aerodynamics::pressure::BasePressure,
         )>,
-        crate::aerodynamics::pressure::PressureError,
+        crate::Error,
     > {
         use crate::aerodynamics::pressure::{PressureError, PressurePatch};
         if indices.len() > mesh.triangles().len() {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         }
         let mut sorted = indices.to_vec();
         sorted.sort_unstable();
         if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         }
         let mut patches = Vec::with_capacity(indices.len());
         for &index in indices {
             let face = mesh
                 .triangles()
                 .get(index)
-                .ok_or(PressureError::InvalidPatch)?;
+                .ok_or_else(|| crate::Error::from(PressureError::InvalidPatch))?;
             let [a, b, c] = face.map(|i| mesh.vertices()[i]);
             let cross = b
                 .checked_sub(a)
                 .and_then(|u| c.checked_sub(a).and_then(|v| u.checked_cross(v)))
-                .ok_or(PressureError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
             let length = cross
                 .checked_length()
-                .ok_or(PressureError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
             let center = a / 3.0 + b / 3.0 + c / 3.0;
             patches.push((PressurePatch::new(center, cross, length * 0.5)?, base));
         }

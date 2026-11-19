@@ -107,7 +107,7 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     let mut incomplete = OwnerPressureWorkspace::new(&[GeometryOwner::Body]).ok_or("owner")?;
     assert_eq!(
         incomplete.evaluate(&patches, flow()),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     assert_eq!(incomplete.published()[0].1.force, Vec3::ZERO);
     assert!(OwnerPressureWorkspace::new(&[GeometryOwner::Body, GeometryOwner::Body]).is_none());
@@ -135,7 +135,7 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     };
     assert_eq!(
         workspace.evaluate(&patches, invalid),
-        Err(PressureError::InvalidSoundSpeed)
+        Err(crate::Error::from(PressureError::InvalidSoundSpeed))
     );
     assert_eq!(workspace.published(), previous.as_slice());
     workspace.evaluate(&patches, flow())?;
@@ -166,7 +166,7 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     workspace.prepare(&patches, flow())?;
     assert_eq!(
         workspace.prepare(&patches, invalid),
-        Err(PressureError::InvalidSoundSpeed)
+        Err(crate::Error::from(PressureError::InvalidSoundSpeed))
     );
     assert!(!workspace.commit());
     assert_eq!(workspace.published(), committed.as_slice());
@@ -174,7 +174,7 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     assert_eq!(workspace.published(), committed.as_slice());
     assert_eq!(
         workspace.prepare(&patches, flow()),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     assert!(!workspace.commit());
     assert_eq!(workspace.published(), committed.as_slice());
@@ -190,11 +190,11 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     assert_eq!(workspace.published(), grouped.as_slice());
     assert_eq!(
         evaluate_prepared_mesh_owner(&patches, invalid, GeometryOwner::Part(part)),
-        Err(PressureError::InvalidSoundSpeed)
+        Err(crate::Error::from(PressureError::InvalidSoundSpeed))
     );
     assert_eq!(
         evaluate_prepared_mesh_by_owner(&patches, invalid),
-        Err(PressureError::InvalidSoundSpeed)
+        Err(crate::Error::from(PressureError::InvalidSoundSpeed))
     );
     let unsupported = PressureFlow {
         linear_velocity: Vec3::X * 100.0,
@@ -202,7 +202,7 @@ fn owner_pressure_wrenches_sum_to_total_without_losing_moment()
     };
     assert_eq!(
         evaluate_prepared_mesh_by_owner(&patches, unsupported),
-        Err(PressureError::UnsupportedMach)
+        Err(crate::Error::from(PressureError::UnsupportedMach))
     );
     Ok(())
 }
@@ -237,7 +237,7 @@ fn signed_cp_on_prepared_mesh_sums_force_and_moment() {
             state,
             SurfacePressure::new(1.0, 0.0, 0.49).unwrap()
         ),
-        Err(PressureError::UnsupportedMach)
+        Err(crate::Error::from(PressureError::UnsupportedMach))
     );
 }
 
@@ -296,7 +296,7 @@ fn potential_cylinder_accepts_tessellated_sides_and_rejects_caps() {
         if patch.normal().dot(Vec3::Z).abs() > 0.5 {
             assert_eq!(
                 patch.evaluate_potential_cylinder(state, Vec3::Z),
-                Err(PressureError::InvalidPatch)
+                Err(crate::Error::from(PressureError::InvalidPatch))
             );
             caps += 1;
         } else {
@@ -394,11 +394,11 @@ fn spherical_mesh_preparation_checks_collider_radius_winding_and_budget() {
     );
     assert_eq!(
         spherical_mesh_pressure_patches(&mesh, Vec3::ZERO, 1.0, 1e-12, budget - 1),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     assert_eq!(
         spherical_mesh_pressure_patches(&mesh, Vec3::ZERO, 2.0, 1e-12, budget),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     let inverted = TriangleMesh::new(
         mesh.vertices().to_vec(),
@@ -410,7 +410,7 @@ fn spherical_mesh_preparation_checks_collider_radius_winding_and_budget() {
     .unwrap();
     assert_eq!(
         spherical_mesh_pressure_patches(&inverted, Vec3::ZERO, 1.0, 1e-12, budget),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
 }
 
@@ -437,7 +437,7 @@ fn verified_sphere_patches_sum_without_partial_results() {
     assert!(wrench.moment.length() < 1e-8, "{:?}", wrench.moment);
     assert_eq!(
         evaluate_potential_sphere_patches(&[], state),
-        Err(PressureError::InvalidPatch)
+        Err(crate::Error::from(PressureError::InvalidPatch))
     );
     assert_eq!(
         evaluate_potential_sphere_patches(
@@ -447,7 +447,7 @@ fn verified_sphere_patches_sum_without_partial_results() {
                 ..state
             }
         ),
-        Err(PressureError::UnsupportedMach)
+        Err(crate::Error::from(PressureError::UnsupportedMach))
     );
     assert_eq!(
         evaluate_potential_sphere_patches(
@@ -457,7 +457,7 @@ fn verified_sphere_patches_sum_without_partial_results() {
                 ..state
             }
         ),
-        Err(PressureError::InvalidMotion)
+        Err(crate::Error::from(PressureError::InvalidMotion))
     );
 }
 
@@ -721,7 +721,7 @@ fn prepared_wrench_preserves_vacuum_mach_and_input_errors() {
     };
     assert_eq!(
         evaluate_prepared_mesh(&patches, low_mach),
-        Err(PressureError::UnsupportedMach)
+        Err(crate::Error::from(PressureError::UnsupportedMach))
     );
     assert!(
         evaluate_prepared_mesh(
@@ -767,7 +767,7 @@ fn prepared_wrench_preserves_vacuum_mach_and_input_errors() {
                 ..flow()
             }
         ),
-        Err(PressureError::InvalidSoundSpeed)
+        Err(crate::Error::from(PressureError::InvalidSoundSpeed))
     );
     assert_eq!(
         evaluate_prepared_mesh(
@@ -777,7 +777,7 @@ fn prepared_wrench_preserves_vacuum_mach_and_input_errors() {
                 ..flow()
             }
         ),
-        Err(PressureError::InvalidMotion)
+        Err(crate::Error::from(PressureError::InvalidMotion))
     );
     assert_eq!(
         evaluate_prepared_mesh(
@@ -787,7 +787,7 @@ fn prepared_wrench_preserves_vacuum_mach_and_input_errors() {
                 ..flow()
             }
         ),
-        Err(PressureError::ArithmeticOverflow)
+        Err(crate::Error::from(PressureError::ArithmeticOverflow))
     );
 }
 
@@ -814,7 +814,7 @@ fn finite_patch_loads_that_overflow_the_sum_are_rejected() {
     }
     assert_eq!(
         evaluate_prepared_mesh(&patches, state),
-        Err(PressureError::ArithmeticOverflow)
+        Err(crate::Error::from(PressureError::ArithmeticOverflow))
     );
 }
 
@@ -838,7 +838,7 @@ fn empty_prepared_set_is_zero_but_still_validates_input() {
                 ..flow()
             }
         ),
-        Err(PressureError::InvalidSoundSpeed)
+        Err(crate::Error::from(PressureError::InvalidSoundSpeed))
     );
 }
 
@@ -917,7 +917,7 @@ fn full_base_visibility_rejects_full_and_partial_blockers_for_mesh_and_colliders
         );
         assert_eq!(
             verify_full_base_visibility(&[selected[0], selected[0]], &visible),
-            Err(PressureError::BaseNotFullyVisible)
+            Err(crate::Error::from(PressureError::BaseNotFullyVisible))
         );
         for width in [0.5, 1.0] {
             let shield = TriangleMesh::new(
@@ -950,7 +950,7 @@ fn full_base_visibility_rejects_full_and_partial_blockers_for_mesh_and_colliders
             let visible = geometry.exposed_surface_patches(&instances, Vec3::X, 1e-6, 100_000)?;
             assert_eq!(
                 verify_full_base_visibility(&selected, &visible),
-                Err(PressureError::BaseNotFullyVisible)
+                Err(crate::Error::from(PressureError::BaseNotFullyVisible))
             );
         }
     }

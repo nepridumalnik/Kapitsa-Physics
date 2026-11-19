@@ -48,9 +48,9 @@ pub(crate) fn verify_unique_base_sources(
         .checked_mul(mesh.triangles().len())
         .is_none_or(|work| work > max_work)
     {
-        return Err(super::AerodynamicsError::Geometry(
+        return Err(super::AerodynamicsError::Geometry(crate::Error::from(
             super::geometry::GeometryError::WorkBudgetExceeded,
-        ));
+        )));
     }
     for triangle in selected {
         if mesh
@@ -60,9 +60,9 @@ pub(crate) fn verify_unique_base_sources(
             .count()
             != 1
         {
-            return Err(super::AerodynamicsError::Pressure(
+            return Err(super::AerodynamicsError::Pressure(crate::Error::from(
                 PressureError::BaseNotFullyVisible,
-            ));
+            )));
         }
     }
     Ok(())
@@ -81,7 +81,7 @@ pub(crate) fn verify_unique_base_sources(
 pub fn verify_full_base_visibility(
     selected: &[[Vec3; 3]],
     visible: &PreparedSurfacePatches,
-) -> Result<(), PressureError> {
+) -> Result<(), crate::Error> {
     for (index, triangle) in selected.iter().enumerate() {
         if selected[..index]
             .iter()
@@ -92,7 +92,7 @@ pub fn verify_full_base_visibility(
                 .count()
                 != 1
         {
-            return Err(PressureError::BaseNotFullyVisible);
+            return Err(crate::Error::from(PressureError::BaseNotFullyVisible));
         }
     }
     Ok(())
@@ -115,7 +115,7 @@ pub struct PressurePatch {
 /// not sufficient by itself to authorize a potential-flow model in a world step.
 pub fn closed_mesh_pressure_patches(
     mesh: &crate::shape::TriangleMesh,
-) -> Result<Vec<PressurePatch>, PressureError> {
+) -> Result<Vec<PressurePatch>, crate::Error> {
     use std::collections::BTreeMap;
 
     let faces = mesh.triangles();
@@ -131,7 +131,7 @@ pub fn closed_mesh_pressure_patches(
     for (index, &[a, b, c]) in faces.iter().enumerate() {
         let [ia, ib, ic] = [a, b, c].map(|i| indices[i]);
         if ia == ib || ib == ic || ic == ia {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         }
         for (u, v) in [(ia, ib), (ib, ic), (ic, ia)] {
             edges
@@ -143,17 +143,17 @@ pub fn closed_mesh_pressure_patches(
         let cross = b
             .checked_sub(a)
             .and_then(|u| c.checked_sub(a).and_then(|v| u.checked_cross(v)))
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         let length = cross
             .checked_length()
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         let center = a / 3.0 + b / 3.0 + c / 3.0;
         patches.push(PressurePatch::new(center, cross, length * 0.5)?);
     }
     let mut neighbors = vec![Vec::new(); faces.len()];
     for edge in edges.values() {
         if edge.len() != 2 || edge[0].1 == edge[1].1 {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         }
         neighbors[edge[0].0].push(edge[1].0);
         neighbors[edge[1].0].push(edge[0].0);
@@ -170,7 +170,7 @@ pub fn closed_mesh_pressure_patches(
         }
     }
     if visited.iter().any(|seen| !seen) {
-        return Err(PressureError::InvalidPatch);
+        return Err(crate::Error::from(PressureError::InvalidPatch));
     }
     Ok(patches)
 }
@@ -188,14 +188,14 @@ pub fn spherical_mesh_pressure_patches(
     radius: f64,
     relative_tolerance: f64,
     max_work: usize,
-) -> Result<Vec<PressurePatch>, PressureError> {
+) -> Result<Vec<PressurePatch>, crate::Error> {
     if !center.is_finite()
         || !radius.is_finite()
         || radius <= 0.0
         || !relative_tolerance.is_finite()
         || !(0.0..1.0).contains(&relative_tolerance)
     {
-        return Err(PressureError::InvalidPatch);
+        return Err(crate::Error::from(PressureError::InvalidPatch));
     }
     if mesh
         .triangles()
@@ -203,16 +203,16 @@ pub fn spherical_mesh_pressure_patches(
         .checked_mul(mesh.vertices().len())
         .is_none_or(|n| n > max_work)
     {
-        return Err(PressureError::InvalidPatch);
+        return Err(crate::Error::from(PressureError::InvalidPatch));
     }
     let tolerance = radius * relative_tolerance;
     for vertex in mesh.vertices() {
         let distance = vertex
             .checked_sub(center)
             .and_then(|v| v.checked_length())
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         if (distance - radius).abs() > tolerance {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         }
     }
     let patches = closed_mesh_pressure_patches(mesh)?;
@@ -220,26 +220,26 @@ pub fn spherical_mesh_pressure_patches(
         let offset = patch
             .center
             .checked_sub(center)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         if patch
             .normal
             .checked_dot(offset)
-            .ok_or(PressureError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?
             <= 0.0
         {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         }
         for vertex in mesh.vertices() {
             let delta = vertex
                 .checked_sub(patch.center)
-                .ok_or(PressureError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
             if patch
                 .normal
                 .checked_dot(delta)
-                .ok_or(PressureError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?
                 > tolerance
             {
-                return Err(PressureError::InvalidPatch);
+                return Err(crate::Error::from(PressureError::InvalidPatch));
             }
         }
     }
@@ -256,10 +256,10 @@ pub fn spherical_mesh_pressure_patches(
 pub fn evaluate_potential_sphere_patches(
     patches: &[PressurePatch],
     flow: PressureFlow,
-) -> Result<PressureWrench, PressureError> {
+) -> Result<PressureWrench, crate::Error> {
     // Validate flow even for an empty set; an empty set is not a sphere.
     if patches.is_empty() {
-        return Err(PressureError::InvalidPatch);
+        return Err(crate::Error::from(PressureError::InvalidPatch));
     }
     let mut total = PressureWrench {
         force: Vec3::ZERO,
@@ -270,11 +270,11 @@ pub fn evaluate_potential_sphere_patches(
         total.force = total
             .force
             .checked_add(load.force)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         total.moment = total
             .moment
             .checked_add(load.moment)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
     }
     Ok(total)
 }
@@ -330,14 +330,14 @@ const CYLINDER_SIDE_SPEED_RATIO_SQUARED: f64 = 4.0;
 const POTENTIAL_CYLINDER_ORTHOGONALITY_TOLERANCE: f64 = 1e-10;
 
 impl SurfacePressure {
-    pub fn new(cp: f64, min_mach: f64, max_mach: f64) -> Result<Self, PressureError> {
+    pub fn new(cp: f64, min_mach: f64, max_mach: f64) -> Result<Self, crate::Error> {
         if !cp.is_finite()
             || !min_mach.is_finite()
             || min_mach < 0.0
             || !max_mach.is_finite()
             || max_mach < min_mach
         {
-            return Err(PressureError::InvalidCoefficient);
+            return Err(crate::Error::from(PressureError::InvalidCoefficient));
         }
         Ok(Self {
             cp,
@@ -354,7 +354,7 @@ enum ExplicitPressure {
 }
 
 impl BasePressure {
-    pub fn new(cp: f64, min_mach: f64, max_mach: f64) -> Result<Self, PressureError> {
+    pub fn new(cp: f64, min_mach: f64, max_mach: f64) -> Result<Self, crate::Error> {
         if !cp.is_finite()
             || cp > 0.0
             || !min_mach.is_finite()
@@ -362,7 +362,7 @@ impl BasePressure {
             || !max_mach.is_finite()
             || max_mach < min_mach
         {
-            return Err(PressureError::InvalidCoefficient);
+            return Err(crate::Error::from(PressureError::InvalidCoefficient));
         }
         Ok(Self {
             cp_magnitude: -cp,
@@ -373,13 +373,13 @@ impl BasePressure {
 }
 
 impl PressurePatch {
-    pub fn new(center: Vec3, outward_normal: Vec3, area: f64) -> Result<Self, PressureError> {
+    pub fn new(center: Vec3, outward_normal: Vec3, area: f64) -> Result<Self, crate::Error> {
         if !center.is_finite() || !area.is_finite() || area < 0.0 {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         }
         let normal = outward_normal
             .try_normalize()
-            .ok_or(PressureError::InvalidPatch)?;
+            .ok_or_else(|| crate::Error::from(PressureError::InvalidPatch))?;
         Ok(Self {
             center,
             normal,
@@ -408,9 +408,9 @@ impl PressurePatch {
     pub fn evaluate_potential_sphere(
         &self,
         flow: PressureFlow,
-    ) -> Result<PressureWrench, PressureError> {
+    ) -> Result<PressureWrench, crate::Error> {
         if flow.angular_velocity != Vec3::ZERO {
-            return Err(PressureError::InvalidMotion);
+            return Err(crate::Error::from(PressureError::InvalidMotion));
         }
         // Reuse the ordinary checks even for a zero-speed or zero-area patch.
         let zero = SurfacePressure::new(0.0, 0.0, POTENTIAL_FLOW_MAX_MACH)?;
@@ -418,10 +418,10 @@ impl PressurePatch {
         let relative = flow
             .linear_velocity
             .checked_sub(flow.atmosphere.wind_velocity())
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         let speed = relative
             .checked_length()
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         if speed == 0.0 || self.area == 0.0 || flow.atmosphere.density() == 0.0 {
             return Ok(PressureWrench {
                 force: Vec3::ZERO,
@@ -431,7 +431,7 @@ impl PressurePatch {
         let normal = flow.transform.transform_vector(self.normal);
         let cosine = normal
             .checked_dot(relative / speed)
-            .ok_or(PressureError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?
             .clamp(-1.0, 1.0);
         let cp = 1.0 - SPHERE_EQUATORIAL_SPEED_RATIO_SQUARED * (1.0 - cosine * cosine);
         self.evaluate_surface(
@@ -454,29 +454,31 @@ impl PressurePatch {
         &self,
         flow: PressureFlow,
         axis: Vec3,
-    ) -> Result<PressureWrench, PressureError> {
-        let axis = axis.try_normalize().ok_or(PressureError::InvalidPatch)?;
+    ) -> Result<PressureWrench, crate::Error> {
+        let axis = axis
+            .try_normalize()
+            .ok_or_else(|| crate::Error::from(PressureError::InvalidPatch))?;
         if self
             .normal
             .checked_dot(axis)
-            .ok_or(PressureError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?
             .abs()
             > POTENTIAL_CYLINDER_ORTHOGONALITY_TOLERANCE
         {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         }
         if flow.angular_velocity != Vec3::ZERO {
-            return Err(PressureError::InvalidMotion);
+            return Err(crate::Error::from(PressureError::InvalidMotion));
         }
         let zero = SurfacePressure::new(0.0, 0.0, POTENTIAL_FLOW_MAX_MACH)?;
         let zero_load = self.evaluate_surface(flow, zero)?;
         let relative = flow
             .linear_velocity
             .checked_sub(flow.atmosphere.wind_velocity())
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         let speed = relative
             .checked_length()
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         if speed == 0.0 || self.area == 0.0 || flow.atmosphere.density() == 0.0 {
             return Ok(zero_load);
         }
@@ -484,23 +486,23 @@ impl PressurePatch {
         let world_axis = flow.transform.transform_vector(axis);
         let axial = world_axis
             .checked_dot(direction)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         let crossflow = direction
             .checked_sub(
                 world_axis
                     .checked_mul_scalar(axial)
-                    .ok_or(PressureError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?,
             )
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         let normal = flow.transform.transform_vector(self.normal);
         let normal_speed = normal
             .checked_dot(crossflow)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         let crossflow_squared = crossflow
             .checked_dot(crossflow)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         if crossflow != Vec3::ZERO && crossflow_squared == 0.0 {
-            return Err(PressureError::ArithmeticOverflow);
+            return Err(crate::Error::from(PressureError::ArithmeticOverflow));
         }
         // Cp is referenced to total dynamic pressure by evaluate_surface.
         let cp = crossflow_squared
@@ -514,7 +516,7 @@ impl PressurePatch {
     /// Evaluates a centroid load sample; supply atmosphere sampled at this patch.
     /// COM is body-local; velocities, force and moment are world-space.
     /// No allocation, geometry preparation or body mutation occurs here.
-    pub fn evaluate(&self, flow: PressureFlow) -> Result<PressureWrench, PressureError> {
+    pub fn evaluate(&self, flow: PressureFlow) -> Result<PressureWrench, crate::Error> {
         self.evaluate_inner(flow, None)
     }
 
@@ -526,7 +528,7 @@ impl PressurePatch {
         &self,
         flow: PressureFlow,
         base: BasePressure,
-    ) -> Result<PressureWrench, PressureError> {
+    ) -> Result<PressureWrench, crate::Error> {
         self.evaluate_inner(flow, Some(ExplicitPressure::Base(base)))
     }
 
@@ -536,7 +538,7 @@ impl PressurePatch {
         &self,
         flow: PressureFlow,
         pressure: SurfacePressure,
-    ) -> Result<PressureWrench, PressureError> {
+    ) -> Result<PressureWrench, crate::Error> {
         self.evaluate_inner(flow, Some(ExplicitPressure::Surface(pressure)))
     }
 
@@ -544,15 +546,15 @@ impl PressurePatch {
         &self,
         flow: PressureFlow,
         explicit: Option<ExplicitPressure>,
-    ) -> Result<PressureWrench, PressureError> {
+    ) -> Result<PressureWrench, crate::Error> {
         if !flow.center_of_mass.is_finite()
             || !flow.linear_velocity.is_finite()
             || !flow.angular_velocity.is_finite()
         {
-            return Err(PressureError::InvalidMotion);
+            return Err(crate::Error::from(PressureError::InvalidMotion));
         }
         if !flow.sound_speed.is_finite() || flow.sound_speed <= 0.0 {
-            return Err(PressureError::InvalidSoundSpeed);
+            return Err(crate::Error::from(PressureError::InvalidSoundSpeed));
         }
         let zero = PressureWrench {
             force: Vec3::ZERO,
@@ -569,7 +571,7 @@ impl PressurePatch {
         let arm = flow.transform.transform_vector(offset);
         let normal = flow.transform.transform_vector(self.normal);
         if !arm.is_finite() || !normal.is_finite() {
-            return Err(overflow);
+            return Err(crate::Error::from(overflow));
         }
         let relative = flow
             .angular_velocity
@@ -583,7 +585,7 @@ impl PressurePatch {
         }
         let mach = speed / flow.sound_speed;
         if !mach.is_finite() {
-            return Err(overflow);
+            return Err(crate::Error::from(overflow));
         }
         let domain = match explicit {
             Some(ExplicitPressure::Base(b)) => Some((b.min_mach, b.max_mach)),
@@ -591,14 +593,14 @@ impl PressurePatch {
             None => None,
         };
         if domain.map_or(mach < 5.0, |(min, max)| mach < min || mach > max) {
-            return Err(PressureError::UnsupportedMach);
+            return Err(crate::Error::from(PressureError::UnsupportedMach));
         }
         if let Some(explicit) = explicit {
             let cp = match explicit {
                 ExplicitPressure::Base(base) => {
                     let alignment = normal.checked_dot(relative / speed).ok_or(overflow)?;
                     if alignment > 0.0 {
-                        return Err(PressureError::InvalidBaseOrientation);
+                        return Err(crate::Error::from(PressureError::InvalidBaseOrientation));
                     }
                     -base.cp_magnitude
                 }
@@ -670,7 +672,7 @@ impl PressurePatch {
 pub fn evaluate_prepared_mesh(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
-) -> Result<PressureWrench, PressureError> {
+) -> Result<PressureWrench, crate::Error> {
     evaluate_prepared(patches, flow, None)
 }
 
@@ -683,18 +685,18 @@ pub fn evaluate_prepared_mesh_owner(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
     owner: super::geometry::GeometryOwner,
-) -> Result<PressureWrench, PressureError> {
+) -> Result<PressureWrench, crate::Error> {
     let mut total = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
     for patch in patches.iter().filter(|patch| patch.owner == owner) {
         let load = PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
         total.force = total
             .force
             .checked_add(load.force)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         total.moment = total
             .moment
             .checked_add(load.moment)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
     }
     Ok(total)
 }
@@ -708,7 +710,7 @@ pub fn evaluate_prepared_mesh_owner(
 pub fn evaluate_prepared_mesh_by_owner(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
-) -> Result<Vec<(super::geometry::GeometryOwner, PressureWrench)>, PressureError> {
+) -> Result<Vec<(super::geometry::GeometryOwner, PressureWrench)>, crate::Error> {
     let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
     let mut totals = std::collections::BTreeMap::new();
     for patch in patches.iter() {
@@ -717,11 +719,11 @@ pub fn evaluate_prepared_mesh_by_owner(
         total.force = total
             .force
             .checked_add(load.force)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         total.moment = total
             .moment
             .checked_add(load.moment)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
     }
     Ok(totals.into_iter().collect())
 }
@@ -771,15 +773,15 @@ impl OwnerPressureWorkspace {
     pub fn configure_pending(
         &mut self,
         owners: &[super::geometry::GeometryOwner],
-    ) -> Result<(), PressureError> {
+    ) -> Result<(), crate::Error> {
         self.prepared = false;
         if owners.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(PressureError::InvalidPatch);
+            return Err(crate::Error::from(PressureError::InvalidPatch));
         }
         self.scratch.clear();
         self.scratch
             .try_reserve(owners.len())
-            .map_err(|_| PressureError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(PressureError::ArithmeticOverflow))?;
         let zero = PressureWrench {
             force: Vec3::ZERO,
             moment: Vec3::ZERO,
@@ -797,7 +799,7 @@ impl OwnerPressureWorkspace {
 
     /// Returns the staged total about the shared COM, accumulated in patch order.
     /// `None` means that there is no successfully staged result.
-    pub fn staged_total(&self) -> Result<Option<PressureWrench>, PressureError> {
+    pub fn staged_total(&self) -> Result<Option<PressureWrench>, crate::Error> {
         Ok(self.prepared.then_some(self.scratch_total))
     }
 
@@ -806,7 +808,7 @@ impl OwnerPressureWorkspace {
         &mut self,
         patches: &PreparedSurfacePatches,
         flow: PressureFlow,
-    ) -> Result<(), PressureError> {
+    ) -> Result<(), crate::Error> {
         self.prepare(patches, flow)?;
         self.commit();
         Ok(())
@@ -818,7 +820,7 @@ impl OwnerPressureWorkspace {
         &mut self,
         patches: &PreparedSurfacePatches,
         flow: PressureFlow,
-    ) -> Result<(), PressureError> {
+    ) -> Result<(), crate::Error> {
         self.prepared = false;
         let zero = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
         self.scratch_total = zero;
@@ -829,28 +831,28 @@ impl OwnerPressureWorkspace {
             let index = self
                 .scratch
                 .binary_search_by_key(&patch.owner, |entry| entry.0)
-                .map_err(|_| PressureError::InvalidPatch)?;
+                .map_err(|_| crate::Error::from(PressureError::InvalidPatch))?;
             let load =
                 PressurePatch::new(patch.center, patch.normal, patch.area)?.evaluate(flow)?;
             self.scratch_total.force = self
                 .scratch_total
                 .force
                 .checked_add(load.force)
-                .ok_or(PressureError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
             self.scratch_total.moment = self
                 .scratch_total
                 .moment
                 .checked_add(load.moment)
-                .ok_or(PressureError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
             let total = &mut self.scratch[index].1;
             total.force = total
                 .force
                 .checked_add(load.force)
-                .ok_or(PressureError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
             total.moment = total
                 .moment
                 .checked_add(load.moment)
-                .ok_or(PressureError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         }
         self.prepared = true;
         Ok(())
@@ -880,7 +882,7 @@ pub fn evaluate_prepared_base(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
     base: BasePressure,
-) -> Result<PressureWrench, PressureError> {
+) -> Result<PressureWrench, crate::Error> {
     evaluate_prepared(patches, flow, Some(ExplicitPressure::Base(base)))
 }
 
@@ -892,7 +894,7 @@ pub fn evaluate_prepared_surface(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
     pressure: SurfacePressure,
-) -> Result<PressureWrench, PressureError> {
+) -> Result<PressureWrench, crate::Error> {
     evaluate_prepared(patches, flow, Some(ExplicitPressure::Surface(pressure)))
 }
 
@@ -900,7 +902,7 @@ fn evaluate_prepared(
     patches: &PreparedSurfacePatches,
     flow: PressureFlow,
     explicit: Option<ExplicitPressure>,
-) -> Result<PressureWrench, PressureError> {
+) -> Result<PressureWrench, crate::Error> {
     // Validate even an empty set, using the same rules as patch evaluation.
     let mut total = PressurePatch::new(Vec3::ZERO, Vec3::X, 0.0)?.evaluate(flow)?;
     for patch in patches.iter() {
@@ -909,11 +911,11 @@ fn evaluate_prepared(
         total.force = total
             .force
             .checked_add(load.force)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
         total.moment = total
             .moment
             .checked_add(load.moment)
-            .ok_or(PressureError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(PressureError::ArithmeticOverflow))?;
     }
     Ok(total)
 }

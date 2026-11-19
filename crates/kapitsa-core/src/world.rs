@@ -3417,7 +3417,9 @@ impl PhysicsWorld {
                 })
                 .map_err(|cause| StepError::Aerodynamics {
                     body_id,
-                    cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Hull(cause)),
+                    cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Hull(
+                        crate::Error::from(cause),
+                    )),
                 })?;
             body.apply_force(wrench.force).map_err(|_| error())?;
             body.apply_torque(wrench.moment).map_err(|_| error())?;
@@ -3471,7 +3473,9 @@ impl PhysicsWorld {
                     return Err(Error::from(StepError::Aerodynamics {
                         body_id,
                         cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Wing(
-                            crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
+                            crate::Error::from(
+                                crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
+                            ),
                         )),
                     }));
                 }
@@ -3590,7 +3594,7 @@ impl PhysicsWorld {
                     .map_err(|cause| StepError::Aerodynamics {
                         body_id,
                         cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Hull(
-                            cause,
+                            crate::Error::from(cause),
                         )),
                     })?;
                 body.apply_force(wrench.force).map_err(|_| error())?;
@@ -3979,13 +3983,17 @@ impl PhysicsWorld {
             )
             .map_err(|cause| StepError::Aerodynamics {
                 body_id,
-                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Geometry(cause)),
+                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Geometry(
+                    crate::Error::from(cause),
+                )),
             })?;
         let section = cache
             .configure_voxel_wave_drag(model.section.clone(), model.axis, model.smoothing_radius)
             .map_err(|cause| StepError::Aerodynamics {
                 body_id,
-                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Hull(cause)),
+                cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Hull(
+                    crate::Error::from(cause),
+                )),
             })?;
         Ok(Some(section))
     }
@@ -4234,7 +4242,9 @@ impl PhysicsWorld {
                         StepError::Aerodynamics {
                             body_id,
                             cause: crate::Error::from(
-                                crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                                crate::aerodynamics::AerodynamicsError::Geometry(
+                                    crate::Error::from(cause),
+                                ),
                             ),
                         }
                     })?;
@@ -4316,7 +4326,9 @@ impl PhysicsWorld {
                             .map_err(|cause| StepError::Aerodynamics {
                                 body_id,
                                 cause: crate::Error::from(
-                                    crate::aerodynamics::AerodynamicsError::Geometry(cause),
+                                    crate::aerodynamics::AerodynamicsError::Geometry(
+                                        crate::Error::from(cause),
+                                    ),
                                 ),
                             })?;
                         crate::aerodynamics::pressure::verify_full_base_visibility(
@@ -4345,7 +4357,7 @@ impl PhysicsWorld {
                         )
                         .map_err(|cause| StepError::Aerodynamics {
                             body_id,
-                            cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Geometry(cause)),
+                            cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(cause))),
                         })?,
                 );
                 }

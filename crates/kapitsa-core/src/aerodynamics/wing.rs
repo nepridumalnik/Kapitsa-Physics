@@ -40,7 +40,7 @@ impl WingPolar {
         mach: Vec<f64>,
         angles: Vec<f64>,
         coefficients: Vec<WingCoefficients>,
-    ) -> Result<Self, WingError> {
+    ) -> Result<Self, crate::Error> {
         let valid_axis = |axis: &[f64]| {
             axis.len() >= 2
                 && axis.iter().all(|v| v.is_finite())
@@ -54,7 +54,7 @@ impl WingPolar {
                 .iter()
                 .any(|c| !c.lift.is_finite() || !c.drag.is_finite() || c.drag < 0.0)
         {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         Ok(Self {
             mach: mach.into_boxed_slice(),
@@ -63,13 +63,13 @@ impl WingPolar {
         })
     }
 
-    pub fn coefficients(&self, angle: f64, mach: f64) -> Result<WingCoefficients, WingError> {
+    pub fn coefficients(&self, angle: f64, mach: f64) -> Result<WingCoefficients, crate::Error> {
         if !angle.is_finite() || !mach.is_finite() || mach < 0.0 {
-            return Err(WingError::InvalidFlow);
+            return Err(crate::Error::from(WingError::InvalidFlow));
         }
-        fn interval(axis: &[f64], value: f64) -> Result<(usize, f64), WingError> {
+        fn interval(axis: &[f64], value: f64) -> Result<(usize, f64), crate::Error> {
             if value < axis[0] || value > axis[axis.len() - 1] {
-                return Err(WingError::UnsupportedFlow);
+                return Err(crate::Error::from(WingError::UnsupportedFlow));
             }
             let index = axis
                 .partition_point(|knot| *knot <= value)
@@ -107,7 +107,7 @@ impl WingPolar {
             mt,
         );
         if !result.lift.is_finite() || !result.drag.is_finite() {
-            return Err(WingError::ArithmeticOverflow);
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
         Ok(result)
     }
@@ -129,7 +129,7 @@ impl WingControl {
         deflection: f64,
         max_deflection: f64,
         effectiveness: f64,
-    ) -> Result<Self, WingError> {
+    ) -> Result<Self, crate::Error> {
         if !deflection.is_finite()
             || !max_deflection.is_finite()
             || max_deflection < 0.0
@@ -138,7 +138,7 @@ impl WingControl {
             || !effectiveness.is_finite()
             || !(deflection * effectiveness).is_finite()
         {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         Ok(Self {
             deflection,
@@ -261,9 +261,9 @@ impl WingSurface {
     /// responsible for consistent values at that seam. This is not a stall
     /// prediction or an automatic fallback. An incidence-shift control must
     /// also remain inside the supplied polar domain.
-    pub fn with_full_angle_polar(mut self) -> Result<Self, WingError> {
+    pub fn with_full_angle_polar(mut self) -> Result<Self, crate::Error> {
         if self.polar.is_none() {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         self.full_angle_polar = true;
         Ok(self)
@@ -277,9 +277,9 @@ impl WingSurface {
     /// Effective incidence, including any control shift, is wrapped by 2*pi.
     /// Mach remains limited to the table domain. This checks value continuity,
     /// not derivative continuity or physical validity of the supplied data.
-    pub fn with_periodic_full_angle_polar(mut self) -> Result<Self, WingError> {
+    pub fn with_periodic_full_angle_polar(mut self) -> Result<Self, crate::Error> {
         let Some(polar) = &self.polar else {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         };
         let count = polar.angles.len();
         if polar.angles[0] != -PI
@@ -289,7 +289,7 @@ impl WingSurface {
                 .chunks_exact(count)
                 .any(|row| row[0] != row[count - 1])
         {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         self.full_angle_polar = true;
         self.periodic_polar = true;
@@ -319,14 +319,14 @@ impl WingSurface {
         center: kapitsa_math::Vec3,
         chord: f64,
         span: f64,
-    ) -> Result<Self, WingError> {
+    ) -> Result<Self, crate::Error> {
         if !center.is_finite()
             || !chord.is_finite()
             || chord <= 0.0
             || !span.is_finite()
             || span <= 0.0
         {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         let area = chord * span;
         if !area.is_finite()
@@ -335,7 +335,7 @@ impl WingSurface {
             || (area - self.planform_area).abs()
                 > 64.0 * f64::EPSILON * area.max(self.planform_area)
         {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         self.footprint = Some(WingFootprint {
             center,
@@ -361,7 +361,7 @@ impl WingSurface {
         geometry: &super::geometry::PreparedGeometry,
         part_to_body: crate::transform::Transform,
         max_samples: usize,
-    ) -> Result<Option<WingVisibility>, WingError> {
+    ) -> Result<Option<WingVisibility>, crate::Error> {
         use kapitsa_math::Vec3;
         let Some(footprint) = self.footprint else {
             return Ok(None);
@@ -369,7 +369,7 @@ impl WingSurface {
         let cells = |length: f64| {
             let value = (length / geometry.cell_size()).ceil().max(1.0);
             if !value.is_finite() || value > 1_000_000.0 {
-                return Err(WingError::ShieldingBudgetExceeded);
+                return Err(crate::Error::from(WingError::ShieldingBudgetExceeded));
             }
             Ok(value as usize)
         };
@@ -378,10 +378,10 @@ impl WingSurface {
         let count = nx
             .checked_mul(ny)
             .filter(|count| *count <= max_samples.min(1_000_000))
-            .ok_or(WingError::ShieldingBudgetExceeded)?;
+            .ok_or_else(|| crate::Error::from(WingError::ShieldingBudgetExceeded))?;
         let transform = part_to_body
             .compose(&self.local_transform)
-            .map_err(|_| WingError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(WingError::ArithmeticOverflow))?;
         let mut visible = 0_usize;
         let mut mean = Vec3::ZERO;
         for y in 0..ny {
@@ -391,7 +391,7 @@ impl WingSurface {
                 let point = footprint
                     .center
                     .checked_add(Vec3::new(dx, dy, 0.0))
-                    .ok_or(WingError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(WingError::ArithmeticOverflow))?;
                 let body_point = transform.transform_point(point);
                 let occupied = geometry
                     .occupied_at(body_point)
@@ -403,9 +403,9 @@ impl WingSurface {
                             point
                                 .checked_sub(mean)
                                 .and_then(|v| v.checked_mul_scalar(1.0 / visible as f64))
-                                .ok_or(WingError::ArithmeticOverflow)?,
+                                .ok_or_else(|| crate::Error::from(WingError::ArithmeticOverflow))?,
                         )
-                        .ok_or(WingError::ArithmeticOverflow)?;
+                        .ok_or_else(|| crate::Error::from(WingError::ArithmeticOverflow))?;
                 }
             }
         }
@@ -413,7 +413,7 @@ impl WingSurface {
             Vec3::ZERO
         } else {
             mean.checked_sub(footprint.center)
-                .ok_or(WingError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(WingError::ArithmeticOverflow))?
         };
         Ok(Some(WingVisibility {
             fraction: visible as f64 / count as f64,
@@ -431,9 +431,9 @@ impl WingSurface {
     /// finite-wing side force, sweep, wingtip effects or separated flow. The
     /// caller must select a range and polar consistent with that approximation.
     /// By default physical spanwise flow remains unsupported.
-    pub fn with_spanwise_projection(mut self, max_sideslip: f64) -> Result<Self, WingError> {
+    pub fn with_spanwise_projection(mut self, max_sideslip: f64) -> Result<Self, crate::Error> {
         if !max_sideslip.is_finite() || max_sideslip <= 0.0 || max_sideslip >= PI / 2.0 {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         self.spanwise_limit = Some(max_sideslip);
         Ok(self)
@@ -445,13 +445,13 @@ impl WingSurface {
     }
 
     /// Evaluate at physical AoA, with an optional configured incidence shift.
-    pub fn coefficients(&self, angle: f64, mach: f64) -> Result<WingCoefficients, WingError> {
+    pub fn coefficients(&self, angle: f64, mach: f64) -> Result<WingCoefficients, crate::Error> {
         let effective = angle + self.control.map_or(0.0, |c| c.deflection * c.effectiveness);
         if !angle.is_finite() {
-            return Err(WingError::InvalidFlow);
+            return Err(crate::Error::from(WingError::InvalidFlow));
         }
         if !effective.is_finite() {
-            return Err(WingError::ArithmeticOverflow);
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
         match &self.polar {
             Some(polar) if self.periodic_polar => {
@@ -474,9 +474,9 @@ impl WingSurface {
         model: FiniteWing,
         local_transform: crate::transform::Transform,
         planform_area: f64,
-    ) -> Result<Self, WingError> {
+    ) -> Result<Self, crate::Error> {
         if !planform_area.is_finite() || planform_area < 0.0 {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         Ok(Self {
             model,
@@ -496,7 +496,7 @@ impl WingSurface {
     pub fn evaluate(
         &self,
         flow: super::pressure::PressureFlow,
-    ) -> Result<super::pressure::PressureWrench, WingError> {
+    ) -> Result<super::pressure::PressureWrench, crate::Error> {
         self.evaluate_with_visibility(flow, None)
     }
 
@@ -504,14 +504,14 @@ impl WingSurface {
         &self,
         flow: super::pressure::PressureFlow,
         visibility: Option<WingVisibility>,
-    ) -> Result<super::pressure::PressureWrench, WingError> {
+    ) -> Result<super::pressure::PressureWrench, crate::Error> {
         if !flow.center_of_mass.is_finite()
             || !flow.linear_velocity.is_finite()
             || !flow.angular_velocity.is_finite()
             || !flow.sound_speed.is_finite()
             || flow.sound_speed <= 0.0
         {
-            return Err(WingError::InvalidFlow);
+            return Err(crate::Error::from(WingError::InvalidFlow));
         }
         let fraction = visibility.map_or(1.0, |value| value.fraction);
         if flow.atmosphere.density() == 0.0 || self.planform_area == 0.0 || fraction == 0.0 {
@@ -559,7 +559,7 @@ impl WingSurface {
             .transform_vector(self.local_transform.transform_vector(local_force));
         let moment = arm.checked_cross(force).ok_or(overflow)?;
         if !force.is_finite() {
-            return Err(overflow);
+            return Err(crate::Error::from(overflow));
         }
         Ok(super::pressure::PressureWrench { force, moment })
     }
@@ -576,7 +576,7 @@ impl FiniteWing {
         density: f64,
         sound_speed: f64,
         planform_area: f64,
-    ) -> Result<kapitsa_math::Vec3, WingError> {
+    ) -> Result<kapitsa_math::Vec3, crate::Error> {
         planar_force(
             relative_velocity,
             density,
@@ -596,7 +596,7 @@ impl FiniteWing {
         profile_drag: f64,
         zero_lift_angle: f64,
         max_attached_angle: f64,
-    ) -> Result<Self, WingError> {
+    ) -> Result<Self, crate::Error> {
         if !aspect_ratio.is_finite()
             || aspect_ratio <= 0.0
             || !efficiency.is_finite()
@@ -610,7 +610,7 @@ impl FiniteWing {
             || max_attached_angle <= 0.0
             || max_attached_angle >= PI / 2.0
         {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         Ok(Self {
             aspect_ratio,
@@ -629,9 +629,9 @@ impl FiniteWing {
     /// must select a limit below the critical Mach for this wing and flow;
     /// this approximation does not predict shock formation, wave drag or stall.
     /// The default model remains incompressible with a Mach limit of 0.3.
-    pub fn with_subsonic_compressibility(mut self, max_mach: f64) -> Result<Self, WingError> {
+    pub fn with_subsonic_compressibility(mut self, max_mach: f64) -> Result<Self, crate::Error> {
         if !max_mach.is_finite() || max_mach <= 0.0 || max_mach >= 1.0 {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         self.compressibility = Compressibility::Subsonic { max_mach };
         Ok(self)
@@ -650,14 +650,14 @@ impl FiniteWing {
         mut self,
         divergence_mach: f64,
         max_mach: f64,
-    ) -> Result<Self, WingError> {
+    ) -> Result<Self, crate::Error> {
         if !divergence_mach.is_finite()
             || divergence_mach <= 0.0
             || divergence_mach >= 0.9
             || !max_mach.is_finite()
             || max_mach < 1.0
         {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         self.compressibility = Compressibility::Ndarc {
             divergence_mach,
@@ -676,14 +676,14 @@ impl FiniteWing {
     /// 1.1; outside the upper limit evaluation fails. The wing's configured
     /// Mach and attached-flow limits still apply independently.
     /// See NASA TP-2015-218751, Appendix 3, section 8-8.
-    pub fn with_drag_rise(mut self, critical_mach: f64, scale: f64) -> Result<Self, WingError> {
+    pub fn with_drag_rise(mut self, critical_mach: f64, scale: f64) -> Result<Self, crate::Error> {
         if !critical_mach.is_finite()
             || critical_mach <= 0.0
             || critical_mach >= 1.0
             || !scale.is_finite()
             || scale < 0.0
         {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         self.drag_rise = (scale != 0.0).then_some(DragRise {
             critical_mach,
@@ -707,12 +707,12 @@ impl FiniteWing {
         zero_lift_critical_mach: f64,
         lift_sensitivity: f64,
         scale: f64,
-    ) -> Result<Self, WingError> {
+    ) -> Result<Self, crate::Error> {
         if !lift_sensitivity.is_finite()
             || lift_sensitivity < 0.0
             || lift_sensitivity >= zero_lift_critical_mach
         {
-            return Err(WingError::InvalidParameters);
+            return Err(crate::Error::from(WingError::InvalidParameters));
         }
         let mut wing = self.with_drag_rise(zero_lift_critical_mach, scale)?;
         if let Some(ref mut model) = wing.drag_rise {
@@ -735,7 +735,7 @@ impl FiniteWing {
         zero_lift_critical_mach: f64,
         lift_sensitivity: f64,
         scale: f64,
-    ) -> Result<Self, WingError> {
+    ) -> Result<Self, crate::Error> {
         let mut wing =
             self.with_lift_dependent_drag_rise(zero_lift_critical_mach, lift_sensitivity, scale)?;
         if let Some(ref mut model) = wing.drag_rise {
@@ -751,9 +751,9 @@ impl FiniteWing {
         self,
         angle_of_attack: f64,
         mach: f64,
-    ) -> Result<WingCoefficients, WingError> {
+    ) -> Result<WingCoefficients, crate::Error> {
         if !angle_of_attack.is_finite() || !mach.is_finite() || mach < 0.0 {
-            return Err(WingError::InvalidFlow);
+            return Err(crate::Error::from(WingError::InvalidFlow));
         }
         let alpha = angle_of_attack - self.zero_lift_angle;
         let max_mach = match self.compressibility {
@@ -763,7 +763,7 @@ impl FiniteWing {
             }
         };
         if mach > max_mach || alpha.abs() > self.max_attached_angle {
-            return Err(WingError::UnsupportedFlow);
+            return Err(crate::Error::from(WingError::UnsupportedFlow));
         }
         let effective_aspect = self.efficiency * self.aspect_ratio;
         let beta = match self.compressibility {
@@ -796,12 +796,12 @@ impl FiniteWing {
         };
         let lift = (slope * alpha) * lift_factor;
         if effective_aspect == 0.0 || !lift.is_finite() {
-            return Err(WingError::ArithmeticOverflow);
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
         let drag_rise = if let Some(model) = self.drag_rise {
             let critical_mach = if model.lift_sensitivity != 0.0 {
                 if !(0.0..=1.0).contains(&lift) {
-                    return Err(WingError::UnsupportedFlow);
+                    return Err(crate::Error::from(WingError::UnsupportedFlow));
                 }
                 let correction = lift * (0.03 + lift * (0.19 + lift * 0.78));
                 model.critical_mach - model.lift_sensitivity * correction
@@ -809,11 +809,11 @@ impl FiniteWing {
                 model.critical_mach
             };
             if !critical_mach.is_finite() || critical_mach <= 0.0 {
-                return Err(WingError::ArithmeticOverflow);
+                return Err(crate::Error::from(WingError::ArithmeticOverflow));
             }
             let ratio = mach / critical_mach;
             if ratio > 1.1 && !model.hold_above_limit {
-                return Err(WingError::UnsupportedFlow);
+                return Err(crate::Error::from(WingError::UnsupportedFlow));
             }
             let x = (ratio.min(1.1) - 0.7).max(0.0);
             let x2 = x * x;
@@ -824,7 +824,7 @@ impl FiniteWing {
         };
         let drag = self.profile_drag + (lift / effective_aspect) * (lift / PI) + drag_rise;
         if effective_aspect == 0.0 || !lift.is_finite() || !drag.is_finite() {
-            return Err(WingError::ArithmeticOverflow);
+            return Err(crate::Error::from(WingError::ArithmeticOverflow));
         }
         Ok(WingCoefficients { lift, drag })
     }
@@ -838,8 +838,8 @@ fn planar_force(
     planform_area: f64,
     spanwise_limit: Option<f64>,
     full_angle_polar: bool,
-    coefficients: impl FnOnce(f64, f64) -> Result<WingCoefficients, WingError>,
-) -> Result<kapitsa_math::Vec3, WingError> {
+    coefficients: impl FnOnce(f64, f64) -> Result<WingCoefficients, crate::Error>,
+) -> Result<kapitsa_math::Vec3, crate::Error> {
     use kapitsa_math::Vec3;
     if !relative_velocity.is_finite()
         || !density.is_finite()
@@ -849,7 +849,7 @@ fn planar_force(
         || !planform_area.is_finite()
         || planform_area < 0.0
     {
-        return Err(WingError::InvalidFlow);
+        return Err(crate::Error::from(WingError::InvalidFlow));
     }
     if density == 0.0 || planform_area == 0.0 || relative_velocity == Vec3::ZERO {
         return Ok(Vec3::ZERO);
@@ -858,22 +858,22 @@ fn planar_force(
     // projection uses the normal-flow independence approximation instead.
     let planar_scale = relative_velocity.x.abs().max(relative_velocity.z.abs());
     if relative_velocity.x <= 0.0 && !full_angle_polar {
-        return Err(WingError::UnsupportedFlow);
+        return Err(crate::Error::from(WingError::UnsupportedFlow));
     }
     let velocity = Vec3::new(relative_velocity.x, 0.0, relative_velocity.z);
     let speed = velocity.x.hypot(velocity.z);
     if speed == 0.0 {
-        return Err(WingError::UnsupportedFlow);
+        return Err(crate::Error::from(WingError::UnsupportedFlow));
     }
     if !speed.is_finite() {
-        return Err(WingError::ArithmeticOverflow);
+        return Err(crate::Error::from(WingError::ArithmeticOverflow));
     }
     match spanwise_limit {
         Some(limit) if relative_velocity.y.abs().atan2(speed) > limit => {
-            return Err(WingError::UnsupportedFlow);
+            return Err(crate::Error::from(WingError::UnsupportedFlow));
         }
         None if relative_velocity.y.abs() > 64.0 * f64::EPSILON * planar_scale => {
-            return Err(WingError::UnsupportedFlow);
+            return Err(crate::Error::from(WingError::UnsupportedFlow));
         }
         _ => {}
     }
@@ -882,7 +882,7 @@ fn planar_force(
     let direction = velocity / speed;
     let lift_direction = Vec3::new(-direction.z, 0.0, direction.x);
     if !c.lift.is_finite() || !c.drag.is_finite() || c.drag < 0.0 {
-        return Err(WingError::ArithmeticOverflow);
+        return Err(crate::Error::from(WingError::ArithmeticOverflow));
     }
     if let Some(force) =
         ordinary_wing_force(density, speed, planform_area, c, direction, lift_direction)
@@ -963,7 +963,7 @@ fn wing_force_component(
     area: f64,
     lift: (f64, f64),
     drag: (f64, f64),
-) -> Result<f64, WingError> {
+) -> Result<f64, crate::Error> {
     let Some((value, exponent)) = super::hull::signed_product_sum(lift.0, lift.1, drag.0, drag.1)
     else {
         return Ok(0.0);
@@ -974,7 +974,7 @@ fn wing_force_component(
         exponent,
     )
     .map(|magnitude| magnitude.copysign(value))
-    .map_err(|_| WingError::ArithmeticOverflow)
+    .map_err(|_| crate::Error::from(WingError::ArithmeticOverflow))
 }
 
 #[cfg(test)]
@@ -1054,15 +1054,15 @@ mod tests {
         assert!(measured[2].lift < measured[1].lift && measured[2].drag > measured[1].drag);
         assert_eq!(
             polar.coefficients(16.29_f64.to_radians(), 0.15),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert_eq!(
             polar.coefficients(19.09_f64.to_radians(), 0.15),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert_eq!(
             polar.coefficients(17.13_f64.to_radians(), 0.14),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         Ok(())
     }
@@ -1077,9 +1077,15 @@ mod tests {
         assert!(p.coefficients(0.35, 1.0).unwrap().lift < p.coefficients(0.2, 1.0).unwrap().lift);
         assert!(p.coefficients(-0.25, 0.0).unwrap().lift < 0.0);
         for (angle, mach) in [(0.51, 1.0), (-0.51, 1.0), (0.0, 1.21)] {
-            assert_eq!(p.coefficients(angle, mach), Err(WingError::UnsupportedFlow));
+            assert_eq!(
+                p.coefficients(angle, mach),
+                Err(crate::Error::from(WingError::UnsupportedFlow))
+            );
         }
-        assert_eq!(p.coefficients(f64::NAN, 0.0), Err(WingError::InvalidFlow));
+        assert_eq!(
+            p.coefficients(f64::NAN, 0.0),
+            Err(crate::Error::from(WingError::InvalidFlow))
+        );
     }
 
     #[test]
@@ -1121,7 +1127,7 @@ mod tests {
         ] {
             assert_eq!(
                 WingPolar::new(mach, angles, values),
-                Err(WingError::InvalidParameters)
+                Err(crate::Error::from(WingError::InvalidParameters))
             );
         }
         assert!(WingControl::new(0.21, 0.2, 1.0).is_err());
@@ -1176,15 +1182,18 @@ mod tests {
                     linear_velocity: velocity,
                     ..flow
                 }),
-                Err(WingError::UnsupportedFlow)
+                Err(crate::Error::from(WingError::UnsupportedFlow))
             );
         }
         let beyond = base.with_control(WingControl::new(0.2, 0.2, 3.0).unwrap());
-        assert_eq!(beyond.evaluate(flow), Err(WingError::UnsupportedFlow));
+        assert_eq!(
+            beyond.evaluate(flow),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
     }
 
     #[test]
-    fn lift_dependent_drag_rise_lowers_critical_mach() -> Result<(), WingError> {
+    fn lift_dependent_drag_rise_lowers_critical_mach() -> Result<(), crate::Error> {
         let base = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?.with_subsonic_compressibility(0.9)?;
         let fixed = base.with_drag_rise(0.8, 0.0011)?;
         let dependent = base.with_lift_dependent_drag_rise(0.8, 0.2, 0.0011)?;
@@ -1194,7 +1203,7 @@ mod tests {
         assert!(adjusted.drag > fixed_coefficients.drag);
         assert_eq!(
             dependent.coefficients(-0.08, 0.7),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert!(
             base.with_lift_dependent_drag_rise(0.8, 0.8, 0.0011)
@@ -1208,7 +1217,7 @@ mod tests {
     }
 
     #[test]
-    fn empirical_drag_rise_uses_configured_wing_data() -> Result<(), WingError> {
+    fn empirical_drag_rise_uses_configured_wing_data() -> Result<(), crate::Error> {
         let base = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?.with_subsonic_compressibility(0.9)?;
         let model = base.with_drag_rise(0.8, 0.0011)?;
         let below = model.coefficients(0.0, 0.5)?;
@@ -1219,7 +1228,7 @@ mod tests {
         assert!((at_critical.drag - 0.02 - expected).abs() < 1e-12);
         assert_eq!(
             model.coefficients(0.0, 0.89),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert!(base.with_drag_rise(0.0, 0.001).is_err());
         assert!(base.with_drag_rise(0.8, f64::NAN).is_err());
@@ -1231,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn ndarc_drag_rise_has_explicit_upper_plateau() -> Result<(), WingError> {
+    fn ndarc_drag_rise_has_explicit_upper_plateau() -> Result<(), crate::Error> {
         let base =
             FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?.with_ndarc_lift_correction(0.75, 1.2)?;
         let model = base.with_ndarc_drag_rise(0.8, 0.2, 0.0011)?;
@@ -1243,17 +1252,17 @@ mod tests {
         let rejecting = base.with_lift_dependent_drag_rise(0.8, 0.2, 0.0011)?;
         assert_eq!(
             rejecting.coefficients(0.0, 1.1),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert_eq!(
             model.coefficients(0.0, 1.21),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         Ok(())
     }
 
     #[test]
-    fn ndarc_lift_correction_is_continuous_at_regime_boundaries() -> Result<(), WingError> {
+    fn ndarc_lift_correction_is_continuous_at_regime_boundaries() -> Result<(), crate::Error> {
         let base = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?;
         let model = base.with_ndarc_lift_correction(0.75, 1.2)?;
         let baseline = base.coefficients(0.1, 0.0)?.lift;
@@ -1267,7 +1276,7 @@ mod tests {
         assert!((model.coefficients(0.1, 1.1)?.lift - baseline).abs() < 1e-12);
         assert_eq!(
             model.coefficients(0.1, 1.21),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert!(base.with_ndarc_lift_correction(0.9, 1.2).is_err());
         assert!(base.with_ndarc_lift_correction(0.75, 0.99).is_err());
@@ -1382,7 +1391,7 @@ mod tests {
         assert!((a.drag - b.drag).abs() < 1e-14);
         assert_eq!(
             surface.coefficients(0.0, 2.0),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         Ok(())
     }
@@ -1420,7 +1429,10 @@ mod tests {
             linear_velocity: -Vec3::X * 10.0,
             angular_velocity: Vec3::ZERO,
         };
-        assert_eq!(ordinary.evaluate(flow), Err(WingError::UnsupportedFlow));
+        assert_eq!(
+            ordinary.evaluate(flow),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
         assert_eq!(full.evaluate(flow)?.force, Vec3::X * 100.0);
         let normal = full.evaluate(PressureFlow {
             linear_velocity: Vec3::Z * 10.0,
@@ -1432,14 +1444,14 @@ mod tests {
                 linear_velocity: Vec3::Y,
                 ..flow
             }),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert_eq!(
             full.evaluate(PressureFlow {
                 linear_velocity: -Vec3::X * 200.0,
                 ..flow
             }),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         Ok(())
     }
@@ -1463,7 +1475,10 @@ mod tests {
             linear_velocity: Vec3::new(50.0, 10.0, -5.0),
             angular_velocity: Vec3::ZERO,
         };
-        assert_eq!(wing.evaluate(flow), Err(WingError::UnsupportedFlow));
+        assert_eq!(
+            wing.evaluate(flow),
+            Err(crate::Error::from(WingError::UnsupportedFlow))
+        );
         let load = projected.evaluate(flow)?;
         let planar = wing.evaluate(PressureFlow {
             linear_velocity: Vec3::new(50.0, 0.0, -5.0),
@@ -1476,14 +1491,14 @@ mod tests {
                 linear_velocity: Vec3::new(50.0, 100.0, -5.0),
                 ..flow
             }),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert_eq!(
             projected.evaluate(PressureFlow {
                 linear_velocity: Vec3::new(-50.0, 0.0, -5.0),
                 ..flow
             }),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert!(
             wing.with_spanwise_projection(std::f64::consts::FRAC_PI_2)
@@ -1493,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    fn compressible_lifting_line_has_explicit_domain() -> Result<(), WingError> {
+    fn compressible_lifting_line_has_explicit_domain() -> Result<(), crate::Error> {
         let base = FiniteWing::new(8.0, 0.8, 0.02, 0.0, 0.4)?;
         let corrected = base.with_subsonic_compressibility(0.7)?;
         let alpha = 0.1;
@@ -1508,19 +1523,19 @@ mod tests {
         assert!(corrected.coefficients(alpha, 0.7).is_ok());
         assert_eq!(
             corrected.coefficients(alpha, 0.7001),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert_eq!(
             base.coefficients(alpha, 0.6),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert_eq!(
             base.with_subsonic_compressibility(1.0),
-            Err(WingError::InvalidParameters)
+            Err(crate::Error::from(WingError::InvalidParameters))
         );
         assert_eq!(
             base.with_subsonic_compressibility(f64::NAN),
-            Err(WingError::InvalidParameters)
+            Err(crate::Error::from(WingError::InvalidParameters))
         );
         Ok(())
     }
@@ -1564,15 +1579,15 @@ mod tests {
         assert!(wing(8.0).coefficients(0.2, 0.3).is_ok());
         assert_eq!(
             wing(8.0).coefficients(0.21, 0.0),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert_eq!(
             wing(8.0).coefficients(0.0, 0.31),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
         assert_eq!(
             wing(8.0).coefficients(f64::NAN, 0.0),
-            Err(WingError::InvalidFlow)
+            Err(crate::Error::from(WingError::InvalidFlow))
         );
         assert!(FiniteWing::new(0.0, 0.8, 0.02, 0.0, 0.2).is_err());
     }
@@ -1597,7 +1612,7 @@ mod tests {
         assert_eq!(wing(8.0).force(Vec3::X, 0.0, 340.0, 2.0), Ok(Vec3::ZERO));
         assert_eq!(
             wing(8.0).force(Vec3::Y, 1.2, 340.0, 2.0),
-            Err(WingError::UnsupportedFlow)
+            Err(crate::Error::from(WingError::UnsupportedFlow))
         );
     }
 
@@ -1699,7 +1714,7 @@ mod tests {
                 sound_speed: 0.0,
                 ..flow
             }),
-            Err(WingError::InvalidFlow)
+            Err(crate::Error::from(WingError::InvalidFlow))
         );
     }
 

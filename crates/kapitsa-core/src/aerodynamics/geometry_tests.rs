@@ -13,6 +13,12 @@ fn aero_cause(
         _ => None,
     }
 }
+fn aero_hull(result: &Result<(), crate::Error>) -> Option<&crate::aerodynamics::hull::HullError> {
+    match aero_cause(result)? {
+        crate::aerodynamics::AerodynamicsError::Hull(cause) => cause.downcast_ref(),
+        _ => None,
+    }
+}
 
 fn visibility_triangle(a: Vec3, b: Vec3, c: Vec3) -> SurfaceTriangle {
     let normal = (b - a).cross(c - a).try_normalize().unwrap();
@@ -1500,7 +1506,7 @@ fn wing_volume_visibility_resolves_full_partial_and_clear_footprints()
     assert!((exposed.moment - visibility.offset.cross(exposed.force)).length() < 1e-10);
     assert!(matches!(
         partial.volume_visibility(&geometry, Transform::identity(), 1),
-        Err(WingError::ShieldingBudgetExceeded)
+        Err(error) if error.downcast_ref::<WingError>() == Some(&WingError::ShieldingBudgetExceeded)
     ));
     let outside = WingSurface::new(model, Transform::identity(), 0.0625)?
         .with_rectangular_footprint(Vec3::new(3.0, 3.0, 0.5), 0.25, 0.25)?;
@@ -1517,8 +1523,8 @@ fn voxel_slender_sections_apply_and_reject_rotation_in_world_steps()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::{
         aerodynamics::{
-            Aerodynamics, AerodynamicsError, AerodynamicsTask, Atmosphere, DensityProfile,
-            SphericalAtmosphere, hull::HullError, slender::hull_sections_from_voxels,
+            Aerodynamics, AerodynamicsTask, Atmosphere, DensityProfile, SphericalAtmosphere,
+            hull::HullError, slender::hull_sections_from_voxels,
         },
         execution::SequentialExecutor,
         mass::MassProperties,
@@ -1577,10 +1583,8 @@ fn voxel_slender_sections_apply_and_reject_rotation_in_world_steps()
                 world.step(1e-4)
             };
             assert!(matches!(
-                aero_cause(&failed),
-                Some(AerodynamicsError::Hull(
-                    HullError::UnsupportedSlenderRotation
-                ))
+                aero_hull(&failed),
+                Some(HullError::UnsupportedSlenderRotation)
             ));
             assert_eq!(world.body(id).ok_or("body")?.motion(), motion);
         }

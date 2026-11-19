@@ -307,12 +307,12 @@ impl AerodynamicForce {
 }
 
 /// Invalid aerodynamic parameters or an unrepresentable force calculation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AerodynamicsError {
-    Geometry(geometry::GeometryError),
-    Pressure(pressure::PressureError),
-    Wing(wing::WingError),
-    Hull(hull::HullError),
+    Geometry(crate::Error),
+    Pressure(crate::Error),
+    Wing(crate::Error),
+    Hull(crate::Error),
     UnsupportedModel,
     InvalidTessellation,
     TessellationBudgetExceeded,

@@ -463,12 +463,14 @@ pub(super) fn prepare(
 ) -> Result<Option<PreparedAssembly>, Error> {
     let error = || StepError::Aerodynamics {
         body_id,
-        cause: crate::Error::from(AerodynamicsError::ArithmeticOverflow),
+        cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::ArithmeticOverflow),
     };
     let geometry_error = |cause| {
         Error::from(StepError::Aerodynamics {
             body_id,
-            cause: crate::Error::from(AerodynamicsError::Geometry(cause)),
+            cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Geometry(
+                crate::Error::from(cause),
+            )),
         })
     };
     let Some(geometry) = geometry else {
@@ -494,7 +496,9 @@ pub(super) fn prepare(
                 if wave_model.replace((part, model.as_ref())).is_some() {
                     return Err(Error::from(StepError::Aerodynamics {
                         body_id,
-                        cause: crate::Error::from(AerodynamicsError::UnsupportedModel),
+                        cause: crate::Error::from(
+                            crate::aerodynamics::AerodynamicsError::UnsupportedModel,
+                        ),
                     }));
                 }
             }
@@ -571,8 +575,10 @@ pub(super) fn prepare(
             if wing_requests.len() >= 1_000_000 {
                 return Err(Error::from(StepError::Aerodynamics {
                     body_id,
-                    cause: crate::Error::from(AerodynamicsError::Wing(
-                        crate::aerodynamics::wing::WingError::ShieldingBudgetExceeded,
+                    cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Wing(
+                        crate::Error::from(
+                            crate::aerodynamics::wing::WingError::ShieldingBudgetExceeded,
+                        ),
                     )),
                 }));
             }
@@ -670,7 +676,9 @@ pub(super) fn prepare(
                 if owner.colliders().len() > entry.collider_tessellation.max_triangles() {
                     return Err(Error::from(StepError::Aerodynamics {
                         body_id,
-                        cause: crate::Error::from(AerodynamicsError::TessellationBudgetExceeded),
+                        cause: crate::Error::from(
+                            crate::aerodynamics::AerodynamicsError::TessellationBudgetExceeded,
+                        ),
                     }));
                 }
                 let mut attached = Vec::new();
@@ -702,7 +710,9 @@ pub(super) fn prepare(
                 if collider_triangle_count > entry.collider_tessellation.max_triangles() {
                     return Err(Error::from(StepError::Aerodynamics {
                         body_id,
-                        cause: crate::Error::from(AerodynamicsError::TessellationBudgetExceeded),
+                        cause: crate::Error::from(
+                            crate::aerodynamics::AerodynamicsError::TessellationBudgetExceeded,
+                        ),
                     }));
                 }
                 collider_parts
@@ -780,9 +790,11 @@ fn evaluate(
     prepared: &mut AssemblyAerodynamics,
 ) -> Result<PreparedAssembly, AerodynamicsError> {
     let mut instances = Vec::new();
-    instances
-        .try_reserve(prepared.sources.len())
-        .map_err(|_| AerodynamicsError::Geometry(GeometryError::AllocationFailed))?;
+    instances.try_reserve(prepared.sources.len()).map_err(|_| {
+        crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
+            GeometryError::AllocationFailed,
+        ))
+    })?;
     for (part, mesh, local_transform) in &prepared.sources {
         instances.push(GeometryInstance {
             mesh,
@@ -795,17 +807,23 @@ fn evaluate(
         });
     }
     let wave = if let Some((part, model, local)) = wave_model {
-        let inverse = local
-            .inverse()
-            .map_err(|_| AerodynamicsError::Geometry(GeometryError::ArithmeticOverflow))?;
+        let inverse = local.inverse().map_err(|_| {
+            crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
+                GeometryError::ArithmeticOverflow,
+            ))
+        })?;
         let mut wave_instances = Vec::new();
-        wave_instances
-            .try_reserve(instances.len())
-            .map_err(|_| AerodynamicsError::Geometry(GeometryError::AllocationFailed))?;
+        wave_instances.try_reserve(instances.len()).map_err(|_| {
+            crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
+                GeometryError::AllocationFailed,
+            ))
+        })?;
         for instance in &instances {
-            let local_transform = inverse
-                .compose(&instance.local_transform)
-                .map_err(|_| AerodynamicsError::Geometry(GeometryError::ArithmeticOverflow))?;
+            let local_transform = inverse.compose(&instance.local_transform).map_err(|_| {
+                crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
+                    GeometryError::ArithmeticOverflow,
+                ))
+            })?;
             wave_instances.push(GeometryInstance {
                 mesh: instance.mesh,
                 local_transform,
@@ -823,11 +841,15 @@ fn evaluate(
                 &wave_instances,
                 model.geometry_config,
             )
-            .map_err(AerodynamicsError::Geometry)?;
+            .map_err(|cause| {
+                crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(cause))
+            })?;
         let section = prepared
             .wave_cache
             .configure_voxel_wave_drag(model.section.clone(), model.axis, model.smoothing_radius)
-            .map_err(AerodynamicsError::Hull)?;
+            .map_err(|cause| {
+                crate::aerodynamics::AerodynamicsError::Hull(crate::Error::from(cause))
+            })?;
         Some((part, section))
     } else {
         None
@@ -863,29 +885,37 @@ fn evaluate(
                     &instances,
                     config,
                 )
-                .map_err(AerodynamicsError::Geometry)?;
+                .map_err(|cause| {
+                    crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(cause))
+                })?;
             let mut candidate = Vec::new();
             candidate
                 .try_reserve_exact(wing_requests.len())
-                .map_err(|_| AerodynamicsError::Geometry(GeometryError::AllocationFailed))?;
+                .map_err(|_| {
+                    crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
+                        GeometryError::AllocationFailed,
+                    ))
+                })?;
             let mut remaining = 1_000_000_usize;
             for &(part, index, wing, local) in wing_requests {
-                let (wing_transform, footprint) =
-                    wing.footprint_signature().ok_or(AerodynamicsError::Wing(
+                let (wing_transform, footprint) = wing.footprint_signature().ok_or(
+                    crate::aerodynamics::AerodynamicsError::Wing(crate::Error::from(
                         crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
-                    ))?;
+                    )),
+                )?;
                 let visibility = wing
                     .volume_visibility(geometry, local, remaining)
-                    .map_err(AerodynamicsError::Wing)?
-                    .ok_or(AerodynamicsError::Wing(
-                        crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
+                    .map_err(crate::aerodynamics::AerodynamicsError::Wing)?
+                    .ok_or(crate::aerodynamics::AerodynamicsError::Wing(
+                        crate::Error::from(
+                            crate::aerodynamics::wing::WingError::ShieldingNotPrepared,
+                        ),
                     ))?;
-                remaining =
-                    remaining
-                        .checked_sub(visibility.samples)
-                        .ok_or(AerodynamicsError::Wing(
-                            crate::aerodynamics::wing::WingError::ShieldingBudgetExceeded,
-                        ))?;
+                remaining = remaining.checked_sub(visibility.samples).ok_or(
+                    crate::aerodynamics::AerodynamicsError::Wing(crate::Error::from(
+                        crate::aerodynamics::wing::WingError::ShieldingBudgetExceeded,
+                    )),
+                )?;
                 candidate.push(CachedWingVisibility {
                     key: WingVisibilityKey {
                         part,
@@ -901,7 +931,11 @@ fn evaluate(
         }
         wing_visibility
             .try_reserve_exact(prepared.wing_cache.len())
-            .map_err(|_| AerodynamicsError::Geometry(GeometryError::AllocationFailed))?;
+            .map_err(|_| {
+                crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
+                    GeometryError::AllocationFailed,
+                ))
+            })?;
         for cached in &prepared.wing_cache {
             wing_visibility.push(PreparedWingVisibility {
                 part: cached.key.part,
@@ -922,7 +956,9 @@ fn evaluate(
                 &prepared.wave_only_parts,
                 &mut prepared.cache,
             )
-            .map_err(AerodynamicsError::Geometry)?,
+            .map_err(|cause| {
+                crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(cause))
+            })?,
         ),
         None => None,
     };
@@ -1020,6 +1056,32 @@ mod tests {
     ) -> Option<&crate::aerodynamics::AerodynamicsError> {
         match step_cause(result)? {
             crate::world::StepError::Aerodynamics { cause, .. } => cause.downcast_ref(),
+            _ => None,
+        }
+    }
+    fn aero_geometry(
+        result: &Result<(), crate::Error>,
+    ) -> Option<&crate::aerodynamics::geometry::GeometryError> {
+        match aero_cause(result)? {
+            crate::aerodynamics::AerodynamicsError::Geometry(cause) => cause.downcast_ref(),
+            _ => None,
+        }
+    }
+
+    fn aero_pressure(
+        result: &Result<(), crate::Error>,
+    ) -> Option<&crate::aerodynamics::pressure::PressureError> {
+        match aero_cause(result)? {
+            crate::aerodynamics::AerodynamicsError::Pressure(cause) => cause.downcast_ref(),
+            _ => None,
+        }
+    }
+
+    fn aero_wing(
+        result: &Result<(), crate::Error>,
+    ) -> Option<&crate::aerodynamics::wing::WingError> {
+        match aero_cause(result)? {
+            crate::aerodynamics::AerodynamicsError::Wing(cause) => cause.downcast_ref(),
             _ => None,
         }
     }
@@ -1435,7 +1497,7 @@ mod tests {
         let before_motion = world.body(id).ok_or("body")?.motion();
         assert!(matches!(
             aero_cause(&world.step(1e-7)),
-            Some(AerodynamicsError::UnsupportedModel)
+            Some(crate::aerodynamics::AerodynamicsError::UnsupportedModel)
         ));
         assert_eq!(world.body(id).ok_or("body")?.motion(), before_motion);
         Ok(())
@@ -1485,10 +1547,8 @@ mod tests {
                 world.step(1e-7)
             };
             assert!(matches!(
-                aero_cause(&result),
-                Some(AerodynamicsError::Geometry(
-                    GeometryError::CellBudgetExceeded
-                ))
+                aero_geometry(&result),
+                Some(GeometryError::CellBudgetExceeded)
             ));
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
             world.set_part_wave_source_mesh(source, Some(plate()?))?;
@@ -1622,7 +1682,7 @@ mod tests {
         let id = world.add_body(body)?;
         let part = world.enable_cluster(id)?;
         let model = FiniteWing::new(4.0, 0.8, 0.02, 0.0, 0.3)?;
-        let wing = |center| -> Result<WingSurface, crate::aerodynamics::wing::WingError> {
+        let wing = |center| -> Result<WingSurface, crate::Error> {
             WingSurface::new(model, Transform::identity(), 4.0)?
                 .with_rectangular_footprint(center, 2.0, 2.0)
         };
@@ -1795,10 +1855,7 @@ mod tests {
     #[test]
     fn partial_shielding_with_spanwise_projection_advances_multiple_steps()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::aerodynamics::{
-            AerodynamicsError,
-            wing::{FiniteWing, WingError, WingSurface},
-        };
+        use crate::aerodynamics::wing::{FiniteWing, WingError, WingSurface};
         for projection in [false, true] {
             let mut world = PhysicsWorld::new();
             world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
@@ -1846,8 +1903,8 @@ mod tests {
             } else {
                 let before = world.body(id).ok_or("body")?.motion();
                 assert!(matches!(
-                    aero_cause(&world.step(1e-4)),
-                    Some(AerodynamicsError::Wing(WingError::UnsupportedFlow))
+                    aero_wing(&world.step(1e-4)),
+                    Some(WingError::UnsupportedFlow)
                 ));
                 assert_eq!(world.body(id).ok_or("body")?.motion(), before);
             }
@@ -1857,10 +1914,7 @@ mod tests {
 
     #[test]
     fn wing_shielding_budget_failure_rolls_back_world() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::aerodynamics::{
-            AerodynamicsError,
-            wing::{FiniteWing, WingError, WingSurface},
-        };
+        use crate::aerodynamics::wing::{FiniteWing, WingError, WingSurface};
         for sharded in [false, true] {
             let mut world = PhysicsWorld::new();
             world.set_atmosphere(super::super::test_atmosphere(AtmosphericState::new(
@@ -1906,8 +1960,8 @@ mod tests {
                 world.step(1e-4)
             };
             assert!(matches!(
-                aero_cause(&result),
-                Some(AerodynamicsError::Wing(WingError::ShieldingBudgetExceeded))
+                aero_wing(&result),
+                Some(WingError::ShieldingBudgetExceeded)
             ));
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
             world.set_part_aerodynamic_wings(part, vec![valid])?;
@@ -2123,7 +2177,7 @@ mod tests {
                         Err(Error::from(StepError::Aerodynamics {
                             body_id: first,
                             cause: crate::Error::from(
-                                AerodynamicsError::TessellationBudgetExceeded
+                                crate::aerodynamics::AerodynamicsError::TessellationBudgetExceeded
                             )
                         }))
                     );
@@ -2244,21 +2298,15 @@ mod tests {
                 result,
                 Err(Error::from(StepError::Aerodynamics {
                     body_id: id,
-                    cause: crate::Error::from(AerodynamicsError::Geometry(
-                        GeometryError::CellBudgetExceeded
+                    cause: crate::Error::from(crate::aerodynamics::AerodynamicsError::Geometry(
+                        crate::Error::from(GeometryError::CellBudgetExceeded)
                     ))
                 }))
             );
-            if let Some(StepError::Aerodynamics { cause, .. }) = step_cause(&result) {
-                let Some(cause) = cause.downcast_ref::<AerodynamicsError>() else {
-                    return Err("missing aerodynamics cause".into());
-                };
-                assert_eq!(
-                    std::error::Error::source(cause)
-                        .and_then(|source| source.downcast_ref::<GeometryError>()),
-                    Some(&GeometryError::CellBudgetExceeded)
-                );
-            }
+            assert_eq!(
+                aero_geometry(&result),
+                Some(&GeometryError::CellBudgetExceeded)
+            );
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
             world.set_part_aerodynamic_mesh(part, None)?;
             world.step(1e-5)?;
@@ -2530,7 +2578,9 @@ mod tests {
                 step(&mut world),
                 Err(Error::from(StepError::Aerodynamics {
                     body_id: id,
-                    cause: crate::Error::from(AerodynamicsError::UnsupportedModel)
+                    cause: crate::Error::from(
+                        crate::aerodynamics::AerodynamicsError::UnsupportedModel
+                    )
                 }))
             );
             assert_eq!(world.body(id).ok_or("body")?.motion(), before);
@@ -2613,10 +2663,8 @@ mod tests {
                 world.step(1e-8)
             };
             assert!(matches!(
-                aero_cause(&unsupported),
-                Some(AerodynamicsError::Pressure(
-                    crate::aerodynamics::pressure::PressureError::UnsupportedMach
-                ))
+                aero_pressure(&unsupported),
+                Some(crate::aerodynamics::pressure::PressureError::UnsupportedMach)
             ));
             assert_eq!(*world.body(body).ok_or("body")?.state(), before);
             assert_eq!(world.owner_mesh_pressure(body), Some(previous.as_slice()));
