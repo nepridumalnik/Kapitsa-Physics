@@ -3240,7 +3240,7 @@ fn body_mut_updates_the_stored_body() -> Result<(), Error> {
 }
 
 #[test]
-fn unknown_body_id_is_rejected() -> Result<(), DensePoolError> {
+fn unknown_body_id_is_rejected() -> Result<(), crate::Error> {
     let mut source = DensePool::new();
     let id = BodyId {
         world: u64::MAX,
@@ -3312,7 +3312,7 @@ fn collider_mut_changes_only_the_collider() -> Result<(), Error> {
 }
 
 #[test]
-fn invalid_body_rejects_collider_without_changing_world() -> Result<(), DensePoolError> {
+fn invalid_body_rejects_collider_without_changing_world() -> Result<(), crate::Error> {
     let mut stale_ids = DensePool::new();
     let first = stale_ids.insert(())?;
     let _ = stale_ids.remove(first);
@@ -3391,7 +3391,7 @@ fn body_state_is_unchanged_when_colliders_are_added_or_removed() -> Result<(), E
 }
 
 #[test]
-fn invalid_collider_ids_are_rejected() -> Result<(), DensePoolError> {
+fn invalid_collider_ids_are_rejected() -> Result<(), crate::Error> {
     let mut source = DensePool::new();
     let id = ColliderId {
         world: u64::MAX,

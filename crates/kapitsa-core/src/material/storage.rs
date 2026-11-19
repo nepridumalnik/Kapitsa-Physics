@@ -54,13 +54,10 @@ impl MaterialStorage {
         if self.storage_id == 0 {
             self.storage_id = allocate_storage_id()?;
         }
-        self.materials
-            .insert(material)
-            .map(|dense| MaterialId {
-                storage: self.storage_id,
-                dense,
-            })
-            .map_err(crate::Error::from)
+        self.materials.insert(material).map(|dense| MaterialId {
+            storage: self.storage_id,
+            dense,
+        })
     }
 
     pub fn get(&self, id: MaterialId) -> Option<&PhysicsMaterial> {

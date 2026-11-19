@@ -519,16 +519,16 @@ async fn part_wings_and_hull_replace_clear_and_follow_queue_while_paused()
             .await
             .expect_err("cluster error");
         assert_eq!(
-            error.downcast_ref::<kapitsa::ClusterError>(),
-            Some(&kapitsa::ClusterError::InvalidPartId)
+            error.downcast_ref::<kapitsa::world::ClusterError>(),
+            Some(&kapitsa::world::ClusterError::InvalidPartId)
         );
         let error = client
             .set_part_aerodynamic_hull(part, Vec::new())
             .await
             .expect_err("cluster error");
         assert_eq!(
-            error.downcast_ref::<kapitsa::ClusterError>(),
-            Some(&kapitsa::ClusterError::InvalidPartId)
+            error.downcast_ref::<kapitsa::world::ClusterError>(),
+            Some(&kapitsa::world::ClusterError::InvalidPartId)
         );
         simulation.stop().await?;
     }
@@ -622,8 +622,8 @@ async fn voxel_wave_commands_work_in_both_runtime_executors()
             .await
             .expect_err("cluster error");
         assert_eq!(
-            error.downcast_ref::<kapitsa::ClusterError>(),
-            Some(&kapitsa::ClusterError::UnsupportedGeometry)
+            error.downcast_ref::<kapitsa::world::ClusterError>(),
+            Some(&kapitsa::world::ClusterError::UnsupportedGeometry)
         );
         client
             .add_part_collider(
@@ -655,24 +655,24 @@ async fn voxel_wave_commands_work_in_both_runtime_executors()
             .await
             .expect_err("cluster error");
         assert_eq!(
-            error.downcast_ref::<kapitsa::ClusterError>(),
-            Some(&kapitsa::ClusterError::InvalidPartId)
+            error.downcast_ref::<kapitsa::world::ClusterError>(),
+            Some(&kapitsa::world::ClusterError::InvalidPartId)
         );
         let error = client
             .set_part_wave_source_mesh(source, None)
             .await
             .expect_err("cluster error");
         assert_eq!(
-            error.downcast_ref::<kapitsa::ClusterError>(),
-            Some(&kapitsa::ClusterError::InvalidPartId)
+            error.downcast_ref::<kapitsa::world::ClusterError>(),
+            Some(&kapitsa::world::ClusterError::InvalidPartId)
         );
         let error = client
             .set_part_wave_source_colliders(source, false)
             .await
             .expect_err("cluster error");
         assert_eq!(
-            error.downcast_ref::<kapitsa::ClusterError>(),
-            Some(&kapitsa::ClusterError::InvalidPartId)
+            error.downcast_ref::<kapitsa::world::ClusterError>(),
+            Some(&kapitsa::world::ClusterError::InvalidPartId)
         );
         simulation.stop().await?;
     }

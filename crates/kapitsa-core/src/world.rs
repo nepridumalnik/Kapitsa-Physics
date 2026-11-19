@@ -2067,17 +2067,14 @@ impl PhysicsWorld {
         if self.world_id == 0 {
             self.world_id = allocate_world_id(&NEXT_WORLD_ID)?;
         }
-        let dense = self
-            .bodies
-            .insert(BodyEntry {
-                body,
-                first_collider: None,
-                cluster: None,
-                mesh_aerodynamics: None,
-                collider_aerodynamic_mesh: None,
-                collider_tessellation: crate::aerodynamics::ColliderTessellation::default(),
-            })
-            .map_err(WorldError::from)?;
+        let dense = self.bodies.insert(BodyEntry {
+            body,
+            first_collider: None,
+            cluster: None,
+            mesh_aerodynamics: None,
+            collider_aerodynamic_mesh: None,
+            collider_tessellation: crate::aerodynamics::ColliderTessellation::default(),
+        })?;
         Ok(BodyId {
             world: self.world_id,
             dense,
@@ -2226,16 +2223,13 @@ impl PhysicsWorld {
             return Err(Error::from(WorldError::InvalidJointBodies));
         }
         joint.validate()?;
-        let dense = self
-            .joints
-            .insert(JointEntry {
-                target_a: JointTarget::Body(body_a),
-                target_b: JointTarget::Body(body_b),
-                body_a,
-                body_b,
-                joint,
-            })
-            .map_err(WorldError::from)?;
+        let dense = self.joints.insert(JointEntry {
+            target_a: JointTarget::Body(body_a),
+            target_b: JointTarget::Body(body_b),
+            body_a,
+            body_b,
+            joint,
+        })?;
         Ok(JointId {
             world: self.world_id,
             dense,
@@ -2259,16 +2253,13 @@ impl PhysicsWorld {
             .map_err(|_| WorldError::InvalidJointTarget)?;
         let frame_b = transform_joint_frame(frame_b, joint.common().frame_b)
             .map_err(|_| WorldError::InvalidJointTarget)?;
-        let dense = self
-            .joints
-            .insert(JointEntry {
-                target_a,
-                target_b,
-                body_a,
-                body_b,
-                joint: joint.with_frames(frame_a, frame_b),
-            })
-            .map_err(WorldError::from)?;
+        let dense = self.joints.insert(JointEntry {
+            target_a,
+            target_b,
+            body_a,
+            body_b,
+            joint: joint.with_frames(frame_a, frame_b),
+        })?;
         Ok(JointId {
             world: self.world_id,
             dense,
@@ -6147,16 +6138,13 @@ impl PhysicsWorld {
             })?;
         }
 
-        let dense = self
-            .colliders
-            .insert(ColliderEntry {
-                collider,
-                body,
-                prev: None,
-                next: first,
-                chunk: None,
-            })
-            .map_err(WorldError::from)?;
+        let dense = self.colliders.insert(ColliderEntry {
+            collider,
+            body,
+            prev: None,
+            next: first,
+            chunk: None,
+        })?;
         let id = ColliderId {
             world: self.world_id,
             dense,

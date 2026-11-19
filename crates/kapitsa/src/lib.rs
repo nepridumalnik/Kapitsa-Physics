@@ -106,13 +106,13 @@ pub use kapitsa_core::{
     chunk::{Chunk, ChunkBuildError, ChunkBuilder},
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{
-        CcdLimitPolicy, CollisionConfig, CollisionError, CollisionEvent, CollisionEventKind,
-        CollisionPair, ContactInfo,
+        CcdLimitPolicy, CollisionConfig, CollisionEvent, CollisionEventKind, CollisionPair,
+        ContactInfo,
     },
     command::{
         CommandBatchError, CommandError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
     },
-    gravity::{CentralGravity, Gravity, GravityError, SphericalGravity, UniformGravity},
+    gravity::{CentralGravity, Gravity, SphericalGravity, UniformGravity},
     joint::{Joint, JointBreakEvent},
     mass::MassProperties,
     material::{MaterialId, PhysicsMaterial},
@@ -120,10 +120,9 @@ pub use kapitsa_core::{
     shape::Shape,
     transform::Transform,
     world::{
-        AddChunkBatchError, AddChunkError, BodyId, ChunkId, ChunkOperationError, ClusterError,
-        ColliderId, ErrorPolicy, ForceSourceId, GravityId, JointId, JointTarget, PartId,
-        PhysicsWorld, RemoveChunkBatchError, StepDiagnostics, StepError, StepResults, WeldId,
-        WorldError,
+        AddChunkBatchError, AddChunkError, BodyId, ChunkId, ChunkOperationError, ColliderId,
+        ErrorPolicy, ForceSourceId, GravityId, JointId, JointTarget, PartId, PhysicsWorld,
+        RemoveChunkBatchError, StepDiagnostics, StepResults, WeldId,
     },
 };
 

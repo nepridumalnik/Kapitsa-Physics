@@ -22,4 +22,4 @@ pub mod transform;
 pub mod world;
 
 pub use error::{Error, ErrorKind};
-pub use gravity::{CentralGravity, GravityError};
+pub use gravity::CentralGravity;

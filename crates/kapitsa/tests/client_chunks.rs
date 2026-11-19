@@ -3,9 +3,9 @@ use std::error::Error;
 use kapitsa::math::{Mat3, Quat, Vec3};
 use kapitsa::query::{QueryFilter, Ray};
 use kapitsa::shape::TriangleMesh;
+use kapitsa::world::WorldError;
 use kapitsa::{
     Chunk, ChunkBuilder, ChunkClientError, MassProperties, RigidBody, Simulation, Transform,
-    WorldError,
 };
 
 fn chunk(x: f64, meshes: usize) -> Result<Chunk, Box<dyn Error>> {
@@ -137,8 +137,8 @@ async fn rejection_and_stopped_service_return_prepared_chunks() -> Result<(), Bo
         Err(ChunkClientError::Rejected {
             cause: kapitsa::ChunkOperationError::World(WorldError::Collision(cause)),
             input,
-        }) if cause.downcast_ref::<kapitsa::CollisionError>()
-            == Some(&kapitsa::CollisionError::UnsupportedDynamicGeometry) =>
+        }) if cause.downcast_ref::<kapitsa::collision::CollisionError>()
+            == Some(&kapitsa::collision::CollisionError::UnsupportedDynamicGeometry) =>
         {
             input
         }

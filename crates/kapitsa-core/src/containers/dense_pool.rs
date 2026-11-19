@@ -139,8 +139,9 @@ impl<T> DensePool<T> {
         Ok(())
     }
 
-    pub fn insert(&mut self, value: T) -> Result<DenseId, DensePoolError> {
-        self.insert_recover(value).map_err(|(error, _)| error)
+    pub fn insert(&mut self, value: T) -> Result<DenseId, crate::Error> {
+        self.insert_recover(value)
+            .map_err(|(error, _)| crate::Error::from(error))
     }
 
     /// Inserts a value, returning it unchanged if insertion fails.
