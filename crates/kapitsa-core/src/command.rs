@@ -826,7 +826,7 @@ fn apply_command_batch_staged(
                 if let Err(error) = joint.validate() {
                     return Err(CommandBatchError {
                         command_index: Some(command_index),
-                        error: CommandError::World(WorldError::Joint(error)),
+                        error: CommandError::from_unified(error),
                     });
                 }
                 staged.joint = *joint;

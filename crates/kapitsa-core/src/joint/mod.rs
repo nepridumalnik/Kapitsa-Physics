@@ -141,7 +141,7 @@ impl Joint {
     }
 
     /// Validates all common and type-specific settings before storage or solving.
-    pub fn validate(&self) -> Result<(), JointError> {
+    pub fn validate(&self) -> Result<(), crate::Error> {
         self.common().validate()?;
         match self {
             Self::Fixed(_) => {}
@@ -157,7 +157,7 @@ impl Joint {
                 if joint.swing_limit.is_some_and(|angle| {
                     !angle.is_finite() || !(0.0..=std::f64::consts::PI).contains(&angle)
                 }) {
-                    return Err(JointError::InvalidLimit);
+                    return Err(crate::Error::from(JointError::InvalidLimit));
                 }
                 validate_limit(joint.twist_limit)?;
             }
@@ -180,13 +180,13 @@ impl Joint {
             Self::Distance(joint) => joint.distance_limit.validate()?,
             Self::Spring(joint) => {
                 if !joint.rest_length.is_finite() || joint.rest_length < 0.0 {
-                    return Err(JointError::InvalidLimit);
+                    return Err(crate::Error::from(JointError::InvalidLimit));
                 }
                 if !joint.stiffness.is_finite() || joint.stiffness < 0.0 {
-                    return Err(JointError::InvalidStiffness);
+                    return Err(crate::Error::from(JointError::InvalidStiffness));
                 }
                 if !joint.spring_damping.is_finite() || joint.spring_damping < 0.0 {
-                    return Err(JointError::InvalidDamping);
+                    return Err(crate::Error::from(JointError::InvalidDamping));
                 }
                 validate_limit(joint.distance_limit)?;
             }
@@ -194,7 +194,7 @@ impl Joint {
                 if joint.swing_limit.iter().any(|angle| {
                     !angle.is_finite() || !(0.0..=std::f64::consts::PI).contains(angle)
                 }) {
-                    return Err(JointError::InvalidLimit);
+                    return Err(crate::Error::from(JointError::InvalidLimit));
                 }
                 joint.twist_limit.validate()?;
             }
@@ -272,7 +272,7 @@ impl Joint {
     }
 }
 
-fn validate_limit(limit: Option<JointLimit>) -> Result<(), JointError> {
+fn validate_limit(limit: Option<JointLimit>) -> Result<(), crate::Error> {
     if let Some(limit) = limit {
         limit.validate()?;
     }
@@ -313,14 +313,17 @@ mod tests {
     #[test]
     fn joint_validation_rejects_bad_frames_limits_and_drives() {
         let invalid_frame = JointFrame::new(Vec3::new(f64::NAN, 0.0, 0.0), Quat::IDENTITY);
-        assert_eq!(invalid_frame.validate(), Err(JointError::InvalidFrame));
+        assert_eq!(
+            invalid_frame.validate(),
+            Err(crate::Error::from(JointError::InvalidFrame))
+        );
 
         let common = common();
         let mut hinge = HingeJoint::new(common);
         hinge.angle_limit = Some(JointLimit::new(1.0, -1.0));
         assert_eq!(
             Joint::Hinge(hinge).validate(),
-            Err(JointError::InvalidLimit)
+            Err(crate::Error::from(JointError::InvalidLimit))
         );
 
         let mut slider = SliderJoint::new(common);
@@ -328,7 +331,7 @@ mod tests {
         slider.drive.max_force = f64::INFINITY;
         assert_eq!(
             Joint::Slider(slider).validate(),
-            Err(JointError::InvalidDrive)
+            Err(crate::Error::from(JointError::InvalidDrive))
         );
     }
 }
