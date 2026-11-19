@@ -64,6 +64,29 @@ fn creates_valid_mass_properties() -> Result<(), crate::Error> {
 }
 
 #[test]
+fn shape_helpers_match_from_shape() -> Result<(), crate::Error> {
+    let sphere = MassProperties::sphere(0.5, 1200.0)?;
+    let sphere_direct = MassProperties::from_shape(&Shape::Sphere(Sphere::new(0.5)?), 1200.0)?;
+    assert_eq!(sphere, sphere_direct);
+
+    let cuboid = MassProperties::cuboid(Vec3::new(1.0, 2.0, 3.0), 800.0)?;
+    let cuboid_direct = MassProperties::from_shape(
+        &Shape::Cuboid(Cuboid::from_vec(Vec3::new(1.0, 2.0, 3.0))?),
+        800.0,
+    )?;
+    assert_eq!(cuboid, cuboid_direct);
+    Ok(())
+}
+
+#[test]
+fn shape_helpers_reject_invalid_inputs() {
+    assert!(MassProperties::sphere(0.0, 1.0).is_err());
+    assert!(MassProperties::sphere(1.0, 0.0).is_err());
+    assert!(MassProperties::cuboid(Vec3::ZERO, 1.0).is_err());
+    assert!(MassProperties::cuboid(Vec3::ONE, f64::NAN).is_err());
+}
+
+#[test]
 fn rejects_invalid_mass_values() {
     for (mass, expected) in [
         (-1.0, MassError::NonPositiveMass),

@@ -46,6 +46,14 @@ impl SimulationConfigBuilder {
         self
     }
 
+    /// Sets the base simulation frequency in Hz.
+    #[must_use]
+    pub fn frequency(mut self, value: u32) -> Self {
+        self.config.tick_rate = value;
+        self
+    }
+
+    #[must_use]
     pub fn tick_rate(mut self, value: u32) -> Self {
         self.config.tick_rate = value;
         self
@@ -83,6 +91,11 @@ impl SimulationConfig {
 
     pub fn error_policy(&self) -> ErrorPolicy {
         self.error_policy
+    }
+
+    /// Base simulation frequency in Hz.
+    pub fn frequency(&self) -> u32 {
+        self.tick_rate
     }
 
     pub fn tick_rate(&self) -> u32 {
@@ -343,6 +356,14 @@ mod tests {
         assert_eq!(config.scheduler.max_batches_per_worker, 4);
         assert!((config.fixed_step_seconds() - 1.0 / 60.0).abs() < f64::EPSILON);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn frequency_alias_matches_tick_rate() {
+        let config = SimulationConfig::builder().frequency(120).build();
+        assert_eq!(config.frequency(), 120);
+        assert_eq!(config.tick_rate(), 120);
+        assert_eq!(config.frequency(), config.tick_rate());
     }
 
     #[test]

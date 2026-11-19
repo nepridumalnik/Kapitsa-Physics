@@ -78,6 +78,22 @@ impl MassProperties {
         Self::new(mass, Vec3::ZERO, inertia)
     }
 
+    /// Creates properties for a solid sphere of the given radius and density.
+    ///
+    /// `radius` is in metres and `density` in kg/m?.
+    pub fn sphere(radius: f64, density: f64) -> Result<Self, crate::Error> {
+        let shape = Sphere::new(radius)?;
+        Self::from_shape(&Shape::Sphere(shape), density)
+    }
+
+    /// Creates properties for a solid cuboid with the given full side lengths and density.
+    ///
+    /// `size` is in metres and `density` in kg/m?.
+    pub fn cuboid(size: kapitsa_math::Vec3, density: f64) -> Result<Self, crate::Error> {
+        let shape = Cuboid::from_vec(size)?;
+        Self::from_shape(&Shape::Cuboid(shape), density)
+    }
+
     /// Adds a part after transforming it into this body's local coordinate system.
     pub fn push(&mut self, part: &Self, transform: &Transform) -> Result<(), crate::Error> {
         let rotation = rotation_matrix(transform)?;

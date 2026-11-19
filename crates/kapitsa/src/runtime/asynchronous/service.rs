@@ -236,6 +236,8 @@ impl SimulationBuilder {
     }
 
     /// Sets the base physics frequency in hertz.
+    /// Sets the base simulation frequency in Hz.
+    #[must_use]
     pub fn frequency(mut self, frequency: u32) -> Self {
         self.config.tick_rate = frequency;
         self
@@ -255,6 +257,7 @@ impl SimulationBuilder {
     }
 
     /// Starts a simulation on the supplied Tokio runtime.
+    /// Starts the simulation on the given Tokio runtime.
     pub fn spawn_on_tokio(self, runtime: &Handle) -> Result<Simulation, Error> {
         if self.invalid_worker_count {
             return Err(Error::from(SimulationError::InvalidWorkerCount));
@@ -275,6 +278,7 @@ impl SimulationBuilder {
     }
 
     /// Starts a simulation using the supplied Rayon pool for computation.
+    /// Starts the simulation on the given Rayon pool.
     pub fn spawn_on_rayon(self, pool: Arc<rayon::ThreadPool>) -> Result<Simulation, Error> {
         if self.invalid_worker_count {
             return Err(Error::from(SimulationError::InvalidWorkerCount));

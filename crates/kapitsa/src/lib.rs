@@ -45,7 +45,11 @@ pub mod collision {
 }
 
 pub mod cluster {
-    pub use kapitsa_core::cluster::*;
+    pub use kapitsa_core::cluster::{
+        ClusterPart, ClusterPartDesc, MassChangeMode, MassTransfer, RigidCluster, Weld, WeldDesc,
+        WeldStiffness, WeldStrength,
+    };
+    pub use kapitsa_core::world::{ClusterError, PartId, WeldId};
 }
 
 pub mod gravity {
@@ -55,7 +59,11 @@ pub mod gravity {
 }
 
 pub mod joint {
-    pub use kapitsa_core::joint::*;
+    pub use kapitsa_core::joint::{
+        BallJoint, ConeTwistJoint, CylindricalJoint, D6Joint, DistanceJoint, FixedJoint,
+        HingeJoint, Joint, JointBreakEvent, JointCommon, JointDrive, JointError, JointFrame,
+        JointLimit, JointMotion, PlanarJoint, SliderJoint, SpringJoint,
+    };
 }
 
 pub mod mass {
@@ -82,7 +90,11 @@ pub mod rigid_body {
 }
 
 pub mod shape {
-    pub use kapitsa_core::shape::*;
+    pub use kapitsa_core::shape::{
+        BoneInfluence, BoundsError, Capsule, Convex, Cuboid, Cylinder, HeightField, LevelSet,
+        Plane, Shape, ShapeError, SkinnedTriangleMesh, Sphere, TaperedCapsule, TaperedCylinder,
+        Triangle, TriangleMesh,
+    };
 }
 
 pub mod transform {
