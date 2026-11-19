@@ -138,3 +138,38 @@ pub use runtime::{
     JointBreakEvents, PhysicsBatchResult, PhysicsBatchResults, PhysicsClient, PhysicsSnapshot,
     PhysicsSubmitError, Simulation, SimulationBuilder,
 };
+
+/// Common imports for typical simulation code.
+///
+/// ```
+/// use kapitsa::prelude::*;
+///
+/// let mut world = PhysicsWorld::new();
+/// let body = world
+///     .add_body(
+///         RigidBody::new_dynamic(
+///             Transform::identity(),
+///             MassProperties::new(1.0, Vec3::ZERO, Mat3::IDENTITY).expect("valid mass"),
+///         )
+///         .expect("valid body"),
+///     )
+///     .expect("valid body");
+/// assert!(world.body(body).is_some());
+/// ```
+pub mod prelude {
+    pub use crate::{
+        Error, ErrorKind,
+        mass::MassProperties,
+        material::PhysicsMaterial,
+        math::{Affine3, Mat3, Quat, Vec2, Vec3},
+        rigid_body::{BodyState, BodyType, RigidBody},
+        shape::{Capsule, Cuboid, Cylinder, Shape, Sphere, TriangleMesh},
+        transform::Transform,
+        world::{BodyId, ColliderId, PartId, PhysicsWorld},
+    };
+
+    #[cfg(feature = "service")]
+    pub use crate::{
+        PhysicsClient, PhysicsSnapshot, Simulation, SimulationBuilder, SimulationConfig,
+    };
+}
