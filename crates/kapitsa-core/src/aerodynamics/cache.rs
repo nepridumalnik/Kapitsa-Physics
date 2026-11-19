@@ -43,7 +43,7 @@ impl GeometryPreparation {
     }
 
     /// Prepare a mesh in the body's local frame, without cloning it.
-    pub fn prepare(self, mesh: &TriangleMesh) -> Result<PreparedMeshGeometry, GeometryError> {
+    pub fn prepare(self, mesh: &TriangleMesh) -> Result<PreparedMeshGeometry, crate::Error> {
         self.prepare_instances(&[GeometryInstance {
             mesh,
             local_transform: Transform::identity(),
@@ -58,7 +58,7 @@ impl GeometryPreparation {
     pub fn prepare_instances(
         self,
         instances: &[GeometryInstance<'_>],
-    ) -> Result<PreparedMeshGeometry, GeometryError> {
+    ) -> Result<PreparedMeshGeometry, crate::Error> {
         let geometry = PreparedGeometry::prepare(instances, self.config)?;
         Ok(PreparedMeshGeometry {
             request: self,
@@ -134,14 +134,16 @@ impl PreparedGeometryCache {
         section: super::hull::HullSection,
         axis: usize,
         smoothing_radius: usize,
-    ) -> Result<super::hull::HullSection, super::hull::HullError> {
+    ) -> Result<super::hull::HullSection, crate::Error> {
         use super::hull::HullError;
         section.validate_voxel_axis(axis)?;
         let request = self
             .requested
             .as_ref()
-            .ok_or(HullError::GeometryNotPrepared)?;
-        let geometry = self.get().ok_or(HullError::GeometryNotPrepared)?;
+            .ok_or_else(|| crate::Error::from(HullError::GeometryNotPrepared))?;
+        let geometry = self
+            .get()
+            .ok_or_else(|| crate::Error::from(HullError::GeometryNotPrepared))?;
         if let Some(cached) = &self.wave
             && Arc::ptr_eq(&cached.incarnation, &request.incarnation)
             && cached.axis == axis
@@ -189,7 +191,7 @@ impl PreparedGeometryCache {
         key: GeometryCacheKey,
         mesh: &TriangleMesh,
         config: GeometryConfig,
-    ) -> Result<&PreparedGeometry, GeometryError> {
+    ) -> Result<&PreparedGeometry, crate::Error> {
         self.prepare_instances(
             key,
             &[GeometryInstance {
@@ -209,13 +211,14 @@ impl PreparedGeometryCache {
         key: GeometryCacheKey,
         instances: &[GeometryInstance<'_>],
         config: GeometryConfig,
-    ) -> Result<&PreparedGeometry, GeometryError> {
+    ) -> Result<&PreparedGeometry, crate::Error> {
         let request = self.request(key, config);
         if self.get().is_none() {
             let prepared = request.prepare_instances(instances)?;
             self.publish(prepared);
         }
-        self.get().ok_or(GeometryError::InvalidGeometry)
+        self.get()
+            .ok_or_else(|| crate::Error::from(GeometryError::InvalidGeometry))
     }
 }
 
@@ -350,7 +353,7 @@ mod tests {
         )?;
         assert!(matches!(
             cache.configure_voxel_wave_drag(section.clone(), 0, 1),
-            Err(HullError::GeometryNotPrepared)
+            Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::GeometryNotPrepared)
         ));
         cache.prepare(first, &mesh, config())?;
         let configured = cache.configure_voxel_wave_drag(section.clone(), 0, 1)?;
@@ -366,7 +369,7 @@ mod tests {
         assert_eq!(hit.factor, factor);
         assert!(matches!(
             cache.configure_voxel_wave_drag(section.clone(), 1, 1),
-            Err(HullError::InvalidParameters)
+            Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::InvalidParameters)
         ));
         assert_eq!(cache.wave.as_ref().ok_or("wave cache")?.smoothing_radius, 1);
         assert!(
@@ -380,7 +383,7 @@ mod tests {
         cache.request(second, config());
         assert!(matches!(
             cache.configure_voxel_wave_drag(section.clone(), 0, 1),
-            Err(HullError::GeometryNotPrepared)
+            Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::GeometryNotPrepared)
         ));
         let changed_mesh =
             TriangleMesh::new(vec![Vec3::ZERO, Vec3::X, Vec3::Y * 2.0], vec![[0, 1, 2]])?;
@@ -498,7 +501,7 @@ mod tests {
         invalid.cell_size = 0.0;
         assert_eq!(
             cache.prepare(key, &mesh, invalid),
-            Err(GeometryError::InvalidConfig)
+            Err(crate::Error::from(GeometryError::InvalidConfig))
         );
         assert!(cache.get().is_none());
         let (retained_key, retained) = cache.last_prepared().unwrap();

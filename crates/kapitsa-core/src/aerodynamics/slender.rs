@@ -31,12 +31,12 @@ impl PotentialCell {
         crossflow: Vec3,
         cross_speed: f64,
         rotation_gradient: Vec3,
-    ) -> Result<Vec3, HullError> {
+    ) -> Result<Vec3, crate::Error> {
         if cross_speed == 0.0 && rotation_gradient == Vec3::ZERO {
             return Ok(Vec3::ZERO);
         }
         if axial_speed <= 0.0 || cross_speed.atan2(axial_speed) > self.max_incidence {
-            return Err(HullError::UnsupportedSlenderIncidence);
+            return Err(crate::Error::from(HullError::UnsupportedSlenderIncidence));
         }
         // Positive body axis points toward the nose; the cited source uses a
         // downstream coordinate. Its area derivative therefore changes sign.
@@ -113,11 +113,11 @@ pub fn hull_sections_from_voxels(
     centerline: Vec3,
     smoothing_radius: usize,
     max_incidence: f64,
-) -> Result<Vec<HullSection>, HullError> {
+) -> Result<Vec<HullSection>, crate::Error> {
     let sections = geometry
         .sections()
         .get(axis)
-        .ok_or(HullError::InvalidParameters)?;
+        .ok_or_else(|| crate::Error::from(HullError::InvalidParameters))?;
     sections_from_areas(
         sections,
         geometry.origin(),
@@ -144,11 +144,11 @@ pub fn hull_sections_from_voxels_quasi_steady(
     centerline: Vec3,
     smoothing_radius: usize,
     max_incidence: f64,
-) -> Result<Vec<HullSection>, HullError> {
+) -> Result<Vec<HullSection>, crate::Error> {
     let sections = geometry
         .sections()
         .get(axis)
-        .ok_or(HullError::InvalidParameters)?;
+        .ok_or_else(|| crate::Error::from(HullError::InvalidParameters))?;
     sections_from_areas_with_rotation(
         sections,
         geometry.origin(),
@@ -170,7 +170,7 @@ fn sections_from_areas(
     centerline: Vec3,
     smoothing_radius: usize,
     max_incidence: f64,
-) -> Result<Vec<HullSection>, HullError> {
+) -> Result<Vec<HullSection>, crate::Error> {
     sections_from_areas_with_rotation(
         sections,
         origin,
@@ -193,30 +193,30 @@ fn sections_from_areas_with_rotation(
     smoothing_radius: usize,
     max_incidence: f64,
     rotation: bool,
-) -> Result<Vec<HullSection>, HullError> {
+) -> Result<Vec<HullSection>, crate::Error> {
     if !origin.is_finite()
         || !centerline.is_finite()
         || !max_incidence.is_finite()
         || max_incidence <= 0.0
         || max_incidence >= std::f64::consts::FRAC_PI_2
     {
-        return Err(HullError::InvalidParameters);
+        return Err(crate::Error::from(HullError::InvalidParameters));
     }
     let direction = match axis {
         0 => Vec3::X,
         1 => Vec3::Y,
         2 => Vec3::Z,
-        _ => return Err(HullError::InvalidParameters),
+        _ => return Err(crate::Error::from(HullError::InvalidParameters)),
     };
     let (areas, slopes) = area_profile_from_sections(sections, cell_size, smoothing_radius)
         .map_err(HullError::Wave)?;
     let padding = smoothing_radius
         .checked_add(2)
-        .ok_or(HullError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(HullError::ArithmeticOverflow))?;
     let mut result = Vec::new();
     result
         .try_reserve_exact(slopes.len())
-        .map_err(|_| HullError::AllocationFailed)?;
+        .map_err(|_| crate::Error::from(HullError::AllocationFailed))?;
     for (index, (area, slope)) in areas.into_iter().zip(slopes).enumerate() {
         if slope == 0.0 && (!rotation || area == 0.0) {
             continue;
@@ -228,7 +228,7 @@ fn sections_from_areas_with_rotation(
             _ => origin.z,
         } + offset;
         if !coordinate.is_finite() {
-            return Err(HullError::ArithmeticOverflow);
+            return Err(crate::Error::from(HullError::ArithmeticOverflow));
         }
         let mut point = centerline;
         match axis {
@@ -236,8 +236,8 @@ fn sections_from_areas_with_rotation(
             1 => point.y = coordinate,
             _ => point.z = coordinate,
         }
-        let transform =
-            Transform::new(point, Quat::IDENTITY).map_err(|_| HullError::ArithmeticOverflow)?;
+        let transform = Transform::new(point, Quat::IDENTITY)
+            .map_err(|_| crate::Error::from(HullError::ArithmeticOverflow))?;
         let section = HullSection::new(
             transform, direction, cell_size, 0.0, 0.0, 0.0, 0.0, 0.0, None,
         )?;
@@ -357,12 +357,12 @@ mod tests {
             true,
         )?;
         let state = flow(Vec3::new(10.0, 0.0, -1.0))?;
-        let sum = |sections: &[HullSection]| -> Result<Vec3, HullError> {
+        let sum = |sections: &[HullSection]| -> Result<Vec3, crate::Error> {
             let mut force = Vec3::ZERO;
             for section in sections {
                 force = force
                     .checked_add(section.evaluate(state)?.force)
-                    .ok_or(HullError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(HullError::ArithmeticOverflow))?;
             }
             Ok(force)
         };
@@ -372,7 +372,7 @@ mod tests {
         fast.angular_velocity = Vec3::Y;
         assert!(matches!(
             section.evaluate(fast),
-            Err(HullError::UnsupportedMach)
+            Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::UnsupportedMach)
         ));
         Ok(())
     }
@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn quasi_steady_cancellation_precedes_force_scaling() -> Result<(), HullError> {
+    fn quasi_steady_cancellation_precedes_force_scaling() -> Result<(), crate::Error> {
         let cell = PotentialCell {
             slope: 1e200,
             width: 1.0,
@@ -479,28 +479,28 @@ mod tests {
         .ok_or("section")?;
         assert!(matches!(
             section.evaluate(flow(Vec3::new(-10.0, 0.0, -1.0))?),
-            Err(HullError::UnsupportedSlenderIncidence)
+            Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::UnsupportedSlenderIncidence)
         ));
         assert!(matches!(
             section.evaluate(flow(Vec3::new(10.0, 0.0, -5.0))?),
-            Err(HullError::UnsupportedSlenderIncidence)
+            Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::UnsupportedSlenderIncidence)
         ));
         assert!(matches!(
             section.evaluate(flow(Vec3::new(200.0, 0.0, -1.0))?),
-            Err(HullError::UnsupportedMach)
+            Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::UnsupportedMach)
         ));
         let mut rotating = flow(Vec3::X * 10.0)?;
         rotating.angular_velocity = Vec3::Z * 0.01;
         assert!(matches!(
             section.evaluate(rotating),
-            Err(HullError::UnsupportedSlenderRotation)
+            Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::UnsupportedSlenderRotation)
         ));
         rotating.angular_velocity = Vec3::X;
         assert_eq!(section.evaluate(rotating)?.force, Vec3::ZERO);
         rotating.linear_velocity = Vec3::new(10.0, 0.0, 1.0);
         assert!(matches!(
             section.evaluate(rotating),
-            Err(HullError::UnsupportedSlenderRotation)
+            Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::UnsupportedSlenderRotation)
         ));
         rotating.linear_velocity = Vec3::ZERO;
         assert_eq!(section.evaluate(rotating)?.force, Vec3::ZERO);

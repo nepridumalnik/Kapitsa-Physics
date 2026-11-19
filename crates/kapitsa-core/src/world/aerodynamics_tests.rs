@@ -3089,7 +3089,9 @@ fn wave_transition_world_and_rollback() -> Result<(), Box<dyn std::error::Error>
                 } else {
                     assert!(matches!(
                         aero_hull(&result),
-                        Some(HullError::Wave(WaveDragError::UnsupportedMach))
+                        Some(HullError::Wave(cause))
+                            if cause.downcast_ref::<WaveDragError>()
+                                == Some(&WaveDragError::UnsupportedMach)
                     ));
                     assert_eq!(world.body(id).ok_or("body")?.motion(), before);
                 }

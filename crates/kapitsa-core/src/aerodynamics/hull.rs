@@ -72,7 +72,7 @@ use crate::transform::Transform;
 use kapitsa_math::Vec3;
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HullError {
     InvalidParameters,
     InvalidFlow,
@@ -90,7 +90,7 @@ pub enum HullError {
     /// The wave drag approximation requires flow aligned with the body axis.
     UnsupportedWaveIncidence,
     /// The wave drag distribution could not be evaluated.
-    Wave(super::wave::WaveDragError),
+    Wave(crate::Error),
     ArithmeticOverflow,
 }
 impl std::fmt::Display for HullError {
@@ -124,7 +124,7 @@ pub struct MachCurve {
     knots: Arc<[MachKnot]>,
 }
 impl MachCurve {
-    pub fn new(knots: Vec<MachKnot>) -> Result<Self, HullError> {
+    pub fn new(knots: Vec<MachKnot>) -> Result<Self, crate::Error> {
         if knots.len() < 2
             || knots.iter().any(|k| {
                 [k.mach, k.axial_cd, k.crossflow_cd]
@@ -133,7 +133,7 @@ impl MachCurve {
             })
             || knots.windows(2).any(|pair| pair[0].mach >= pair[1].mach)
         {
-            return Err(HullError::InvalidParameters);
+            return Err(crate::Error::from(HullError::InvalidParameters));
         }
         Ok(Self {
             knots: knots.into(),
@@ -146,9 +146,9 @@ impl MachCurve {
 
     /// Returns (axial Cd, crossflow Cd), including both endpoints exactly.
     /// Nonfinite or negative input is invalid; finite out-of-domain Mach is unsupported.
-    pub fn coefficients(&self, mach: f64) -> Result<(f64, f64), HullError> {
+    pub fn coefficients(&self, mach: f64) -> Result<(f64, f64), crate::Error> {
         if !mach.is_finite() || mach < 0.0 {
-            return Err(HullError::InvalidFlow);
+            return Err(crate::Error::from(HullError::InvalidFlow));
         }
         for pair in self.knots.windows(2) {
             let [a, b] = [pair[0], pair[1]];
@@ -177,7 +177,7 @@ impl MachCurve {
                 ));
             }
         }
-        Err(HullError::UnsupportedMach)
+        Err(crate::Error::from(HullError::UnsupportedMach))
     }
 
     fn has_axial_resistance(&self) -> bool {
@@ -212,9 +212,9 @@ pub struct NormalForceCurve {
     angle_count: usize,
 }
 impl NormalForceCurve {
-    pub fn new(reference_area: f64, knots: Vec<NormalForceKnot>) -> Result<Self, HullError> {
+    pub fn new(reference_area: f64, knots: Vec<NormalForceKnot>) -> Result<Self, crate::Error> {
         if !reference_area.is_finite() || reference_area <= 0.0 || knots.len() < 4 {
-            return Err(HullError::InvalidParameters);
+            return Err(crate::Error::from(HullError::InvalidParameters));
         }
         if knots.iter().any(|k| {
             !k.mach.is_finite()
@@ -224,7 +224,7 @@ impl NormalForceCurve {
                 || k.angle_of_attack > std::f64::consts::PI
                 || !k.normal_cn.is_finite()
         }) {
-            return Err(HullError::InvalidParameters);
+            return Err(crate::Error::from(HullError::InvalidParameters));
         }
         let mut machs = Vec::new();
         let mut angles = Vec::new();
@@ -249,7 +249,7 @@ impl NormalForceCurve {
                     != 1
             })
         {
-            return Err(HullError::InvalidParameters);
+            return Err(crate::Error::from(HullError::InvalidParameters));
         }
         let mut ordered = knots;
         ordered.sort_by(|a, b| {
@@ -270,9 +270,9 @@ impl NormalForceCurve {
     pub fn knots(&self) -> &[NormalForceKnot] {
         &self.knots
     }
-    fn coefficient(&self, mach: f64, alpha: f64) -> Result<f64, HullError> {
+    fn coefficient(&self, mach: f64, alpha: f64) -> Result<f64, crate::Error> {
         if !mach.is_finite() || mach < 0.0 || !alpha.is_finite() {
-            return Err(HullError::InvalidFlow);
+            return Err(crate::Error::from(HullError::InvalidFlow));
         }
         let m = (0..self.mach_count - 1)
             .find_map(|i| {
@@ -280,7 +280,7 @@ impl NormalForceCurve {
                 let b = self.knots[(i + 1) * self.angle_count].mach;
                 (mach >= a && mach <= b).then_some((i, (mach - a) / (b - a), (b - mach) / (b - a)))
             })
-            .ok_or(HullError::UnsupportedMach)?;
+            .ok_or_else(|| crate::Error::from(HullError::UnsupportedMach))?;
         let j = (0..self.angle_count - 1)
             .find_map(|j| {
                 let a = self.knots[j].angle_of_attack;
@@ -291,7 +291,7 @@ impl NormalForceCurve {
                     (b - alpha) / (b - a),
                 ))
             })
-            .ok_or(HullError::UnsupportedMach)?;
+            .ok_or_else(|| crate::Error::from(HullError::UnsupportedMach))?;
         // Opposite-sign differences can overflow even for a finite convex result.
         let lerp = |x: f64, y: f64, t: f64, remaining: f64| {
             if x.is_sign_negative() != y.is_sign_negative() {
@@ -338,7 +338,7 @@ impl SkinFriction {
         regime: BoundaryLayer,
         min_reynolds: f64,
         max_reynolds: f64,
-    ) -> Result<Self, HullError> {
+    ) -> Result<Self, crate::Error> {
         if !dynamic_viscosity.is_finite()
             || dynamic_viscosity <= 0.0
             || !min_reynolds.is_finite()
@@ -346,7 +346,7 @@ impl SkinFriction {
             || !max_reynolds.is_finite()
             || max_reynolds < min_reynolds
         {
-            return Err(HullError::InvalidParameters);
+            return Err(crate::Error::from(HullError::InvalidParameters));
         }
         Ok(Self {
             dynamic_viscosity,
@@ -355,12 +355,12 @@ impl SkinFriction {
             max_reynolds,
         })
     }
-    fn mean_coefficient(self, reynolds: f64) -> Result<f64, HullError> {
+    fn mean_coefficient(self, reynolds: f64) -> Result<f64, crate::Error> {
         if !reynolds.is_finite() {
-            return Err(HullError::ArithmeticOverflow);
+            return Err(crate::Error::from(HullError::ArithmeticOverflow));
         }
         if reynolds < self.min_reynolds || reynolds > self.max_reynolds {
-            return Err(HullError::UnsupportedReynolds);
+            return Err(crate::Error::from(HullError::UnsupportedReynolds));
         }
         Ok(match self.regime {
             BoundaryLayer::Laminar => 1.328 / reynolds.sqrt(),
@@ -403,8 +403,10 @@ impl HullSection {
         axial_cd: f64,
         crossflow_cd: f64,
         skin_friction: Option<SkinFriction>,
-    ) -> Result<Self, HullError> {
-        let axis = axis.try_normalize().ok_or(HullError::InvalidParameters)?;
+    ) -> Result<Self, crate::Error> {
+        let axis = axis
+            .try_normalize()
+            .ok_or_else(|| crate::Error::from(HullError::InvalidParameters))?;
         if !length.is_finite()
             || length <= 0.0
             || [
@@ -417,7 +419,7 @@ impl HullSection {
             .iter()
             .any(|v| !v.is_finite() || *v < 0.0)
         {
-            return Err(HullError::InvalidParameters);
+            return Err(crate::Error::from(HullError::InvalidParameters));
         }
         Ok(Self {
             local_transform,
@@ -449,7 +451,7 @@ impl HullSection {
     /// additive, so callers must avoid counting wave drag twice. Evaluation is
     /// limited to Mach > 1 and flow aligned with the section axis unless an
     /// explicit Mach multiplier curve supplies a different range.
-    pub fn with_wave_drag(mut self, area_slopes: &[f64]) -> Result<Self, HullError> {
+    pub fn with_wave_drag(mut self, area_slopes: &[f64]) -> Result<Self, crate::Error> {
         let factor = super::wave::prepare_wave_drag(area_slopes).map_err(HullError::Wave)?;
         self.wave_drag_factor = (!factor.is_zero()).then_some(factor);
         Ok(self)
@@ -468,27 +470,27 @@ impl HullSection {
         geometry: &super::geometry::PreparedGeometry,
         axis: usize,
         smoothing_radius: usize,
-    ) -> Result<Self, HullError> {
+    ) -> Result<Self, crate::Error> {
         self.validate_voxel_axis(axis)?;
         let factor = super::wave::prepare_voxel_wave_drag(geometry, axis, smoothing_radius)
             .map_err(HullError::Wave)?;
         Ok(self.with_prepared_wave_drag(factor))
     }
 
-    pub(super) fn validate_voxel_axis(&self, axis: usize) -> Result<(), HullError> {
+    pub(super) fn validate_voxel_axis(&self, axis: usize) -> Result<(), crate::Error> {
         let expected_axis = match axis {
             0 => Vec3::X,
             1 => Vec3::Y,
             2 => Vec3::Z,
-            _ => return Err(HullError::InvalidParameters),
+            _ => return Err(crate::Error::from(HullError::InvalidParameters)),
         };
         let actual_axis = self.local_transform.transform_vector(self.axis);
         let misalignment = actual_axis
             .checked_cross(expected_axis)
             .and_then(Vec3::checked_length)
-            .ok_or(HullError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(HullError::ArithmeticOverflow))?;
         if misalignment > 64.0 * f64::EPSILON {
-            return Err(HullError::InvalidParameters);
+            return Err(crate::Error::from(HullError::InvalidParameters));
         }
         Ok(())
     }
@@ -540,14 +542,14 @@ impl HullSection {
 
     /// Independent evaluator; atmosphere must be sampled at this section's point.
     /// Returns world force and moment about the current COM (body-local in flow).
-    pub fn evaluate(&self, flow: PressureFlow) -> Result<PressureWrench, HullError> {
+    pub fn evaluate(&self, flow: PressureFlow) -> Result<PressureWrench, crate::Error> {
         if !flow.center_of_mass.is_finite()
             || !flow.linear_velocity.is_finite()
             || !flow.angular_velocity.is_finite()
             || !flow.sound_speed.is_finite()
             || flow.sound_speed <= 0.0
         {
-            return Err(HullError::InvalidFlow);
+            return Err(crate::Error::from(HullError::InvalidFlow));
         }
         let zero = PressureWrench {
             force: Vec3::ZERO,
@@ -577,18 +579,18 @@ impl HullSection {
             self.local_transform
                 .translation()
                 .checked_sub(flow.center_of_mass)
-                .ok_or(overflow)?,
+                .ok_or_else(|| overflow.clone())?,
         );
         let velocity = flow
             .angular_velocity
             .checked_cross(arm)
             .and_then(|v| flow.linear_velocity.checked_add(v))
             .and_then(|v| v.checked_sub(flow.atmosphere.wind_velocity()))
-            .ok_or(overflow)?;
-        let speed = velocity.checked_length().ok_or(overflow)?;
+            .ok_or_else(|| overflow.clone())?;
+        let speed = velocity.checked_length().ok_or_else(|| overflow.clone())?;
         let mach = speed / flow.sound_speed;
         if !mach.is_finite() {
-            return Err(HullError::UnsupportedMach);
+            return Err(crate::Error::from(HullError::UnsupportedMach));
         }
         // Unused drag coefficients must not gate normal-only or friction loads.
         let (axial_cd, crossflow_cd) = if !drag_enabled {
@@ -597,29 +599,36 @@ impl HullSection {
             curve.coefficients(mach)?
         } else {
             if mach > 0.3 {
-                return Err(HullError::UnsupportedMach);
+                return Err(crate::Error::from(HullError::UnsupportedMach));
             }
             (self.axial_cd, self.crossflow_cd)
         };
         // No compressible viscosity correlation is supplied. Reject explicit
         // friction above its domain even if this point's axial speed is zero.
         if mach > 0.3 && self.wetted_area != 0.0 && self.skin_friction.is_some() {
-            return Err(HullError::UnsupportedSkinFrictionMach);
+            return Err(crate::Error::from(HullError::UnsupportedSkinFrictionMach));
         }
         let axis = flow
             .transform
             .transform_vector(self.local_transform.transform_vector(self.axis));
-        let axial_speed = velocity.checked_dot(axis).ok_or(overflow)?;
-        let axial = axis.checked_mul_scalar(axial_speed).ok_or(overflow)?;
-        let crossflow = velocity.checked_sub(axial).ok_or(overflow)?;
-        let cross_speed = crossflow.checked_length().ok_or(overflow)?;
+        let axial_speed = velocity.checked_dot(axis).ok_or_else(|| overflow.clone())?;
+        let axial = axis
+            .checked_mul_scalar(axial_speed)
+            .ok_or_else(|| overflow.clone())?;
+        let crossflow = velocity
+            .checked_sub(axial)
+            .ok_or_else(|| overflow.clone())?;
+        let cross_speed = crossflow.checked_length().ok_or_else(|| overflow.clone())?;
         let rotation_gradient = if let Some(cell) = self.potential {
-            let transverse_rotation = flow.angular_velocity.checked_cross(axis).ok_or(overflow)?;
+            let transverse_rotation = flow
+                .angular_velocity
+                .checked_cross(axis)
+                .ok_or_else(|| overflow.clone())?;
             if !cell.allows_rotation()
                 && flow.angular_velocity != Vec3::ZERO
                 && (transverse_rotation != Vec3::ZERO || cross_speed != 0.0)
             {
-                return Err(HullError::UnsupportedSlenderRotation);
+                return Err(crate::Error::from(HullError::UnsupportedSlenderRotation));
             }
             if cell.allows_rotation() {
                 transverse_rotation
@@ -631,7 +640,7 @@ impl HullSection {
         };
         if speed == 0.0 {
             if rotation_gradient != Vec3::ZERO {
-                return Err(HullError::UnsupportedSlenderIncidence);
+                return Err(crate::Error::from(HullError::UnsupportedSlenderIncidence));
             }
             return Ok(zero);
         }
@@ -639,27 +648,27 @@ impl HullSection {
             && (cross_speed != 0.0 || rotation_gradient != Vec3::ZERO)
             && mach > 0.3
         {
-            return Err(HullError::UnsupportedMach);
+            return Err(crate::Error::from(HullError::UnsupportedMach));
         }
         let density = flow.atmosphere.density();
         let wave_force = if let Some(factor) = self.wave_drag_factor {
             let multiplier = match &self.wave_mach_curve {
                 Some(curve) => curve.multiplier(mach).map_err(HullError::Wave)?,
                 None if mach > 1.0 => 1.0,
-                None => return Err(HullError::UnsupportedMach),
+                None => return Err(crate::Error::from(HullError::UnsupportedMach)),
             };
             if multiplier == 0.0 {
                 Vec3::ZERO
             } else {
                 if cross_speed > speed * (64.0 * f64::EPSILON) {
-                    return Err(HullError::UnsupportedWaveIncidence);
+                    return Err(crate::Error::from(HullError::UnsupportedWaveIncidence));
                 }
                 {
                     let component = |v: f64| {
                         factor
                             .magnitude(density, axial_speed.abs(), multiplier, v.abs())
                             .map(|magnitude| -magnitude.copysign(v))
-                            .map_err(|_| HullError::ArithmeticOverflow)
+                            .map_err(|_| crate::Error::from(HullError::ArithmeticOverflow))
                     };
                     Vec3::new(
                         component(axial.x)?,
@@ -690,7 +699,7 @@ impl HullSection {
                     self.wetted_area,
                     cf,
                 )?)
-                .ok_or(overflow)?;
+                .ok_or_else(|| overflow.clone())?;
         }
         let cross_force = resistance(
             crossflow,
@@ -744,8 +753,8 @@ impl HullSection {
             .and_then(|f| f.checked_add(normal_force))
             .and_then(|f| f.checked_add(wave_force))
             .and_then(|f| f.checked_add(potential_force))
-            .ok_or(overflow)?;
-        let moment = arm.checked_cross(force).ok_or(overflow)?;
+            .ok_or_else(|| overflow.clone())?;
+        let moment = arm.checked_cross(force).ok_or_else(|| overflow.clone())?;
         Ok(PressureWrench { force, moment })
     }
 }
@@ -756,7 +765,7 @@ fn resistance(
     density: f64,
     area: f64,
     cd: f64,
-) -> Result<Vec3, HullError> {
+) -> Result<Vec3, crate::Error> {
     if speed == 0.0 || area == 0.0 || cd == 0.0 {
         return Ok(Vec3::ZERO);
     }
@@ -815,7 +824,7 @@ pub(super) fn signed_product_sum(a: f64, b: f64, c: f64, d: f64) -> Option<(f64,
     (sum != 0.0).then_some((sum, exponent))
 }
 
-pub(super) fn scaled_product(factors: &[f64], divisor: f64) -> Result<f64, HullError> {
+pub(super) fn scaled_product(factors: &[f64], divisor: f64) -> Result<f64, crate::Error> {
     scaled_product_with_exponent(factors, divisor, 0)
 }
 
@@ -823,7 +832,7 @@ pub(super) fn scaled_product_with_exponent(
     factors: &[f64],
     divisor: f64,
     exponent_offset: i32,
-) -> Result<f64, HullError> {
+) -> Result<f64, crate::Error> {
     if factors.contains(&0.0) {
         return Ok(0.0);
     }
@@ -853,7 +862,7 @@ pub(super) fn scaled_product_with_exponent(
     mantissa
         .is_finite()
         .then_some(mantissa)
-        .ok_or(HullError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(HullError::ArithmeticOverflow))
 }
 
 #[cfg(test)]
@@ -896,7 +905,10 @@ mod tests {
         use crate::aerodynamics::wave::{WaveDragError, WaveMachCurve};
         let curve = WaveMachCurve::new(vec![(0.8, 0.0), (1.0, 0.5), (1.2, 1.0)])?;
         assert!((curve.multiplier(0.9)? - 0.25).abs() < 1e-12);
-        assert_eq!(curve.multiplier(1.3), Err(WaveDragError::UnsupportedMach));
+        assert_eq!(
+            curve.multiplier(1.3),
+            Err(crate::Error::from(WaveDragError::UnsupportedMach))
+        );
         let section = HullSection::new(
             Transform::identity(),
             Vec3::X,
@@ -921,7 +933,12 @@ mod tests {
         assert!((at_one.force.x + reference / 8.0).abs() < reference * 1e-12);
         assert!(matches!(
             section.evaluate(flow(Vec3::X * 500.0)),
-            Err(HullError::Wave(WaveDragError::UnsupportedMach))
+            Err(error) if matches!(
+                error.downcast_ref::<HullError>(),
+                Some(HullError::Wave(cause))
+                    if cause.downcast_ref::<WaveDragError>()
+                        == Some(&WaveDragError::UnsupportedMach)
+            )
         ));
         Ok(())
     }
@@ -1017,11 +1034,11 @@ mod tests {
         assert!((wrench.moment.z - expected).abs() < expected * 1e-12);
         assert_eq!(
             section.evaluate(flow(Vec3::X * 340.0)),
-            Err(HullError::UnsupportedMach)
+            Err(crate::Error::from(HullError::UnsupportedMach))
         );
         assert_eq!(
             section.evaluate(flow(Vec3::new(680.0, 1.0, 0.0))),
-            Err(HullError::UnsupportedWaveIncidence)
+            Err(crate::Error::from(HullError::UnsupportedWaveIncidence))
         );
         let reverse = section.evaluate(flow(-Vec3::X * 680.0))?;
         assert!((reverse.force.x - expected).abs() < expected * 1e-12);
@@ -1194,13 +1211,13 @@ mod tests {
         }
         assert_eq!(
             s.evaluate(flow(Vec3::Y * 680.0)),
-            Err(HullError::UnsupportedMach)
+            Err(crate::Error::from(HullError::UnsupportedMach))
         );
         let mut drag = s.clone().with_mach_curve(curve());
         drag.axial_area = 3.0;
         assert_eq!(
             drag.evaluate(flow(Vec3::ZERO)),
-            Err(HullError::UnsupportedMach)
+            Err(crate::Error::from(HullError::UnsupportedMach))
         );
         let narrow = NormalForceCurve::new(
             2.0,
@@ -1220,13 +1237,13 @@ mod tests {
         assert!(drag.evaluate(flow(Vec3::X * 340.0)).is_ok());
         assert_eq!(
             drag.evaluate(flow(Vec3::Y * 340.0)),
-            Err(HullError::UnsupportedMach)
+            Err(crate::Error::from(HullError::UnsupportedMach))
         );
         // Normal data cannot extend the domain of enabled constant drag.
         let constant = section(Vec3::ZERO).with_normal_curve(normal_curve(0.5));
         assert_eq!(
             constant.evaluate(flow(Vec3::Y * 340.0)),
-            Err(HullError::UnsupportedMach)
+            Err(crate::Error::from(HullError::UnsupportedMach))
         );
     }
 
@@ -1236,13 +1253,13 @@ mod tests {
         for knots in [vec![], valid[..3].to_vec(), vec![valid[0]; 4]] {
             assert_eq!(
                 NormalForceCurve::new(2.0, knots),
-                Err(HullError::InvalidParameters)
+                Err(crate::Error::from(HullError::InvalidParameters))
             );
         }
         for area in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert_eq!(
                 NormalForceCurve::new(area, valid.clone()),
-                Err(HullError::InvalidParameters)
+                Err(crate::Error::from(HullError::InvalidParameters))
             );
         }
         for bad in [-0.1, std::f64::consts::PI + 0.1, f64::NAN, f64::INFINITY] {
@@ -1250,7 +1267,7 @@ mod tests {
             knots[0].angle_of_attack = bad;
             assert_eq!(
                 NormalForceCurve::new(2.0, knots),
-                Err(HullError::InvalidParameters)
+                Err(crate::Error::from(HullError::InvalidParameters))
             );
         }
         for bad in [-1.0, f64::NAN, f64::INFINITY] {
@@ -1258,7 +1275,7 @@ mod tests {
             knots[0].mach = bad;
             assert_eq!(
                 NormalForceCurve::new(2.0, knots),
-                Err(HullError::InvalidParameters)
+                Err(crate::Error::from(HullError::InvalidParameters))
             );
         }
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -1266,7 +1283,7 @@ mod tests {
             knots[0].normal_cn = bad;
             assert_eq!(
                 NormalForceCurve::new(2.0, knots),
-                Err(HullError::InvalidParameters)
+                Err(crate::Error::from(HullError::InvalidParameters))
             );
         }
         let mut knots = valid;
@@ -1282,8 +1299,14 @@ mod tests {
         for k in c.knots() {
             assert_eq!(c.coefficient(k.mach, k.angle_of_attack), Ok(k.normal_cn));
         }
-        assert_eq!(c.coefficient(1.0, -0.1), Err(HullError::UnsupportedMach));
-        assert_eq!(c.coefficient(1.0, f64::NAN), Err(HullError::InvalidFlow));
+        assert_eq!(
+            c.coefficient(1.0, -0.1),
+            Err(crate::Error::from(HullError::UnsupportedMach))
+        );
+        assert_eq!(
+            c.coefficient(1.0, f64::NAN),
+            Err(crate::Error::from(HullError::InvalidFlow))
+        );
     }
 
     #[test]
@@ -1306,7 +1329,10 @@ mod tests {
         assert!(w.force.is_finite());
         assert!((w.force.y / -std::f64::consts::SQRT_2 / 1e308 - 1.0).abs() < 1e-14);
         f.atmosphere = AtmosphericState::new(f64::MAX, Vec3::ZERO).unwrap();
-        assert_eq!(s.evaluate(f), Err(HullError::ArithmeticOverflow));
+        assert_eq!(
+            s.evaluate(f),
+            Err(crate::Error::from(HullError::ArithmeticOverflow))
+        );
     }
 
     #[test]
@@ -1375,10 +1401,16 @@ mod tests {
         let (a, b) = across.coefficients(1.0).unwrap();
         assert!((a - 0.3).abs() < 1e-14 && (b - 0.5).abs() < 1e-14);
         for mach in [0.0, 0.4999, 1.5001, f64::MAX] {
-            assert_eq!(c.coefficients(mach), Err(HullError::UnsupportedMach));
+            assert_eq!(
+                c.coefficients(mach),
+                Err(crate::Error::from(HullError::UnsupportedMach))
+            );
         }
         for mach in [f64::NAN, f64::INFINITY, -0.1] {
-            assert_eq!(c.coefficients(mach), Err(HullError::InvalidFlow));
+            assert_eq!(
+                c.coefficients(mach),
+                Err(crate::Error::from(HullError::InvalidFlow))
+            );
         }
         let large = MachCurve::new(vec![
             MachKnot {
@@ -1405,7 +1437,10 @@ mod tests {
             vec![valid[1], valid[0]],
             vec![valid[0], valid[0]],
         ] {
-            assert_eq!(MachCurve::new(knots), Err(HullError::InvalidParameters));
+            assert_eq!(
+                MachCurve::new(knots),
+                Err(crate::Error::from(HullError::InvalidParameters))
+            );
         }
         for bad in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for field in 0..3 {
@@ -1415,7 +1450,10 @@ mod tests {
                     1 => knots[1].axial_cd = bad,
                     _ => knots[1].crossflow_cd = bad,
                 }
-                assert_eq!(MachCurve::new(knots), Err(HullError::InvalidParameters));
+                assert_eq!(
+                    MachCurve::new(knots),
+                    Err(crate::Error::from(HullError::InvalidParameters))
+                );
             }
         }
         let c = curve();
@@ -1471,11 +1509,11 @@ mod tests {
         let s = section(Vec3::ZERO).with_mach_curve(curve());
         assert_eq!(
             s.evaluate(flow(Vec3::X * 100.0)),
-            Err(HullError::UnsupportedMach)
+            Err(crate::Error::from(HullError::UnsupportedMach))
         );
         assert_eq!(
             s.evaluate(flow(Vec3::X * 600.0)),
-            Err(HullError::UnsupportedMach)
+            Err(crate::Error::from(HullError::UnsupportedMach))
         );
         let mut f = flow(Vec3::X * 600.0);
         f.atmosphere = AtmosphericState::new(0.0, Vec3::ZERO).unwrap();
@@ -1493,13 +1531,16 @@ mod tests {
         for velocity in [Vec3::X * 340.0, Vec3::Y * 340.0] {
             assert_eq!(
                 viscous.evaluate(flow(velocity)),
-                Err(HullError::UnsupportedSkinFrictionMach)
+                Err(crate::Error::from(HullError::UnsupportedSkinFrictionMach))
             );
         }
         // Vacuum still skips correlation domains, not finite-flow validation.
         assert_eq!(viscous.evaluate(f).unwrap().force, Vec3::ZERO);
         f.sound_speed = f64::NAN;
-        assert_eq!(viscous.evaluate(f), Err(HullError::InvalidFlow));
+        assert_eq!(
+            viscous.evaluate(f),
+            Err(crate::Error::from(HullError::InvalidFlow))
+        );
     }
 
     #[test]
@@ -1539,7 +1580,7 @@ mod tests {
             assert_eq!(s.evaluate(flow(Vec3::Y * 30.0)).unwrap().force, Vec3::ZERO);
             assert_eq!(
                 s.evaluate(flow(Vec3::X * 10.0)),
-                Err(HullError::UnsupportedReynolds)
+                Err(crate::Error::from(HullError::UnsupportedReynolds))
             );
         }
     }
@@ -1574,11 +1615,17 @@ mod tests {
         assert!((wrench.force.x / -6.64e306 - 1.0).abs() < 1e-14);
         s.skin_friction =
             Some(SkinFriction::new(1.0, BoundaryLayer::Laminar, 1.0, f64::MAX).unwrap());
-        assert_eq!(s.evaluate(f), Err(HullError::ArithmeticOverflow));
+        assert_eq!(
+            s.evaluate(f),
+            Err(crate::Error::from(HullError::ArithmeticOverflow))
+        );
         s.skin_friction = None;
         s.axial_cd = 1.0;
         s.axial_area = 1.0;
-        assert_eq!(s.evaluate(f), Err(HullError::ArithmeticOverflow));
+        assert_eq!(
+            s.evaluate(f),
+            Err(crate::Error::from(HullError::ArithmeticOverflow))
+        );
     }
 
     #[test]
@@ -1586,7 +1633,7 @@ mod tests {
         assert_eq!(scaled_product(&[1e308, 100.0, 1.0], 1e308), Ok(100.0));
         assert_eq!(
             scaled_product(&[f64::MAX, 2.0], 1.0),
-            Err(HullError::ArithmeticOverflow)
+            Err(crate::Error::from(HullError::ArithmeticOverflow))
         );
         let tiny = f64::from_bits(1);
         assert_eq!(scaled_product(&[tiny, 0.5, 2.0], 1.0), Ok(tiny));
@@ -1641,13 +1688,16 @@ mod tests {
         assert!(s.evaluate(flow(Vec3::X * 102.0)).is_ok());
         assert_eq!(
             s.evaluate(flow(Vec3::X * 102.0001)),
-            Err(HullError::UnsupportedMach)
+            Err(crate::Error::from(HullError::UnsupportedMach))
         );
         let mut f = flow(Vec3::X * 200.0);
         f.atmosphere = AtmosphericState::new(0.0, Vec3::ZERO).unwrap();
         assert_eq!(s.evaluate(f).unwrap().force, Vec3::ZERO);
         f.sound_speed = f64::NAN;
-        assert_eq!(s.evaluate(f), Err(HullError::InvalidFlow));
+        assert_eq!(
+            s.evaluate(f),
+            Err(crate::Error::from(HullError::InvalidFlow))
+        );
         let mut disabled = s.clone();
         disabled.axial_cd = 0.0;
         disabled.crossflow_cd = 0.0;
@@ -1657,13 +1707,13 @@ mod tests {
         );
         assert_eq!(
             s.evaluate(flow(Vec3::X * f64::MAX)),
-            Err(HullError::UnsupportedMach)
+            Err(crate::Error::from(HullError::UnsupportedMach))
         );
         let mut huge = s;
         huge.axial_area = f64::MAX;
         assert_eq!(
             huge.evaluate(flow(Vec3::X * 50.0)),
-            Err(HullError::ArithmeticOverflow)
+            Err(crate::Error::from(HullError::ArithmeticOverflow))
         );
         assert!(SkinFriction::new(0.0, BoundaryLayer::Laminar, 1.0, 2.0).is_err());
         assert!(SkinFriction::new(1.0, BoundaryLayer::Laminar, 2.0, 1.0).is_err());

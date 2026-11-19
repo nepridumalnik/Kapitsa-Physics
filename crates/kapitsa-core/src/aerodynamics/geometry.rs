@@ -132,34 +132,34 @@ pub struct PreparedGeometry {
     volume: f64,
 }
 
-fn allocated<T: Clone>(len: usize, value: T) -> Result<Vec<T>, GeometryError> {
+fn allocated<T: Clone>(len: usize, value: T) -> Result<Vec<T>, crate::Error> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(len)
-        .map_err(|_| GeometryError::AllocationFailed)?;
+        .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
     values.resize(len, value);
     Ok(values)
 }
 
-fn checked_push<T>(values: &mut Vec<T>, value: T) -> Result<(), GeometryError> {
+fn checked_push<T>(values: &mut Vec<T>, value: T) -> Result<(), crate::Error> {
     values
         .try_reserve(1)
-        .map_err(|_| GeometryError::AllocationFailed)?;
+        .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
     values.push(value);
     Ok(())
 }
 
-fn surface_triangle_count(instances: &[GeometryInstance<'_>]) -> Result<usize, GeometryError> {
+fn surface_triangle_count(instances: &[GeometryInstance<'_>]) -> Result<usize, crate::Error> {
     instances.iter().try_fold(0usize, |total, instance| {
         total
             .checked_add(instance.mesh.triangles().len())
-            .ok_or(GeometryError::WorkBudgetExceeded)
+            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))
     })
 }
 
-fn check_surface_work(work: Option<usize>, max_work: usize) -> Result<(), GeometryError> {
+fn check_surface_work(work: Option<usize>, max_work: usize) -> Result<(), crate::Error> {
     if max_work == 0 || work.is_none_or(|w| w > max_work.min(100_000_000)) {
-        return Err(GeometryError::WorkBudgetExceeded);
+        return Err(crate::Error::from(GeometryError::WorkBudgetExceeded));
     }
     Ok(())
 }
@@ -190,10 +190,10 @@ fn charge_surface_work(
     work: &mut usize,
     amount: usize,
     max_work: usize,
-) -> Result<(), GeometryError> {
+) -> Result<(), crate::Error> {
     let next = work.checked_add(amount);
     check_surface_work(next, max_work)?;
-    *work = next.ok_or(GeometryError::WorkBudgetExceeded)?;
+    *work = next.ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
     Ok(())
 }
 
@@ -201,7 +201,7 @@ fn allocate_candidate_marks(
     count: usize,
     work: &mut usize,
     max_work: usize,
-) -> Result<Vec<u32>, GeometryError> {
+) -> Result<Vec<u32>, crate::Error> {
     charge_surface_work(work, count, max_work)?;
     allocated(count, 0u32)
 }
@@ -212,7 +212,7 @@ fn budgeted_sort<T>(
     work: &mut usize,
     max_work: usize,
     compare: impl Fn(&T, &T) -> std::cmp::Ordering,
-) -> Result<(), GeometryError> {
+) -> Result<(), crate::Error> {
     fn sift<T>(
         values: &mut [T],
         mut root: usize,
@@ -220,7 +220,7 @@ fn budgeted_sort<T>(
         work: &mut usize,
         max_work: usize,
         compare: &impl Fn(&T, &T) -> std::cmp::Ordering,
-    ) -> Result<(), GeometryError> {
+    ) -> Result<(), crate::Error> {
         while root < end / 2 {
             let mut child = root * 2 + 1;
             if child + 1 < end {
@@ -265,23 +265,23 @@ struct TriangleGrid {
 }
 
 impl TriangleGrid {
-    fn build(triangles: &[SurfaceTriangle], max_work: usize) -> Result<Self, GeometryError> {
+    fn build(triangles: &[SurfaceTriangle], max_work: usize) -> Result<Self, crate::Error> {
         if triangles.is_empty() {
-            return Err(GeometryError::EmptyGeometry);
+            return Err(crate::Error::from(GeometryError::EmptyGeometry));
         }
         // Bounds, entry counting and entry construction each scan the input.
         const TRIANGLE_SCAN_WORK: usize = 3;
         let scan_work = triangles
             .len()
             .checked_mul(TRIANGLE_SCAN_WORK)
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         check_surface_work(Some(scan_work), max_work)?;
         let mut min = Vec3::splat(f64::INFINITY);
         let mut max = Vec3::splat(f64::NEG_INFINITY);
         for triangle in triangles {
             for &point in &triangle.vertices {
                 if !point.is_finite() {
-                    return Err(GeometryError::ArithmeticOverflow);
+                    return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
                 }
                 min = min.min(point);
                 max = max.max(point);
@@ -300,11 +300,11 @@ impl TriangleGrid {
         let cell_count = dimensions
             .into_iter()
             .try_fold(1usize, |n, d| n.checked_mul(d))
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
-        let cell = |point: Vec3| -> Result<[usize; 3], GeometryError> {
+            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
+        let cell = |point: Vec3| -> Result<[usize; 3], crate::Error> {
             let values = components((point - min) / cell_size);
             if !values.iter().all(|value| value.is_finite()) {
-                return Err(GeometryError::PrecisionLoss);
+                return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
             Ok(values.map(|value| (value.floor().max(0.0) as usize).min(target.saturating_sub(1))))
         };
@@ -332,21 +332,21 @@ impl TriangleGrid {
                     spans[0]
                         .checked_mul(spans[1])
                         .and_then(|n| n.checked_mul(spans[2]))
-                        .ok_or(GeometryError::WorkBudgetExceeded)?,
+                        .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?,
                 )
-                .ok_or(GeometryError::WorkBudgetExceeded)?;
+                .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
             // The estimate is monotone in entry_count: once it exceeds the
             // budget, later triangles cannot make this construction viable.
             let partial_work = grid_build_work_estimate(entry_count, cell_count, scan_work);
             check_surface_work(partial_work, max_work)?;
         }
         let build_work = grid_build_work_estimate(entry_count, cell_count, scan_work)
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         check_surface_work(Some(build_work), max_work)?;
         let mut entries = Vec::new();
         entries
             .try_reserve_exact(entry_count)
-            .map_err(|_| GeometryError::AllocationFailed)?;
+            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
         let mut counts = allocated(cell_count, 0usize)?;
         for (triangle_index, triangle) in triangles.iter().enumerate() {
             let lower = cell(
@@ -367,7 +367,7 @@ impl TriangleGrid {
                         let i = index([x, y, z], dimensions);
                         counts[i] = counts[i]
                             .checked_add(1)
-                            .ok_or(GeometryError::WorkBudgetExceeded)?;
+                            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                         checked_push(&mut entries, (i, triangle_index))?;
                     }
                 }
@@ -377,14 +377,14 @@ impl TriangleGrid {
         for (i, count) in counts.into_iter().enumerate() {
             offsets[i + 1] = offsets[i]
                 .checked_add(count)
-                .ok_or(GeometryError::WorkBudgetExceeded)?;
+                .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         }
         let mut sort_work = build_work;
         budgeted_sort(&mut entries, &mut sort_work, max_work, Ord::cmp)?;
         let mut indexed_triangles = Vec::new();
         indexed_triangles
             .try_reserve_exact(entries.len())
-            .map_err(|_| GeometryError::AllocationFailed)?;
+            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
         for (_, triangle) in entries {
             checked_push(&mut indexed_triangles, triangle)?;
         }
@@ -406,7 +406,7 @@ impl TriangleGrid {
         marks: &mut [u32],
         stamp: u32,
         max_work: usize,
-    ) -> Result<(Vec<usize>, usize), GeometryError> {
+    ) -> Result<(Vec<usize>, usize), crate::Error> {
         let source_min = source
             .vertices
             .iter()
@@ -434,9 +434,9 @@ impl TriangleGrid {
             }
         }
         let cell_size = components(self.cell_size);
-        let to_cell = |point: [f64; 3]| -> Result<[usize; 3], GeometryError> {
+        let to_cell = |point: [f64; 3]| -> Result<[usize; 3], crate::Error> {
             if !point.iter().all(|value| value.is_finite()) {
-                return Err(GeometryError::PrecisionLoss);
+                return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
             Ok(std::array::from_fn(|axis| {
                 ((point[axis] - origin[axis]) / cell_size[axis])
@@ -457,13 +457,13 @@ impl TriangleGrid {
                 for x in lower[0]..=upper[0] {
                     query_work = query_work
                         .checked_add(1)
-                        .ok_or(GeometryError::WorkBudgetExceeded)?;
+                        .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                     check_surface_work(Some(query_work), max_work)?;
                     let range = index([x, y, z], self.dimensions);
                     for &triangle in &self.triangles[self.offsets[range]..self.offsets[range + 1]] {
                         query_work = query_work
                             .checked_add(1)
-                            .ok_or(GeometryError::WorkBudgetExceeded)?;
+                            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                         check_surface_work(Some(query_work), max_work)?;
                         if marks[triangle] != stamp {
                             checked_push(&mut result, triangle)?;
@@ -493,14 +493,14 @@ fn ray_hits_triangle(
     origin: Vec3,
     direction: Vec3,
     vertices: [Vec3; 3],
-) -> Result<bool, GeometryError> {
+) -> Result<bool, crate::Error> {
     let [a, b, c] = vertices;
     let e1 = b - a;
     let e2 = c - a;
     let p = direction.cross(e2);
     let determinant = e1.dot(p);
     if !determinant.is_finite() {
-        return Err(GeometryError::ArithmeticOverflow);
+        return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
     }
     if determinant == 0.0 {
         return Ok(false);
@@ -511,7 +511,7 @@ fn ray_hits_triangle(
     let v = direction.dot(q) / determinant;
     let t = e2.dot(q) / determinant;
     if ![u, v, t].iter().all(|n| n.is_finite()) {
-        return Err(GeometryError::ArithmeticOverflow);
+        return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
     }
     Ok(t > 0.0 && u >= 0.0 && v >= 0.0 && u + v <= 1.0)
 }
@@ -537,15 +537,15 @@ fn neighbor(mut p: [usize; 3], axis: usize, positive: bool, d: [usize; 3]) -> Op
     (p[axis] < d[axis]).then(|| index(p, d))
 }
 
-fn closed(mesh: &TriangleMesh, weld_tolerance: Option<f64>) -> Result<bool, GeometryError> {
+fn closed(mesh: &TriangleMesh, weld_tolerance: Option<f64>) -> Result<bool, crate::Error> {
     let welded = if let Some(tolerance) = weld_tolerance {
         if !tolerance.is_finite() || tolerance <= 0.0 {
-            return Err(GeometryError::InvalidConfig);
+            return Err(crate::Error::from(GeometryError::InvalidConfig));
         }
         let mut representatives: Vec<usize> = Vec::new();
         representatives
             .try_reserve_exact(mesh.vertices().len())
-            .map_err(|_| GeometryError::AllocationFailed)?;
+            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
         for vertex in mesh.vertices() {
             let representative = representatives.iter().position(|&index| {
                 (mesh.vertices()[index] - *vertex).length_squared() <= tolerance * tolerance
@@ -566,9 +566,9 @@ fn closed(mesh: &TriangleMesh, weld_tolerance: Option<f64>) -> Result<bool, Geom
             mesh.triangles()
                 .len()
                 .checked_mul(3)
-                .ok_or(GeometryError::WorkBudgetExceeded)?,
+                .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?,
         )
-        .map_err(|_| GeometryError::AllocationFailed)?;
+        .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
     for &[a, b, c] in mesh.triangles() {
         for (a, b) in [(a, b), (b, c), (c, a)] {
             let a = welded.as_ref().map_or(a, |w| w[a]);
@@ -596,7 +596,7 @@ fn closed(mesh: &TriangleMesh, weld_tolerance: Option<f64>) -> Result<bool, Geom
         .map(|&index| (mesh.vertices()[index] - reference).abs().max_element())
         .fold(0.0_f64, f64::max);
     if !scale.is_finite() || scale == 0.0 {
-        return Err(GeometryError::InvalidGeometry);
+        return Err(crate::Error::from(GeometryError::InvalidGeometry));
     }
     let mut volume = 0.0;
     for &[a, b, c] in mesh.triangles() {
@@ -607,7 +607,7 @@ fn closed(mesh: &TriangleMesh, weld_tolerance: Option<f64>) -> Result<bool, Geom
 }
 
 /// Separating-axis triangle/box test: box axes, triangle normal, nine edge axes.
-fn intersects(triangle: [Vec3; 3], center: Vec3, half: f64) -> Result<bool, GeometryError> {
+fn intersects(triangle: [Vec3; 3], center: Vec3, half: f64) -> Result<bool, crate::Error> {
     let v = triangle.map(|v| v - center);
     let edges = [v[1] - v[0], v[2] - v[1], v[0] - v[2]];
     let axes = [Vec3::X, Vec3::Y, Vec3::Z];
@@ -619,7 +619,7 @@ fn intersects(triangle: [Vec3; 3], center: Vec3, half: f64) -> Result<bool, Geom
     {
         let scale = axis.abs().max_element();
         if !scale.is_finite() {
-            return Err(GeometryError::ArithmeticOverflow);
+            return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
         }
         if scale == 0.0 {
             continue;
@@ -628,7 +628,7 @@ fn intersects(triangle: [Vec3; 3], center: Vec3, half: f64) -> Result<bool, Geom
         let projected = v.map(|p| p.dot(axis));
         let radius = half * (axis.x.abs() + axis.y.abs() + axis.z.abs());
         if !radius.is_finite() || !projected.iter().all(|v| v.is_finite()) {
-            return Err(GeometryError::ArithmeticOverflow);
+            return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
         }
         // Include boundary contact so grid-aligned zero-thickness surfaces survive.
         if projected.iter().all(|&v| v > radius) || projected.iter().all(|&v| v < -radius) {
@@ -663,7 +663,7 @@ impl PreparedGeometry {
     pub fn prepare(
         instances: &[GeometryInstance<'_>],
         config: GeometryConfig,
-    ) -> Result<Self, GeometryError> {
+    ) -> Result<Self, crate::Error> {
         let h = config.cell_size;
         if !h.is_finite()
             || h <= 0.0
@@ -674,24 +674,24 @@ impl PreparedGeometry {
             || config.max_work == 0
             || config.max_work > 100_000_000
         {
-            return Err(GeometryError::InvalidConfig);
+            return Err(crate::Error::from(GeometryError::InvalidConfig));
         }
         if instances.is_empty() {
-            return Err(GeometryError::EmptyGeometry);
+            return Err(crate::Error::from(GeometryError::EmptyGeometry));
         }
         let triangle_count = instances
             .iter()
             .try_fold(0usize, |n, i| n.checked_add(i.mesh.triangles().len()))
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         let vertex_count = instances
             .iter()
             .try_fold(0usize, |n, i| n.checked_add(i.mesh.vertices().len()))
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         if triangle_count
             .checked_add(vertex_count)
             .is_none_or(|n| n > config.max_work)
         {
-            return Err(GeometryError::WorkBudgetExceeded);
+            return Err(crate::Error::from(GeometryError::WorkBudgetExceeded));
         }
         // Closure checks sort three edges per triangle; optional positional
         // welding compares each vertex with preceding representatives.
@@ -712,9 +712,9 @@ impl PreparedGeometry {
                 };
                 work.checked_add(sorting)?.checked_add(welding)
             })
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         if preprocessing_work > config.max_work {
-            return Err(GeometryError::WorkBudgetExceeded);
+            return Err(crate::Error::from(GeometryError::WorkBudgetExceeded));
         }
         let mut min = Vec3::splat(f64::INFINITY);
         let mut max = Vec3::splat(f64::NEG_INFINITY);
@@ -724,7 +724,7 @@ impl PreparedGeometry {
                     let vertex = instance.mesh.vertices()[index];
                     let v = instance.local_transform.transform_point(vertex);
                     if !v.is_finite() {
-                        return Err(GeometryError::ArithmeticOverflow);
+                        return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
                     }
                     min = min.min(v);
                     max = max.max(v);
@@ -738,21 +738,21 @@ impl PreparedGeometry {
                 .iter()
                 .all(|x| x.is_finite() && *x >= 0.0 && *x <= config.max_cells as f64)
         {
-            return Err(GeometryError::CellBudgetExceeded);
+            return Err(crate::Error::from(GeometryError::CellBudgetExceeded));
         }
         if (origin + Vec3::splat(h * 0.5)).x == origin.x
             || (origin + Vec3::splat(h * 0.5)).y == origin.y
             || (origin + Vec3::splat(h * 0.5)).z == origin.z
         {
-            return Err(GeometryError::InvalidGeometry);
+            return Err(crate::Error::from(GeometryError::InvalidGeometry));
         }
         let dimensions = extents.map(|x| (x.ceil() as usize).max(1) + 2);
         let count = dimensions
             .into_iter()
             .try_fold(1usize, |n, d| n.checked_mul(d))
-            .ok_or(GeometryError::CellBudgetExceeded)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::CellBudgetExceeded))?;
         if count > config.max_cells {
-            return Err(GeometryError::CellBudgetExceeded);
+            return Err(crate::Error::from(GeometryError::CellBudgetExceeded));
         }
         // Charge full-grid passes and the actual conservative triangle bounds.
         // This pass happens before grid allocation and uses the same bounds as
@@ -762,7 +762,7 @@ impl PreparedGeometry {
             .and_then(|n| n.checked_add(vertex_count))
             .and_then(|n| n.checked_add(preprocessing_work))
             .and_then(|n| n.checked_add(triangle_count.saturating_mul(10)))
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         for instance in instances {
             for &[a, b, c] in instance.mesh.triangles() {
                 let triangle = [a, b, c].map(|i| {
@@ -778,24 +778,24 @@ impl PreparedGeometry {
                             .checked_add(1)
                             .and_then(|width| n.checked_mul(width))
                     })
-                    .ok_or(GeometryError::WorkBudgetExceeded)?;
+                    .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                 work = work
                     .checked_add(cells)
-                    .ok_or(GeometryError::WorkBudgetExceeded)?;
+                    .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                 if work > config.max_work {
-                    return Err(GeometryError::WorkBudgetExceeded);
+                    return Err(crate::Error::from(GeometryError::WorkBudgetExceeded));
                 }
             }
         }
         if work > config.max_work {
-            return Err(GeometryError::WorkBudgetExceeded);
+            return Err(crate::Error::from(GeometryError::WorkBudgetExceeded));
         }
         let upper = origin + vector(dimensions.map(|d| d as f64 * h));
         if !upper.is_finite() {
-            return Err(GeometryError::ArithmeticOverflow);
+            return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
         }
         if !(h * h * count as f64 * 6.0).is_finite() || !(h * h * h * count as f64).is_finite() {
-            return Err(GeometryError::ArithmeticOverflow);
+            return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
         }
         let mut occupancy: Vec<Option<GeometryOwner>> = allocated(count, None)?;
         let mut shell = allocated(count, false)?;
@@ -803,11 +803,11 @@ impl PreparedGeometry {
         let mut queue = Vec::new();
         queue
             .try_reserve_exact(count)
-            .map_err(|_| GeometryError::AllocationFailed)?;
+            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
         for instance in instances {
             let is_closed = closed(instance.mesh, config.weld_tolerance)?;
             if !is_closed && config.open_mesh_policy == OpenMeshPolicy::Reject {
-                return Err(GeometryError::OpenMesh);
+                return Err(crate::Error::from(GeometryError::OpenMesh));
             }
             shell.fill(false);
             exterior.fill(false);
@@ -933,7 +933,7 @@ impl PreparedGeometry {
     pub fn surface_triangles(
         instances: &[GeometryInstance<'_>],
         max_work: usize,
-    ) -> Result<Vec<SurfaceTriangle>, GeometryError> {
+    ) -> Result<Vec<SurfaceTriangle>, crate::Error> {
         check_surface_work(Some(instances.len()), max_work)?;
         let total = surface_triangle_count(instances)?;
         check_surface_work(
@@ -945,7 +945,7 @@ impl PreparedGeometry {
         let mut triangles = Vec::new();
         triangles
             .try_reserve_exact(total)
-            .map_err(|_| GeometryError::AllocationFailed)?;
+            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
         for instance in instances {
             for &[a, b, c] in instance.mesh.triangles() {
                 let vertices = [a, b, c].map(|i| {
@@ -956,9 +956,9 @@ impl PreparedGeometry {
                 let cross = (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0]);
                 let length = cross
                     .checked_length()
-                    .ok_or(GeometryError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?;
                 if length == 0.0 {
-                    return Err(GeometryError::InvalidGeometry);
+                    return Err(crate::Error::from(GeometryError::InvalidGeometry));
                 }
                 triangles.push(SurfaceTriangle {
                     vertices,
@@ -980,13 +980,13 @@ impl PreparedGeometry {
     /// Returns whether a body-local point lies in an occupied voxel.
     /// Grid occupancy is conservative and uses the configured open-mesh policy;
     /// this query is not an exact point-in-mesh test.
-    pub fn occupied_at(&self, point: Vec3) -> Result<bool, GeometryError> {
+    pub fn occupied_at(&self, point: Vec3) -> Result<bool, crate::Error> {
         if !point.is_finite() {
-            return Err(GeometryError::InvalidGeometry);
+            return Err(crate::Error::from(GeometryError::InvalidGeometry));
         }
         let upper = self.origin + vector(self.dimensions.map(|n| n as f64 * self.cell_size));
         if !upper.is_finite() {
-            return Err(GeometryError::ArithmeticOverflow);
+            return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
         }
         let point_components = components(point);
         let lower_components = components(self.origin);
@@ -999,16 +999,16 @@ impl PreparedGeometry {
         }
         let relative = components((point - self.origin) / self.cell_size);
         if relative.iter().any(|v| !v.is_finite() || *v < 0.0) {
-            return Err(GeometryError::ArithmeticOverflow);
+            return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
         }
         let cell = relative.map(|v| v.floor() as usize);
         if (0..3).any(|axis| cell[axis] >= self.dimensions[axis]) {
-            return Err(GeometryError::PrecisionLoss);
+            return Err(crate::Error::from(GeometryError::PrecisionLoss));
         }
         self.occupancy
             .get(index(cell, self.dimensions))
             .map(Option::is_some)
-            .ok_or(GeometryError::PrecisionLoss)
+            .ok_or_else(|| crate::Error::from(GeometryError::PrecisionLoss))
     }
 
     /// Partitions triangles along projected blocker edges and depth planes.
@@ -1025,13 +1025,13 @@ impl PreparedGeometry {
         direction: Vec3,
         epsilon: f64,
         max_work: usize,
-    ) -> Result<PreparedSurfacePatches, GeometryError> {
+    ) -> Result<PreparedSurfacePatches, crate::Error> {
         if !direction.is_finite() || !epsilon.is_finite() || epsilon <= 0.0 {
-            return Err(GeometryError::InvalidGeometry);
+            return Err(crate::Error::from(GeometryError::InvalidGeometry));
         }
         let upstream = direction
             .try_normalize()
-            .ok_or(GeometryError::InvalidGeometry)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::InvalidGeometry))?;
         self.surface_patches_with_flow(instances, max_work, |_| Ok(upstream))
     }
 
@@ -1043,8 +1043,8 @@ impl PreparedGeometry {
         &self,
         instances: &[GeometryInstance<'_>],
         max_work: usize,
-        flow: impl Fn(Vec3) -> Result<Vec3, GeometryError>,
-    ) -> Result<PreparedSurfacePatches, GeometryError> {
+        flow: impl Fn(Vec3) -> Result<Vec3, crate::Error>,
+    ) -> Result<PreparedSurfacePatches, crate::Error> {
         // Counting, selecting a reference and constructing relative instances
         // all visit every instance, even when its mesh has no triangles.
         check_surface_work(instances.len().checked_mul(4), max_work)?;
@@ -1058,7 +1058,8 @@ impl PreparedGeometry {
                     .and_then(|i| n.checked_add(i))
             });
         check_surface_work(preprocessing, max_work)?;
-        let work = preprocessing.ok_or(GeometryError::WorkBudgetExceeded)?;
+        let work =
+            preprocessing.ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         let Some(reference) = instances
             .iter()
             .min_by(|a, b| {
@@ -1082,7 +1083,7 @@ impl PreparedGeometry {
         let mut relative = Vec::new();
         relative
             .try_reserve_exact(instances.len())
-            .map_err(|_| GeometryError::AllocationFailed)?;
+            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
         for instance in instances {
             let local_transform = if instance.local_transform == reference {
                 Transform::identity()
@@ -1091,19 +1092,19 @@ impl PreparedGeometry {
                     .local_transform
                     .translation()
                     .checked_sub(reference.translation())
-                    .ok_or(GeometryError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?;
                 let translation = inverse_rotation
                     .rotate_vector(delta)
-                    .ok_or(GeometryError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?;
                 let rotation = if instance.local_transform.rotation() == reference.rotation() {
                     kapitsa_math::Quat::IDENTITY
                 } else {
                     (inverse_rotation * instance.local_transform.rotation())
                         .try_normalize()
-                        .ok_or(GeometryError::ArithmeticOverflow)?
+                        .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?
                 };
                 Transform::new(translation, rotation)
-                    .map_err(|_| GeometryError::ArithmeticOverflow)?
+                    .map_err(|_| crate::Error::from(GeometryError::ArithmeticOverflow))?
             };
             relative.push(GeometryInstance {
                 local_transform,
@@ -1113,11 +1114,11 @@ impl PreparedGeometry {
         let mut patches = self.surface_patches_in_frame(&relative, max_work, work, |point| {
             let point = reference.transform_point(point);
             if !point.is_finite() {
-                return Err(GeometryError::ArithmeticOverflow);
+                return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
             }
             inverse_rotation
                 .rotate_vector(flow(point)?)
-                .ok_or(GeometryError::ArithmeticOverflow)
+                .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))
         })?;
         for patch in &mut patches.patches {
             patch.vertices = patch.vertices.map(|point| reference.transform_point(point));
@@ -1127,7 +1128,7 @@ impl PreparedGeometry {
                 || !patch.center.is_finite()
                 || !patch.normal.is_finite()
             {
-                return Err(GeometryError::ArithmeticOverflow);
+                return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
             }
         }
         Ok(patches)
@@ -1138,8 +1139,8 @@ impl PreparedGeometry {
         instances: &[GeometryInstance<'_>],
         max_work: usize,
         mut work: usize,
-        flow: impl Fn(Vec3) -> Result<Vec3, GeometryError>,
-    ) -> Result<PreparedSurfacePatches, GeometryError> {
+        flow: impl Fn(Vec3) -> Result<Vec3, crate::Error>,
+    ) -> Result<PreparedSurfacePatches, crate::Error> {
         // Work units are conservative accounting weights, not instruction counts.
         const SOURCE_WORK: usize = 48;
         const SHADOW_WORK: usize = 64;
@@ -1175,7 +1176,7 @@ impl PreparedGeometry {
         let grid = TriangleGrid::build(&triangles, max_work.saturating_sub(work))?;
         work = work
             .checked_add(grid.build_work)
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         check_surface_work(Some(work), max_work)?;
         let mut marks = allocate_candidate_marks(triangles.len(), &mut work, max_work)?;
         let mut stamp = 0u32;
@@ -1184,7 +1185,7 @@ impl PreparedGeometry {
             let [a, b, c] = triangle.vertices;
             work = work
                 .checked_add(SOURCE_WORK)
-                .ok_or(GeometryError::WorkBudgetExceeded)?;
+                .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
             check_surface_work(Some(work), max_work)?;
             let velocities = [flow(a)?, flow(b)?, flow(c)?];
             let Some(initial) = visibility::windward_triangle(triangle.normal, velocities)? else {
@@ -1192,7 +1193,7 @@ impl PreparedGeometry {
             };
             let initial_fraction = visibility::polygon_fraction(&initial)?;
             if initial_fraction == 0.0 {
-                return Err(GeometryError::PrecisionLoss);
+                return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
             let centroid = initial
                 .iter()
@@ -1201,25 +1202,25 @@ impl PreparedGeometry {
                 / (initial.len() as f64);
             let weights = [1.0 - centroid.x - centroid.y, centroid.x, centroid.y];
             if weights.iter().any(|weight| *weight < 0.0) {
-                return Err(GeometryError::PrecisionLoss);
+                return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
             let mut velocity = Vec3::ZERO;
             for (value, weight) in velocities.into_iter().zip(weights) {
                 velocity = value
                     .checked_mul_scalar(weight)
                     .and_then(|v| velocity.checked_add(v))
-                    .ok_or(GeometryError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?;
             }
             let upstream = velocity
                 .try_normalize()
-                .ok_or(GeometryError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?;
             if triangle
                 .normal
                 .checked_dot(upstream)
-                .ok_or(GeometryError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?
                 <= 0.0
             {
-                return Err(GeometryError::PrecisionLoss);
+                return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
             let first_patch = patches.len();
             let mut any_blocked = false;
@@ -1228,7 +1229,7 @@ impl PreparedGeometry {
             let mut shadows = Vec::new();
             stamp = stamp
                 .checked_add(1)
-                .ok_or(GeometryError::WorkBudgetExceeded)?;
+                .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
             let (candidates, query_work) = grid.candidates(
                 triangle,
                 upstream,
@@ -1238,7 +1239,7 @@ impl PreparedGeometry {
             )?;
             work = work
                 .checked_add(query_work)
-                .ok_or(GeometryError::WorkBudgetExceeded)?;
+                .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
             check_surface_work(Some(work), max_work)?;
             for j in candidates {
                 if i == j {
@@ -1248,7 +1249,7 @@ impl PreparedGeometry {
                 // predicates even when the candidate produces no shadow.
                 work = work
                     .checked_add(SHADOW_WORK)
-                    .ok_or(GeometryError::WorkBudgetExceeded)?;
+                    .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                 check_surface_work(Some(work), max_work)?;
                 let blocker = &triangles[j];
                 let Some(shadow) = visibility::Shadow::new(triangle, blocker, i, j, upstream)?
@@ -1267,18 +1268,18 @@ impl PreparedGeometry {
                             .len()
                             .checked_mul(CLIP_VERTEX_WORK)
                             .and_then(|n| n.checked_add(POLYGON_VISIT_WORK))
-                            .ok_or(GeometryError::WorkBudgetExceeded)?;
+                            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                         charge_surface_work(&mut work, polygon_work, max_work)?;
                         let mut distances = Vec::new();
                         distances
                             .try_reserve_exact(polygon.len())
-                            .map_err(|_| GeometryError::AllocationFailed)?;
+                            .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
                         for point in &polygon {
                             let distance = visibility::distance(coefficients, *point)?;
                             distances.push(distance);
                         }
                         if !distances.iter().all(|d| d.is_finite()) {
-                            return Err(GeometryError::ArithmeticOverflow);
+                            return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
                         }
                         if !distances.iter().any(|d| *d > 0.0)
                             || !distances.iter().any(|d| *d < 0.0)
@@ -1319,7 +1320,7 @@ impl PreparedGeometry {
                     // when there are no shadows to test against the centroid.
                     work = work
                         .checked_add(PARTITION_TRIANGLE_WORK)
-                        .ok_or(GeometryError::WorkBudgetExceeded)?;
+                        .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                     check_surface_work(Some(work), max_work)?;
                     let coordinates = [polygon[0], polygon[k], polygon[k + 1]];
                     let fraction = visibility::triangle_fraction(coordinates)?;
@@ -1329,11 +1330,11 @@ impl PreparedGeometry {
                     let reconstruct = |point: Vec3| a + (b - a) * point.x + (c - a) * point.y;
                     let vertices = coordinates.map(reconstruct);
                     if !area.is_finite() {
-                        return Err(GeometryError::ArithmeticOverflow);
+                        return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
                     }
                     if area == 0.0 {
                         if fraction != 0.0 {
-                            return Err(GeometryError::PrecisionLoss);
+                            return Err(crate::Error::from(GeometryError::PrecisionLoss));
                         }
                         continue;
                     }
@@ -1342,13 +1343,13 @@ impl PreparedGeometry {
                         + (coordinates[2] - coordinates[0]) / 3.0;
                     let center = reconstruct(centroid);
                     if !center.is_finite() {
-                        return Err(GeometryError::ArithmeticOverflow);
+                        return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
                     }
                     let mut blocked = false;
                     for shadow in &shadows {
                         work = work
                             .checked_add(1)
-                            .ok_or(GeometryError::WorkBudgetExceeded)?;
+                            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
                         check_surface_work(Some(work), max_work)?;
                         if shadow.covers(centroid)? {
                             blocked = true;
@@ -1380,7 +1381,7 @@ impl PreparedGeometry {
             if !partition_fraction.is_finite()
                 || (partition_fraction - initial_fraction).abs() > allowance
             {
-                return Err(GeometryError::PrecisionLoss);
+                return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
             if !any_blocked && initial_fraction == 1.0 {
                 // Replacing the partition constructs an additional output patch.
@@ -1402,7 +1403,7 @@ impl PreparedGeometry {
         let frame_work = patches
             .len()
             .checked_mul(PATCH_FRAME_WORK)
-            .ok_or(GeometryError::WorkBudgetExceeded)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::WorkBudgetExceeded))?;
         charge_surface_work(&mut work, frame_work, max_work)?;
         Ok(PreparedSurfacePatches { patches })
     }

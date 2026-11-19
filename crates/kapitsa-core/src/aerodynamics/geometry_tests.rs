@@ -99,7 +99,7 @@ fn triangle_grid_candidates_are_conservative_for_axis_and_diagonal_sweeps() {
     let grid = TriangleGrid::build(&triangles, 10_000).unwrap();
     assert!(matches!(
         TriangleGrid::build(&triangles, grid.build_work - 1),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::WorkBudgetExceeded)
     ));
     assert!(TriangleGrid::build(&triangles, grid.build_work).is_ok());
     let mut marks = vec![0; triangles.len()];
@@ -224,7 +224,7 @@ fn budgeted_sort_charges_swap_before_mutating_values() {
     let mut work = 0;
     assert_eq!(
         budgeted_sort(&mut values, &mut work, 1, Ord::cmp),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(values, [1, 2]);
     assert_eq!(work, 1);
@@ -247,7 +247,7 @@ fn budgeted_sort_counts_comparisons_and_rejects_exhaustion() {
     let mut work = 0;
     assert_eq!(
         budgeted_sort(&mut values, &mut work, required - 1, Ord::cmp),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     let mut values = source;
     let mut work = 0;
@@ -283,7 +283,7 @@ fn budgeted_sort_matches_standard_sort_for_varied_inputs() {
                 let mut charged = 0;
                 assert_eq!(
                     budgeted_sort(&mut retry, &mut charged, work - 1, Ord::cmp),
-                    Err(GeometryError::WorkBudgetExceeded)
+                    Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
                 );
                 let mut retry = input;
                 let mut charged = 0;
@@ -301,13 +301,13 @@ fn surface_work_charge_rejects_overflow_and_preserves_previous_value() {
     assert_eq!(work, 5);
     assert_eq!(
         charge_surface_work(&mut work, 1, 5),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(work, 5);
     let mut overflow = usize::MAX;
     assert_eq!(
         charge_surface_work(&mut overflow, 1, usize::MAX),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(overflow, usize::MAX);
 }
@@ -320,16 +320,16 @@ fn surface_work_enforces_hard_ceiling_even_with_larger_caller_budget() {
     assert_eq!(work, HARD_LIMIT);
     assert_eq!(
         charge_surface_work(&mut work, 1, usize::MAX),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(work, HARD_LIMIT);
     assert_eq!(
         check_surface_work(Some(0), 0),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(
         check_surface_work(None, usize::MAX),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
 }
 
@@ -340,7 +340,7 @@ fn candidate_mark_allocation_requires_work_budget_up_front() {
     let mut work = INITIAL_WORK;
     assert_eq!(
         allocate_candidate_marks(MARK_COUNT, &mut work, INITIAL_WORK + MARK_COUNT - 1),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(work, INITIAL_WORK);
     assert_eq!(
@@ -392,13 +392,13 @@ fn triangle_grid_build_accounts_for_input_scans() {
     let triangles = [triangle; TRIANGLE_COUNT];
     assert!(matches!(
         TriangleGrid::build(&triangles, SCAN_WORK - 1),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::WorkBudgetExceeded)
     ));
     let required = TriangleGrid::build(&triangles, 10_000).unwrap().build_work;
     assert!(required > SCAN_WORK);
     assert!(matches!(
         TriangleGrid::build(&triangles, required - 1),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::WorkBudgetExceeded)
     ));
     assert_eq!(
         TriangleGrid::build(&triangles, required)
@@ -422,7 +422,7 @@ fn triangle_grid_counts_empty_buckets_toward_query_budget() {
     assert_eq!(
         grid.candidates(&source, Vec3::X, &mut [], 1, 2)
             .unwrap_err(),
-        GeometryError::WorkBudgetExceeded
+        crate::Error::from(GeometryError::WorkBudgetExceeded)
     );
     assert_eq!(
         grid.candidates(&source, Vec3::X, &mut [], 1, 3).unwrap().1,
@@ -447,7 +447,7 @@ fn triangle_grid_charges_repeated_entries_even_when_deduplicated() {
     assert_eq!(
         grid.candidates(&source, Vec3::X, &mut marks, 1, QUERY_WORK - 1)
             .unwrap_err(),
-        GeometryError::WorkBudgetExceeded
+        crate::Error::from(GeometryError::WorkBudgetExceeded)
     );
     let (candidates, work) = grid
         .candidates(&source, Vec3::X, &mut marks, 2, QUERY_WORK)
@@ -472,7 +472,7 @@ fn triangle_grid_budget_stops_before_marking_next_candidate() {
     let mut marks = [0; 2];
     assert_eq!(
         grid.candidates(&source, Vec3::X, &mut marks, 1, FIRST_CANDIDATE_WORK),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(marks, [1, 0]);
     let (result, work) = grid
@@ -497,7 +497,7 @@ fn triangle_grid_rejects_query_after_work_limit_before_scanning_all_buckets() {
     assert_eq!(
         grid.candidates(&triangles[0], Vec3::X, &mut marks, 1, 1)
             .unwrap_err(),
-        GeometryError::WorkBudgetExceeded
+        crate::Error::from(GeometryError::WorkBudgetExceeded)
     );
 }
 
@@ -563,7 +563,7 @@ fn thin_grid_aligned_surface_survives_and_open_policy_is_explicit() {
     let instances = [instance(&mesh, Vec3::ZERO)];
     assert_eq!(
         PreparedGeometry::prepare(&instances, config(0.25)),
-        Err(GeometryError::OpenMesh)
+        Err(crate::Error::from(GeometryError::OpenMesh))
     );
     let mut cfg = config(0.25);
     cfg.open_mesh_policy = OpenMeshPolicy::SurfaceOnly;
@@ -617,24 +617,24 @@ fn resources_and_nonrepresentable_coordinates_are_rejected() {
         cfg.cell_size = cell_size;
         assert_eq!(
             PreparedGeometry::prepare(&instances, cfg),
-            Err(GeometryError::InvalidConfig)
+            Err(crate::Error::from(GeometryError::InvalidConfig))
         );
     }
     let mut cfg = config(0.25);
     cfg.max_cells = 1;
     assert_eq!(
         PreparedGeometry::prepare(&instances, cfg),
-        Err(GeometryError::CellBudgetExceeded)
+        Err(crate::Error::from(GeometryError::CellBudgetExceeded))
     );
     cfg = config(0.25);
     cfg.max_work = 20;
     assert_eq!(
         PreparedGeometry::prepare(&instances, cfg),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(
         PreparedGeometry::prepare(&[], config(0.25)),
-        Err(GeometryError::EmptyGeometry)
+        Err(crate::Error::from(GeometryError::EmptyGeometry))
     );
     assert!(
         PreparedGeometry::prepare(&[instance(&mesh, Vec3::splat(1e30))], config(0.25)).is_err()
@@ -712,14 +712,14 @@ fn duplicated_faces_and_wrong_winding_are_not_closed_solids() {
     let duplicate = TriangleMesh::new(cube.vertices().to_vec(), triangles).unwrap();
     assert_eq!(
         PreparedGeometry::prepare(&[instance(&duplicate, Vec3::ZERO)], config(0.25)),
-        Err(GeometryError::OpenMesh)
+        Err(crate::Error::from(GeometryError::OpenMesh))
     );
     let mut triangles = cube.triangles().to_vec();
     triangles[0].swap(0, 1);
     let wrong = TriangleMesh::new(cube.vertices().to_vec(), triangles).unwrap();
     assert_eq!(
         PreparedGeometry::prepare(&[instance(&wrong, Vec3::ZERO)], config(0.25)),
-        Err(GeometryError::OpenMesh)
+        Err(crate::Error::from(GeometryError::OpenMesh))
     );
 }
 
@@ -929,17 +929,17 @@ fn patch_budget_is_checked_before_transform_and_allocation() {
     for sources in [&instances[..], &invalid_transform[..]] {
         assert_eq!(
             PreparedGeometry::surface_triangles(sources, 1),
-            Err(GeometryError::WorkBudgetExceeded)
+            Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
         );
         assert_eq!(
             g.exposed_surface_patches(sources, Vec3::X, 0.01, 1),
-            Err(GeometryError::WorkBudgetExceeded)
+            Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
         );
     }
     // Exact conservative preflight: 3T² + 8T (T = 12).
     assert_eq!(
         g.exposed_surface_patches(&instances, Vec3::X, 0.01, 527),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(
         g.exposed_surface_patches(&instances, Vec3::X, 0.01, 100_000)
@@ -956,7 +956,7 @@ fn surface_triangle_budget_includes_instance_visits() {
     let work = 2 + 4 * 2 * 12;
     assert_eq!(
         PreparedGeometry::surface_triangles(&instances, work - 1),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(
         PreparedGeometry::surface_triangles(&instances, work)
@@ -973,7 +973,7 @@ fn patch_budget_includes_unshadowed_partition_output() -> Result<(), Box<dyn std
     let geometry = surface_geometry(&instances);
     assert_eq!(
         geometry.exposed_surface_patches(&instances, Vec3::X, 0.01, 100),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
     );
     assert_eq!(
         geometry
@@ -1011,7 +1011,10 @@ fn patch_frame_conversion_is_reserved_before_return() {
     }
     assert_eq!(evaluate(high).unwrap().len(), 1);
     let successful_calls = calls.get();
-    assert_eq!(evaluate(low), Err(GeometryError::WorkBudgetExceeded));
+    assert_eq!(
+        evaluate(low),
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
+    );
     assert_eq!(calls.get(), successful_calls);
 }
 
@@ -1035,7 +1038,10 @@ fn unshadowed_patch_replacement_has_budget_boundary() {
     // Includes one unit for replacing the partition and one for frame conversion.
     const REQUIRED_WORK: usize = 116;
     assert_eq!(high, REQUIRED_WORK);
-    assert_eq!(evaluate(low), Err(GeometryError::WorkBudgetExceeded));
+    assert_eq!(
+        evaluate(low),
+        Err(crate::Error::from(GeometryError::WorkBudgetExceeded))
+    );
     assert_eq!(evaluate(high).unwrap().len(), 1);
 }
 
@@ -1088,13 +1094,18 @@ fn partially_clipped_patches_respect_exact_budget_boundary() {
         let middle = low + (high - low) / 2;
         match evaluate(middle) {
             Ok(_) => high = middle,
-            Err(GeometryError::WorkBudgetExceeded) => low = middle,
+            Err(error)
+                if error.downcast_ref::<GeometryError>()
+                    == Some(&GeometryError::WorkBudgetExceeded) =>
+            {
+                low = middle
+            }
             Err(error) => panic!("unexpected error: {error:?}"),
         }
     }
     assert!(matches!(
         evaluate(low),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::WorkBudgetExceeded)
     ));
     assert_eq!(evaluate(high).unwrap().as_slice(), expected.as_slice());
 }
@@ -1121,13 +1132,18 @@ fn multiple_shadow_budget_exhaustion_never_returns_partial_patches() {
                 assert_eq!(result.as_slice(), expected.as_slice());
                 high = middle;
             }
-            Err(GeometryError::WorkBudgetExceeded) => low = middle,
+            Err(error)
+                if error.downcast_ref::<GeometryError>()
+                    == Some(&GeometryError::WorkBudgetExceeded) =>
+            {
+                low = middle
+            }
             Err(error) => panic!("unexpected error: {error:?}"),
         }
     }
     assert!(matches!(
         evaluate(low),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::WorkBudgetExceeded)
     ));
     assert_eq!(evaluate(high).unwrap().as_slice(), expected.as_slice());
 }
@@ -1340,11 +1356,11 @@ fn voxel_sections_configure_wave_drag_with_checked_axis() -> Result<(), Box<dyn 
     )?;
     assert!(matches!(
         section.clone().with_voxel_wave_drag(&geometry, 1, 1),
-        Err(HullError::InvalidParameters)
+        Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::InvalidParameters)
     ));
     assert!(matches!(
         section.clone().with_voxel_wave_drag(&geometry, 3, 1),
-        Err(HullError::InvalidParameters)
+        Err(error) if error.downcast_ref::<HullError>() == Some(&HullError::InvalidParameters)
     ));
     let configured = section.with_voxel_wave_drag(&geometry, 0, 1)?;
     let slopes = wave::area_slopes_from_sections(&geometry.sections()[0], geometry.cell_size(), 1)?;
@@ -1436,7 +1452,7 @@ fn preflight_counts_triangle_bounds_and_enforces_budget() -> Result<(), Box<dyn 
     settings.max_work = 100_000;
     assert!(matches!(
         PreparedGeometry::prepare(&instances, settings),
-        Err(GeometryError::WorkBudgetExceeded)
+        Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::WorkBudgetExceeded)
     ));
     Ok(())
 }
@@ -1450,7 +1466,7 @@ fn occupancy_query_validates_points_and_grid_boundaries() -> Result<(), Box<dyn 
     assert!(!geometry.occupied_at(Vec3::splat(10.0))?);
     assert_eq!(
         geometry.occupied_at(Vec3::new(f64::NAN, 0.0, 0.0)),
-        Err(GeometryError::InvalidGeometry)
+        Err(crate::Error::from(GeometryError::InvalidGeometry))
     );
     let upper = geometry.origin()
         + Vec3::new(

@@ -148,7 +148,7 @@ impl WingControl {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WingError {
     InvalidParameters,
     InvalidFlow,
@@ -159,7 +159,7 @@ pub enum WingError {
     /// A configured geometry query did not produce a wing visibility result.
     ShieldingNotPrepared,
     /// The prepared voxel occupancy could not be queried reliably.
-    ShieldingGeometry(super::geometry::GeometryError),
+    ShieldingGeometry(crate::Error),
 }
 
 impl std::fmt::Display for WingError {
@@ -525,26 +525,26 @@ impl WingSurface {
             self.local_transform
                 .transform_point(visibility.map_or(kapitsa_math::Vec3::ZERO, |value| value.offset))
                 .checked_sub(flow.center_of_mass)
-                .ok_or(overflow)?,
+                .ok_or_else(|| overflow.clone())?,
         );
         let velocity = flow
             .angular_velocity
             .checked_cross(arm)
             .and_then(|v| flow.linear_velocity.checked_add(v))
             .and_then(|v| v.checked_sub(flow.atmosphere.wind_velocity()))
-            .ok_or(overflow)?;
+            .ok_or_else(|| overflow.clone())?;
         let body_velocity = flow
             .transform
             .rotation()
             .conjugate()
             .rotate_vector(velocity)
-            .ok_or(overflow)?;
+            .ok_or_else(|| overflow.clone())?;
         let wing_velocity = self
             .local_transform
             .rotation()
             .conjugate()
             .rotate_vector(body_velocity)
-            .ok_or(overflow)?;
+            .ok_or_else(|| overflow.clone())?;
         let local_force = planar_force(
             wing_velocity,
             flow.atmosphere.density(),
@@ -557,7 +557,7 @@ impl WingSurface {
         let force = flow
             .transform
             .transform_vector(self.local_transform.transform_vector(local_force));
-        let moment = arm.checked_cross(force).ok_or(overflow)?;
+        let moment = arm.checked_cross(force).ok_or_else(|| overflow.clone())?;
         if !force.is_finite() {
             return Err(crate::Error::from(overflow));
         }

@@ -841,15 +841,11 @@ fn evaluate(
                 &wave_instances,
                 model.geometry_config,
             )
-            .map_err(|cause| {
-                crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(cause))
-            })?;
+            .map_err(|cause| crate::aerodynamics::AerodynamicsError::Geometry(cause))?;
         let section = prepared
             .wave_cache
             .configure_voxel_wave_drag(model.section.clone(), model.axis, model.smoothing_radius)
-            .map_err(|cause| {
-                crate::aerodynamics::AerodynamicsError::Hull(crate::Error::from(cause))
-            })?;
+            .map_err(|cause| crate::aerodynamics::AerodynamicsError::Hull(cause))?;
         Some((part, section))
     } else {
         None
@@ -885,9 +881,7 @@ fn evaluate(
                     &instances,
                     config,
                 )
-                .map_err(|cause| {
-                    crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(cause))
-                })?;
+                .map_err(|cause| crate::aerodynamics::AerodynamicsError::Geometry(cause))?;
             let mut candidate = Vec::new();
             candidate
                 .try_reserve_exact(wing_requests.len())
@@ -956,9 +950,7 @@ fn evaluate(
                 &prepared.wave_only_parts,
                 &mut prepared.cache,
             )
-            .map_err(|cause| {
-                crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(cause))
-            })?,
+            .map_err(|cause| crate::aerodynamics::AerodynamicsError::Geometry(cause))?,
         ),
         None => None,
     };
@@ -992,7 +984,7 @@ fn evaluate_pressure(
     collider_parts: &[PartId],
     wave_only_parts: &[PartId],
     cache: &mut PreparedGeometryCache,
-) -> Result<PreparedSurfacePatches, GeometryError> {
+) -> Result<PreparedSurfacePatches, crate::Error> {
     let config = pressure_geometry_config(collider_parts);
     let geometry = cache.prepare_instances(
         GeometryCacheKey {
@@ -1014,7 +1006,7 @@ fn evaluate_pressure(
         .state()
         .linear_velocity()
         .checked_sub(wind)
-        .ok_or(GeometryError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?;
     let velocity = inverse.transform_vector(relative);
     let omega = inverse.transform_vector(entry.body.state().angular_velocity());
     let center = entry
@@ -1029,7 +1021,7 @@ fn evaluate_pressure(
                 .checked_sub(center)
                 .and_then(|arm| omega.checked_cross(arm))
                 .and_then(|rotation| velocity.checked_add(rotation))
-                .ok_or(GeometryError::ArithmeticOverflow)
+                .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))
         })?;
     patches.retain(|patch| match patch.owner {
         GeometryOwner::Part(part) => wave_only_parts.binary_search(&part).is_err(),
