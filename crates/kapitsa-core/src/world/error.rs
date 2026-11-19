@@ -10,7 +10,7 @@ use super::{BodyId, ForceSourceId};
 use crate::joint::JointError;
 
 /// Failure while configuring or editing a rigid cluster.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClusterError {
     InvalidBodyId,
     InvalidPartId,
@@ -28,10 +28,10 @@ pub enum ClusterError {
     ManagedMass,
     ArithmeticOverflow,
     StorageCapacityExceeded,
-    Mass(crate::mass::MassError),
-    Body(BodyError),
-    Transform(crate::transform::TransformError),
-    Collision(CollisionError),
+    Mass(crate::Error),
+    Body(crate::Error),
+    Transform(crate::Error),
+    Collision(crate::Error),
 }
 
 impl fmt::Display for ClusterError {
@@ -101,7 +101,7 @@ impl From<BodyError> for ForceSourceError {
 }
 
 /// Failure returned when a world timestep cannot be completed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StepError {
     InvalidDeltaTime,
     InvalidStepResults,

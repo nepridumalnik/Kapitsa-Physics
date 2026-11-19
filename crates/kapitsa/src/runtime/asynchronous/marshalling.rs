@@ -123,7 +123,6 @@ impl From<ClusterError> for PhysicsClientError {
     fn from(error: ClusterError) -> Self {
         match error {
             ClusterError::InvalidBodyId => Self::World(WorldError::InvalidBodyId),
-            ClusterError::Body(error) => Self::Body(error),
             error => Self::Cluster(error),
         }
     }
@@ -152,8 +151,8 @@ mod tests {
             PhysicsClientError::World(WorldError::InvalidBodyId)
         );
         assert_eq!(
-            PhysicsClientError::from(ClusterError::Body(BodyError::NonFiniteValue)),
-            PhysicsClientError::Body(BodyError::NonFiniteValue)
+            PhysicsClientError::from(ClusterError::Body(BodyError::NonFiniteValue.into())),
+            PhysicsClientError::Cluster(ClusterError::Body(BodyError::NonFiniteValue.into()))
         );
         assert_eq!(
             PhysicsClientError::from(ClusterError::ManagedMass),

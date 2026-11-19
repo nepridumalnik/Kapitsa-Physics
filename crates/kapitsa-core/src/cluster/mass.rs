@@ -8,7 +8,7 @@ use super::ClusterError;
 fn map_mass_error(error: MassError) -> ClusterError {
     match error {
         MassError::ArithmeticOverflow => ClusterError::ArithmeticOverflow,
-        other => ClusterError::Mass(other),
+        other => ClusterError::Mass(crate::Error::from(other)),
     }
 }
 
@@ -19,7 +19,7 @@ pub(crate) fn aggregate_mass<'a>(
     let mut parts = parts.into_iter();
     let (first, transform) = parts
         .next()
-        .ok_or(ClusterError::Mass(MassError::EmptyComposition))?;
+        .ok_or_else(|| ClusterError::Mass(crate::Error::from(MassError::EmptyComposition)))?;
     let mut result = MassProperties::combine(&[(*first, *transform)]).map_err(map_mass_error)?;
     for (part, transform) in parts {
         result.push(part, transform).map_err(map_mass_error)?;
@@ -67,7 +67,9 @@ mod tests {
     fn empty_and_error_mapping() {
         assert_eq!(
             aggregate_mass([]),
-            Err(ClusterError::Mass(MassError::EmptyComposition))
+            Err(ClusterError::Mass(crate::Error::from(
+                MassError::EmptyComposition
+            )))
         );
         assert_eq!(
             map_mass_error(MassError::ArithmeticOverflow),
@@ -75,7 +77,7 @@ mod tests {
         );
         assert_eq!(
             map_mass_error(MassError::NonPhysicalInertia),
-            ClusterError::Mass(MassError::NonPhysicalInertia)
+            ClusterError::Mass(crate::Error::from(MassError::NonPhysicalInertia))
         );
     }
 

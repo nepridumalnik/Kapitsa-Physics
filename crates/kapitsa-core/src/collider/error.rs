@@ -3,9 +3,9 @@ use std::fmt;
 use crate::{shape::BoundsError, transform::TransformError};
 
 /// Reason collider world bounds could not be computed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColliderError {
-    Transform(TransformError),
+    Transform(crate::Error),
     Bounds(BoundsError),
 }
 
@@ -29,7 +29,7 @@ impl std::error::Error for ColliderError {
 
 impl From<TransformError> for ColliderError {
     fn from(error: TransformError) -> Self {
-        Self::Transform(error)
+        Self::Transform(crate::Error::from(error))
     }
 }
 

@@ -3,8 +3,9 @@ use rstest::rstest;
 
 use super::{Transform, TransformError};
 
-fn assert_transform_error(result: Result<Transform, TransformError>, expected: TransformError) {
-    assert_eq!(result, Err(expected));
+fn assert_transform_error(result: Result<Transform, crate::Error>, expected: TransformError) {
+    let error = result.expect_err("expected transform error");
+    assert_eq!(error.downcast_ref::<TransformError>(), Some(&expected));
 }
 
 fn assert_vec3_close(actual: Vec3, expected: Vec3) {

@@ -11,12 +11,12 @@ pub struct Transform {
 }
 
 impl Transform {
-    pub fn new(translation: Vec3, rotation: Quat) -> Result<Self, TransformError> {
+    pub fn new(translation: Vec3, rotation: Quat) -> Result<Self, crate::Error> {
         if !translation.is_finite() {
-            return Err(TransformError::NonFiniteTranslation);
+            return Err(crate::Error::from(TransformError::NonFiniteTranslation));
         }
         if !rotation.is_normalized() {
-            return Err(TransformError::InvalidRotation);
+            return Err(crate::Error::from(TransformError::InvalidRotation));
         }
 
         Ok(Self {
@@ -55,19 +55,19 @@ impl Transform {
     }
 
     /// Composes this transform with a local transform applied before it.
-    pub fn compose(&self, local: &Self) -> Result<Self, TransformError> {
+    pub fn compose(&self, local: &Self) -> Result<Self, crate::Error> {
         let Some(rotation_matrix) = self.rotation.to_mat3() else {
-            return Err(TransformError::CompositionOverflow);
+            return Err(crate::Error::from(TransformError::CompositionOverflow));
         };
         let translation = rotation_matrix * local.translation + self.translation;
         if !translation.is_finite() {
-            return Err(TransformError::CompositionOverflow);
+            return Err(crate::Error::from(TransformError::CompositionOverflow));
         }
 
         let rotation = (self.rotation * local.rotation)
             .try_normalize()
             .filter(|rotation| rotation.is_normalized())
-            .ok_or(TransformError::CompositionOverflow)?;
+            .ok_or_else(|| crate::Error::from(TransformError::CompositionOverflow))?;
 
         Ok(Self {
             translation,
@@ -75,15 +75,15 @@ impl Transform {
         })
     }
 
-    pub fn inverse(&self) -> Result<Self, TransformError> {
+    pub fn inverse(&self) -> Result<Self, crate::Error> {
         let rotation = self.rotation.conjugate();
         let Some(rotation_matrix) = rotation.to_mat3() else {
-            return Err(TransformError::InverseOverflow);
+            return Err(crate::Error::from(TransformError::InverseOverflow));
         };
         let translation = rotation_matrix * -self.translation;
 
         if !translation.is_finite() {
-            return Err(TransformError::InverseOverflow);
+            return Err(crate::Error::from(TransformError::InverseOverflow));
         }
 
         Ok(Self {

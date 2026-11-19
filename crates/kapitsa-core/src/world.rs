@@ -894,7 +894,7 @@ impl BodyStep {
                     body_id: self.body_id,
                     cause,
                 };
-                self.error = Some(Error::from(error));
+                self.error = Some(Error::from(error.clone()));
                 return Err(Error::from(error));
             }
         };
@@ -6344,7 +6344,7 @@ fn validate_force_source_values(
 pub(crate) fn transform_joint_frame(
     target_transform: crate::transform::Transform,
     frame: JointFrame,
-) -> Result<JointFrame, crate::transform::TransformError> {
+) -> Result<JointFrame, crate::Error> {
     let frame_transform =
         crate::transform::Transform::new(frame.local_anchor, frame.local_rotation)?;
     let transformed = target_transform.compose(&frame_transform)?;

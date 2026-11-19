@@ -2563,7 +2563,7 @@ fn validate_weld_frames(
 
 fn map_cluster_world_error(error: super::WorldError) -> ClusterError {
     match error {
-        super::WorldError::Collision(error) => ClusterError::Collision(error),
+        super::WorldError::Collision(error) => ClusterError::Collision(crate::Error::from(error)),
         super::WorldError::DensePoolCapacityExceeded
         | super::WorldError::DensePoolIndexOverflow
         | super::WorldError::DensePoolInvalidFreeList
@@ -2579,7 +2579,9 @@ mod tests;
 
 fn map_body_to_cluster(error: crate::Error) -> ClusterError {
     match error.downcast_ref::<crate::rigid_body::BodyError>() {
-        Some(error) => ClusterError::Body(*error),
-        None => ClusterError::Body(crate::rigid_body::BodyError::NonFiniteValue),
+        Some(error) => ClusterError::Body(crate::Error::from(*error)),
+        None => ClusterError::Body(crate::Error::from(
+            crate::rigid_body::BodyError::NonFiniteValue,
+        )),
     }
 }

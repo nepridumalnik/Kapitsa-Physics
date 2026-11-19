@@ -95,7 +95,7 @@ impl CommandError {
             return Self::Body(*error);
         }
         if let Some(error) = error.downcast_ref::<ClusterError>() {
-            return Self::from(*error);
+            return Self::from(error.clone());
         }
         if let Some(error) = error.downcast_ref::<QueryError>() {
             return Self::Query(*error);
@@ -129,7 +129,6 @@ impl From<ClusterError> for CommandError {
     fn from(error: ClusterError) -> Self {
         match error {
             ClusterError::InvalidBodyId => Self::World(WorldError::InvalidBodyId),
-            ClusterError::Body(error) => Self::Body(error),
             error => Self::Cluster(error),
         }
     }
