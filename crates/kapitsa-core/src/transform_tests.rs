@@ -3,6 +3,13 @@ use rstest::rstest;
 
 use super::{Transform, TransformError};
 
+fn assert_transform_error(result: Result<Transform, crate::Error>, expected: TransformError) {
+    match result {
+        Ok(_) => panic!("expected transform error"),
+        Err(error) => assert_eq!(error.downcast_ref::<TransformError>(), Some(&expected)),
+    }
+}
+
 fn assert_vec3_close(actual: Vec3, expected: Vec3) {
     const EPSILON: f64 = 1.0e-5;
 
@@ -43,9 +50,9 @@ fn stores_translation_and_rotation() {
 #[case::positive_infinity(Vec3::new(0.0, f64::INFINITY, 0.0))]
 #[case::negative_infinity(Vec3::new(0.0, 0.0, f64::NEG_INFINITY))]
 fn rejects_non_finite_translation(#[case] translation: Vec3) {
-    assert_eq!(
+    assert_transform_error(
         Transform::new(translation, Quat::IDENTITY),
-        Err(TransformError::NonFiniteTranslation)
+        TransformError::NonFiniteTranslation,
     );
 }
 
@@ -55,9 +62,9 @@ fn rejects_non_finite_translation(#[case] translation: Vec3) {
 #[case::nan(Quat::new(0.0, 0.0, 0.0, f64::NAN))]
 #[case::infinity(Quat::new(0.0, 0.0, f64::INFINITY, 1.0))]
 fn rejects_invalid_rotation(#[case] rotation: Quat) {
-    assert_eq!(
+    assert_transform_error(
         Transform::new(Vec3::ZERO, rotation),
-        Err(TransformError::InvalidRotation)
+        TransformError::InvalidRotation,
     );
 }
 
@@ -176,7 +183,7 @@ fn inverse_rejects_overflow() {
     )
     .expect("valid transform");
 
-    assert_eq!(transform.inverse(), Err(TransformError::InverseOverflow));
+    assert_transform_error(transform.inverse(), TransformError::InverseOverflow);
 }
 
 #[test]
@@ -250,8 +257,5 @@ fn composition_rejects_translation_overflow() {
     let local =
         Transform::new(Vec3::splat(f64::MAX), Quat::IDENTITY).expect("valid local transform");
 
-    assert_eq!(
-        parent.compose(&local),
-        Err(TransformError::CompositionOverflow)
-    );
+    assert_transform_error(parent.compose(&local), TransformError::CompositionOverflow);
 }

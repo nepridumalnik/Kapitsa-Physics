@@ -6355,8 +6355,8 @@ pub(crate) fn transform_joint_frame(
     frame: JointFrame,
 ) -> Result<JointFrame, crate::transform::TransformError> {
     let frame_transform =
-        crate::transform::Transform::new(frame.local_anchor, frame.local_rotation)?;
-    let transformed = target_transform.compose(&frame_transform)?;
+        crate::transform::Transform::new_typed(frame.local_anchor, frame.local_rotation)?;
+    let transformed = target_transform.compose_typed(&frame_transform)?;
     Ok(JointFrame::new(
         transformed.translation(),
         transformed.rotation(),

@@ -371,7 +371,7 @@ impl PhysicsWorld {
         let body = part_entry.body();
         let local_transform = part_entry
             .local_transform()
-            .compose(&collider.local_transform())
+            .compose_typed(&collider.local_transform())
             .map_err(ClusterError::Transform)?;
         self.parts
             .get_mut(part.dense)
@@ -415,7 +415,7 @@ impl PhysicsWorld {
         let body = owner.body();
         let local = owner
             .local_transform()
-            .compose(&part_local_transform)
+            .compose_typed(&part_local_transform)
             .map_err(ClusterError::Transform)?;
         self.rebind_collider(collider, body, local)?;
         let entry = self
@@ -668,7 +668,7 @@ impl PhysicsWorld {
             .ok_or(ClusterError::InvalidPartId)?
             .local_transform();
         let part_pose = body_pose
-            .compose(&desc.local_transform)
+            .compose_typed(&desc.local_transform)
             .map_err(ClusterError::Transform)?;
         validate_weld_frames(parent_transform, desc.local_transform, weld_desc)?;
 
@@ -781,7 +781,7 @@ impl PhysicsWorld {
         for mut collider in desc.colliders.drain(..) {
             let local_transform = desc
                 .local_transform
-                .compose(&collider.local_transform())
+                .compose_typed(&collider.local_transform())
                 .map_err(ClusterError::Transform)?;
             collider.set_local_transform(local_transform);
             prepared_colliders.push(collider);
@@ -1189,9 +1189,11 @@ impl PhysicsWorld {
         }
         let first_pose = first_body.state().transform();
         let second_pose = second_body.state().transform();
-        let inverse_first = first_pose.inverse().map_err(ClusterError::Transform)?;
+        let inverse_first = first_pose
+            .inverse_typed()
+            .map_err(ClusterError::Transform)?;
         let relative = inverse_first
-            .compose(&second_pose)
+            .compose_typed(&second_pose)
             .map_err(ClusterError::Transform)?;
 
         let first_root_transform = self
@@ -1203,7 +1205,7 @@ impl PhysicsWorld {
             .ok_or(ClusterError::InvalidTopology)?
             .local_transform();
         let second_root_in_first = relative
-            .compose(&second_root_transform)
+            .compose_typed(&second_root_transform)
             .map_err(ClusterError::Transform)?;
         validate_weld_frames(first_root_transform, second_root_in_first, weld_desc)?;
         if first_type == BodyType::Kinematic {
@@ -1272,7 +1274,7 @@ impl PhysicsWorld {
                 .cluster_part(part)
                 .ok_or(ClusterError::InvalidTopology)?;
             let local_transform = relative
-                .compose(&entry.local_transform())
+                .compose_typed(&entry.local_transform())
                 .map_err(ClusterError::Transform)?;
             transformed_parts.push((part, local_transform));
             for &collider in entry.colliders() {
@@ -1286,7 +1288,7 @@ impl PhysicsWorld {
                 }
                 self.validate_collider_rebind(collider, first)?;
                 let local_transform = relative
-                    .compose(&collider_entry.collider.local_transform())
+                    .compose_typed(&collider_entry.collider.local_transform())
                     .map_err(ClusterError::Transform)?;
                 transformed_colliders.push((collider, local_transform));
             }
