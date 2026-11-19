@@ -1,4 +1,4 @@
-use super::{BoundsError, ShapeError};
+use super::ShapeError;
 use crate::aabb::Aabb;
 use kapitsa_math::Vec3;
 
@@ -23,8 +23,8 @@ impl Sphere {
         self.radius
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let extent = Vec3::splat(self.radius);
-        Aabb::new(-extent, extent).map_err(BoundsError::from_unified)
+        Aabb::new(-extent, extent)
     }
 }

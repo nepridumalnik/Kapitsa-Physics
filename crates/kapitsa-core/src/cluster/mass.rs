@@ -16,7 +16,7 @@ fn map_mass_error(error: crate::Error) -> ClusterError {
 /// Combines part properties in cluster-local coordinates.
 pub(crate) fn aggregate_mass<'a>(
     parts: impl IntoIterator<Item = (&'a MassProperties, &'a Transform)>,
-) -> Result<MassProperties, ClusterError> {
+) -> Result<MassProperties, crate::Error> {
     let mut parts = parts.into_iter();
     let (first, transform) = parts
         .next()
@@ -30,7 +30,7 @@ pub(crate) fn aggregate_mass<'a>(
         || !result.center_of_mass().is_finite()
         || !result.inertia().is_finite()
     {
-        return Err(ClusterError::ArithmeticOverflow);
+        return Err(crate::Error::from(ClusterError::ArithmeticOverflow));
     }
     Ok(result)
 }
@@ -68,9 +68,9 @@ mod tests {
     fn empty_and_error_mapping() {
         assert_eq!(
             aggregate_mass([]),
-            Err(ClusterError::Mass(crate::Error::from(
+            Err(crate::Error::from(ClusterError::Mass(crate::Error::from(
                 MassError::EmptyComposition
-            )))
+            ))))
         );
         assert_eq!(
             map_mass_error(MassError::ArithmeticOverflow.into()),
@@ -140,11 +140,11 @@ mod tests {
         let far = MassProperties::new(1.0, Vec3::new(f64::MAX, 0.0, 0.0), Mat3::IDENTITY)?;
         assert_eq!(
             aggregate_mass([(&far, &huge_translation)]),
-            Err(ClusterError::ArithmeticOverflow)
+            Err(crate::Error::from(ClusterError::ArithmeticOverflow))
         );
         assert_eq!(
             aggregate_mass([(&large, &identity), (&large, &identity)]),
-            Err(ClusterError::ArithmeticOverflow)
+            Err(crate::Error::from(ClusterError::ArithmeticOverflow))
         );
         Ok(())
     }

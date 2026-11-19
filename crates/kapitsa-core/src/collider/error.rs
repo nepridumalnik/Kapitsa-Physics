@@ -6,7 +6,7 @@ use crate::{shape::BoundsError, transform::TransformError};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColliderError {
     Transform(crate::Error),
-    Bounds(BoundsError),
+    Bounds(crate::Error),
 }
 
 impl fmt::Display for ColliderError {
@@ -35,6 +35,6 @@ impl From<TransformError> for ColliderError {
 
 impl From<BoundsError> for ColliderError {
     fn from(error: BoundsError) -> Self {
-        Self::Bounds(error)
+        Self::Bounds(crate::Error::from(error))
     }
 }

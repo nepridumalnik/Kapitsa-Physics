@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use kapitsa_math::Vec3;
 
-use super::{BoundsError, ShapeError};
+use super::ShapeError;
 
 /// Convex hull of two spheres at local-space endpoints.
 /// Neither sphere may fully contain the other.
@@ -64,13 +64,12 @@ impl TaperedCapsule {
         self.end_radius
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let start_radius = Vec3::splat(self.start_radius);
         let end_radius = Vec3::splat(self.end_radius);
         Aabb::new(
             (self.start - start_radius).min(self.end - end_radius),
             (self.start + start_radius).max(self.end + end_radius),
         )
-        .map_err(BoundsError::from_unified)
     }
 }

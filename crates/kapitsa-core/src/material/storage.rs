@@ -52,7 +52,7 @@ impl MaterialStorage {
 
     pub fn insert(&mut self, material: PhysicsMaterial) -> Result<MaterialId, crate::Error> {
         if self.storage_id == 0 {
-            self.storage_id = allocate_storage_id().map_err(crate::Error::from)?;
+            self.storage_id = allocate_storage_id()?;
         }
         self.materials
             .insert(material)

@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use kapitsa_math::Affine3;
 
-use super::{BoundsError, ShapeError, TriangleMesh};
+use super::{ShapeError, TriangleMesh};
 
 pub struct BoneInfluence {
     bone_index: usize,
@@ -77,7 +77,7 @@ impl SkinnedTriangleMesh {
         &self.mesh
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         self.mesh.local_bounds()
     }
 

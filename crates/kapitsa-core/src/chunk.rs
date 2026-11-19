@@ -7,7 +7,7 @@ use crate::{
     aabb::Aabb,
     collider::Collider,
     collision::CollisionError,
-    shape::{BoundsError, Shape, TriangleMesh},
+    shape::{Shape, TriangleMesh},
     transform::Transform,
 };
 
@@ -48,10 +48,10 @@ pub struct ChunkBuilder {
 }
 
 /// Failure to collect or prepare chunk geometry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChunkBuildError {
     Empty,
-    Bounds(BoundsError),
+    Bounds(crate::Error),
     Preparation(CollisionError),
     CapacityExceeded,
 }
@@ -83,9 +83,7 @@ impl ChunkBuilder {
     }
 
     pub fn add_mesh(&mut self, mesh: TriangleMesh) -> Result<(), Error> {
-        let bounds = mesh
-            .local_bounds()
-            .map_err(|error| Error::from(ChunkBuildError::Bounds(error)))?;
+        let bounds = mesh.local_bounds().map_err(ChunkBuildError::Bounds)?;
         self.meshes
             .try_reserve(1)
             .map_err(|_| Error::from(ChunkBuildError::CapacityExceeded))?;

@@ -60,12 +60,12 @@ pub struct AtmosphericState {
 
 impl AtmosphericState {
     /// Creates atmospheric conditions with density in kg/m³ and wind velocity in m/s.
-    pub fn new(density: f64, wind_velocity: Vec3) -> Result<Self, AerodynamicsError> {
+    pub fn new(density: f64, wind_velocity: Vec3) -> Result<Self, crate::Error> {
         if !density.is_finite() || density < 0.0 {
-            return Err(AerodynamicsError::InvalidDensity);
+            return Err(crate::Error::from(AerodynamicsError::InvalidDensity));
         }
         if !wind_velocity.is_finite() {
-            return Err(AerodynamicsError::NonFiniteWindVelocity);
+            return Err(crate::Error::from(AerodynamicsError::NonFiniteWindVelocity));
         }
         Ok(Self {
             density,
@@ -106,15 +106,19 @@ impl AerodynamicProperties {
         reference_area: f64,
         drag_coefficient: f64,
         local_application_offset: Vec3,
-    ) -> Result<Self, AerodynamicsError> {
+    ) -> Result<Self, crate::Error> {
         if !reference_area.is_finite() || reference_area < 0.0 {
-            return Err(AerodynamicsError::InvalidReferenceArea);
+            return Err(crate::Error::from(AerodynamicsError::InvalidReferenceArea));
         }
         if !drag_coefficient.is_finite() || drag_coefficient < 0.0 {
-            return Err(AerodynamicsError::InvalidDragCoefficient);
+            return Err(crate::Error::from(
+                AerodynamicsError::InvalidDragCoefficient,
+            ));
         }
         if !local_application_offset.is_finite() {
-            return Err(AerodynamicsError::NonFiniteApplicationOffset);
+            return Err(crate::Error::from(
+                AerodynamicsError::NonFiniteApplicationOffset,
+            ));
         }
         Ok(Self {
             reference_area,
@@ -140,9 +144,11 @@ impl AerodynamicProperties {
     pub(crate) fn with_local_application_offset(
         mut self,
         local_application_offset: Vec3,
-    ) -> Result<Self, AerodynamicsError> {
+    ) -> Result<Self, crate::Error> {
         if !local_application_offset.is_finite() {
-            return Err(AerodynamicsError::NonFiniteApplicationOffset);
+            return Err(crate::Error::from(
+                AerodynamicsError::NonFiniteApplicationOffset,
+            ));
         }
         self.local_application_offset = local_application_offset;
         Ok(self)
@@ -164,9 +170,11 @@ impl AerodynamicProperties {
         mut self,
         lift_coefficient: f64,
         local_lift_axis: Vec3,
-    ) -> Result<Self, AerodynamicsError> {
+    ) -> Result<Self, crate::Error> {
         if !lift_coefficient.is_finite() {
-            return Err(AerodynamicsError::InvalidLiftCoefficient);
+            return Err(crate::Error::from(
+                AerodynamicsError::InvalidLiftCoefficient,
+            ));
         }
         let local_lift_axis = local_lift_axis
             .try_normalize()
@@ -187,7 +195,7 @@ impl AerodynamicProperties {
         transform: Transform,
         linear_velocity: Vec3,
         angular_velocity: Vec3,
-    ) -> Result<AerodynamicForce, AerodynamicsError> {
+    ) -> Result<AerodynamicForce, crate::Error> {
         let (drag, lift) =
             self.force_components(atmosphere, transform, linear_velocity, angular_velocity)?;
         let force = drag
@@ -205,12 +213,16 @@ impl AerodynamicProperties {
         transform: Transform,
         linear_velocity: Vec3,
         angular_velocity: Vec3,
-    ) -> Result<(Vec3, Vec3), AerodynamicsError> {
+    ) -> Result<(Vec3, Vec3), crate::Error> {
         if !linear_velocity.is_finite() {
-            return Err(AerodynamicsError::NonFiniteLinearVelocity);
+            return Err(crate::Error::from(
+                AerodynamicsError::NonFiniteLinearVelocity,
+            ));
         }
         if !angular_velocity.is_finite() {
-            return Err(AerodynamicsError::NonFiniteAngularVelocity);
+            return Err(crate::Error::from(
+                AerodynamicsError::NonFiniteAngularVelocity,
+            ));
         }
 
         if atmosphere.density == 0.0
@@ -223,7 +235,7 @@ impl AerodynamicProperties {
 
         let world_offset = transform.transform_vector(self.local_application_offset);
         if !world_offset.is_finite() {
-            return Err(AerodynamicsError::ArithmeticOverflow);
+            return Err(crate::Error::from(AerodynamicsError::ArithmeticOverflow));
         }
         let rotational_velocity = angular_velocity
             .checked_cross(world_offset)
@@ -244,12 +256,12 @@ impl AerodynamicProperties {
 
         let speed_squared = speed * speed;
         if !speed_squared.is_finite() {
-            return Err(AerodynamicsError::ArithmeticOverflow);
+            return Err(crate::Error::from(AerodynamicsError::ArithmeticOverflow));
         }
         let dynamic_pressure = 0.5 * atmosphere.density * speed_squared;
         let drag_magnitude = dynamic_pressure * self.reference_area * self.drag_coefficient;
         if !drag_magnitude.is_finite() {
-            return Err(AerodynamicsError::ArithmeticOverflow);
+            return Err(crate::Error::from(AerodynamicsError::ArithmeticOverflow));
         }
         let flow_direction = relative_velocity
             .checked_mul_scalar(1.0 / speed)
@@ -277,7 +289,7 @@ impl AerodynamicProperties {
                 let lift_magnitude =
                     dynamic_pressure * self.reference_area * self.lift_coefficient * lift_factor;
                 if !lift_magnitude.is_finite() {
-                    return Err(AerodynamicsError::ArithmeticOverflow);
+                    return Err(crate::Error::from(AerodynamicsError::ArithmeticOverflow));
                 }
                 lift_direction
                     .checked_mul_scalar(lift_magnitude)
@@ -396,7 +408,9 @@ mod tests {
                 Vec3::new(f64::NAN, 0.0, 0.0),
                 Vec3::ZERO
             ),
-            Err(AerodynamicsError::NonFiniteLinearVelocity)
+            Err(crate::Error::from(
+                AerodynamicsError::NonFiniteLinearVelocity
+            ))
         );
     }
 
@@ -525,21 +539,25 @@ mod tests {
     fn constructors_reject_invalid_values() {
         assert_eq!(
             AtmosphericState::new(-1.0, Vec3::ZERO),
-            Err(AerodynamicsError::InvalidDensity)
+            Err(crate::Error::from(AerodynamicsError::InvalidDensity))
         );
         assert_eq!(
             AerodynamicProperties::new(1.0, f64::NAN, Vec3::ZERO),
-            Err(AerodynamicsError::InvalidDragCoefficient)
+            Err(crate::Error::from(
+                AerodynamicsError::InvalidDragCoefficient
+            ))
         );
         assert_eq!(
             AerodynamicProperties::new(1.0, 1.0, Vec3::new(f64::INFINITY, 0.0, 0.0)),
-            Err(AerodynamicsError::NonFiniteApplicationOffset)
+            Err(crate::Error::from(
+                AerodynamicsError::NonFiniteApplicationOffset
+            ))
         );
         assert_eq!(
             AerodynamicProperties::new(1.0, 0.0, Vec3::ZERO)
                 .unwrap()
                 .with_lift(1.0, Vec3::ZERO),
-            Err(AerodynamicsError::InvalidLiftAxis)
+            Err(crate::Error::from(AerodynamicsError::InvalidLiftAxis))
         );
     }
 }

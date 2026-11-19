@@ -3219,7 +3219,7 @@ fn world_id_allocator_reports_exhaustion_without_wrapping() {
     assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), u64::MAX);
     assert_eq!(
         allocate_world_id(&counter),
-        Err(WorldError::WorldIdExhausted)
+        Err(crate::Error::from(WorldError::WorldIdExhausted))
     );
     assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), u64::MAX);
 }
@@ -4161,7 +4161,7 @@ fn body_removal_invalidates_its_force_sources_and_disable_stops_force() {
     assert_eq!(world.force_source(source), None);
     assert_eq!(
         world.remove_force_source(source),
-        Err(ForceSourceError::InvalidForceSourceId)
+        Err(crate::Error::from(ForceSourceError::InvalidForceSourceId))
     );
 }
 

@@ -540,7 +540,9 @@ fn automatic_weld_failure_multiple_clusters_is_atomic_on_rejection()
         world.weld_split_fail_after = Some(1);
         assert!(matches!(
             step_cause(&step(&mut world)),
-            Some(StepError::WeldSplit(ClusterError::StorageCapacityExceeded))
+            Some(StepError::WeldSplit(cause))
+                if cause.downcast_ref::<ClusterError>()
+                    == Some(&ClusterError::StorageCapacityExceeded)
         ));
         assert_eq!(world.body_count(), 2);
         for (body, _, child, weld) in &clusters {

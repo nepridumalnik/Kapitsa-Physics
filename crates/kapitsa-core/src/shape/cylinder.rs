@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use kapitsa_math::Vec3;
 
-use super::{BoundsError, ShapeError};
+use super::ShapeError;
 
 /// Finite cylinder whose cap centers are local-space `start` and `end`.
 pub struct Cylinder {
@@ -42,12 +42,11 @@ impl Cylinder {
         self.radius
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let radius = Vec3::splat(self.radius);
         Aabb::new(
             self.start.min(self.end) - radius,
             self.start.max(self.end) + radius,
         )
-        .map_err(BoundsError::from_unified)
     }
 }

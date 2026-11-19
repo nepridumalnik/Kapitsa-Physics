@@ -597,7 +597,7 @@ fn capsule_local_bounds_rejects_overflow() {
 
     assert_eq!(
         capsule.local_bounds(),
-        Err(BoundsError::InvalidBounds(AabbError::NonFiniteBounds))
+        Err(crate::Error::from(AabbError::NonFiniteBounds))
     );
 }
 
@@ -695,21 +695,21 @@ fn cylindrical_local_bounds_reject_overflow() {
     let cylinder = Cylinder::new(start, end, f64::MAX).expect("valid cylinder");
     assert_eq!(
         cylinder.local_bounds(),
-        Err(BoundsError::InvalidBounds(AabbError::NonFiniteBounds))
+        Err(crate::Error::from(AabbError::NonFiniteBounds))
     );
 
     let tapered_capsule =
         TaperedCapsule::new(start, end, f64::MAX, f64::MAX).expect("valid tapered capsule");
     assert_eq!(
         tapered_capsule.local_bounds(),
-        Err(BoundsError::InvalidBounds(AabbError::NonFiniteBounds))
+        Err(crate::Error::from(AabbError::NonFiniteBounds))
     );
 
     let tapered_cylinder =
         TaperedCylinder::new(start, end, f64::MAX, f64::MAX).expect("valid tapered cylinder");
     assert_eq!(
         tapered_cylinder.local_bounds(),
-        Err(BoundsError::InvalidBounds(AabbError::NonFiniteBounds))
+        Err(crate::Error::from(AabbError::NonFiniteBounds))
     );
 }
 
@@ -920,7 +920,7 @@ fn shape_local_bounds_propagates_overflow() {
 
     assert_eq!(
         Shape::Cylinder(cylinder).local_bounds(),
-        Err(BoundsError::InvalidBounds(AabbError::NonFiniteBounds))
+        Err(crate::Error::from(AabbError::NonFiniteBounds))
     );
 }
 
@@ -1003,7 +1003,7 @@ fn sphere_world_bounds_report_overflow() {
 
     assert_eq!(
         sphere.world_bounds(&transform),
-        Err(BoundsError::InvalidBounds(
+        Err(crate::Error::from(
             crate::aabb::AabbError::TransformOverflow
         ))
     );

@@ -237,8 +237,8 @@ impl SpatialIndex {
         direction: Vec3,
         mut max_distance: f64,
         stack: &mut Vec<(usize, f64)>,
-        mut visit: impl FnMut(ColliderId) -> Result<Option<f64>, QueryError>,
-    ) -> Result<(), QueryError> {
+        mut visit: impl FnMut(ColliderId) -> Result<Option<f64>, crate::Error>,
+    ) -> Result<(), crate::Error> {
         stack.clear();
         if let Some(root) = self.root
             && let Some(entry) = ray_aabb_entry(
@@ -264,7 +264,7 @@ impl SpatialIndex {
                         || hit_distance < 0.0
                         || hit_distance > max_distance
                     {
-                        return Err(QueryError::ArithmeticOverflow);
+                        return Err(crate::Error::from(QueryError::ArithmeticOverflow));
                     }
                     max_distance = hit_distance;
                 }

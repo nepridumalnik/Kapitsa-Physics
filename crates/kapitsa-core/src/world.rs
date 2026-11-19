@@ -177,12 +177,12 @@ pub use metrics::PhysicsStepMetrics;
 
 static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
-fn allocate_world_id(counter: &AtomicU64) -> Result<u64, WorldError> {
+fn allocate_world_id(counter: &AtomicU64) -> Result<u64, Error> {
     counter
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
             next.checked_add(1)
         })
-        .map_err(|_| WorldError::WorldIdExhausted)
+        .map_err(|_| Error::from(WorldError::WorldIdExhausted))
 }
 
 use crate::{
@@ -984,18 +984,18 @@ impl PhysicsWorld {
     ) -> Result<Vec<WeldFailureCandidate>, WeldBalanceError> {
         use crate::cluster::WeldStrength;
         let mut welds = HashMap::new();
-        welds
-            .try_reserve(snapshot_welds.len())
-            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        welds.try_reserve(snapshot_welds.len()).map_err(|_| {
+            WeldBalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+        })?;
         for weld in snapshot_welds {
             if welds.insert(weld.weld, weld.value).is_some() {
                 return Err(WeldBalanceError::InvalidTree);
             }
         }
         let mut candidates = Vec::new();
-        candidates
-            .try_reserve_exact(reactions.len())
-            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        candidates.try_reserve_exact(reactions.len()).map_err(|_| {
+            WeldBalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+        })?;
         for reaction in reactions {
             let weld = welds
                 .get(&reaction.weld)
@@ -1010,7 +1010,9 @@ impl PhysicsWorld {
             let force = reaction.force.length();
             let torque = reaction.moment.length();
             if !force.is_finite() || !torque.is_finite() {
-                return Err(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow));
+                return Err(WeldBalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )));
             }
             let force_exceeded = max_force.is_some_and(|limit| force > limit);
             let torque_exceeded = max_torque.is_some_and(|limit| torque > limit);
@@ -1254,9 +1256,9 @@ impl PhysicsWorld {
             use crate::aerodynamics::geometry::GeometryOwner;
             let pressure = pressure.ok_or(WeldBalanceError::IncompleteLoads)?;
             let mut indices = HashMap::new();
-            indices
-                .try_reserve(tree.len())
-                .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+            indices.try_reserve(tree.len()).map_err(|_| {
+                WeldBalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+            })?;
             for (index, part) in tree.iter().enumerate() {
                 indices.insert(part.part, index);
             }
@@ -1266,14 +1268,12 @@ impl PhysicsWorld {
                 };
                 let index = *indices.get(part).ok_or(WeldBalanceError::InvalidTree)?;
                 let input = &mut inputs[index];
-                input.external_force = input
-                    .external_force
-                    .checked_add(wrench.force)
-                    .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
-                input.external_moment = input
-                    .external_moment
-                    .checked_add(wrench.moment)
-                    .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                input.external_force = input.external_force.checked_add(wrench.force).ok_or(
+                    WeldBalanceError::Physics(crate::Error::from(ClusterError::ArithmeticOverflow)),
+                )?;
+                input.external_moment = input.external_moment.checked_add(wrench.moment).ok_or(
+                    WeldBalanceError::Physics(crate::Error::from(ClusterError::ArithmeticOverflow)),
+                )?;
             }
         }
         if matches!(load_mode, WeldLoadMode::PartAerodynamics)
@@ -1290,9 +1290,9 @@ impl PhysicsWorld {
                 return Err(WeldBalanceError::IncompleteLoads);
             }
             let mut indices = HashMap::new();
-            indices
-                .try_reserve(tree.len())
-                .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+            indices.try_reserve(tree.len()).map_err(|_| {
+                WeldBalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+            })?;
             for (index, part) in tree.iter().enumerate() {
                 indices.insert(part.part, index);
             }
@@ -1303,14 +1303,17 @@ impl PhysicsWorld {
                 let input =
                     &mut inputs[*indices.get(&part).ok_or(WeldBalanceError::InvalidTree)?];
                 for wrench in [load.drag, load.lift] {
-                    input.external_force = input
-                        .external_force
-                        .checked_add(wrench.force)
-                        .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                    input.external_force = input.external_force.checked_add(wrench.force).ok_or(
+                        WeldBalanceError::Physics(crate::Error::from(
+                            ClusterError::ArithmeticOverflow,
+                        )),
+                    )?;
                     input.external_moment = input
                         .external_moment
                         .checked_add(wrench.moment)
-                        .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                        .ok_or(WeldBalanceError::Physics(crate::Error::from(
+                            ClusterError::ArithmeticOverflow,
+                        )))?;
                 }
             }
         }
@@ -1319,28 +1322,37 @@ impl PhysicsWorld {
         for input in &mut inputs {
             force = force
                 .checked_add(input.external_force)
-                .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                .ok_or(WeldBalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))?;
             moment = moment
                 .checked_add(input.external_moment)
-                .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+                .ok_or(WeldBalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))?;
             input.loads_complete = true;
         }
-        let acceleration = force
-            .checked_mul_scalar(1.0 / mass.mass())
-            .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
+        let acceleration =
+            force
+                .checked_mul_scalar(1.0 / mass.mass())
+                .ok_or(WeldBalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))?;
         let omega = state.state.angular_velocity();
         let effective_moment = inertia
             .checked_mul_vector(omega)
             .and_then(|angular_momentum| omega.checked_cross(angular_momentum))
             .and_then(|gyroscopic| moment.checked_sub(gyroscopic))
-            .ok_or(WeldBalanceError::Physics(ClusterError::ArithmeticOverflow))?;
-        let alpha = inertia
-            .solve_spd(effective_moment)
-            .map_err(|_| WeldBalanceError::Physics(ClusterError::InvalidMotion))?;
+            .ok_or(WeldBalanceError::Physics(crate::Error::from(
+                ClusterError::ArithmeticOverflow,
+            )))?;
+        let alpha = inertia.solve_spd(effective_moment).map_err(|_| {
+            WeldBalanceError::Physics(crate::Error::from(ClusterError::InvalidMotion))
+        })?;
         let mut parents = Vec::new();
-        parents
-            .try_reserve_exact(tree.len())
-            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        parents.try_reserve_exact(tree.len()).map_err(|_| {
+            WeldBalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+        })?;
         parents.extend(tree.iter().map(|part| part.parent));
         let reactions = tree_reactions(
             &inputs,
@@ -1356,11 +1368,13 @@ impl PhysicsWorld {
         let mut result = Vec::new();
         result
             .try_reserve_exact(tree.len().saturating_sub(1))
-            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+            .map_err(|_| {
+                WeldBalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+            })?;
         let mut welds = HashMap::new();
-        welds
-            .try_reserve(snapshot_welds.len())
-            .map_err(|_| WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded))?;
+        welds.try_reserve(snapshot_welds.len()).map_err(|_| {
+            WeldBalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+        })?;
         for weld in snapshot_welds {
             if welds.insert(weld.weld, weld.value).is_some() {
                 return Err(WeldBalanceError::InvalidTree);
@@ -1623,10 +1637,10 @@ impl PhysicsWorld {
         collider: ColliderId,
         indices: &[usize],
         base: crate::aerodynamics::pressure::BasePressure,
-    ) -> Result<(), crate::aerodynamics::AerodynamicsError> {
+    ) -> Result<(), crate::Error> {
         use crate::aerodynamics::{Aerodynamics, AerodynamicsError};
         if body.world != self.world_id || collider.world != self.world_id {
-            return Err(AerodynamicsError::UnsupportedModel);
+            return Err(crate::Error::from(AerodynamicsError::UnsupportedModel));
         }
         let entry = self
             .bodies
@@ -1634,7 +1648,7 @@ impl PhysicsWorld {
             .ok_or(AerodynamicsError::UnsupportedModel)?;
         if entry.cluster.is_some() || !matches!(entry.body.aerodynamics(), Aerodynamics::Colliders)
         {
-            return Err(AerodynamicsError::UnsupportedModel);
+            return Err(crate::Error::from(AerodynamicsError::UnsupportedModel));
         }
         let source = self
             .colliders
@@ -1710,14 +1724,14 @@ impl PhysicsWorld {
         &mut self,
         id: BodyId,
         properties: AerodynamicProperties,
-    ) -> Result<usize, WorldError> {
+    ) -> Result<usize, Error> {
         if id.world != self.world_id {
-            return Err(WorldError::InvalidBodyId);
+            return Err(Error::from(WorldError::InvalidBodyId));
         }
         let surfaces = &mut self
             .bodies
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidBodyId)?
+            .ok_or_else(|| Error::from(WorldError::InvalidBodyId))?
             .body
             .aerodynamic_surfaces;
         surfaces
@@ -1733,18 +1747,18 @@ impl PhysicsWorld {
         &mut self,
         id: BodyId,
         index: usize,
-    ) -> Result<AerodynamicProperties, WorldError> {
+    ) -> Result<AerodynamicProperties, Error> {
         if id.world != self.world_id {
-            return Err(WorldError::InvalidBodyId);
+            return Err(Error::from(WorldError::InvalidBodyId));
         }
         let surfaces = &mut self
             .bodies
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidBodyId)?
+            .ok_or_else(|| Error::from(WorldError::InvalidBodyId))?
             .body
             .aerodynamic_surfaces;
         if index >= surfaces.len() {
-            return Err(WorldError::InvalidAerodynamicSurface);
+            return Err(Error::from(WorldError::InvalidAerodynamicSurface));
         }
         let properties = surfaces.remove(index).properties();
         self.body_revision = self.body_revision.wrapping_add(1);
@@ -1756,13 +1770,15 @@ impl PhysicsWorld {
         &mut self,
         part: PartId,
         properties: AerodynamicProperties,
-    ) -> Result<usize, WorldError> {
-        let part_entry = self.cluster_part(part).ok_or(WorldError::InvalidBodyId)?;
+    ) -> Result<usize, Error> {
+        let part_entry = self
+            .cluster_part(part)
+            .ok_or_else(|| Error::from(WorldError::InvalidBodyId))?;
         let body = part_entry.body();
         let surfaces = &mut self
             .bodies
             .get_mut(body.dense)
-            .ok_or(WorldError::InvalidBodyId)?
+            .ok_or_else(|| Error::from(WorldError::InvalidBodyId))?
             .body
             .aerodynamic_surfaces;
         surfaces
@@ -1777,7 +1793,7 @@ impl PhysicsWorld {
         surface: AerodynamicSurface,
         old_body: &BodyMotion,
         new_body: &BodyMotion,
-    ) -> Result<AerodynamicSurface, crate::aerodynamics::AerodynamicsError> {
+    ) -> Result<AerodynamicSurface, crate::Error> {
         if !matches!(surface.target(), AerodynamicTarget::Body) {
             return Ok(surface);
         }
@@ -1865,14 +1881,14 @@ impl PhysicsWorld {
         &mut self,
         id: GravityId,
         gravity: impl Into<Gravity>,
-    ) -> Result<(), WorldError> {
+    ) -> Result<(), Error> {
         if id.world != self.world_id {
-            return Err(WorldError::InvalidGravityId);
+            return Err(Error::from(WorldError::InvalidGravityId));
         }
         *self
             .gravity_fields
             .get_mut(id.dense)
-            .ok_or(WorldError::InvalidGravityId)? = gravity.into();
+            .ok_or_else(|| Error::from(WorldError::InvalidGravityId))? = gravity.into();
         Ok(())
     }
 
@@ -1915,11 +1931,11 @@ impl PhysicsWorld {
         &mut self,
         id: MaterialId,
         material: PhysicsMaterial,
-    ) -> Result<(), WorldError> {
+    ) -> Result<(), Error> {
         let current = self
             .materials
             .get_mut(id)
-            .ok_or(WorldError::InvalidMaterialId)?;
+            .ok_or_else(|| Error::from(WorldError::InvalidMaterialId))?;
         if *current == material {
             return Ok(());
         }
@@ -2234,19 +2250,19 @@ impl PhysicsWorld {
     fn resolve_joint_target(
         &self,
         target: JointTarget,
-    ) -> Result<(BodyId, crate::transform::Transform), WorldError> {
+    ) -> Result<(BodyId, crate::transform::Transform), Error> {
         match target {
             JointTarget::Body(body) => self
                 .body(body)
                 .map(|_| (body, crate::transform::Transform::identity()))
-                .ok_or(WorldError::InvalidJointTarget),
+                .ok_or_else(|| Error::from(WorldError::InvalidJointTarget)),
             JointTarget::Part(part) => self
                 .cluster_part(part)
                 .and_then(|entry| {
                     self.cluster(entry.body())
                         .map(|_| (entry.body(), entry.local_transform()))
                 })
-                .ok_or(WorldError::InvalidJointTarget),
+                .ok_or_else(|| Error::from(WorldError::InvalidJointTarget)),
         }
     }
 
@@ -2476,24 +2492,21 @@ impl PhysicsWorld {
         &mut self,
         id: ForceSourceId,
         enabled: bool,
-    ) -> Result<(), ForceSourceError> {
+    ) -> Result<(), Error> {
         self.force_source_mut(id)
-            .ok_or(ForceSourceError::InvalidForceSourceId)?
+            .ok_or_else(|| Error::from(ForceSourceError::InvalidForceSourceId))?
             .enabled = enabled;
         Ok(())
     }
 
     /// Removes a source and returns its last configuration.
-    pub fn remove_force_source(
-        &mut self,
-        id: ForceSourceId,
-    ) -> Result<ForceSource, ForceSourceError> {
+    pub fn remove_force_source(&mut self, id: ForceSourceId) -> Result<ForceSource, Error> {
         if id.world != self.world_id {
-            return Err(ForceSourceError::InvalidForceSourceId);
+            return Err(Error::from(ForceSourceError::InvalidForceSourceId));
         }
         self.force_sources
             .remove(id.dense)
-            .ok_or(ForceSourceError::InvalidForceSourceId)
+            .ok_or_else(|| Error::from(ForceSourceError::InvalidForceSourceId))
     }
 
     fn force_source_mut(&mut self, id: ForceSourceId) -> Option<&mut ForceSource> {
@@ -3312,10 +3325,7 @@ impl PhysicsWorld {
             Some(
                 atmosphere
                     .state_at(center)
-                    .map_err(|cause| StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::Error::from(cause),
-                    })?,
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
             )
             .filter(|state| state.density() != 0.0)
         } else {
@@ -3381,10 +3391,7 @@ impl PhysicsWorld {
                 .transform_point(model.section.local_transform().translation());
             let state = atmosphere
                 .state_at(point)
-                .map_err(|cause| StepError::Aerodynamics {
-                    body_id,
-                    cause: crate::Error::from(cause),
-                })?;
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             if state.density() != 0.0 {
                 return Err(Error::from(StepError::Aerodynamics {
                     body_id,
@@ -3402,10 +3409,7 @@ impl PhysicsWorld {
             }
             let state = atmosphere
                 .state_at(point)
-                .map_err(|cause| StepError::Aerodynamics {
-                    body_id,
-                    cause: crate::Error::from(cause),
-                })?;
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             let wrench = section
                 .evaluate(crate::aerodynamics::pressure::PressureFlow {
                     atmosphere: state,
@@ -3459,13 +3463,9 @@ impl PhysicsWorld {
             if !point.is_finite() {
                 return Err(Error::from(error()));
             }
-            let atmosphere =
-                atmosphere
-                    .state_at(point)
-                    .map_err(|cause| StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::Error::from(cause),
-                    })?;
+            let atmosphere = atmosphere
+                .state_at(point)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             if atmosphere.density() != 0.0 {
                 if visibility_required && visibility.is_none() {
                     return Err(Error::from(StepError::Aerodynamics {
@@ -3573,13 +3573,9 @@ impl PhysicsWorld {
                 if !point.is_finite() {
                     return Err(Error::from(error()));
                 }
-                let state =
-                    atmosphere
-                        .state_at(point)
-                        .map_err(|cause| StepError::Aerodynamics {
-                            body_id,
-                            cause: crate::Error::from(cause),
-                        })?;
+                let state = atmosphere
+                    .state_at(point)
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
                 let wrench = section
                     .evaluate(crate::aerodynamics::pressure::PressureFlow {
                         atmosphere: state,
@@ -3635,13 +3631,9 @@ impl PhysicsWorld {
             }
             .filter(|point| point.is_finite())
             .ok_or_else(error)?;
-            let local_atmosphere =
-                atmosphere
-                    .state_at(point)
-                    .map_err(|cause| StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::Error::from(cause),
-                    })?;
+            let local_atmosphere = atmosphere
+                .state_at(point)
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             if local_atmosphere.density() == 0.0 {
                 if let Some(entries) = raw_simple_surfaces.as_deref_mut() {
                     entries.try_reserve(1).map_err(|_| error())?;
@@ -3675,10 +3667,7 @@ impl PhysicsWorld {
                     point_velocity,
                     Vec3::ZERO,
                 )
-                .map_err(|cause| StepError::Aerodynamics {
-                    body_id,
-                    cause: crate::Error::from(cause),
-                })?;
+                .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
             drag = drag.checked_add(surface_drag).ok_or_else(error)?;
             let surface_drag_torque = offset.checked_cross(surface_drag).ok_or_else(error)?;
             drag_torque = drag_torque
@@ -3733,10 +3722,7 @@ impl PhysicsWorld {
         }
         let center_wind = atmosphere
             .state_at(center)
-            .map_err(|cause| StepError::Aerodynamics {
-                body_id,
-                cause: crate::Error::from(cause),
-            })?
+            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?
             .wind_velocity();
         let mut scale = 1.0_f64;
         if let Some(dt) = dt {
@@ -3962,10 +3948,7 @@ impl PhysicsWorld {
             .transform_point(model.section.local_transform().translation());
         let state = atmosphere
             .state_at(point)
-            .map_err(|cause| StepError::Aerodynamics {
-                body_id,
-                cause: crate::Error::from(cause),
-            })?;
+            .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
         if state.density() == 0.0 {
             return Ok(None);
         }
@@ -4114,10 +4097,7 @@ impl PhysicsWorld {
                 Some(
                     atmosphere
                         .state_at(center)
-                        .map_err(|cause| StepError::Aerodynamics {
-                            body_id,
-                            cause: crate::Error::from(cause),
-                        })?,
+                        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
                 )
                 .filter(|state| state.density() != 0.0)
             } else {
@@ -4142,10 +4122,7 @@ impl PhysicsWorld {
                         attached,
                         entry.collider_tessellation,
                     )
-                    .map_err(|cause| StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::Error::from(cause),
-                    })?,
+                    .map_err(|cause| StepError::Aerodynamics { body_id, cause })?,
                 );
             }
             let mesh = match entry.body.aerodynamics() {
@@ -4295,10 +4272,7 @@ impl PhysicsWorld {
                             mesh,
                             config.max_patch_work,
                         )
-                        .map_err(|cause| StepError::Aerodynamics {
-                            body_id,
-                            cause: crate::Error::from(cause),
-                        })?;
+                        .map_err(|cause| StepError::Aerodynamics { body_id, cause })?;
                         let visible = geometry
                             .surface_patches_with_flow(
                                 &[crate::aerodynamics::geometry::GeometryInstance {
@@ -4494,7 +4468,7 @@ impl PhysicsWorld {
                 .state_at(center)
                 .map_err(|cause| StepError::Aerodynamics {
                     body_id: update.id,
-                    cause: crate::Error::from(cause),
+                    cause,
                 })?;
             if state.density() == 0.0 {
                 continue;
@@ -6078,38 +6052,37 @@ impl PhysicsWorld {
             return Err(Error::from(WorldError::InvalidBodyId));
         }
         self.add_collider_internal(body, collider)
-            .map_err(Error::from)
     }
 
     fn add_collider_internal(
         &mut self,
         body: BodyId,
         mut collider: Collider,
-    ) -> Result<ColliderId, WorldError> {
+    ) -> Result<ColliderId, Error> {
         if body.world != self.world_id {
-            return Err(WorldError::InvalidBodyId);
+            return Err(Error::from(WorldError::InvalidBodyId));
         }
         if collider
             .material()
             .is_some_and(|material| !self.materials.contains(material))
         {
-            return Err(WorldError::InvalidMaterialId);
+            return Err(Error::from(WorldError::InvalidMaterialId));
         }
         let first = self
             .bodies
             .get(body.dense)
-            .ok_or(WorldError::InvalidBodyId)?
+            .ok_or_else(|| Error::from(WorldError::InvalidBodyId))?
             .first_collider;
         if self.bodies.get(body.dense).is_some_and(|entry| {
             entry.body.physics().body_type() == crate::rigid_body::BodyType::Dynamic
                 && !collider.shape().is_convex()
         }) {
-            return Err(WorldError::Collision(
+            return Err(Error::from(WorldError::Collision(
                 CollisionError::UnsupportedDynamicGeometry,
-            ));
+            )));
         }
         if first.is_some_and(|id| self.colliders.get(id.dense).is_none()) {
-            return Err(WorldError::InvalidColliderId);
+            return Err(Error::from(WorldError::InvalidColliderId));
         }
         collider.prepare_query_geometry()?;
         let has_finite_bounds = collider.local_bounds().ok().flatten().is_some();
@@ -6426,12 +6399,9 @@ impl Default for PhysicsWorld {
     }
 }
 
-fn validate_force_source_values(
-    local_point: Vec3,
-    local_force: Vec3,
-) -> Result<(), ForceSourceError> {
+fn validate_force_source_values(local_point: Vec3, local_force: Vec3) -> Result<(), Error> {
     if !local_point.is_finite() || !local_force.is_finite() {
-        return Err(ForceSourceError::NonFiniteValue);
+        return Err(Error::from(ForceSourceError::NonFiniteValue));
     }
     Ok(())
 }

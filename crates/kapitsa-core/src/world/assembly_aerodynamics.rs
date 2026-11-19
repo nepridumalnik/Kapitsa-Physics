@@ -7,7 +7,7 @@ use crate::Error;
 use super::{BodyEntry, BodyId, ClusterError, PartId, PhysicsWorld, StepError};
 use crate::{
     aerodynamics::{
-        AerodynamicsError, Atmosphere,
+        Atmosphere,
         cache::{GeometryCacheKey, PreparedGeometryCache},
         geometry::{
             GeometryConfig, GeometryError, GeometryInstance, GeometryOwner, OpenMeshPolicy,
@@ -512,12 +512,9 @@ pub(super) fn prepare(
             .world_center_of_mass()
             .map_err(|_| error())?
             .ok_or_else(error)?;
-        let state = atmosphere.state_at(center).map_err(|cause| {
-            Error::from(StepError::Aerodynamics {
-                body_id,
-                cause: crate::Error::from(cause),
-            })
-        })?;
+        let state = atmosphere
+            .state_at(center)
+            .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
         (state.density() != 0.0).then_some(state.wind_velocity())
     } else {
         None
@@ -535,12 +532,9 @@ pub(super) fn prepare(
             .compose(&local)
             .map_err(|_| error())?;
         let point = transform.transform_point(model.section.local_transform().translation());
-        let state = atmosphere.state_at(point).map_err(|cause| {
-            Error::from(StepError::Aerodynamics {
-                body_id,
-                cause: crate::Error::from(cause),
-            })
-        })?;
+        let state = atmosphere
+            .state_at(point)
+            .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
         (state.density() != 0.0).then_some((part, model, local))
     } else {
         None
@@ -563,12 +557,9 @@ pub(super) fn prepare(
                 .compose(&local)
                 .map_err(|_| error())?;
             let point = transform.transform_point(wing.local_transform().translation());
-            let state = atmosphere.state_at(point).map_err(|cause| {
-                Error::from(StepError::Aerodynamics {
-                    body_id,
-                    cause: crate::Error::from(cause),
-                })
-            })?;
+            let state = atmosphere
+                .state_at(point)
+                .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
             if state.density() == 0.0 {
                 continue;
             }
@@ -639,12 +630,7 @@ pub(super) fn prepare(
             caches.get_mut(&body_id).ok_or_else(error)?,
         )
         .map(Some)
-        .map_err(|cause| {
-            Error::from(StepError::Aerodynamics {
-                body_id,
-                cause: crate::Error::from(cause),
-            })
-        });
+        .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }));
     }
     let mut sources = Vec::new();
     let mut collider_parts = Vec::new();
@@ -698,12 +684,7 @@ pub(super) fn prepare(
                     attached,
                     entry.collider_tessellation,
                 )
-                .map_err(|cause| {
-                    Error::from(StepError::Aerodynamics {
-                        body_id,
-                        cause: crate::Error::from(cause),
-                    })
-                })?;
+                .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
                 collider_triangle_count = collider_triangle_count
                     .checked_add(mesh.triangles().len())
                     .ok_or_else(error)?;
@@ -766,12 +747,7 @@ pub(super) fn prepare(
         &wing_requests,
         &mut candidate,
     )
-    .map_err(|cause| {
-        Error::from(StepError::Aerodynamics {
-            body_id,
-            cause: crate::Error::from(cause),
-        })
-    })?;
+    .map_err(|cause| Error::from(StepError::Aerodynamics { body_id, cause }))?;
     caches.insert(body_id, candidate);
     Ok(Some(prepared))
 }
@@ -788,7 +764,7 @@ fn evaluate(
         Transform,
     )],
     prepared: &mut AssemblyAerodynamics,
-) -> Result<PreparedAssembly, AerodynamicsError> {
+) -> Result<PreparedAssembly, crate::Error> {
     let mut instances = Vec::new();
     instances.try_reserve(prepared.sources.len()).map_err(|_| {
         crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
@@ -841,11 +817,11 @@ fn evaluate(
                 &wave_instances,
                 model.geometry_config,
             )
-            .map_err(|cause| crate::aerodynamics::AerodynamicsError::Geometry(cause))?;
+            .map_err(crate::aerodynamics::AerodynamicsError::Geometry)?;
         let section = prepared
             .wave_cache
             .configure_voxel_wave_drag(model.section.clone(), model.axis, model.smoothing_radius)
-            .map_err(|cause| crate::aerodynamics::AerodynamicsError::Hull(cause))?;
+            .map_err(crate::aerodynamics::AerodynamicsError::Hull)?;
         Some((part, section))
     } else {
         None
@@ -881,7 +857,7 @@ fn evaluate(
                     &instances,
                     config,
                 )
-                .map_err(|cause| crate::aerodynamics::AerodynamicsError::Geometry(cause))?;
+                .map_err(crate::aerodynamics::AerodynamicsError::Geometry)?;
             let mut candidate = Vec::new();
             candidate
                 .try_reserve_exact(wing_requests.len())
@@ -950,7 +926,7 @@ fn evaluate(
                 &prepared.wave_only_parts,
                 &mut prepared.cache,
             )
-            .map_err(|cause| crate::aerodynamics::AerodynamicsError::Geometry(cause))?,
+            .map_err(crate::aerodynamics::AerodynamicsError::Geometry)?,
         ),
         None => None,
     };

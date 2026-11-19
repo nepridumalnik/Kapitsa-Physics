@@ -42,14 +42,14 @@ pub(crate) fn verify_unique_base_sources(
     selected: &[[Vec3; 3]],
     mesh: &crate::shape::TriangleMesh,
     max_work: usize,
-) -> Result<(), super::AerodynamicsError> {
+) -> Result<(), crate::Error> {
     if selected
         .len()
         .checked_mul(mesh.triangles().len())
         .is_none_or(|work| work > max_work)
     {
-        return Err(super::AerodynamicsError::Geometry(crate::Error::from(
-            super::geometry::GeometryError::WorkBudgetExceeded,
+        return Err(crate::Error::from(super::AerodynamicsError::Geometry(
+            crate::Error::from(super::geometry::GeometryError::WorkBudgetExceeded),
         )));
     }
     for triangle in selected {
@@ -60,8 +60,8 @@ pub(crate) fn verify_unique_base_sources(
             .count()
             != 1
         {
-            return Err(super::AerodynamicsError::Pressure(crate::Error::from(
-                PressureError::BaseNotFullyVisible,
+            return Err(crate::Error::from(super::AerodynamicsError::Pressure(
+                crate::Error::from(PressureError::BaseNotFullyVisible),
             )));
         }
     }

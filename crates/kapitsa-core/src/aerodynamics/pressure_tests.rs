@@ -68,23 +68,29 @@ fn base_source_uniqueness_obeys_work_limit_and_triangle_permutations() {
     let selected = [[vertices[2], vertices[1], vertices[0]]];
     assert_eq!(
         verify_unique_base_sources(&selected, &mesh, 1),
-        Err(crate::aerodynamics::AerodynamicsError::Geometry(
-            crate::Error::from(GeometryError::WorkBudgetExceeded)
+        Err(crate::Error::from(
+            crate::aerodynamics::AerodynamicsError::Geometry(crate::Error::from(
+                GeometryError::WorkBudgetExceeded
+            ))
         ))
     );
     assert_eq!(verify_unique_base_sources(&selected, &mesh, 2), Ok(()));
     let absent = [[vertices[1], vertices[2], vertices[3]]];
     assert_eq!(
         verify_unique_base_sources(&absent, &mesh, 2),
-        Err(crate::aerodynamics::AerodynamicsError::Pressure(
-            crate::Error::from(PressureError::BaseNotFullyVisible)
+        Err(crate::Error::from(
+            crate::aerodynamics::AerodynamicsError::Pressure(crate::Error::from(
+                PressureError::BaseNotFullyVisible
+            ))
         ))
     );
     let duplicate = TriangleMesh::new(vertices, vec![[0, 1, 2], [2, 1, 0]]).unwrap();
     assert_eq!(
         verify_unique_base_sources(&selected, &duplicate, 2),
-        Err(crate::aerodynamics::AerodynamicsError::Pressure(
-            crate::Error::from(PressureError::BaseNotFullyVisible)
+        Err(crate::Error::from(
+            crate::aerodynamics::AerodynamicsError::Pressure(crate::Error::from(
+                PressureError::BaseNotFullyVisible
+            ))
         ))
     );
 }

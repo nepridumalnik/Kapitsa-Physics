@@ -106,7 +106,7 @@ pub enum StepError {
     /// Automatic weld failure could not certify or balance this step.
     WeldBalance(super::WeldBalanceError),
     /// Preparing or committing a weld split failed.
-    WeldSplit(ClusterError),
+    WeldSplit(crate::Error),
     Collision(CollisionError),
     BodyIntegration {
         body_id: BodyId,

@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use kapitsa_math::Vec3;
 
-use super::{BoundsError, ShapeError};
+use super::ShapeError;
 
 /// Row-major 3D signed-distance samples with X as the fastest-changing index.
 pub struct LevelSet {
@@ -72,7 +72,7 @@ impl LevelSet {
         &self.signed_distances
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let span = Vec3::new(
             (self.dimensions[0] - 1) as f64,
             (self.dimensions[1] - 1) as f64,
@@ -81,6 +81,5 @@ impl LevelSet {
         let last_node = self.origin + self.grid_spacing * span;
 
         Aabb::new(self.origin.min(last_node), self.origin.max(last_node))
-            .map_err(BoundsError::from_unified)
     }
 }

@@ -61,16 +61,16 @@ impl ImpulseStrength {
             return Err(ImpulseBalanceError::InvalidTolerance);
         }
         if !reaction.linear.is_finite() || !reaction.angular.is_finite() {
-            return Err(ImpulseBalanceError::Physics(
+            return Err(ImpulseBalanceError::Physics(crate::Error::from(
                 super::ClusterError::InvalidMotion,
-            ));
+            )));
         }
         let linear = reaction.linear.length();
         let angular = reaction.angular.length();
         if !linear.is_finite() || !angular.is_finite() {
-            return Err(ImpulseBalanceError::Physics(
+            return Err(ImpulseBalanceError::Physics(crate::Error::from(
                 super::ClusterError::ArithmeticOverflow,
-            ));
+            )));
         }
         Ok(self.max_linear.is_some_and(|limit| linear > limit)
             || self.max_angular.is_some_and(|limit| angular > limit))
@@ -100,9 +100,11 @@ pub fn tree_impulse_reactions(
     angular_tolerance: f64,
 ) -> Result<Vec<ImpulseReaction>, BalanceError> {
     let mut inputs = Vec::new();
-    inputs
-        .try_reserve_exact(parts.len())
-        .map_err(|_| BalanceError::Physics(super::ClusterError::StorageCapacityExceeded))?;
+    inputs.try_reserve_exact(parts.len()).map_err(|_| {
+        BalanceError::Physics(crate::Error::from(
+            super::ClusterError::StorageCapacityExceeded,
+        ))
+    })?;
     for part in parts {
         inputs.push(PartBalanceInput {
             mass: part.mass,
@@ -124,9 +126,11 @@ pub fn tree_impulse_reactions(
         angular_tolerance,
     )?;
     let mut output = Vec::new();
-    output
-        .try_reserve_exact(reactions.len())
-        .map_err(|_| BalanceError::Physics(super::ClusterError::StorageCapacityExceeded))?;
+    output.try_reserve_exact(reactions.len()).map_err(|_| {
+        BalanceError::Physics(crate::Error::from(
+            super::ClusterError::StorageCapacityExceeded,
+        ))
+    })?;
     output.extend(
         reactions
             .into_iter()
@@ -223,9 +227,9 @@ mod tests {
         assert!(!limit.exceeded_by(anchored).map_err(|e| format!("{e:?}"))?);
         assert_eq!(
             reaction.at_anchor(Vec3::ZERO, Vec3::new(f64::NAN, 0.0, 0.0)),
-            Err(ImpulseBalanceError::Physics(
+            Err(ImpulseBalanceError::Physics(crate::Error::from(
                 super::super::ClusterError::InvalidMotion
-            ))
+            )))
         );
         Ok(())
     }

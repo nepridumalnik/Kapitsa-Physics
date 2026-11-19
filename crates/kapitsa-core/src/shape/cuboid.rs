@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use kapitsa_math::Vec3;
 
-use super::{BoundsError, ShapeError};
+use super::ShapeError;
 
 /// Axis-aligned cuboid centered at the collider-local origin.
 pub struct Cuboid {
@@ -32,8 +32,8 @@ impl Cuboid {
         self.size * 0.5
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let half = self.half_extents();
-        Aabb::new(-half, half).map_err(BoundsError::from_unified)
+        Aabb::new(-half, half)
     }
 }

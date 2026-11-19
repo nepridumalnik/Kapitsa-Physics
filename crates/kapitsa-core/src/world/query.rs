@@ -93,17 +93,17 @@ impl PhysicsWorld {
         let end_translation = transform
             .translation()
             .checked_add(displacement)
-            .ok_or(QueryError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
         let end_transform = crate::transform::Transform::new(end_translation, transform.rotation())
-            .map_err(|_| QueryError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
         let start_bounds = shape
             .world_bounds(&transform)
             .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
-            .ok_or(QueryError::UnsupportedQueryShape)?;
+            .ok_or_else(|| crate::Error::from(QueryError::UnsupportedQueryShape))?;
         let end_bounds = shape
             .world_bounds(&end_transform)
             .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
-            .ok_or(QueryError::UnsupportedQueryShape)?;
+            .ok_or_else(|| crate::Error::from(QueryError::UnsupportedQueryShape))?;
         self.query_candidates(start_bounds.union(&end_bounds), scratch)?;
         let mut closest = None;
         for candidate_index in 0..scratch.colliders.len() {
@@ -112,7 +112,9 @@ impl PhysicsWorld {
                 .colliders
                 .get(collider_id.dense)
                 .filter(|_| collider_id.world == self.world_id)
-                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+                .ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+                })?;
             if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
                 continue;
             }
@@ -120,13 +122,15 @@ impl PhysicsWorld {
                 .bodies
                 .get(entry.body.dense)
                 .filter(|_| entry.body.world == self.world_id)
-                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+                .ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+                })?;
             let target_transform = body
                 .body
                 .state()
                 .transform()
                 .compose(&entry.collider.local_transform())
-                .map_err(|_| QueryError::ArithmeticOverflow)?;
+                .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
             let Some(hit) = sweep_shape_with_scratch(
                 shape,
                 transform,
@@ -193,7 +197,7 @@ impl PhysicsWorld {
         let bounds = shape
             .world_bounds(&transform)
             .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
-            .ok_or(QueryError::UnsupportedQueryShape)?;
+            .ok_or_else(|| crate::Error::from(QueryError::UnsupportedQueryShape))?;
         self.query_candidates(bounds, scratch)?;
         for candidate_index in 0..scratch.colliders.len() {
             let collider_id = scratch.colliders[candidate_index];
@@ -201,7 +205,9 @@ impl PhysicsWorld {
                 .colliders
                 .get(collider_id.dense)
                 .filter(|_| collider_id.world == self.world_id)
-                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+                .ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+                })?;
             if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
                 continue;
             }
@@ -209,13 +215,15 @@ impl PhysicsWorld {
                 .bodies
                 .get(entry.body.dense)
                 .filter(|_| entry.body.world == self.world_id)
-                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+                .ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+                })?;
             let target_transform = body
                 .body
                 .state()
                 .transform()
                 .compose(&entry.collider.local_transform())
-                .map_err(|_| QueryError::ArithmeticOverflow)?;
+                .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
             if overlaps_shape_with_scratch(
                 shape,
                 transform,
@@ -254,7 +262,9 @@ impl PhysicsWorld {
 
         self.query_index
             .as_ref()
-            .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?
+            .ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+            })?
             .query_readonly(bounds, &mut scratch.tree_stack, candidates)
             .map_err(QueryError::Geometry)?;
         candidates
@@ -271,12 +281,14 @@ impl PhysicsWorld {
         filter: QueryFilter,
         closest: &mut Option<RayHit>,
         scratch: &mut QueryScratch,
-    ) -> Result<Option<RayHit>, QueryError> {
+    ) -> Result<Option<RayHit>, crate::Error> {
         let entry = self
             .colliders
             .get(collider_id.dense)
             .filter(|_| collider_id.world == self.world_id)
-            .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+            .ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+            })?;
         if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
             return Ok(None);
         }
@@ -284,13 +296,15 @@ impl PhysicsWorld {
             .bodies
             .get(entry.body.dense)
             .filter(|_| entry.body.world == self.world_id)
-            .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+            .ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+            })?;
         let transform = body
             .body
             .state()
             .transform()
             .compose(&entry.collider.local_transform())
-            .map_err(|_| QueryError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
         let limited_ray =
             ray.with_max_distance(closest.map_or(ray.max_distance(), |hit| hit.distance));
         let Some((position, normal, distance)) = raycast_shape_with_scratch(

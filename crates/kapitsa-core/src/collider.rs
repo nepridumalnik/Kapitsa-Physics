@@ -166,9 +166,7 @@ impl Collider {
                     None => error,
                 });
         }
-        self.shape
-            .world_bounds(&transform)
-            .map_err(crate::Error::from)
+        self.shape.world_bounds(&transform)
     }
 
     pub(crate) fn local_bounds(&self) -> Result<Option<Aabb>, CollisionError> {
@@ -324,14 +322,16 @@ fn fill_deformed_vertices(
     Ok(())
 }
 
-fn points_bounds(points: &[Vec3]) -> Result<Aabb, BoundsError> {
-    let (&first, rest) = points.split_first().ok_or(BoundsError::InvalidGeometry)?;
+fn points_bounds(points: &[Vec3]) -> Result<Aabb, crate::Error> {
+    let (&first, rest) = points
+        .split_first()
+        .ok_or_else(|| crate::Error::from(BoundsError::InvalidGeometry))?;
     let (min, max) = rest.iter().fold((first, first), |(min, max), &point| {
         (min.min(point), max.max(point))
     });
     Aabb::new(min, max).map_err(|error| match error.downcast_ref::<AabbError>() {
-        Some(error) => BoundsError::from(*error),
-        None => BoundsError::InvalidGeometry,
+        Some(error) => crate::Error::from(BoundsError::from(*error)),
+        None => crate::Error::from(BoundsError::InvalidGeometry),
     })
 }
 

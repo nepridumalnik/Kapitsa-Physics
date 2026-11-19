@@ -10,38 +10,38 @@ pub(crate) fn velocity_field(
     parent_velocity: Vec3,
     omega: Vec3,
     new_center: Vec3,
-) -> Result<(Vec3, Vec3), ClusterError> {
+) -> Result<(Vec3, Vec3), crate::Error> {
     if !parent_center.is_finite()
         || !parent_velocity.is_finite()
         || !omega.is_finite()
         || !new_center.is_finite()
     {
-        return Err(ClusterError::InvalidMotion);
+        return Err(crate::Error::from(ClusterError::InvalidMotion));
     }
     let velocity = new_center
         .checked_sub(parent_center)
         .and_then(|offset| omega.checked_cross(offset))
         .and_then(|relative| parent_velocity.checked_add(relative))
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     Ok((velocity, omega))
 }
 
 pub(crate) fn world_properties(
     mass: MassProperties,
     pose: Transform,
-) -> Result<(Vec3, Mat3), ClusterError> {
+) -> Result<(Vec3, Mat3), crate::Error> {
     let rotation = pose
         .rotation()
         .to_mat3()
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let center = rotation
         .checked_mul_vector(mass.center_of_mass())
         .and_then(|value| value.checked_add(pose.translation()))
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let inertia = rotation
         .checked_mul_matrix(mass.inertia())
         .and_then(|value| value.checked_mul_matrix(rotation.transpose()))
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     Ok((center, inertia))
 }
 
@@ -59,7 +59,7 @@ pub(crate) fn part_momentum_rate(
     omega: Vec3,
     alpha: Vec3,
     moment_origin: Vec3,
-) -> Result<(Vec3, Vec3), ClusterError> {
+) -> Result<(Vec3, Vec3), crate::Error> {
     if [
         reference_center,
         reference_acceleration,
@@ -70,24 +70,24 @@ pub(crate) fn part_momentum_rate(
     .iter()
     .any(|value| !value.is_finite())
     {
-        return Err(ClusterError::InvalidMotion);
+        return Err(crate::Error::from(ClusterError::InvalidMotion));
     }
     let (center, inertia) = world_properties(mass, pose)?;
     let offset = center
         .checked_sub(reference_center)
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let tangential = alpha
         .checked_cross(offset)
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let centripetal = omega
         .checked_cross(offset)
         .and_then(|velocity| omega.checked_cross(velocity))
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let force = reference_acceleration
         .checked_add(tangential)
         .and_then(|value| value.checked_add(centripetal))
         .and_then(|value| value.checked_mul_scalar(mass.mass()))
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let spin = inertia
         .checked_mul_vector(alpha)
         .and_then(|angular| {
@@ -96,12 +96,12 @@ pub(crate) fn part_momentum_rate(
                 .and_then(|momentum| omega.checked_cross(momentum))
                 .and_then(|gyroscopic| angular.checked_add(gyroscopic))
         })
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let moment = center
         .checked_sub(moment_origin)
         .and_then(|arm| arm.checked_cross(force))
         .and_then(|orbital| spin.checked_add(orbital))
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     Ok((force, moment))
 }
 
@@ -128,52 +128,52 @@ pub(crate) fn transfer_motion(
     origin: Vec3,
     delta_p: Vec3,
     delta_h: Vec3,
-) -> Result<(Vec3, Vec3), ClusterError> {
+) -> Result<(Vec3, Vec3), crate::Error> {
     if !velocity.is_finite()
         || !omega.is_finite()
         || !origin.is_finite()
         || !delta_p.is_finite()
         || !delta_h.is_finite()
     {
-        return Err(ClusterError::InvalidMotion);
+        return Err(crate::Error::from(ClusterError::InvalidMotion));
     }
     let (old_center, old_inertia) = world_properties(old_mass, old_pose)?;
     let (new_center, new_inertia) = world_properties(new_mass, new_pose)?;
     let old_p = velocity
         .checked_mul_scalar(old_mass.mass())
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let new_p = old_p
         .checked_add(delta_p)
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let old_spin = old_inertia
         .checked_mul_vector(omega)
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let old_orbital = old_center
         .checked_sub(origin)
         .and_then(|offset| offset.checked_cross(old_p))
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let new_h = old_spin
         .checked_add(old_orbital)
         .and_then(|value| value.checked_add(delta_h))
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let new_orbital = new_center
         .checked_sub(origin)
         .and_then(|offset| offset.checked_cross(new_p))
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let new_spin = new_h
         .checked_sub(new_orbital)
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let new_velocity = Vec3::new(
         new_p.x / new_mass.mass(),
         new_p.y / new_mass.mass(),
         new_p.z / new_mass.mass(),
     );
     if !new_velocity.is_finite() {
-        return Err(ClusterError::ArithmeticOverflow);
+        return Err(crate::Error::from(ClusterError::ArithmeticOverflow));
     }
     let new_omega = new_inertia.solve_spd(new_spin).map_err(map_cholesky)?;
     if !new_omega.is_finite() {
-        return Err(ClusterError::ArithmeticOverflow);
+        return Err(crate::Error::from(ClusterError::ArithmeticOverflow));
     }
     Ok((new_velocity, new_omega))
 }
@@ -229,7 +229,7 @@ mod tests {
                 Vec3::ZERO,
                 Vec3::ZERO
             ),
-            Err(ClusterError::InvalidMotion)
+            Err(crate::Error::from(ClusterError::InvalidMotion))
         );
         assert_eq!(
             part_momentum_rate(
@@ -241,13 +241,13 @@ mod tests {
                 Vec3::ZERO,
                 Vec3::ZERO
             ),
-            Err(ClusterError::ArithmeticOverflow)
+            Err(crate::Error::from(ClusterError::ArithmeticOverflow))
         );
         Ok(())
     }
 
     #[test]
-    fn velocity_field_rotates_about_shifted_center() -> Result<(), ClusterError> {
+    fn velocity_field_rotates_about_shifted_center() -> Result<(), crate::Error> {
         let (velocity, angular) = velocity_field(Vec3::X, Vec3::Y, 2.0 * Vec3::Z, 3.0 * Vec3::X)?;
         close(velocity, 5.0 * Vec3::Y);
         close(angular, 2.0 * Vec3::Z);
@@ -258,11 +258,11 @@ mod tests {
                 Vec3::Z,
                 Vec3::new(f64::NAN, 0.0, 0.0)
             ),
-            Err(ClusterError::InvalidMotion)
+            Err(crate::Error::from(ClusterError::InvalidMotion))
         );
         assert_eq!(
             velocity_field(-Vec3::X * f64::MAX, Vec3::ZERO, Vec3::Z, Vec3::X * f64::MAX),
-            Err(ClusterError::ArithmeticOverflow)
+            Err(crate::Error::from(ClusterError::ArithmeticOverflow))
         );
         Ok(())
     }
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn fuel_removal_without_reaction_preserves_velocity() -> Result<(), ClusterError> {
+    fn fuel_removal_without_reaction_preserves_velocity() -> Result<(), crate::Error> {
         let original_center = Vec3::new(10.0, 2.0, -3.0);
         let velocity = Vec3::new(20.0, -4.0, 1.0);
         let (new_velocity, new_omega) = velocity_field(

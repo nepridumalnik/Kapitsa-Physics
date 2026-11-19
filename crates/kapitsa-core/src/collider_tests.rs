@@ -23,9 +23,7 @@ use crate::{
     collider::{Collider, ColliderError, CollisionFilter, CollisionMode},
     collision::mesh::MeshQueryWorkspace,
     material::{MaterialStorage, PhysicsMaterial},
-    shape::{
-        BoneInfluence, BoundsError, Cuboid, Plane, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh,
-    },
+    shape::{BoneInfluence, Cuboid, Plane, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh},
     transform::{Transform, TransformError},
 };
 
@@ -460,15 +458,8 @@ fn error_source_chain_preserves_bounds_and_aabb_errors() {
         .world_bounds(&parent)
         .expect_err("sphere bounds overflow at maximum translation");
 
-    let bounds_error =
-        Error::source(&error).and_then(|source| source.downcast_ref::<BoundsError>());
     assert_eq!(
-        bounds_error,
-        Some(&BoundsError::InvalidBounds(AabbError::TransformOverflow))
+        error.downcast_ref::<AabbError>(),
+        Some(&AabbError::TransformOverflow)
     );
-
-    let aabb_error = bounds_error
-        .and_then(Error::source)
-        .and_then(|source| source.downcast_ref::<AabbError>());
-    assert_eq!(aabb_error, Some(&AabbError::TransformOverflow));
 }

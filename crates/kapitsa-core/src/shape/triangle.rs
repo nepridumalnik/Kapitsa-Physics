@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use kapitsa_math::Vec3;
 
-use super::{BoundsError, ShapeError};
+use super::ShapeError;
 
 /// Nondegenerate triangle in collider-local coordinates.
 pub struct Triangle {
@@ -35,10 +35,10 @@ impl Triangle {
         self.vertices
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let [first, second, third] = self.vertices;
         let min = first.min(second).min(third);
         let max = first.max(second).max(third);
-        Aabb::new(min, max).map_err(BoundsError::from_unified)
+        Aabb::new(min, max)
     }
 }

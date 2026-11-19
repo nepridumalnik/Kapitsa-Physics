@@ -1290,14 +1290,18 @@ fn collider_base_triangle_selection_uses_owned_geometry_and_invalidates()
         );
         assert_eq!(
             world.set_collider_base_triangles(id, collider, &[2, 2], base),
-            Err(crate::aerodynamics::AerodynamicsError::Pressure(
-                crate::Error::from(PressureError::InvalidPatch)
+            Err(crate::Error::from(
+                crate::aerodynamics::AerodynamicsError::Pressure(crate::Error::from(
+                    PressureError::InvalidPatch
+                ))
             ))
         );
         assert_eq!(
             world.set_collider_base_triangles(id, collider, &[12], base),
-            Err(crate::aerodynamics::AerodynamicsError::Pressure(
-                crate::Error::from(PressureError::InvalidPatch)
+            Err(crate::Error::from(
+                crate::aerodynamics::AerodynamicsError::Pressure(crate::Error::from(
+                    PressureError::InvalidPatch
+                ))
             ))
         );
         assert_eq!(world.body(id).unwrap().base_pressure_patches(), patches);
@@ -2534,7 +2538,9 @@ fn failed_surface_removal_does_not_invalidate_prepared_motion() {
     shards[0][0].integrate(0.1).unwrap();
     assert_eq!(
         world.remove_aerodynamic_surface(id, usize::MAX),
-        Err(crate::world::WorldError::InvalidAerodynamicSurface)
+        Err(crate::Error::from(
+            crate::world::WorldError::InvalidAerodynamicSurface
+        ))
     );
     assert!(world.commit_step_shards(&shards).is_ok());
 }

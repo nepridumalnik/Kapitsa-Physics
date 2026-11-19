@@ -65,11 +65,11 @@ impl HeightField {
         &self.heights
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let (&first_height, remaining_heights) = self
             .heights
             .split_first()
-            .ok_or(BoundsError::InvalidGeometry)?;
+            .ok_or_else(|| crate::Error::from(BoundsError::InvalidGeometry))?;
         let (min_height, max_height) = remaining_heights
             .iter()
             .fold((first_height, first_height), |(min, max), &height| {
@@ -81,6 +81,5 @@ impl HeightField {
             Vec3::new(0.0, 0.0, min_height),
             Vec3::new(span.x, span.y, max_height),
         )
-        .map_err(BoundsError::from_unified)
     }
 }

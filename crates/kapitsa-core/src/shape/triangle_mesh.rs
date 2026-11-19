@@ -57,14 +57,14 @@ impl TriangleMesh {
         &self.triangles
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let (&first, rest) = self
             .vertices
             .split_first()
-            .ok_or(BoundsError::InvalidGeometry)?;
+            .ok_or_else(|| crate::Error::from(BoundsError::InvalidGeometry))?;
         let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
             (min.min(vertex), max.max(vertex))
         });
-        Aabb::new(min, max).map_err(BoundsError::from_unified)
+        Aabb::new(min, max)
     }
 }
