@@ -1,4 +1,8 @@
 #![doc = include_str!("../README.md")]
+// Documentation debt: `missing_docs` is intentionally exempted crate-wide here.
+// The published `kapitsa` facade enforces `deny(missing_docs)`; documenting every
+// `kapitsa-core` public item is tracked separately.
+#![allow(missing_docs)]
 
 pub mod aabb;
 pub mod aerodynamics;

@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+// Documentation debt: `missing_docs` is intentionally exempted crate-wide here.
+// The published `kapitsa` facade enforces `deny(missing_docs)`.
+#![allow(missing_docs)]
 
 mod affine;
 mod matrix;
