@@ -1,5 +1,6 @@
 use super::{PhysicsClient, PhysicsClientError, PhysicsCommand, PhysicsCommandResult, expect_done};
 use kapitsa_core::{
+    Error,
     cluster::{
         ClusterPart, ClusterPartDesc, MassChangeMode, MassTransfer, RigidCluster, Weld, WeldDesc,
     },
@@ -17,7 +18,7 @@ impl PhysicsClient {
         target_a: JointTarget,
         target_b: JointTarget,
         joint: Joint,
-    ) -> Result<JointId, PhysicsClientError> {
+    ) -> Result<JointId, Error> {
         match self
             .submit(PhysicsCommand::AddJointTargets {
                 target_a,
@@ -27,15 +28,11 @@ impl PhysicsClient {
             .await?
         {
             PhysicsCommandResult::Joint(id) => Ok(id),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
     /// Updates a joint using its original target-local frames.
-    pub async fn update_joint_targets(
-        &self,
-        id: JointId,
-        joint: Joint,
-    ) -> Result<(), PhysicsClientError> {
+    pub async fn update_joint_targets(&self, id: JointId, joint: Joint) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::UpdateJointTargets { id, joint })
                 .await?,
@@ -47,7 +44,7 @@ impl PhysicsClient {
         part: PartId,
         local_point: Vec3,
         local_force: Vec3,
-    ) -> Result<ForceSourceId, PhysicsClientError> {
+    ) -> Result<ForceSourceId, Error> {
         match self
             .submit(PhysicsCommand::AddPartForceSource {
                 part,
@@ -57,14 +54,14 @@ impl PhysicsClient {
             .await?
         {
             PhysicsCommandResult::ForceSource(id) => Ok(id),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
     /// Converts a dynamic body into a cluster and returns its root part.
-    pub async fn enable_cluster(&self, body: BodyId) -> Result<PartId, PhysicsClientError> {
+    pub async fn enable_cluster(&self, body: BodyId) -> Result<PartId, Error> {
         match self.submit(PhysicsCommand::EnableCluster { body }).await? {
             PhysicsCommandResult::Part(id) => Ok(id),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
     /// Converts a body into a cluster using explicit root mass.
@@ -72,13 +69,13 @@ impl PhysicsClient {
         &self,
         body: BodyId,
         mass: MassProperties,
-    ) -> Result<PartId, PhysicsClientError> {
+    ) -> Result<PartId, Error> {
         match self
             .submit(PhysicsCommand::EnableClusterWithMass { body, mass })
             .await?
         {
             PhysicsCommandResult::Part(id) => Ok(id),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
     /// Adds a part connected to its parent by a weld.
@@ -87,13 +84,13 @@ impl PhysicsClient {
         parent: PartId,
         desc: ClusterPartDesc,
         weld: WeldDesc,
-    ) -> Result<PartId, PhysicsClientError> {
+    ) -> Result<PartId, Error> {
         match self
             .submit(PhysicsCommand::AddClusterPart { parent, desc, weld })
             .await?
         {
             PhysicsCommandResult::Part(id) => Ok(id),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
     /// Adds a collider using part-local coordinates.
@@ -101,13 +98,13 @@ impl PhysicsClient {
         &self,
         part: PartId,
         collider: Collider,
-    ) -> Result<ColliderId, PhysicsClientError> {
+    ) -> Result<ColliderId, Error> {
         match self
             .submit(PhysicsCommand::AddPartCollider { part, collider })
             .await?
         {
             PhysicsCommandResult::Collider(id) => Ok(id),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
     /// Replaces explicit finite wings in the stable part-local frame; empty clears.
@@ -119,7 +116,7 @@ impl PhysicsClient {
         &self,
         part: PartId,
         wings: Vec<kapitsa_core::aerodynamics::wing::WingSurface>,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetPartAerodynamicWings { part, wings })
                 .await?,
@@ -134,7 +131,7 @@ impl PhysicsClient {
         &self,
         part: PartId,
         sections: Vec<kapitsa_core::aerodynamics::hull::HullSection>,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetPartAerodynamicHull { part, sections })
                 .await?,
@@ -146,7 +143,7 @@ impl PhysicsClient {
         &self,
         part: PartId,
         mesh: Option<kapitsa_core::shape::TriangleMesh>,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetPartAerodynamicMesh { part, mesh })
                 .await?,
@@ -157,7 +154,7 @@ impl PhysicsClient {
         &self,
         part: PartId,
         enabled: bool,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetPartAerodynamicColliders { part, enabled })
                 .await?,
@@ -169,7 +166,7 @@ impl PhysicsClient {
         &self,
         part: PartId,
         model: Option<kapitsa_core::aerodynamics::wave::VoxelWave>,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetPartVoxelWave { part, model })
                 .await?,
@@ -181,7 +178,7 @@ impl PhysicsClient {
         &self,
         part: PartId,
         mesh: Option<kapitsa_core::shape::TriangleMesh>,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetPartWaveSourceMesh { part, mesh })
                 .await?,
@@ -193,7 +190,7 @@ impl PhysicsClient {
         &self,
         part: PartId,
         enabled: bool,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetPartWaveSourceColliders { part, enabled })
                 .await?,
@@ -206,7 +203,7 @@ impl PhysicsClient {
         part: PartId,
         collider: ColliderId,
         transform: kapitsa_core::transform::Transform,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetPartColliderTransform {
                 part,
@@ -221,7 +218,7 @@ impl PhysicsClient {
         &self,
         body: BodyId,
         config: kapitsa_core::aerodynamics::ColliderTessellation,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetColliderTessellation { body, config })
                 .await?,
@@ -233,7 +230,7 @@ impl PhysicsClient {
         &self,
         body: BodyId,
         model: kapitsa_core::aerodynamics::Aerodynamics,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetAerodynamics { body, model })
                 .await?,
@@ -241,31 +238,31 @@ impl PhysicsClient {
     }
 
     /// Removes a collider owned by a cluster part.
-    pub async fn remove_part_collider(&self, id: ColliderId) -> Result<(), PhysicsClientError> {
+    pub async fn remove_part_collider(&self, id: ColliderId) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::RemovePartCollider { id })
                 .await?,
         )
     }
     /// Destroys a part when the cluster topology permits it.
-    pub async fn destroy_cluster_part(&self, part: PartId) -> Result<(), PhysicsClientError> {
+    pub async fn destroy_cluster_part(&self, part: PartId) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::DestroyClusterPart { part })
                 .await?,
         )
     }
     /// Removes a weld and returns the resulting component body IDs.
-    pub async fn break_weld(&self, weld: WeldId) -> Result<Vec<BodyId>, PhysicsClientError> {
+    pub async fn break_weld(&self, weld: WeldId) -> Result<Vec<BodyId>, Error> {
         match self.submit(PhysicsCommand::BreakWeld { weld }).await? {
             PhysicsCommandResult::Bodies(ids) => Ok(ids),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
     /// Removes incident welds and returns the resulting component body IDs.
-    pub async fn detach_part(&self, part: PartId) -> Result<Vec<BodyId>, PhysicsClientError> {
+    pub async fn detach_part(&self, part: PartId) -> Result<Vec<BodyId>, Error> {
         match self.submit(PhysicsCommand::DetachPart { part }).await? {
             PhysicsCommandResult::Bodies(ids) => Ok(ids),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
     /// Merges the second cluster into the first.
@@ -274,7 +271,7 @@ impl PhysicsClient {
         first: BodyId,
         second: BodyId,
         weld: WeldDesc,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::MergeClusters {
                 first,
@@ -290,7 +287,7 @@ impl PhysicsClient {
         part: PartId,
         mass: MassProperties,
         mode: MassChangeMode,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetPartMass { part, mass, mode })
                 .await?,
@@ -302,7 +299,7 @@ impl PhysicsClient {
         part: PartId,
         mass: MassProperties,
         transfer: MassTransfer,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetPartMassWithTransfer {
                 part,
@@ -313,27 +310,24 @@ impl PhysicsClient {
         )
     }
     /// Reads the cluster at the request's position in the command queue.
-    pub async fn cluster(&self, body: BodyId) -> Result<Option<RigidCluster>, PhysicsClientError> {
+    pub async fn cluster(&self, body: BodyId) -> Result<Option<RigidCluster>, Error> {
         match self.submit(PhysicsCommand::GetCluster { body }).await? {
             PhysicsCommandResult::Cluster(value) => Ok(value),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
     /// Reads a cluster part at the request's position in the command queue.
-    pub async fn cluster_part(
-        &self,
-        part: PartId,
-    ) -> Result<Option<ClusterPart>, PhysicsClientError> {
+    pub async fn cluster_part(&self, part: PartId) -> Result<Option<ClusterPart>, Error> {
         match self.submit(PhysicsCommand::GetClusterPart { part }).await? {
             PhysicsCommandResult::ClusterPart(value) => Ok(value),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
     /// Reads a weld at the request's position in the command queue.
-    pub async fn weld(&self, weld: WeldId) -> Result<Option<Weld>, PhysicsClientError> {
+    pub async fn weld(&self, weld: WeldId) -> Result<Option<Weld>, Error> {
         match self.submit(PhysicsCommand::GetWeld { weld }).await? {
             PhysicsCommandResult::Weld(value) => Ok(value),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 }

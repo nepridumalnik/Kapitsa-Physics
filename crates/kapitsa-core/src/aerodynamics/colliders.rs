@@ -31,12 +31,12 @@ impl ColliderTessellation {
         radial_segments: usize,
         sphere_rings: usize,
         max_triangles: usize,
-    ) -> Result<Self, AerodynamicsError> {
+    ) -> Result<Self, crate::Error> {
         if !(3..=128).contains(&radial_segments)
             || !(3..=128).contains(&sphere_rings)
             || !(1..=65_536).contains(&max_triangles)
         {
-            return Err(AerodynamicsError::InvalidTessellation);
+            return Err(crate::Error::from(AerodynamicsError::InvalidTessellation));
         }
         Ok(Self {
             radial_segments,
@@ -61,7 +61,7 @@ impl ColliderTessellation {
 pub fn collider_mesh<'a>(
     colliders: impl IntoIterator<Item = &'a Collider>,
     config: ColliderTessellation,
-) -> Result<TriangleMesh, AerodynamicsError> {
+) -> Result<TriangleMesh, crate::Error> {
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
     for collider in colliders {
@@ -72,25 +72,27 @@ pub fn collider_mesh<'a>(
             Shape::Triangle(_) => 1,
             Shape::Convex(shape) => shape.faces().len(),
             Shape::TriangleMesh(shape) => shape.triangles().len(),
-            _ => return Err(AerodynamicsError::UnsupportedModel),
+            _ => return Err(crate::Error::from(AerodynamicsError::UnsupportedModel)),
         };
         if count > config.max_triangles - triangles.len() {
-            return Err(AerodynamicsError::TessellationBudgetExceeded);
+            return Err(crate::Error::from(
+                AerodynamicsError::TessellationBudgetExceeded,
+            ));
         }
         // Use independent indexed triangles, welded explicitly by world geometry
         // preparation if closure is required. This also bounds unreferenced input.
         vertices
             .try_reserve(count * 3)
-            .map_err(|_| AerodynamicsError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(AerodynamicsError::ArithmeticOverflow))?;
         triangles
             .try_reserve(count)
-            .map_err(|_| AerodynamicsError::ArithmeticOverflow)?;
-        let mut emit = |points: [Vec3; 3]| -> Result<(), AerodynamicsError> {
+            .map_err(|_| crate::Error::from(AerodynamicsError::ArithmeticOverflow))?;
+        let mut emit = |points: [Vec3; 3]| -> Result<(), crate::Error> {
             let base = vertices.len();
             for point in points {
                 let point = collider.local_transform().transform_point(point);
                 if !point.is_finite() {
-                    return Err(AerodynamicsError::ArithmeticOverflow);
+                    return Err(crate::Error::from(AerodynamicsError::ArithmeticOverflow));
                 }
                 vertices.push(point);
             }
@@ -187,13 +189,14 @@ pub fn collider_mesh<'a>(
                     emit([shape.end(), d, c])?;
                 }
             }
-            _ => return Err(AerodynamicsError::UnsupportedModel),
+            _ => return Err(crate::Error::from(AerodynamicsError::UnsupportedModel)),
         }
     }
     if triangles.is_empty() {
-        return Err(AerodynamicsError::UnsupportedModel);
+        return Err(crate::Error::from(AerodynamicsError::UnsupportedModel));
     }
-    TriangleMesh::new(vertices, triangles).map_err(|_| AerodynamicsError::ArithmeticOverflow)
+    TriangleMesh::new(vertices, triangles)
+        .map_err(|_| crate::Error::from(AerodynamicsError::ArithmeticOverflow))
 }
 
 #[cfg(test)]
@@ -224,7 +227,9 @@ mod tests {
             }
             assert_eq!(
                 collider_mesh([&collider], ColliderTessellation::new(16, 8, 1)?).err(),
-                Some(AerodynamicsError::TessellationBudgetExceeded)
+                Some(crate::Error::from(
+                    AerodynamicsError::TessellationBudgetExceeded
+                ))
             );
         }
         let plane = Collider::new(
@@ -233,7 +238,7 @@ mod tests {
         );
         assert_eq!(
             collider_mesh([&plane], config).err(),
-            Some(AerodynamicsError::UnsupportedModel)
+            Some(crate::Error::from(AerodynamicsError::UnsupportedModel))
         );
         Ok(())
     }

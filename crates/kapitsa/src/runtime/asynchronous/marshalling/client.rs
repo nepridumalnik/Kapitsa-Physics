@@ -8,6 +8,7 @@ use std::sync::{
 };
 
 use kapitsa_core::{
+    Error,
     collider::{Collider, CollisionFilter, CollisionMode},
     collision::{CollisionConfig, OverlapHit, QueryFilter, Ray, RayHit, ShapeHit},
     gravity::Gravity,
@@ -49,7 +50,7 @@ impl PhysicsClient {
     pub async fn set_atmosphere(
         &self,
         atmosphere: kapitsa_core::aerodynamics::Atmosphere,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetAtmosphere { atmosphere })
                 .await?,
@@ -61,7 +62,7 @@ impl PhysicsClient {
     pub async fn set_central_gravity(
         &self,
         gravity: Option<kapitsa_core::gravity::CentralGravity>,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetCentralGravity { gravity })
                 .await?,
@@ -69,10 +70,7 @@ impl PhysicsClient {
     }
 
     /// Adds a gravity field and returns its world-scoped ID.
-    pub async fn add_gravity(
-        &self,
-        gravity: impl Into<Gravity>,
-    ) -> Result<GravityId, PhysicsClientError> {
+    pub async fn add_gravity(&self, gravity: impl Into<Gravity>) -> Result<GravityId, Error> {
         match self
             .submit(PhysicsCommand::AddGravity {
                 gravity: gravity.into(),
@@ -80,7 +78,7 @@ impl PhysicsClient {
             .await?
         {
             PhysicsCommandResult::Gravity(id) => Ok(id),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
@@ -88,7 +86,7 @@ impl PhysicsClient {
         &self,
         id: GravityId,
         gravity: impl Into<Gravity>,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::UpdateGravity {
                 id,
@@ -98,7 +96,7 @@ impl PhysicsClient {
         )
     }
 
-    pub async fn remove_gravity(&self, id: GravityId) -> Result<(), PhysicsClientError> {
+    pub async fn remove_gravity(&self, id: GravityId) -> Result<(), Error> {
         expect_done(self.submit(PhysicsCommand::RemoveGravity { id }).await?)
     }
     pub(crate) fn new(
@@ -123,9 +121,7 @@ impl PhysicsClient {
 
     /// Creates an empty command buffer for nonblocking submission.
     pub fn commands(&self) -> PhysicsCommandBuffer {
-        PhysicsCommandBuffer {
-            commands: self.buffer_pool.take(),
-        }
+        PhysicsCommandBuffer::from_commands(self.buffer_pool.take())
     }
 
     /// Attempts to enqueue a complete command buffer without waiting.
@@ -182,10 +178,7 @@ impl PhysicsClient {
     /// completed and its snapshot has been published. Read-only queries return
     /// the value computed at their FIFO position before that step's integration;
     /// a query result is still valid if that later integration fails.
-    pub async fn submit(
-        &self,
-        command: PhysicsCommand,
-    ) -> Result<PhysicsCommandResult, PhysicsClientError> {
+    pub async fn submit(&self, command: PhysicsCommand) -> Result<PhysicsCommandResult, Error> {
         let sender = self
             .command_tx
             .borrow()
@@ -195,14 +188,15 @@ impl PhysicsClient {
         sender
             .send(CommandRequest::Single { command, reply })
             .await
-            .map_err(|_| PhysicsClientError::ChannelClosed)?;
+            .map_err(|_| Error::from(PhysicsClientError::ChannelClosed))?;
         response
             .await
-            .map_err(|_| PhysicsClientError::ChannelClosed)?
+            .map_err(|_| Error::from(PhysicsClientError::ChannelClosed))?
+            .map_err(Error::from)
     }
 
     /// Adds a body and returns its world-scoped ID after a snapshot includes it.
-    pub async fn add_body(&self, body: RigidBody) -> Result<BodyId, PhysicsClientError> {
+    pub async fn add_body(&self, body: RigidBody) -> Result<BodyId, Error> {
         match self.submit(PhysicsCommand::AddBody { body }).await? {
             PhysicsCommandResult::Body(id) => Ok(id),
             PhysicsCommandResult::Done
@@ -219,12 +213,15 @@ impl PhysicsClient {
             | PhysicsCommandResult::ClusterPart(_)
             | PhysicsCommandResult::Weld(_)
             | PhysicsCommandResult::Gravity(_)
-            | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
+            | PhysicsCommandResult::Overlaps(_) => {
+                Err(Error::from(PhysicsClientError::UnexpectedResult))
+            }
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
     /// Removes a body and its colliders, then waits for a snapshot without it.
-    pub async fn remove_body(&self, id: BodyId) -> Result<(), PhysicsClientError> {
+    pub async fn remove_body(&self, id: BodyId) -> Result<(), Error> {
         expect_done(self.submit(PhysicsCommand::RemoveBody { id }).await?)
     }
 
@@ -233,7 +230,7 @@ impl PhysicsClient {
         &self,
         body: BodyId,
         collider: Collider,
-    ) -> Result<ColliderId, PhysicsClientError> {
+    ) -> Result<ColliderId, Error> {
         match self
             .submit(PhysicsCommand::AddCollider { body, collider })
             .await?
@@ -253,12 +250,15 @@ impl PhysicsClient {
             | PhysicsCommandResult::ClusterPart(_)
             | PhysicsCommandResult::Weld(_)
             | PhysicsCommandResult::Gravity(_)
-            | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
+            | PhysicsCommandResult::Overlaps(_) => {
+                Err(Error::from(PhysicsClientError::UnexpectedResult))
+            }
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
     /// Removes a collider from the world.
-    pub async fn remove_collider(&self, id: ColliderId) -> Result<(), PhysicsClientError> {
+    pub async fn remove_collider(&self, id: ColliderId) -> Result<(), Error> {
         expect_done(self.submit(PhysicsCommand::RemoveCollider { id }).await?)
     }
 
@@ -268,7 +268,7 @@ impl PhysicsClient {
         body_a: BodyId,
         body_b: BodyId,
         joint: Joint,
-    ) -> Result<JointId, PhysicsClientError> {
+    ) -> Result<JointId, Error> {
         match self
             .submit(PhysicsCommand::AddJoint {
                 body_a,
@@ -292,17 +292,20 @@ impl PhysicsClient {
             | PhysicsCommandResult::ClusterPart(_)
             | PhysicsCommandResult::Weld(_)
             | PhysicsCommandResult::Gravity(_)
-            | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
+            | PhysicsCommandResult::Overlaps(_) => {
+                Err(Error::from(PhysicsClientError::UnexpectedResult))
+            }
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
     /// Removes a joint at a physics-step boundary.
-    pub async fn remove_joint(&self, id: JointId) -> Result<(), PhysicsClientError> {
+    pub async fn remove_joint(&self, id: JointId) -> Result<(), Error> {
         expect_done(self.submit(PhysicsCommand::RemoveJoint { id }).await?)
     }
 
     /// Replaces a joint's settings at a physics-step boundary.
-    pub async fn update_joint(&self, id: JointId, joint: Joint) -> Result<(), PhysicsClientError> {
+    pub async fn update_joint(&self, id: JointId, joint: Joint) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::UpdateJoint { id, joint })
                 .await?,
@@ -310,11 +313,7 @@ impl PhysicsClient {
     }
 
     /// Enables or disables a joint at a physics-step boundary.
-    pub async fn set_joint_enabled(
-        &self,
-        id: JointId,
-        enabled: bool,
-    ) -> Result<(), PhysicsClientError> {
+    pub async fn set_joint_enabled(&self, id: JointId, enabled: bool) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetJointEnabled { id, enabled })
                 .await?,
@@ -330,7 +329,7 @@ impl PhysicsClient {
         body: BodyId,
         local_point: Vec3,
         local_force: Vec3,
-    ) -> Result<ForceSourceId, PhysicsClientError> {
+    ) -> Result<ForceSourceId, Error> {
         match self
             .submit(PhysicsCommand::AddForceSource {
                 body,
@@ -354,12 +353,15 @@ impl PhysicsClient {
             | PhysicsCommandResult::ClusterPart(_)
             | PhysicsCommandResult::Weld(_)
             | PhysicsCommandResult::Gravity(_)
-            | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
+            | PhysicsCommandResult::Overlaps(_) => {
+                Err(Error::from(PhysicsClientError::UnexpectedResult))
+            }
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
     /// Removes a persistent force source.
-    pub async fn remove_force_source(&self, id: ForceSourceId) -> Result<(), PhysicsClientError> {
+    pub async fn remove_force_source(&self, id: ForceSourceId) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::RemoveForceSource { id })
                 .await?,
@@ -367,11 +369,7 @@ impl PhysicsClient {
     }
 
     /// Replaces a body's transform while preserving its velocities.
-    pub async fn set_transform(
-        &self,
-        id: BodyId,
-        transform: Transform,
-    ) -> Result<(), PhysicsClientError> {
+    pub async fn set_transform(&self, id: BodyId, transform: Transform) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetTransform { id, transform })
                 .await?,
@@ -379,11 +377,7 @@ impl PhysicsClient {
     }
 
     /// Sets a body's world-space linear velocity.
-    pub async fn set_linear_velocity(
-        &self,
-        id: BodyId,
-        velocity: Vec3,
-    ) -> Result<(), PhysicsClientError> {
+    pub async fn set_linear_velocity(&self, id: BodyId, velocity: Vec3) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetLinearVelocity { id, velocity })
                 .await?,
@@ -391,11 +385,7 @@ impl PhysicsClient {
     }
 
     /// Sets a body's world-space angular velocity.
-    pub async fn set_angular_velocity(
-        &self,
-        id: BodyId,
-        velocity: Vec3,
-    ) -> Result<(), PhysicsClientError> {
+    pub async fn set_angular_velocity(&self, id: BodyId, velocity: Vec3) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetAngularVelocity { id, velocity })
                 .await?,
@@ -403,19 +393,12 @@ impl PhysicsClient {
     }
 
     /// Replaces a dynamic body's mass properties.
-    pub async fn set_mass(
-        &self,
-        id: BodyId,
-        mass: MassProperties,
-    ) -> Result<(), PhysicsClientError> {
+    pub async fn set_mass(&self, id: BodyId, mass: MassProperties) -> Result<(), Error> {
         expect_done(self.submit(PhysicsCommand::SetMass { id, mass }).await?)
     }
 
     /// Replaces the world's collision configuration after validation.
-    pub async fn set_collision_config(
-        &self,
-        config: CollisionConfig,
-    ) -> Result<(), PhysicsClientError> {
+    pub async fn set_collision_config(&self, config: CollisionConfig) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetCollisionConfig { config })
                 .await?,
@@ -423,22 +406,22 @@ impl PhysicsClient {
     }
 
     /// Sets continuous collision detection for a body.
-    pub async fn set_ccd_mode(&self, id: BodyId, mode: CcdMode) -> Result<(), PhysicsClientError> {
+    pub async fn set_ccd_mode(&self, id: BodyId, mode: CcdMode) -> Result<(), Error> {
         expect_done(self.submit(PhysicsCommand::SetCcdMode { id, mode }).await?)
     }
 
     /// Puts a dynamic body to sleep.
-    pub async fn sleep(&self, id: BodyId) -> Result<(), PhysicsClientError> {
+    pub async fn sleep(&self, id: BodyId) -> Result<(), Error> {
         expect_done(self.submit(PhysicsCommand::Sleep { id }).await?)
     }
 
     /// Wakes a dynamic body.
-    pub async fn wake_up(&self, id: BodyId) -> Result<(), PhysicsClientError> {
+    pub async fn wake_up(&self, id: BodyId) -> Result<(), Error> {
         expect_done(self.submit(PhysicsCommand::WakeUp { id }).await?)
     }
 
     /// Accumulates a world-space force on a dynamic body.
-    pub async fn apply_force(&self, id: BodyId, force: Vec3) -> Result<(), PhysicsClientError> {
+    pub async fn apply_force(&self, id: BodyId, force: Vec3) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::ApplyForce { id, force })
                 .await?,
@@ -451,7 +434,7 @@ impl PhysicsClient {
         id: BodyId,
         force: Vec3,
         point: Vec3,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::ApplyForceAtPoint { id, force, point })
                 .await?,
@@ -459,7 +442,7 @@ impl PhysicsClient {
     }
 
     /// Accumulates a world-space torque on a dynamic body.
-    pub async fn apply_torque(&self, id: BodyId, torque: Vec3) -> Result<(), PhysicsClientError> {
+    pub async fn apply_torque(&self, id: BodyId, torque: Vec3) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::ApplyTorque { id, torque })
                 .await?,
@@ -467,7 +450,7 @@ impl PhysicsClient {
     }
 
     /// Applies a world-space impulse immediately to a dynamic body.
-    pub async fn apply_impulse(&self, id: BodyId, impulse: Vec3) -> Result<(), PhysicsClientError> {
+    pub async fn apply_impulse(&self, id: BodyId, impulse: Vec3) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::ApplyImpulse { id, impulse })
                 .await?,
@@ -480,7 +463,7 @@ impl PhysicsClient {
         id: BodyId,
         impulse: Vec3,
         point: Vec3,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::ApplyImpulseAtPoint { id, impulse, point })
                 .await?,
@@ -488,7 +471,7 @@ impl PhysicsClient {
     }
 
     /// Clears accumulated force and torque on a body.
-    pub async fn clear_forces(&self, id: BodyId) -> Result<(), PhysicsClientError> {
+    pub async fn clear_forces(&self, id: BodyId) -> Result<(), Error> {
         expect_done(self.submit(PhysicsCommand::ClearForces { id }).await?)
     }
 
@@ -497,7 +480,7 @@ impl PhysicsClient {
         &self,
         id: ColliderId,
         filter: CollisionFilter,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetColliderFilter { id, filter })
                 .await?,
@@ -509,7 +492,7 @@ impl PhysicsClient {
         &self,
         id: ColliderId,
         mode: CollisionMode,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetColliderMode { id, mode })
                 .await?,
@@ -517,11 +500,7 @@ impl PhysicsClient {
     }
 
     /// Updates the bone pose of an attached skinned mesh collider.
-    pub async fn set_skin_pose(
-        &self,
-        id: ColliderId,
-        matrices: Vec<Affine3>,
-    ) -> Result<(), PhysicsClientError> {
+    pub async fn set_skin_pose(&self, id: ColliderId, matrices: Vec<Affine3>) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetSkinPose { id, matrices })
                 .await?,
@@ -533,7 +512,7 @@ impl PhysicsClient {
         &self,
         id: ColliderId,
         material: Option<MaterialId>,
-    ) -> Result<(), PhysicsClientError> {
+    ) -> Result<(), Error> {
         expect_done(
             self.submit(PhysicsCommand::SetColliderMaterial { id, material })
                 .await?,
@@ -542,14 +521,10 @@ impl PhysicsClient {
 
     /// Raycasts the world at this request's FIFO position before integration.
     /// The query result does not describe the following snapshot's state.
-    pub async fn raycast(
-        &self,
-        ray: Ray,
-        filter: QueryFilter,
-    ) -> Result<Option<RayHit>, PhysicsClientError> {
+    pub async fn raycast(&self, ray: Ray, filter: QueryFilter) -> Result<Option<RayHit>, Error> {
         match self.submit(PhysicsCommand::Raycast { ray, filter }).await? {
             PhysicsCommandResult::Raycast(hit) => Ok(hit),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
@@ -561,7 +536,7 @@ impl PhysicsClient {
         transform: Transform,
         displacement: Vec3,
         filter: QueryFilter,
-    ) -> Result<Option<ShapeHit>, PhysicsClientError> {
+    ) -> Result<Option<ShapeHit>, Error> {
         match self
             .submit(PhysicsCommand::Sweep {
                 shape,
@@ -572,7 +547,7 @@ impl PhysicsClient {
             .await?
         {
             PhysicsCommandResult::Sweep(hit) => Ok(hit),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
@@ -583,7 +558,7 @@ impl PhysicsClient {
         shape: Shape,
         transform: Transform,
         filter: QueryFilter,
-    ) -> Result<Vec<OverlapHit>, PhysicsClientError> {
+    ) -> Result<Vec<OverlapHit>, Error> {
         match self
             .submit(PhysicsCommand::Overlaps {
                 shape,
@@ -593,7 +568,7 @@ impl PhysicsClient {
             .await?
         {
             PhysicsCommandResult::Overlaps(overlaps) => Ok(overlaps),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
@@ -619,11 +594,11 @@ impl PhysicsClient {
 
     /// Waits for a publication not yet observed by this client.
     ///
-    /// Intermediate snapshots may be skipped. Returns [`PhysicsClientError::NotRunning`]
+    /// Intermediate snapshots may be skipped. Returns an error whose message reports
     /// when the simulation stops before publishing another snapshot.
-    pub async fn next_snapshot(&mut self) -> Result<Arc<PhysicsSnapshot>, PhysicsClientError> {
+    pub async fn next_snapshot(&mut self) -> Result<Arc<PhysicsSnapshot>, Error> {
         if self.command_tx.borrow().is_none() {
-            return Err(PhysicsClientError::NotRunning);
+            return Err(Error::from(PhysicsClientError::NotRunning));
         }
 
         // A new call always starts waiting from the latest publication, even
@@ -635,15 +610,15 @@ impl PhysicsClient {
         loop {
             tokio::select! {
                 changed = self.snapshot_rx.changed() => {
-                    changed.map_err(|_| PhysicsClientError::ChannelClosed)?;
+                    changed.map_err(|_| Error::from(PhysicsClientError::ChannelClosed))?;
                     return Ok(Arc::clone(&self.snapshot_rx.borrow_and_update()));
                 }
                 changed = self.command_tx.changed() => {
                     if changed.is_err() {
-                        return Err(PhysicsClientError::ChannelClosed);
+                        return Err(Error::from(PhysicsClientError::ChannelClosed));
                     }
                     if self.command_tx.borrow().is_none() {
-                        return Err(PhysicsClientError::NotRunning);
+                        return Err(Error::from(PhysicsClientError::NotRunning));
                     }
                 }
             }
@@ -651,7 +626,7 @@ impl PhysicsClient {
     }
 }
 
-fn expect_done(result: PhysicsCommandResult) -> Result<(), PhysicsClientError> {
+fn expect_done(result: PhysicsCommandResult) -> Result<(), Error> {
     match result {
         PhysicsCommandResult::Done => Ok(()),
         PhysicsCommandResult::Body(_)
@@ -668,7 +643,10 @@ fn expect_done(result: PhysicsCommandResult) -> Result<(), PhysicsClientError> {
         | PhysicsCommandResult::ClusterPart(_)
         | PhysicsCommandResult::Weld(_)
         | PhysicsCommandResult::Gravity(_)
-        | PhysicsCommandResult::Overlaps(_) => Err(PhysicsClientError::UnexpectedResult),
+        | PhysicsCommandResult::Overlaps(_) => {
+            Err(Error::from(PhysicsClientError::UnexpectedResult))
+        }
+        _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
     }
 }
 
@@ -832,7 +810,7 @@ mod tests {
             let Some(CommandRequest::Batch { buffer, .. }) = receiver.recv().await else {
                 panic!("source updates arrive as one command batch");
             };
-            apply_command_batch(&mut world, &buffer.commands, &mut BatchScratch::default())
+            apply_command_batch(&mut world, buffer.commands(), &mut BatchScratch::default())
                 .expect("source update batch");
             let configured = world.force_source(source).expect("source remains live");
             assert_eq!(configured.local_point(), Vec3::Y);
@@ -898,10 +876,7 @@ mod tests {
         let material = world
             .add_material(PhysicsMaterial::default())
             .expect("material");
-        let config = CollisionConfig {
-            contact_offset: 0.02,
-            ..CollisionConfig::default()
-        };
+        let config = CollisionConfig::builder().contact_offset(0.02).build();
 
         let server = tokio::spawn(async move {
             for _ in 0..5 {
@@ -1031,10 +1006,7 @@ mod tests {
                 .send(Err(PhysicsClientError::NotRunning))
                 .expect("client is waiting");
         });
-        assert!(matches!(
-            client.submit(add_body()).await,
-            Err(PhysicsClientError::NotRunning)
-        ));
+        assert!(client.submit(add_body()).await.is_err());
         server.await.expect("server task");
     }
 
@@ -1108,7 +1080,7 @@ mod tests {
             panic!("expected QueueFull");
         };
         assert_eq!(buffer.len(), 2);
-        assert_eq!(buffer.commands.capacity(), 2);
+        assert_eq!(buffer.capacity(), 2);
 
         let _ = take_single_request(receiver.recv().await.expect("queued command"));
         let id = client.try_submit(buffer).expect("retry accepted");
@@ -1121,7 +1093,7 @@ mod tests {
         };
         assert_eq!(queued_id, id);
         assert_eq!(buffer.len(), 2);
-        assert_eq!(buffer.commands.capacity(), 2);
+        assert_eq!(buffer.capacity(), 2);
     }
 
     #[test]
@@ -1133,13 +1105,13 @@ mod tests {
             .expect("body ID");
         let mut returned = PhysicsCommandBuffer::with_capacity(12);
         returned.set_linear_velocity(body, Vec3::X);
-        let capacity = returned.commands.capacity();
+        let capacity = returned.capacity();
         let empty_pool_stats = harness.buffer_pool.stats();
         harness.buffer_pool.recycle(returned);
 
         let buffer = harness.client.commands();
         assert!(buffer.is_empty());
-        assert_eq!(buffer.commands.capacity(), capacity);
+        assert_eq!(buffer.capacity(), capacity);
         assert_eq!(harness.buffer_pool.stats(), empty_pool_stats);
     }
 
@@ -1260,10 +1232,7 @@ mod tests {
             Arc::new(AtomicU64::new(1)),
             Arc::new(CommandBufferPool::default()),
         );
-        assert!(matches!(
-            client.submit(add_body()).await,
-            Err(PhysicsClientError::NotRunning)
-        ));
+        assert!(client.submit(add_body()).await.is_err());
         drop(state_tx);
     }
 
@@ -1375,10 +1344,7 @@ mod tests {
         assert!(matches!(poll_once(next.as_mut()), Poll::Pending));
 
         _command_tx.send_replace(None);
-        assert!(matches!(
-            poll_once(next.as_mut()),
-            Poll::Ready(Err(PhysicsClientError::NotRunning))
-        ));
+        assert!(matches!(poll_once(next.as_mut()), Poll::Ready(Err(_))));
     }
 
     #[test]

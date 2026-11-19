@@ -1,7 +1,7 @@
 use super::{
     ConstraintRow, GeneralizedImpulse, IncompleteCholeskyPreconditioner, PositionPcgResult,
     RowDimension, SolverBody, SolverMass, SolverMassCacheStats, SolverMassSlot, StepExecutor,
-    VelocityPcgResult, VelocityPcgScratch, VelocityRowTerm, map_rigid_body_error, row_velocity,
+    VelocityPcgResult, VelocityPcgScratch, VelocityRowTerm, row_velocity,
 };
 use crate::collision::CollisionError;
 use kapitsa_math::Vec3;
@@ -17,7 +17,7 @@ pub(super) fn solve_position_pcg_prepared(
     incomplete_cholesky_preconditioner: bool,
     scratch: &mut VelocityPcgScratch,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<Option<PositionPcgResult>, CollisionError> {
+) -> Result<Option<PositionPcgResult>, crate::Error> {
     if rows.is_empty() {
         return Ok(Some(PositionPcgResult {
             converged: true,
@@ -38,14 +38,14 @@ pub(super) fn solve_position_pcg_prepared(
     }
 
     if slots.len() < bodies.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let preparation_started = std::time::Instant::now();
     scratch.masses.clear();
     scratch
         .masses
         .try_reserve(bodies.len())
-        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     for (body, slot) in bodies.iter().zip(slots) {
         let (mass, status) = slot.resolve(body.body())?;
         cache_stats.record(status);
@@ -56,21 +56,21 @@ pub(super) fn solve_position_pcg_prepared(
     resize_f64_buffer(&mut scratch.diagonal, rows.len())?;
     for (index, row) in rows.iter().copied().enumerate() {
         if !row.is_valid(bodies.len()) {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         scratch.residual[index] = -row.error;
         let mass_a = *scratch
             .masses
             .get(row.body_a)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let mass_b = *scratch
             .masses
             .get(row.body_b)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         scratch.diagonal[index] = mass_a.diagonal(row.linear_a, row.angular_a)?
             + mass_b.diagonal(row.linear_b, row.angular_b)?;
         if !scratch.residual[index].is_finite() || !scratch.diagonal[index].is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         if scratch.diagonal[index] <= f64::MIN_POSITIVE {
             if scratch.residual[index].abs() > position_row_tolerance(row, tolerance) {
@@ -144,13 +144,13 @@ pub(super) fn solve_position_pcg_prepared(
         }
         let alpha = residual_product / denominator;
         if !alpha.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         for index in 0..rows.len() {
             scratch.solution[index] += alpha * scratch.direction[index];
             scratch.residual[index] -= alpha * scratch.product[index];
             if !scratch.solution[index].is_finite() || !scratch.residual[index].is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
         }
         completed_iterations = iteration + 1;
@@ -175,13 +175,13 @@ pub(super) fn solve_position_pcg_prepared(
         }
         let beta = next_residual_product / residual_product;
         if !beta.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         for index in 0..rows.len() {
             scratch.direction[index] =
                 scratch.preconditioned[index] + beta * scratch.direction[index];
             if !scratch.direction[index].is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
         }
         residual_product = next_residual_product;
@@ -197,15 +197,17 @@ pub(super) fn solve_position_pcg_prepared(
             continue;
         }
         if body.body().physics().body_type() == crate::rigid_body::BodyType::Dynamic {
-            body.body_mut()
-                .apply_constraint_position_impulse_cached(impulse.linear, impulse.angular, mass)
-                .map_err(map_rigid_body_error)?;
+            body.body_mut().apply_constraint_position_impulse_cached(
+                impulse.linear,
+                impulse.angular,
+                mass,
+            )?;
         }
     }
     for (row, delta) in rows.iter_mut().zip(scratch.solution.iter().copied()) {
         let next = row.accumulated_multiplier + delta;
         if !next.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         row.accumulated_multiplier = next;
     }
@@ -230,7 +232,7 @@ pub(super) fn solve_velocity_pcg_prepared(
     executor: &impl StepExecutor,
     worker_count: usize,
     scratch: &mut VelocityPcgScratch,
-) -> Result<Option<VelocityPcgResult>, CollisionError> {
+) -> Result<Option<VelocityPcgResult>, crate::Error> {
     if rows.is_empty() {
         return Ok(Some(VelocityPcgResult {
             converged: true,
@@ -255,7 +257,7 @@ pub(super) fn solve_velocity_pcg_prepared(
 
     resize_f64_buffer(&mut scratch.residual, rows.len())?;
     if rows.iter().any(|row| !row.is_valid(bodies.len())) {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     prepare_velocity_residual_parallel(
         rows,
@@ -277,15 +279,15 @@ pub(super) fn solve_velocity_pcg_prepared(
             let mass_a = *scratch
                 .masses
                 .get(row.body_a)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let mass_b = *scratch
                 .masses
                 .get(row.body_b)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             scratch.diagonal[index] = mass_a.diagonal(row.linear_a, row.angular_a)?
                 + mass_b.diagonal(row.linear_b, row.angular_b)?;
             if !scratch.diagonal[index].is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             if scratch.diagonal[index] <= f64::MIN_POSITIVE {
                 if scratch.residual[index].abs() > velocity_row_tolerance(row, tolerance) {
@@ -418,7 +420,7 @@ pub(super) fn solve_velocity_pcg_prepared(
         }
         let alpha = residual_product / denominator;
         if !alpha.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         velocity_pcg_scaled_add(
             &mut scratch.solution,
@@ -472,7 +474,7 @@ pub(super) fn solve_velocity_pcg_prepared(
         }
         let beta = next_residual_product / residual_product;
         if !beta.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         velocity_pcg_update_direction(
             &mut scratch.direction,
@@ -497,14 +499,13 @@ pub(super) fn solve_velocity_pcg_prepared(
         }
         if body.body().physics().body_type() == crate::rigid_body::BodyType::Dynamic {
             body.body_mut()
-                .apply_constraint_impulse(impulse.linear, impulse.angular)
-                .map_err(map_rigid_body_error)?;
+                .apply_constraint_impulse(impulse.linear, impulse.angular)?;
         }
     }
     for (row, delta) in rows.iter_mut().zip(scratch.solution.iter().copied()) {
         let next = row.accumulated_impulse + delta;
         if !next.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         row.accumulated_impulse = next;
     }
@@ -521,7 +522,7 @@ fn build_velocity_row_terms_by_body(
     rows: &[ConstraintRow],
     body_count: usize,
     row_terms_by_body: &mut Vec<Vec<VelocityRowTerm>>,
-) -> Result<bool, CollisionError> {
+) -> Result<bool, crate::Error> {
     resize_nested_buffer(row_terms_by_body, body_count)?;
     for (row_index, row) in rows.iter().copied().enumerate() {
         for (body_index, linear, angular) in [
@@ -555,7 +556,7 @@ fn build_velocity_block_jacobi_preconditioner(
     row_joint_indices: &[usize],
     masses: &[SolverMass],
     blocks: &mut Vec<VelocityBlockFactor>,
-) -> Result<bool, CollisionError> {
+) -> Result<bool, crate::Error> {
     if row_joint_indices.len() != rows.len() {
         return Ok(false);
     }
@@ -567,7 +568,7 @@ fn build_velocity_block_jacobi_preconditioner(
     if block_count > blocks.capacity() {
         blocks
             .try_reserve_exact(block_count - blocks.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     }
     blocks.clear();
     let mut start = 0;
@@ -595,10 +596,10 @@ fn build_velocity_block_jacobi_preconditioner(
                 }
                 let mass_a = *masses
                     .get(row_i.body_a)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let mass_b = *masses
                     .get(row_i.body_b)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let mut value = mass_a.cross(
                     row_i.linear_a,
                     row_i.angular_a,
@@ -614,7 +615,7 @@ fn build_velocity_block_jacobi_preconditioner(
                     value -= block.lower[row * 6 + previous] * block.lower[column * 6 + previous];
                 }
                 if !value.is_finite() {
-                    return Err(CollisionError::ArithmeticOverflow);
+                    return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                 }
                 if row == column {
                     if value <= f64::MIN_POSITIVE {
@@ -645,14 +646,14 @@ fn apply_velocity_pcg_preconditioner(
     output: &mut [f64],
     executor: &impl StepExecutor,
     worker_count: usize,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if let Some(blocks) = block_jacobi {
         apply_block_jacobi_preconditioner(residual, blocks, output)
     } else if incomplete_cholesky.is_some() {
         apply_velocity_preconditioner(residual, diagonal, incomplete_cholesky, output)
     } else {
         if residual.len() != diagonal.len() || residual.len() != output.len() {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         let chunk_size = velocity_pcg_chunk_size(output.len(), worker_count);
         velocity_pcg_for_each_chunk_mut(output, chunk_size, executor, |chunk_index, chunk| {
@@ -663,7 +664,7 @@ fn apply_velocity_pcg_preconditioner(
             }
         })?;
         if output.iter().any(|value| !value.is_finite()) {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         Ok(())
     }
@@ -674,9 +675,9 @@ fn apply_block_jacobi_preconditioner(
     residual: &[f64],
     blocks: &[VelocityBlockFactor],
     output: &mut [f64],
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if residual.len() != output.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     for block in blocks {
         for row in 0..block.len {
@@ -693,7 +694,7 @@ fn apply_block_jacobi_preconditioner(
             }
             output[block.start + row] = value / block.lower[row * 6 + row];
             if !output[block.start + row].is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
         }
     }
@@ -708,7 +709,7 @@ fn build_incomplete_cholesky_preconditioner_into(
     row_terms_by_body: &mut Vec<Vec<VelocityRowTerm>>,
     lower_pattern: &mut Vec<Vec<(usize, f64)>>,
     preconditioner: &mut IncompleteCholeskyPreconditioner,
-) -> Result<bool, CollisionError> {
+) -> Result<bool, crate::Error> {
     if diagonal.len() != rows.len() {
         return Ok(false);
     }
@@ -720,7 +721,7 @@ fn build_incomplete_cholesky_preconditioner_into(
     for (body_index, terms) in row_terms_by_body.iter().enumerate() {
         let mass = *masses
             .get(body_index)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         for right in 0..terms.len() {
             for left in 0..right {
                 let left_term = terms[left];
@@ -737,7 +738,7 @@ fn build_incomplete_cholesky_preconditioner_into(
                     right_term.angular,
                 )?;
                 if !value.is_finite() {
-                    return Err(CollisionError::ArithmeticOverflow);
+                    return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                 }
                 lower_pattern[row].push((column, value));
             }
@@ -752,7 +753,7 @@ fn build_incomplete_cholesky_preconditioner_into(
             if write > 0 && entries[write - 1].0 == column {
                 entries[write - 1].1 += value;
                 if !entries[write - 1].1.is_finite() {
-                    return Err(CollisionError::ArithmeticOverflow);
+                    return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                 }
             } else {
                 entries[write] = (column, value);
@@ -814,9 +815,9 @@ fn apply_velocity_preconditioner(
     diagonal: &[f64],
     preconditioner: Option<&IncompleteCholeskyPreconditioner>,
     output: &mut [f64],
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if residual.len() != diagonal.len() || residual.len() != output.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let Some(preconditioner) = preconditioner else {
         for index in 0..residual.len() {
@@ -825,7 +826,7 @@ fn apply_velocity_preconditioner(
         return Ok(());
     };
     if preconditioner.diagonal.len() != residual.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     for row in 0..residual.len() {
         let mut value = residual[row];
@@ -834,7 +835,7 @@ fn apply_velocity_preconditioner(
         }
         output[row] = value / preconditioner.diagonal[row];
         if !output[row].is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
     }
     for row in (0..residual.len()).rev() {
@@ -844,7 +845,7 @@ fn apply_velocity_preconditioner(
         }
         output[row] = value / preconditioner.diagonal[row];
         if !output[row].is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
     }
     Ok(())
@@ -858,9 +859,9 @@ fn global_velocity_matrix_vector(
     body_impulses: &mut [GeneralizedImpulse],
     body_responses: &mut [GeneralizedImpulse],
     result: &mut [f64],
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if rows.len() != vector.len() || rows.len() != result.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     body_impulses.fill(GeneralizedImpulse::default());
     body_responses.fill(GeneralizedImpulse::default());
@@ -868,7 +869,7 @@ fn global_velocity_matrix_vector(
         add_generalized_impulse(
             body_impulses
                 .get_mut(row.body_a)
-                .ok_or(CollisionError::InvalidContact)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
             row.linear_a,
             row.angular_a,
             coefficient,
@@ -876,7 +877,7 @@ fn global_velocity_matrix_vector(
         add_generalized_impulse(
             body_impulses
                 .get_mut(row.body_b)
-                .ok_or(CollisionError::InvalidContact)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
             row.linear_b,
             row.angular_b,
             coefficient,
@@ -890,37 +891,37 @@ fn global_velocity_matrix_vector(
             angular: mass
                 .inverse_inertia
                 .checked_mul_vector(impulse.angular)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         };
         if !body_responses[index].linear.is_finite() || !body_responses[index].angular.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
     }
     for (index, row) in rows.iter().copied().enumerate() {
         let response_a = body_responses
             .get(row.body_a)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let response_b = body_responses
             .get(row.body_b)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let value = row
             .linear_a
             .checked_dot(response_a.linear)
-            .ok_or(CollisionError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
             + row
                 .angular_a
                 .checked_dot(response_a.angular)
-                .ok_or(CollisionError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
             + row
                 .linear_b
                 .checked_dot(response_b.linear)
-                .ok_or(CollisionError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
             + row
                 .angular_b
                 .checked_dot(response_b.angular)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         if !value.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         result[index] = value;
     }
@@ -932,16 +933,16 @@ fn global_velocity_impulse(
     rows: &[ConstraintRow],
     vector: &[f64],
     body_impulses: &mut [GeneralizedImpulse],
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if rows.len() != vector.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     body_impulses.fill(GeneralizedImpulse::default());
     for (row, coefficient) in rows.iter().copied().zip(vector.iter().copied()) {
         add_generalized_impulse(
             body_impulses
                 .get_mut(row.body_a)
-                .ok_or(CollisionError::InvalidContact)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
             row.linear_a,
             row.angular_a,
             coefficient,
@@ -949,7 +950,7 @@ fn global_velocity_impulse(
         add_generalized_impulse(
             body_impulses
                 .get_mut(row.body_b)
-                .ok_or(CollisionError::InvalidContact)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
             row.linear_b,
             row.angular_b,
             coefficient,
@@ -970,14 +971,14 @@ fn global_velocity_matrix_vector_parallel(
     result: &mut [f64],
     executor: &impl StepExecutor,
     worker_count: usize,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if rows.len() != vector.len()
         || rows.len() != result.len()
         || masses.len() != row_terms_by_body.len()
         || masses.len() != body_impulses.len()
         || masses.len() != body_responses.len()
     {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let chunk_size = velocity_pcg_chunk_size(masses.len(), worker_count);
     velocity_pcg_for_each_chunk_mut(body_impulses, chunk_size, executor, |chunk_index, chunk| {
@@ -996,7 +997,7 @@ fn global_velocity_matrix_vector_parallel(
         .iter()
         .any(|impulse| !impulse.linear.is_finite() || !impulse.angular.is_finite())
     {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     velocity_pcg_for_each_chunk_mut(
@@ -1023,7 +1024,7 @@ fn global_velocity_matrix_vector_parallel(
         .iter()
         .any(|response| !response.linear.is_finite() || !response.angular.is_finite())
     {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     let chunk_size = velocity_pcg_chunk_size(rows.len(), worker_count);
@@ -1052,7 +1053,7 @@ fn global_velocity_matrix_vector_parallel(
         }
     })?;
     if result.iter().any(|value| !value.is_finite()) {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(())
 }
@@ -1064,9 +1065,9 @@ fn global_velocity_impulse_parallel(
     body_impulses: &mut [GeneralizedImpulse],
     executor: &impl StepExecutor,
     worker_count: usize,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if body_impulses.len() != row_terms_by_body.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let chunk_size = velocity_pcg_chunk_size(body_impulses.len(), worker_count);
     velocity_pcg_for_each_chunk_mut(body_impulses, chunk_size, executor, |chunk_index, chunk| {
@@ -1085,7 +1086,7 @@ fn global_velocity_impulse_parallel(
         .iter()
         .any(|impulse| !impulse.linear.is_finite() || !impulse.angular.is_finite())
     {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(())
 }
@@ -1108,7 +1109,7 @@ fn velocity_pcg_for_each_chunk_mut<T, F>(
     chunk_size: usize,
     executor: &impl StepExecutor,
     operation: F,
-) -> Result<(), CollisionError>
+) -> Result<(), crate::Error>
 where
     T: Send,
     F: Fn(usize, &mut [T]) + Send + Sync,
@@ -1126,7 +1127,7 @@ where
     if matches!(result, Ok(Ok(()))) {
         Ok(())
     } else {
-        Err(CollisionError::WorkerFailed)
+        Err(crate::Error::from(CollisionError::WorkerFailed))
     }
 }
 
@@ -1137,9 +1138,9 @@ fn velocity_pcg_scaled_add(
     scale: f64,
     executor: &impl StepExecutor,
     worker_count: usize,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if destination.len() != source.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let chunk_size = velocity_pcg_chunk_size(destination.len(), worker_count);
     velocity_pcg_for_each_chunk_mut(destination, chunk_size, executor, |chunk_index, chunk| {
@@ -1149,7 +1150,7 @@ fn velocity_pcg_scaled_add(
         }
     })?;
     if destination.iter().any(|value| !value.is_finite()) {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(())
 }
@@ -1161,9 +1162,9 @@ fn velocity_pcg_update_direction(
     beta: f64,
     executor: &impl StepExecutor,
     worker_count: usize,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if direction.len() != preconditioned.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let chunk_size = velocity_pcg_chunk_size(direction.len(), worker_count);
     velocity_pcg_for_each_chunk_mut(direction, chunk_size, executor, |chunk_index, chunk| {
@@ -1173,7 +1174,7 @@ fn velocity_pcg_update_direction(
         }
     })?;
     if direction.iter().any(|value| !value.is_finite()) {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(())
 }
@@ -1184,13 +1185,13 @@ fn add_generalized_impulse(
     linear: Vec3,
     angular: Vec3,
     coefficient: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     impulse.linear += linear * coefficient;
     impulse.angular += angular * coefficient;
     if impulse.linear.is_finite() && impulse.angular.is_finite() {
         Ok(())
     } else {
-        Err(CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(CollisionError::ArithmeticOverflow))
     }
 }
 
@@ -1213,9 +1214,9 @@ fn velocity_vector_converged_parallel(
     tolerance: crate::joint::JointTolerance,
     executor: &impl StepExecutor,
     worker_count: usize,
-) -> Result<bool, CollisionError> {
+) -> Result<bool, crate::Error> {
     if rows.len() != residual.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let chunk_size = velocity_pcg_chunk_size(rows.len(), worker_count);
     if chunk_size >= rows.len().max(1) {
@@ -1298,9 +1299,9 @@ fn prepare_velocity_residual_parallel(
     residual: &mut [f64],
     executor: &impl StepExecutor,
     worker_count: usize,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if rows.len() != residual.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let chunk_size = velocity_pcg_chunk_size(rows.len(), worker_count);
     velocity_pcg_for_each_chunk_mut(residual, chunk_size, executor, |chunk_index, chunk| {
@@ -1311,7 +1312,7 @@ fn prepare_velocity_residual_parallel(
         }
     })?;
     if residual.iter().any(|value| !value.is_finite()) {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(())
 }
@@ -1344,15 +1345,15 @@ fn position_row_tolerance(row: ConstraintRow, tolerance: crate::joint::JointTole
 }
 
 #[cfg(feature = "bench-internals")]
-fn checked_dot_product(left: &[f64], right: &[f64]) -> Result<f64, CollisionError> {
+fn checked_dot_product(left: &[f64], right: &[f64]) -> Result<f64, crate::Error> {
     if left.len() != right.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     left.iter().zip(right).try_fold(0.0, |sum, (left, right)| {
         let next = sum + left * right;
         next.is_finite()
             .then_some(next)
-            .ok_or(CollisionError::ArithmeticOverflow)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
     })
 }
 
@@ -1363,9 +1364,9 @@ fn checked_dot_product_parallel(
     partial_sums: &mut Vec<f64>,
     executor: &impl StepExecutor,
     worker_count: usize,
-) -> Result<f64, CollisionError> {
+) -> Result<f64, crate::Error> {
     if left.len() != right.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let chunk_size = velocity_pcg_chunk_size(left.len(), worker_count);
     if chunk_size >= left.len().max(1) {
@@ -1388,36 +1389,36 @@ fn checked_dot_product_parallel(
             let next = sum + partial;
             next.is_finite()
                 .then_some(next)
-                .ok_or(CollisionError::ArithmeticOverflow)
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
         })
 }
 
 #[cfg(feature = "bench-internals")]
-fn zero_f64_buffer(length: usize) -> Result<Vec<f64>, CollisionError> {
+fn zero_f64_buffer(length: usize) -> Result<Vec<f64>, crate::Error> {
     let mut buffer = Vec::new();
     buffer
         .try_reserve_exact(length)
-        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     buffer.resize(length, 0.0);
     Ok(buffer)
 }
 
 #[cfg(feature = "bench-internals")]
-fn zero_impulse_buffer(length: usize) -> Result<Vec<GeneralizedImpulse>, CollisionError> {
+fn zero_impulse_buffer(length: usize) -> Result<Vec<GeneralizedImpulse>, crate::Error> {
     let mut buffer = Vec::new();
     buffer
         .try_reserve_exact(length)
-        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     buffer.resize(length, GeneralizedImpulse::default());
     Ok(buffer)
 }
 
 #[cfg(feature = "bench-internals")]
-fn resize_f64_buffer(buffer: &mut Vec<f64>, length: usize) -> Result<(), CollisionError> {
+fn resize_f64_buffer(buffer: &mut Vec<f64>, length: usize) -> Result<(), crate::Error> {
     if length > buffer.capacity() {
         buffer
             .try_reserve_exact(length - buffer.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     }
     buffer.resize(length, 0.0);
     buffer.fill(0.0);
@@ -1428,11 +1429,11 @@ fn resize_f64_buffer(buffer: &mut Vec<f64>, length: usize) -> Result<(), Collisi
 fn resize_impulse_buffer(
     buffer: &mut Vec<GeneralizedImpulse>,
     length: usize,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if length > buffer.capacity() {
         buffer
             .try_reserve_exact(length - buffer.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     }
     buffer.resize(length, GeneralizedImpulse::default());
     buffer.fill(GeneralizedImpulse::default());
@@ -1440,22 +1441,22 @@ fn resize_impulse_buffer(
 }
 
 #[cfg(feature = "bench-internals")]
-fn clear_mass_buffer(buffer: &mut Vec<SolverMass>, length: usize) -> Result<(), CollisionError> {
+fn clear_mass_buffer(buffer: &mut Vec<SolverMass>, length: usize) -> Result<(), crate::Error> {
     buffer.clear();
     if length > buffer.capacity() {
         buffer
             .try_reserve_exact(length)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     }
     Ok(())
 }
 
 #[cfg(feature = "bench-internals")]
-fn resize_nested_buffer<T>(buffer: &mut Vec<Vec<T>>, length: usize) -> Result<(), CollisionError> {
+fn resize_nested_buffer<T>(buffer: &mut Vec<Vec<T>>, length: usize) -> Result<(), crate::Error> {
     if length > buffer.len() {
         buffer
             .try_reserve_exact(length - buffer.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         buffer.resize_with(length, Vec::new);
     } else {
         buffer.truncate(length);

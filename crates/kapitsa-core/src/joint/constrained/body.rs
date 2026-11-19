@@ -1,5 +1,4 @@
 use super::{finite, length, rotate};
-use crate::joint::solver::map_rigid_body_error;
 use crate::{
     collision::CollisionError,
     mass::MassProperties,
@@ -20,11 +19,11 @@ pub(crate) struct MomentumBody {
 }
 
 impl MomentumBody {
-    pub(crate) fn new(body: &BodyMotion) -> Result<Self, CollisionError> {
+    pub(crate) fn new(body: &BodyMotion) -> Result<Self, crate::Error> {
         let mass = body
             .physics()
             .mass()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let state = body.state();
         let rotation = state.transform().rotation();
         let local_omega = rotate(rotation.conjugate(), state.angular_velocity())?;
@@ -33,9 +32,8 @@ impl MomentumBody {
         finite(momentum)?;
         Ok(Self {
             center: body
-                .world_center_of_mass()
-                .map_err(map_rigid_body_error)?
-                .ok_or(CollisionError::InvalidContact)?,
+                .world_center_of_mass()?
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
             rotation,
             momentum,
             spin,
@@ -44,28 +42,28 @@ impl MomentumBody {
         })
     }
 
-    pub(crate) fn inverse_angular_mass(self, spin: Vec3) -> Result<Vec3, CollisionError> {
+    pub(crate) fn inverse_angular_mass(self, spin: Vec3) -> Result<Vec3, crate::Error> {
         rotate(
             self.rotation,
             self.inverse_inertia * rotate(self.rotation.conjugate(), spin)?,
         )
     }
 
-    pub(crate) fn omega(self) -> Result<Vec3, CollisionError> {
+    pub(crate) fn omega(self) -> Result<Vec3, crate::Error> {
         self.inverse_angular_mass(self.spin)
     }
 
-    pub(crate) fn kick(&mut self, linear: Vec3, angular: Vec3) -> Result<(), CollisionError> {
+    pub(crate) fn kick(&mut self, linear: Vec3, angular: Vec3) -> Result<(), crate::Error> {
         self.momentum = finite(self.momentum + linear)?;
         self.spin = finite(self.spin + angular)?;
         Ok(())
     }
 
-    pub(crate) fn anchor(self, local: Vec3) -> Result<Vec3, CollisionError> {
+    pub(crate) fn anchor(self, local: Vec3) -> Result<Vec3, crate::Error> {
         finite(self.center + rotate(self.rotation, local - self.mass.center_of_mass())?)
     }
 
-    pub(crate) fn drift(&mut self, dt: f64) -> Result<(), CollisionError> {
+    pub(crate) fn drift(&mut self, dt: f64) -> Result<(), crate::Error> {
         self.center = finite(self.center + self.momentum * (dt / self.mass.mass()))?;
         let rotation = self.rotation;
         let mut omega = self.omega()?;
@@ -73,30 +71,27 @@ impl MomentumBody {
         for _ in 0..MAX_ITERATIONS {
             self.rotation = rotation
                 .integrate_world_angular_velocity(omega, dt * 0.5)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let next = self.omega()?;
             let residual = length(next - omega)?;
             omega = next;
             if residual <= 1.0e-14 * (1.0 + length(omega)?) {
                 self.rotation = rotation
                     .integrate_world_angular_velocity(omega, dt)
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                 return Ok(());
             }
         }
-        Err(CollisionError::NonConvergent)
+        Err(crate::Error::from(CollisionError::NonConvergent))
     }
 
-    pub(crate) fn state(self, mut body: BodyMotion) -> Result<BodyState, CollisionError> {
+    pub(crate) fn state(self, mut body: BodyMotion) -> Result<BodyState, crate::Error> {
         let origin = finite(self.center - rotate(self.rotation, self.mass.center_of_mass())?)?;
         let transform = Transform::new(origin, self.rotation)
-            .map_err(|_| CollisionError::ArithmeticOverflow)?;
-        body.set_transform(transform)
-            .map_err(map_rigid_body_error)?;
-        body.set_linear_velocity(self.momentum / self.mass.mass())
-            .map_err(map_rigid_body_error)?;
-        body.set_angular_velocity(self.omega()?)
-            .map_err(map_rigid_body_error)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
+        body.set_transform(transform)?;
+        body.set_linear_velocity(self.momentum / self.mass.mass())?;
+        body.set_angular_velocity(self.omega()?)?;
         Ok(*body.state())
     }
 }

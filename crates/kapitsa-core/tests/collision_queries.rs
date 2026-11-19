@@ -157,11 +157,11 @@ fn sweep_returns_first_impact_and_overlap_lists_all_matching_colliders() {
 fn invalid_ray_and_non_convex_query_shape_return_explicit_errors() {
     assert_eq!(
         Ray::new(Vec3::ZERO, Vec3::ZERO, 1.0),
-        Err(QueryError::InvalidInput)
+        Err(kapitsa_core::Error::from(QueryError::InvalidInput))
     );
     assert_eq!(
         Ray::new(Vec3::ZERO, Vec3::X, f64::INFINITY),
-        Err(QueryError::InvalidInput)
+        Err(kapitsa_core::Error::from(QueryError::InvalidInput))
     );
 
     let mut world = PhysicsWorld::new();
@@ -186,6 +186,6 @@ fn invalid_ray_and_non_convex_query_shape_return_explicit_errors() {
             Vec3::X,
             QueryFilter::default()
         ),
-        Err(QueryError::UnsupportedQueryShape)
+        Err(kapitsa_core::Error::from(QueryError::UnsupportedQueryShape))
     );
 }

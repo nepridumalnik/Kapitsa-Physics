@@ -12,12 +12,12 @@ pub struct Convex {
 }
 
 impl Convex {
-    pub fn new(vertices: Vec<Vec3>, faces: Vec<[usize; 3]>) -> Result<Self, ShapeError> {
+    pub fn new(vertices: Vec<Vec3>, faces: Vec<[usize; 3]>) -> Result<Self, crate::Error> {
         if vertices.len() < 4 || faces.len() < 4 {
-            return Err(ShapeError::InvalidTopology);
+            return Err(crate::Error::from(ShapeError::InvalidTopology));
         }
         if !vertices.iter().all(|vertex| vertex.is_finite()) {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
 
         let (minimum, maximum) = vertices.iter().fold(
@@ -26,10 +26,10 @@ impl Convex {
         );
         let extent = (maximum - minimum).max_element();
         if !extent.is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
         if extent <= 0.0 {
-            return Err(ShapeError::DegenerateGeometry);
+            return Err(crate::Error::from(ShapeError::DegenerateGeometry));
         }
 
         let tolerance = extent * f64::EPSILON * 8.0;
@@ -40,10 +40,10 @@ impl Convex {
 
         for &[a, b, c] in &faces {
             if a >= vertices.len() || b >= vertices.len() || c >= vertices.len() {
-                return Err(ShapeError::InvalidTopology);
+                return Err(crate::Error::from(ShapeError::InvalidTopology));
             }
             if a == b || b == c || c == a {
-                return Err(ShapeError::InvalidTopology);
+                return Err(crate::Error::from(ShapeError::InvalidTopology));
             }
 
             let ab = vertices[b] - vertices[a];
@@ -51,10 +51,10 @@ impl Convex {
             let area = ab.cross(ac);
             let area_length = area.length();
             if !area_length.is_finite() {
-                return Err(ShapeError::ArithmeticOverflow);
+                return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
             }
             if area_length <= 0.0 {
-                return Err(ShapeError::DegenerateGeometry);
+                return Err(crate::Error::from(ShapeError::DegenerateGeometry));
             }
 
             // Every vertex must be on or behind the outward-facing plane.
@@ -62,10 +62,10 @@ impl Convex {
             for &vertex in &vertices {
                 let side = normal.dot(vertex - vertices[a]);
                 if !side.is_finite() {
-                    return Err(ShapeError::ArithmeticOverflow);
+                    return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
                 }
                 if side > tolerance {
-                    return Err(ShapeError::InvalidTopology);
+                    return Err(crate::Error::from(ShapeError::InvalidTopology));
                 }
             }
 
@@ -81,7 +81,7 @@ impl Convex {
                 *count += 1;
                 *winding += if from < to { 1 } else { -1 };
                 if *count > 2 {
-                    return Err(ShapeError::InvalidTopology);
+                    return Err(crate::Error::from(ShapeError::InvalidTopology));
                 }
             }
         }
@@ -91,16 +91,16 @@ impl Convex {
                 .values()
                 .all(|&(count, winding)| count == 2 && winding == 0)
         {
-            return Err(ShapeError::InvalidTopology);
+            return Err(crate::Error::from(ShapeError::InvalidTopology));
         }
         if !volume_six.is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
         if volume_six < 0.0 {
-            return Err(ShapeError::InvalidTopology);
+            return Err(crate::Error::from(ShapeError::InvalidTopology));
         }
         if volume_six == 0.0 {
-            return Err(ShapeError::DegenerateGeometry);
+            return Err(crate::Error::from(ShapeError::DegenerateGeometry));
         }
 
         Ok(Self { vertices, faces })
@@ -114,14 +114,14 @@ impl Convex {
         &self.faces
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let (&first, rest) = self
             .vertices
             .split_first()
-            .ok_or(BoundsError::InvalidGeometry)?;
+            .ok_or_else(|| crate::Error::from(BoundsError::InvalidGeometry))?;
         let (min, max) = rest.iter().fold((first, first), |(min, max), &vertex| {
             (min.min(vertex), max.max(vertex))
         });
-        Aabb::new(min, max).map_err(BoundsError::InvalidBounds)
+        Aabb::new(min, max)
     }
 }

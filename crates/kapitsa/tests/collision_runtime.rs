@@ -19,15 +19,15 @@ fn dynamic(position: Vec3) -> RigidBody {
 }
 
 fn config(tick_rate: u32) -> SimulationConfig {
-    SimulationConfig {
-        tick_rate,
-        max_catch_up_steps: 1,
-        workers: WorkerConfig {
-            max_workers: std::num::NonZeroUsize::new(2),
-            ..WorkerConfig::default()
-        },
-        ..SimulationConfig::default()
-    }
+    SimulationConfig::builder()
+        .tick_rate(tick_rate)
+        .max_catch_up_steps(1)
+        .workers(
+            WorkerConfig::builder()
+                .max_workers(std::num::NonZeroUsize::new(2))
+                .build(),
+        )
+        .build()
 }
 
 async fn next_batch_with(

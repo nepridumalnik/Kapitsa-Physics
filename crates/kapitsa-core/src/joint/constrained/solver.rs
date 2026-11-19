@@ -119,9 +119,9 @@ impl ConstrainedIntegrator {
         joints: &[JointConstraint],
         dt: f64,
         scratch: &mut ConstrainedWorkspace,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if !dt.is_finite() || dt <= 0.0 {
-            return Err(CollisionError::InvalidConfig);
+            return Err(crate::Error::from(CollisionError::InvalidConfig));
         }
         scratch.cyclic = joints.len() >= bodies.len();
         scratch.linear_iterations = 0;
@@ -169,12 +169,12 @@ impl ConstrainedIntegrator {
             for (impulse, delta) in scratch.impulses.iter_mut().zip(&scratch.solution) {
                 *impulse += delta;
                 if !impulse.is_finite() {
-                    return Err(CollisionError::ArithmeticOverflow);
+                    return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                 }
             }
         }
         if !converged {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         scratch.prepare_masses(false)?;
         let mut compatible = false;
@@ -199,7 +199,7 @@ impl ConstrainedIntegrator {
             }
         }
         if !compatible {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         scratch.states.clear();
         for (body, original) in scratch.candidate.iter().zip(bodies.iter()) {
@@ -238,7 +238,7 @@ impl ConstrainedWorkspace {
             + (self.path_scale.capacity() + self.path_rhs.capacity()) * size_of::<f64>()
     }
 
-    fn prepare_masses(&mut self, start: bool) -> Result<(), CollisionError> {
+    fn prepare_masses(&mut self, start: bool) -> Result<(), crate::Error> {
         self.masses.clear();
         let bodies = if start { &self.start } else { &self.candidate };
         reserve(&mut self.masses, bodies.len())?;
@@ -246,11 +246,11 @@ impl ConstrainedWorkspace {
             let rotation = body
                 .rotation
                 .to_mat3()
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let angular = rotation * body.inverse_inertia * rotation.transpose();
             let linear = 1.0 / body.mass.mass();
             if !angular.is_finite() || !linear.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             self.masses.push(MassResponse { linear, angular });
         }
@@ -261,7 +261,7 @@ impl ConstrainedWorkspace {
     // the path. Its Cholesky bandwidth is at most 11 regardless of body count.
     // This exact O(N) structural solve avoids the O(N^2) propagation cost of
     // Jacobi-PCG on long chains. Branches keep the matrix-free PCG operator.
-    fn path_solve(&mut self, start: bool) -> Result<bool, CollisionError> {
+    fn path_solve(&mut self, start: bool) -> Result<bool, crate::Error> {
         let rows = if start { &self.start_rows } else { &self.rows };
         let n = rows.len();
         self.path_blocks.clear();
@@ -343,7 +343,7 @@ impl ConstrainedWorkspace {
         for (i, old) in self.path_order.iter().copied().enumerate() {
             let value = cross_mass(rows[old], rows[old], &self.masses)?;
             if value <= 0.0 {
-                return Err(CollisionError::NonConvergent);
+                return Err(crate::Error::from(CollisionError::NonConvergent));
             }
             self.path_scale[i] = value.sqrt();
         }
@@ -359,7 +359,7 @@ impl ConstrainedWorkspace {
                 }
                 if j == i {
                     if !value.is_finite() || value <= 0.0 {
-                        return Err(CollisionError::NonConvergent);
+                        return Err(crate::Error::from(CollisionError::NonConvergent));
                     }
                     self.path_band[i][0] = value.sqrt();
                 } else {
@@ -400,14 +400,14 @@ impl ConstrainedWorkspace {
                 return Ok(true);
             }
         }
-        Err(CollisionError::NonConvergent)
+        Err(crate::Error::from(CollisionError::NonConvergent))
     }
 
     // Cyclic graphs can have a singular Schur operator and an off-manifold
     // residual outside its range. CGLS finds a minimum-residual reaction without
     // regularizing the physical constraints. The nonlinear solve still checks
     // every original geometric equality before accepting a step.
-    fn least_squares(&mut self, start: bool) -> Result<(), CollisionError> {
+    fn least_squares(&mut self, start: bool) -> Result<(), crate::Error> {
         let rows = if start { &self.start_rows } else { &self.rows };
         let n = rows.len();
         resize(&mut self.normal, n, 0.0)?;
@@ -434,7 +434,7 @@ impl ConstrainedWorkspace {
             )?;
             let denominator = dot(&self.product, &self.product)?;
             if denominator <= 0.0 {
-                return Err(CollisionError::NonConvergent);
+                return Err(crate::Error::from(CollisionError::NonConvergent));
             }
             let alpha = norm / denominator;
             for i in 0..n {
@@ -456,10 +456,10 @@ impl ConstrainedWorkspace {
             norm = next;
             self.linear_iterations += 1;
         }
-        Err(CollisionError::NonConvergent)
+        Err(crate::Error::from(CollisionError::NonConvergent))
     }
 
-    fn linear_solve(&mut self, start: bool) -> Result<(), CollisionError> {
+    fn linear_solve(&mut self, start: bool) -> Result<(), crate::Error> {
         let n = if start {
             self.start_rows.len()
         } else {
@@ -484,17 +484,17 @@ impl ConstrainedWorkspace {
             let ma = self
                 .masses
                 .get(row.a)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let mb = self
                 .masses
                 .get(row.b)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let d = ma.linear * row.linear_a.length_squared()
                 + row.angular_a.dot(ma.angular * row.angular_a)
                 + mb.linear * row.linear_b.length_squared()
                 + row.angular_b.dot(mb.angular * row.angular_b);
             if !d.is_finite() || d <= 0.0 {
-                return Err(CollisionError::NonConvergent);
+                return Err(crate::Error::from(CollisionError::NonConvergent));
             }
             self.diagonal[i] = d;
             self.direction[i] = self.residual[i] / d;
@@ -515,7 +515,7 @@ impl ConstrainedWorkspace {
             )?;
             let curvature = dot(&self.direction, &self.product)?;
             if curvature <= 0.0 || !rho.is_finite() {
-                return Err(CollisionError::NonConvergent);
+                return Err(crate::Error::from(CollisionError::NonConvergent));
             }
             let alpha = rho / curvature;
             for i in 0..n {
@@ -551,19 +551,23 @@ impl ConstrainedWorkspace {
             rho = next;
             self.linear_iterations += 1;
         }
-        Err(CollisionError::NonConvergent)
+        Err(crate::Error::from(CollisionError::NonConvergent))
     }
 }
 
-fn velocity(row: EqualityRow, bodies: &[MomentumBody]) -> Result<f64, CollisionError> {
-    let a = bodies.get(row.a).ok_or(CollisionError::InvalidContact)?;
-    let b = bodies.get(row.b).ok_or(CollisionError::InvalidContact)?;
+fn velocity(row: EqualityRow, bodies: &[MomentumBody]) -> Result<f64, crate::Error> {
+    let a = bodies
+        .get(row.a)
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+    let b = bodies
+        .get(row.b)
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     let value = row.linear_a.dot(a.momentum / a.mass.mass())
         + row.angular_a.dot(a.omega()?)
         + row.linear_b.dot(b.momentum / b.mass.mass())
         + row.angular_b.dot(b.omega()?);
     if !value.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(value)
 }
@@ -571,7 +575,7 @@ fn write_rows(
     joints: &[JointConstraint],
     bodies: &[MomentumBody],
     rows: &mut Vec<EqualityRow>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     rows.clear();
     reserve(rows, joints.len().saturating_mul(MAX_EQUALITY_ROWS))?;
     let mut local = [EqualityRow::ZERO; MAX_EQUALITY_ROWS];
@@ -586,7 +590,7 @@ fn transpose(
     values: &[f64],
     out: &mut Vec<[Vec3; 2]>,
     count: usize,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     resize(out, count, [Vec3::ZERO; 2])?;
     out.fill([Vec3::ZERO; 2]);
     for (row, value) in rows.iter().zip(values) {
@@ -594,7 +598,9 @@ fn transpose(
             (row.a, row.linear_a, row.angular_a),
             (row.b, row.linear_b, row.angular_b),
         ] {
-            let body = out.get_mut(index).ok_or(CollisionError::InvalidContact)?;
+            let body = out
+                .get_mut(index)
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             body[0] = finite(body[0] + linear * *value)?;
             body[1] = finite(body[1] + angular * *value)?;
         }
@@ -607,7 +613,7 @@ fn operator(
     input: &[f64],
     out: &mut [f64],
     generalized: &mut Vec<[Vec3; 2]>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     transpose(rows, input, generalized, masses.len())?;
     for (value, mass) in generalized.iter_mut().zip(masses) {
         value[0] = finite(value[0] * mass.linear)?;
@@ -621,24 +627,24 @@ fn operator(
             + row.linear_b.dot(b[0])
             + row.angular_b.dot(b[1]);
         if !value.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
     }
     Ok(())
 }
-fn dot(a: &[f64], b: &[f64]) -> Result<f64, CollisionError> {
+fn dot(a: &[f64], b: &[f64]) -> Result<f64, crate::Error> {
     let value: f64 = a.iter().zip(b).map(|(a, b)| a * b).sum();
     value
         .is_finite()
         .then_some(value)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
-fn reserve<T>(values: &mut Vec<T>, count: usize) -> Result<(), CollisionError> {
+fn reserve<T>(values: &mut Vec<T>, count: usize) -> Result<(), crate::Error> {
     values
         .try_reserve(count.saturating_sub(values.len()))
-        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)
+        .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))
 }
-fn resize<T: Clone>(values: &mut Vec<T>, count: usize, value: T) -> Result<(), CollisionError> {
+fn resize<T: Clone>(values: &mut Vec<T>, count: usize, value: T) -> Result<(), crate::Error> {
     reserve(values, count)?;
     values.resize(count, value);
     Ok(())
@@ -648,7 +654,7 @@ fn cross_mass(
     a: EqualityRow,
     b: EqualityRow,
     masses: &[MassResponse],
-) -> Result<f64, CollisionError> {
+) -> Result<f64, crate::Error> {
     let mut value = 0.0;
     for (ai, al, aa) in [
         (a.a, a.linear_a, a.angular_a),
@@ -659,7 +665,9 @@ fn cross_mass(
             (b.b, b.linear_b, b.angular_b),
         ] {
             if ai == bi {
-                let mass = masses.get(ai).ok_or(CollisionError::InvalidContact)?;
+                let mass = masses
+                    .get(ai)
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 value += mass.linear * al.dot(bl) + aa.dot(mass.angular * ba);
             }
         }
@@ -667,5 +675,5 @@ fn cross_mass(
     value
         .is_finite()
         .then_some(value)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }

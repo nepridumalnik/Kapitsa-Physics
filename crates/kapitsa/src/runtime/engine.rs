@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use kapitsa_core::{
+    Error,
     collision::CollisionError,
     execution::StepExecutor,
     rigid_body::BodyType,
@@ -45,9 +46,6 @@ impl<E: StepExecutor> StepEngine<E> {
     ) -> Self {
         executor.set_parallelism(1);
         world.set_error_policy(config.error_policy);
-        if let Some(gravity) = config.central_gravity {
-            world.set_central_gravity(Some(gravity));
-        }
         let step_budget = config.step_budget();
         let metrics = SimulationMetrics {
             step_budget,
@@ -112,7 +110,7 @@ impl<E: StepExecutor> StepEngine<E> {
     }
 
     #[cfg(test)]
-    pub(crate) fn step(&mut self, task_wait_duration: Duration) -> Result<StepStats, StepError> {
+    pub(crate) fn step(&mut self, task_wait_duration: Duration) -> Result<StepStats, Error> {
         self.step_with_dt(task_wait_duration, self.config.fixed_step_seconds())
     }
 
@@ -120,9 +118,9 @@ impl<E: StepExecutor> StepEngine<E> {
         &mut self,
         task_wait_duration: Duration,
         physics_dt: f64,
-    ) -> Result<StepStats, StepError> {
-        let physics_step =
-            Duration::try_from_secs_f64(physics_dt).map_err(|_| StepError::InvalidDeltaTime)?;
+    ) -> Result<StepStats, Error> {
+        let physics_step = Duration::try_from_secs_f64(physics_dt)
+            .map_err(|_| Error::from(StepError::InvalidDeltaTime))?;
         let started = Instant::now();
         let result = self.run_step(physics_dt);
         let step_duration = started.elapsed();
@@ -185,7 +183,7 @@ impl<E: StepExecutor> StepEngine<E> {
         })
     }
 
-    fn run_step(&mut self, physics_dt: f64) -> Result<(), StepError> {
+    fn run_step(&mut self, physics_dt: f64) -> Result<(), Error> {
         kapitsa_core::hydrodynamics::HydrodynamicsTask.execute(&self.world);
         let body_count = self.world.body_count();
         let worker_count = self.active_workers.min(body_count).max(1);
@@ -219,7 +217,11 @@ impl<E: StepExecutor> StepEngine<E> {
         if self.bucket_buffers.len() < bucket_count {
             self.bucket_buffers
                 .try_reserve(bucket_count - self.bucket_buffers.len())
-                .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+                .map_err(|_| {
+                    Error::from(StepError::Collision(crate::Error::from(
+                        CollisionError::SpatialIndexCapacityExceeded,
+                    )))
+                })?;
             self.bucket_buffers.resize_with(bucket_count, Vec::new);
         }
         let buckets = &mut self.bucket_buffers[..bucket_count];
@@ -240,7 +242,7 @@ fn average_duration(durations: &VecDeque<Duration>) -> Duration {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "service"))]
 mod tests {
     #[cfg(feature = "bench-internals")]
     use std::time::Instant;
@@ -430,24 +432,27 @@ mod tests {
         let mut pool = RayonPool::new(&Handle::current(), 4).unwrap();
         for workers in [1, 4] {
             let (mut reference, reference_ids) = world_with_force_sources();
-            let (world, ids) = world_with_force_sources();
+            let (mut world, ids) = world_with_force_sources();
+            world.set_central_gravity(Some(
+                CentralGravity::new(Vec3::new(8.0, 0.0, 0.0), 1.0).unwrap(),
+            ));
             let original: Vec<_> = ids
                 .iter()
                 .map(|id| world.body(*id).unwrap().motion())
                 .collect();
-            let config = SimulationConfig {
-                tick_rate: 120,
-                central_gravity: Some(CentralGravity::new(Vec3::new(8.0, 0.0, 0.0), 1.0).unwrap()),
-                ..SimulationConfig::default()
-            };
+            let config = SimulationConfig::builder().tick_rate(120).build();
             let mut engine = StepEngine::new(world, config, pool.executor().unwrap()).unwrap();
             engine.set_parallelism(workers, Some(4));
             assert_eq!(
                 engine.step(Duration::ZERO),
-                Err(kapitsa_core::world::StepError::Gravity {
-                    body_id: ids[2],
-                    cause: kapitsa_core::gravity::GravityError::AtFieldCenter,
-                })
+                Err(kapitsa_core::Error::from(
+                    kapitsa_core::world::StepError::Gravity {
+                        body_id: ids[2],
+                        cause: kapitsa_core::Error::from(
+                            kapitsa_core::gravity::GravityError::AtFieldCenter
+                        ),
+                    }
+                ))
             );
             for (id, before) in ids.iter().zip(&original) {
                 assert_eq!(&engine.world().body(*id).unwrap().motion(), before);
@@ -463,14 +468,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn changing_worker_count_preserves_bits_over_many_gravity_steps() {
         let (mut reference, reference_ids) = world_with_force_sources();
-        let (world, ids) = world_with_force_sources();
+        let (mut world, ids) = world_with_force_sources();
         let gravity = CentralGravity::new(Vec3::new(-100.0, 0.0, 0.0), 10_000.0).unwrap();
         reference.set_central_gravity(Some(gravity));
-        let config = SimulationConfig {
-            tick_rate: 120,
-            central_gravity: Some(gravity),
-            ..SimulationConfig::default()
-        };
+        world.set_central_gravity(Some(gravity));
+        let config = SimulationConfig::builder().tick_rate(120).build();
         let mut pool = RayonPool::new(&Handle::current(), 4).unwrap();
         let mut engine = StepEngine::new(world, config, pool.executor().unwrap()).unwrap();
         for tick in 0..120 {
@@ -527,15 +529,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sharded_step_matches_sequential_with_gravity_and_force_sources() {
         let (mut sequential_world, sequential_bodies) = world_with_force_sources();
-        let (sharded_world, sharded_bodies) = world_with_force_sources();
+        let (mut sharded_world, sharded_bodies) = world_with_force_sources();
         let gravity =
             CentralGravity::new(Vec3::new(-100.0, 0.0, 0.0), 10_000.0).expect("gravity field");
         sequential_world.set_central_gravity(Some(gravity));
-        let config = SimulationConfig {
-            tick_rate: 10,
-            central_gravity: Some(gravity),
-            ..SimulationConfig::default()
-        };
+        sharded_world.set_central_gravity(Some(gravity));
+        let config = SimulationConfig::builder().tick_rate(10).build();
         sequential_world
             .step(config.fixed_step_seconds())
             .expect("sequential step");
@@ -734,12 +733,12 @@ mod tests {
                 )?;
             }
 
-            let config = SimulationConfig {
-                tick_rate: 120,
-                central_gravity: with_gravity
-                    .then(|| CentralGravity::new(Vec3::ZERO, 1_000.0).expect("valid gravity")),
-                ..SimulationConfig::default()
-            };
+            if with_gravity {
+                world.set_central_gravity(Some(
+                    CentralGravity::new(Vec3::ZERO, 1_000.0).expect("valid gravity"),
+                ));
+            }
+            let config = SimulationConfig::builder().tick_rate(120).build();
             let executor = pool.executor().expect("Rayon executor");
             let mut engine = StepEngine::new(world, config, executor)?;
             engine.set_parallelism(4, Some(4));

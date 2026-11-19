@@ -14,9 +14,9 @@ pub(crate) struct Block3 {
 
 impl Block3 {
     /// Returns delta multipliers; the caller must apply the three Jacobians together.
-    pub(crate) fn solve_position(self, dt: f64) -> Result<Vec3, CollisionError> {
+    pub(crate) fn solve_position(self, dt: f64) -> Result<Vec3, crate::Error> {
         if !dt.is_finite() || dt <= 0.0 || !self.compliance.is_finite() || self.compliance < 0.0 {
-            return Err(CollisionError::InvalidConfig);
+            return Err(crate::Error::from(CollisionError::InvalidConfig));
         }
 
         let alpha = if self.compliance == 0.0 {
@@ -25,17 +25,17 @@ impl Block3 {
             self.compliance / dt / dt
         };
         if !alpha.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
 
         let lhs = self.inverse_effective_mass + Mat3::from_diagonal(Vec3::splat(alpha));
         let rhs = -(self.errors + self.multipliers * alpha);
         if !rhs.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         lhs.factor_spd()
             .and_then(|factor| factor.solve(rhs))
-            .map_err(|_| CollisionError::NonConvergent)
+            .map_err(|_| crate::Error::from(CollisionError::NonConvergent))
     }
 }
 
@@ -47,7 +47,7 @@ impl Block3 {
 pub(crate) fn prepare_block3_operator(
     rows: &[ConstraintRow; 3],
     masses: [SolverMass; 2],
-) -> Result<Mat3, CollisionError> {
+) -> Result<Mat3, crate::Error> {
     validate_block3_rows(rows)?;
 
     let mut entries = [[0.0; 3]; 3];
@@ -67,7 +67,7 @@ pub(crate) fn prepare_block3_operator(
                 column.angular_b,
             )?;
             if !value.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             entries[row_index][column_index] = value;
             entries[column_index][row_index] = value;
@@ -77,23 +77,23 @@ pub(crate) fn prepare_block3_operator(
     Ok(Mat3::from_rows(entries))
 }
 
-fn validate_block3_rows(rows: &[ConstraintRow; 3]) -> Result<(), CollisionError> {
+fn validate_block3_rows(rows: &[ConstraintRow; 3]) -> Result<(), crate::Error> {
     let body_a = rows[0].body_a;
     let body_b = rows[0].body_b;
     let body_count = body_a
         .max(body_b)
         .checked_add(1)
-        .ok_or(CollisionError::InvalidContact)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     if rows
         .iter()
         .any(|row| row.body_a != body_a || row.body_b != body_b || !row.is_valid(body_count))
     {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
 
     let compliance = rows[0].compliance;
     if rows.iter().any(|row| row.compliance != compliance) {
-        return Err(CollisionError::InvalidConfig);
+        return Err(crate::Error::from(CollisionError::InvalidConfig));
     }
 
     Ok(())
@@ -106,9 +106,9 @@ pub(crate) fn prepare_fixed_block3(
     masses: [SolverMass; 2],
     dt: f64,
     anchor: bool,
-) -> Result<Block3, CollisionError> {
+) -> Result<Block3, crate::Error> {
     if !dt.is_finite() || dt <= 0.0 {
-        return Err(CollisionError::InvalidConfig);
+        return Err(crate::Error::from(CollisionError::InvalidConfig));
     }
     validate_block3_rows(rows)?;
     let axes = [Vec3::X, Vec3::Y, Vec3::Z];
@@ -123,11 +123,11 @@ pub(crate) fn prepare_fixed_block3(
         let response_a = masses[0]
             .inverse_inertia
             .checked_mul_vector(rows[column].angular_a)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let response_b = masses[1]
             .inverse_inertia
             .checked_mul_vector(rows[column].angular_b)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         for row in 0..=column {
             let linear_a = if anchor && row == column {
                 masses[0].inverse_mass
@@ -142,14 +142,14 @@ pub(crate) fn prepare_fixed_block3(
             let a = rows[row]
                 .angular_a
                 .checked_dot(response_a)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let b = rows[row]
                 .angular_b
                 .checked_dot(response_b)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let value = (linear_a + a) + (linear_b + b);
             if !value.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             entries[row][column] = value;
             entries[column][row] = value;
@@ -174,9 +174,9 @@ pub(crate) fn prepare_block3(
     rows: &[ConstraintRow; 3],
     masses: [SolverMass; 2],
     dt: f64,
-) -> Result<Block3, CollisionError> {
+) -> Result<Block3, crate::Error> {
     if !dt.is_finite() || dt <= 0.0 {
-        return Err(CollisionError::InvalidConfig);
+        return Err(crate::Error::from(CollisionError::InvalidConfig));
     }
     let inverse_effective_mass = prepare_block3_operator(rows, masses)?;
     Ok(Block3 {
@@ -340,18 +340,18 @@ mod tests {
         };
         assert_eq!(
             block.solve_position(0.0),
-            Err(CollisionError::InvalidConfig)
+            Err(crate::Error::from(CollisionError::InvalidConfig))
         );
         assert_eq!(
             block.solve_position(f64::NAN),
-            Err(CollisionError::InvalidConfig)
+            Err(crate::Error::from(CollisionError::InvalidConfig))
         );
 
         block.inverse_effective_mass =
             Mat3::from_rows([[1.0, 2.0, 0.0], [2.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
         assert_eq!(
             block.solve_position(1.0),
-            Err(CollisionError::NonConvergent)
+            Err(crate::Error::from(CollisionError::NonConvergent))
         );
     }
 

@@ -1,4 +1,8 @@
-#![doc = include_str!("../../../docs/collisions.md")]
+#![doc = include_str!("../README.md")]
+// Documentation debt: `missing_docs` is intentionally exempted crate-wide here.
+// The published `kapitsa` facade enforces `deny(missing_docs)`; documenting every
+// `kapitsa-core` public item is tracked separately.
+#![allow(missing_docs)]
 
 pub mod aabb;
 pub mod aerodynamics;
@@ -6,8 +10,12 @@ pub mod chunk;
 pub mod cluster;
 pub mod collider;
 pub mod collision;
+#[doc(hidden)]
+pub mod command;
 mod constraint;
+#[doc(hidden)]
 pub mod containers;
+pub mod error;
 pub mod execution;
 pub mod gravity;
 pub mod hydrodynamics;
@@ -19,4 +27,5 @@ pub mod shape;
 pub mod transform;
 pub mod world;
 
-pub use gravity::{CentralGravity, GravityError};
+pub use error::{Error, ErrorKind};
+pub use gravity::CentralGravity;

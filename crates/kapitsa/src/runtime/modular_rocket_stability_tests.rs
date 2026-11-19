@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use kapitsa_core::collision::CollisionEventKind;
+use kapitsa_core::collision::{CollisionConfig, CollisionEventKind};
 #[cfg(feature = "bench-internals")]
 use kapitsa_core::world::PhysicsWorld;
 #[cfg(feature = "bench-internals")]
@@ -289,9 +289,10 @@ fn diagnose_fixed_block_iterations_from_same_pose() {
         } else {
             initial_errors = Some(before);
         }
-        let mut config = rocket.world.collision_config();
-        config.velocity_iterations = 8;
-        config.position_iterations = position_iterations;
+        let config = CollisionConfig::builder()
+            .velocity_iterations(8)
+            .position_iterations(position_iterations)
+            .build();
         rocket
             .world
             .set_collision_config(config)
@@ -1862,9 +1863,10 @@ fn run_scenario(
         "reverse sweep diagnostic needs bench-internals"
     );
     if let Some((velocity_iterations, position_iterations)) = iteration_counts {
-        let mut config = rocket.world.collision_config();
-        config.velocity_iterations = velocity_iterations;
-        config.position_iterations = position_iterations;
+        let config = CollisionConfig::builder()
+            .velocity_iterations(velocity_iterations)
+            .position_iterations(position_iterations)
+            .build();
         rocket
             .world
             .set_collision_config(config)
@@ -2194,6 +2196,7 @@ fn run_scenario(
                 CollisionEventKind::End => surface_ends += 1,
                 CollisionEventKind::Impact => surface_impacts += 1,
                 CollisionEventKind::Persist => {}
+                _ => {}
             }
         }
 

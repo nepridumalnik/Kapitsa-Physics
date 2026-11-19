@@ -375,6 +375,7 @@ fn joint_coefficients(joint: &Joint) -> (f64, f64, f64, f64) {
             }
         }
         Joint::Fixed(_) | Joint::Ball(_) | Joint::Distance(_) | Joint::ConeTwist(_) => {}
+        _ => {}
     }
     (
         linear_stiffness,

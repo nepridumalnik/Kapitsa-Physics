@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use kapitsa_math::Vec3;
 
-use super::{BoundsError, ShapeError};
+use super::ShapeError;
 
 /// Convex hull of two spheres at local-space endpoints.
 /// Neither sphere may fully contain the other.
@@ -18,26 +18,26 @@ impl TaperedCapsule {
         end: Vec3,
         start_radius: f64,
         end_radius: f64,
-    ) -> Result<Self, ShapeError> {
+    ) -> Result<Self, crate::Error> {
         if !start.is_finite()
             || !end.is_finite()
             || !start_radius.is_finite()
             || !end_radius.is_finite()
         {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
 
         if start_radius <= 0.0 || end_radius <= 0.0 {
-            return Err(ShapeError::InvalidDimension);
+            return Err(crate::Error::from(ShapeError::InvalidDimension));
         }
 
         let length = (end - start).length();
         let radius_difference = (start_radius - end_radius).abs();
         if !length.is_finite() || !radius_difference.is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
         if length <= 0.0 || radius_difference >= length {
-            return Err(ShapeError::DegenerateGeometry);
+            return Err(crate::Error::from(ShapeError::DegenerateGeometry));
         }
 
         Ok(Self {
@@ -64,13 +64,12 @@ impl TaperedCapsule {
         self.end_radius
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let start_radius = Vec3::splat(self.start_radius);
         let end_radius = Vec3::splat(self.end_radius);
         Aabb::new(
             (self.start - start_radius).min(self.end - end_radius),
             (self.start + start_radius).max(self.end + end_radius),
         )
-        .map_err(BoundsError::InvalidBounds)
     }
 }

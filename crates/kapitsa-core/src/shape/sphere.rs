@@ -1,4 +1,4 @@
-use super::{BoundsError, ShapeError};
+use super::ShapeError;
 use crate::aabb::Aabb;
 use kapitsa_math::Vec3;
 
@@ -8,12 +8,12 @@ pub struct Sphere {
 }
 
 impl Sphere {
-    pub fn new(radius: f64) -> Result<Self, ShapeError> {
+    pub fn new(radius: f64) -> Result<Self, crate::Error> {
         if !radius.is_finite() {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
         if radius <= 0.0 {
-            return Err(ShapeError::InvalidDimension);
+            return Err(crate::Error::from(ShapeError::InvalidDimension));
         }
 
         Ok(Self { radius })
@@ -23,8 +23,8 @@ impl Sphere {
         self.radius
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let extent = Vec3::splat(self.radius);
-        Aabb::new(-extent, extent).map_err(BoundsError::InvalidBounds)
+        Aabb::new(-extent, extent)
     }
 }

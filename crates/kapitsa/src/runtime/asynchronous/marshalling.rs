@@ -18,23 +18,26 @@ pub use command::{
 };
 pub(crate) use command::{BatchScratch, CommandRequest, apply_command, apply_command_batch};
 pub use events::{
-    CollisionEventBatch, CollisionEventStreamError, CollisionEvents, JointBreakEventBatch,
-    JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError, PhysicsBatchResult,
-    PhysicsBatchResultStreamError, PhysicsBatchResults,
+    CollisionEventBatch, CollisionEvents, JointBreakEventBatch, JointBreakEvents,
+    PhysicsBatchResult, PhysicsBatchResults,
+};
+pub(crate) use events::{
+    CollisionEventStreamError, JointBreakEventStreamError, PhysicsBatchResultStreamError,
 };
 pub use snapshot::PhysicsSnapshot;
 
 use std::fmt;
 
 use kapitsa_core::{
+    Error,
     collision::QueryError,
     rigid_body::BodyError,
-    world::{ClusterError, ForceSourceError, StepError, WorldError},
+    world::{ClusterError, ForceSourceError, WorldError},
 };
 
 /// Failure returned while submitting or completing a physics command.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PhysicsClientError {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PhysicsClientError {
     NotRunning,
     ChannelClosed,
     World(WorldError),
@@ -46,10 +49,14 @@ pub enum PhysicsClientError {
     /// publishing a snapshot. `step` is the failed step attempt.
     StepFailedAfterApply {
         step: u64,
-        cause: StepError,
+        cause: Error,
     },
     UnsupportedBatchCommand,
+    TooManyCommands {
+        max_commands: usize,
+    },
     UnexpectedResult,
+    Unified(Error),
 }
 
 impl fmt::Display for PhysicsClientError {
@@ -69,9 +76,14 @@ impl fmt::Display for PhysicsClientError {
             Self::UnsupportedBatchCommand => {
                 formatter.write_str("command cannot be used in an atomic body batch")
             }
+            Self::TooManyCommands { max_commands } => write!(
+                formatter,
+                "command batch exceeds the maximum of {max_commands} commands"
+            ),
             Self::UnexpectedResult => {
                 formatter.write_str("physics command returned an unexpected result")
             }
+            Self::Unified(error) => error.fmt(formatter),
         }
     }
 }
@@ -85,11 +97,21 @@ impl std::error::Error for PhysicsClientError {
             Self::Query(error) => Some(error),
             Self::ForceSource(error) => Some(error),
             Self::StepFailedAfterApply { cause, .. } => Some(cause),
+            Self::Unified(error) => Some(error),
             Self::NotRunning
             | Self::ChannelClosed
             | Self::UnsupportedBatchCommand
+            | Self::TooManyCommands { .. }
             | Self::UnexpectedResult => None,
         }
+    }
+}
+
+impl From<Error> for PhysicsClientError {
+    fn from(error: Error) -> Self {
+        Self::from(
+            crate::runtime::asynchronous::marshalling::command::CommandError::from_unified(error),
+        )
     }
 }
 
@@ -109,7 +131,6 @@ impl From<ClusterError> for PhysicsClientError {
     fn from(error: ClusterError) -> Self {
         match error {
             ClusterError::InvalidBodyId => Self::World(WorldError::InvalidBodyId),
-            ClusterError::Body(error) => Self::Body(error),
             error => Self::Cluster(error),
         }
     }
@@ -138,8 +159,8 @@ mod tests {
             PhysicsClientError::World(WorldError::InvalidBodyId)
         );
         assert_eq!(
-            PhysicsClientError::from(ClusterError::Body(BodyError::NonFiniteValue)),
-            PhysicsClientError::Body(BodyError::NonFiniteValue)
+            PhysicsClientError::from(ClusterError::Body(BodyError::NonFiniteValue.into())),
+            PhysicsClientError::Cluster(ClusterError::Body(BodyError::NonFiniteValue.into()))
         );
         assert_eq!(
             PhysicsClientError::from(ClusterError::ManagedMass),

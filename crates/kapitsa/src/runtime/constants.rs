@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Several groups are only referenced by the feature-gated runtime.
+
 //! Runtime limits and tuning thresholds. Values must preserve documented runtime contracts.
 
 // planner.rs

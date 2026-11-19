@@ -1,3 +1,4 @@
+use crate::Error;
 use kapitsa_math::{Mat3, Quat, Vec3};
 
 use super::{BodyType, CcdMode, MassProperties, RigidBody};
@@ -126,14 +127,18 @@ fn dynamic_constructor_rejects_world_center_of_mass_overflow() {
     let mass_properties = MassProperties::new(1.0, Vec3::X * f64::MAX, Mat3::IDENTITY)
         .expect("valid mass properties");
 
-    assert!(matches!(
-        RigidBody::new_dynamic(transform, mass_properties),
-        Err(super::BodyError::ArithmeticOverflow)
-    ));
+    let error = match RigidBody::new_dynamic(transform, mass_properties) {
+        Ok(_) => panic!("overflow must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.downcast_ref::<super::BodyError>(),
+        Some(&super::BodyError::ArithmeticOverflow)
+    );
 }
 
 #[test]
-fn velocities_are_allowed_for_dynamic_and_kinematic_bodies() -> Result<(), super::BodyError> {
+fn velocities_are_allowed_for_dynamic_and_kinematic_bodies() -> Result<(), Error> {
     let mut dynamic = RigidBody::new_dynamic(transform(), mass()).expect("valid dynamic body");
     let mut kinematic = RigidBody::new_kinematic(transform());
     let linear = Vec3::new(1.0, 2.0, 3.0);
@@ -157,11 +162,11 @@ fn static_bodies_reject_velocity_changes() {
 
     assert_eq!(
         body.set_linear_velocity(Vec3::X),
-        Err(super::BodyError::StaticBodyCannotHaveVelocity)
+        Err(Error::from(super::BodyError::StaticBodyCannotHaveVelocity))
     );
     assert_eq!(
         body.set_angular_velocity(Vec3::Y),
-        Err(super::BodyError::StaticBodyCannotHaveVelocity)
+        Err(Error::from(super::BodyError::StaticBodyCannotHaveVelocity))
     );
     assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
     assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
@@ -183,11 +188,11 @@ fn rejects_non_finite_velocities_without_changing_state() {
 
     assert_eq!(
         body.set_linear_velocity(Vec3::new(f64::NAN, 0.0, 0.0)),
-        Err(super::BodyError::NonFiniteValue)
+        Err(Error::from(super::BodyError::NonFiniteValue))
     );
     assert_eq!(
         body.set_angular_velocity(Vec3::new(0.0, f64::INFINITY, 0.0)),
-        Err(super::BodyError::NonFiniteValue)
+        Err(Error::from(super::BodyError::NonFiniteValue))
     );
     assert_eq!(body.state().linear_velocity(), Vec3::X);
     assert_eq!(body.state().angular_velocity(), Vec3::Y);
@@ -236,7 +241,7 @@ fn transform_overflow_does_not_change_body() {
 
     assert_eq!(
         body.set_transform(transform_at(Vec3::X * f64::MAX, Quat::IDENTITY)),
-        Err(super::BodyError::ArithmeticOverflow)
+        Err(Error::from(super::BodyError::ArithmeticOverflow))
     );
     assert_eq!(body.state().transform(), original);
     assert_eq!(body.state().linear_velocity(), Vec3::X);
@@ -266,7 +271,7 @@ fn set_mass_only_changes_dynamic_body_and_preserves_pose_and_velocity() {
     assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
     assert_eq!(
         RigidBody::new_static(transform()).set_mass(replacement),
-        Err(super::BodyError::BodyMustBeDynamic)
+        Err(Error::from(super::BodyError::BodyMustBeDynamic))
     );
 }
 
@@ -293,7 +298,7 @@ fn sleep_and_wake_up_follow_dynamic_body_rules() {
     ] {
         assert_eq!(
             non_dynamic.sleep(),
-            Err(super::BodyError::BodyMustBeDynamic)
+            Err(Error::from(super::BodyError::BodyMustBeDynamic))
         );
         non_dynamic.wake_up();
         assert!(!non_dynamic.state().is_sleeping());
@@ -372,15 +377,15 @@ fn force_and_torque_operations_require_dynamic_body() {
     ] {
         assert_eq!(
             body.apply_force(Vec3::X),
-            Err(super::BodyError::BodyMustBeDynamic)
+            Err(Error::from(super::BodyError::BodyMustBeDynamic))
         );
         assert_eq!(
             body.apply_force_at_point(Vec3::X, Vec3::Y),
-            Err(super::BodyError::BodyMustBeDynamic)
+            Err(Error::from(super::BodyError::BodyMustBeDynamic))
         );
         assert_eq!(
             body.apply_torque(Vec3::Z),
-            Err(super::BodyError::BodyMustBeDynamic)
+            Err(Error::from(super::BodyError::BodyMustBeDynamic))
         );
         assert_eq!(body.forces().force(), Vec3::ZERO);
         assert_eq!(body.forces().torque(), Vec3::ZERO);
@@ -394,15 +399,15 @@ fn invalid_force_inputs_do_not_change_accumulators_or_sleep_state() {
 
     assert_eq!(
         body.apply_force(Vec3::new(f64::NAN, 0.0, 0.0)),
-        Err(super::BodyError::NonFiniteValue)
+        Err(Error::from(super::BodyError::NonFiniteValue))
     );
     assert_eq!(
         body.apply_force_at_point(Vec3::Y, Vec3::new(f64::INFINITY, 0.0, 0.0)),
-        Err(super::BodyError::NonFiniteValue)
+        Err(Error::from(super::BodyError::NonFiniteValue))
     );
     assert_eq!(
         body.apply_torque(Vec3::new(0.0, 0.0, f64::NEG_INFINITY)),
-        Err(super::BodyError::NonFiniteValue)
+        Err(Error::from(super::BodyError::NonFiniteValue))
     );
     assert_eq!(body.forces().force(), Vec3::X);
     assert_eq!(body.forces().torque(), Vec3::ZERO);
@@ -410,7 +415,7 @@ fn invalid_force_inputs_do_not_change_accumulators_or_sleep_state() {
     body.sleep().expect("dynamic body can sleep");
     assert_eq!(
         body.apply_torque(Vec3::new(0.0, 0.0, f64::NEG_INFINITY)),
-        Err(super::BodyError::NonFiniteValue)
+        Err(Error::from(super::BodyError::NonFiniteValue))
     );
     assert_eq!(body.forces().force(), Vec3::ZERO);
     assert_eq!(body.forces().torque(), Vec3::ZERO);
@@ -426,7 +431,7 @@ fn force_accumulation_overflow_is_atomic() {
 
     assert_eq!(
         body.apply_force(large_force),
-        Err(super::BodyError::ArithmeticOverflow)
+        Err(Error::from(super::BodyError::ArithmeticOverflow))
     );
     assert_eq!(body.forces().force(), large_force);
 
@@ -434,7 +439,7 @@ fn force_accumulation_overflow_is_atomic() {
         RigidBody::new_dynamic(Transform::identity(), mass()).expect("valid dynamic body");
     assert_eq!(
         body.apply_force_at_point(Vec3::X * f64::MAX, Vec3::new(0.0, -f64::MAX, 0.0)),
-        Err(super::BodyError::ArithmeticOverflow)
+        Err(Error::from(super::BodyError::ArithmeticOverflow))
     );
     assert_eq!(body.forces().force(), Vec3::ZERO);
     assert_eq!(body.forces().torque(), Vec3::ZERO);
@@ -579,11 +584,11 @@ fn impulses_require_a_dynamic_body() {
     ] {
         assert_eq!(
             body.apply_impulse(Vec3::X),
-            Err(super::BodyError::BodyMustBeDynamic)
+            Err(Error::from(super::BodyError::BodyMustBeDynamic))
         );
         assert_eq!(
             body.apply_impulse_at_point(Vec3::X, Vec3::Y),
-            Err(super::BodyError::BodyMustBeDynamic)
+            Err(Error::from(super::BodyError::BodyMustBeDynamic))
         );
         assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
         assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
@@ -598,11 +603,11 @@ fn invalid_impulses_do_not_change_body_state() {
 
     assert_eq!(
         body.apply_impulse(Vec3::new(f64::NAN, 0.0, 0.0)),
-        Err(super::BodyError::NonFiniteValue)
+        Err(Error::from(super::BodyError::NonFiniteValue))
     );
     assert_eq!(
         body.apply_impulse_at_point(Vec3::X, Vec3::new(0.0, f64::INFINITY, 0.0)),
-        Err(super::BodyError::NonFiniteValue)
+        Err(Error::from(super::BodyError::NonFiniteValue))
     );
     assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
     assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
@@ -619,7 +624,7 @@ fn impulse_overflow_does_not_partially_update_velocity_or_sleep_state() {
 
     assert_eq!(
         body.apply_impulse(Vec3::X * f64::MAX),
-        Err(super::BodyError::ArithmeticOverflow)
+        Err(Error::from(super::BodyError::ArithmeticOverflow))
     );
     assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
     assert!(body.state().is_sleeping());
@@ -629,7 +634,7 @@ fn impulse_overflow_does_not_partially_update_velocity_or_sleep_state() {
     body.sleep().expect("dynamic body can sleep");
     assert_eq!(
         body.apply_impulse_at_point(Vec3::X * f64::MAX, Vec3::new(0.0, -f64::MAX, 0.0)),
-        Err(super::BodyError::ArithmeticOverflow)
+        Err(Error::from(super::BodyError::ArithmeticOverflow))
     );
     assert_eq!(body.state().linear_velocity(), Vec3::ZERO);
     assert_eq!(body.state().angular_velocity(), Vec3::ZERO);
@@ -650,7 +655,7 @@ fn mass_update_overflow_preserves_existing_properties_and_state() {
 
     assert_eq!(
         body.set_mass(replacement),
-        Err(super::BodyError::ArithmeticOverflow)
+        Err(Error::from(super::BodyError::ArithmeticOverflow))
     );
     assert_eq!(body.physics().mass(), Some(existing));
     assert_eq!(body.state().transform(), pose);

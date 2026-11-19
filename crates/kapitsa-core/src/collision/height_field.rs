@@ -15,7 +15,7 @@ pub(crate) fn query_triangles(
     field: &HeightField,
     local_bounds: Aabb,
     output: &mut Vec<HeightFieldTriangle>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     output.clear();
     let spacing = field.grid_spacing();
     let cell_columns = field.columns() - 1;
@@ -25,7 +25,7 @@ pub(crate) fn query_triangles(
         spacing.y * cell_rows as f64,
     );
     if !span.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let min = local_bounds.min();
     let max = local_bounds.max();
@@ -47,7 +47,7 @@ pub(crate) fn query_triangles(
             let cell = row
                 .checked_mul(cell_columns)
                 .and_then(|index| index.checked_add(column))
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             append_if_intersects(output, local_bounds, [v00, v10, v11], cell, 0)?;
             append_if_intersects(output, local_bounds, [v00, v11, v01], cell, 1)?;
         }
@@ -60,7 +60,7 @@ pub(crate) fn query_world_bounds(
     world_transform: &Transform,
     world_bounds: Aabb,
     output: &mut Vec<HeightFieldTriangle>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let local_bounds = super::mesh::local_query_bounds(world_bounds, world_transform)?;
     query_triangles(field, local_bounds, output)
 }
@@ -92,20 +92,20 @@ fn field_vertex(
     row: usize,
     column: usize,
     spacing: Vec2,
-) -> Result<Vec3, CollisionError> {
+) -> Result<Vec3, crate::Error> {
     let index = row
         .checked_mul(field.columns())
         .and_then(|index| index.checked_add(column))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let height = *field
         .heights()
         .get(index)
-        .ok_or(CollisionError::GeometryBounds)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
     let vertex = Vec3::new(column as f64 * spacing.x, row as f64 * spacing.y, height);
     vertex
         .is_finite()
         .then_some(vertex)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 fn append_if_intersects(
@@ -114,21 +114,23 @@ fn append_if_intersects(
     vertices: [Vec3; 3],
     cell: usize,
     triangle: u64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let min = vertices[0].min(vertices[1]).min(vertices[2]);
     let max = vertices[0].max(vertices[1]).max(vertices[2]);
-    let triangle_bounds = Aabb::new(min, max).map_err(|_| CollisionError::GeometryBounds)?;
+    let triangle_bounds =
+        Aabb::new(min, max).map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?;
     if !triangle_bounds.intersects(&bounds) {
         return Ok(());
     }
-    let cell = u64::try_from(cell).map_err(|_| CollisionError::ArithmeticOverflow)?;
+    let cell =
+        u64::try_from(cell).map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let feature_id = cell
         .checked_mul(2)
         .and_then(|feature| feature.checked_add(triangle))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     output
         .try_reserve(1)
-        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     output.push(HeightFieldTriangle {
         vertices,
         feature_id,

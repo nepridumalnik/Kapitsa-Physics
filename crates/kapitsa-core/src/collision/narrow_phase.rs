@@ -124,7 +124,7 @@ impl NarrowPhase {
         body_b: &Transform,
         mode_b: CollisionMode,
         contact_offset: f64,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         self.detect_with_geometry(
             pair,
             shape_a,
@@ -160,9 +160,9 @@ impl NarrowPhase {
         bvh_b: Option<&TriangleBvh>,
         vertices_b: Option<&[Vec3]>,
         contact_offset: f64,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         if !contact_offset.is_finite() || contact_offset < 0.0 {
-            return Err(CollisionError::InvalidConfig);
+            return Err(crate::Error::from(CollisionError::InvalidConfig));
         }
         let contact_offset = if mode_a == CollisionMode::Sensor || mode_b == CollisionMode::Sensor {
             0.0
@@ -189,7 +189,7 @@ impl NarrowPhase {
             (a, b) if a.is_convex() && b.is_convex() => {
                 self.convex_convex(pair, a, collider_a, body_a, b, collider_b, body_b)
             }
-            _ => Err(CollisionError::UnsupportedGeometryPair),
+            _ => Err(crate::Error::from(CollisionError::UnsupportedGeometryPair)),
         }
     }
 
@@ -199,7 +199,7 @@ impl NarrowPhase {
         routing: SurfacePair<'_>,
         mode: CollisionMode,
         contact_offset: f64,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         match routing.surface {
             Shape::Plane(plane) => self.plane_convex(
                 pair,
@@ -228,7 +228,9 @@ impl NarrowPhase {
                 pair,
                 mesh,
                 routing.surface_vertices.unwrap_or_else(|| mesh.vertices()),
-                routing.surface_bvh.ok_or(CollisionError::GeometryBounds)?,
+                routing
+                    .surface_bvh
+                    .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
                 routing.surface_transform,
                 routing.convex,
                 routing.convex_transform,
@@ -243,7 +245,9 @@ impl NarrowPhase {
                 routing
                     .surface_vertices
                     .unwrap_or_else(|| mesh.mesh().vertices()),
-                routing.surface_bvh.ok_or(CollisionError::GeometryBounds)?,
+                routing
+                    .surface_bvh
+                    .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
                 routing.surface_transform,
                 routing.convex,
                 routing.convex_transform,
@@ -273,7 +277,7 @@ impl NarrowPhase {
                 routing.body_b,
                 routing.surface_is_a,
             ),
-            _ => Err(CollisionError::UnsupportedGeometryPair),
+            _ => Err(crate::Error::from(CollisionError::UnsupportedGeometryPair)),
         }
     }
 
@@ -289,7 +293,7 @@ impl NarrowPhase {
         bvh_b: Option<&TriangleBvh>,
         vertices_b: Option<&[Vec3]>,
         sensor: bool,
-    ) -> Result<Option<CcdHit>, CollisionError> {
+    ) -> Result<Option<CcdHit>, crate::Error> {
         match (shape_a, shape_b) {
             (Shape::Plane(plane), convex) if convex.is_convex() => {
                 super::ccd::plane_toi_motion(convex, motion_b, plane, motion_a, sensor, true)
@@ -300,7 +304,7 @@ impl NarrowPhase {
             (Shape::Triangle(triangle), convex) if convex.is_convex() => {
                 let target = Shape::Triangle(
                     Triangle::from_vertices(triangle.vertices())
-                        .map_err(|_| CollisionError::InvalidContact)?,
+                        .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?,
                 );
                 super::ccd::convex_toi_motion(convex, motion_b, &target, motion_a)
                     .map(|hit| hit.map(reverse_hit))
@@ -308,7 +312,7 @@ impl NarrowPhase {
             (convex, Shape::Triangle(triangle)) if convex.is_convex() => {
                 let target = Shape::Triangle(
                     Triangle::from_vertices(triangle.vertices())
-                        .map_err(|_| CollisionError::InvalidContact)?,
+                        .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?,
                 );
                 super::ccd::convex_toi_motion(convex, motion_a, &target, motion_b)
             }
@@ -318,7 +322,7 @@ impl NarrowPhase {
                     motion_b,
                     mesh,
                     vertices_a,
-                    bvh_a.ok_or(CollisionError::GeometryBounds)?,
+                    bvh_a.ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
                     motion_a,
                     &mut self.mesh_workspace,
                     &mut self.mesh_candidates,
@@ -331,7 +335,7 @@ impl NarrowPhase {
                     motion_a,
                     mesh,
                     vertices_b,
-                    bvh_b.ok_or(CollisionError::GeometryBounds)?,
+                    bvh_b.ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
                     motion_b,
                     &mut self.mesh_workspace,
                     &mut self.mesh_candidates,
@@ -343,7 +347,7 @@ impl NarrowPhase {
                     motion_b,
                     mesh.mesh(),
                     vertices_a,
-                    bvh_a.ok_or(CollisionError::GeometryBounds)?,
+                    bvh_a.ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
                     motion_a,
                     &mut self.mesh_workspace,
                     &mut self.mesh_candidates,
@@ -356,7 +360,7 @@ impl NarrowPhase {
                     motion_a,
                     mesh.mesh(),
                     vertices_b,
-                    bvh_b.ok_or(CollisionError::GeometryBounds)?,
+                    bvh_b.ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
                     motion_b,
                     &mut self.mesh_workspace,
                     &mut self.mesh_candidates,
@@ -403,7 +407,7 @@ impl NarrowPhase {
             (a, b) if a.is_convex() && b.is_convex() => {
                 super::ccd::convex_toi_motion(a, motion_a, b, motion_b)
             }
-            _ => Err(CollisionError::UnsupportedGeometryPair),
+            _ => Err(crate::Error::from(CollisionError::UnsupportedGeometryPair)),
         }
     }
 
@@ -420,24 +424,24 @@ impl NarrowPhase {
         mode: CollisionMode,
         contact_offset: f64,
         surface_is_a: bool,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         let local_normal = plane.normal();
         let plane_normal = plane_transform
             .transform_vector(local_normal)
             .try_normalize()
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let local_point = local_normal
             .checked_mul_scalar(plane.distance())
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let plane_point = plane_transform.transform_point(local_point);
         let center = shape_center(convex, convex_transform)?;
         if !plane_point.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let center_distance = center
             .checked_sub(plane_point)
             .and_then(|delta| delta.checked_dot(plane_normal))
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
 
         if mode == CollisionMode::Solid && center_distance < 0.0 {
             return Ok(None);
@@ -452,7 +456,7 @@ impl NarrowPhase {
         let separation = convex_point
             .checked_sub(plane_point)
             .and_then(|delta| delta.checked_dot(normal_plane_to_convex))
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         if separation > contact_offset {
             return Ok(None);
         }
@@ -460,9 +464,9 @@ impl NarrowPhase {
             .checked_sub(
                 normal_plane_to_convex
                     .checked_mul_scalar(separation)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             )
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let penetration = (-separation).max(0.0);
         make_surface_manifold(
             pair,
@@ -491,23 +495,23 @@ impl NarrowPhase {
         body_b: &Transform,
         triangle_is_a: bool,
         contact_offset: f64,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         let vertices = triangle
             .vertices()
             .map(|vertex| triangle_transform.transform_point(vertex));
         if !vertices.iter().all(|vertex| vertex.is_finite()) {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let edge_ab = vertices[1]
             .checked_sub(vertices[0])
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let edge_ac = vertices[2]
             .checked_sub(vertices[0])
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let face_normal = edge_ab
             .checked_cross(edge_ac)
             .and_then(Vec3::try_normalize)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let center = shape_center(convex, convex_transform)?;
         let normal_for_side = triangle_normal_for_side(center, vertices[0], face_normal)?;
         let (
@@ -521,10 +525,10 @@ impl NarrowPhase {
             let triangle_point = closest_point_on_triangle(center, vertices)?;
             let radial = center
                 .checked_sub(triangle_point)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let distance = radial
                 .checked_length()
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let separation = distance - sphere.radius();
             if separation > contact_offset {
                 return Ok(None);
@@ -534,9 +538,9 @@ impl NarrowPhase {
                 .checked_sub(
                     normal
                         .checked_mul_scalar(sphere.radius())
-                        .ok_or(CollisionError::ArithmeticOverflow)?,
+                        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 )
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             (
                 triangle_point,
                 convex_point,
@@ -548,7 +552,7 @@ impl NarrowPhase {
         } else {
             let triangle_shape = Shape::Triangle(
                 Triangle::from_vertices(triangle.vertices())
-                    .map_err(|_| CollisionError::InvalidContact)?,
+                    .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?,
             );
             let distance = gjk::distance(
                 &triangle_shape,
@@ -635,10 +639,10 @@ impl NarrowPhase {
         body_b: &Transform,
         mesh_is_a: bool,
         contact_offset: f64,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         if vertices.len() != mesh.vertices().len() || bvh.triangle_count() != mesh.triangles().len()
         {
-            return Err(CollisionError::GeometryBounds);
+            return Err(crate::Error::from(CollisionError::GeometryBounds));
         }
         let bounds = expanded_convex_bounds(convex, convex_transform, contact_offset)?;
         let local_bounds = mesh::local_query_bounds(bounds, mesh_transform)?;
@@ -653,13 +657,19 @@ impl NarrowPhase {
             let [a, b, c] = *mesh
                 .triangles()
                 .get(triangle_index)
-                .ok_or(CollisionError::GeometryBounds)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
             let triangle = Triangle::from_vertices([
-                *vertices.get(a).ok_or(CollisionError::GeometryBounds)?,
-                *vertices.get(b).ok_or(CollisionError::GeometryBounds)?,
-                *vertices.get(c).ok_or(CollisionError::GeometryBounds)?,
+                *vertices
+                    .get(a)
+                    .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
+                *vertices
+                    .get(b)
+                    .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
+                *vertices
+                    .get(c)
+                    .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
             ])
-            .map_err(|_| CollisionError::InvalidContact)?;
+            .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
             let Some(contact) = self.triangle_convex(
                 pair,
                 &triangle,
@@ -674,8 +684,8 @@ impl NarrowPhase {
             else {
                 continue;
             };
-            let feature =
-                u64::try_from(triangle_index).map_err(|_| CollisionError::ArithmeticOverflow)?;
+            let feature = u64::try_from(triangle_index)
+                .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             merge_contact_manifold(&mut manifold, contact, feature)?;
         }
         Ok(manifold)
@@ -693,7 +703,7 @@ impl NarrowPhase {
         body_b: &Transform,
         surface_is_a: bool,
         contact_offset: f64,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         let bounds = expanded_convex_bounds(convex, convex_transform, contact_offset)?;
         height_field::query_world_bounds(
             field,
@@ -705,7 +715,7 @@ impl NarrowPhase {
         for candidate_index in 0..self.height_field_candidates.len() {
             let candidate = self.height_field_candidates[candidate_index];
             let triangle = Triangle::from_vertices(candidate.vertices)
-                .map_err(|_| CollisionError::InvalidContact)?;
+                .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
             let Some(contact) = self.triangle_convex(
                 pair,
                 &triangle,
@@ -736,7 +746,7 @@ impl NarrowPhase {
         body_a: &Transform,
         body_b: &Transform,
         surface_is_a: bool,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         let Some(hit) = super::ccd::level_set_toi(
             convex,
             *convex_transform,
@@ -750,7 +760,7 @@ impl NarrowPhase {
             return Ok(None);
         };
         if !gjk::distance_to_point(convex, convex_transform, hit.point_b)?.intersects {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         let surface_point = hit.point_b;
         let convex_point = hit.point_a;
@@ -758,7 +768,7 @@ impl NarrowPhase {
         let separation = convex_point
             .checked_sub(surface_point)
             .and_then(|delta| delta.checked_dot(surface_to_convex))
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         make_surface_manifold(
             pair,
             surface_is_a,
@@ -784,7 +794,7 @@ impl NarrowPhase {
         shape_b: &Shape,
         collider_b: &Transform,
         body_b: &Transform,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         if compare_convex_geometry(shape_a, collider_a, shape_b, collider_b)? == Ordering::Greater {
             return self
                 .convex_convex(
@@ -797,7 +807,10 @@ impl NarrowPhase {
         match self.convex_convex_ordered(
             pair, shape_a, collider_a, body_a, shape_b, collider_b, body_b,
         ) {
-            Err(error @ CollisionError::NonConvergent) => {
+            Err(error)
+                if error.downcast_ref::<CollisionError>()
+                    == Some(&CollisionError::NonConvergent) =>
+            {
                 if let Ok(Some(manifold)) = self.convex_convex_ordered(
                     pair, shape_b, collider_b, body_b, shape_a, collider_a, body_a,
                 ) {
@@ -819,7 +832,7 @@ impl NarrowPhase {
         shape_b: &Shape,
         collider_b: &Transform,
         body_b: &Transform,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         let core_distance = gjk::distance_core(shape_a, collider_a, shape_b, collider_b)?;
         let radius_a = super::support::convex_radius(shape_a);
         let radius_b = super::support::convex_radius(shape_b);
@@ -833,12 +846,12 @@ impl NarrowPhase {
                 .translation()
                 .checked_add(core_distance.point_a)
                 .and_then(|point| point.checked_add(normal * radius_a))
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let point_b = collider_a
                 .translation()
                 .checked_add(core_distance.point_b)
                 .and_then(|point| point.checked_sub(normal * radius_b))
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             return make_manifold(
                 pair,
                 body_a,
@@ -888,21 +901,21 @@ fn expanded_convex_bounds(
     shape: &Shape,
     transform: &Transform,
     expansion: f64,
-) -> Result<Aabb, CollisionError> {
+) -> Result<Aabb, crate::Error> {
     let bounds = shape
         .world_bounds(transform)
-        .map_err(|_| CollisionError::GeometryBounds)?
-        .ok_or(CollisionError::UnsupportedGeometryPair)?;
+        .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?
+        .ok_or_else(|| crate::Error::from(CollisionError::UnsupportedGeometryPair))?;
     let expansion = Vec3::splat(expansion);
     let min = bounds
         .min()
         .checked_sub(expansion)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let max = bounds
         .max()
         .checked_add(expansion)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    Aabb::new(min, max).map_err(|_| CollisionError::GeometryBounds)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
+    Aabb::new(min, max).map_err(|_| crate::Error::from(CollisionError::GeometryBounds))
 }
 
 fn reverse_hit(hit: CcdHit) -> CcdHit {
@@ -918,28 +931,28 @@ fn merge_contact_manifold(
     output: &mut Option<ContactManifold>,
     source: ContactManifold,
     feature: u64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let manifold = output.get_or_insert_with(|| ContactManifold::new(source.pair));
     for (point_index, mut point) in source.points().iter().copied().enumerate() {
         point.feature_id = combine_feature_ids(feature, point.feature_id);
         let world_position = source
             .world_point(point_index)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let mut duplicate = false;
         for index in 0..manifold.len() {
             let existing = *manifold
                 .point(index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let distance_a = point
                 .local_a
                 .checked_sub(existing.local_a)
                 .and_then(Vec3::checked_length)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let distance_b = point
                 .local_b
                 .checked_sub(existing.local_b)
                 .and_then(Vec3::checked_length)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let scale_a = point
                 .local_a
                 .abs()
@@ -970,16 +983,16 @@ fn merge_contact_manifold(
     Ok(())
 }
 
-fn shape_center(shape: &Shape, transform: &Transform) -> Result<Vec3, CollisionError> {
+fn shape_center(shape: &Shape, transform: &Transform) -> Result<Vec3, crate::Error> {
     let bounds = shape
         .local_bounds()
-        .map_err(|_| CollisionError::GeometryBounds)?
-        .ok_or(CollisionError::UnsupportedGeometryPair)?;
+        .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?
+        .ok_or_else(|| crate::Error::from(CollisionError::UnsupportedGeometryPair))?;
     let center = transform.transform_point(bounds.center());
     center
         .is_finite()
         .then_some(center)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -992,7 +1005,7 @@ fn make_manifold(
     normal: Vec3,
     penetration: f64,
     feature_id: u64,
-) -> Result<ContactManifold, CollisionError> {
+) -> Result<ContactManifold, crate::Error> {
     let contact = ContactPoint::from_world(
         body_a,
         body_b,
@@ -1020,7 +1033,7 @@ fn make_surface_manifold(
     penetration: f64,
     surface_feature: u64,
     convex_feature: u64,
-) -> Result<ContactManifold, CollisionError> {
+) -> Result<ContactManifold, crate::Error> {
     let (point_a, point_b, normal, feature_id) = if surface_is_a {
         (
             surface_point,
@@ -1052,7 +1065,7 @@ fn reverse_manifold(
     manifold: ContactManifold,
     body_a: &Transform,
     body_b: &Transform,
-) -> Result<ContactManifold, CollisionError> {
+) -> Result<ContactManifold, crate::Error> {
     let mut reversed = ContactManifold::new(manifold.pair);
     for (index, point) in manifold.points().iter().copied().enumerate() {
         let world_a = body_a.transform_point(point.local_a);
@@ -1068,7 +1081,7 @@ fn reverse_manifold(
         )?;
         let world_position = manifold
             .world_point(index)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         reversed.insert(reversed_point, world_position)?;
     }
     Ok(reversed)
@@ -1079,7 +1092,7 @@ fn compare_convex_geometry(
     transform_a: &Transform,
     shape_b: &Shape,
     transform_b: &Transform,
-) -> Result<Ordering, CollisionError> {
+) -> Result<Ordering, crate::Error> {
     let rank_a = convex_shape_rank(shape_a);
     let rank_b = convex_shape_rank(shape_b);
     match rank_a.cmp(&rank_b) {
@@ -1100,12 +1113,12 @@ fn compare_convex_geometry(
     }
     let bounds_a = shape_a
         .world_bounds(transform_a)
-        .map_err(|_| CollisionError::GeometryBounds)?
-        .ok_or(CollisionError::UnsupportedGeometryPair)?;
+        .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?
+        .ok_or_else(|| crate::Error::from(CollisionError::UnsupportedGeometryPair))?;
     let bounds_b = shape_b
         .world_bounds(transform_b)
-        .map_err(|_| CollisionError::GeometryBounds)?
-        .ok_or(CollisionError::UnsupportedGeometryPair)?;
+        .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?
+        .ok_or_else(|| crate::Error::from(CollisionError::UnsupportedGeometryPair))?;
     let values_a = [
         bounds_a.min().x,
         bounds_a.min().y,
@@ -1149,7 +1162,7 @@ fn support_contact_for_degenerate_simplex(
     transform_a: &Transform,
     shape_b: &Shape,
     transform_b: &Transform,
-) -> Result<super::epa::EpaResult, CollisionError> {
+) -> Result<super::epa::EpaResult, crate::Error> {
     let normal = transform_b
         .translation()
         .checked_sub(transform_a.translation())
@@ -1159,9 +1172,9 @@ fn support_contact_for_degenerate_simplex(
     let penetration = support
         .difference
         .checked_dot(normal)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if penetration < 0.0 {
-        return Err(CollisionError::NonConvergent);
+        return Err(crate::Error::from(CollisionError::NonConvergent));
     }
     Ok(super::epa::EpaResult {
         normal,
@@ -1182,17 +1195,17 @@ fn sphere_sphere(
     sphere_b: &Sphere,
     collider_b: &Transform,
     body_b: &Transform,
-) -> Result<Option<ContactManifold>, CollisionError> {
+) -> Result<Option<ContactManifold>, crate::Error> {
     let center_delta = collider_b
         .translation()
         .checked_sub(collider_a.translation())
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let distance = center_delta
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let radius_sum = sphere_a.radius() + sphere_b.radius();
     if !radius_sum.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if distance > radius_sum {
         return Ok(None);
@@ -1204,17 +1217,17 @@ fn sphere_sphere(
         .checked_add(
             normal
                 .checked_mul_scalar(sphere_a.radius())
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let point_b = collider_b
         .translation()
         .checked_sub(
             normal
                 .checked_mul_scalar(sphere_b.radius())
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
 
     make_manifold(
         pair,
@@ -1233,11 +1246,11 @@ fn triangle_normal_for_side(
     center: Vec3,
     vertex: Vec3,
     normal: Vec3,
-) -> Result<Vec3, CollisionError> {
+) -> Result<Vec3, crate::Error> {
     let signed_distance = center
         .checked_sub(vertex)
         .and_then(|offset| offset.checked_dot(normal))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     Ok(if signed_distance < 0.0 {
         -normal
     } else {
@@ -1245,7 +1258,7 @@ fn triangle_normal_for_side(
     })
 }
 
-fn simplex_has_resolvable_volume(simplex: &gjk::Simplex) -> Result<bool, CollisionError> {
+fn simplex_has_resolvable_volume(simplex: &gjk::Simplex) -> Result<bool, crate::Error> {
     if simplex.count != 4 {
         return Ok(false);
     }
@@ -1253,22 +1266,22 @@ fn simplex_has_resolvable_volume(simplex: &gjk::Simplex) -> Result<bool, Collisi
     let ab = simplex.points[1]
         .difference
         .checked_sub(a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let ac = simplex.points[2]
         .difference
         .checked_sub(a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let ad = simplex.points[3]
         .difference
         .checked_sub(a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let scale = ab
         .abs()
         .max_element()
         .max(ac.abs().max_element())
         .max(ad.abs().max_element());
     if !scale.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if scale == 0.0 {
         return Ok(false);
@@ -1278,9 +1291,9 @@ fn simplex_has_resolvable_volume(simplex: &gjk::Simplex) -> Result<bool, Collisi
         .checked_dot(
             normalize(ac)
                 .checked_cross(normalize(ad))
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
         .abs();
     Ok(relative_volume.is_finite() && relative_volume > f64::EPSILON * 128.0)
 }

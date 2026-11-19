@@ -1,5 +1,15 @@
 # Simulation runtime
 
+`kapitsa` is synchronous by default. `PhysicsWorld` is the primitive: the host
+creates bodies and colliders, calls `step`, and reads committed state directly. The
+clock-driven service described here is enabled by the `service` feature, which also
+enables `parallel`. A build without `service` does not depend on Tokio.
+
+Host-driven loops can use `PhysicsWorld::commands()` to build a command buffer and
+`PhysicsWorld::apply()` to apply it atomically; applying never steps the world or
+publishes a snapshot. `simulate(dt)` stages one step and `fetch_results()` returns
+the committed `StepResults`; `step(dt)` is the convenience composition of both.
+
 `Simulation::builder().time_horizon(Duration::ZERO)` starts the real world
 service with motion gated while bodies and terrain are registered through its
 client. `Simulation::set_time_horizon(Some(target))` permits autonomous world
@@ -87,7 +97,7 @@ published. The result's `step` identifies that publication; the latest snapshot
 may have a greater step because snapshots can skip intermediate steps.
 
 Command validation failures preserve the original error and command index, and
-the batch makes no partial changes. `PhysicsClientError::StepFailedAfterApply`
+the batch makes no partial changes. An `Error` with `failed_step()` set
 means the command or batch did change the world, but the following physical step
 failed; it includes the failed attempt number and `StepError` cause. Those
 changes are not automatically rolled back, and no snapshot for the failed step
@@ -99,13 +109,13 @@ point, then delivered when that step attempt finishes. A query result is a read
 of that earlier state, not a claim about the published post-step snapshot; a
 query error remains distinct from a later integration error.
 
-`SimulationConfig::central_gravity` optionally enables a point-mass field with
-`CentralGravity::new(center, μ)`, where `μ = GM` is in m³/s². The field acts on
-dynamic bodies at their world-space center of mass; static and kinematic bodies
-are unaffected. The physical step stays fixed at `1 / tick_rate`. A body at the
-field center, non-finite input, or an unrepresentable acceleration fails the
-step atomically with a typed gravity cause. `PhysicsWorld` also exposes
-`set_central_gravity` for synchronous world stepping.
+`Simulation::builder().central_gravity(CentralGravity::new(center, μ))` optionally
+enables a point-mass field, where `μ = GM` is in m³/s². The client can update it with
+`PhysicsClient::set_central_gravity`, and `PhysicsWorld` exposes the same setter for
+synchronous stepping. The field acts on dynamic bodies at their world-space center of
+mass; static and kinematic bodies are unaffected. The physical step stays fixed at
+`1 / tick_rate`. A body at the field center, non-finite input, or an unrepresentable
+acceleration fails the step atomically with a typed gravity cause.
 
 `Simulation::set_time_multiplier()` changes scheduler pacing while the
 simulation is running. It accepts finite non-negative values; zero pauses new
@@ -139,7 +149,8 @@ its force sources too.
 
 Snapshots are immutable and may skip intermediate steps. Collision events are
 published in bounded batches and report their committed step. Lagging event
-subscribers receive an explicit `CollisionEventStreamError::Lagged` result.
+subscribers receive an `Error` with `lagged_batches()` set to the number of discarded
+batches.
 Joint breaks are available from `PhysicsWorld::joint_events()` and through
 `PhysicsClient::subscribe_joint_break_events()`. A break event reports the joint
 ID and measured force/torque; the runtime publishes it only after the successful

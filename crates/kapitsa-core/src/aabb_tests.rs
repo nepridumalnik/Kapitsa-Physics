@@ -45,7 +45,10 @@ fn accepts_degenerate_bounds() {
 #[case::inverted_y(Vec3::Y, Vec3::ZERO)]
 #[case::inverted_z(Vec3::Z, Vec3::ZERO)]
 fn rejects_inverted_bounds(#[case] min: Vec3, #[case] max: Vec3) {
-    assert_eq!(Aabb::new(min, max), Err(AabbError::InvertedBounds));
+    assert_eq!(
+        Aabb::new(min, max),
+        Err(crate::Error::from(AabbError::InvertedBounds))
+    );
 }
 
 #[rstest]
@@ -56,7 +59,10 @@ fn rejects_inverted_bounds(#[case] min: Vec3, #[case] max: Vec3) {
 #[case::positive_infinite_max(Vec3::ZERO, Vec3::new(1.0, f64::INFINITY, 1.0))]
 #[case::negative_infinite_max(Vec3::ZERO, Vec3::new(1.0, f64::NEG_INFINITY, 1.0))]
 fn rejects_non_finite_bounds(#[case] min: Vec3, #[case] max: Vec3) {
-    assert_eq!(Aabb::new(min, max), Err(AabbError::NonFiniteBounds));
+    assert_eq!(
+        Aabb::new(min, max),
+        Err(crate::Error::from(AabbError::NonFiniteBounds))
+    );
 }
 
 #[test]
@@ -180,7 +186,7 @@ fn transformed_bounds_report_coordinate_overflow() {
 
     assert_eq!(
         aabb.transformed(&transform),
-        Err(AabbError::TransformOverflow)
+        Err(crate::Error::from(AabbError::TransformOverflow))
     );
 }
 
@@ -188,7 +194,10 @@ fn transformed_bounds_report_coordinate_overflow() {
 fn identity_transform_handles_bounds_whose_size_overflows() {
     let aabb = bounds(Vec3::splat(-f64::MAX), Vec3::splat(f64::MAX));
 
-    assert_eq!(aabb.size(), Err(AabbError::SizeOverflow));
+    assert_eq!(
+        aabb.size(),
+        Err(crate::Error::from(AabbError::SizeOverflow))
+    );
     assert_eq!(aabb.transformed(&Transform::identity()), Ok(aabb));
 }
 
@@ -270,7 +279,10 @@ fn union_with_contained_bounds_preserves_outer_bounds() {
 #[test]
 fn size_rejects_overflow() {
     let aabb = Aabb::new(Vec3::splat(-f64::MAX), Vec3::splat(f64::MAX)).expect("valid AABB");
-    assert_eq!(aabb.size(), Err(AabbError::SizeOverflow));
+    assert_eq!(
+        aabb.size(),
+        Err(crate::Error::from(AabbError::SizeOverflow))
+    );
 }
 
 #[test]

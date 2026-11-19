@@ -85,25 +85,31 @@ impl TriangleBvh {
             + self.triangle_bounds.capacity() * std::mem::size_of::<Aabb>()
     }
 
-    pub(crate) fn build(mesh: &TriangleMesh) -> Result<Self, CollisionError> {
+    pub(crate) fn build(mesh: &TriangleMesh) -> Result<Self, crate::Error> {
         let triangle_count = mesh.triangles().len();
         let node_capacity = triangle_count
             .checked_mul(2)
-            .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         let mut primitives = Vec::new();
         primitives
             .try_reserve_exact(triangle_count)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         let mut bounds_by_triangle = Vec::new();
         bounds_by_triangle
             .try_reserve_exact(triangle_count)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         for (triangle, indices) in mesh.triangles().iter().copied().enumerate() {
             let [a, b, c] = indices;
             let vertices = mesh.vertices();
-            let a = *vertices.get(a).ok_or(CollisionError::GeometryBounds)?;
-            let b = *vertices.get(b).ok_or(CollisionError::GeometryBounds)?;
-            let c = *vertices.get(c).ok_or(CollisionError::GeometryBounds)?;
+            let a = *vertices
+                .get(a)
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
+            let b = *vertices
+                .get(b)
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
+            let c = *vertices
+                .get(c)
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
             let bounds = triangle_bounds([a, b, c])?;
             bounds_by_triangle.push(bounds);
             primitives.push(Primitive {
@@ -116,11 +122,11 @@ impl TriangleBvh {
         let mut nodes = Vec::new();
         nodes
             .try_reserve_exact(node_capacity)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         let mut triangles = Vec::new();
         triangles
             .try_reserve_exact(triangle_count)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         build_node(
             &mut primitives,
             0,
@@ -147,7 +153,7 @@ impl TriangleBvh {
         &mut self,
         mesh: &TriangleMesh,
         vertices: &[Vec3],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let mut scratch = BvhRefitScratch::default();
         self.prepare_refit(mesh, vertices, &mut scratch)?;
         self.commit_refit(&mut scratch);
@@ -159,23 +165,29 @@ impl TriangleBvh {
         mesh: &TriangleMesh,
         vertices: &[Vec3],
         scratch: &mut BvhRefitScratch,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if vertices.len() != mesh.vertices().len()
             || mesh.triangles().len() != self.triangle_count
             || !vertices.iter().all(|vertex| vertex.is_finite())
         {
-            return Err(CollisionError::InvalidSkinPose);
+            return Err(crate::Error::from(CollisionError::InvalidSkinPose));
         }
 
         scratch.triangle_bounds.clear();
         scratch
             .triangle_bounds
             .try_reserve_exact(self.triangle_count)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         for [a, b, c] in mesh.triangles().iter().copied() {
-            let a = *vertices.get(a).ok_or(CollisionError::GeometryBounds)?;
-            let b = *vertices.get(b).ok_or(CollisionError::GeometryBounds)?;
-            let c = *vertices.get(c).ok_or(CollisionError::GeometryBounds)?;
+            let a = *vertices
+                .get(a)
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
+            let b = *vertices
+                .get(b)
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
+            let c = *vertices
+                .get(c)
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
             scratch.triangle_bounds.push(triangle_bounds([a, b, c])?);
         }
 
@@ -183,7 +195,7 @@ impl TriangleBvh {
         scratch
             .node_bounds
             .try_reserve_exact(self.nodes.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         scratch
             .node_bounds
             .extend(self.nodes.iter().map(|node| node.bounds));
@@ -192,41 +204,43 @@ impl TriangleBvh {
                 NodeKind::Leaf { start, count } => {
                     let end = start
                         .checked_add(count)
-                        .ok_or(CollisionError::GeometryBounds)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
                     let triangle_ids = self
                         .triangles
                         .get(start..end)
-                        .ok_or(CollisionError::GeometryBounds)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
                     let mut ids = triangle_ids.iter().copied();
-                    let first = ids.next().ok_or(CollisionError::GeometryBounds)?;
+                    let first = ids
+                        .next()
+                        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
                     let first_bounds = *scratch
                         .triangle_bounds
                         .get(first)
-                        .ok_or(CollisionError::GeometryBounds)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
                     ids.try_fold(first_bounds, |bounds, triangle| {
                         scratch
                             .triangle_bounds
                             .get(triangle)
                             .map(|triangle_bounds| bounds.union(triangle_bounds))
-                            .ok_or(CollisionError::GeometryBounds)
+                            .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))
                     })?
                 }
                 NodeKind::Branch { left, right } => {
                     let left = scratch
                         .node_bounds
                         .get(left)
-                        .ok_or(CollisionError::GeometryBounds)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
                     let right = scratch
                         .node_bounds
                         .get(right)
-                        .ok_or(CollisionError::GeometryBounds)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
                     left.union(right)
                 }
             };
             *scratch
                 .node_bounds
                 .get_mut(index)
-                .ok_or(CollisionError::GeometryBounds)? = bounds;
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))? = bounds;
         }
         Ok(())
     }
@@ -247,7 +261,7 @@ impl TriangleBvh {
         bounds: Aabb,
         workspace: &mut MeshQueryWorkspace,
         output: &mut Vec<usize>,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         output.clear();
         workspace.stack.clear();
         if self.nodes.is_empty() {
@@ -256,13 +270,13 @@ impl TriangleBvh {
         workspace
             .stack
             .try_reserve(1)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         workspace.stack.push(0);
         while let Some(index) = workspace.stack.pop() {
             let node = self
                 .nodes
                 .get(index)
-                .ok_or(CollisionError::GeometryBounds)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
             if !node.bounds.intersects(&bounds) {
                 continue;
             }
@@ -270,29 +284,28 @@ impl TriangleBvh {
                 NodeKind::Leaf { start, count } => {
                     let end = start
                         .checked_add(count)
-                        .ok_or(CollisionError::GeometryBounds)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
                     let triangle_ids = self
                         .triangles
                         .get(start..end)
-                        .ok_or(CollisionError::GeometryBounds)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
                     for triangle in triangle_ids.iter().copied() {
                         let triangle_bounds = self
                             .triangle_bounds
                             .get(triangle)
-                            .ok_or(CollisionError::GeometryBounds)?;
+                            .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
                         if triangle_bounds.intersects(&bounds) {
-                            output
-                                .try_reserve(1)
-                                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                            output.try_reserve(1).map_err(|_| {
+                                crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                            })?;
                             output.push(triangle);
                         }
                     }
                 }
                 NodeKind::Branch { left, right } => {
-                    workspace
-                        .stack
-                        .try_reserve(2)
-                        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    workspace.stack.try_reserve(2).map_err(|_| {
+                        crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
                     workspace.stack.push(right);
                     workspace.stack.push(left);
                 }
@@ -306,10 +319,10 @@ impl TriangleBvh {
 pub(crate) fn local_query_bounds(
     world_bounds: Aabb,
     world_transform: &Transform,
-) -> Result<Aabb, CollisionError> {
+) -> Result<Aabb, crate::Error> {
     let inverse = world_transform
         .inverse()
-        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let min = world_bounds.min();
     let max = world_bounds.max();
     let corners = [
@@ -324,19 +337,19 @@ pub(crate) fn local_query_bounds(
     ];
     let first = inverse.transform_point(corners[0]);
     if !first.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let mut local_min = first;
     let mut local_max = first;
     for corner in corners.into_iter().skip(1) {
         let point = inverse.transform_point(corner);
         if !point.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         local_min = local_min.min(point);
         local_max = local_max.max(point);
     }
-    Aabb::new(local_min, local_max).map_err(|_| CollisionError::GeometryBounds)
+    Aabb::new(local_min, local_max).map_err(|_| crate::Error::from(CollisionError::GeometryBounds))
 }
 
 fn build_node(
@@ -345,16 +358,16 @@ fn build_node(
     end: usize,
     nodes: &mut Vec<Node>,
     triangles: &mut Vec<usize>,
-) -> Result<usize, CollisionError> {
+) -> Result<usize, crate::Error> {
     if start >= end || end > primitives.len() {
-        return Err(CollisionError::GeometryBounds);
+        return Err(crate::Error::from(CollisionError::GeometryBounds));
     }
     let first = primitives
         .get(start)
-        .ok_or(CollisionError::GeometryBounds)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
     let bounds = primitives
         .get(start + 1..end)
-        .ok_or(CollisionError::GeometryBounds)?
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?
         .iter()
         .fold(first.bounds, |bounds, primitive| {
             bounds.union(&primitive.bounds)
@@ -368,13 +381,13 @@ fn build_node(
         let triangle_start = triangles.len();
         for primitive in primitives
             .get(start..end)
-            .ok_or(CollisionError::GeometryBounds)?
+            .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?
         {
             triangles.push(primitive.triangle);
         }
         nodes
             .get_mut(node_index)
-            .ok_or(CollisionError::GeometryBounds)?
+            .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?
             .kind = NodeKind::Leaf {
             start: triangle_start,
             count: end - start,
@@ -384,26 +397,26 @@ fn build_node(
 
     let center_bounds = primitives
         .get(start..end)
-        .ok_or(CollisionError::GeometryBounds)?
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?
         .iter()
         .map(|primitive| primitive.center)
         .reduce(|min, center| min.min(center))
-        .ok_or(CollisionError::GeometryBounds)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
     let center_max = primitives
         .get(start..end)
-        .ok_or(CollisionError::GeometryBounds)?
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?
         .iter()
         .map(|primitive| primitive.center)
         .reduce(|max, center| max.max(center))
-        .ok_or(CollisionError::GeometryBounds)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
     let extent = center_max - center_bounds;
     if !extent.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let axis = longest_axis(extent);
     primitives
         .get_mut(start..end)
-        .ok_or(CollisionError::GeometryBounds)?
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?
         .sort_by(|left, right| {
             component(left.center, axis)
                 .total_cmp(&component(right.center, axis))
@@ -414,15 +427,15 @@ fn build_node(
     let right = build_node(primitives, middle, end, nodes, triangles)?;
     nodes
         .get_mut(node_index)
-        .ok_or(CollisionError::GeometryBounds)?
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?
         .kind = NodeKind::Branch { left, right };
     Ok(node_index)
 }
 
-fn triangle_bounds(vertices: [Vec3; 3]) -> Result<Aabb, CollisionError> {
+fn triangle_bounds(vertices: [Vec3; 3]) -> Result<Aabb, crate::Error> {
     let min = vertices[0].min(vertices[1]).min(vertices[2]);
     let max = vertices[0].max(vertices[1]).max(vertices[2]);
-    Aabb::new(min, max).map_err(|_| CollisionError::GeometryBounds)
+    Aabb::new(min, max).map_err(|_| crate::Error::from(CollisionError::GeometryBounds))
 }
 
 fn longest_axis(extent: Vec3) -> usize {

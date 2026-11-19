@@ -152,9 +152,9 @@ impl JointImpulseCache {
         kind: Joint,
         dt: f64,
         rows: &[ConstraintRow],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if !dt.is_finite() || dt <= 0.0 {
-            return Err(CollisionError::InvalidConfig);
+            return Err(crate::Error::from(CollisionError::InvalidConfig));
         }
         let index = joint.index() as usize;
         ensure_slot(&mut self.current, index, rows.len())?;
@@ -162,17 +162,17 @@ impl JointImpulseCache {
         let slot = self
             .next
             .get_mut(index)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         if slot.joint.is_some() {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         slot.impulses
             .try_reserve(rows.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         let kind = JointKind::from(kind);
         for row in rows {
             if !row.accumulated_impulse.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             let Some((axis_a, axis_b)) = row_axes(*row) else {
                 continue;
@@ -224,23 +224,23 @@ fn ensure_slot(
     slots: &mut Vec<JointImpulseSlot>,
     index: usize,
     row_count: usize,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if index >= slots.len() {
         let new_len = index
             .checked_add(1)
-            .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         slots
             .try_reserve(new_len - slots.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         slots.resize_with(new_len, JointImpulseSlot::default);
     }
     let impulses = &mut slots
         .get_mut(index)
-        .ok_or(CollisionError::InvalidContact)?
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
         .impulses;
     impulses
         .try_reserve(row_count.saturating_sub(impulses.len()))
-        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)
+        .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))
 }
 
 fn row_axes(row: ConstraintRow) -> Option<(Vec3, Vec3)> {

@@ -36,11 +36,15 @@ fn ray_constructor_normalizes_direction_and_rejects_bad_inputs() {
     assert_eq!(ray.max_distance(), 5.0);
     assert_eq!(
         Ray::new(Vec3::ZERO, Vec3::ZERO, 1.0),
-        Err(crate::collision::QueryError::InvalidInput)
+        Err(crate::Error::from(
+            crate::collision::QueryError::InvalidInput
+        ))
     );
     assert_eq!(
         Ray::new(Vec3::ZERO, Vec3::X, f64::INFINITY),
-        Err(crate::collision::QueryError::InvalidInput)
+        Err(crate::Error::from(
+            crate::collision::QueryError::InvalidInput
+        ))
     );
 }
 
@@ -340,7 +344,9 @@ fn sweep_reports_initial_overlap_and_rejects_nonconvex_query_shapes() {
             Vec3::X,
             QueryFilter::default(),
         ),
-        Err(crate::collision::QueryError::UnsupportedQueryShape)
+        Err(crate::Error::from(
+            crate::collision::QueryError::UnsupportedQueryShape
+        ))
     );
     let empty_world = PhysicsWorld::new();
     assert_eq!(
@@ -350,7 +356,9 @@ fn sweep_reports_initial_overlap_and_rejects_nonconvex_query_shapes() {
             Vec3::X,
             QueryFilter::default(),
         ),
-        Err(crate::collision::QueryError::UnsupportedQueryShape)
+        Err(crate::Error::from(
+            crate::collision::QueryError::UnsupportedQueryShape
+        ))
     );
     assert_eq!(
         empty_world.overlaps(
@@ -359,7 +367,9 @@ fn sweep_reports_initial_overlap_and_rejects_nonconvex_query_shapes() {
             QueryFilter::default(),
             &mut Vec::new(),
         ),
-        Err(crate::collision::QueryError::UnsupportedQueryShape)
+        Err(crate::Error::from(
+            crate::collision::QueryError::UnsupportedQueryShape
+        ))
     );
 }
 
@@ -431,7 +441,9 @@ fn overlaps_detects_all_shape_categories_and_preserves_output_on_error() {
                 QueryFilter::default(),
                 &mut output,
             ),
-            Err(crate::collision::QueryError::UnsupportedQueryShape)
+            Err(crate::Error::from(
+                crate::collision::QueryError::UnsupportedQueryShape
+            ))
         );
         assert_eq!(output.len(), 1);
     }

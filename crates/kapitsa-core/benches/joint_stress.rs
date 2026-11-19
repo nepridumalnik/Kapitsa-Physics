@@ -9,7 +9,7 @@ use std::{
 
 use kapitsa_core::{
     collider::Collider,
-    collision::CollisionStepMetrics,
+    collision::{CollisionConfig, CollisionStepMetrics},
     gravity::CentralGravity,
     joint::{FixedJoint, Joint, JointCommon, JointFrame},
     mass::MassProperties,
@@ -345,9 +345,10 @@ fn report_block_projection_comparison(
             let mut world = build(size)?;
             world.set_joint_projection_for_bench(projection);
             world.set_joint_warm_start_for_bench(warm_start);
-            let mut config = world.collision_config();
-            config.position_iterations = 1;
-            config.velocity_iterations = 1;
+            let config = CollisionConfig::builder()
+                .position_iterations(1)
+                .velocity_iterations(1)
+                .build();
             world.set_collision_config(config)?;
             let initial_errors = max_joint_frame_errors(&world)?;
             for _ in 0..WARMUPS {
@@ -390,9 +391,10 @@ fn report_adaptive_iteration_comparison(
     for adaptive in [false, true] {
         let mut world = build(size)?;
         world.set_joint_adaptive_iterations_for_bench(adaptive);
-        let mut config = world.collision_config();
-        config.position_iterations = 8;
-        config.velocity_iterations = 8;
+        let config = CollisionConfig::builder()
+            .position_iterations(8)
+            .velocity_iterations(8)
+            .build();
         world.set_collision_config(config)?;
         let initial_errors = max_joint_frame_errors(&world)?;
         for _ in 0..WARMUPS {

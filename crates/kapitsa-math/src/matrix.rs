@@ -9,13 +9,17 @@ pub struct Mat3 {
 }
 
 impl Mat3 {
+    /// Zero matrix.
     pub const ZERO: Self = Self::from_cols(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
+    /// Identity matrix.
     pub const IDENTITY: Self = Self::from_cols(Vec3::X, Vec3::Y, Vec3::Z);
 
+    /// Creates a matrix from three column vectors.
     pub const fn from_cols(x: Vec3, y: Vec3, z: Vec3) -> Self {
         Self { columns: [x, y, z] }
     }
 
+    /// Creates a diagonal matrix.
     pub const fn from_diagonal(diagonal: Vec3) -> Self {
         Self::from_cols(
             Vec3::new(diagonal.x, 0.0, 0.0),
@@ -24,6 +28,7 @@ impl Mat3 {
         )
     }
 
+    /// Creates a matrix from row-major values.
     pub const fn from_rows(rows: [[f64; 3]; 3]) -> Self {
         Self::from_cols(
             Vec3::new(rows[0][0], rows[1][0], rows[2][0]),
@@ -41,6 +46,7 @@ impl Mat3 {
         )
     }
 
+    /// Returns columns in column-major order.
     pub const fn to_cols_array(self) -> [f64; 9] {
         [
             self.columns[0].x,
@@ -55,6 +61,7 @@ impl Mat3 {
         ]
     }
 
+    /// Returns a column by index.
     pub const fn column(self, index: usize) -> Option<Vec3> {
         match index {
             0 => Some(self.columns[0]),
@@ -64,6 +71,7 @@ impl Mat3 {
         }
     }
 
+    /// Returns a row by index.
     pub const fn row(self, index: usize) -> Option<Vec3> {
         match index {
             0 => Some(Vec3::new(
@@ -85,6 +93,7 @@ impl Mat3 {
         }
     }
 
+    /// Returns the transpose.
     pub fn transpose(self) -> Self {
         Self::from_cols(
             Vec3::new(self.columns[0].x, self.columns[1].x, self.columns[2].x),
@@ -93,6 +102,7 @@ impl Mat3 {
         )
     }
 
+    /// Returns the component-wise absolute value.
     pub fn abs(self) -> Self {
         Self::from_cols(
             self.columns[0].abs(),
@@ -101,15 +111,18 @@ impl Mat3 {
         )
     }
 
+    /// Returns `true` when every component is finite.
     pub const fn is_finite(self) -> bool {
         self.columns[0].is_finite() && self.columns[1].is_finite() && self.columns[2].is_finite()
     }
 
+    /// Multiplies by a vector, returning `None` on overflow.
     pub fn checked_mul_vector(self, rhs: Vec3) -> Option<Vec3> {
         let result = self * rhs;
         (self.is_finite() && rhs.is_finite() && result.is_finite()).then_some(result)
     }
 
+    /// Multiplies by another matrix, returning `None` on overflow.
     pub fn checked_mul_matrix(self, rhs: Self) -> Option<Self> {
         let result = self * rhs;
         (self.is_finite() && rhs.is_finite() && result.is_finite()).then_some(result)
@@ -309,9 +322,13 @@ impl Mul<f64> for Mat3 {
 /// Failure returned by [`Mat3::solve_spd`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CholeskyError {
+    /// Input contains a non-finite value.
     NonFiniteInput,
+    /// Matrix is not symmetric.
     NotSymmetric,
+    /// Matrix is not positive definite.
     NotPositiveDefinite,
+    /// Factorisation result exceeds the finite range.
     ResultOutOfRange,
 }
 

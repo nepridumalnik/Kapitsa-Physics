@@ -1,3 +1,5 @@
+//! Numerically robust rounding helpers.
+
 /// Adds finite values, returning `None` if the result is not representable.
 pub fn checked_add(left: f64, right: f64) -> Option<f64> {
     checked_result(left + right, left, right)

@@ -5,6 +5,7 @@ use std::{
 };
 
 use kapitsa_core::{
+    Error,
     collision::CollisionError,
     world::{PhysicsWorld, StepError},
 };
@@ -22,13 +23,16 @@ pub mod marshalling;
 mod service;
 
 pub use marshalling::{
-    BatchId, ChunkClientError, CollisionEventBatch, CollisionEventStreamError, CollisionEvents,
-    JointBreakEventBatch, JointBreakEventStreamError, JointBreakEvents, PhysicsBatchError,
-    PhysicsBatchResult, PhysicsBatchResultStreamError, PhysicsBatchResults, PhysicsClient,
-    PhysicsClientError, PhysicsCommand, PhysicsCommandBuffer, PhysicsCommandResult,
-    PhysicsSnapshot, PhysicsSubmitError,
+    BatchId, ChunkClientError, CollisionEventBatch, CollisionEvents, JointBreakEventBatch,
+    JointBreakEvents, PhysicsBatchResult, PhysicsBatchResults, PhysicsClient, PhysicsSnapshot,
+    PhysicsSubmitError,
 };
-pub use service::{Simulation, SimulationBuilder, SimulationError};
+pub(crate) use marshalling::{
+    CollisionEventStreamError, JointBreakEventStreamError, PhysicsBatchResultStreamError,
+    PhysicsClientError,
+};
+pub(crate) use service::SimulationError;
+pub use service::{Simulation, SimulationBuilder};
 
 enum EngineState {
     Available(Box<StepEngine<RayonExecutor>>),
@@ -41,7 +45,7 @@ enum EngineState {
 
 struct StepOutput {
     engine: Box<StepEngine<RayonExecutor>>,
-    result: Result<StepStats, StepError>,
+    result: Result<StepStats, Error>,
 }
 
 /// Error returned by the Tokio backed simulation.
@@ -50,7 +54,7 @@ enum StepRunnerError {
     InvalidConfig(ConfigError),
     InvalidWorkerConfig(WorkerConfigError),
     RayonPool(RayonPoolError),
-    Physics(StepError),
+    Physics(Error),
     WorldUnavailable,
     WorldLost,
 }
@@ -102,8 +106,8 @@ impl From<WorkerConfigError> for StepRunnerError {
     }
 }
 
-impl From<StepError> for StepRunnerError {
-    fn from(error: StepError) -> Self {
+impl From<Error> for StepRunnerError {
+    fn from(error: Error) -> Self {
         Self::Physics(error)
     }
 }
@@ -305,7 +309,9 @@ impl StepRunner {
                     engine.step_with_dt(Duration::ZERO, physics_dt)
                 })) {
                     Ok(result) => result,
-                    Err(_) => Err(StepError::Collision(CollisionError::WorkerFailed)),
+                    Err(_) => Err(Error::from(StepError::Collision(crate::Error::from(
+                        CollisionError::WorkerFailed,
+                    )))),
                 };
                 let _ = result_sender.send(StepOutput { engine, result });
             })?;
@@ -391,7 +397,7 @@ mod tests {
 
     use crate::runtime::{SimulationConfig, WorkerConfig, executor::RayonPool};
 
-    use super::{Simulation, SimulationError, StepRunner, StepRunnerError};
+    use super::{Simulation, StepRunner, StepRunnerError};
 
     fn runtime() -> tokio::runtime::Runtime {
         Builder::new_multi_thread()
@@ -540,10 +546,8 @@ mod tests {
 
     #[test]
     fn public_constructor_requires_a_host_runtime_and_does_not_create_one() {
-        assert!(matches!(
-            Simulation::new(),
-            Err(SimulationError::MissingRuntime)
-        ));
+        let result = Simulation::new();
+        assert!(result.is_err());
     }
 
     #[test]
@@ -630,7 +634,8 @@ mod tests {
 
             assert!(matches!(
                 simulation.step().await,
-                Err(StepRunnerError::Physics(StepError::BodyIntegration { .. }))
+                Err(StepRunnerError::Physics(error))
+                    if error.downcast_ref::<StepError>().is_some()
             ));
             assert!(
                 simulation

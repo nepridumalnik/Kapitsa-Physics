@@ -96,6 +96,6 @@ fn support_mapping_reports_world_transform_overflow() {
     let transform = Transform::new(Vec3::splat(f64::MAX), Quat::IDENTITY).expect("transform");
     assert_eq!(
         support_world(&shape, &transform, Vec3::X),
-        Err(CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(CollisionError::ArithmeticOverflow))
     );
 }

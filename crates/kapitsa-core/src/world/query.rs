@@ -9,8 +9,10 @@ use crate::{
 };
 use kapitsa_math::Vec3;
 
+use crate::Error;
+
 impl PhysicsWorld {
-    pub fn raycast(&self, ray: Ray, filter: QueryFilter) -> Result<Option<RayHit>, QueryError> {
+    pub fn raycast(&self, ray: Ray, filter: QueryFilter) -> Result<Option<RayHit>, Error> {
         self.raycast_with_scratch(ray, filter, &mut QueryScratch::default())
     }
 
@@ -20,7 +22,7 @@ impl PhysicsWorld {
         ray: Ray,
         filter: QueryFilter,
         scratch: &mut QueryScratch,
-    ) -> Result<Option<RayHit>, QueryError> {
+    ) -> Result<Option<RayHit>, Error> {
         scratch.clear();
         ray.validate()?;
         let mut closest = None;
@@ -62,7 +64,7 @@ impl PhysicsWorld {
         transform: crate::transform::Transform,
         displacement: Vec3,
         filter: QueryFilter,
-    ) -> Result<Option<ShapeHit>, QueryError> {
+    ) -> Result<Option<ShapeHit>, Error> {
         self.sweep_with_scratch(
             shape,
             transform,
@@ -80,28 +82,28 @@ impl PhysicsWorld {
         displacement: Vec3,
         filter: QueryFilter,
         scratch: &mut QueryScratch,
-    ) -> Result<Option<ShapeHit>, QueryError> {
+    ) -> Result<Option<ShapeHit>, Error> {
         scratch.clear();
         if !shape.is_convex() {
-            return Err(QueryError::UnsupportedQueryShape);
+            return Err(Error::from(QueryError::UnsupportedQueryShape));
         }
         if !displacement.is_finite() {
-            return Err(QueryError::InvalidInput);
+            return Err(Error::from(QueryError::InvalidInput));
         }
         let end_translation = transform
             .translation()
             .checked_add(displacement)
-            .ok_or(QueryError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
         let end_transform = crate::transform::Transform::new(end_translation, transform.rotation())
-            .map_err(|_| QueryError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
         let start_bounds = shape
             .world_bounds(&transform)
             .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
-            .ok_or(QueryError::UnsupportedQueryShape)?;
+            .ok_or_else(|| crate::Error::from(QueryError::UnsupportedQueryShape))?;
         let end_bounds = shape
             .world_bounds(&end_transform)
             .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
-            .ok_or(QueryError::UnsupportedQueryShape)?;
+            .ok_or_else(|| crate::Error::from(QueryError::UnsupportedQueryShape))?;
         self.query_candidates(start_bounds.union(&end_bounds), scratch)?;
         let mut closest = None;
         for candidate_index in 0..scratch.colliders.len() {
@@ -110,7 +112,9 @@ impl PhysicsWorld {
                 .colliders
                 .get(collider_id.dense)
                 .filter(|_| collider_id.world == self.world_id)
-                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+                .ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+                })?;
             if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
                 continue;
             }
@@ -118,13 +122,15 @@ impl PhysicsWorld {
                 .bodies
                 .get(entry.body.dense)
                 .filter(|_| entry.body.world == self.world_id)
-                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+                .ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+                })?;
             let target_transform = body
                 .body
                 .state()
                 .transform()
                 .compose(&entry.collider.local_transform())
-                .map_err(|_| QueryError::ArithmeticOverflow)?;
+                .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
             let Some(hit) = sweep_shape_with_scratch(
                 shape,
                 transform,
@@ -142,7 +148,7 @@ impl PhysicsWorld {
             };
             let position = hit.point_a * 0.5 + hit.point_b * 0.5;
             if !position.is_finite() || !hit.normal.is_finite() || !hit.toi.is_finite() {
-                return Err(QueryError::ArithmeticOverflow);
+                return Err(Error::from(QueryError::ArithmeticOverflow));
             }
             if closest.is_none_or(|current: ShapeHit| {
                 hit.toi < current.toi || (hit.toi == current.toi && collider_id < current.collider)
@@ -165,7 +171,7 @@ impl PhysicsWorld {
         transform: crate::transform::Transform,
         filter: QueryFilter,
         output: &mut Vec<OverlapHit>,
-    ) -> Result<(), QueryError> {
+    ) -> Result<(), Error> {
         self.overlaps_with_scratch(
             shape,
             transform,
@@ -183,15 +189,15 @@ impl PhysicsWorld {
         filter: QueryFilter,
         output: &mut Vec<OverlapHit>,
         scratch: &mut QueryScratch,
-    ) -> Result<(), QueryError> {
+    ) -> Result<(), Error> {
         scratch.clear();
         if !shape.is_convex() {
-            return Err(QueryError::UnsupportedQueryShape);
+            return Err(Error::from(QueryError::UnsupportedQueryShape));
         }
         let bounds = shape
             .world_bounds(&transform)
             .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
-            .ok_or(QueryError::UnsupportedQueryShape)?;
+            .ok_or_else(|| crate::Error::from(QueryError::UnsupportedQueryShape))?;
         self.query_candidates(bounds, scratch)?;
         for candidate_index in 0..scratch.colliders.len() {
             let collider_id = scratch.colliders[candidate_index];
@@ -199,7 +205,9 @@ impl PhysicsWorld {
                 .colliders
                 .get(collider_id.dense)
                 .filter(|_| collider_id.world == self.world_id)
-                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+                .ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+                })?;
             if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
                 continue;
             }
@@ -207,13 +215,15 @@ impl PhysicsWorld {
                 .bodies
                 .get(entry.body.dense)
                 .filter(|_| entry.body.world == self.world_id)
-                .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+                .ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+                })?;
             let target_transform = body
                 .body
                 .state()
                 .transform()
                 .compose(&entry.collider.local_transform())
-                .map_err(|_| QueryError::ArithmeticOverflow)?;
+                .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
             if overlaps_shape_with_scratch(
                 shape,
                 transform,
@@ -237,7 +247,7 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn query_candidates(&self, bounds: Aabb, scratch: &mut QueryScratch) -> Result<(), QueryError> {
+    fn query_candidates(&self, bounds: Aabb, scratch: &mut QueryScratch) -> Result<(), Error> {
         let candidates = &mut scratch.colliders;
         if self.query_index_dirty || self.query_index.is_none() {
             candidates
@@ -252,9 +262,10 @@ impl PhysicsWorld {
 
         self.query_index
             .as_ref()
-            .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?
-            .query_readonly(bounds, &mut scratch.tree_stack, candidates)
-            .map_err(QueryError::Geometry)?;
+            .ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+            })?
+            .query_readonly(bounds, &mut scratch.tree_stack, candidates)?;
         candidates
             .try_reserve(self.unbounded_query_colliders.len())
             .map_err(|_| QueryError::Geometry(CollisionError::SpatialIndexCapacityExceeded))?;
@@ -269,12 +280,14 @@ impl PhysicsWorld {
         filter: QueryFilter,
         closest: &mut Option<RayHit>,
         scratch: &mut QueryScratch,
-    ) -> Result<Option<RayHit>, QueryError> {
+    ) -> Result<Option<RayHit>, crate::Error> {
         let entry = self
             .colliders
             .get(collider_id.dense)
             .filter(|_| collider_id.world == self.world_id)
-            .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+            .ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+            })?;
         if !filter.allows(entry.body, entry.collider.filter(), entry.collider.mode()) {
             return Ok(None);
         }
@@ -282,13 +295,15 @@ impl PhysicsWorld {
             .bodies
             .get(entry.body.dense)
             .filter(|_| entry.body.world == self.world_id)
-            .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+            .ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
+            })?;
         let transform = body
             .body
             .state()
             .transform()
             .compose(&entry.collider.local_transform())
-            .map_err(|_| QueryError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
         let limited_ray =
             ray.with_max_distance(closest.map_or(ray.max_distance(), |hit| hit.distance));
         let Some((position, normal, distance)) = raycast_shape_with_scratch(
@@ -328,21 +343,21 @@ impl PhysicsWorld {
     fn committed_collider_bounds(
         &self,
         collider_id: ColliderId,
-    ) -> Result<Option<Aabb>, CollisionError> {
+    ) -> Result<Option<Aabb>, crate::Error> {
         let entry = self
             .colliders
             .get(collider_id.dense)
             .filter(|_| collider_id.world == self.world_id)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let body = self
             .bodies
             .get(entry.body.dense)
             .filter(|_| entry.body.world == self.world_id)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         entry
             .collider
             .world_bounds(&body.body.state().transform())
-            .map_err(|_| CollisionError::GeometryBounds)
+            .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))
     }
 
     pub(super) fn update_query_index_for_collider(&mut self, collider_id: ColliderId) {
@@ -387,20 +402,20 @@ impl PhysicsWorld {
                     .bodies
                     .get(entry.body.dense)
                     .filter(|_| entry.body.world == self.world_id)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let bounds = entry
                     .collider
                     .world_bounds(&body.body.state().transform())
-                    .map_err(|_| CollisionError::GeometryBounds)?;
+                    .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?;
                 if let Some(bounds) = bounds {
-                    self.query_proxies
-                        .try_reserve(1)
-                        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    self.query_proxies.try_reserve(1).map_err(|_| {
+                        crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
                     self.query_proxies
                         .push((collider_id, expanded_query_bounds(bounds)?));
                 }
             }
-            Ok::<(), CollisionError>(())
+            Ok::<(), crate::Error>(())
         })();
         if build_result.is_err() {
             self.mark_query_index_dirty();

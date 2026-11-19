@@ -32,7 +32,7 @@ impl IslandLayout {
         &mut self,
         body_types: &[BodyType],
         manifolds: &[SolverManifold],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         self.build_with_joints(body_types, manifolds, &[])
     }
 
@@ -41,36 +41,36 @@ impl IslandLayout {
         body_types: &[BodyType],
         manifolds: &[SolverManifold],
         joints: &[JointConstraint],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         self.parents.clear();
         self.parents
             .try_reserve(body_types.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.parents.extend(0..body_types.len());
         self.root_islands.clear();
         self.root_islands
             .try_reserve(body_types.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.root_islands.resize(body_types.len(), None);
         self.body_islands.clear();
         self.body_islands
             .try_reserve(body_types.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.body_islands.resize(body_types.len(), None);
         self.connected.clear();
         self.connected
             .try_reserve(body_types.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.connected.resize(body_types.len(), false);
         self.manifold_islands.clear();
         self.manifold_islands
             .try_reserve(manifolds.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.manifold_islands.resize(manifolds.len(), None);
         self.joint_islands.clear();
         self.joint_islands
             .try_reserve(joints.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.joint_islands.resize(joints.len(), None);
         self.island_count = 0;
 
@@ -78,7 +78,7 @@ impl IslandLayout {
             let a = manifold.body_a;
             let b = manifold.body_b;
             if a == b || a >= body_types.len() || b >= body_types.len() {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             if body_types[a] == BodyType::Dynamic {
                 self.connected[a] = true;
@@ -98,7 +98,7 @@ impl IslandLayout {
             let a = joint.body_a;
             let b = joint.body_b;
             if a == b || a >= body_types.len() || b >= body_types.len() {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             if body_types[a] == BodyType::Dynamic {
                 self.connected[a] = true;
@@ -124,14 +124,15 @@ impl IslandLayout {
                     *self
                         .root_islands
                         .get_mut(root)
-                        .ok_or(CollisionError::InvalidContact)? = Some(island);
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? =
+                        Some(island);
                     island
                 }
             };
             *self
                 .body_islands
                 .get_mut(body)
-                .ok_or(CollisionError::InvalidContact)? = Some(island);
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = Some(island);
         }
 
         for (index, manifold) in manifolds.iter().enumerate() {
@@ -144,32 +145,32 @@ impl IslandLayout {
                     let root_a = find(&mut self.parents, body_a)?;
                     let root_b = find(&mut self.parents, body_b)?;
                     if root_a != root_b {
-                        return Err(CollisionError::InvalidContact);
+                        return Err(crate::Error::from(CollisionError::InvalidContact));
                     }
                     self.root_islands
                         .get(root_a)
                         .copied()
                         .flatten()
-                        .ok_or(CollisionError::InvalidContact)?
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                 }
                 (true, false) => self
                     .body_islands
                     .get(body_a)
                     .copied()
                     .flatten()
-                    .ok_or(CollisionError::InvalidContact)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
                 (false, true) => self
                     .body_islands
                     .get(body_b)
                     .copied()
                     .flatten()
-                    .ok_or(CollisionError::InvalidContact)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
                 (false, false) => continue,
             };
             *self
                 .manifold_islands
                 .get_mut(index)
-                .ok_or(CollisionError::InvalidContact)? = Some(island);
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = Some(island);
         }
         for (index, joint) in joints.iter().enumerate() {
             if !joint.joint.common().enabled {
@@ -184,32 +185,32 @@ impl IslandLayout {
                     let root_a = find(&mut self.parents, body_a)?;
                     let root_b = find(&mut self.parents, body_b)?;
                     if root_a != root_b {
-                        return Err(CollisionError::InvalidContact);
+                        return Err(crate::Error::from(CollisionError::InvalidContact));
                     }
                     self.root_islands
                         .get(root_a)
                         .copied()
                         .flatten()
-                        .ok_or(CollisionError::InvalidContact)?
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                 }
                 (true, false) => self
                     .body_islands
                     .get(body_a)
                     .copied()
                     .flatten()
-                    .ok_or(CollisionError::InvalidContact)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
                 (false, true) => self
                     .body_islands
                     .get(body_b)
                     .copied()
                     .flatten()
-                    .ok_or(CollisionError::InvalidContact)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
                 (false, false) => continue,
             };
             *self
                 .joint_islands
                 .get_mut(index)
-                .ok_or(CollisionError::InvalidContact)? = Some(island);
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = Some(island);
         }
         Ok(())
     }
@@ -244,30 +245,30 @@ impl IslandLayout {
     }
 }
 
-pub(super) fn find(parents: &mut [usize], mut body: usize) -> Result<usize, CollisionError> {
+pub(super) fn find(parents: &mut [usize], mut body: usize) -> Result<usize, crate::Error> {
     let mut root = body;
     loop {
-        let parent = *parents.get(root).ok_or(CollisionError::InvalidContact)?;
+        let parent = *parents
+            .get(root)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         if parent == root {
             break;
         }
         root = parent;
     }
     while body != root {
-        let parent = *parents.get(body).ok_or(CollisionError::InvalidContact)?;
+        let parent = *parents
+            .get(body)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         *parents
             .get_mut(body)
-            .ok_or(CollisionError::InvalidContact)? = root;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = root;
         body = parent;
     }
     Ok(root)
 }
 
-pub(super) fn union(
-    parents: &mut [usize],
-    left: usize,
-    right: usize,
-) -> Result<(), CollisionError> {
+pub(super) fn union(parents: &mut [usize], left: usize, right: usize) -> Result<(), crate::Error> {
     let root_left = find(parents, left)?;
     let root_right = find(parents, right)?;
     if root_left == root_right {
@@ -280,7 +281,7 @@ pub(super) fn union(
     };
     *parents
         .get_mut(child)
-        .ok_or(CollisionError::InvalidContact)? = root;
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = root;
     Ok(())
 }
 

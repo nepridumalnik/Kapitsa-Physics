@@ -22,9 +22,9 @@ impl JointFrame {
         }
     }
 
-    pub fn validate(self) -> Result<(), JointError> {
+    pub fn validate(self) -> Result<(), crate::Error> {
         if !self.local_anchor.is_finite() || !self.local_rotation.is_normalized() {
-            return Err(JointError::InvalidFrame);
+            return Err(crate::Error::from(JointError::InvalidFrame));
         }
         Ok(())
     }
@@ -42,9 +42,9 @@ impl JointLimit {
         Self { lower, upper }
     }
 
-    pub fn validate(self) -> Result<(), JointError> {
+    pub fn validate(self) -> Result<(), crate::Error> {
         if !self.lower.is_finite() || !self.upper.is_finite() || self.lower > self.upper {
-            return Err(JointError::InvalidLimit);
+            return Err(crate::Error::from(JointError::InvalidLimit));
         }
         Ok(())
     }
@@ -72,7 +72,7 @@ impl JointDrive {
         max_force: 0.0,
     };
 
-    pub fn validate(self) -> Result<(), JointError> {
+    pub fn validate(self) -> Result<(), crate::Error> {
         if !self.target_position.is_finite()
             || !self.target_velocity.is_finite()
             || !self.stiffness.is_finite()
@@ -82,7 +82,7 @@ impl JointDrive {
             || !self.max_force.is_finite()
             || self.max_force < 0.0
         {
-            return Err(JointError::InvalidDrive);
+            return Err(crate::Error::from(JointError::InvalidDrive));
         }
         Ok(())
     }
@@ -119,18 +119,18 @@ impl JointCommon {
         }
     }
 
-    pub fn validate(self) -> Result<(), JointError> {
+    pub fn validate(self) -> Result<(), crate::Error> {
         self.frame_a.validate()?;
         self.frame_b.validate()?;
         if !self.compliance.is_finite() || self.compliance < 0.0 {
-            return Err(JointError::InvalidStiffness);
+            return Err(crate::Error::from(JointError::InvalidStiffness));
         }
         if !self.damping.is_finite() || self.damping < 0.0 {
-            return Err(JointError::InvalidDamping);
+            return Err(crate::Error::from(JointError::InvalidDamping));
         }
         for threshold in [self.break_force, self.break_torque].into_iter().flatten() {
             if !threshold.is_finite() || threshold <= 0.0 {
-                return Err(JointError::InvalidBreakThreshold);
+                return Err(crate::Error::from(JointError::InvalidBreakThreshold));
             }
         }
         Ok(())
@@ -146,7 +146,7 @@ pub enum JointMotion {
 }
 
 impl JointMotion {
-    pub(crate) fn validate(self) -> Result<(), JointError> {
+    pub(crate) fn validate(self) -> Result<(), crate::Error> {
         if let Self::Limited(limit) = self {
             limit.validate()?;
         }

@@ -161,7 +161,10 @@ fn solver_mass_handles_static_kinematic_and_dynamic_pairs() {
 
 #[test]
 fn inverse_spd_rejects_non_positive_definite_inputs() {
-    assert_eq!(inverse_spd(Mat3::ZERO), Err(CollisionError::InvalidContact));
+    assert_eq!(
+        inverse_spd(Mat3::ZERO),
+        Err(crate::Error::from(CollisionError::InvalidContact))
+    );
 }
 
 #[test]

@@ -1,18 +1,18 @@
 use std::fmt;
 
-use super::PhysicsClientError;
 use kapitsa_core::{
+    Error,
     chunk::Chunk,
     world::{
         AddChunkBatchError, AddChunkError, BodyId, ChunkId, ChunkOperationError, ColliderId,
-        PhysicsWorld, StepError, WorldError,
+        PhysicsWorld, WorldError,
     },
 };
 
 /// A chunk operation's failure, preserving its input or applied output when available.
 pub enum ChunkClientError<I, O> {
     /// The service did not accept the operation; its original input is returned.
-    NotSubmitted { cause: PhysicsClientError, input: I },
+    NotSubmitted { cause: Error, input: I },
     /// Validation or reservation failed before the world was changed.
     Rejected {
         cause: ChunkOperationError,
@@ -20,11 +20,7 @@ pub enum ChunkClientError<I, O> {
     },
     /// The operation was applied, but the subsequent simulation step failed.
     /// The actual output is returned because the world mutation was not rolled back.
-    StepFailedAfterApply {
-        step: u64,
-        cause: StepError,
-        output: O,
-    },
+    StepFailedAfterApply { step: u64, cause: Error, output: O },
     /// The response channel closed after enqueueing; the operation's outcome is unknown.
     ResponseLost,
 }
@@ -109,11 +105,11 @@ impl ChunkOutcome {
 pub(crate) enum ChunkReply {
     NotSubmitted {
         command: ChunkCommand,
-        cause: PhysicsClientError,
+        cause: Error,
     },
     Completed {
         outcome: ChunkOutcome,
-        step_failure: Option<(u64, StepError)>,
+        step_failure: Option<(u64, Error)>,
     },
 }
 
@@ -129,7 +125,9 @@ pub(crate) fn apply_chunk(world: &mut PhysicsWorld, command: ChunkCommand) -> Ch
             let result = match input.try_reserve_exact(ids.len()) {
                 Ok(()) => {
                     input.extend_from_slice(&ids);
-                    world.remove_chunk_batch(input)
+                    world
+                        .remove_chunk_batch(input)
+                        .map_err(chunk_operation_error)
                 }
                 Err(_) => Err(ChunkOperationError::World(
                     WorldError::DensePoolCapacityExceeded,
@@ -151,4 +149,13 @@ pub(crate) fn apply_chunk(world: &mut PhysicsWorld, command: ChunkCommand) -> Ch
             Ok(Some(colliders))
         })()),
     }
+}
+
+fn chunk_operation_error(error: kapitsa_core::Error) -> ChunkOperationError {
+    error
+        .downcast_ref::<ChunkOperationError>()
+        .cloned()
+        .unwrap_or(ChunkOperationError::World(
+            WorldError::DensePoolCapacityExceeded,
+        ))
 }

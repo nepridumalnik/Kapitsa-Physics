@@ -126,7 +126,9 @@ fn refitting_bvh_moves_triangle_bounds_and_rejects_invalid_pose_without_mutation
 
     assert_eq!(
         bvh.refit_vertices(&mesh, &[]),
-        Err(crate::collision::CollisionError::InvalidSkinPose)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::InvalidSkinPose
+        ))
     );
     bvh.query(
         Aabb::new(Vec3::new(10.0, 0.0, 0.0), Vec3::new(11.0, 1.0, 0.0)).unwrap(),

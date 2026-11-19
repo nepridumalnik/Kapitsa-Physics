@@ -10,7 +10,7 @@ fn empty_pool_has_no_values() {
 }
 
 #[test]
-fn insert_get_mut_and_remove() -> Result<(), DensePoolError> {
+fn insert_get_mut_and_remove() -> Result<(), crate::Error> {
     let mut pool = DensePool::default();
     let id = pool.insert(10)?;
 
@@ -27,7 +27,7 @@ fn insert_get_mut_and_remove() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn removes_first_and_last_elements() -> Result<(), DensePoolError> {
+fn removes_first_and_last_elements() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert(1)?;
     let middle = pool.insert(2)?;
@@ -41,7 +41,7 @@ fn removes_first_and_last_elements() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn removes_the_only_element() -> Result<(), DensePoolError> {
+fn removes_the_only_element() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let id = pool.insert(1)?;
 
@@ -51,7 +51,7 @@ fn removes_the_only_element() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn swap_remove_updates_the_moved_elements_slot() -> Result<(), DensePoolError> {
+fn swap_remove_updates_the_moved_elements_slot() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert("first")?;
     let middle = pool.insert("middle")?;
@@ -69,7 +69,7 @@ fn swap_remove_updates_the_moved_elements_slot() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn reuses_free_slots_and_rejects_stale_ids() -> Result<(), DensePoolError> {
+fn reuses_free_slots_and_rejects_stale_ids() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let old_id = pool.insert(1)?;
     assert_eq!(pool.remove(old_id), Some(1));
@@ -84,7 +84,7 @@ fn reuses_free_slots_and_rejects_stale_ids() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn supports_multiple_generations_of_one_slot() -> Result<(), DensePoolError> {
+fn supports_multiple_generations_of_one_slot() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let mut previous = pool.insert(0)?;
 
@@ -100,7 +100,7 @@ fn supports_multiple_generations_of_one_slot() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn retires_a_slot_when_its_generation_overflows() -> Result<(), DensePoolError> {
+fn retires_a_slot_when_its_generation_overflows() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let initial = pool.insert(1)?;
     let slot = pool
@@ -128,7 +128,7 @@ fn retires_a_slot_when_its_generation_overflows() -> Result<(), DensePoolError> 
 }
 
 #[test]
-fn iteration_has_no_skips_or_repeats() -> Result<(), DensePoolError> {
+fn iteration_has_no_skips_or_repeats() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert(10)?;
     let removed = pool.insert(20)?;
@@ -147,7 +147,7 @@ fn iteration_has_no_skips_or_repeats() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn iter_mut_updates_every_live_value() -> Result<(), DensePoolError> {
+fn iter_mut_updates_every_live_value() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert(1)?;
     let second = pool.insert(2)?;
@@ -162,7 +162,7 @@ fn iter_mut_updates_every_live_value() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn inserting_does_not_reuse_a_live_id() -> Result<(), DensePoolError> {
+fn inserting_does_not_reuse_a_live_id() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert(1)?;
     let second = pool.insert(2)?;
@@ -183,7 +183,7 @@ fn values_returns_an_empty_slice_for_an_empty_pool() {
 }
 
 #[test]
-fn values_match_the_inserted_elements() -> Result<(), DensePoolError> {
+fn values_match_the_inserted_elements() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     pool.insert(10)?;
     pool.insert(20)?;
@@ -194,7 +194,7 @@ fn values_match_the_inserted_elements() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn values_mut_changes_each_element() -> Result<(), DensePoolError> {
+fn values_mut_changes_each_element() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     pool.insert(1)?;
     pool.insert(2)?;
@@ -209,7 +209,7 @@ fn values_mut_changes_each_element() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn values_reflect_swap_remove() -> Result<(), DensePoolError> {
+fn values_reflect_swap_remove() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert(1)?;
     pool.insert(2)?;
@@ -221,7 +221,7 @@ fn values_reflect_swap_remove() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn dense_ids_remain_valid_after_slice_mutation() -> Result<(), DensePoolError> {
+fn dense_ids_remain_valid_after_slice_mutation() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert(1)?;
     let second = pool.insert(2)?;
@@ -238,7 +238,7 @@ fn dense_ids_remain_valid_after_slice_mutation() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn values_length_stays_synchronized_with_pool_length() -> Result<(), DensePoolError> {
+fn values_length_stays_synchronized_with_pool_length() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert(1)?;
     let second = pool.insert(2)?;
@@ -257,7 +257,7 @@ fn values_length_stays_synchronized_with_pool_length() -> Result<(), DensePoolEr
 }
 
 #[test]
-fn try_insert_many_commits_as_a_batch_and_reuses_free_slots() -> Result<(), DensePoolError> {
+fn try_insert_many_commits_as_a_batch_and_reuses_free_slots() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert(1)?;
     let second = pool.insert(2)?;
@@ -282,7 +282,7 @@ fn try_insert_many_commits_as_a_batch_and_reuses_free_slots() -> Result<(), Dens
 }
 
 #[test]
-fn try_insert_many_with_no_values_is_a_no_op() -> Result<(), DensePoolError> {
+fn try_insert_many_with_no_values_is_a_no_op() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let id = pool.insert(1)?;
 
@@ -292,7 +292,7 @@ fn try_insert_many_with_no_values_is_a_no_op() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn try_insert_many_rolls_back_values_slots_and_generations() -> Result<(), DensePoolError> {
+fn try_insert_many_rolls_back_values_slots_and_generations() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert(1)?;
     let second = pool.insert(2)?;
@@ -335,7 +335,7 @@ fn try_insert_many_rolls_back_values_slots_and_generations() -> Result<(), Dense
 }
 
 #[test]
-fn reserves_insertions_for_reused_and_new_slots() -> Result<(), DensePoolError> {
+fn reserves_insertions_for_reused_and_new_slots() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let first = pool.insert(1)?;
     let second = pool.insert(2)?;
@@ -360,7 +360,7 @@ fn reserves_insertions_for_reused_and_new_slots() -> Result<(), DensePoolError> 
 }
 
 #[test]
-fn reserve_overflow_does_not_change_pool() -> Result<(), DensePoolError> {
+fn reserve_overflow_does_not_change_pool() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let id = pool.insert(7)?;
     let values = pool.values().to_vec();
@@ -391,7 +391,7 @@ fn reserve_overflow_does_not_change_pool() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn reserve_rejects_a_cycle_before_insertion() -> Result<(), DensePoolError> {
+fn reserve_rejects_a_cycle_before_insertion() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let id = pool.insert(7)?;
     assert_eq!(pool.remove(id), Some(7));
@@ -407,7 +407,7 @@ fn reserve_rejects_a_cycle_before_insertion() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn failed_insertion_returns_owned_value() -> Result<(), DensePoolError> {
+fn failed_insertion_returns_owned_value() -> Result<(), crate::Error> {
     let mut pool = DensePool::new();
     let id = pool.insert(String::from("previous"))?;
     assert!(pool.remove(id).is_some());
@@ -426,7 +426,7 @@ fn failed_insertion_returns_owned_value() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn recoverable_batch_restores_values_and_free_slots_after_failure() -> Result<(), DensePoolError> {
+fn recoverable_batch_restores_values_and_free_slots_after_failure() -> Result<(), crate::Error> {
     for fail_after in 0..3 {
         let mut pool = DensePool::new();
         let survivor = pool.insert(String::from("survivor"))?;

@@ -27,7 +27,7 @@ pub(crate) fn wrench_from_impulse(
     com_world: Vec3,
     anchor_world: Vec3,
     dt: f64,
-) -> Result<JointWrench, CollisionError> {
+) -> Result<JointWrench, crate::Error> {
     if !dt.is_finite()
         || dt <= 0.0
         || !linear_impulse.is_finite()
@@ -35,14 +35,14 @@ pub(crate) fn wrench_from_impulse(
         || !com_world.is_finite()
         || !anchor_world.is_finite()
     {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
 
     let shift = anchor_world - com_world;
     let force = linear_impulse / dt;
     let torque = (torque_com_impulse - shift.cross(linear_impulse)) / dt;
     if !force.is_finite() || !torque.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     Ok(JointWrench { force, torque })
@@ -113,7 +113,7 @@ mod tests {
     fn wrench_conversion_rejects_invalid_inputs_and_overflow() {
         assert_eq!(
             wrench_from_impulse(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, 0.0),
-            Err(CollisionError::InvalidContact)
+            Err(crate::Error::from(CollisionError::InvalidContact))
         );
         assert_eq!(
             wrench_from_impulse(
@@ -123,7 +123,7 @@ mod tests {
                 Vec3::ZERO,
                 1.0,
             ),
-            Err(CollisionError::InvalidContact)
+            Err(crate::Error::from(CollisionError::InvalidContact))
         );
         assert_eq!(
             wrench_from_impulse(
@@ -133,7 +133,7 @@ mod tests {
                 Vec3::ZERO,
                 f64::MIN_POSITIVE,
             ),
-            Err(CollisionError::ArithmeticOverflow)
+            Err(crate::Error::from(CollisionError::ArithmeticOverflow))
         );
     }
 }

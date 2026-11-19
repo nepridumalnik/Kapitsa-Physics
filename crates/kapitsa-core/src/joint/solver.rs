@@ -392,9 +392,9 @@ impl JointSolver {
         position_iterations: u32,
         velocity_iterations: u32,
         prepare_rows: F,
-    ) -> Result<(), CollisionError>
+    ) -> Result<(), crate::Error>
     where
-        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), CollisionError>,
+        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), crate::Error>,
     {
         Self::solve_with_options(
             workspace,
@@ -415,9 +415,9 @@ impl JointSolver {
         velocity_iterations: u32,
         options: JointSolverOptions,
         mut prepare_rows: F,
-    ) -> Result<(), CollisionError>
+    ) -> Result<(), crate::Error>
     where
-        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), CollisionError>,
+        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), crate::Error>,
     {
         if !dt.is_finite()
             || dt <= 0.0
@@ -426,7 +426,7 @@ impl JointSolver {
             || options.warm_start().enabled
             || !options.iterations().validate()
         {
-            return Err(CollisionError::InvalidConfig);
+            return Err(crate::Error::from(CollisionError::InvalidConfig));
         }
         workspace.begin_step();
         if matches!(options.iterations(), JointIterations::Adaptive { .. }) {
@@ -461,9 +461,9 @@ impl JointSolver {
         iterations: JointIterations,
         options: JointSolverOptions,
         prepare_rows: &mut F,
-    ) -> Result<(), CollisionError>
+    ) -> Result<(), crate::Error>
     where
-        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), CollisionError>,
+        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), crate::Error>,
     {
         let JointIterations::Adaptive {
             position,
@@ -471,7 +471,7 @@ impl JointSolver {
             tolerance,
         } = iterations
         else {
-            return Err(CollisionError::InvalidConfig);
+            return Err(crate::Error::from(CollisionError::InvalidConfig));
         };
         for iteration in 0..position.max {
             #[cfg(feature = "bench-internals")]
@@ -509,7 +509,7 @@ impl JointSolver {
         bodies: &[SolverBody],
         joints: &[JointConstraint],
         dt: f64,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         workspace.begin_prepare();
         prepare_joint_rows(bodies, workspace, joints, dt)?;
         workspace.finish_prepare();
@@ -520,7 +520,7 @@ impl JointSolver {
         workspace: &mut JointWorkspace,
         bodies: &mut [SolverBody],
         mass_cache: bool,
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         if mass_cache {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
@@ -538,7 +538,7 @@ impl JointSolver {
         bodies: &mut [SolverBody],
         dt: f64,
         options: JointSolverOptions,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         Self::position_sweep(workspace, bodies, dt, options, JointRowBuffer::Current)
     }
 
@@ -547,7 +547,7 @@ impl JointSolver {
         bodies: &mut [SolverBody],
         dt: f64,
         options: JointSolverOptions,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         Self::velocity_sweep(workspace, bodies, dt, options, JointRowBuffer::Current)
     }
 
@@ -563,7 +563,7 @@ impl JointSolver {
         block_jacobi_preconditioner: bool,
         executor: &impl StepExecutor,
         worker_count: usize,
-    ) -> Result<Option<VelocityPcgResult>, CollisionError> {
+    ) -> Result<Option<VelocityPcgResult>, crate::Error> {
         if !workspace.velocity_pcg_rows_prepared() {
             Self::prepare(workspace, bodies, joints, dt)?;
             workspace.mark_velocity_pcg_rows_prepared();
@@ -613,7 +613,7 @@ impl JointSolver {
         dt: f64,
         max_iterations: u32,
         incomplete_cholesky_preconditioner: bool,
-    ) -> Result<Option<PositionPcgResult>, CollisionError> {
+    ) -> Result<Option<PositionPcgResult>, crate::Error> {
         Self::prepare(workspace, bodies, joints, dt)?;
         workspace.ensure_solver_mass_slots(bodies.len())?;
         let tolerance = super::JointTolerance {
@@ -660,7 +660,7 @@ impl JointSolver {
         joint_index: usize,
         dt: f64,
         options: JointSolverOptions,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         Self::solve_position_joint_impl(
             workspace,
             bodies,
@@ -680,7 +680,7 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
         allow_in_place: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         // A fixed joint with six committed rows can update those rows in place:
         // the row count never changes, so the generic prepare/commit copy is
         // redundant. The first call of a step (or any layout mismatch) falls
@@ -731,7 +731,7 @@ impl JointSolver {
         joint_index: usize,
         step: JointSolverStep<'_>,
         first_velocity_iteration: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let dt = step.dt();
         let options = step.options();
         workspace.begin_joint_prepare(joint_index, constraint.id);
@@ -739,7 +739,9 @@ impl JointSolver {
         #[cfg(test)]
         workspace.record_solver_call(JointSolverCall::JointRowsPrepared(joint_index));
         if first_velocity_iteration && options.warm_start().enabled {
-            let warm_start_cache = step.impulse_cache().ok_or(CollisionError::InvalidConfig)?;
+            let warm_start_cache = step
+                .impulse_cache()
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidConfig))?;
             apply_warm_start(
                 workspace,
                 bodies,
@@ -774,7 +776,7 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
         row_buffer: JointRowBuffer,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if options.mass_cache() && workspace.solver_rows_len(row_buffer.is_preparing()) > 0 {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
@@ -804,7 +806,7 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
         block: FixedJointRowBlock,
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         if options.mass_cache() {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
@@ -812,9 +814,10 @@ impl JointSolver {
             bodies
                 .get(index)
                 .map(|body| body.state().transform())
-                .ok_or(CollisionError::InvalidContact)
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))
         });
-        let [before_a, before_b] = [before[0]?, before[1]?];
+        let [before_a, before_b] = before;
+        let (before_a, before_b) = (before_a?, before_b?);
         #[cfg(any(test, feature = "bench-internals"))]
         let row_count = 3;
         let mut cache_stats = SolverMassCacheStats::default();
@@ -838,11 +841,11 @@ impl JointSolver {
         let after_a = bodies
             .get(body_indices[0])
             .map(|body| body.state().transform())
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let after_b = bodies
             .get(body_indices[1])
             .map(|body| body.state().transform())
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         Ok(before_a != after_a || before_b != after_b)
     }
 
@@ -852,7 +855,7 @@ impl JointSolver {
         constraint: JointConstraint,
         dt: f64,
         options: JointSolverOptions,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let linear_changed = Self::position_sweep_fixed_block(
             workspace,
             bodies,
@@ -904,7 +907,7 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
         row_buffer: JointRowBuffer,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if options.mass_cache() && workspace.solver_rows_len(row_buffer.is_preparing()) > 0 {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
@@ -933,7 +936,7 @@ impl JointSolver {
         constraint: JointConstraint,
         dt: f64,
         options: JointSolverOptions,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if options.mass_cache() {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
@@ -994,7 +997,7 @@ impl JointSolver {
         joint_index: usize,
         dt: f64,
         options: JointSolverOptions,
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         let super::Joint::Fixed(joint) = constraint.joint else {
             return Ok(false);
         };
@@ -1106,9 +1109,9 @@ impl JointSolver {
         start: usize,
         block: FixedJointRowBlock,
         masses: [SolverMass; 2],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let super::Joint::Fixed(joint) = constraint.joint else {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         };
         #[cfg(feature = "bench-internals")]
         let preparation_started = std::time::Instant::now();
@@ -1119,11 +1122,14 @@ impl JointSolver {
             FixedJointRowBlock::Anchor => {
                 let mut centers = [Vec3::ZERO; 2];
                 for (i, index) in [settings.body_a, settings.body_b].into_iter().enumerate() {
-                    centers[i] = if masses[i].inverse_mass > 0.0 {
-                        masses[i].center
-                    } else {
-                        center_of_mass(bodies.get(index).ok_or(CollisionError::InvalidContact)?)?
-                    };
+                    centers[i] =
+                        if masses[i].inverse_mass > 0.0 {
+                            masses[i].center
+                        } else {
+                            center_of_mass(bodies.get(index).ok_or_else(|| {
+                                crate::Error::from(CollisionError::InvalidContact)
+                            })?)?
+                        };
                 }
                 fixed_anchor_rows_with_centers(
                     settings,
@@ -1138,7 +1144,7 @@ impl JointSolver {
         let rows = workspace
             .rows_mut()
             .get_mut(start..start + replacements.len())
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         write_fixed_rows(rows, replacements)?;
         #[cfg(feature = "bench-internals")]
         {
@@ -1153,7 +1159,7 @@ impl JointSolver {
         bodies: &B,
         start: usize,
         options: JointSolverOptions,
-    ) -> Result<[SolverMass; 2], CollisionError> {
+    ) -> Result<[SolverMass; 2], crate::Error> {
         let mut stats = SolverMassCacheStats::default();
         let masses = {
             let (rows, slots) = workspace.row_range_and_slots_mut(start, start + 3)?;
@@ -1177,7 +1183,7 @@ impl JointSolver {
         keys: [u8; 3],
         range: std::ops::Range<usize>,
         masses: [SolverMass; 2],
-    ) -> Result<ProjectionGroupResult, CollisionError> {
+    ) -> Result<ProjectionGroupResult, crate::Error> {
         let mut cache_stats = SolverMassCacheStats::default();
         let result = {
             let (rows, slots) = workspace.row_range_and_slots_mut(range.start, range.end)?;
@@ -1203,7 +1209,7 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
         row_buffer: JointRowBuffer,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if options.mass_cache() {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
@@ -1239,7 +1245,7 @@ impl JointSolver {
         constraint: JointConstraint,
         joint_index: usize,
         dt: f64,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         workspace.begin_joint_prepare(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, constraint, dt)?;
         workspace.finish_joint_prepare()?;
@@ -1259,12 +1265,14 @@ impl JointSolver {
         joint_index: usize,
         step: JointSolverStep<'_>,
         first_velocity_iteration: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let dt = step.dt();
         let options = step.options();
         workspace.set_active_joint_index(joint_index);
         if first_velocity_iteration && options.warm_start().enabled {
-            let warm_start_cache = step.impulse_cache().ok_or(CollisionError::InvalidConfig)?;
+            let warm_start_cache = step
+                .impulse_cache()
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidConfig))?;
             apply_warm_start(
                 workspace,
                 bodies,
@@ -1296,7 +1304,7 @@ impl JointSolver {
         joints: &[JointConstraint],
         dt: f64,
         options: JointSolverOptions,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if options.projection() == super::JointProjection::FixedBlock3 {
             Self::velocity_block_prepared_sweep(workspace, bodies, joints, dt, options)
         } else {
@@ -1311,7 +1319,7 @@ impl JointSolver {
         joints: &[JointConstraint],
         dt: f64,
         options: JointSolverOptions,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if options.mass_cache() {
             workspace.ensure_solver_mass_slots(bodies.len())?;
         }
@@ -1342,7 +1350,7 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
         cache_stats: &mut SolverMassCacheStats,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let (start, end) = workspace.joint_row_range(joint_index);
         if start == end {
             return Ok(());
@@ -1360,7 +1368,7 @@ impl JointSolver {
                     workspace.solver_buffers_and_velocity_operators_mut(false);
                 let rows = rows
                     .get_mut(start..end)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let mut joint_stats = SolverMassCacheStats::default();
                 let linear = solve_velocity_projection_group(
                     rows,
@@ -1402,7 +1410,7 @@ impl JointSolver {
                 let (rows, slots) = workspace.solver_buffers_mut(false);
                 let rows = rows
                     .get_mut(start..end)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 solve_velocity_rows(rows, slots, bodies, dt, options, &mut joint_stats)?;
             }
             cache_stats.accumulate(joint_stats);
@@ -1421,7 +1429,7 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
         keys: [u8; 3],
-    ) -> Result<ProjectionGroupResult, CollisionError> {
+    ) -> Result<ProjectionGroupResult, crate::Error> {
         let mut cache_stats = SolverMassCacheStats::default();
         let result = {
             let (rows, slots) = workspace.solver_buffers_mut(true);
@@ -1447,7 +1455,7 @@ impl JointSolver {
         options: JointSolverOptions,
         keys: [u8; 3],
         row_buffer: JointRowBuffer,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let mut cache_stats = SolverMassCacheStats::default();
         let result = {
             let (rows, slots, operators) =
@@ -1473,7 +1481,7 @@ impl JointSolver {
         bodies: &mut B,
         dt: f64,
         options: JointSolverOptions,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let mut cache_stats = SolverMassCacheStats::default();
         let stats = {
             let (rows, slots) = workspace.solver_buffers_mut(true);
@@ -1490,7 +1498,7 @@ impl JointSolver {
         dt: f64,
         options: JointSolverOptions,
         row_buffer: JointRowBuffer,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let mut cache_stats = SolverMassCacheStats::default();
         let stats = {
             let (rows, slots) = workspace.solver_buffers_mut(row_buffer.is_preparing());
@@ -1505,9 +1513,9 @@ impl JointSolver {
         workspace: &mut JointWorkspace,
         bodies: &[SolverBody],
         prepare_rows: &mut F,
-    ) -> Result<(), CollisionError>
+    ) -> Result<(), crate::Error>
     where
-        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), CollisionError>,
+        F: FnMut(&[SolverBody], &mut JointWorkspace) -> Result<(), crate::Error>,
     {
         workspace.begin_prepare();
         prepare_rows(bodies, workspace)?;
@@ -1524,7 +1532,7 @@ impl JointSolver {
         bodies: &[SolverBody],
         joints: &[JointConstraint],
         dt: f64,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         #[cfg(feature = "bench-internals")]
         {
             let metrics = workspace.metrics();
@@ -1563,7 +1571,7 @@ impl JointSolver {
         bodies: &[SolverBody],
         joints: &[JointConstraint],
         dt: f64,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let metrics = workspace.metrics();
         workspace.begin_diagnostic_prepare();
         let result = prepare_joint_rows(bodies, workspace, joints, dt)
@@ -1582,7 +1590,7 @@ impl JointSolver {
         workspace: &mut JointWorkspace,
         bodies: &[SolverBody],
         dt: f64,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let residual = measure_prepared_rows(workspace.rows(), bodies, dt)?;
         #[cfg(feature = "bench-internals")]
         {
@@ -1599,9 +1607,9 @@ impl JointSolver {
 fn measure_joint_geometry(
     rows: &[ConstraintRow],
     row_joint_indices: &[usize],
-) -> Result<super::diagnostics::JointGeometryResidual, CollisionError> {
+) -> Result<super::diagnostics::JointGeometryResidual, crate::Error> {
     if rows.len() != row_joint_indices.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let mut residual = super::diagnostics::JointGeometryResidual::default();
     let mut row_index = 0;
@@ -1622,7 +1630,7 @@ fn measure_joint_geometry(
         // components of the connector rotation log, so these norms match its
         // geometric residuals rather than the projected KKT residual.
         if !anchor_error_m.is_finite() || !frame_error_rad.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         residual.anchor_error_m = residual.anchor_error_m.max(anchor_error_m);
         residual.frame_error_rad = residual.frame_error_rad.max(frame_error_rad);
@@ -1638,17 +1646,19 @@ fn apply_warm_start<B: SolverBodyAccess + ?Sized>(
     config: WarmStartConfig,
     cache: &JointImpulseCache,
     row_buffer: JointRowBuffer,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if !config.validate() || !dt.is_finite() || dt <= 0.0 {
-        return Err(CollisionError::InvalidConfig);
+        return Err(crate::Error::from(CollisionError::InvalidConfig));
     }
     let mut applied_count = 0;
     {
         let (rows, _) = workspace.solver_buffers_mut(row_buffer.is_preparing());
         for index in 0..rows.len() {
-            let row = *rows.get(index).ok_or(CollisionError::InvalidContact)?;
+            let row = *rows
+                .get(index)
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             if !row.is_valid(bodies.len()) {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             let Some(impulse) = cache.lookup(constraint.id, constraint.joint, row, dt, config)
             else {
@@ -1657,7 +1667,7 @@ fn apply_warm_start<B: SolverBodyAccess + ?Sized>(
             let next = (row.accumulated_impulse + impulse).clamp(row.min_impulse, row.max_impulse);
             let applied = next - row.accumulated_impulse;
             if !next.is_finite() || !applied.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             if applied != 0.0 {
                 apply_velocity_row(bodies, row, applied, None)?;
@@ -1677,21 +1687,21 @@ fn measure_prepared_rows(
     rows: &[ConstraintRow],
     bodies: &[SolverBody],
     dt: f64,
-) -> Result<JointResidual, CollisionError> {
+) -> Result<JointResidual, crate::Error> {
     let dt_squared = dt * dt;
     if !dt_squared.is_finite() || dt_squared <= 0.0 {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let alpha_scale = dt_squared.recip();
     let mut residual = JointResidual::ZERO;
     for row in rows.iter().copied() {
         if !row.is_valid(bodies.len()) {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         if row.position_enabled {
             let gradient = row.error + row.compliance * alpha_scale * row.accumulated_multiplier;
             if !gradient.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             let position_error =
                 if row.min_multiplier != f64::NEG_INFINITY || row.max_multiplier != f64::INFINITY {
@@ -1709,7 +1719,7 @@ fn measure_prepared_rows(
 
         let speed_error = row.target_velocity - row_velocity(bodies, row)?;
         if !speed_error.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let velocity_error =
             if row.min_impulse != f64::NEG_INFINITY || row.max_impulse != f64::INFINITY {
@@ -1727,7 +1737,7 @@ fn measure_prepared_rows(
     if residual.is_valid() {
         Ok(residual)
     } else {
-        Err(CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(CollisionError::ArithmeticOverflow))
     }
 }
 
@@ -1762,9 +1772,9 @@ fn update_position_residual(
     residual: &mut JointResidual,
     dimension: RowDimension,
     value: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if !value.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     match dimension {
         RowDimension::Linear => residual.max_linear_m = residual.max_linear_m.max(value),
@@ -1777,9 +1787,9 @@ fn update_velocity_residual(
     residual: &mut JointResidual,
     dimension: RowDimension,
     value: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if !value.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     match dimension {
         RowDimension::Linear => residual.max_velocity_mps = residual.max_velocity_mps.max(value),
@@ -1795,7 +1805,7 @@ pub(crate) fn prepare_joint_rows(
     workspace: &mut JointWorkspace,
     joints: &[JointConstraint],
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     for (joint_index, constraint) in joints.iter().enumerate() {
         workspace.set_joint_index(joint_index, constraint.id);
         prepare_joint_rows_for_constraint(bodies, workspace, *constraint, dt)?;
@@ -1808,7 +1818,7 @@ fn prepare_joint_rows_for_constraint<B: SolverBodyAccess + ?Sized>(
     workspace: &mut JointWorkspace,
     constraint: JointConstraint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if !constraint.joint.common().enabled {
         return Ok(());
     }
@@ -1909,7 +1919,7 @@ fn append_fixed_rows<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     joint: super::FixedJoint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let geometry = fixed_joint_geometry(
         bodies,
         workspace,
@@ -1938,15 +1948,15 @@ fn fixed_joint_geometry<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     frame_a: super::JointFrame,
     frame_b: super::JointFrame,
-) -> Result<FixedJointGeometry, CollisionError> {
+) -> Result<FixedJointGeometry, crate::Error> {
     let transform_a = bodies
         .get(body_a)
-        .ok_or(CollisionError::InvalidContact)?
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
         .state()
         .transform();
     let transform_b = bodies
         .get(body_b)
-        .ok_or(CollisionError::InvalidContact)?
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
         .state()
         .transform();
     let joint_index = workspace.active_joint_index();
@@ -1963,7 +1973,7 @@ fn fixed_joint_geometry<B: SolverBodyAccess + ?Sized>(
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, frame_b)?;
     let position_error = anchor_b
         .checked_sub(anchor_a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let rotation_error = relative_rotation_error(rotation_a, rotation_b)?;
     let geometry = FixedJointGeometry {
         anchor: FixedAnchorGeometry {
@@ -1995,18 +2005,18 @@ fn fixed_anchor_geometry<B: SolverBodyAccess + ?Sized>(
     bodies: &B,
     settings: RowSettings,
     frames: [super::JointFrame; 2],
-) -> Result<FixedAnchorGeometry, CollisionError> {
+) -> Result<FixedAnchorGeometry, crate::Error> {
     let anchor = |index, frame: super::JointFrame| {
         Transform::new(frame.local_anchor, frame.local_rotation)
-            .map_err(|_| CollisionError::InvalidContact)?;
+            .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
         let point = bodies
             .get(index)
-            .ok_or(CollisionError::InvalidContact)?
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
             .state()
             .transform()
             .transform_point(frame.local_anchor);
         if !point.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         Ok(point)
     };
@@ -2014,7 +2024,7 @@ fn fixed_anchor_geometry<B: SolverBodyAccess + ?Sized>(
     let anchor_b = anchor(settings.body_b, frames[1])?;
     let position_error = anchor_b
         .checked_sub(anchor_a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     Ok(FixedAnchorGeometry {
         anchor_a,
         anchor_b,
@@ -2026,15 +2036,17 @@ fn fixed_frame_geometry<B: SolverBodyAccess + ?Sized>(
     bodies: &B,
     settings: RowSettings,
     frames: [super::JointFrame; 2],
-) -> Result<FixedFrameGeometry, CollisionError> {
+) -> Result<FixedFrameGeometry, crate::Error> {
     let rotation = |index, frame: super::JointFrame| {
         Transform::new(frame.local_anchor, frame.local_rotation)
-            .map_err(|_| CollisionError::InvalidContact)?;
-        let body = bodies.get(index).ok_or(CollisionError::InvalidContact)?;
+            .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
+        let body = bodies
+            .get(index)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         (body.state().transform().rotation() * frame.local_rotation)
             .try_normalize()
             .filter(|rotation| rotation.is_normalized())
-            .ok_or(CollisionError::ArithmeticOverflow)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
     };
     let rotation_a = rotation(settings.body_a, frames[0])?;
     let rotation_b = rotation(settings.body_b, frames[1])?;
@@ -2049,18 +2061,18 @@ fn fixed_anchor_rows<B: SolverBodyAccess + ?Sized>(
     bodies: &B,
     settings: RowSettings,
     geometry: FixedAnchorGeometry,
-) -> Result<[ConstraintRow; 3], CollisionError> {
+) -> Result<[ConstraintRow; 3], crate::Error> {
     // These rows share centers and anchors, so resolve them once per block.
     let centers = [
         center_of_mass(
             bodies
                 .get(settings.body_a)
-                .ok_or(CollisionError::InvalidContact)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
         )?,
         center_of_mass(
             bodies
                 .get(settings.body_b)
-                .ok_or(CollisionError::InvalidContact)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
         )?,
     ];
     fixed_anchor_rows_with_centers(settings, geometry, centers)
@@ -2070,7 +2082,7 @@ fn fixed_anchor_rows_with_centers(
     settings: RowSettings,
     geometry: FixedAnchorGeometry,
     centers: [Vec3; 2],
-) -> Result<[ConstraintRow; 3], CollisionError> {
+) -> Result<[ConstraintRow; 3], crate::Error> {
     let anchors = [geometry.anchor_a, geometry.anchor_b];
     Ok([
         make_linear_row(
@@ -2081,7 +2093,7 @@ fn fixed_anchor_rows_with_centers(
             geometry
                 .position_error
                 .checked_dot(Vec3::X)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             0,
             bilateral_bounds(),
             centers,
@@ -2094,7 +2106,7 @@ fn fixed_anchor_rows_with_centers(
             geometry
                 .position_error
                 .checked_dot(Vec3::Y)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             1,
             bilateral_bounds(),
             centers,
@@ -2107,7 +2119,7 @@ fn fixed_anchor_rows_with_centers(
             geometry
                 .position_error
                 .checked_dot(Vec3::Z)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             2,
             bilateral_bounds(),
             centers,
@@ -2118,7 +2130,7 @@ fn fixed_anchor_rows_with_centers(
 fn fixed_frame_rows(
     settings: RowSettings,
     geometry: FixedFrameGeometry,
-) -> Result<[ConstraintRow; 3], CollisionError> {
+) -> Result<[ConstraintRow; 3], crate::Error> {
     // The log-rotation derivative coefficient depends only on the rotation
     // error, so compute it once for all three axes.
     let coefficient = fixed_rotation_coefficient(geometry.rotation_error)?;
@@ -2130,7 +2142,7 @@ fn fixed_frame_rows(
             fixed_rotation_row_axis(rotation_a, rotation_error, Vec3::X, coefficient)?,
             rotation_error
                 .checked_dot(Vec3::X)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             3,
             bilateral_bounds(),
         )?,
@@ -2139,7 +2151,7 @@ fn fixed_frame_rows(
             fixed_rotation_row_axis(rotation_a, rotation_error, Vec3::Y, coefficient)?,
             rotation_error
                 .checked_dot(Vec3::Y)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             4,
             bilateral_bounds(),
         )?,
@@ -2148,7 +2160,7 @@ fn fixed_frame_rows(
             fixed_rotation_row_axis(rotation_a, rotation_error, Vec3::Z, coefficient)?,
             rotation_error
                 .checked_dot(Vec3::Z)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             5,
             bilateral_bounds(),
         )?,
@@ -2161,10 +2173,10 @@ fn refresh_fixed_joint_row_block<B: SolverBodyAccess + ?Sized>(
     constraint: JointConstraint,
     dt: f64,
     block: FixedJointRowBlock,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let joint = match constraint.joint {
         super::Joint::Fixed(joint) => joint,
-        _ => return Err(CollisionError::InvalidContact),
+        _ => return Err(crate::Error::from(CollisionError::InvalidContact)),
     };
     #[cfg(feature = "bench-internals")]
     let preparation_started = std::time::Instant::now();
@@ -2202,13 +2214,13 @@ fn refresh_fixed_joint_row_block<B: SolverBodyAccess + ?Sized>(
 fn write_fixed_rows(
     rows: &mut [ConstraintRow],
     replacements: [ConstraintRow; 3],
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if rows.len() != replacements.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     for (row, mut replacement) in rows.iter_mut().zip(replacements) {
         if row.key != replacement.key {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         replacement.accumulated_multiplier = row.accumulated_multiplier;
         replacement.accumulated_impulse = row.accumulated_impulse;
@@ -2224,20 +2236,20 @@ fn append_ball_rows<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     joint: super::BallJoint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
     let position_error = anchor_b
         .checked_sub(anchor_a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     // The ball anchor is a hard bilateral lock; its swing/twist limits are
     // unilateral and handled separately below.
     let lock = lock_settings(settings);
     for (axis_index, axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
         let error = position_error
             .checked_dot(axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         push_linear_row(
             bodies,
             workspace,
@@ -2261,18 +2273,18 @@ fn append_ball_angular_limits<B: SolverBodyAccess + ?Sized>(
     rotation_a: Quat,
     rotation_b: Quat,
     joint: super::BallJoint,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let relative = canonical_relative_rotation(rotation_a, rotation_b)?;
     if let Some(limit) = joint.swing_limit {
         let axis_a = rotation_a
             .rotate_vector(Vec3::Z)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let axis_b = rotation_b
             .rotate_vector(Vec3::Z)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let cosine = axis_a
             .checked_dot(axis_b)
-            .ok_or(CollisionError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
             .clamp(-1.0, 1.0);
         let angle = cosine.acos();
         // A swing upper bound is unilateral. Derive its direction from the
@@ -2300,7 +2312,7 @@ fn append_ball_angular_limits<B: SolverBodyAccess + ?Sized>(
         // while the collapsed interval still collapses to a bilateral lock.
         let axis = rotation_a
             .rotate_vector(Vec3::Z)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         append_angular_axis_limit(bodies, workspace, settings, axis, twist, limit, 4)?;
     }
     Ok(())
@@ -2313,22 +2325,22 @@ fn append_distance_rows<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     joint: super::DistanceJoint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, _) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
     let delta = anchor_b
         .checked_sub(anchor_a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let distance = delta
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let axis = if distance > f64::MIN_POSITIVE {
         delta / distance
     } else {
         rotation_a
             .rotate_vector(Vec3::Z)
-            .ok_or(CollisionError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
     };
     // Route the distance interval through the shared unilateral limit so that
     // the row activates both on an existing violation and when the radial
@@ -2355,7 +2367,7 @@ fn append_hinge_rows<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     joint: super::HingeJoint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
@@ -2371,7 +2383,7 @@ fn append_hinge_rows<B: SolverBodyAccess + ?Sized>(
                 settings,
                 rotation_a
                     .rotate_vector(Vec3::Z)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 angle - joint.drive.target_position,
                 5,
                 bilateral_bounds(),
@@ -2391,7 +2403,7 @@ fn append_slider_rows<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     joint: super::SliderJoint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
@@ -2404,7 +2416,7 @@ fn append_slider_rows<B: SolverBodyAccess + ?Sized>(
         &perpendicular_basis(
             rotation_a
                 .rotate_vector(Vec3::Z)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )?,
         0,
     )?;
@@ -2412,11 +2424,11 @@ fn append_slider_rows<B: SolverBodyAccess + ?Sized>(
 
     let axis = rotation_a
         .rotate_vector(Vec3::Z)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let coordinate = anchor_b
         .checked_sub(anchor_a)
         .and_then(|delta| delta.checked_dot(axis))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if let Some(drive) = drive_settings(settings, joint.drive)? {
         push_linear_row(
             bodies,
@@ -2453,13 +2465,13 @@ fn append_cylindrical_rows<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     joint: super::CylindricalJoint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
     let axis = rotation_a
         .rotate_vector(Vec3::Z)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     append_linear_axes(
         bodies,
         workspace,
@@ -2474,7 +2486,7 @@ fn append_cylindrical_rows<B: SolverBodyAccess + ?Sized>(
     let coordinate = anchor_b
         .checked_sub(anchor_a)
         .and_then(|delta| delta.checked_dot(axis))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if let Some(drive) = drive_settings(settings, joint.translation_drive)? {
         push_linear_row(
             bodies,
@@ -2527,19 +2539,19 @@ fn append_planar_rows<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     joint: super::PlanarJoint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
     let axes = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| rotation_a.rotate_vector(axis));
     let axes = [
-        axes[0].ok_or(CollisionError::ArithmeticOverflow)?,
-        axes[1].ok_or(CollisionError::ArithmeticOverflow)?,
-        axes[2].ok_or(CollisionError::ArithmeticOverflow)?,
+        axes[0].ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        axes[1].ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        axes[2].ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
     ];
     let delta = anchor_b
         .checked_sub(anchor_a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     push_linear_row(
         bodies,
         workspace,
@@ -2549,7 +2561,7 @@ fn append_planar_rows<B: SolverBodyAccess + ?Sized>(
         anchor_b,
         delta
             .checked_dot(axes[2])
-            .ok_or(CollisionError::ArithmeticOverflow)?,
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         0,
         bilateral_bounds(),
     )?;
@@ -2558,7 +2570,7 @@ fn append_planar_rows<B: SolverBodyAccess + ?Sized>(
     for (axis_index, axis) in axes.iter().copied().take(2).enumerate() {
         let coordinate = delta
             .checked_dot(axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         if let Some(drive) = drive_settings(settings, joint.translation_drives[axis_index])? {
             push_linear_row(
                 bodies,
@@ -2612,20 +2624,20 @@ fn append_spring_rows<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     joint: super::SpringJoint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, _) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let delta = anchor_b
         .checked_sub(anchor_a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let distance = delta
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let axis = match delta.try_normalize() {
         Some(axis) => axis,
         None => rotation_a
             .rotate_vector(Vec3::X)
-            .ok_or(CollisionError::ArithmeticOverflow)?,
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
     };
     let settings = row_settings(body_a, body_b, joint.common, dt);
     if joint.stiffness > 0.0 || joint.spring_damping > 0.0 {
@@ -2633,7 +2645,7 @@ fn append_spring_rows<B: SolverBodyAccess + ?Sized>(
         spring_settings.common.compliance = 0.0;
         spring_settings.force_bias = joint.stiffness * (distance - joint.rest_length);
         if !spring_settings.force_bias.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         spring_settings.common.damping = joint.spring_damping;
         spring_settings.force_driven = true;
@@ -2674,7 +2686,7 @@ fn append_cone_twist_rows<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     joint: super::ConeTwistJoint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
@@ -2684,7 +2696,7 @@ fn append_cone_twist_rows<B: SolverBodyAccess + ?Sized>(
     let relative = canonical_relative_rotation(rotation_a, rotation_b)?;
     let twist_length = relative.z.hypot(relative.w);
     if !twist_length.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let twist = if twist_length > TWIST_SINGULAR_TOLERANCE {
         Quat::new(
@@ -2700,34 +2712,34 @@ fn append_cone_twist_rows<B: SolverBodyAccess + ?Sized>(
     };
     let swing = (relative * twist.conjugate())
         .try_normalize()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let swing_error = relative_rotation_error(Quat::IDENTITY, swing)?;
     let axes = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| rotation_a.rotate_vector(axis));
     let axes = [
-        axes[0].ok_or(CollisionError::ArithmeticOverflow)?,
-        axes[1].ok_or(CollisionError::ArithmeticOverflow)?,
-        axes[2].ok_or(CollisionError::ArithmeticOverflow)?,
+        axes[0].ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        axes[1].ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        axes[2].ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
     ];
     let swing_radius = swing_error.x.hypot(swing_error.y);
     let (swing_x_limit, swing_y_limit) = (joint.swing_limit[0], joint.swing_limit[1]);
     if swing_x_limit > 0.0 && swing_y_limit > 0.0 {
         let angular_velocity = bodies
             .get(body_b)
-            .ok_or(CollisionError::InvalidContact)?
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
             .state()
             .angular_velocity()
             .checked_sub(
                 bodies
                     .get(body_a)
-                    .ok_or(CollisionError::InvalidContact)?
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                     .state()
                     .angular_velocity(),
             )
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let local_velocity = rotation_a
             .conjugate()
             .rotate_vector(angular_velocity)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let predicted = Vec3::new(
             swing_error.x + local_velocity.x * dt,
             swing_error.y + local_velocity.y * dt,
@@ -2743,11 +2755,11 @@ fn append_cone_twist_rows<B: SolverBodyAccess + ?Sized>(
                 / ((direction.x / swing_x_limit).powi(2) + (direction.y / swing_y_limit).powi(2))
                     .sqrt();
             if !boundary.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             let axis = rotation_a
                 .rotate_vector(direction)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             append_angular_axis_limit(
                 bodies,
                 workspace,
@@ -2773,7 +2785,7 @@ fn append_cone_twist_rows<B: SolverBodyAccess + ?Sized>(
                 axis,
                 swing_error
                     .checked_dot(local_axis)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 super::JointLimit::new(-limit, limit),
                 3 + axis_index as u8,
             )?;
@@ -2800,23 +2812,23 @@ fn append_d6_rows<B: SolverBodyAccess + ?Sized>(
     body_b: usize,
     joint: super::D6Joint,
     dt: f64,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let (anchor_a, rotation_a) = world_frame(bodies, body_a, joint.common.frame_a)?;
     let (anchor_b, rotation_b) = world_frame(bodies, body_b, joint.common.frame_b)?;
     let settings = row_settings(body_a, body_b, joint.common, dt);
     let lock = lock_settings(settings);
     let delta = anchor_b
         .checked_sub(anchor_a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let rotation_error = relative_rotation_error(rotation_a, rotation_b)?;
 
     for (axis_index, local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
         let axis = rotation_a
             .rotate_vector(local_axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let coordinate = delta
             .checked_dot(axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         match joint.linear_motion[axis_index] {
             super::JointMotion::Locked => push_linear_row(
                 bodies,
@@ -2862,7 +2874,7 @@ fn append_d6_rows<B: SolverBodyAccess + ?Sized>(
         let angular_axis = axis;
         let angular_coordinate = rotation_error
             .checked_dot(local_axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         match joint.angular_motion[axis_index] {
             super::JointMotion::Locked => push_angular_row(
                 workspace,
@@ -2908,12 +2920,12 @@ fn append_anchor_lock<B: SolverBodyAccess + ?Sized>(
     anchor_b: Vec3,
     frame_rotation: Quat,
     first_key: u8,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let axes = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| frame_rotation.rotate_vector(axis));
     let axes = [
-        axes[0].ok_or(CollisionError::ArithmeticOverflow)?,
-        axes[1].ok_or(CollisionError::ArithmeticOverflow)?,
-        axes[2].ok_or(CollisionError::ArithmeticOverflow)?,
+        axes[0].ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        axes[1].ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        axes[2].ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
     ];
     append_linear_axes(
         bodies, workspace, settings, anchor_a, anchor_b, &axes, first_key,
@@ -2928,15 +2940,15 @@ fn append_linear_axes<B: SolverBodyAccess + ?Sized>(
     anchor_b: Vec3,
     axes: &[Vec3],
     first_key: u8,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let settings = lock_settings(settings);
     let delta = anchor_b
         .checked_sub(anchor_a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     for (axis_index, axis) in axes.iter().copied().enumerate() {
         let error = delta
             .checked_dot(axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         push_linear_row(
             bodies,
             workspace,
@@ -2960,20 +2972,20 @@ fn append_rotation_lock(
     rotation_a: Quat,
     rotation_b: Quat,
     first_key: u8,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let settings = lock_settings(settings);
     let error = relative_rotation_error(rotation_a, rotation_b)?;
     for (axis_index, local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
         let axis = rotation_a
             .rotate_vector(local_axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         push_angular_row(
             workspace,
             settings,
             axis,
             error
                 .checked_dot(local_axis)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             first_key + axis_index as u8,
             bilateral_bounds(),
         )?;
@@ -2993,40 +3005,41 @@ fn ball_swing_axis<B: SolverBodyAccess + ?Sized>(
     axis_a: Vec3,
     axis_b: Vec3,
     cosine: f64,
-) -> Result<Option<Vec3>, CollisionError> {
+) -> Result<Option<Vec3>, crate::Error> {
     let cross = axis_a
         .checked_cross(axis_b)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if let Some(axis) = cross.try_normalize() {
         return Ok(Some(axis));
     }
     if cosine < 0.0 {
         // Antiparallel swing: the rotation axis is undefined, so pick a
         // deterministic perpendicular to keep the limit well posed.
-        let (first, _) = constraint::tangent_basis(axis_a).ok_or(CollisionError::InvalidContact)?;
+        let (first, _) = constraint::tangent_basis(axis_a)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         return Ok(Some(first));
     }
     let relative_velocity = bodies
         .get(settings.body_b)
-        .ok_or(CollisionError::InvalidContact)?
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
         .state()
         .angular_velocity()
         .checked_sub(
             bodies
                 .get(settings.body_a)
-                .ok_or(CollisionError::InvalidContact)?
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                 .state()
                 .angular_velocity(),
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let perpendicular = relative_velocity
         .checked_sub(
             axis_a
                 * relative_velocity
                     .checked_dot(axis_a)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if let Some(axis) = perpendicular.try_normalize() {
         return Ok(Some(axis));
     }
@@ -3040,38 +3053,39 @@ fn append_axis_alignment(
     rotation_a: Quat,
     rotation_b: Quat,
     first_key: u8,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let settings = lock_settings(settings);
     let axis_a = rotation_a
         .rotate_vector(Vec3::Z)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let axis_b = rotation_b
         .rotate_vector(Vec3::Z)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let dot = axis_a
         .checked_dot(axis_b)
-        .ok_or(CollisionError::ArithmeticOverflow)?
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
         .clamp(-1.0, 1.0);
     let cross = axis_a
         .checked_cross(axis_b)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let sine = cross
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let error = if sine > f64::MIN_POSITIVE {
         cross * (sine.atan2(dot) / sine)
     } else if dot < 0.0 {
-        let (axis, _) = constraint::tangent_basis(axis_a).ok_or(CollisionError::InvalidContact)?;
+        let (axis, _) = constraint::tangent_basis(axis_a)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         axis * std::f64::consts::PI
     } else {
         Vec3::ZERO
     };
-    let (tangent_a, tangent_b) =
-        constraint::tangent_basis(axis_a).ok_or(CollisionError::InvalidContact)?;
+    let (tangent_a, tangent_b) = constraint::tangent_basis(axis_a)
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     for (axis_index, axis) in [tangent_a, tangent_b].into_iter().enumerate() {
         let component = error
             .checked_dot(axis)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         // A zero position error still leaves the relative angular velocity
         // unconstrained: the aligned axis must keep matching velocity around
         // both tangent axes. Emit both rows unconditionally so the velocity
@@ -3099,7 +3113,7 @@ fn append_linear_limit<B: SolverBodyAccess + ?Sized>(
     coordinate: f64,
     limit: super::JointLimit,
     key: u8,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     // When the two unilateral bounds coincide, their intersection is a
     // bilateral equality. Emit a hard, bias-free lock every step so the
     // collapsed limit cannot be pushed through by another row sharing the
@@ -3126,18 +3140,17 @@ fn append_linear_limit<B: SolverBodyAccess + ?Sized>(
     } else {
         let body_a = bodies
             .get(settings.body_a)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let body_b = bodies
             .get(settings.body_b)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let speed =
-            constraint::relative_velocity_at(body_a.body(), body_b.body(), anchors[0], anchors[1])
-                .map_err(map_constraint_error)?
+            constraint::relative_velocity_at(body_a.body(), body_b.body(), anchors[0], anchors[1])?
                 .checked_dot(axis)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let predicted = coordinate + speed * settings.dt;
         if !predicted.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         if speed > 0.0 && predicted > limit.upper {
             row_settings.position_enabled = false;
@@ -3175,10 +3188,10 @@ fn append_angular_limit<B: SolverBodyAccess + ?Sized>(
     angle: f64,
     limit: super::JointLimit,
     key: u8,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let axis = rotation_a
         .rotate_vector(Vec3::Z)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     append_angular_axis_limit(bodies, workspace, settings, axis, angle, limit, key)
 }
 
@@ -3190,7 +3203,7 @@ fn append_angular_axis_limit<B: SolverBodyAccess + ?Sized>(
     angle: f64,
     limit: super::JointLimit,
     key: u8,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     // A collapsed angular limit is a bilateral equality, exactly as for the
     // linear case: lock the angle every step instead of waiting for a
     // predicted crossing.
@@ -3213,19 +3226,19 @@ fn append_angular_axis_limit<B: SolverBodyAccess + ?Sized>(
     } else {
         let body_a = bodies
             .get(settings.body_a)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let body_b = bodies
             .get(settings.body_b)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let speed = body_b
             .state()
             .angular_velocity()
             .checked_sub(body_a.state().angular_velocity())
             .and_then(|velocity| velocity.checked_dot(axis))
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let predicted = angle + speed * settings.dt;
         if !predicted.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         if speed > 0.0 && predicted > limit.upper {
             row_settings.position_enabled = false;
@@ -3287,22 +3300,23 @@ fn lock_settings(mut settings: RowSettings) -> RowSettings {
     settings
 }
 
-fn perpendicular_basis(axis: Vec3) -> Result<[Vec3; 2], CollisionError> {
-    let (first, second) = constraint::tangent_basis(axis).ok_or(CollisionError::InvalidContact)?;
+fn perpendicular_basis(axis: Vec3) -> Result<[Vec3; 2], crate::Error> {
+    let (first, second) = constraint::tangent_basis(axis)
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     Ok([first, second])
 }
 
 fn drive_settings(
     mut settings: RowSettings,
     drive: super::JointDrive,
-) -> Result<Option<RowSettings>, CollisionError> {
+) -> Result<Option<RowSettings>, crate::Error> {
     if !drive.enabled || drive.max_force == 0.0 {
         return Ok(None);
     }
     let max_impulse = drive.max_force * settings.dt;
     let max_multiplier = max_impulse * settings.dt;
     if !max_impulse.is_finite() || !max_multiplier.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let compliance = if drive.stiffness > 0.0 {
         drive.stiffness.recip()
@@ -3310,7 +3324,7 @@ fn drive_settings(
         0.0
     };
     if !compliance.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     settings.common.compliance = compliance;
     settings.common.damping = drive.damping;
@@ -3326,54 +3340,54 @@ fn world_frame<B: SolverBodyAccess + ?Sized>(
     bodies: &B,
     body_index: usize,
     frame: super::JointFrame,
-) -> Result<(Vec3, Quat), CollisionError> {
+) -> Result<(Vec3, Quat), crate::Error> {
     let body = bodies
         .get(body_index)
-        .ok_or(CollisionError::InvalidContact)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     let local = Transform::new(frame.local_anchor, frame.local_rotation)
-        .map_err(|_| CollisionError::InvalidContact)?;
+        .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
     let transform = body
         .state()
         .transform()
         .compose(&local)
-        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     Ok((transform.translation(), transform.rotation()))
 }
 
 pub(super) fn relative_rotation_error(
     rotation_a: Quat,
     rotation_b: Quat,
-) -> Result<Vec3, CollisionError> {
+) -> Result<Vec3, crate::Error> {
     let relative = canonical_relative_rotation(rotation_a, rotation_b)?;
     let vector = Vec3::new(relative.x, relative.y, relative.z);
     let sine = vector
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if sine <= f64::MIN_POSITIVE {
         return Ok(Vec3::ZERO);
     }
     let angle = 2.0 * sine.atan2(relative.w);
     vector
         .checked_mul_scalar(angle / sine)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
-fn canonical_relative_rotation(rotation_a: Quat, rotation_b: Quat) -> Result<Quat, CollisionError> {
+fn canonical_relative_rotation(rotation_a: Quat, rotation_b: Quat) -> Result<Quat, crate::Error> {
     let mut relative = (rotation_a.conjugate() * rotation_b)
         .try_normalize()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if relative.w < 0.0 {
         relative = Quat::new(-relative.x, -relative.y, -relative.z, -relative.w);
     }
     Ok(relative)
 }
 
-pub(super) fn fixed_rotation_coefficient(rotation_error: Vec3) -> Result<f64, CollisionError> {
+pub(super) fn fixed_rotation_coefficient(rotation_error: Vec3) -> Result<f64, crate::Error> {
     let angle_squared = rotation_error
         .checked_dot(rotation_error)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if !angle_squared.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     // The FixedJoint error is log(R_a^-1 R_b). Its derivative for world-space
@@ -3386,7 +3400,7 @@ pub(super) fn fixed_rotation_coefficient(rotation_error: Vec3) -> Result<f64, Co
         1.0 / angle_squared - half_angle.cos() / (2.0 * angle * half_angle.sin())
     };
     if !coefficient.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(coefficient)
 }
@@ -3396,33 +3410,33 @@ pub(super) fn fixed_rotation_row_axis(
     rotation_error: Vec3,
     local_axis: Vec3,
     coefficient: f64,
-) -> Result<Vec3, CollisionError> {
+) -> Result<Vec3, crate::Error> {
     if !local_axis.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     let first_cross = rotation_error
         .checked_cross(local_axis)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let second_cross = rotation_error
         .checked_cross(first_cross)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let local_gradient = local_axis
         .checked_add(first_cross * 0.5)
         .and_then(|value| value.checked_add(second_cross * coefficient))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     rotation_a
         .rotate_vector(local_gradient)
         .filter(|axis| axis.is_finite())
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 const TWIST_SINGULAR_TOLERANCE: f64 = 64.0 * f64::EPSILON;
 
-fn twist_angle(relative: Quat) -> Result<Option<f64>, CollisionError> {
+fn twist_angle(relative: Quat) -> Result<Option<f64>, crate::Error> {
     let length = relative.z.hypot(relative.w);
     if !length.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if length <= TWIST_SINGULAR_TOLERANCE {
         // The swing is valid but its twist coordinate is undefined. Callers
@@ -3435,7 +3449,7 @@ fn twist_angle(relative: Quat) -> Result<Option<f64>, CollisionError> {
     wrapped
         .is_finite()
         .then_some(Some(wrapped))
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 fn bilateral_bounds() -> (f64, f64) {
@@ -3453,17 +3467,17 @@ fn push_linear_row<B: SolverBodyAccess + ?Sized>(
     error: f64,
     key: u8,
     bounds: (f64, f64),
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let centers = [
         center_of_mass(
             bodies
                 .get(settings.body_a)
-                .ok_or(CollisionError::InvalidContact)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
         )?,
         center_of_mass(
             bodies
                 .get(settings.body_b)
-                .ok_or(CollisionError::InvalidContact)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
         )?,
     ];
     workspace.push(make_linear_row(
@@ -3498,35 +3512,35 @@ fn make_linear_row(
     key: u8,
     bounds: (f64, f64),
     centers: [Vec3; 2],
-) -> Result<ConstraintRow, CollisionError> {
+) -> Result<ConstraintRow, crate::Error> {
     if !axis.is_finite()
         || !axis_anchor.is_finite()
         || !error.is_finite()
         || !settings.dt.is_finite()
         || settings.dt <= 0.0
     {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let offset_a = axis_anchor
         .checked_sub(centers[0])
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let position_offset_a = anchors[0]
         .checked_sub(centers[0])
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let offset_b = anchors[1]
         .checked_sub(centers[1])
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let angular_a = offset_a
         .checked_cross(axis)
         .and_then(|value| value.checked_mul_scalar(-1.0))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let position_angular_a = position_offset_a
         .checked_cross(axis)
         .and_then(|value| value.checked_mul_scalar(-1.0))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let angular_b = offset_b
         .checked_cross(axis)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     Ok(ConstraintRow {
         key,
         dimension: RowDimension::Linear,
@@ -3565,7 +3579,7 @@ fn push_angular_row(
     error: f64,
     key: u8,
     bounds: (f64, f64),
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     workspace.push(make_angular_row(settings, axis, error, key, bounds)?);
     Ok(())
 }
@@ -3576,9 +3590,9 @@ fn make_angular_row(
     error: f64,
     key: u8,
     bounds: (f64, f64),
-) -> Result<ConstraintRow, CollisionError> {
+) -> Result<ConstraintRow, crate::Error> {
     if !axis.is_finite() || !error.is_finite() || !settings.dt.is_finite() || settings.dt <= 0.0 {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(ConstraintRow {
         key,
@@ -3611,10 +3625,10 @@ fn make_angular_row(
     })
 }
 
-fn center_of_mass(body: &SolverBody) -> Result<Vec3, CollisionError> {
+fn center_of_mass(body: &SolverBody) -> Result<Vec3, crate::Error> {
     body.body()
         .world_center_of_mass()
-        .map_err(|_| CollisionError::ArithmeticOverflow)
+        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))
         .map(|center| center.unwrap_or(body.state().transform().translation()))
 }
 
@@ -3623,7 +3637,7 @@ fn solve_position_iteration<B: SolverBodyAccess + ?Sized>(
     bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if options.mass_cache() {
         workspace.ensure_solver_mass_slots(bodies.len())?;
     }
@@ -3643,10 +3657,10 @@ fn solve_position_rows<B: SolverBodyAccess + ?Sized>(
     dt: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let dt_squared = dt * dt;
     if !dt_squared.is_finite() || dt_squared <= 0.0 {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let alpha_scale = dt_squared.recip();
     for row in rows {
@@ -3662,9 +3676,9 @@ fn solve_position_row<B: SolverBodyAccess + ?Sized>(
     alpha_scale: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<bool, CollisionError> {
+) -> Result<bool, crate::Error> {
     if !row.is_valid(bodies.len()) {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     if !row.position_enabled {
         return Ok(false);
@@ -3677,7 +3691,7 @@ fn solve_position_row<B: SolverBodyAccess + ?Sized>(
         effective_mass_for_row(bodies, slots, position_row, options, cache_stats)?;
     let alpha = position_row.compliance * alpha_scale;
     if !alpha.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let denominator = effective_mass + alpha;
     if denominator <= f64::MIN_POSITIVE {
@@ -3688,7 +3702,7 @@ fn solve_position_row<B: SolverBodyAccess + ?Sized>(
         .clamp(position_row.min_multiplier, position_row.max_multiplier);
     let applied = next - position_row.accumulated_multiplier;
     if !next.is_finite() || !applied.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if applied != 0.0 {
         apply_position_row(bodies, position_row, applied, masses)?;
@@ -3705,7 +3719,7 @@ fn solve_velocity_iteration<B: SolverBodyAccess + ?Sized>(
     bodies: &mut B,
     dt: f64,
     options: JointSolverOptions,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if options.mass_cache() {
         workspace.ensure_solver_mass_slots(bodies.len())?;
     }
@@ -3725,7 +3739,7 @@ fn solve_velocity_rows<B: SolverBodyAccess + ?Sized>(
     dt: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     // Rows of one joint share the same body pair and the velocity pass never
     // changes poses, so resolve each pair's mass response once per sweep.
     let mut pair = None;
@@ -3751,7 +3765,7 @@ fn solve_velocity_row<B: SolverBodyAccess + ?Sized>(
     dt: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     solve_velocity_row_with_pair(row, slots, bodies, dt, options, cache_stats, &mut None)
 }
 
@@ -3763,9 +3777,9 @@ fn solve_velocity_row_with_pair<B: SolverBodyAccess + ?Sized>(
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
     pair: &mut Option<VelocityMassPair>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if !row.is_valid(bodies.len()) {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let (effective_mass, masses) = if options.mass_cache() {
         let (masses, statuses) = match *pair {
@@ -3809,7 +3823,7 @@ fn solve_velocity_row_with_pair<B: SolverBodyAccess + ?Sized>(
     let speed_error = row.target_velocity - velocity;
     let alpha = row.compliance / (dt * dt);
     if !alpha.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let delta = if row.force_driven {
         // Integrate Hooke force and implicit viscous damping in this GS row.
@@ -3835,7 +3849,7 @@ fn solve_velocity_row_with_pair<B: SolverBodyAccess + ?Sized>(
     let next = (row.accumulated_impulse + delta).clamp(row.min_impulse, row.max_impulse);
     let applied = next - row.accumulated_impulse;
     if !delta.is_finite() || !next.is_finite() || !applied.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if applied != 0.0 {
         apply_velocity_row(bodies, *row, applied, masses)?;
@@ -3852,7 +3866,7 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
     options: JointSolverOptions,
     selection: ([u8; 3], Option<[SolverMass; 2]>),
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<ProjectionGroupResult, CollisionError> {
+) -> Result<ProjectionGroupResult, crate::Error> {
     let (keys, resolved_masses) = selection;
     validate_projection_rows(rows, bodies.len())?;
     // Resolved masses are passed only by the in-place FixedJoint path, whose
@@ -3897,7 +3911,9 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
                             fallback_rows: 0,
                         });
                     }
-                    Err(CollisionError::NonConvergent) => {}
+                    Err(error)
+                        if error.downcast_ref::<CollisionError>()
+                            == Some(&CollisionError::NonConvergent) => {}
                     Err(error) => return Err(error),
                 }
             }
@@ -3906,7 +3922,7 @@ fn solve_position_projection_group<B: SolverBodyAccess + ?Sized>(
 
     let dt_squared = dt * dt;
     if !dt_squared.is_finite() || dt_squared <= 0.0 {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let alpha_scale = dt_squared.recip();
     let mut fallback_rows = 0;
@@ -3932,7 +3948,7 @@ fn solve_velocity_projection_group<B: SolverBodyAccess + ?Sized>(
     keys: [u8; 3],
     cache_stats: &mut SolverMassCacheStats,
     operators: &mut FixedBlockVelocityOperators,
-) -> Result<ProjectionGroupResult, CollisionError> {
+) -> Result<ProjectionGroupResult, crate::Error> {
     validate_projection_rows(rows, bodies.len())?;
     let indices = projection_group_indices(rows, keys);
     if let Some(indices) = indices {
@@ -3956,7 +3972,7 @@ fn solve_velocity_projection_group<B: SolverBodyAccess + ?Sized>(
                     block_rows[2].target_velocity - row_velocity(bodies, block_rows[2])?,
                 );
                 if !velocity_error.is_finite() {
-                    return Err(CollisionError::ArithmeticOverflow);
+                    return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                 }
                 match factor.solve(velocity_error) {
                     Ok(delta) if delta.is_finite() => {
@@ -3997,11 +4013,11 @@ fn solve_position_projection_remainder<B: SolverBodyAccess + ?Sized>(
     dt: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<ProjectionGroupResult, CollisionError> {
+) -> Result<ProjectionGroupResult, crate::Error> {
     validate_projection_rows(rows, bodies.len())?;
     let dt_squared = dt * dt;
     if !dt_squared.is_finite() || dt_squared <= 0.0 {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let alpha_scale = dt_squared.recip();
     let mut fallback_rows = 0;
@@ -4022,7 +4038,7 @@ fn solve_velocity_projection_remainder<B: SolverBodyAccess + ?Sized>(
     dt: f64,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<ProjectionGroupResult, CollisionError> {
+) -> Result<ProjectionGroupResult, crate::Error> {
     validate_projection_rows(rows, bodies.len())?;
     let mut fallback_rows = 0;
     let mut pair = None;
@@ -4036,14 +4052,11 @@ fn solve_velocity_projection_remainder<B: SolverBodyAccess + ?Sized>(
     })
 }
 
-fn validate_projection_rows(
-    rows: &[ConstraintRow],
-    body_count: usize,
-) -> Result<(), CollisionError> {
+fn validate_projection_rows(rows: &[ConstraintRow], body_count: usize) -> Result<(), crate::Error> {
     if rows.iter().all(|row| row.is_valid(body_count)) {
         Ok(())
     } else {
-        Err(CollisionError::InvalidContact)
+        Err(crate::Error::from(CollisionError::InvalidContact))
     }
 }
 
@@ -4099,7 +4112,7 @@ fn projection_masses<B: SolverBodyAccess + ?Sized>(
     rows: [ConstraintRow; 3],
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<[SolverMass; 2], CollisionError> {
+) -> Result<[SolverMass; 2], crate::Error> {
     let body_a = rows[0].body_a;
     let body_b = rows[0].body_b;
     if options.mass_cache() {
@@ -4118,14 +4131,21 @@ fn prepared_block(
     masses: [SolverMass; 2],
     dt: f64,
     anchor: bool,
-) -> Result<Option<super::block::Block3>, CollisionError> {
+) -> Result<Option<super::block::Block3>, crate::Error> {
     match super::block::prepare_fixed_block3(&rows, masses, dt, anchor) {
         Ok(block) => Ok(Some(block)),
-        Err(
-            CollisionError::InvalidContact
-            | CollisionError::InvalidConfig
-            | CollisionError::NonConvergent,
-        ) => Ok(None),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<CollisionError>(),
+                Some(
+                    CollisionError::InvalidContact
+                        | CollisionError::InvalidConfig
+                        | CollisionError::NonConvergent
+                )
+            ) =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }
@@ -4140,7 +4160,7 @@ fn velocity_block_operator(
     masses: [SolverMass; 2],
     block: FixedJointRowBlock,
     operators: &mut FixedBlockVelocityOperators,
-) -> Result<Option<Cholesky3>, CollisionError> {
+) -> Result<Option<Cholesky3>, crate::Error> {
     if let Some(cached) = operators
         .slot(block)
         .filter(|cached| cached.masses == masses)
@@ -4149,11 +4169,18 @@ fn velocity_block_operator(
     }
     let inverse_effective_mass = match super::block::prepare_block3_operator(&rows, masses) {
         Ok(inverse_effective_mass) => inverse_effective_mass,
-        Err(
-            CollisionError::InvalidContact
-            | CollisionError::InvalidConfig
-            | CollisionError::NonConvergent,
-        ) => return Ok(None),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<CollisionError>(),
+                Some(
+                    CollisionError::InvalidContact
+                        | CollisionError::InvalidConfig
+                        | CollisionError::NonConvergent
+                )
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(error),
     };
     let Ok(factor) = inverse_effective_mass.factor_spd() else {
@@ -4169,9 +4196,9 @@ fn apply_position_block<B: SolverBodyAccess + ?Sized>(
     delta: Vec3,
     bodies: &mut B,
     masses: Option<[SolverMass; 2]>,
-) -> Result<bool, CollisionError> {
+) -> Result<bool, crate::Error> {
     if !delta.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let selected = [rows[indices[0]], rows[indices[1]], rows[indices[2]]];
     let linear_a = selected[0].linear_a * delta.x
@@ -4191,7 +4218,7 @@ fn apply_position_block<B: SolverBodyAccess + ?Sized>(
         || !linear_b.is_finite()
         || !angular_b.is_finite()
     {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let next_multipliers = [
         rows[indices[0]].accumulated_multiplier + delta.x,
@@ -4199,7 +4226,7 @@ fn apply_position_block<B: SolverBodyAccess + ?Sized>(
         rows[indices[2]].accumulated_multiplier + delta.z,
     ];
     if next_multipliers.iter().any(|value| !value.is_finite()) {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let applied = indices
         .into_iter()
@@ -4237,9 +4264,9 @@ fn apply_velocity_block<B: SolverBodyAccess + ?Sized>(
     delta: Vec3,
     bodies: &mut B,
     masses: Option<[SolverMass; 2]>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if !delta.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let selected = [rows[indices[0]], rows[indices[1]], rows[indices[2]]];
     let impulses = [
@@ -4264,7 +4291,7 @@ fn apply_velocity_block<B: SolverBodyAccess + ?Sized>(
         .iter()
         .any(|impulse| !impulse.linear.is_finite() || !impulse.angular.is_finite())
     {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let next_impulses = [
         rows[indices[0]].accumulated_impulse + delta.x,
@@ -4272,7 +4299,7 @@ fn apply_velocity_block<B: SolverBodyAccess + ?Sized>(
         rows[indices[2]].accumulated_impulse + delta.z,
     ];
     if next_impulses.iter().any(|value| !value.is_finite()) {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     apply_velocity_impulse_at(
         bodies,
@@ -4298,7 +4325,7 @@ fn effective_mass_for_row<B: SolverBodyAccess + ?Sized>(
     row: ConstraintRow,
     options: JointSolverOptions,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<(f64, Option<[SolverMass; 2]>), CollisionError> {
+) -> Result<(f64, Option<[SolverMass; 2]>), crate::Error> {
     if options.mass_cache() {
         let masses = resolve_solver_mass_pair(bodies, slots, row.body_a, row.body_b, cache_stats)?;
         effective_mass_from_masses(row, masses).map(|effective_mass| (effective_mass, Some(masses)))
@@ -4306,7 +4333,6 @@ fn effective_mass_for_row<B: SolverBodyAccess + ?Sized>(
         let jacobians = row_jacobians(row);
         let (body_a, body_b) = solver_bodies_at(bodies, row.body_a, row.body_b)?;
         constraint::effective_cross_mass(body_a.body(), body_b.body(), jacobians, jacobians)
-            .map_err(map_constraint_error)
             .map(|effective_mass| (effective_mass, None))
     }
 }
@@ -4314,10 +4340,9 @@ fn effective_mass_for_row<B: SolverBodyAccess + ?Sized>(
 fn effective_mass_from_masses(
     row: ConstraintRow,
     masses: [SolverMass; 2],
-) -> Result<f64, CollisionError> {
+) -> Result<f64, crate::Error> {
     let jacobians = row_jacobians(row);
     constraint::effective_cross_mass_cached(masses, jacobians, jacobians)
-        .map_err(map_constraint_error)
 }
 
 fn row_jacobians(row: ConstraintRow) -> [constraint::Jacobian; 2] {
@@ -4336,7 +4361,7 @@ fn row_jacobians(row: ConstraintRow) -> [constraint::Jacobian; 2] {
 pub(super) fn row_velocity<B: SolverBodyAccess + ?Sized>(
     bodies: &B,
     row: ConstraintRow,
-) -> Result<f64, CollisionError> {
+) -> Result<f64, crate::Error> {
     let (body_a, body_b) = solver_bodies_at(bodies, row.body_a, row.body_b)?;
     let state_a = body_a.state();
     let state_b = body_b.state();
@@ -4347,7 +4372,7 @@ pub(super) fn row_velocity<B: SolverBodyAccess + ?Sized>(
     value
         .is_finite()
         .then_some(value)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 fn apply_position_row<B: SolverBodyAccess + ?Sized>(
@@ -4355,7 +4380,7 @@ fn apply_position_row<B: SolverBodyAccess + ?Sized>(
     row: ConstraintRow,
     multiplier: f64,
     masses: Option<[SolverMass; 2]>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     apply_position_impulse_at(
         bodies,
         row.body_a,
@@ -4381,7 +4406,7 @@ fn apply_velocity_row<B: SolverBodyAccess + ?Sized>(
     row: ConstraintRow,
     impulse: f64,
     masses: Option<[SolverMass; 2]>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let impulses = [
         constraint::Jacobian {
             linear: row.linear_a * impulse,
@@ -4401,10 +4426,10 @@ fn apply_position_impulse_at<B: SolverBodyAccess + ?Sized>(
     body_index: usize,
     impulse: constraint::Jacobian,
     mass: Option<SolverMass>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let is_dynamic = bodies
         .get(body_index)
-        .ok_or(CollisionError::InvalidContact)?
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
         .body()
         .physics()
         .body_type()
@@ -4412,13 +4437,12 @@ fn apply_position_impulse_at<B: SolverBodyAccess + ?Sized>(
     if is_dynamic {
         let body = bodies
             .get_dynamic_mut(body_index)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         if let Some(mass) = mass {
             constraint::apply_generalized_position_impulse_cached(body.body_mut(), mass, impulse)
         } else {
             constraint::apply_generalized_position_impulse(body.body_mut(), impulse)
-        }
-        .map_err(map_constraint_error)?;
+        }?;
     }
     Ok(())
 }
@@ -4428,10 +4452,10 @@ fn apply_velocity_impulse_at<B: SolverBodyAccess + ?Sized>(
     body_index: usize,
     impulse: constraint::Jacobian,
     mass: Option<SolverMass>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let is_dynamic = bodies
         .get(body_index)
-        .ok_or(CollisionError::InvalidContact)?
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
         .body()
         .physics()
         .body_type()
@@ -4439,13 +4463,12 @@ fn apply_velocity_impulse_at<B: SolverBodyAccess + ?Sized>(
     if is_dynamic {
         let body = bodies
             .get_dynamic_mut(body_index)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         if let Some(mass) = mass {
             constraint::apply_generalized_impulse_cached(body.body_mut(), mass, impulse)
         } else {
             constraint::apply_generalized_impulse(body.body_mut(), impulse)
-        }
-        .map_err(map_constraint_error)?;
+        }?;
     }
     Ok(())
 }
@@ -4456,7 +4479,7 @@ fn resolve_solver_mass_pair<B: SolverBodyAccess + ?Sized>(
     body_a: usize,
     body_b: usize,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<[SolverMass; 2], CollisionError> {
+) -> Result<[SolverMass; 2], crate::Error> {
     resolve_solver_mass_pair_with_status(bodies, slots, body_a, body_b, cache_stats)
         .map(|(masses, _)| masses)
 }
@@ -4467,7 +4490,7 @@ fn resolve_solver_mass_pair_with_status<B: SolverBodyAccess + ?Sized>(
     body_a: usize,
     body_b: usize,
     cache_stats: &mut SolverMassCacheStats,
-) -> Result<([SolverMass; 2], [SolverMassCacheStatus; 2]), CollisionError> {
+) -> Result<([SolverMass; 2], [SolverMassCacheStatus; 2]), crate::Error> {
     let (solver_body_a, solver_body_b) = solver_bodies_at(bodies, body_a, body_b)?;
     let (slot_a, slot_b) = solver_mass_slots_at_mut(slots, body_a, body_b)?;
     let (mass_a, status_a) = slot_a.resolve(solver_body_a.body())?;
@@ -4481,7 +4504,7 @@ fn invalidate_solver_mass_pair(
     slots: &mut [SolverMassSlot],
     body_a: usize,
     body_b: usize,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let (slot_a, slot_b) = solver_mass_slots_at_mut(slots, body_a, body_b)?;
     slot_a.invalidate_pose();
     slot_b.invalidate_pose();
@@ -4492,21 +4515,27 @@ fn solver_mass_slots_at_mut(
     slots: &mut [SolverMassSlot],
     body_a: usize,
     body_b: usize,
-) -> Result<(&mut SolverMassSlot, &mut SolverMassSlot), CollisionError> {
+) -> Result<(&mut SolverMassSlot, &mut SolverMassSlot), crate::Error> {
     if body_a == body_b {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     if body_a < body_b {
         let (left, right) = slots.split_at_mut(body_b);
         Ok((
-            left.get_mut(body_a).ok_or(CollisionError::InvalidContact)?,
-            right.first_mut().ok_or(CollisionError::InvalidContact)?,
+            left.get_mut(body_a)
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
+            right
+                .first_mut()
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
         ))
     } else {
         let (left, right) = slots.split_at_mut(body_a);
         Ok((
-            right.first_mut().ok_or(CollisionError::InvalidContact)?,
-            left.get_mut(body_b).ok_or(CollisionError::InvalidContact)?,
+            right
+                .first_mut()
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
+            left.get_mut(body_b)
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
         ))
     }
 }
@@ -4515,34 +4544,18 @@ fn solver_bodies_at<B: SolverBodyAccess + ?Sized>(
     bodies: &B,
     body_a: usize,
     body_b: usize,
-) -> Result<(&SolverBody, &SolverBody), CollisionError> {
+) -> Result<(&SolverBody, &SolverBody), crate::Error> {
     if body_a == body_b {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     Ok((
-        bodies.get(body_a).ok_or(CollisionError::InvalidContact)?,
-        bodies.get(body_b).ok_or(CollisionError::InvalidContact)?,
+        bodies
+            .get(body_a)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
+        bodies
+            .get(body_b)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
     ))
-}
-
-fn map_constraint_error(error: constraint::ConstraintError) -> CollisionError {
-    match error {
-        constraint::ConstraintError::InvalidMass => CollisionError::InvalidContact,
-        constraint::ConstraintError::ArithmeticOverflow => CollisionError::ArithmeticOverflow,
-        constraint::ConstraintError::NonConvergent => CollisionError::NonConvergent,
-    }
-}
-
-pub(super) fn map_rigid_body_error(error: crate::rigid_body::BodyError) -> CollisionError {
-    match error {
-        crate::rigid_body::BodyError::ArithmeticOverflow
-        | crate::rigid_body::BodyError::NonFiniteValue => CollisionError::ArithmeticOverflow,
-        crate::rigid_body::BodyError::InvalidInertiaTensor => CollisionError::NonConvergent,
-        crate::rigid_body::BodyError::BodyMustBeDynamic
-        | crate::rigid_body::BodyError::StaticBodyCannotHaveVelocity => {
-            CollisionError::InvalidContact
-        }
-    }
 }
 
 #[cfg(test)]

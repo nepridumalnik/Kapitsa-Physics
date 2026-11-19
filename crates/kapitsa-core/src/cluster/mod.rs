@@ -31,12 +31,12 @@ pub struct MassTransfer {
 }
 
 impl MassTransfer {
-    pub fn validate(self) -> Result<(), ClusterError> {
+    pub fn validate(self) -> Result<(), crate::Error> {
         if !self.world_origin.is_finite()
             || !self.linear_impulse.is_finite()
             || !self.angular_impulse.is_finite()
         {
-            return Err(ClusterError::InvalidMotion);
+            return Err(crate::Error::from(ClusterError::InvalidMotion));
         }
         Ok(())
     }
@@ -70,7 +70,10 @@ mod tests {
                 ..valid
             },
         ] {
-            assert_eq!(transfer.validate(), Err(ClusterError::InvalidMotion));
+            assert_eq!(
+                transfer.validate(),
+                Err(crate::Error::from(ClusterError::InvalidMotion))
+            );
         }
     }
 }

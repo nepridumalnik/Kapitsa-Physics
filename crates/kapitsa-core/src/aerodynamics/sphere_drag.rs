@@ -41,16 +41,16 @@ impl std::error::Error for SphereDragError {}
 /// translating non-rotating sphere in uniform flow; wall temperature,
 /// rarefaction corrections, interference and drag crisis are not modeled.
 /// This returns a coefficient only and is not integrated into the world.
-pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, SphereDragError> {
+pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate::Error> {
     if !mach.is_finite() || !reynolds.is_finite() || mach <= 0.0 || reynolds <= 0.0 {
-        return Err(SphereDragError::InvalidInput);
+        return Err(crate::Error::from(SphereDragError::InvalidInput));
     }
     let knudsen = mach / reynolds * (GAMMA * std::f64::consts::PI / 2.0).sqrt();
     if !(MIN_MACH..=MAX_MACH).contains(&mach)
         || !(MIN_REYNOLDS..=MAX_REYNOLDS).contains(&reynolds)
         || knudsen >= MAX_KNUDSEN
     {
-        return Err(SphereDragError::UnsupportedDomain);
+        return Err(crate::Error::from(SphereDragError::UnsupportedDomain));
     }
     let theta = |m: f64| (1.0 + (GAMMA - 1.0) * m * m / 2.0).powf(GAMMA / (GAMMA - 1.0));
     let exponent = (GAMMA + 1.0) / (2.0 * GAMMA) - (GAMMA - 1.0) * VISCOSITY_EXPONENT / GAMMA;
@@ -77,7 +77,7 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, Spher
     let effective_re = reynolds * reynolds_factor * theta.powf(exponent);
     let cd = pressure + c0 * theta * (1.0 + BOUNDARY_LAYER_SCALE / effective_re.sqrt()).powi(2);
     if !cd.is_finite() || cd < 0.0 {
-        return Err(SphereDragError::ArithmeticOverflow);
+        return Err(crate::Error::from(SphereDragError::ArithmeticOverflow));
     }
     Ok(cd)
 }
@@ -131,13 +131,13 @@ mod tests {
         for (m, re) in [(f64::NAN, 300.0), (1.0, 0.0), (-1.0, 300.0)] {
             assert_eq!(
                 continuum_drag_coefficient(m, re),
-                Err(SphereDragError::InvalidInput)
+                Err(crate::Error::from(SphereDragError::InvalidInput))
             );
         }
         for (m, re) in [(0.29, 300.0), (2.01, 300.0), (1.0, 299.0), (1.0, 10_001.0)] {
             assert_eq!(
                 continuum_drag_coefficient(m, re),
-                Err(SphereDragError::UnsupportedDomain)
+                Err(crate::Error::from(SphereDragError::UnsupportedDomain))
             );
         }
         for (m, re) in [(0.3, 300.0), (2.0, 300.0), (1.0, 10_000.0)] {

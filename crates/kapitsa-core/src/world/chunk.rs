@@ -1,7 +1,7 @@
 use std::{collections::HashSet, fmt};
 
 use super::{BodyId, ChunkId, ColliderEntry, ColliderId, PhysicsWorld, WorldError};
-use crate::{chunk::Chunk, collision::CollisionError, rigid_body::BodyType};
+use crate::{Error, chunk::Chunk, collision::CollisionError, rigid_body::BodyType};
 
 pub(super) struct ChunkEntry {
     body: BodyId,
@@ -10,7 +10,7 @@ pub(super) struct ChunkEntry {
 }
 
 /// Reason a chunk operation was rejected before changing registered geometry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChunkOperationError {
     World(WorldError),
     InvalidChunkId,
@@ -226,7 +226,10 @@ impl PhysicsWorld {
             return Err(WorldError::InvalidBodyId.into());
         }
         if entry.body.physics().body_type() == BodyType::Dynamic {
-            return Err(WorldError::Collision(CollisionError::UnsupportedDynamicGeometry).into());
+            return Err(WorldError::Collision(crate::Error::from(
+                CollisionError::UnsupportedDynamicGeometry,
+            ))
+            .into());
         }
         if let Some(first) = entry.first_collider {
             let first = self
@@ -246,7 +249,11 @@ impl PhysicsWorld {
             }
             collider
                 .world_bounds(&entry.body.state().transform())
-                .map_err(|_| WorldError::Collision(CollisionError::GeometryBounds))?;
+                .map_err(|_| {
+                    ChunkOperationError::from(WorldError::Collision(crate::Error::from(
+                        CollisionError::GeometryBounds,
+                    )))
+                })?;
         }
         Ok(())
     }
@@ -485,10 +492,7 @@ impl PhysicsWorld {
 
     /// Validates every ID (including duplicates) before removing any geometry.
     /// Returned chunks keep their original mesh order, transforms and BVHs.
-    pub fn remove_chunk_batch(
-        &mut self,
-        ids: Vec<ChunkId>,
-    ) -> Result<Vec<Chunk>, RemoveChunkBatchError> {
+    pub fn remove_chunk_batch(&mut self, ids: Vec<ChunkId>) -> Result<Vec<Chunk>, Error> {
         let mut seen = HashSet::new();
         seen.try_reserve(ids.len()).map_err(|_| capacity())?;
         let mut result = Vec::new();
@@ -497,7 +501,7 @@ impl PhysicsWorld {
             .map_err(|_| capacity())?;
         for &id in &ids {
             if !seen.insert(id) {
-                return Err(ChunkOperationError::DuplicateChunkId);
+                return Err(Error::from(ChunkOperationError::DuplicateChunkId));
             }
             self.validate_chunk_removal(id)?;
         }

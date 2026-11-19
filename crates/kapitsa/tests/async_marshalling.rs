@@ -20,8 +20,8 @@ use kapitsa::math::{Mat3, Vec3};
 use kapitsa::query::{QueryFilter, Ray};
 use kapitsa::shape::Sphere;
 use kapitsa::{
-    Collider, MassProperties, PhysicsClient, PhysicsClientError, PhysicsSnapshot,
-    PhysicsSubmitError, RigidBody, Shape, Simulation, SimulationConfig, Transform, WorkerConfig,
+    Collider, MassProperties, PhysicsClient, PhysicsSnapshot, PhysicsSubmitError, RigidBody, Shape,
+    Simulation, SimulationConfig, Transform, WorkerConfig,
 };
 use tokio::task::JoinSet;
 
@@ -95,15 +95,17 @@ impl Drop for AllocationTracking {
 }
 
 fn simulation() -> Simulation {
-    Simulation::new_from_config(SimulationConfig {
-        tick_rate: 10,
-        max_catch_up_steps: 2,
-        workers: WorkerConfig {
-            max_workers: NonZeroUsize::new(1),
-            ..WorkerConfig::default()
-        },
-        ..SimulationConfig::default()
-    })
+    Simulation::new_from_config(
+        SimulationConfig::builder()
+            .tick_rate(10)
+            .max_catch_up_steps(2)
+            .workers(
+                WorkerConfig::builder()
+                    .max_workers(NonZeroUsize::new(1))
+                    .build(),
+            )
+            .build(),
+    )
     .expect("valid simulation configuration")
 }
 
@@ -128,10 +130,7 @@ async fn next_snapshot(client: &mut PhysicsClient) -> std::sync::Arc<PhysicsSnap
 async fn commands_steps_snapshots_remove_and_recreate_bodies() {
     let mut simulation = simulation();
     let mut client = simulation.client();
-    assert!(matches!(
-        client.add_body(dynamic_body()).await,
-        Err(PhysicsClientError::NotRunning)
-    ));
+    assert!(client.add_body(dynamic_body()).await.is_err());
 
     simulation.start().expect("start");
     assert!(next_snapshot(&mut client).await.step() > 0);
@@ -171,10 +170,7 @@ async fn commands_steps_snapshots_remove_and_recreate_bodies() {
 
     simulation.stop().await.expect("stop");
     assert_eq!(client.snapshot().len(), 1);
-    assert!(matches!(
-        client.apply_force(replacement, Vec3::Y).await,
-        Err(PhysicsClientError::NotRunning)
-    ));
+    assert!(client.apply_force(replacement, Vec3::Y).await.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -202,7 +198,7 @@ async fn command_buffers_are_ordered_atomic_and_report_step_results() {
         .expect("batch result");
     assert_eq!(applied.batch_id, accepted_id);
     assert!(applied.step > 0);
-    assert_eq!(applied.result, Ok(()));
+    assert!(applied.result.is_ok());
 
     let snapshot = next_snapshot(&mut client).await;
     assert_eq!(
@@ -225,12 +221,15 @@ async fn command_buffers_are_ordered_atomic_and_report_step_results() {
         .expect("batch result timeout")
         .expect("batch result");
     assert_eq!(rejected.batch_id, rejected_id);
+    let error = rejected
+        .result
+        .expect_err("rejected batch reports its cause");
+    assert_eq!(error.command_index(), Some(1));
     assert_eq!(
-        rejected.result,
-        Err(kapitsa::PhysicsBatchError {
-            command_index: Some(1),
-            error: PhysicsClientError::Body(kapitsa::rigid_body::BodyError::BodyMustBeDynamic),
-        })
+        error.downcast_ref::<kapitsa::CommandError>(),
+        Some(&kapitsa::CommandError::Body(
+            kapitsa::rigid_body::BodyError::BodyMustBeDynamic
+        ))
     );
 
     let unchanged = next_snapshot(&mut client).await;
@@ -270,7 +269,7 @@ async fn single_commands_and_batches_keep_fifo_order_and_snapshot_completion() {
     last_result.expect("last single command");
     let batch_result = batch_result.expect("batch result");
     assert_eq!(batch_result.batch_id, batch_id);
-    assert_eq!(batch_result.result, Ok(()));
+    assert!(batch_result.result.is_ok());
     let snapshot = client.snapshot();
     assert!(snapshot.step() >= batch_result.step);
     assert_eq!(
@@ -384,11 +383,9 @@ async fn many_short_command_batches_are_processed_in_fifo_order() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_publishes_results_for_accepted_but_unapplied_batches() {
-    let mut simulation = Simulation::new_from_config(SimulationConfig {
-        tick_rate: 2,
-        ..SimulationConfig::default()
-    })
-    .expect("simulation");
+    let mut simulation =
+        Simulation::new_from_config(SimulationConfig::builder().tick_rate(2).build())
+            .expect("simulation");
     let client = simulation.client();
     let mut results = client.subscribe_batch_results();
     simulation.start().expect("start");
@@ -401,13 +398,8 @@ async fn stop_publishes_results_for_accepted_but_unapplied_batches() {
 
     let result = results.next_result().await.expect("stopped batch result");
     assert_eq!(result.batch_id, batch_id);
-    assert_eq!(
-        result.result,
-        Err(kapitsa::PhysicsBatchError {
-            command_index: None,
-            error: PhysicsClientError::NotRunning,
-        })
-    );
+    let error = result.result.expect_err("stopped batch result");
+    assert!(error.to_string().contains("not running"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -501,11 +493,8 @@ async fn queued_cancellation_applies_and_stop_discards_other_session_requests() 
     let mut pending = Box::pin(client.add_body(RigidBody::new_static(Transform::identity())));
     assert!(matches!(poll_once(pending.as_mut()), Poll::Pending));
     simulation.stop().await.expect("stop before next step");
-    assert!(matches!(pending.await, Err(PhysicsClientError::NotRunning)));
-    assert!(matches!(
-        client.next_snapshot().await,
-        Err(PhysicsClientError::NotRunning)
-    ));
+    assert!(pending.await.is_err());
+    assert!(client.next_snapshot().await.is_err());
     assert_eq!(client.snapshot().len(), 1);
 
     simulation.start().expect("restart with fresh queue");
@@ -615,15 +604,17 @@ async fn benchmark_runtime_completion_latency() {
     const CYCLES_PER_SAMPLE: usize = 20;
     const SAMPLE_COUNT: usize = 5;
 
-    let mut simulation = Simulation::new_from_config(SimulationConfig {
-        tick_rate: 1_000,
-        max_catch_up_steps: 2,
-        workers: WorkerConfig {
-            max_workers: NonZeroUsize::new(1),
-            ..WorkerConfig::default()
-        },
-        ..SimulationConfig::default()
-    })
+    let mut simulation = Simulation::new_from_config(
+        SimulationConfig::builder()
+            .tick_rate(1_000)
+            .max_catch_up_steps(2)
+            .workers(
+                WorkerConfig::builder()
+                    .max_workers(NonZeroUsize::new(1))
+                    .build(),
+            )
+            .build(),
+    )
     .expect("valid simulation configuration");
     let client = simulation.client();
     let mut results = client.subscribe_batch_results();

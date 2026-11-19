@@ -206,12 +206,16 @@ fn lifecycle_rejects_duplicate_pairs_and_sensor_impacts() {
     ];
     assert_eq!(
         lifecycle.stage(&mut duplicates, &mut events),
-        Err(crate::collision::CollisionError::InvalidContact)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::InvalidContact
+        ))
     );
     let mut sensor_impact = [interaction(pair, true, Some(contact(1.0)), true)];
     assert_eq!(
         lifecycle.stage(&mut sensor_impact, &mut events),
-        Err(crate::collision::CollisionError::InvalidContact)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::InvalidContact
+        ))
     );
     let mut transient_solid = [CollisionInteraction {
         pair,
@@ -222,6 +226,8 @@ fn lifecycle_rejects_duplicate_pairs_and_sensor_impacts() {
     }];
     assert_eq!(
         lifecycle.stage(&mut transient_solid, &mut events),
-        Err(crate::collision::CollisionError::InvalidContact)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::InvalidContact
+        ))
     );
 }

@@ -9,21 +9,21 @@ pub(crate) use solver::{ConstrainedIntegrator, ConstrainedWorkspace, IslandEligi
 use crate::collision::CollisionError;
 use kapitsa_math::{Quat, Vec3};
 
-fn finite(value: Vec3) -> Result<Vec3, CollisionError> {
+fn finite(value: Vec3) -> Result<Vec3, crate::Error> {
     value
         .is_finite()
         .then_some(value)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
-fn length(value: Vec3) -> Result<f64, CollisionError> {
+fn length(value: Vec3) -> Result<f64, crate::Error> {
     value
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
-fn rotate(rotation: Quat, value: Vec3) -> Result<Vec3, CollisionError> {
+fn rotate(rotation: Quat, value: Vec3) -> Result<Vec3, crate::Error> {
     rotation
         .rotate_vector(value)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 #[cfg(test)]

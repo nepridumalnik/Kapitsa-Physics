@@ -57,9 +57,9 @@ impl EpaWorkspace {
         transform_a: &Transform,
         shape_b: &Shape,
         transform_b: &Transform,
-    ) -> Result<EpaResult, CollisionError> {
+    ) -> Result<EpaResult, crate::Error> {
         if simplex.count != 4 {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         self.vertices.clear();
         self.faces.clear();
@@ -67,10 +67,10 @@ impl EpaWorkspace {
         self.horizon.clear();
         self.vertices
             .try_reserve(4)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.faces
             .try_reserve(8)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.vertices.extend_from_slice(&simplex.points);
         for vertices in [[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]] {
             let face = self.make_face(vertices)?;
@@ -83,7 +83,7 @@ impl EpaWorkspace {
             let projection = support
                 .difference
                 .checked_dot(face.normal)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let tolerance = scale_tolerance(support.difference);
             // A support point already in the polytope cannot expand it. Reusing
             // it would create zero-area horizon faces when dot-product rounding
@@ -99,7 +99,7 @@ impl EpaWorkspace {
             let new_index = self.vertices.len();
             self.vertices
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.visible.clear();
             self.horizon.clear();
             for (index, face) in self.faces.iter().copied().enumerate() {
@@ -107,11 +107,11 @@ impl EpaWorkspace {
                 let offset = support
                     .difference
                     .checked_sub(origin)
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                 if face.normal.dot(offset) > tolerance {
-                    self.visible
-                        .try_reserve(1)
-                        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    self.visible.try_reserve(1).map_err(|_| {
+                        crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
                     self.visible.push(index);
                 }
             }
@@ -123,12 +123,12 @@ impl EpaWorkspace {
                     .visible
                     .get(position)
                     .copied()
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let face = self
                     .faces
                     .get(index)
                     .copied()
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 self.add_horizon_edge(face.vertices[0], face.vertices[1])?;
                 self.add_horizon_edge(face.vertices[1], face.vertices[2])?;
                 self.add_horizon_edge(face.vertices[2], face.vertices[0])?;
@@ -138,11 +138,11 @@ impl EpaWorkspace {
             }
             self.faces
                 .try_reserve(self.horizon.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.vertices.push(support);
             for index in self.visible.iter().rev().copied() {
                 if index >= self.faces.len() {
-                    return Err(CollisionError::InvalidContact);
+                    return Err(crate::Error::from(CollisionError::InvalidContact));
                 }
                 self.faces.swap_remove(index);
             }
@@ -154,24 +154,24 @@ impl EpaWorkspace {
         self.contact(face)
     }
 
-    fn vertex(&self, index: usize) -> Result<SupportPoint, CollisionError> {
+    fn vertex(&self, index: usize) -> Result<SupportPoint, crate::Error> {
         self.vertices
             .get(index)
             .copied()
-            .ok_or(CollisionError::InvalidContact)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))
     }
 
-    fn make_face(&self, mut vertices: [usize; 3]) -> Result<Face, CollisionError> {
+    fn make_face(&self, mut vertices: [usize; 3]) -> Result<Face, crate::Error> {
         let a = self.vertex(vertices[0])?.difference;
         let b = self.vertex(vertices[1])?.difference;
         let c = self.vertex(vertices[2])?.difference;
         let normal = (b - a)
             .checked_cross(c - a)
             .and_then(Vec3::try_normalize)
-            .ok_or(CollisionError::NonConvergent)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::NonConvergent))?;
         let mut distance = normal
             .checked_dot(a)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let normal = if distance < 0.0 {
             vertices.swap(1, 2);
             distance = -distance;
@@ -186,9 +186,11 @@ impl EpaWorkspace {
         })
     }
 
-    fn closest_face(&self) -> Result<(usize, Face), CollisionError> {
+    fn closest_face(&self) -> Result<(usize, Face), crate::Error> {
         let mut faces = self.faces.iter().copied().enumerate();
-        let first = faces.next().ok_or(CollisionError::NonConvergent)?;
+        let first = faces
+            .next()
+            .ok_or_else(|| crate::Error::from(CollisionError::NonConvergent))?;
         let mut closest = first;
         for candidate in faces {
             if candidate.1.distance < closest.1.distance {
@@ -198,7 +200,7 @@ impl EpaWorkspace {
         Ok(closest)
     }
 
-    fn add_horizon_edge(&mut self, from: usize, to: usize) -> Result<(), CollisionError> {
+    fn add_horizon_edge(&mut self, from: usize, to: usize) -> Result<(), crate::Error> {
         if let Some(position) = self
             .horizon
             .iter()
@@ -208,20 +210,20 @@ impl EpaWorkspace {
         } else {
             self.horizon
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.horizon.push((from, to));
         }
         Ok(())
     }
 
-    fn contact(&self, face: Face) -> Result<EpaResult, CollisionError> {
+    fn contact(&self, face: Face) -> Result<EpaResult, crate::Error> {
         let a = self.vertex(face.vertices[0])?;
         let b = self.vertex(face.vertices[1])?;
         let c = self.vertex(face.vertices[2])?;
         let target = face
             .normal
             .checked_mul_scalar(face.distance)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let weights = barycentric(target, a.difference, b.difference, c.difference)?;
         let point_a = weighted_point(weights, a.point_a, b.point_a, c.point_a)?;
         let point_b = weighted_point(weights, a.point_b, b.point_b, c.point_b)?;
@@ -243,53 +245,57 @@ impl EpaWorkspace {
     }
 }
 
-fn barycentric(point: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Result<[f64; 3], CollisionError> {
-    let v0 = b.checked_sub(a).ok_or(CollisionError::ArithmeticOverflow)?;
-    let v1 = c.checked_sub(a).ok_or(CollisionError::ArithmeticOverflow)?;
+fn barycentric(point: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Result<[f64; 3], crate::Error> {
+    let v0 = b
+        .checked_sub(a)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
+    let v1 = c
+        .checked_sub(a)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let v2 = point
         .checked_sub(a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d00 = v0
         .checked_dot(v0)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d01 = v0
         .checked_dot(v1)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d11 = v1
         .checked_dot(v1)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d20 = v2
         .checked_dot(v0)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d21 = v2
         .checked_dot(v1)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let denominator = d00 * d11 - d01 * d01;
     if !denominator.is_finite() || denominator <= f64::MIN_POSITIVE {
-        return Err(CollisionError::NonConvergent);
+        return Err(crate::Error::from(CollisionError::NonConvergent));
     }
     let mut v = (d11 * d20 - d01 * d21) / denominator;
     let mut w = (d00 * d21 - d01 * d20) / denominator;
     let mut u = 1.0 - v - w;
     if !u.is_finite() || !v.is_finite() || !w.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     u = u.clamp(0.0, 1.0);
     v = v.clamp(0.0, 1.0);
     w = w.clamp(0.0, 1.0);
     let sum = u + v + w;
     if sum <= 0.0 || !sum.is_finite() {
-        return Err(CollisionError::NonConvergent);
+        return Err(crate::Error::from(CollisionError::NonConvergent));
     }
     Ok([u / sum, v / sum, w / sum])
 }
 
-fn weighted_point(weights: [f64; 3], a: Vec3, b: Vec3, c: Vec3) -> Result<Vec3, CollisionError> {
+fn weighted_point(weights: [f64; 3], a: Vec3, b: Vec3, c: Vec3) -> Result<Vec3, crate::Error> {
     let point = a * weights[0] + b * weights[1] + c * weights[2];
     point
         .is_finite()
         .then_some(point)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 fn scale_tolerance(value: Vec3) -> f64 {

@@ -764,7 +764,7 @@ fn detect(
     pair: CollisionPair,
     left: &Geometry,
     right: &Geometry,
-) -> Result<Option<crate::collision::manifold::ContactManifold>, crate::collision::CollisionError> {
+) -> Result<Option<crate::collision::manifold::ContactManifold>, crate::Error> {
     detect_with_offset(narrow_phase, pair, left, right, 0.01)
 }
 
@@ -774,7 +774,7 @@ fn detect_with_offset(
     left: &Geometry,
     right: &Geometry,
     contact_offset: f64,
-) -> Result<Option<crate::collision::manifold::ContactManifold>, crate::collision::CollisionError> {
+) -> Result<Option<crate::collision::manifold::ContactManifold>, crate::Error> {
     narrow_phase.detect_with_geometry(
         pair,
         &left.shape,

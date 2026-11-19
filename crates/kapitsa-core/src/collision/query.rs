@@ -24,11 +24,13 @@ pub struct Ray {
 }
 
 impl Ray {
-    pub fn new(origin: Vec3, direction: Vec3, max_distance: f64) -> Result<Self, QueryError> {
+    pub fn new(origin: Vec3, direction: Vec3, max_distance: f64) -> Result<Self, crate::Error> {
         if !origin.is_finite() || !max_distance.is_finite() || max_distance < 0.0 {
-            return Err(QueryError::InvalidInput);
+            return Err(crate::Error::from(QueryError::InvalidInput));
         }
-        let direction = direction.try_normalize().ok_or(QueryError::InvalidInput)?;
+        let direction = direction
+            .try_normalize()
+            .ok_or_else(|| crate::Error::from(QueryError::InvalidInput))?;
         Ok(Self {
             origin,
             direction,
@@ -55,14 +57,14 @@ impl Ray {
         }
     }
 
-    pub(crate) fn validate(self) -> Result<(), QueryError> {
+    pub(crate) fn validate(self) -> Result<(), crate::Error> {
         if !self.origin.is_finite()
             || !self.direction.is_finite()
             || (self.direction.length() - 1.0).abs() > 1.0e-12
             || !self.max_distance.is_finite()
             || self.max_distance < 0.0
         {
-            return Err(QueryError::InvalidInput);
+            return Err(crate::Error::from(QueryError::InvalidInput));
         }
         Ok(())
     }
@@ -167,18 +169,18 @@ pub(crate) fn raycast_shape_with_scratch(
     bvh: Option<&TriangleBvh>,
     deformed_vertices: Option<&[Vec3]>,
     scratch: &mut QueryScratch,
-) -> Result<Option<(Vec3, Vec3, f64)>, QueryError> {
+) -> Result<Option<(Vec3, Vec3, f64)>, crate::Error> {
     ray.validate()?;
     if shape.is_convex() {
         return raycast_convex(shape, transform, ray);
     }
     let inverse = transform
         .inverse()
-        .map_err(|_| QueryError::ArithmeticOverflow)?;
+        .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
     let local_origin = inverse.transform_point(ray.origin());
     let local_direction = inverse.transform_vector(ray.direction());
     if !local_origin.is_finite() || !local_direction.is_finite() {
-        return Err(QueryError::ArithmeticOverflow);
+        return Err(crate::Error::from(QueryError::ArithmeticOverflow));
     }
     let (local_normal, distance) = match shape {
         Shape::Plane(plane) => ray_plane(plane, local_origin, local_direction, ray.max_distance())?,
@@ -191,7 +193,9 @@ pub(crate) fn raycast_shape_with_scratch(
         Shape::TriangleMesh(mesh) => ray_mesh(
             mesh,
             deformed_vertices.unwrap_or_else(|| mesh.vertices()),
-            bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
+            bvh.ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?,
             local_origin,
             local_direction,
             ray.max_distance(),
@@ -210,7 +214,9 @@ pub(crate) fn raycast_shape_with_scratch(
         Shape::SkinnedTriangleMesh(skinned) => ray_mesh(
             skinned.mesh(),
             deformed_vertices.unwrap_or_else(|| skinned.mesh().vertices()),
-            bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
+            bvh.ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?,
             local_origin,
             local_direction,
             ray.max_distance(),
@@ -230,10 +236,10 @@ pub(crate) fn raycast_shape_with_scratch(
     let normal = transform
         .transform_vector(local_normal)
         .try_normalize()
-        .ok_or(QueryError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
     let position = ray.origin() + ray.direction() * distance;
     if !position.is_finite() {
-        return Err(QueryError::ArithmeticOverflow);
+        return Err(crate::Error::from(QueryError::ArithmeticOverflow));
     }
     Ok(Some((position, normal, distance)))
 }
@@ -244,19 +250,19 @@ pub(crate) fn sweep_shape_with_scratch(
     displacement: Vec3,
     target: QueryTarget<'_>,
     scratch: &mut QueryScratch,
-) -> Result<Option<CcdHit>, QueryError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     if !query_shape.is_convex() {
-        return Err(QueryError::UnsupportedQueryShape);
+        return Err(crate::Error::from(QueryError::UnsupportedQueryShape));
     }
     if !displacement.is_finite() {
-        return Err(QueryError::InvalidInput);
+        return Err(crate::Error::from(QueryError::InvalidInput));
     }
     let end_translation = query_transform
         .translation()
         .checked_add(displacement)
-        .ok_or(QueryError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
     let end_transform = Transform::new(end_translation, query_transform.rotation())
-        .map_err(|_| QueryError::ArithmeticOverflow)?;
+        .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
     let QueryTarget {
         shape: target_shape,
         transform: target_transform,
@@ -288,7 +294,9 @@ pub(crate) fn sweep_shape_with_scratch(
             end_transform,
             mesh,
             deformed_vertices,
-            bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
+            bvh.ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?,
             target_transform,
             target_transform,
             &mut scratch.mesh,
@@ -318,7 +326,9 @@ pub(crate) fn sweep_shape_with_scratch(
             end_transform,
             skinned.mesh(),
             deformed_vertices,
-            bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
+            bvh.ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?,
             target_transform,
             target_transform,
             &mut scratch.mesh,
@@ -332,9 +342,8 @@ pub(crate) fn sweep_shape_with_scratch(
             target_transform,
             target_transform,
         ),
-        _ => return Err(QueryError::UnsupportedQueryShape),
-    }
-    .map_err(query_collision)?;
+        _ => return Err(crate::Error::from(QueryError::UnsupportedQueryShape)),
+    }?;
     Ok(hit)
 }
 
@@ -343,9 +352,9 @@ pub(crate) fn overlaps_shape_with_scratch(
     query_transform: Transform,
     target: QueryTarget<'_>,
     scratch: &mut QueryScratch,
-) -> Result<bool, QueryError> {
+) -> Result<bool, crate::Error> {
     if !query_shape.is_convex() {
-        return Err(QueryError::UnsupportedQueryShape);
+        return Err(crate::Error::from(QueryError::UnsupportedQueryShape));
     }
     let QueryTarget {
         shape: target_shape,
@@ -365,7 +374,9 @@ pub(crate) fn overlaps_shape_with_scratch(
             query_transform,
             mesh,
             deformed_vertices.unwrap_or_else(|| mesh.vertices()),
-            bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
+            bvh.ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?,
             target_transform,
             scratch,
         ),
@@ -388,14 +399,16 @@ pub(crate) fn overlaps_shape_with_scratch(
             query_transform,
             skinned.mesh(),
             deformed_vertices.unwrap_or_else(|| skinned.mesh().vertices()),
-            bvh.ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
+            bvh.ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?,
             target_transform,
             scratch,
         ),
         target if target.is_convex() => {
             overlaps_convex(query_shape, query_transform, target, target_transform)
         }
-        _ => Err(QueryError::UnsupportedQueryShape),
+        _ => Err(crate::Error::from(QueryError::UnsupportedQueryShape)),
     }
 }
 
@@ -404,7 +417,7 @@ fn overlaps_convex(
     query_transform: Transform,
     target_shape: &Shape,
     target_transform: Transform,
-) -> Result<bool, QueryError> {
+) -> Result<bool, crate::Error> {
     gjk::intersect(
         query_shape,
         &query_transform,
@@ -412,7 +425,6 @@ fn overlaps_convex(
         &target_transform,
     )
     .map(|result| result.intersects)
-    .map_err(query_collision)
 }
 
 fn overlaps_plane(
@@ -420,24 +432,20 @@ fn overlaps_plane(
     query_transform: Transform,
     plane: &Plane,
     plane_transform: Transform,
-) -> Result<bool, QueryError> {
+) -> Result<bool, crate::Error> {
     let normal = plane_transform
         .transform_vector(plane.normal())
         .try_normalize()
-        .ok_or(QueryError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
     let point = plane_transform.transform_point(plane.normal() * plane.distance());
-    let minimum = super::support::support_world(query_shape, &query_transform, -normal)
-        .map_err(query_collision)?
-        .0;
-    let maximum = super::support::support_world(query_shape, &query_transform, normal)
-        .map_err(query_collision)?
-        .0;
+    let minimum = super::support::support_world(query_shape, &query_transform, -normal)?.0;
+    let maximum = super::support::support_world(query_shape, &query_transform, normal)?.0;
     let minimum = (minimum - point)
         .checked_dot(normal)
-        .ok_or(QueryError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
     let maximum = (maximum - point)
         .checked_dot(normal)
-        .ok_or(QueryError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
     Ok(minimum <= 0.0 && maximum >= 0.0)
 }
 
@@ -449,31 +457,30 @@ fn overlaps_mesh(
     bvh: &TriangleBvh,
     target_transform: Transform,
     scratch: &mut QueryScratch,
-) -> Result<bool, QueryError> {
+) -> Result<bool, crate::Error> {
     if vertices.len() != mesh.vertices().len() || bvh.triangle_count() != mesh.triangles().len() {
-        return Err(QueryError::Geometry(CollisionError::InvalidSkinPose));
+        return Err(crate::Error::from(QueryError::Geometry(
+            CollisionError::InvalidSkinPose,
+        )));
     }
     let world_bounds = query_world_bounds(query_shape, query_transform)?;
-    let local_bounds = super::mesh::local_query_bounds(world_bounds, &target_transform)
-        .map_err(query_collision)?;
-    bvh.query(local_bounds, &mut scratch.mesh, &mut scratch.candidates)
-        .map_err(query_collision)?;
+    let local_bounds = super::mesh::local_query_bounds(world_bounds, &target_transform)?;
+    bvh.query(local_bounds, &mut scratch.mesh, &mut scratch.candidates)?;
     for triangle_id in scratch.candidates.iter().copied() {
-        let [a, b, c] = *mesh
-            .triangles()
-            .get(triangle_id)
-            .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?;
+        let [a, b, c] = *mesh.triangles().get(triangle_id).ok_or_else(|| {
+            crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+        })?;
         let triangle = Shape::Triangle(
             Triangle::from_vertices([
-                *vertices
-                    .get(a)
-                    .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
-                *vertices
-                    .get(b)
-                    .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
-                *vertices
-                    .get(c)
-                    .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
+                *vertices.get(a).ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+                })?,
+                *vertices.get(b).ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+                })?,
+                *vertices.get(c).ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+                })?,
             ])
             .map_err(|_| QueryError::Geometry(CollisionError::InvalidContact))?,
         );
@@ -490,10 +497,9 @@ fn overlaps_height_field(
     field: &crate::shape::HeightField,
     target_transform: Transform,
     candidates: &mut Vec<HeightFieldTriangle>,
-) -> Result<bool, QueryError> {
+) -> Result<bool, crate::Error> {
     let world_bounds = query_world_bounds(query_shape, query_transform)?;
-    height_field::query_world_bounds(field, &target_transform, world_bounds, candidates)
-        .map_err(query_collision)?;
+    height_field::query_world_bounds(field, &target_transform, world_bounds, candidates)?;
     for candidate in candidates.iter().copied() {
         let triangle = Shape::Triangle(
             Triangle::from_vertices(candidate.vertices)
@@ -512,33 +518,28 @@ fn overlaps_level_set(
     field: &LevelSet,
     target_transform: Transform,
     candidates: &mut Vec<LevelSetCell>,
-) -> Result<bool, QueryError> {
+) -> Result<bool, crate::Error> {
     let world_bounds = query_world_bounds(query_shape, query_transform)?;
-    let local_bounds = super::mesh::local_query_bounds(world_bounds, &target_transform)
-        .map_err(query_collision)?;
-    level_set::query_surface_cells(field, local_bounds, candidates).map_err(query_collision)?;
+    let local_bounds = super::mesh::local_query_bounds(world_bounds, &target_transform)?;
+    level_set::query_surface_cells(field, local_bounds, candidates)?;
     if candidates.is_empty() {
         return Ok(false);
     }
 
     let inverse = target_transform
         .inverse()
-        .map_err(|_| QueryError::ArithmeticOverflow)?;
+        .map_err(|_| crate::Error::from(QueryError::ArithmeticOverflow))?;
     let shape_center = query_transform.transform_point(
         query_shape
             .local_bounds()
             .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
-            .ok_or(QueryError::UnsupportedQueryShape)?
+            .ok_or_else(|| crate::Error::from(QueryError::UnsupportedQueryShape))?
             .center(),
     );
     let mut signs = [false; 2];
     for direction in support_directions() {
-        let point = super::support::support_world(query_shape, &query_transform, direction)
-            .map_err(query_collision)?
-            .0;
-        if let Some(sample) =
-            level_set::sample(field, inverse.transform_point(point)).map_err(query_collision)?
-        {
+        let point = super::support::support_world(query_shape, &query_transform, direction)?.0;
+        if let Some(sample) = level_set::sample(field, inverse.transform_point(point))? {
             signs[usize::from(sample.value >= 0.0)] = true;
             if sample.value == 0.0 {
                 return Ok(true);
@@ -559,8 +560,7 @@ fn overlaps_level_set(
                 query_shape,
                 &query_transform,
                 target_transform.transform_point(surface),
-            )
-            .map_err(query_collision)?
+            )?
             .intersects
         {
             return Ok(true);
@@ -578,7 +578,7 @@ fn cell_edge_root_inside(
     field: &LevelSet,
     field_transform: Transform,
     cell: level_set::LevelSetCell,
-) -> Result<bool, QueryError> {
+) -> Result<bool, crate::Error> {
     let min = cell.bounds.min();
     let max = cell.bounds.max();
     let corners = [
@@ -605,12 +605,12 @@ fn cell_edge_root_inside(
         (2, 6),
         (3, 7),
     ] {
-        let first = level_set::sample(field, corners[left])
-            .map_err(query_collision)?
-            .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?;
-        let second = level_set::sample(field, corners[right])
-            .map_err(query_collision)?
-            .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?;
+        let first = level_set::sample(field, corners[left])?.ok_or_else(|| {
+            crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+        })?;
+        let second = level_set::sample(field, corners[right])?.ok_or_else(|| {
+            crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+        })?;
         if first.value == 0.0
             && level_set_point_inside(
                 query_shape,
@@ -649,21 +649,19 @@ fn level_set_point_inside(
     shape: &Shape,
     transform: Transform,
     point: Vec3,
-) -> Result<bool, QueryError> {
-    gjk::distance_to_point(shape, &transform, point)
-        .map(|distance| distance.intersects)
-        .map_err(query_collision)
+) -> Result<bool, crate::Error> {
+    gjk::distance_to_point(shape, &transform, point).map(|distance| distance.intersects)
 }
 
 fn project_level_set_point(
     field: &LevelSet,
     bounds: Aabb,
     mut point: Vec3,
-) -> Result<Option<Vec3>, QueryError> {
+) -> Result<Option<Vec3>, crate::Error> {
     for _ in 0..24 {
-        let sample = level_set::sample(field, point)
-            .map_err(query_collision)?
-            .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?;
+        let sample = level_set::sample(field, point)?.ok_or_else(|| {
+            crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+        })?;
         let tolerance = point.abs().max_element().max(1.0) * f64::EPSILON * 128.0;
         if sample.value.abs() <= tolerance {
             return Ok(Some(point));
@@ -671,7 +669,7 @@ fn project_level_set_point(
         let gradient_squared = sample
             .gradient
             .checked_dot(sample.gradient)
-            .ok_or(QueryError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
         if gradient_squared <= f64::MIN_POSITIVE {
             return Ok(None);
         }
@@ -680,9 +678,9 @@ fn project_level_set_point(
                 sample
                     .gradient
                     .checked_mul_scalar(sample.value / gradient_squared)
-                    .ok_or(QueryError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?,
             )
-            .ok_or(QueryError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?
             .max(bounds.min())
             .min(bounds.max());
     }
@@ -706,23 +704,23 @@ fn support_directions() -> [Vec3; 26] {
     directions
 }
 
-fn query_world_bounds(shape: &Shape, transform: Transform) -> Result<Aabb, QueryError> {
+fn query_world_bounds(shape: &Shape, transform: Transform) -> Result<Aabb, crate::Error> {
     shape
         .world_bounds(&transform)
         .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?
-        .ok_or(QueryError::UnsupportedQueryShape)
+        .ok_or_else(|| crate::Error::from(QueryError::UnsupportedQueryShape))
 }
 
 fn raycast_convex(
     shape: &Shape,
     transform: Transform,
     ray: Ray,
-) -> Result<Option<(Vec3, Vec3, f64)>, QueryError> {
+) -> Result<Option<(Vec3, Vec3, f64)>, crate::Error> {
     let mut distance = 0.0;
     let mut previous_normal = None;
     for _ in 0..128 {
         let point = ray.origin() + ray.direction() * distance;
-        let result = gjk::distance_to_point(shape, &transform, point).map_err(query_collision)?;
+        let result = gjk::distance_to_point(shape, &transform, point)?;
         if result.intersects {
             let normal = previous_normal.unwrap_or(-ray.direction());
             let position = if distance == 0.0 {
@@ -735,16 +733,16 @@ fn raycast_convex(
         let closing_speed = -ray
             .direction()
             .checked_dot(result.normal)
-            .ok_or(QueryError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
         if closing_speed <= f64::EPSILON {
             return Ok(None);
         }
         let advance = result.lower_bound / closing_speed;
         if !advance.is_finite() {
-            return Err(QueryError::ArithmeticOverflow);
+            return Err(crate::Error::from(QueryError::ArithmeticOverflow));
         }
         if advance <= 0.0 {
-            return Err(QueryError::NonConvergent);
+            return Err(crate::Error::from(QueryError::NonConvergent));
         }
         previous_normal = Some(result.normal);
         distance += advance;
@@ -752,7 +750,7 @@ fn raycast_convex(
             return Ok(None);
         }
     }
-    Err(QueryError::NonConvergent)
+    Err(crate::Error::from(QueryError::NonConvergent))
 }
 
 fn ray_plane(
@@ -760,21 +758,21 @@ fn ray_plane(
     origin: Vec3,
     direction: Vec3,
     max_distance: f64,
-) -> Result<(Option<Vec3>, f64), QueryError> {
+) -> Result<(Option<Vec3>, f64), crate::Error> {
     let normal = plane.normal();
     let denominator = direction
         .checked_dot(normal)
-        .ok_or(QueryError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
     if denominator.abs() <= f64::EPSILON * 32.0 {
         return Ok((None, 0.0));
     }
     let distance = (plane.distance()
         - origin
             .checked_dot(normal)
-            .ok_or(QueryError::ArithmeticOverflow)?)
+            .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?)
         / denominator;
     if !distance.is_finite() {
-        return Err(QueryError::ArithmeticOverflow);
+        return Err(crate::Error::from(QueryError::ArithmeticOverflow));
     }
     if distance < 0.0 || distance > max_distance {
         return Ok((None, 0.0));
@@ -790,13 +788,13 @@ fn ray_triangle(
     direction: Vec3,
     max_distance: f64,
     vertices: [Vec3; 3],
-) -> Result<(Option<Vec3>, f64), QueryError> {
+) -> Result<(Option<Vec3>, f64), crate::Error> {
     let edge_a = vertices[1] - vertices[0];
     let edge_b = vertices[2] - vertices[0];
     let p = direction.cross(edge_b);
     let determinant = edge_a
         .checked_dot(p)
-        .ok_or(QueryError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
     let scale = edge_a
         .abs()
         .max_element()
@@ -823,7 +821,7 @@ fn ray_triangle(
     let normal = edge_a
         .cross(edge_b)
         .try_normalize()
-        .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
+        .ok_or_else(|| crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact)))?;
     Ok((
         Some(if direction.dot(normal) > 0.0 {
             -normal
@@ -842,34 +840,34 @@ fn ray_mesh(
     direction: Vec3,
     max_distance: f64,
     scratch: &mut QueryScratch,
-) -> Result<(Option<Vec3>, f64), QueryError> {
+) -> Result<(Option<Vec3>, f64), crate::Error> {
     if vertices.len() != mesh.vertices().len() {
-        return Err(QueryError::Geometry(CollisionError::InvalidSkinPose));
+        return Err(crate::Error::from(QueryError::Geometry(
+            CollisionError::InvalidSkinPose,
+        )));
     }
     let end = origin + direction * max_distance;
     if !end.is_finite() {
-        return Err(QueryError::ArithmeticOverflow);
+        return Err(crate::Error::from(QueryError::ArithmeticOverflow));
     }
     let segment_bounds = Aabb::new(origin.min(end), origin.max(end))
         .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?;
-    bvh.query(segment_bounds, &mut scratch.mesh, &mut scratch.candidates)
-        .map_err(query_collision)?;
+    bvh.query(segment_bounds, &mut scratch.mesh, &mut scratch.candidates)?;
     let mut best = None;
     for triangle in scratch.candidates.iter().copied() {
-        let [a, b, c] = *mesh
-            .triangles()
-            .get(triangle)
-            .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?;
+        let [a, b, c] = *mesh.triangles().get(triangle).ok_or_else(|| {
+            crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+        })?;
         let vertices = [
-            *vertices
-                .get(a)
-                .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
-            *vertices
-                .get(b)
-                .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
-            *vertices
-                .get(c)
-                .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?,
+            *vertices.get(a).ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?,
+            *vertices.get(b).ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?,
+            *vertices.get(c).ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?,
         ];
         let (normal, distance) = ray_triangle(origin, direction, max_distance, vertices)?;
         if let Some(normal) = normal
@@ -887,14 +885,14 @@ fn ray_height_field(
     direction: Vec3,
     max_distance: f64,
     candidates: &mut Vec<HeightFieldTriangle>,
-) -> Result<(Option<Vec3>, f64), QueryError> {
+) -> Result<(Option<Vec3>, f64), crate::Error> {
     let end = origin + direction * max_distance;
     if !end.is_finite() {
-        return Err(QueryError::ArithmeticOverflow);
+        return Err(crate::Error::from(QueryError::ArithmeticOverflow));
     }
     let bounds = Aabb::new(origin.min(end), origin.max(end))
         .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?;
-    height_field::query_triangles(field, bounds, candidates).map_err(query_collision)?;
+    height_field::query_triangles(field, bounds, candidates)?;
     let mut best = None;
     for triangle in candidates.iter().copied() {
         let (normal, distance) = ray_triangle(origin, direction, max_distance, triangle.vertices)?;
@@ -912,7 +910,7 @@ fn ray_level_set(
     origin: Vec3,
     direction: Vec3,
     max_distance: f64,
-) -> Result<(Option<Vec3>, f64), QueryError> {
+) -> Result<(Option<Vec3>, f64), crate::Error> {
     let bounds = field
         .local_bounds()
         .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?;
@@ -925,7 +923,7 @@ fn ray_level_set(
         .checked_add(dimensions[1])
         .and_then(|count| count.checked_add(dimensions[2]))
         .and_then(|count| count.checked_add(4))
-        .ok_or(QueryError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
     for _ in 0..max_cells {
         if current > exit {
             return Ok((None, 0.0));
@@ -934,14 +932,14 @@ fn ray_level_set(
         let indices = ray_cell_indices(field, point, direction)?;
         let next = next_cell_boundary(field, current, point, direction, indices, exit)?;
         if next <= current {
-            let sample = level_set::sample(field, point)
-                .map_err(query_collision)?
-                .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?;
+            let sample = level_set::sample(field, point)?.ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?;
             if sample.value == 0.0 {
                 let normal = sample
                     .gradient
                     .try_normalize()
-                    .ok_or(QueryError::NonConvergent)?;
+                    .ok_or_else(|| crate::Error::from(QueryError::NonConvergent))?;
                 return Ok((Some(normal), current));
             }
             return Ok((None, 0.0));
@@ -949,22 +947,24 @@ fn ray_level_set(
         let end = next.min(exit);
         let values = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0].map(|fraction| {
             let sample_point = origin + direction * (current + (end - current) * fraction);
-            level_set::sample(field, sample_point)
-                .map_err(query_collision)?
+            level_set::sample(field, sample_point)?
                 .map(|sample| sample.value)
-                .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))
+                .ok_or_else(|| {
+                    crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+                })
         });
-        let [y0, y1, y2, y3] = [values[0]?, values[1]?, values[2]?, values[3]?];
+        let [y0, y1, y2, y3] = values;
+        let [y0, y1, y2, y3] = [y0?, y1?, y2?, y3?];
         if let Some(fraction) = first_cubic_root(y0, y1, y2, y3)? {
             let distance = current + (end - current) * fraction;
             let hit_point = origin + direction * distance;
-            let sample = level_set::sample(field, hit_point)
-                .map_err(query_collision)?
-                .ok_or(QueryError::Geometry(CollisionError::GeometryBounds))?;
+            let sample = level_set::sample(field, hit_point)?.ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?;
             let normal = sample
                 .gradient
                 .try_normalize()
-                .ok_or(QueryError::NonConvergent)?;
+                .ok_or_else(|| crate::Error::from(QueryError::NonConvergent))?;
             return Ok((Some(normal), distance));
         }
         if end >= exit {
@@ -972,7 +972,7 @@ fn ray_level_set(
         }
         current = end;
     }
-    Err(QueryError::NonConvergent)
+    Err(crate::Error::from(QueryError::NonConvergent))
 }
 
 fn ray_aabb_interval(
@@ -980,7 +980,7 @@ fn ray_aabb_interval(
     direction: Vec3,
     max_distance: f64,
     bounds: Aabb,
-) -> Result<Option<(f64, f64)>, QueryError> {
+) -> Result<Option<(f64, f64)>, crate::Error> {
     let min = bounds.min();
     let max = bounds.max();
     let mut entry: f64 = 0.0;
@@ -1014,7 +1014,7 @@ fn ray_cell_indices(
     field: &LevelSet,
     point: Vec3,
     direction: Vec3,
-) -> Result<[usize; 3], QueryError> {
+) -> Result<[usize; 3], crate::Error> {
     let origin = field.origin();
     let spacing = field.grid_spacing();
     let dimensions = field.dimensions();
@@ -1026,7 +1026,7 @@ fn ray_cell_indices(
     let mut indices = [0; 3];
     for (axis, (coordinate, direction, dimension)) in coordinates.into_iter().enumerate() {
         if !coordinate.is_finite() {
-            return Err(QueryError::ArithmeticOverflow);
+            return Err(crate::Error::from(QueryError::ArithmeticOverflow));
         }
         let nearest = coordinate.round();
         let index = if direction < 0.0
@@ -1050,7 +1050,7 @@ fn next_cell_boundary(
     direction: Vec3,
     cell: [usize; 3],
     exit: f64,
-) -> Result<f64, QueryError> {
+) -> Result<f64, crate::Error> {
     let origin = field.origin();
     let spacing = field.grid_spacing();
     let coordinates = [
@@ -1067,7 +1067,7 @@ fn next_cell_boundary(
         let boundary = origin + spacing * boundary_index as f64;
         let distance = (boundary - point) / direction;
         if !distance.is_finite() {
-            return Err(QueryError::ArithmeticOverflow);
+            return Err(crate::Error::from(QueryError::ArithmeticOverflow));
         }
         if distance > f64::EPSILON * point.abs().max(1.0) * 16.0 {
             next = next.min(current + distance);
@@ -1076,7 +1076,7 @@ fn next_cell_boundary(
     Ok(next)
 }
 
-fn first_cubic_root(y0: f64, y1: f64, y2: f64, y3: f64) -> Result<Option<f64>, QueryError> {
+fn first_cubic_root(y0: f64, y1: f64, y2: f64, y3: f64) -> Result<Option<f64>, crate::Error> {
     let delta1 = y1 - y0;
     let delta2 = y2 - 2.0 * y1 + y0;
     let delta3 = y3 - 3.0 * y2 + 3.0 * y1 - y0;
@@ -1087,7 +1087,7 @@ fn first_cubic_root(y0: f64, y1: f64, y2: f64, y3: f64) -> Result<Option<f64>, Q
         y0,
     ];
     if !coefficients.iter().all(|value| value.is_finite()) {
-        return Err(QueryError::ArithmeticOverflow);
+        return Err(crate::Error::from(QueryError::ArithmeticOverflow));
     }
     let [a, b, c, d] = coefficients;
     let mut points = [0.0, 1.0, 0.0, 0.0];
@@ -1154,14 +1154,6 @@ fn first_cubic_root(y0: f64, y1: f64, y2: f64, y3: f64) -> Result<Option<f64>, Q
         return Ok(Some(low * 0.5 + high * 0.5));
     }
     Ok(None)
-}
-
-fn query_collision(error: CollisionError) -> QueryError {
-    match error {
-        CollisionError::ArithmeticOverflow => QueryError::ArithmeticOverflow,
-        CollisionError::NonConvergent => QueryError::NonConvergent,
-        other => QueryError::Geometry(other),
-    }
 }
 
 #[cfg(test)]

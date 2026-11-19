@@ -1,6 +1,7 @@
 use kapitsa_core::{
+    Error,
     chunk::Chunk,
-    world::{BodyId, ChunkId, ChunkOperationError, ColliderId, StepError},
+    world::{BodyId, ChunkId, ChunkOperationError, ColliderId},
 };
 use tokio::sync::oneshot;
 
@@ -9,7 +10,7 @@ use super::{CommandRequest, PhysicsClient, PhysicsClientError};
 
 fn finish<I, O>(
     result: Result<O, (ChunkOperationError, I)>,
-    failure: Option<(u64, StepError)>,
+    failure: Option<(u64, Error)>,
 ) -> Result<O, ChunkClientError<I, O>> {
     match result {
         Err((cause, input)) => Err(ChunkClientError::Rejected { cause, input }),
@@ -25,13 +26,13 @@ fn finish<I, O>(
 }
 
 impl PhysicsClient {
-    async fn request_chunk(&self, command: ChunkCommand) -> Result<ChunkReply, PhysicsClientError> {
+    async fn request_chunk(&self, command: ChunkCommand) -> Result<ChunkReply, Error> {
         let sender = match self.command_tx.borrow().clone() {
             Some(sender) => sender,
             None => {
                 return Ok(ChunkReply::NotSubmitted {
                     command,
-                    cause: PhysicsClientError::NotRunning,
+                    cause: PhysicsClientError::NotRunning.into(),
                 });
             }
         };
@@ -42,7 +43,7 @@ impl PhysicsClient {
             Err(_) => {
                 return Ok(ChunkReply::NotSubmitted {
                     command,
-                    cause: PhysicsClientError::ChannelClosed,
+                    cause: PhysicsClientError::ChannelClosed.into(),
                 });
             }
         };
@@ -50,7 +51,7 @@ impl PhysicsClient {
         permit.send(CommandRequest::Chunk { command, reply });
         response
             .await
-            .map_err(|_| PhysicsClientError::ChannelClosed)
+            .map_err(|_| Error::from(PhysicsClientError::ChannelClosed))
     }
 
     /// Registers a prepared chunk at a simulation boundary.
@@ -83,6 +84,8 @@ impl PhysicsClient {
     }
 
     /// Atomically registers all prepared chunks on one body, preserving input order.
+    // The failure type intentionally owns the caller's chunk inputs.
+    #[allow(clippy::result_large_err)]
     pub async fn add_chunk_batch(
         &self,
         body: BodyId,
@@ -131,6 +134,8 @@ impl PhysicsClient {
     }
 
     /// Atomically removes all IDs; returned chunks follow the input order.
+    // The failure type intentionally owns both the caller's IDs and removed chunks.
+    #[allow(clippy::result_large_err)]
     pub async fn remove_chunk_batch(
         &self,
         ids: Vec<ChunkId>,
@@ -149,41 +154,38 @@ impl PhysicsClient {
     }
 
     /// Reads the number of registered chunks at this request's FIFO position.
-    pub async fn chunk_count(&self) -> Result<usize, PhysicsClientError> {
+    pub async fn chunk_count(&self) -> Result<usize, Error> {
         match self.request_chunk(ChunkCommand::Count).await? {
             ChunkReply::NotSubmitted { cause, .. } => Err(cause),
             ChunkReply::Completed {
                 outcome: ChunkOutcome::Count(value),
                 ..
             } => Ok(value),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
     /// Resolves a chunk's owning body at this request's FIFO position.
-    pub async fn chunk_body(&self, id: ChunkId) -> Result<Option<BodyId>, PhysicsClientError> {
+    pub async fn chunk_body(&self, id: ChunkId) -> Result<Option<BodyId>, Error> {
         match self.request_chunk(ChunkCommand::Body { id }).await? {
             ChunkReply::NotSubmitted { cause, .. } => Err(cause),
             ChunkReply::Completed {
                 outcome: ChunkOutcome::Body(value),
                 ..
             } => Ok(value),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 
     /// Reads IDs of the colliders owned by a registered chunk.
-    pub async fn chunk_colliders(
-        &self,
-        id: ChunkId,
-    ) -> Result<Option<Vec<ColliderId>>, PhysicsClientError> {
+    pub async fn chunk_colliders(&self, id: ChunkId) -> Result<Option<Vec<ColliderId>>, Error> {
         match self.request_chunk(ChunkCommand::Colliders { id }).await? {
             ChunkReply::NotSubmitted { cause, .. } => Err(cause),
             ChunkReply::Completed {
                 outcome: ChunkOutcome::Colliders(value),
                 ..
             } => value.map_err(Into::into),
-            _ => Err(PhysicsClientError::UnexpectedResult),
+            _ => Err(Error::from(PhysicsClientError::UnexpectedResult)),
         }
     }
 }
@@ -191,7 +193,9 @@ impl PhysicsClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kapitsa_core::{chunk::ChunkBuilder, shape::TriangleMesh, transform::Transform};
+    use kapitsa_core::{
+        chunk::ChunkBuilder, shape::TriangleMesh, transform::Transform, world::StepError,
+    };
     use kapitsa_math::Vec3;
     use std::error::Error;
 
@@ -203,13 +207,19 @@ mod tests {
             vec![[0, 1, 2]],
         )?)?;
         let chunk = builder.build(Transform::identity())?;
-        let result = finish::<(), _>(Ok(Some(chunk)), Some((17, StepError::InvalidDeltaTime)));
+        let result = finish::<(), _>(
+            Ok(Some(chunk)),
+            Some((17, kapitsa_core::Error::from(StepError::InvalidDeltaTime))),
+        );
         match result {
             Err(ChunkClientError::StepFailedAfterApply {
                 step: 17,
-                cause: StepError::InvalidDeltaTime,
+                cause,
                 output: Some(chunk),
-            }) => assert_eq!(chunk.colliders().len(), 1),
+            }) => {
+                assert!(cause.downcast_ref::<StepError>().is_some());
+                assert_eq!(chunk.colliders().len(), 1);
+            }
             _ => return Err("applied removal result was lost".into()),
         }
         Ok(())
@@ -255,10 +265,9 @@ mod tests {
             .first()
             .and_then(|collider| collider.mesh_bvh_serial());
         match client.add_chunk(body, chunk).await {
-            Err(ChunkClientError::NotSubmitted {
-                cause: PhysicsClientError::ChannelClosed,
-                input,
-            }) => {
+            Err(ChunkClientError::NotSubmitted { cause, input })
+                if cause.to_string().contains("closed") =>
+            {
                 assert_eq!(input.colliders().len(), 1);
                 #[cfg(feature = "bench-internals")]
                 assert_eq!(

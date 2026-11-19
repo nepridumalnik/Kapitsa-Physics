@@ -13,9 +13,9 @@ impl SphericalGravity {
         center: Vec3,
         gravitational_parameter: f64,
         radius: f64,
-    ) -> Result<Self, GravityError> {
+    ) -> Result<Self, crate::Error> {
         if !radius.is_finite() || radius <= 0.0 {
-            return Err(GravityError::InvalidRadius);
+            return Err(crate::Error::from(GravityError::InvalidRadius));
         }
         Ok(Self {
             field: CentralGravity::new(center, gravitational_parameter)?,
@@ -33,13 +33,13 @@ impl SphericalGravity {
         self.radius
     }
 
-    pub fn acceleration_at(self, position: Vec3) -> Result<Vec3, GravityError> {
+    pub fn acceleration_at(self, position: Vec3) -> Result<Vec3, crate::Error> {
         if !position.is_finite() {
-            return Err(GravityError::NonFinitePosition);
+            return Err(crate::Error::from(GravityError::NonFinitePosition));
         }
         let offset = position
             .checked_sub(self.center())
-            .ok_or(GravityError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(GravityError::ArithmeticOverflow))?;
         if offset.length() > self.radius {
             return Ok(Vec3::ZERO);
         }

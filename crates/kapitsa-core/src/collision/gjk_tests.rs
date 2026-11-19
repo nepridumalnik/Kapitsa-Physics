@@ -46,11 +46,11 @@ fn large_planet_and_rocket_reproduce_gjk_nonconvergence() {
     for rocket_transform in transforms {
         assert!(matches!(
             intersect(&planet, &planet_transform, &rocket, &rocket_transform),
-            Err(CollisionError::NonConvergent)
+            Err(error) if error.downcast_ref::<CollisionError>() == Some(&CollisionError::NonConvergent)
         ));
         assert!(matches!(
             intersect(&rocket, &rocket_transform, &planet, &planet_transform),
-            Err(CollisionError::NonConvergent)
+            Err(error) if error.downcast_ref::<CollisionError>() == Some(&CollisionError::NonConvergent)
         ));
         let first = super::distance_core(&planet, &planet_transform, &rocket, &rocket_transform)
             .expect("core GJK");
@@ -173,7 +173,7 @@ fn gjk_handles_rotated_polyhedra_and_reports_bad_geometry() {
     let sphere = Shape::Sphere(crate::shape::Sphere::new(f64::MAX).expect("sphere"));
     assert!(matches!(
         intersect(&sphere, &invalid, &sphere, &first),
-        Err(CollisionError::ArithmeticOverflow)
+        Err(error) if error.downcast_ref::<CollisionError>() == Some(&CollisionError::ArithmeticOverflow)
     ));
 }
 

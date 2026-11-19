@@ -1,7 +1,7 @@
 use crate::aabb::Aabb;
 use kapitsa_math::Vec3;
 
-use super::{BoundsError, ShapeError};
+use super::ShapeError;
 
 /// Finite cylinder whose cap centers are local-space `start` and `end`.
 pub struct Cylinder {
@@ -11,20 +11,20 @@ pub struct Cylinder {
 }
 
 impl Cylinder {
-    pub fn new(start: Vec3, end: Vec3, radius: f64) -> Result<Self, ShapeError> {
+    pub fn new(start: Vec3, end: Vec3, radius: f64) -> Result<Self, crate::Error> {
         if !start.is_finite() || !end.is_finite() || !radius.is_finite() {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
 
         let length = (end - start).length();
         if !length.is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
         if length <= 0.0 {
-            return Err(ShapeError::DegenerateGeometry);
+            return Err(crate::Error::from(ShapeError::DegenerateGeometry));
         }
         if radius <= 0.0 {
-            return Err(ShapeError::InvalidDimension);
+            return Err(crate::Error::from(ShapeError::InvalidDimension));
         }
 
         Ok(Self { start, end, radius })
@@ -42,12 +42,11 @@ impl Cylinder {
         self.radius
     }
 
-    pub fn local_bounds(&self) -> Result<Aabb, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Aabb, crate::Error> {
         let radius = Vec3::splat(self.radius);
         Aabb::new(
             self.start.min(self.end) - radius,
             self.start.max(self.end) + radius,
         )
-        .map_err(BoundsError::InvalidBounds)
     }
 }

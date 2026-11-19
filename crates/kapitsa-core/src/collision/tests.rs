@@ -70,7 +70,7 @@ fn config_rejects_invalid_values() {
             ..defaults
         }
         .validate(),
-        Err(CollisionError::InvalidConfig)
+        Err(crate::Error::from(CollisionError::InvalidConfig))
     );
     assert_eq!(
         CollisionConfig {
@@ -78,7 +78,7 @@ fn config_rejects_invalid_values() {
             ..defaults
         }
         .validate(),
-        Err(CollisionError::InvalidConfig)
+        Err(crate::Error::from(CollisionError::InvalidConfig))
     );
     assert_eq!(
         CollisionConfig {
@@ -86,7 +86,7 @@ fn config_rejects_invalid_values() {
             ..defaults
         }
         .validate(),
-        Err(CollisionError::InvalidConfig)
+        Err(crate::Error::from(CollisionError::InvalidConfig))
     );
 }
 
@@ -100,7 +100,7 @@ fn world_keeps_previous_config_when_update_is_invalid() {
     };
     assert_eq!(
         world.set_collision_config(invalid),
-        Err(CollisionError::InvalidConfig)
+        Err(crate::Error::from(CollisionError::InvalidConfig))
     );
     assert_eq!(world.collision_config(), original);
     assert!(world.collision_events().is_empty());
@@ -861,9 +861,9 @@ fn continuous_rebound_replays_an_already_completed_island() {
         .unwrap();
     assert_eq!(
         world.step(0.01),
-        Err(crate::world::StepError::Collision(
-            CollisionError::CcdLimitExceeded
-        ))
+        Err(crate::Error::from(crate::world::StepError::Collision(
+            crate::Error::from(CollisionError::CcdLimitExceeded)
+        )))
     );
     assert_eq!(*world.body(completed).unwrap().state(), before_completed);
     assert_eq!(*world.body(rebound).unwrap().state(), before_rebound);
@@ -991,7 +991,9 @@ fn collision_mode_changes_restart_the_pair_lifecycle_and_failed_steps_preserve_e
 
     assert_eq!(
         world.step(0.0),
-        Err(crate::world::StepError::InvalidDeltaTime)
+        Err(crate::Error::from(
+            crate::world::StepError::InvalidDeltaTime
+        ))
     );
     assert_eq!(world.collision_events(), committed_events);
 
@@ -1676,9 +1678,9 @@ fn ccd_impact_limit_failure_preserves_the_world_state_and_events() {
 
     assert_eq!(
         world.step(0.01),
-        Err(crate::world::StepError::Collision(
-            CollisionError::CcdLimitExceeded
-        ))
+        Err(crate::Error::from(crate::world::StepError::Collision(
+            crate::Error::from(CollisionError::CcdLimitExceeded)
+        )))
     );
 
     assert_eq!(*world.body(ball).unwrap().state(), before_state);

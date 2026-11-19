@@ -1,4 +1,5 @@
 use super::*;
+use crate::Error;
 use crate::{
     aerodynamics::{AerodynamicProperties, AerodynamicTarget, Aerodynamics},
     cluster::{
@@ -150,7 +151,7 @@ fn mass_change_preserves_part_surface_buffer_and_rebase_failure_is_atomic() {
             mass,
             crate::cluster::MassChangeMode::KeepVelocityField
         ),
-        Err(ClusterError::ArithmeticOverflow)
+        Err(crate::Error::from(ClusterError::ArithmeticOverflow))
     );
     assert_eq!(world.body(body).unwrap().motion(), before);
     assert_eq!(world.cluster_part(root).unwrap().mass(), new_mass);
@@ -259,7 +260,7 @@ fn merge_rebase_overflow_preserves_topology() {
     };
     assert_eq!(
         world.merge_clusters(first, second, desc),
-        Err(ClusterError::ArithmeticOverflow)
+        Err(crate::Error::from(ClusterError::ArithmeticOverflow))
     );
     assert_eq!(world.body_count(), 2);
     assert_eq!(world.body(first).unwrap().motion(), first_before);
@@ -313,7 +314,7 @@ fn split_rebase_overflow_preserves_topology() {
     let before = world.body(body).unwrap().motion();
     assert_eq!(
         world.break_weld(bridge),
-        Err(ClusterError::ArithmeticOverflow)
+        Err(crate::Error::from(ClusterError::ArithmeticOverflow))
     );
     assert_eq!(world.body_count(), 1);
     assert_eq!(world.body(body).unwrap().motion(), before);
@@ -375,7 +376,7 @@ fn validation_rejects_disconnected_and_invalid_graphs() {
     });
     assert_eq!(
         world.validate_clusters(),
-        Err(ClusterError::InvalidTopology)
+        Err(crate::Error::from(ClusterError::InvalidTopology))
     );
     let edge = weld(&mut world, a, b);
     if let Some(cluster) = world
@@ -389,7 +390,10 @@ fn validation_rejects_disconnected_and_invalid_graphs() {
     if let Some(weld) = world.welds.get_mut(edge.dense) {
         weld.desc.stiffness.linear = f64::NAN;
     }
-    assert_eq!(world.validate_clusters(), Err(ClusterError::InvalidWeld));
+    assert_eq!(
+        world.validate_clusters(),
+        Err(crate::Error::from(ClusterError::InvalidWeld))
+    );
     if let Some(weld) = world.welds.get_mut(edge.dense) {
         weld.desc.stiffness.linear = 1.0;
     }
@@ -402,7 +406,7 @@ fn validation_rejects_disconnected_and_invalid_graphs() {
     }
     assert_eq!(
         world.validate_clusters(),
-        Err(ClusterError::InvalidTopology)
+        Err(crate::Error::from(ClusterError::InvalidTopology))
     );
 }
 
@@ -437,11 +441,11 @@ fn managed_body_mutation_is_validated() {
     };
     assert_eq!(
         world.edit_body(body, |body| body.set_mass(replacement_mass)),
-        Err(ClusterError::ManagedMass)
+        Err(Error::from(ClusterError::ManagedMass))
     );
     assert_eq!(
         world.replace_body_state(body, RigidBody::new_static(Transform::identity())),
-        Err(ClusterError::ManagedMass)
+        Err(crate::Error::from(ClusterError::ManagedMass))
     );
     assert_eq!(
         world.edit_body(body, |body| body.set_linear_velocity(Vec3::X)),
@@ -566,7 +570,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
             mass,
             crate::cluster::MassChangeMode::ConserveRemainingMomentum
         ),
-        Err(ClusterError::InvalidMotion)
+        Err(crate::Error::from(ClusterError::InvalidMotion))
     );
     assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
     let invalid = crate::cluster::MassTransfer {
@@ -575,7 +579,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
     };
     assert_eq!(
         world.set_part_mass_with_transfer(root, mass, invalid),
-        Err(ClusterError::InvalidMotion)
+        Err(crate::Error::from(ClusterError::InvalidMotion))
     );
     assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
     let overflow = crate::cluster::MassTransfer {
@@ -597,7 +601,7 @@ fn explicit_mass_transfer_updates_momentum_and_rejects_invalid_input() {
             mass,
             crate::cluster::MassChangeMode::KeepVelocityField
         ),
-        Err(ClusterError::InvalidTopology)
+        Err(crate::Error::from(ClusterError::InvalidTopology))
     );
     assert_eq!(world.body(body).map(RigidBody::motion), Some(updated));
 }
@@ -632,7 +636,7 @@ fn changing_static_cluster_mass_rejects_world_center_overflow() {
             replacement,
             crate::cluster::MassChangeMode::KeepVelocityField
         ),
-        Err(ClusterError::ArithmeticOverflow)
+        Err(crate::Error::from(ClusterError::ArithmeticOverflow))
     );
     assert_eq!(world.cluster_part(root).map(ClusterPart::mass), before);
 }
@@ -713,7 +717,7 @@ fn enable_cluster_assigns_existing_colliders_to_identity_root() {
     assert_eq!(world.validate_clusters(), Ok(()));
     assert_eq!(
         world.enable_cluster(body),
-        Err(ClusterError::AlreadyClustered)
+        Err(crate::Error::from(ClusterError::AlreadyClustered))
     );
 }
 
@@ -728,7 +732,7 @@ fn enable_cluster_rejects_incompatible_mass_without_mutation() {
 
     assert_eq!(
         world.enable_cluster_with_mass(body, replacement),
-        Err(ClusterError::InvalidMass)
+        Err(crate::Error::from(ClusterError::InvalidMass))
     );
     assert!(world.cluster(body).is_none());
     assert_eq!(
@@ -828,7 +832,10 @@ fn add_cluster_part_rejects_mismatched_anchors_without_mutation() {
             },
         },
     );
-    assert_eq!(result, Err(ClusterError::IncompatibleAnchors));
+    assert_eq!(
+        result,
+        Err(crate::Error::from(ClusterError::IncompatibleAnchors))
+    );
     assert_eq!(world.cluster(body).cloned(), before);
     assert_eq!(world.parts.len(), 1);
     assert_eq!(world.welds.len(), 0);
@@ -1129,7 +1136,7 @@ fn removing_cluster_root_cleans_part_targets_and_selects_stable_root() {
     assert_eq!(world.validate_clusters(), Ok(()));
     assert_eq!(
         world.remove_cluster_part(child),
-        Err(ClusterError::InvalidTopology)
+        Err(crate::Error::from(ClusterError::InvalidTopology))
     );
     assert_eq!(world.cluster(body).map(RigidCluster::root), Some(child));
 }
@@ -1294,7 +1301,7 @@ fn kinematic_merge_rejects_mismatched_angular_velocity() {
 
     assert_eq!(
         world.merge_clusters(first, second, weld),
-        Err(ClusterError::IncompatibleMotion)
+        Err(crate::Error::from(ClusterError::IncompatibleMotion))
     );
     assert_eq!(world.body_count(), 2);
     assert_eq!(world.cluster(first).map(RigidCluster::part_count), Some(1));
@@ -1494,7 +1501,7 @@ fn weld_anchor_validation_uses_local_coordinates_at_large_world_offsets() {
                     },
                 },
             ),
-            Err(ClusterError::IncompatibleAnchors)
+            Err(crate::Error::from(ClusterError::IncompatibleAnchors))
         );
     }
 }
@@ -1538,7 +1545,10 @@ fn invalid_merge_leaves_cluster_topology_unchanged() {
         },
     );
 
-    assert_eq!(result, Err(ClusterError::IncompatibleAnchors));
+    assert_eq!(
+        result,
+        Err(crate::Error::from(ClusterError::IncompatibleAnchors))
+    );
     assert_eq!(
         (
             world.body_count(),
@@ -1586,15 +1596,15 @@ fn pending_weld_split_plan_uses_staged_loads_and_prediction()
     let result = world.with_force_source_updates(|world| {
         let motion = world
             .body(body)
-            .ok_or(StepError::InvalidStepResults)?
+            .ok_or_else(|| crate::Error::from(StepError::InvalidStepResults))?
             .motion();
-        let predicted =
-            crate::rigid_body::predict(&motion, 0.01).map_err(|_| StepError::InvalidStepResults)?;
+        let predicted = crate::rigid_body::predict(&motion, 0.01)
+            .map_err(|_| crate::Error::from(StepError::InvalidStepResults))?;
         world.collision_system.begin_step();
         world.collision_system.stage_prediction(body, predicted);
         let plans = world
             .prepare_pending_weld_splits(1e-12, 1e-12)
-            .map_err(|_| StepError::InvalidStepResults)?;
+            .map_err(|_| crate::Error::from(StepError::InvalidStepResults))?;
         assert_eq!(plans.len(), 1);
         assert_eq!(
             plans[0].prepared_bodies[0].state().linear_velocity(),
@@ -1602,7 +1612,7 @@ fn pending_weld_split_plan_uses_staged_loads_and_prediction()
         );
         assert_eq!(world.part_body(child), Some(body));
         world.collision_system.abort_step();
-        Err::<(), _>(StepError::InvalidDeltaTime)
+        Err::<(), crate::Error>(crate::Error::from(StepError::InvalidDeltaTime))
     });
     assert!(result.is_err());
     assert_eq!(world.part_body(child), Some(body));

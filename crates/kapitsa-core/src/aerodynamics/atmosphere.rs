@@ -12,11 +12,11 @@ pub enum Atmosphere {
 
 impl Atmosphere {
     /// Samples conditions at a world-space point.
-    pub fn state_at(self, point: Vec3) -> Result<AtmosphericState, AerodynamicsError> {
+    pub fn state_at(self, point: Vec3) -> Result<AtmosphericState, crate::Error> {
         if !point.is_finite() {
-            return Err(AerodynamicsError::InvalidAtmosphere(
+            return Err(crate::Error::from(AerodynamicsError::InvalidAtmosphere(
                 "sample point must be finite",
-            ));
+            )));
         }
         match self {
             Self::Vacuum => AtmosphericState::new(0.0, Vec3::ZERO),
@@ -58,11 +58,11 @@ impl SphericalAtmosphere {
     }
 
     /// Density is constant below the reference radius and zero at/beyond the outer radius.
-    pub fn state_at(self, point: Vec3) -> Result<AtmosphericState, AerodynamicsError> {
+    pub fn state_at(self, point: Vec3) -> Result<AtmosphericState, crate::Error> {
         if !point.is_finite() {
-            return Err(AerodynamicsError::InvalidAtmosphere(
+            return Err(crate::Error::from(AerodynamicsError::InvalidAtmosphere(
                 "sample point must be finite",
-            ));
+            )));
         }
         let distance = point
             .checked_sub(self.center)
@@ -157,7 +157,7 @@ impl SphericalAtmosphere {
 /// let surface = sphere.state_at(Vec3::Y * 600_000.0)?;
 /// assert_eq!(surface.density(), 1.225);
 /// world.set_atmosphere(Atmosphere::Vacuum);
-/// # Ok::<(), kapitsa_core::aerodynamics::AerodynamicsError>(())
+/// # Ok::<(), kapitsa_core::Error>(())
 /// ```
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SphericalAtmosphereBuilder {
@@ -236,16 +236,18 @@ impl SphericalAtmosphereBuilder {
     /// # Errors
     /// Returns [`AerodynamicsError`] for missing required fields, non-finite values,
     /// invalid profile/edge parameters, or an unrepresentable outer radius.
-    pub fn build(self) -> Result<SphericalAtmosphere, AerodynamicsError> {
-        let invalid = AerodynamicsError::InvalidAtmosphere;
+    pub fn build(self) -> Result<SphericalAtmosphere, crate::Error> {
+        let invalid = |message| crate::Error::from(AerodynamicsError::InvalidAtmosphere(message));
         let reference_radius = self
             .reference_radius
-            .ok_or(invalid("reference radius is required"))?;
+            .ok_or_else(|| invalid("reference radius is required"))?;
         let reference_density = self
             .reference_density
-            .ok_or(invalid("reference density is required"))?;
-        let height = self.height.ok_or(invalid("height is required"))?;
-        let profile = self.profile.ok_or(invalid("density profile is required"))?;
+            .ok_or_else(|| invalid("reference density is required"))?;
+        let height = self.height.ok_or_else(|| invalid("height is required"))?;
+        let profile = self
+            .profile
+            .ok_or_else(|| invalid("density profile is required"))?;
         if !self.center.is_finite() {
             return Err(invalid("center must be finite"));
         }
@@ -393,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn samples_reference_profile_and_cutoff() -> Result<(), AerodynamicsError> {
+    fn samples_reference_profile_and_cutoff() -> Result<(), crate::Error> {
         let sphere = builder().build()?;
         assert_eq!(sphere.state_at(Vec3::X * 10.0)?.density(), 2.0);
         assert_eq!(sphere.state_at(Vec3::X * 110.0)?.density(), 2.0);
@@ -406,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn smooth_edge_preserves_reference_and_tapers_inside_top() -> Result<(), AerodynamicsError> {
+    fn smooth_edge_preserves_reference_and_tapers_inside_top() -> Result<(), crate::Error> {
         let sphere = builder().smooth_edge(10.0).build()?;
         assert_eq!(sphere.state_at(Vec3::X * 110.0)?.density(), 2.0);
         let hard = builder().build()?;

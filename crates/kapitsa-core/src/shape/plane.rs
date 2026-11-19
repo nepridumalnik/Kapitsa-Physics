@@ -10,33 +10,33 @@ pub struct Plane {
 }
 
 impl Plane {
-    pub fn new(nx: f64, ny: f64, nz: f64, distance: f64) -> Result<Self, ShapeError> {
+    pub fn new(nx: f64, ny: f64, nz: f64, distance: f64) -> Result<Self, crate::Error> {
         Self::from_vec(Vec3::new(nx, ny, nz), distance)
     }
 
-    pub fn from_vec(normal: Vec3, distance: f64) -> Result<Self, ShapeError> {
+    pub fn from_vec(normal: Vec3, distance: f64) -> Result<Self, crate::Error> {
         if !normal.is_finite() || !distance.is_finite() {
-            return Err(ShapeError::NonFiniteParameter);
+            return Err(crate::Error::from(ShapeError::NonFiniteParameter));
         }
 
         let length = normal.length();
         if !length.is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
         if length <= 0.0 {
-            return Err(if normal == Vec3::ZERO {
+            return Err(crate::Error::from(if normal == Vec3::ZERO {
                 ShapeError::DegenerateGeometry
             } else {
                 ShapeError::ArithmeticOverflow
-            });
+            }));
         }
 
         let normal = normal
             .try_normalize()
-            .ok_or(ShapeError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(ShapeError::ArithmeticOverflow))?;
         let distance = distance / length;
         if !normal.is_finite() || !distance.is_finite() {
-            return Err(ShapeError::ArithmeticOverflow);
+            return Err(crate::Error::from(ShapeError::ArithmeticOverflow));
         }
 
         Ok(Self { normal, distance })

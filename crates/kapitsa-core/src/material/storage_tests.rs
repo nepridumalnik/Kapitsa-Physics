@@ -1,9 +1,9 @@
-use crate::{containers::DensePoolError, material::PhysicsMaterial};
+use crate::material::PhysicsMaterial;
 
 use super::MaterialStorage;
 
 #[test]
-fn reuses_slot_with_a_new_generation() -> Result<(), DensePoolError> {
+fn reuses_slot_with_a_new_generation() -> Result<(), crate::Error> {
     let mut storage = MaterialStorage::new();
     let old_id = storage.insert(PhysicsMaterial::default())?;
     storage.remove(old_id);
@@ -16,7 +16,7 @@ fn reuses_slot_with_a_new_generation() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn material_ids_do_not_resolve_in_a_different_storage() -> Result<(), DensePoolError> {
+fn material_ids_do_not_resolve_in_a_different_storage() -> Result<(), crate::Error> {
     let mut first = MaterialStorage::new();
     let mut second = MaterialStorage::new();
     let id = first.insert(PhysicsMaterial::default())?;

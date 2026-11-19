@@ -231,6 +231,6 @@ fn unsupported_surface_pairs_return_an_error() {
             CollisionMode::Solid,
             0.01,
         ),
-        Err(CollisionError::UnsupportedGeometryPair)
+        Err(crate::Error::from(CollisionError::UnsupportedGeometryPair))
     );
 }

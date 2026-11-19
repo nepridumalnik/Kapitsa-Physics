@@ -8,6 +8,10 @@ use crate::{
 };
 use kapitsa_math::{Mat3, Quat, Vec3};
 
+fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepError> {
+    result.as_ref().err().and_then(|error| error.downcast_ref())
+}
+
 fn section(point: Vec3) -> HullSection {
     HullSection::new(
         Transform::new(point, Quat::IDENTITY).expect("test transform"),
@@ -67,7 +71,7 @@ fn part_hull_accessor_and_late_failure_preserve_configuration() {
         .expect("foreign part");
     assert_eq!(
         world.set_part_aerodynamic_hull(foreign_part, hull),
-        Err(ClusterError::InvalidPartId)
+        Err(crate::Error::from(ClusterError::InvalidPartId))
     );
     assert_eq!(
         world.part_aerodynamic_hull(part),
@@ -211,7 +215,7 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
         assert_eq!(recorded[1].external_moment, Vec3::ZERO);
         assert!(matches!(
             prepare_tree(&load_states[0], &load_parts, &[]),
-            Err(BalanceError::InvalidTree)
+            Err(error) if error.downcast_ref::<BalanceError>() == Some(&BalanceError::InvalidTree)
         ));
         let sum = snapshot
             .iter()
@@ -267,7 +271,10 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
         assert!((reactions[1].0 - expected).length() < 1e-10);
         assert!(reactions[1].1.length() < 1e-10);
         inputs[1].loads_complete = false;
-        assert_eq!(balance(&inputs), Err(BalanceError::IncompleteLoads));
+        assert_eq!(
+            balance(&inputs),
+            Err(crate::Error::from(BalanceError::IncompleteLoads))
+        );
         velocities.push(state.linear_velocity());
         let center = world
             .body(id)
@@ -357,8 +364,8 @@ fn automatic_failure_certifies_only_uncorrected_part_surfaces()
         };
         let before = *world.body(body).ok_or("body")?.state();
         assert!(matches!(
-            step(&mut world, 1.0),
-            Err(StepError::WeldBalance(_))
+            step_cause(&step(&mut world, 1.0)),
+            Some(StepError::WeldBalance(_))
         ));
         assert_eq!(*world.body(body).ok_or("body")?.state(), before);
         assert!(world.weld(weld).is_some());
@@ -519,7 +526,10 @@ fn automatic_weld_failure_multiple_clusters_is_atomic_on_rejection()
                 world.step(0.01)
             }
         };
-        assert!(matches!(step(&mut world), Err(StepError::WeldBalance(_))));
+        assert!(matches!(
+            step_cause(&step(&mut world)),
+            Some(StepError::WeldBalance(_))
+        ));
         assert_eq!(world.body_count(), 2);
         for (body, _, child, weld) in &clusters {
             assert_eq!(
@@ -532,8 +542,10 @@ fn automatic_weld_failure_multiple_clusters_is_atomic_on_rejection()
         world.remove_force_source(unsupported)?;
         world.weld_split_fail_after = Some(1);
         assert!(matches!(
-            step(&mut world),
-            Err(StepError::WeldSplit(ClusterError::StorageCapacityExceeded))
+            step_cause(&step(&mut world)),
+            Some(StepError::WeldSplit(cause))
+                if cause.downcast_ref::<ClusterError>()
+                    == Some(&ClusterError::StorageCapacityExceeded)
         ));
         assert_eq!(world.body_count(), 2);
         for (body, _, child, weld) in &clusters {
@@ -639,7 +651,10 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
         } else {
             world.step(0.01)
         };
-        assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+        assert!(matches!(
+            step_cause(&rejected),
+            Some(StepError::WeldBalance(_))
+        ));
         assert_eq!(*world.body(body).ok_or("body")?.state(), before);
         assert!(world.weld(weld).is_some());
         world.remove_force_source(unsupported)?;
@@ -660,7 +675,10 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
         } else {
             world.step(0.01)
         };
-        assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+        assert!(matches!(
+            step_cause(&rejected),
+            Some(StepError::WeldBalance(_))
+        ));
         assert!(world.weld(weld).is_some());
         world.remove_part_collider(own_collider)?;
         world.add_gravity(crate::gravity::UniformGravity::new(Vec3::Y * -10.0)?)?;
@@ -795,7 +813,7 @@ fn impulse_balance_tolerances_are_independent_and_transactional()
     ] {
         assert!(matches!(
             world.set_automatic_weld_impulse_tolerances(Some(invalid)),
-            Err(super::WeldBalanceError::InvalidTolerance)
+            Err(error) if error.downcast_ref::<super::WeldBalanceError>() == Some(&super::WeldBalanceError::InvalidTolerance)
         ));
         assert_eq!(world.automatic_weld_impulse_tolerances(), Some((0.0, 2e-8)));
     }
@@ -867,7 +885,7 @@ fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn
         assert_eq!(world.step_diagnostics().weld_incomplete_load_clusters, 1);
         assert!(matches!(
             world.part_aerodynamic_weld_reactions(body, 1e-9, 1e-9),
-            Err(super::WeldBalanceError::IncompleteLoads)
+            Err(error) if error.downcast_ref::<super::WeldBalanceError>() == Some(&super::WeldBalanceError::IncompleteLoads)
         ));
         world.remove_force_source(unsupported)?;
         let obstacle = world.add_body(RigidBody::new_static(Transform::identity()))?;
@@ -903,7 +921,7 @@ fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn
         assert!(snapshot.collision_loads_uncertified);
         assert!(matches!(
             world.part_aerodynamic_weld_reactions(body, 1e-9, 1e-9),
-            Err(super::WeldBalanceError::IncompleteLoads)
+            Err(error) if error.downcast_ref::<super::WeldBalanceError>() == Some(&super::WeldBalanceError::IncompleteLoads)
         ));
         assert!(world.step(-1.0).is_err());
         assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
@@ -955,10 +973,10 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
     let staged = world.with_force_source_updates(|world| {
         let candidates = world
             .pending_weld_failure_candidates(body, 1e-12, 1e-12, false)
-            .map_err(|_| StepError::InvalidDeltaTime)?;
+            .map_err(|_| crate::Error::from(StepError::InvalidDeltaTime))?;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].reaction.force, -Vec3::X * 5.0);
-        Err::<(), _>(StepError::InvalidDeltaTime)
+        Err::<(), crate::Error>(crate::Error::from(StepError::InvalidDeltaTime))
     });
     assert!(staged.is_err());
     assert!(
@@ -981,7 +999,7 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
     assert!(world.weld(candidates[0].reaction.weld).is_some());
     assert!(matches!(
         world.force_free_weld_reactions(body, 1e-12, 1e-12),
-        Err(BalanceError::IncompleteLoads)
+        Err(error) if error.downcast_ref::<BalanceError>() == Some(&BalanceError::IncompleteLoads)
     ));
     let state = world.cluster_load_states()[0];
     let tree = prepare_tree(
@@ -992,26 +1010,26 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
     .map_err(|error| format!("{error:?}"))?;
     assert!(matches!(
         prepare_force_free_inputs(&state, &tree),
-        Err(BalanceError::IncompleteLoads)
+        Err(error) if error.downcast_ref::<BalanceError>() == Some(&BalanceError::IncompleteLoads)
     ));
     world.set_part_aerodynamic_hull(root, vec![section(Vec3::ZERO)])?;
     world.step(0.01)?;
     assert!(matches!(
         world.force_free_weld_reactions(body, 0.0, 0.0),
-        Err(BalanceError::IncompleteLoads)
+        Err(error) if error.downcast_ref::<BalanceError>() == Some(&BalanceError::IncompleteLoads)
     ));
     assert!(matches!(
         world.part_source_weld_reactions(body, 1e-12, 1e-12),
-        Err(BalanceError::IncompleteLoads)
+        Err(error) if error.downcast_ref::<BalanceError>() == Some(&BalanceError::IncompleteLoads)
     ));
     assert!(matches!(
         world.part_source_weld_failure_candidates(body, 1e-12, 1e-12),
-        Err(BalanceError::IncompleteLoads)
+        Err(error) if error.downcast_ref::<BalanceError>() == Some(&BalanceError::IncompleteLoads)
     ));
     let state = world.cluster_load_states()[0];
     assert!(matches!(
         prepare_force_free_inputs(&state, &tree),
-        Err(BalanceError::IncompleteLoads)
+        Err(error) if error.downcast_ref::<BalanceError>() == Some(&BalanceError::IncompleteLoads)
     ));
     Ok(())
 }
@@ -1154,7 +1172,9 @@ fn part_simple_surfaces_share_body_level_drag_limit() -> Result<(), Box<dyn std:
             let raw = world.raw_simple_surface_wrenches().to_vec();
             assert_eq!(
                 correction.check_part_attribution(&raw),
-                Err(SimpleSurfaceAttributionError::CorrectedAggregate)
+                Err(crate::Error::from(
+                    SimpleSurfaceAttributionError::CorrectedAggregate
+                ))
             );
             assert_eq!(raw.len(), if distributed { 2 } else { 1 });
             assert!(
@@ -1251,13 +1271,17 @@ fn simple_surface_attribution_accepts_only_complete_uncorrected_part_loads()
         assert_eq!(raw[0].drag.moment, Vec3::Z * 60.0);
         assert_eq!(
             correction.check_part_attribution(&[]),
-            Err(SimpleSurfaceAttributionError::InconsistentSnapshot)
+            Err(crate::Error::from(
+                SimpleSurfaceAttributionError::InconsistentSnapshot
+            ))
         );
         let mut body_target = raw.to_vec();
         body_target[0].target = AerodynamicTarget::Body;
         assert_eq!(
             correction.check_part_attribution(&body_target),
-            Err(SimpleSurfaceAttributionError::BodyTarget)
+            Err(crate::Error::from(
+                SimpleSurfaceAttributionError::BodyTarget
+            ))
         );
     }
     Ok(())

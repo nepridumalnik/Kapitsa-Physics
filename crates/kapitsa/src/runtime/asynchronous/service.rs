@@ -8,9 +8,9 @@ use std::{
 };
 
 use kapitsa_core::{
+    Error, ErrorKind,
     aerodynamics::Atmosphere,
-    collision::CollisionError,
-    world::{ErrorPolicy, PhysicsWorld, StepError},
+    world::{ErrorPolicy, PhysicsWorld},
 };
 use tokio::{
     runtime::Handle,
@@ -23,7 +23,7 @@ use super::{
     StepRunner, StepRunnerError,
     marshalling::{
         BatchScratch, ChunkOutcome, ChunkReply, CollisionEventBatch, CommandBufferPool,
-        CommandRequest, JointBreakEventBatch, PhysicsBatchError, PhysicsBatchResult, PhysicsClient,
+        CommandRequest, JointBreakEventBatch, PhysicsBatchResult, PhysicsClient,
         PhysicsClientError, PhysicsCommand, PhysicsCommandResult, PhysicsSnapshot, apply_chunk,
         apply_command, apply_command_batch,
     },
@@ -124,7 +124,7 @@ impl Drop for OwnedRuntime {
 
 impl OwnedRuntime {
     fn start() -> Result<(Self, Handle), SimulationError> {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<Handle, Error>>(1);
         let (shutdown, stopped) = tokio::sync::oneshot::channel();
         std::thread::Builder::new()
             .name("kapitsa-clock".into())
@@ -141,14 +141,18 @@ impl OwnedRuntime {
                         }
                     }
                     Err(error) => {
-                        let _ = sender.send(Err(error.to_string()));
+                        let _ = sender.send(Err(Error::from_source(ErrorKind::Runtime, error)));
                     }
                 }
             })
-            .map_err(|error| SimulationError::TaskFailed(error.to_string()))?;
+            .map_err(|error| {
+                SimulationError::TaskFailed(Error::from_source(ErrorKind::Runtime, error))
+            })?;
         let runtime = receiver
             .recv()
-            .map_err(|error| SimulationError::TaskFailed(error.to_string()))?
+            .map_err(|error| {
+                SimulationError::TaskFailed(Error::from_source(ErrorKind::Runtime, error))
+            })?
             .map_err(SimulationError::TaskFailed)?;
         Ok((
             Self {
@@ -167,6 +171,7 @@ pub struct SimulationBuilder {
     config: SimulationConfig,
     invalid_worker_count: bool,
     time_horizon: Option<Duration>,
+    central_gravity: Option<kapitsa_core::gravity::CentralGravity>,
 }
 
 impl SimulationBuilder {
@@ -188,6 +193,15 @@ impl SimulationBuilder {
     /// The configuration is validated when the simulation is spawned.
     pub fn config(mut self, config: SimulationConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Sets a central point-mass gravity field on the world before it starts.
+    ///
+    /// The value uses `μ = GM`; separate gravity fields can still be added
+    /// through the client after startup.
+    pub fn central_gravity(mut self, gravity: kapitsa_core::gravity::CentralGravity) -> Self {
+        self.central_gravity = Some(gravity);
         self
     }
 
@@ -225,6 +239,8 @@ impl SimulationBuilder {
     }
 
     /// Sets the base physics frequency in hertz.
+    /// Sets the base simulation frequency in Hz.
+    #[must_use]
     pub fn frequency(mut self, frequency: u32) -> Self {
         self.config.tick_rate = frequency;
         self
@@ -244,13 +260,15 @@ impl SimulationBuilder {
     }
 
     /// Starts a simulation on the supplied Tokio runtime.
-    pub fn spawn_on_tokio(self, runtime: &Handle) -> Result<Simulation, SimulationError> {
+    /// Starts the simulation on the given Tokio runtime.
+    pub fn spawn_on_tokio(self, runtime: &Handle) -> Result<Simulation, Error> {
         if self.invalid_worker_count {
-            return Err(SimulationError::InvalidWorkerCount);
+            return Err(Error::from(SimulationError::InvalidWorkerCount));
         }
         let _entered = runtime.enter();
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(self.atmosphere);
+        world.set_central_gravity(self.central_gravity);
         if let Some(sound_speed) = self.mesh_sound_speed {
             world
                 .set_mesh_sound_speed(sound_speed)
@@ -263,18 +281,17 @@ impl SimulationBuilder {
     }
 
     /// Starts a simulation using the supplied Rayon pool for computation.
-    pub fn spawn_on_rayon(
-        self,
-        pool: Arc<rayon::ThreadPool>,
-    ) -> Result<Simulation, SimulationError> {
+    /// Starts the simulation on the given Rayon pool.
+    pub fn spawn_on_rayon(self, pool: Arc<rayon::ThreadPool>) -> Result<Simulation, Error> {
         if self.invalid_worker_count {
-            return Err(SimulationError::InvalidWorkerCount);
+            return Err(Error::from(SimulationError::InvalidWorkerCount));
         }
         self.config
             .validate()
             .map_err(SimulationError::InvalidConfig)?;
         let mut world = PhysicsWorld::new();
         world.set_atmosphere(self.atmosphere);
+        world.set_central_gravity(self.central_gravity);
         if let Some(sound_speed) = self.mesh_sound_speed {
             world
                 .set_mesh_sound_speed(sound_speed)
@@ -293,20 +310,20 @@ impl SimulationBuilder {
 
 /// Failure returned by a clock-driven physics service.
 #[derive(Debug)]
-pub enum SimulationError {
+pub(crate) enum SimulationError {
     InvalidConfig(ConfigError),
     MissingRuntime,
     SimulationTimeOverflow,
     InvalidTimeMultiplier,
     InvalidWorkerCount,
-    InvalidMeshSoundSpeed(kapitsa_core::aerodynamics::pressure::PressureError),
+    InvalidMeshSoundSpeed(kapitsa_core::Error),
     AlreadyRunning,
     TaskRequiresStop,
-    Physics(kapitsa_core::world::StepError),
+    Physics(kapitsa_core::Error),
     WorkerPoolInitializationFailed,
     WorldUnavailable,
     WorldLost,
-    TaskFailed(String),
+    TaskFailed(Error),
 }
 
 impl std::fmt::Display for SimulationError {
@@ -367,31 +384,37 @@ impl From<StepRunnerError> for SimulationError {
     }
 }
 
+impl From<StepRunnerError> for Error {
+    fn from(error: StepRunnerError) -> Self {
+        Error::from(SimulationError::from(error))
+    }
+}
+
 impl Simulation {
     pub fn builder() -> SimulationBuilder {
         SimulationBuilder::default()
     }
     /// Creates an empty simulation using the default fixed-step configuration.
-    pub fn new() -> Result<Self, SimulationError> {
+    pub fn new() -> Result<Self, Error> {
         Self::new_from_config(SimulationConfig::default())
     }
 
     /// Creates an empty simulation using the supplied configuration.
-    pub fn new_from_config(config: SimulationConfig) -> Result<Self, SimulationError> {
+    pub fn new_from_config(config: SimulationConfig) -> Result<Self, Error> {
         Self::new_with_world(PhysicsWorld::new(), config)
     }
 
     pub(crate) fn new_with_world(
         world: PhysicsWorld,
         config: SimulationConfig,
-    ) -> Result<Self, SimulationError> {
+    ) -> Result<Self, Error> {
         config.validate().map_err(SimulationError::InvalidConfig)?;
         let runtime = Handle::try_current().map_err(|_| SimulationError::MissingRuntime)?;
         let simulation = StepRunner::new_on_validated(world, config, runtime.clone())?;
         Self::from_runner(simulation, runtime)
     }
 
-    fn from_runner(simulation: StepRunner, runtime: Handle) -> Result<Self, SimulationError> {
+    fn from_runner(simulation: StepRunner, runtime: Handle) -> Result<Self, Error> {
         let world = simulation.world().map_err(SimulationError::from)?;
         let initial_snapshot = Arc::new(PhysicsSnapshot::from_world(
             world,
@@ -432,12 +455,12 @@ impl Simulation {
     }
 
     /// Starts clock-driven stepping on the configured Tokio runtime.
-    pub fn start(&mut self) -> Result<(), SimulationError> {
+    pub fn start(&mut self) -> Result<(), Error> {
         if let Some(task) = &self.task {
             return if task.is_finished() {
-                Err(SimulationError::TaskRequiresStop)
+                Err(SimulationError::TaskRequiresStop.into())
             } else {
-                Err(SimulationError::AlreadyRunning)
+                Err(SimulationError::AlreadyRunning.into())
             };
         }
 
@@ -526,7 +549,7 @@ impl Simulation {
     }
 
     /// Stops scheduling steps and waits for any active step to finish.
-    pub async fn stop(&mut self) -> Result<(), SimulationError> {
+    pub async fn stop(&mut self) -> Result<(), Error> {
         let Some(task) = &mut self.task else {
             return Ok(());
         };
@@ -541,13 +564,13 @@ impl Simulation {
             Ok(output) => {
                 self.simulation = Some(output.simulation);
                 self.simulation_time = output.simulation_time;
-                output.result
+                output.result.map_err(Error::from)
             }
             Err(error) => {
                 self.metrics_tx.send_modify(|metrics| {
                     metrics.state = SimulationState::Error;
                 });
-                Err(SimulationError::TaskFailed(error.to_string()))
+                Err(Error::from_source(ErrorKind::Runtime, error))
             }
         }
     }
@@ -582,9 +605,9 @@ impl Simulation {
     /// `1 / tick_rate`; `Adaptive` scales the target interval and substeps it
     /// according to physics bounds. Achieved scaling is reported in
     /// [`SimulationMetrics::actual_time_multiplier`].
-    pub fn set_time_multiplier(&self, multiplier: f64) -> Result<(), SimulationError> {
+    pub fn set_time_multiplier(&self, multiplier: f64) -> Result<(), Error> {
         if !multiplier.is_finite() || multiplier < 0.0 {
-            return Err(SimulationError::InvalidTimeMultiplier);
+            return Err(Error::from(SimulationError::InvalidTimeMultiplier));
         }
         self.time_multiplier_tx.send_replace(multiplier);
         self.metrics_tx.send_modify(|metrics| {
@@ -596,7 +619,7 @@ impl Simulation {
     }
 
     /// Pauses simulated time, retaining the requested speed for resuming.
-    pub fn pause(&mut self) -> Result<(), SimulationError> {
+    pub fn pause(&mut self) -> Result<(), Error> {
         if self.paused_multiplier.is_none() {
             self.paused_multiplier = Some(*self.time_multiplier_tx.borrow());
             self.set_time_multiplier(0.0)?;
@@ -605,7 +628,7 @@ impl Simulation {
     }
 
     /// Resumes at the speed requested before pausing.
-    pub fn resume(&mut self) -> Result<(), SimulationError> {
+    pub fn resume(&mut self) -> Result<(), Error> {
         if let Some(multiplier) = self.paused_multiplier.take() {
             self.set_time_multiplier(multiplier)?;
         }
@@ -1094,7 +1117,7 @@ fn apply_queued_commands(
             }
             CommandRequest::Batch { id, buffer } => {
                 let result =
-                    apply_command_batch(world, &buffer.commands, &mut commands.batch_scratch);
+                    apply_command_batch(world, buffer.commands(), &mut commands.batch_scratch);
                 commands.buffer_pool.recycle(buffer);
                 commands
                     .pending_results
@@ -1133,12 +1156,12 @@ fn publish_failed_command_results(
     commands: &mut CommandQueue,
     events: &SimulationEvents,
     attempted_step: u64,
-    cause: StepError,
+    cause: kapitsa_core::Error,
 ) {
     for pending in commands.pending_results.drain(..) {
         match pending {
             DeferredCommandResult::Chunk { reply, outcome } => {
-                let step_failure = outcome.applied().then_some((attempted_step, cause));
+                let step_failure = outcome.applied().then(|| (attempted_step, cause.clone()));
                 let _ = reply.send(ChunkReply::Completed {
                     outcome,
                     step_failure,
@@ -1152,7 +1175,7 @@ fn publish_failed_command_results(
                 if result.is_ok() && !is_read_only_query {
                     result = Err(PhysicsClientError::StepFailedAfterApply {
                         step: attempted_step,
-                        cause,
+                        cause: cause.clone(),
                     });
                 }
                 let _ = reply.send(result);
@@ -1160,13 +1183,10 @@ fn publish_failed_command_results(
             DeferredCommandResult::Batch(mut result) => {
                 result.step = attempted_step;
                 if result.result.is_ok() {
-                    result.result = Err(PhysicsBatchError {
-                        command_index: None,
-                        error: PhysicsClientError::StepFailedAfterApply {
-                            step: attempted_step,
-                            cause,
-                        },
-                    });
+                    result.result = Err(Error::from(PhysicsClientError::StepFailedAfterApply {
+                        step: attempted_step,
+                        cause: cause.clone(),
+                    }));
                 }
                 let _ = events.batch_results.send(result);
             }
@@ -1174,14 +1194,21 @@ fn publish_failed_command_results(
     }
 }
 
-fn step_error_for_result(error: &StepRunnerError) -> StepError {
+fn step_error_for_result(error: &StepRunnerError) -> kapitsa_core::Error {
     match error {
-        StepRunnerError::Physics(error) => *error,
-        StepRunnerError::InvalidConfig(_)
-        | StepRunnerError::InvalidWorkerConfig(_)
-        | StepRunnerError::RayonPool(_)
-        | StepRunnerError::WorldUnavailable
-        | StepRunnerError::WorldLost => StepError::Collision(CollisionError::WorkerFailed),
+        StepRunnerError::Physics(error) => error.clone(),
+        StepRunnerError::InvalidConfig(error) => kapitsa_core::Error::from(*error),
+        StepRunnerError::InvalidWorkerConfig(error) => kapitsa_core::Error::from(*error),
+        StepRunnerError::RayonPool(error) => {
+            kapitsa_core::Error::from_source(ErrorKind::Runtime, *error)
+        }
+        StepRunnerError::WorldUnavailable => kapitsa_core::Error::new(
+            ErrorKind::Runtime,
+            "the physics world is unavailable while a step is in flight",
+        ),
+        StepRunnerError::WorldLost => {
+            kapitsa_core::Error::new(ErrorKind::Runtime, "the in-flight physics world was lost")
+        }
     }
 }
 
@@ -1195,7 +1222,7 @@ fn reject_request(
         CommandRequest::Chunk { command, reply } => {
             let _ = reply.send(ChunkReply::NotSubmitted {
                 command,
-                cause: PhysicsClientError::NotRunning,
+                cause: PhysicsClientError::NotRunning.into(),
             });
         }
         CommandRequest::Single { reply, .. } => {
@@ -1206,10 +1233,7 @@ fn reject_request(
             let _ = events.batch_results.send(PhysicsBatchResult {
                 batch_id: id,
                 step,
-                result: Err(PhysicsBatchError {
-                    command_index: None,
-                    error: PhysicsClientError::NotRunning,
-                }),
+                result: Err(Error::from(PhysicsClientError::NotRunning)),
             });
         }
     }
@@ -1300,6 +1324,24 @@ mod chunk_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_step_reports_runner_cause_instead_of_collision_failure() {
+        use super::{StepRunnerError, step_error_for_result};
+
+        let error = step_error_for_result(&StepRunnerError::RayonPool(
+            crate::runtime::RayonPoolError::BuildFailed,
+        ));
+        assert_eq!(error.kind(), kapitsa_core::ErrorKind::Runtime);
+        assert_eq!(
+            error.downcast_ref::<crate::runtime::RayonPoolError>(),
+            Some(&crate::runtime::RayonPoolError::BuildFailed)
+        );
+
+        let lost = step_error_for_result(&StepRunnerError::WorldLost);
+        assert_eq!(lost.kind(), kapitsa_core::ErrorKind::Runtime);
+        assert!(lost.to_string().contains("world was lost"));
+    }
+
     #[tokio::test]
     async fn builder_installs_atmosphere_on_both_executors()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1413,10 +1455,8 @@ mod tests {
                 } else {
                     builder.spawn_on_tokio(&tokio::runtime::Handle::current())
                 };
-                assert!(matches!(
-                    result,
-                    Err(super::SimulationError::InvalidMeshSoundSpeed(_))
-                ));
+                let error = result.err().expect("invalid mesh sound speed is rejected");
+                assert!(error.to_string().contains("mesh flow"));
             }
         }
         Ok(())
@@ -1446,13 +1486,13 @@ mod tests {
     use tokio::{sync::oneshot, time::sleep};
 
     use crate::runtime::{
-        AdaptiveTimeStepConfig, PhysicsClientError, SimulationConfig, SimulationError,
-        SimulationState, TimeStepPolicy, WorkerConfig,
+        AdaptiveTimeStepConfig, SimulationConfig, SimulationError, SimulationState, TimeStepPolicy,
+        WorkerConfig,
     };
 
     use super::{
-        PhysicsBatchError, Simulation, add_elapsed, add_scaled_elapsed, load_speed_for_step,
-        measured_time_multiplier, wait_for_scaled_step, wait_for_scheduler_turn,
+        Simulation, add_elapsed, add_scaled_elapsed, load_speed_for_step, measured_time_multiplier,
+        wait_for_scaled_step, wait_for_scheduler_turn,
     };
 
     fn dynamic_body() -> RigidBody {
@@ -1597,7 +1637,7 @@ mod tests {
         let result = Simulation::builder()
             .max_workers(0)
             .spawn_on_tokio(&tokio::runtime::Handle::current());
-        assert!(matches!(result, Err(SimulationError::InvalidWorkerCount)));
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -1605,7 +1645,7 @@ mod tests {
         let result = Simulation::builder()
             .frequency(0)
             .spawn_on_tokio(&tokio::runtime::Handle::current());
-        assert!(matches!(result, Err(SimulationError::InvalidConfig(_))));
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -1736,7 +1776,7 @@ mod tests {
         let batch_id = client.try_submit(commands).expect("joint batch accepted");
         let batch = results.next_result().await.expect("joint batch result");
         assert_eq!(batch.batch_id, batch_id);
-        assert_eq!(batch.result, Ok(()));
+        assert!(batch.result.is_ok());
 
         client
             .set_linear_velocity(body_b, Vec3::X * 10.0)
@@ -1749,9 +1789,13 @@ mod tests {
         assert_eq!(event_batch.events().len(), 1);
         assert_eq!(event_batch.events()[0].joint(), joint);
         assert!(client.snapshot().step() >= event_batch.step());
+        let error = client
+            .remove_joint(joint)
+            .await
+            .expect_err("removed joint is rejected");
         assert!(matches!(
-            client.remove_joint(joint).await,
-            Err(PhysicsClientError::World(WorldError::InvalidJointId))
+            error.downcast_ref::<WorldError>(),
+            Some(WorldError::InvalidJointId)
         ));
         simulation.stop().await.expect("stop");
     }
@@ -1759,13 +1803,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn client_rejects_commands_before_simulation_starts() {
         let simulation = Simulation::new_from_config(config(60)).expect("simulation");
-        assert!(matches!(
+        assert!(
             simulation
                 .client()
                 .add_body(RigidBody::new_static(Transform::identity()))
-                .await,
-            Err(crate::runtime::PhysicsClientError::NotRunning)
-        ));
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1797,7 +1841,7 @@ mod tests {
         let mut buffer = client.commands();
         buffer.reserve(15);
         buffer.set_linear_velocity(body, Vec3::X);
-        let capacity = buffer.commands.capacity();
+        let capacity = buffer.capacity();
         let batch_id = client.try_submit(buffer).expect("accepted batch");
         simulation.stop().await.expect("stop");
 
@@ -1809,7 +1853,7 @@ mod tests {
         simulation.start().expect("restart");
         let reused = client.commands();
         assert!(reused.is_empty());
-        assert_eq!(reused.commands.capacity(), capacity);
+        assert_eq!(reused.capacity(), capacity);
         drop(reused);
         simulation.stop().await.expect("second stop");
     }
@@ -1833,7 +1877,7 @@ mod tests {
         let mut first = client.commands();
         first.reserve(15);
         first.set_linear_velocity(body, Vec3::X);
-        let first_capacity = first.commands.capacity();
+        let first_capacity = first.capacity();
         let first_id = client.try_submit(first).expect("accepted batch");
         tokio::time::advance(Duration::from_millis(10)).await;
         tokio::task::yield_now().await;
@@ -1843,7 +1887,7 @@ mod tests {
         assert_eq!(simulation.buffer_pool.stats().0, 1);
 
         let mut second = client.commands();
-        assert_eq!(second.commands.capacity(), first_capacity);
+        assert_eq!(second.capacity(), first_capacity);
         second.set_linear_velocity(body, Vec3::new(f64::NAN, 0.0, 0.0));
         let second_id = client.try_submit(second).expect("accepted invalid batch");
         tokio::time::advance(Duration::from_millis(10)).await;
@@ -1909,15 +1953,14 @@ mod tests {
         let second = results.next_result().await.expect("second batch result");
         assert_eq!((first.batch_id, second.batch_id), (valid_id, invalid_id));
         assert!(first.result.is_ok());
-        assert_eq!(
-            second.result,
-            Err(PhysicsBatchError {
-                command_index: Some(1),
-                error: PhysicsClientError::Body(
-                    kapitsa_core::rigid_body::BodyError::NonFiniteValue
-                ),
-            })
-        );
+        let error = second.result.expect_err("invalid batch reports its cause");
+        assert_eq!(error.command_index(), Some(1));
+        assert!(matches!(
+            error.downcast_ref::<kapitsa_core::command::CommandError>(),
+            Some(kapitsa_core::command::CommandError::Body(
+                kapitsa_core::rigid_body::BodyError::NonFiniteValue
+            ))
+        ));
         assert_eq!(first.step, second.step);
         assert!(client.snapshot().step() >= first.step);
         assert_eq!(
@@ -1967,12 +2010,12 @@ mod tests {
             _ = tokio::task::yield_now() => {}
         }
         drop(stop);
-        assert!(matches!(
+        assert!(
             client
                 .add_body(RigidBody::new_static(Transform::identity()))
-                .await,
-            Err(PhysicsClientError::NotRunning)
-        ));
+                .await
+                .is_err()
+        );
 
         release_tx.send(()).expect("release step worker");
         simulation.stop().await.expect("join cancelled stop");
@@ -2019,22 +2062,19 @@ mod tests {
         let result = results.next_result().await.expect("failed step result");
         assert_eq!(result.batch_id, batch_id);
         assert_eq!(result.step, 1);
-        assert_eq!(
-            result.result,
-            Err(PhysicsBatchError {
-                command_index: None,
-                error: PhysicsClientError::StepFailedAfterApply {
-                    step: 1,
-                    cause: StepError::BodyIntegration {
-                        body_id: body,
-                        cause: kapitsa_core::rigid_body::IntegrationError::ArithmeticOverflow,
-                    },
-                },
-            })
-        );
+        let error = result.result.expect_err("failed step result");
+        assert_eq!(error.failed_step(), Some(1));
         assert!(matches!(
-            simulation.stop().await,
-            Err(SimulationError::Physics(StepError::BodyIntegration { .. }))
+            error.downcast_ref::<StepError>(),
+            Some(StepError::BodyIntegration { .. })
+        ));
+        let error = match simulation.stop().await {
+            Ok(()) => panic!("failed step must be reported by stop"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.downcast_ref::<StepError>(),
+            Some(StepError::BodyIntegration { .. })
         ));
         assert_eq!(client.snapshot().step(), 0);
         assert_eq!(
@@ -2128,19 +2168,15 @@ mod tests {
 
         let velocity_error = velocity.await.expect_err("failed step is reported");
         let force_error = force.await.expect_err("failed step is reported");
+        assert_eq!(velocity_error.failed_step(), Some(1));
         assert!(matches!(
-            velocity_error,
-            PhysicsClientError::StepFailedAfterApply {
-                step: 1,
-                cause: StepError::BodyIntegration { body_id, .. },
-            } if body_id == body
+            velocity_error.downcast_ref::<StepError>(),
+            Some(StepError::BodyIntegration { body_id, .. }) if *body_id == body
         ));
+        assert_eq!(force_error.failed_step(), Some(1));
         assert!(matches!(
-            force_error,
-            PhysicsClientError::StepFailedAfterApply {
-                step: 1,
-                cause: StepError::BodyIntegration { body_id, .. },
-            } if body_id == body
+            force_error.downcast_ref::<StepError>(),
+            Some(StepError::BodyIntegration { body_id, .. }) if *body_id == body
         ));
         assert!(
             query
@@ -2153,9 +2189,13 @@ mod tests {
             Some(kapitsa_core::material::PhysicsMaterial::default())
         );
         assert_eq!(part_query.await.unwrap().unwrap().body(), fixed);
+        let error = match simulation.stop().await {
+            Ok(()) => panic!("failed step must be reported by stop"),
+            Err(error) => error,
+        };
         assert!(matches!(
-            simulation.stop().await,
-            Err(SimulationError::Physics(StepError::BodyIntegration { .. }))
+            error.downcast_ref::<StepError>(),
+            Some(StepError::BodyIntegration { .. })
         ));
         let world = simulation
             .simulation
@@ -2170,12 +2210,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runtime_config_applies_central_gravity() {
-        let mut config = config(1_000);
-        config.central_gravity =
-            Some(CentralGravity::new(Vec3::ZERO, 100.0).expect("valid central gravity"));
-        let mut simulation = Simulation::new_from_config(config).expect("simulation");
+        let mut simulation = Simulation::new_from_config(config(1_000)).expect("simulation");
         let client = simulation.client();
         simulation.start().expect("start");
+        client
+            .set_central_gravity(Some(
+                CentralGravity::new(Vec3::ZERO, 100.0).expect("valid central gravity"),
+            ))
+            .await
+            .expect("central gravity command");
         let mass = MassProperties::new(2.0, Vec3::ZERO, Mat3::IDENTITY).expect("mass");
         let body = RigidBody::new_dynamic(
             Transform::new(Vec3::Y * 10.0, kapitsa_math::Quat::IDENTITY).expect("transform"),
@@ -2207,10 +2250,7 @@ mod tests {
             assert_eq!(simulation.metrics().requested_time_multiplier, multiplier);
         }
         for multiplier in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-            assert!(matches!(
-                simulation.set_time_multiplier(multiplier),
-                Err(SimulationError::InvalidTimeMultiplier)
-            ));
+            assert!(simulation.set_time_multiplier(multiplier).is_err());
         }
         simulation
             .set_time_multiplier(0.0)
@@ -2435,10 +2475,7 @@ mod tests {
     async fn invalid_time_multiplier_is_rejected_without_changing_metrics() {
         let simulation = Simulation::new().expect("simulation");
         assert_eq!(simulation.metrics().requested_time_multiplier, 1.0);
-        assert!(matches!(
-            simulation.set_time_multiplier(-0.5),
-            Err(SimulationError::InvalidTimeMultiplier)
-        ));
+        assert!(simulation.set_time_multiplier(-0.5).is_err());
         assert_eq!(simulation.metrics().requested_time_multiplier, 1.0);
     }
 
@@ -2446,10 +2483,7 @@ mod tests {
     async fn start_twice_reports_an_invalid_transition() {
         let mut simulation = Simulation::new().expect("simulation");
         simulation.start().expect("start");
-        assert!(matches!(
-            simulation.start(),
-            Err(SimulationError::AlreadyRunning)
-        ));
+        assert!(simulation.start().is_err());
         simulation.stop().await.expect("stop");
     }
 }

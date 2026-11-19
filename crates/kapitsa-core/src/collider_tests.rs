@@ -6,7 +6,7 @@ fn mesh_preparation_on_worker_is_idempotent() -> Result<(), Box<dyn Error>> {
     let worker = std::thread::spawn(move || {
         let mut collider = Collider::new(Shape::TriangleMesh(mesh), Transform::identity());
         collider.prepare()?;
-        Ok::<_, crate::collision::CollisionError>(collider)
+        Ok::<_, crate::Error>(collider)
     });
     let mut collider = worker.join().map_err(|_| "preparation worker failed")??;
     let first = collider.query_bvh().ok_or("missing BVH")? as *const _;
@@ -23,9 +23,7 @@ use crate::{
     collider::{Collider, ColliderError, CollisionFilter, CollisionMode},
     collision::mesh::MeshQueryWorkspace,
     material::{MaterialStorage, PhysicsMaterial},
-    shape::{
-        BoneInfluence, BoundsError, Cuboid, Plane, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh,
-    },
+    shape::{BoneInfluence, Cuboid, Plane, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh},
     transform::{Transform, TransformError},
 };
 
@@ -377,7 +375,9 @@ fn skinned_pose_updates_bounds_and_keeps_the_last_valid_pose_on_error() {
     );
     assert_eq!(
         collider.set_skin_pose(&[overflowing_pose]),
-        Err(crate::collision::CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::ArithmeticOverflow
+        ))
     );
     assert!(collider.mesh_bvh.is_some());
     assert!(collider.skin_pose.is_none());
@@ -402,7 +402,9 @@ fn skinned_pose_updates_bounds_and_keeps_the_last_valid_pose_on_error() {
 
     assert_eq!(
         collider.set_skin_pose(&[]),
-        Err(crate::collision::CollisionError::InvalidSkinPose)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::InvalidSkinPose
+        ))
     );
     assert_eq!(
         collider.world_bounds(&Transform::identity()),
@@ -411,14 +413,18 @@ fn skinned_pose_updates_bounds_and_keeps_the_last_valid_pose_on_error() {
 
     assert_eq!(
         collider.set_skin_pose(&[Affine3::from_translation(Vec3::splat(f64::NAN))]),
-        Err(crate::collision::CollisionError::InvalidSkinPose)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::InvalidSkinPose
+        ))
     );
     assert_eq!(
         collider.set_skin_pose(&[Affine3::new(
             kapitsa_math::Mat3::from_diagonal(Vec3::splat(f64::MAX)),
             Vec3::splat(f64::MAX),
         )]),
-        Err(crate::collision::CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::ArithmeticOverflow
+        ))
     );
     assert_eq!(
         collider.world_bounds(&Transform::identity()),
@@ -446,9 +452,9 @@ fn transform_overflow_is_preserved() {
 
     assert_eq!(
         collider.world_bounds(&parent),
-        Err(ColliderError::Transform(
-            TransformError::CompositionOverflow
-        ))
+        Err(crate::Error::from(ColliderError::Transform(
+            TransformError::CompositionOverflow.into()
+        )))
     );
 }
 
@@ -460,15 +466,8 @@ fn error_source_chain_preserves_bounds_and_aabb_errors() {
         .world_bounds(&parent)
         .expect_err("sphere bounds overflow at maximum translation");
 
-    let bounds_error =
-        Error::source(&error).and_then(|source| source.downcast_ref::<BoundsError>());
     assert_eq!(
-        bounds_error,
-        Some(&BoundsError::InvalidBounds(AabbError::TransformOverflow))
+        error.downcast_ref::<AabbError>(),
+        Some(&AabbError::TransformOverflow)
     );
-
-    let aabb_error = bounds_error
-        .and_then(Error::source)
-        .and_then(|source| source.downcast_ref::<AabbError>());
-    assert_eq!(aabb_error, Some(&AabbError::TransformOverflow));
 }

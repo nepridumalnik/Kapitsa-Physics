@@ -8,8 +8,10 @@ pub struct Affine3 {
 }
 
 impl Affine3 {
+    /// Identity affine transform.
     pub const IDENTITY: Self = Self::new(Mat3::IDENTITY, Vec3::ZERO);
 
+    /// Creates an affine transform from a linear matrix and translation.
     pub const fn new(linear: Mat3, translation: Vec3) -> Self {
         Self {
             linear,
@@ -17,18 +19,22 @@ impl Affine3 {
         }
     }
 
+    /// Creates a translation-only affine transform.
     pub const fn from_translation(translation: Vec3) -> Self {
         Self::new(Mat3::IDENTITY, translation)
     }
 
+    /// Returns the linear 3x3 matrix.
     pub const fn linear(self) -> Mat3 {
         self.linear
     }
 
+    /// Returns the translation vector.
     pub const fn translation(self) -> Vec3 {
         self.translation
     }
 
+    /// Returns `true` when every component is finite.
     pub const fn is_finite(self) -> bool {
         self.linear.is_finite() && self.translation.is_finite()
     }

@@ -1,4 +1,6 @@
 use kapitsa_math::Vec3;
+
+use crate::Error;
 use std::collections::{HashMap, HashSet};
 
 use super::{
@@ -17,13 +19,16 @@ use crate::{
     transform::Transform,
 };
 
+/// Rebind of one part's owned colliders after a split.
+type PartRebind = (usize, PartId, Vec<(ColliderId, Transform)>);
+
 /// Prepared against an unchanged world; commit must immediately follow it.
 pub(super) struct PreparedWeldSplit {
     body: BodyId,
     removed_welds: Vec<WeldId>,
     entries: Vec<BodyEntry>,
     prepared_bodies: Vec<BodyMotion>,
-    part_rebinds: Vec<(usize, PartId, Vec<(ColliderId, Transform)>)>,
+    part_rebinds: Vec<PartRebind>,
     part_components: HashMap<PartId, usize>,
     root_aerodynamics: Vec<AerodynamicSurface>,
     root_cluster: RigidCluster,
@@ -40,16 +45,16 @@ pub(super) struct InsertedWeldSplits {
 
 #[derive(Debug)]
 pub(super) enum WeldSplitPreparationError {
-    Balance(super::WeldBalanceError),
-    Cluster(ClusterError),
+    Balance(crate::Error),
+    Cluster(crate::Error),
 }
 
 impl PhysicsWorld {
     fn pending_contact_weld_impulses(
         &self,
         state: &super::ClusterLoadState,
-    ) -> Result<Vec<WeldId>, super::WeldBalanceError> {
-        use super::WeldBalanceError as Error;
+    ) -> Result<Vec<WeldId>, crate::Error> {
+        use super::WeldBalanceError as BalanceError;
         use crate::cluster::{
             balance::prepare_tree,
             impulse::{PartImpulse, tree_impulse_reactions},
@@ -58,7 +63,7 @@ impl PhysicsWorld {
 
         let (linear_tolerance, angular_tolerance) = self
             .automatic_weld_impulse_tolerances
-            .ok_or(Error::IncompleteLoads)?;
+            .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
         let context = &self.collision_system.context;
         if !context.ccd_solved_manifolds.is_empty()
             || (!context.ccd_clipped_bodies.is_empty()
@@ -68,7 +73,7 @@ impl PhysicsWorld {
                     || self.collider_body(manifold.pair.b).is_none()
             })
         {
-            return Err(Error::IncompleteLoads);
+            return Err(crate::Error::from(BalanceError::IncompleteLoads));
         }
         let mut matching = self.contact_impulses_pending.iter().filter_map(|contact| {
             let a = self.collider_body(contact.pair.a);
@@ -81,23 +86,25 @@ impl PhysicsWorld {
                 None
             }
         });
-        let (contact, side) = matching.next().ok_or(Error::IncompleteLoads)?;
+        let (contact, side) = matching
+            .next()
+            .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
         if contact.ccd
             || self.contact_impulses_omitted_pending != 0
             || self.contact_ccd_clipped_pending
         {
-            return Err(Error::IncompleteLoads);
+            return Err(crate::Error::from(BalanceError::IncompleteLoads));
         }
         let states = contact
             .isolated_velocity_states
-            .ok_or(Error::IncompleteLoads)?;
+            .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
         let other_body = self
             .collider_body(if side == 0 {
                 contact.pair.b
             } else {
                 contact.pair.a
             })
-            .ok_or(Error::IncompleteLoads)?;
+            .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
         let before = states[0][side];
         let after = states[1][side];
         let mut impact_state = *state;
@@ -107,28 +114,39 @@ impl PhysicsWorld {
             &self.cluster_load_parts_pending,
             &self.cluster_load_welds_pending,
         )?;
-        let mass = state.mass.ok_or(Error::IncompleteLoads)?;
-        let (origin, _) = world_properties(mass, before.transform()).map_err(Error::Physics)?;
+        let mass = state
+            .mass
+            .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
+        let (origin, _) =
+            world_properties(mass, before.transform()).map_err(BalanceError::Physics)?;
         let delta_linear = after
             .linear_velocity()
             .checked_sub(before.linear_velocity())
-            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
         let delta_angular = after
             .angular_velocity()
             .checked_sub(before.angular_velocity())
-            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
         let mut inputs = Vec::new();
         let mut parents = Vec::new();
         let mut indices = HashMap::new();
-        inputs
-            .try_reserve_exact(tree.len())
-            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
-        parents
-            .try_reserve_exact(tree.len())
-            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
-        indices
-            .try_reserve(tree.len())
-            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
+        inputs.try_reserve_exact(tree.len()).map_err(|_| {
+            BalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+        })?;
+        parents.try_reserve_exact(tree.len()).map_err(|_| {
+            BalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+        })?;
+        indices.try_reserve(tree.len()).map_err(|_| {
+            BalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+        })?;
         for (index, part) in tree.iter().enumerate() {
             indices.insert(part.part, index);
             inputs.push(PartImpulse {
@@ -143,7 +161,7 @@ impl PhysicsWorld {
         for (point, point_side) in std::iter::once((contact, side)).chain(matching) {
             let point_states = point
                 .isolated_velocity_states
-                .ok_or(Error::IncompleteLoads)?;
+                .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
             let point_other = self.collider_body(if point_side == 0 {
                 point.pair.b
             } else {
@@ -154,31 +172,50 @@ impl PhysicsWorld {
                 || point_states[0][point_side] != before
                 || point_states[1][point_side] != after
             {
-                return Err(Error::IncompleteLoads);
+                return Err(crate::Error::from(BalanceError::IncompleteLoads));
             }
-            let part = point.parts[point_side].ok_or(Error::IncompleteLoads)?;
-            let index = *indices.get(&part).ok_or(Error::IncompleteLoads)?;
+            let part = point.parts[point_side]
+                .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
+            let index = *indices
+                .get(&part)
+                .ok_or_else(|| crate::Error::from(BalanceError::IncompleteLoads))?;
             let contribution = if point_side == 0 {
                 point.impulse_on_b.checked_mul_scalar(-1.0)
             } else {
                 Some(point.impulse_on_b)
             }
-            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
             let moment = point.points[point_side]
                 .checked_sub(origin)
                 .and_then(|arm| arm.checked_cross(contribution))
-                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-            inputs[index].linear = inputs[index]
-                .linear
-                .checked_add(contribution)
-                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-            inputs[index].angular = inputs[index]
-                .angular
-                .checked_add(moment)
-                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
-            count = count
-                .checked_add(1)
-                .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+                .ok_or_else(|| {
+                    crate::Error::from(BalanceError::Physics(crate::Error::from(
+                        ClusterError::ArithmeticOverflow,
+                    )))
+                })?;
+            inputs[index].linear =
+                inputs[index]
+                    .linear
+                    .checked_add(contribution)
+                    .ok_or_else(|| {
+                        crate::Error::from(BalanceError::Physics(crate::Error::from(
+                            ClusterError::ArithmeticOverflow,
+                        )))
+                    })?;
+            inputs[index].angular = inputs[index].angular.checked_add(moment).ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
+            count = count.checked_add(1).ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
         }
         let expected = context
             .manifolds
@@ -188,9 +225,13 @@ impl PhysicsWorld {
                     || self.collider_body(manifold.pair.b) == Some(state.body)
             })
             .try_fold(0usize, |count, manifold| count.checked_add(manifold.len()))
-            .ok_or(Error::Physics(ClusterError::ArithmeticOverflow))?;
+            .ok_or_else(|| {
+                crate::Error::from(BalanceError::Physics(crate::Error::from(
+                    ClusterError::ArithmeticOverflow,
+                )))
+            })?;
         if expected != count {
-            return Err(Error::IncompleteLoads);
+            return Err(crate::Error::from(BalanceError::IncompleteLoads));
         }
         let reactions = tree_impulse_reactions(
             &inputs,
@@ -205,10 +246,16 @@ impl PhysicsWorld {
         let mut candidates = Vec::new();
         candidates
             .try_reserve(tree.len().saturating_sub(1))
-            .map_err(|_| Error::Physics(ClusterError::StorageCapacityExceeded))?;
+            .map_err(|_| {
+                BalanceError::Physics(crate::Error::from(ClusterError::StorageCapacityExceeded))
+            })?;
         for (part, reaction) in tree.iter().zip(reactions).skip(1) {
-            let id = part.weld.ok_or(Error::InvalidTree)?;
-            let weld = self.weld(id).ok_or(Error::InvalidTree)?;
+            let id = part
+                .weld
+                .ok_or_else(|| crate::Error::from(BalanceError::InvalidTree))?;
+            let weld = self
+                .weld(id)
+                .ok_or_else(|| crate::Error::from(BalanceError::InvalidTree))?;
             let Some(strength) = weld.impulse_strength() else {
                 continue;
             };
@@ -217,7 +264,7 @@ impl PhysicsWorld {
             } else if weld.part_b() == part.part {
                 weld.desc().frame_b
             } else {
-                return Err(Error::InvalidTree);
+                return Err(crate::Error::from(BalanceError::InvalidTree));
             };
             let reaction =
                 reaction.at_anchor(origin, part.pose.transform_point(frame.local_anchor))?;
@@ -239,14 +286,16 @@ impl PhysicsWorld {
         plans
             .try_reserve(self.cluster_load_states_pending.len())
             .map_err(|_| {
-                WeldSplitPreparationError::Cluster(ClusterError::StorageCapacityExceeded)
+                WeldSplitPreparationError::Cluster(crate::Error::from(
+                    ClusterError::StorageCapacityExceeded,
+                ))
             })?;
         for state in &self.cluster_load_states_pending {
             let cluster = self
                 .cluster(state.body)
-                .ok_or(WeldSplitPreparationError::Cluster(
+                .ok_or(WeldSplitPreparationError::Cluster(crate::Error::from(
                     ClusterError::InvalidTopology,
-                ))?;
+                )))?;
             if !cluster.welds().iter().any(|id| {
                 self.weld(*id).is_some_and(|weld| {
                     matches!(
@@ -270,12 +319,16 @@ impl PhysicsWorld {
                     state.collision_loads_uncertified,
                 )?;
                 welds.try_reserve(candidates.len()).map_err(|_| {
-                    super::WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded)
+                    crate::Error::from(super::WeldBalanceError::Physics(crate::Error::from(
+                        ClusterError::StorageCapacityExceeded,
+                    )))
                 })?;
                 let mut seen = HashSet::new();
                 seen.try_reserve(welds.len().saturating_add(candidates.len()))
                     .map_err(|_| {
-                        super::WeldBalanceError::Physics(ClusterError::StorageCapacityExceeded)
+                        crate::Error::from(super::WeldBalanceError::Physics(crate::Error::from(
+                            ClusterError::StorageCapacityExceeded,
+                        )))
                     })?;
                 seen.extend(welds.iter().copied());
                 for candidate in candidates {
@@ -283,28 +336,30 @@ impl PhysicsWorld {
                         welds.push(candidate.reaction.weld);
                     }
                 }
-                Ok::<_, super::WeldBalanceError>(welds)
+                Ok::<_, crate::Error>(welds)
             })();
             let welds = match evaluation {
                 Ok(welds) => welds,
-                Err(super::WeldBalanceError::IncompleteLoads)
-                    if self.error_policy == super::ErrorPolicy::Realtime =>
+                Err(error)
+                    if error.downcast_ref::<super::WeldBalanceError>()
+                        == Some(&super::WeldBalanceError::IncompleteLoads)
+                        && self.error_policy == super::ErrorPolicy::Realtime =>
                 {
                     self.pending_step_diagnostics.weld_incomplete_load_clusters = self
                         .pending_step_diagnostics
                         .weld_incomplete_load_clusters
                         .checked_add(1)
-                        .ok_or(WeldSplitPreparationError::Cluster(
+                        .ok_or(WeldSplitPreparationError::Cluster(crate::Error::from(
                             ClusterError::StorageCapacityExceeded,
-                        ))?;
+                        )))?;
                     if state.collision_loads_uncertified {
                         self.pending_step_diagnostics.weld_collision_load_clusters = self
                             .pending_step_diagnostics
                             .weld_collision_load_clusters
                             .checked_add(1)
-                            .ok_or(WeldSplitPreparationError::Cluster(
+                            .ok_or(WeldSplitPreparationError::Cluster(crate::Error::from(
                                 ClusterError::StorageCapacityExceeded,
-                            ))?;
+                            )))?;
                     }
                     continue;
                 }
@@ -320,14 +375,14 @@ impl PhysicsWorld {
                 .iter()
                 .find(|(body, _)| *body == state.body)
                 .map(|(_, state)| *state)
-                .ok_or(WeldSplitPreparationError::Cluster(
+                .ok_or(WeldSplitPreparationError::Cluster(crate::Error::from(
                     ClusterError::InvalidMotion,
-                ))?;
+                )))?;
             let mut motion = self
                 .body(state.body)
-                .ok_or(WeldSplitPreparationError::Cluster(
+                .ok_or(WeldSplitPreparationError::Cluster(crate::Error::from(
                     ClusterError::InvalidBodyId,
-                ))?
+                )))?
                 .motion();
             motion.commit_integrated_state(predicted);
             plans.push(
@@ -352,9 +407,18 @@ impl PhysicsWorld {
     pub fn add_part_collider(
         &mut self,
         part: PartId,
+        collider: crate::collider::Collider,
+    ) -> Result<ColliderId, Error> {
+        self.add_part_collider_inner(part, collider)
+    }
+    fn add_part_collider_inner(
+        &mut self,
+        part: PartId,
         mut collider: crate::collider::Collider,
-    ) -> Result<ColliderId, ClusterError> {
-        let part_entry = self.cluster_part(part).ok_or(ClusterError::InvalidPartId)?;
+    ) -> Result<ColliderId, crate::Error> {
+        let part_entry = self
+            .cluster_part(part)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidPartId))?;
         let body = part_entry.body();
         let local_transform = part_entry
             .local_transform()
@@ -362,14 +426,12 @@ impl PhysicsWorld {
             .map_err(ClusterError::Transform)?;
         self.parts
             .get_mut(part.dense)
-            .ok_or(ClusterError::InvalidPartId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidPartId))?
             .colliders
             .try_reserve(1)
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         collider.set_local_transform(local_transform);
-        let id = self
-            .add_collider_internal(body, collider)
-            .map_err(map_cluster_world_error)?;
+        let id = self.add_collider_internal(body, collider)?;
         self.parts
             .get_mut(part.dense)
             .expect("validated cluster part must exist")
@@ -385,10 +447,20 @@ impl PhysicsWorld {
         part: PartId,
         collider: ColliderId,
         part_local_transform: Transform,
-    ) -> Result<(), ClusterError> {
-        let owner = self.cluster_part(part).ok_or(ClusterError::InvalidPartId)?;
+    ) -> Result<(), Error> {
+        self.set_part_collider_transform_inner(part, collider, part_local_transform)
+    }
+    fn set_part_collider_transform_inner(
+        &mut self,
+        part: PartId,
+        collider: ColliderId,
+        part_local_transform: Transform,
+    ) -> Result<(), crate::Error> {
+        let owner = self
+            .cluster_part(part)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidPartId))?;
         if !owner.colliders().contains(&collider) {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         let body = owner.body();
         let local = owner
@@ -399,7 +471,7 @@ impl PhysicsWorld {
         let entry = self
             .bodies
             .get_mut(body.dense)
-            .ok_or(ClusterError::InvalidBodyId)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?;
         entry.collider_aerodynamic_mesh = None;
         entry.mesh_aerodynamics = None;
         if let Some(caches) = &mut self.assembly_aerodynamics {
@@ -413,24 +485,33 @@ impl PhysicsWorld {
     pub fn remove_part_collider(
         &mut self,
         id: ColliderId,
-    ) -> Result<crate::collider::Collider, ClusterError> {
-        let body = self.collider_body(id).ok_or(ClusterError::InvalidPartId)?;
-        self.cluster(body).ok_or(ClusterError::NotClustered)?;
+    ) -> Result<crate::collider::Collider, Error> {
+        self.remove_part_collider_inner(id)
+    }
+    fn remove_part_collider_inner(
+        &mut self,
+        id: ColliderId,
+    ) -> Result<crate::collider::Collider, crate::Error> {
+        let body = self
+            .collider_body(id)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidPartId))?;
+        self.cluster(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
         let part = self
             .collider_part(id)
-            .ok_or(ClusterError::InvalidTopology)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         let collider = self
             .remove_collider_internal(id)
-            .ok_or(ClusterError::InvalidTopology)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         let entry = self
             .parts
             .get_mut(part.dense)
-            .ok_or(ClusterError::InvalidTopology)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         if let Some(index) = entry.colliders.iter().position(|value| *value == id) {
             entry.colliders.remove(index);
             Ok(collider)
         } else {
-            Err(ClusterError::InvalidTopology)
+            Err(crate::Error::from(ClusterError::InvalidTopology))
         }
     }
 
@@ -439,14 +520,17 @@ impl PhysicsWorld {
     /// Existing colliders become owned by the identity-transform root part.
     /// Static and kinematic bodies can use [`Self::enable_cluster_with_mass`]
     /// because they do not carry mass properties in `RigidBody`.
-    pub fn enable_cluster(&mut self, body: BodyId) -> Result<PartId, ClusterError> {
+    pub fn enable_cluster(&mut self, body: BodyId) -> Result<PartId, Error> {
+        self.enable_cluster_inner(body)
+    }
+    fn enable_cluster_inner(&mut self, body: BodyId) -> Result<PartId, crate::Error> {
         let mass = self
             .body(body)
-            .ok_or(ClusterError::InvalidBodyId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
             .physics()
             .mass()
-            .ok_or(ClusterError::InvalidMass)?;
-        self.enable_cluster_with_mass(body, mass)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidMass))?;
+        self.enable_cluster_with_mass_inner(body, mass)
     }
 
     /// Converts an existing body into a one-part cluster with explicit root mass.
@@ -454,24 +538,31 @@ impl PhysicsWorld {
         &mut self,
         body: BodyId,
         mass: MassProperties,
-    ) -> Result<PartId, ClusterError> {
+    ) -> Result<PartId, Error> {
+        self.enable_cluster_with_mass_inner(body, mass)
+    }
+    fn enable_cluster_with_mass_inner(
+        &mut self,
+        body: BodyId,
+        mass: MassProperties,
+    ) -> Result<PartId, crate::Error> {
         if self.has_body_chunks(body) {
-            return Err(ClusterError::UnsupportedGeometry);
+            return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
         }
         let body_entry = self
             .bodies
             .get(body.dense)
             .filter(|_| body.world == self.world_id)
-            .ok_or(ClusterError::InvalidBodyId)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?;
         if body_entry.cluster.is_some() {
-            return Err(ClusterError::AlreadyClustered);
+            return Err(crate::Error::from(ClusterError::AlreadyClustered));
         }
         // Base patches are body-local and are not yet transferred to a part.
         // Reject before changing topology rather than strand or lose loads.
         if !body_entry.body.base_pressure_patches.is_empty()
             || body_entry.body.potential_sphere.is_some()
         {
-            return Err(ClusterError::UnsupportedGeometry);
+            return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
         }
         let mut root_hull = Vec::new();
         if let Aerodynamics::Hull(sections) = body_entry.body.aerodynamics() {
@@ -491,7 +582,7 @@ impl PhysicsWorld {
         if body_entry.body.physics().body_type() == BodyType::Dynamic
             && body_entry.body.physics().mass() != Some(mass)
         {
-            return Err(ClusterError::InvalidMass);
+            return Err(crate::Error::from(ClusterError::InvalidMass));
         }
 
         let mut colliders = Vec::new();
@@ -501,7 +592,7 @@ impl PhysicsWorld {
                 .colliders
                 .get(collider.dense)
                 .filter(|entry| entry.body == body)
-                .ok_or(ClusterError::InvalidTopology)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             colliders.push(collider);
             next = entry.next;
         }
@@ -536,7 +627,7 @@ impl PhysicsWorld {
         let entry = self
             .bodies
             .get_mut(body.dense)
-            .ok_or(ClusterError::InvalidBodyId)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?;
         entry.cluster = Some(RigidCluster {
             root: part,
             parts: vec![part],
@@ -591,46 +682,61 @@ impl PhysicsWorld {
     pub fn add_cluster_part(
         &mut self,
         parent: PartId,
+        desc: crate::cluster::ClusterPartDesc,
+        weld_desc: crate::cluster::WeldDesc,
+    ) -> Result<PartId, Error> {
+        self.add_cluster_part_inner(parent, desc, weld_desc)
+    }
+    fn add_cluster_part_inner(
+        &mut self,
+        parent: PartId,
         mut desc: crate::cluster::ClusterPartDesc,
         weld_desc: crate::cluster::WeldDesc,
-    ) -> Result<PartId, ClusterError> {
+    ) -> Result<PartId, crate::Error> {
         weld_desc.validate()?;
         if !desc.local_transform.translation().is_finite()
             || !desc.local_transform.rotation().is_normalized()
             || !desc.linear_velocity.is_finite()
             || !desc.angular_velocity.is_finite()
         {
-            return Err(ClusterError::InvalidMotion);
+            return Err(crate::Error::from(ClusterError::InvalidMotion));
         }
         let body = self
             .cluster_part(parent)
-            .ok_or(ClusterError::InvalidPartId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidPartId))?
             .body();
-        let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+        let cluster = self
+            .cluster(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
         if !cluster.parts().contains(&parent) {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         let body_pose = self
             .body(body)
-            .ok_or(ClusterError::InvalidBodyId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
             .state()
             .transform();
         let parent_transform = self
             .cluster_part(parent)
-            .ok_or(ClusterError::InvalidPartId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidPartId))?
             .local_transform();
         let part_pose = body_pose
             .compose(&desc.local_transform)
             .map_err(ClusterError::Transform)?;
         validate_weld_frames(parent_transform, desc.local_transform, weld_desc)?;
 
-        let original = self.body(body).ok_or(ClusterError::InvalidBodyId)?.motion();
+        let original = self
+            .body(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
+            .motion();
         let mut values = Vec::new();
         values
             .try_reserve(cluster.parts().len().saturating_add(1))
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         for &id in cluster.parts() {
-            let part = self.cluster_part(id).ok_or(ClusterError::InvalidTopology)?;
+            let part = self
+                .cluster_part(id)
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             values.push((part.mass(), part.local_transform()));
         }
         values.push((desc.mass, desc.local_transform));
@@ -639,11 +745,11 @@ impl PhysicsWorld {
         let prepared_body = if original.physics().body_type() == BodyType::Dynamic {
             let old_center = original
                 .world_center_of_mass()
-                .map_err(ClusterError::Body)?
-                .ok_or(ClusterError::InvalidMass)?;
+                .map_err(map_body_to_cluster)?
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidMass))?;
             let new_center = body_pose.transform_point(aggregate.center_of_mass());
             if !new_center.is_finite() {
-                return Err(ClusterError::ArithmeticOverflow);
+                return Err(crate::Error::from(ClusterError::ArithmeticOverflow));
             }
             let (velocity, omega) = velocity_field(
                 old_center,
@@ -656,17 +762,17 @@ impl PhysicsWorld {
                 .checked_sub(new_center)
                 .and_then(|offset| offset.checked_cross(force))
                 .and_then(|shift| original.forces().torque().checked_add(shift))
-                .ok_or(ClusterError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
             let mut prepared = original;
-            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+            prepared.set_mass(aggregate).map_err(map_body_to_cluster)?;
             prepared
                 .set_linear_velocity(velocity)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             prepared
                 .set_angular_velocity(omega)
-                .map_err(ClusterError::Body)?;
-            prepared.apply_force(force).map_err(ClusterError::Body)?;
-            prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
+            prepared.apply_force(force).map_err(map_body_to_cluster)?;
+            prepared.apply_torque(torque).map_err(map_body_to_cluster)?;
             Some(prepared)
         } else {
             None
@@ -675,14 +781,14 @@ impl PhysicsWorld {
         if original.physics().body_type() == BodyType::Dynamic {
             let old_center = original
                 .world_center_of_mass()
-                .map_err(ClusterError::Body)?
-                .ok_or(ClusterError::InvalidMass)?;
+                .map_err(map_body_to_cluster)?
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidMass))?;
             let part_center = part_pose.transform_point(desc.mass.center_of_mass());
             let expected_linear = part_center
                 .checked_sub(old_center)
                 .and_then(|offset| original.state().angular_velocity().checked_cross(offset))
                 .and_then(|relative| original.state().linear_velocity().checked_add(relative))
-                .ok_or(ClusterError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
             if (desc.linear_velocity - expected_linear).length()
                 > 128.0 * f64::EPSILON * expected_linear.abs().max_element().max(1.0)
                 || (desc.angular_velocity - original.state().angular_velocity()).length()
@@ -695,7 +801,7 @@ impl PhysicsWorld {
                             .max_element()
                             .max(1.0)
             {
-                return Err(ClusterError::IncompatibleMotion);
+                return Err(crate::Error::from(ClusterError::IncompatibleMotion));
             }
         }
 
@@ -719,7 +825,7 @@ impl PhysicsWorld {
                 .try_reserve(1)
                 .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         } else {
-            return Err(ClusterError::NotClustered);
+            return Err(crate::Error::from(ClusterError::NotClustered));
         }
         if !desc.colliders.is_empty() {
             self.colliders
@@ -768,7 +874,7 @@ impl PhysicsWorld {
                         self.remove_collider_internal(collider_id);
                     }
                     self.parts.remove(part_dense);
-                    return Err(map_cluster_world_error(error));
+                    return Err(error);
                 }
             }
         }
@@ -789,7 +895,7 @@ impl PhysicsWorld {
                     self.remove_collider_internal(collider_id);
                 }
                 self.parts.remove(part_dense);
-                return Err(ClusterError::StorageCapacityExceeded);
+                return Err(crate::Error::from(ClusterError::StorageCapacityExceeded));
             }
         };
         let weld = WeldId {
@@ -822,18 +928,23 @@ impl PhysicsWorld {
     ///
     /// The remaining parts must stay connected. Removing the final part is
     /// rejected so the owning body cannot outlive an empty cluster.
-    pub fn destroy_cluster_part(&mut self, part: PartId) -> Result<(), ClusterError> {
+    pub fn destroy_cluster_part(&mut self, part: PartId) -> Result<(), Error> {
+        self.destroy_cluster_part_inner(part)
+    }
+    fn destroy_cluster_part_inner(&mut self, part: PartId) -> Result<(), crate::Error> {
         let body = self
             .cluster_part(part)
-            .ok_or(ClusterError::InvalidPartId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidPartId))?
             .body();
-        let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+        let cluster = self
+            .cluster(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
         let original_root = cluster.root();
         if !cluster.parts().contains(&part) {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         if cluster.parts().len() == 1 {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
 
         let mut remaining_parts = Vec::new();
@@ -853,14 +964,16 @@ impl PhysicsWorld {
             .try_reserve(cluster.welds().len())
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         for &weld_id in cluster.welds() {
-            let weld = self.weld(weld_id).ok_or(ClusterError::InvalidTopology)?;
+            let weld = self
+                .weld(weld_id)
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             let (a, b) = weld.parts();
             if a == part || b == part {
                 removed_welds.push(weld_id);
             } else if remaining_set.contains(&a) && remaining_set.contains(&b) {
                 remaining_welds.push(weld_id);
             } else {
-                return Err(ClusterError::InvalidTopology);
+                return Err(crate::Error::from(ClusterError::InvalidTopology));
             }
         }
 
@@ -869,15 +982,17 @@ impl PhysicsWorld {
             adjacency.insert(id, Vec::new());
         }
         for &weld_id in &remaining_welds {
-            let weld = self.weld(weld_id).ok_or(ClusterError::InvalidTopology)?;
+            let weld = self
+                .weld(weld_id)
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             let (a, b) = weld.parts();
             adjacency
                 .get_mut(&a)
-                .ok_or(ClusterError::InvalidTopology)?
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?
                 .push(b);
             adjacency
                 .get_mut(&b)
-                .ok_or(ClusterError::InvalidTopology)?
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?
                 .push(a);
         }
         let mut visited = HashSet::new();
@@ -891,16 +1006,16 @@ impl PhysicsWorld {
             }
         }
         if visited.len() != remaining_parts.len() {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
 
         let removed_entry = self
             .cluster_part(part)
-            .ok_or(ClusterError::InvalidTopology)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         let removed_colliders = removed_entry.colliders().to_vec();
         for &collider in &removed_colliders {
             if self.collider_body(collider) != Some(body) {
-                return Err(ClusterError::InvalidTopology);
+                return Err(crate::Error::from(ClusterError::InvalidTopology));
             }
         }
 
@@ -909,24 +1024,29 @@ impl PhysicsWorld {
             .try_reserve(remaining_parts.len())
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         for &id in &remaining_parts {
-            let entry = self.cluster_part(id).ok_or(ClusterError::InvalidTopology)?;
+            let entry = self
+                .cluster_part(id)
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             values.push((entry.mass(), entry.local_transform()));
         }
         let aggregate = aggregate_mass(values.iter().map(|(mass, transform)| (mass, transform)))?;
-        let original = self.body(body).ok_or(ClusterError::InvalidBodyId)?.motion();
+        let original = self
+            .body(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
+            .motion();
         let new_center = original
             .state()
             .transform()
             .transform_point(aggregate.center_of_mass());
         if !new_center.is_finite() {
-            return Err(ClusterError::ArithmeticOverflow);
+            return Err(crate::Error::from(ClusterError::ArithmeticOverflow));
         }
         let mut prepared = original;
         if original.physics().body_type() == BodyType::Dynamic {
             let old_center = original
                 .world_center_of_mass()
-                .map_err(ClusterError::Body)?
-                .ok_or(ClusterError::InvalidMass)?;
+                .map_err(map_body_to_cluster)?
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidMass))?;
             let (velocity, omega) = velocity_field(
                 old_center,
                 original.state().linear_velocity(),
@@ -938,17 +1058,17 @@ impl PhysicsWorld {
                 .checked_sub(new_center)
                 .and_then(|offset| offset.checked_cross(force))
                 .and_then(|shift| original.forces().torque().checked_add(shift))
-                .ok_or(ClusterError::ArithmeticOverflow)?;
-            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
+            prepared.set_mass(aggregate).map_err(map_body_to_cluster)?;
             prepared
                 .set_linear_velocity(velocity)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             prepared
                 .set_angular_velocity(omega)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             if original.physics().mass() != Some(aggregate) {
-                prepared.apply_force(force).map_err(ClusterError::Body)?;
-                prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+                prepared.apply_force(force).map_err(map_body_to_cluster)?;
+                prepared.apply_torque(torque).map_err(map_body_to_cluster)?;
             }
         }
 
@@ -982,23 +1102,23 @@ impl PhysicsWorld {
         }
         for collider in removed_colliders {
             self.remove_collider_internal(collider)
-                .ok_or(ClusterError::InvalidTopology)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         }
         for weld in &removed_welds {
             self.welds
                 .remove(weld.dense)
-                .ok_or(ClusterError::InvalidTopology)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         }
         self.parts
             .remove(part.dense)
-            .ok_or(ClusterError::InvalidTopology)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
 
         let root = if original_root == part {
             remaining_parts
                 .iter()
                 .copied()
                 .min()
-                .ok_or(ClusterError::InvalidTopology)?
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?
         } else {
             original_root
         };
@@ -1006,7 +1126,7 @@ impl PhysicsWorld {
             .bodies
             .get_mut(body.dense)
             .and_then(|entry| entry.cluster.as_mut())
-            .ok_or(ClusterError::NotClustered)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
         cluster.root = root;
         cluster.parts.retain(|id| *id != part);
         cluster.welds.retain(|id| !removed_welds.contains(id));
@@ -1022,33 +1142,48 @@ impl PhysicsWorld {
     }
 
     /// Backward-compatible alias for [`Self::destroy_cluster_part`].
-    pub fn remove_cluster_part(&mut self, part: PartId) -> Result<(), ClusterError> {
-        self.destroy_cluster_part(part)
+    pub fn remove_cluster_part(&mut self, part: PartId) -> Result<(), Error> {
+        self.remove_cluster_part_inner(part)
+    }
+    fn remove_cluster_part_inner(&mut self, part: PartId) -> Result<(), crate::Error> {
+        self.destroy_cluster_part_inner(part)
     }
 
     /// Removes one weld and splits the graph when that edge disconnects it.
-    pub fn break_weld(&mut self, weld: WeldId) -> Result<Vec<BodyId>, ClusterError> {
-        let weld_entry = self.weld(weld).ok_or(ClusterError::InvalidWeldId)?;
+    pub fn break_weld(&mut self, weld: WeldId) -> Result<Vec<BodyId>, Error> {
+        self.break_weld_inner(weld)
+    }
+    fn break_weld_inner(&mut self, weld: WeldId) -> Result<Vec<BodyId>, crate::Error> {
+        let weld_entry = self
+            .weld(weld)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidWeldId))?;
         let body = self
             .cluster_part(weld_entry.part_a())
-            .ok_or(ClusterError::InvalidTopology)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?
             .body();
-        let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+        let cluster = self
+            .cluster(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
         if !cluster.welds().contains(&weld) {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         self.split_after_weld_removal(body, &[weld])
     }
 
     /// Removes all welds incident to a part and splits any resulting components.
-    pub fn detach_part(&mut self, part: PartId) -> Result<Vec<BodyId>, ClusterError> {
+    pub fn detach_part(&mut self, part: PartId) -> Result<Vec<BodyId>, Error> {
+        self.detach_part_inner(part)
+    }
+    fn detach_part_inner(&mut self, part: PartId) -> Result<Vec<BodyId>, crate::Error> {
         let body = self
             .cluster_part(part)
-            .ok_or(ClusterError::InvalidPartId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidPartId))?
             .body();
-        let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+        let cluster = self
+            .cluster(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
         if !cluster.parts().contains(&part) {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         let welds = cluster
             .welds()
@@ -1068,13 +1203,25 @@ impl PhysicsWorld {
         first: BodyId,
         second: BodyId,
         weld_desc: crate::cluster::WeldDesc,
-    ) -> Result<(), ClusterError> {
+    ) -> Result<(), Error> {
+        self.merge_clusters_inner(first, second, weld_desc)
+    }
+    fn merge_clusters_inner(
+        &mut self,
+        first: BodyId,
+        second: BodyId,
+        weld_desc: crate::cluster::WeldDesc,
+    ) -> Result<(), crate::Error> {
         if first == second {
-            return Err(ClusterError::InvalidBodyId);
+            return Err(crate::Error::from(ClusterError::InvalidBodyId));
         }
         weld_desc.validate()?;
-        let first_cluster = self.cluster(first).ok_or(ClusterError::NotClustered)?;
-        let second_cluster = self.cluster(second).ok_or(ClusterError::NotClustered)?;
+        let first_cluster = self
+            .cluster(first)
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
+        let second_cluster = self
+            .cluster(second)
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
         let has_wave = |cluster: &RigidCluster| {
             cluster.parts().iter().any(|part| {
                 matches!(
@@ -1086,20 +1233,20 @@ impl PhysicsWorld {
             })
         };
         if has_wave(first_cluster) && has_wave(second_cluster) {
-            return Err(ClusterError::UnsupportedGeometry);
+            return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
         }
         let first_tessellation = self
             .bodies
             .get(first.dense)
-            .ok_or(ClusterError::InvalidBodyId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
             .collider_tessellation;
         let second_tessellation = self
             .bodies
             .get(second.dense)
-            .ok_or(ClusterError::InvalidBodyId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
             .collider_tessellation;
         if first_tessellation != second_tessellation {
-            return Err(ClusterError::UnsupportedGeometry);
+            return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
         }
         let first_root = first_cluster.root();
         let second_root = second_cluster.root();
@@ -1108,15 +1255,15 @@ impl PhysicsWorld {
         let second_welds = second_cluster.welds().to_vec();
         let first_body = self
             .body(first)
-            .ok_or(ClusterError::InvalidBodyId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
             .motion();
         let second_body = self
             .body(second)
-            .ok_or(ClusterError::InvalidBodyId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
             .motion();
         let first_type = first_body.physics().body_type();
         if first_type != second_body.physics().body_type() {
-            return Err(ClusterError::IncompatibleMotion);
+            return Err(crate::Error::from(ClusterError::IncompatibleMotion));
         }
         let first_pose = first_body.state().transform();
         let second_pose = second_body.state().transform();
@@ -1127,11 +1274,11 @@ impl PhysicsWorld {
 
         let first_root_transform = self
             .cluster_part(first_root)
-            .ok_or(ClusterError::InvalidTopology)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?
             .local_transform();
         let second_root_transform = self
             .cluster_part(second_root)
-            .ok_or(ClusterError::InvalidTopology)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?
             .local_transform();
         let second_root_in_first = relative
             .compose(&second_root_transform)
@@ -1149,20 +1296,20 @@ impl PhysicsWorld {
                 .checked_cross(
                     weld_point
                         .checked_sub(first_pose.translation())
-                        .ok_or(ClusterError::ArithmeticOverflow)?,
+                        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?,
                 )
                 .and_then(|value| first_body.state().linear_velocity().checked_add(value))
-                .ok_or(ClusterError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
             let second_velocity = second_body
                 .state()
                 .angular_velocity()
                 .checked_cross(
                     weld_point
                         .checked_sub(second_pose.translation())
-                        .ok_or(ClusterError::ArithmeticOverflow)?,
+                        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?,
                 )
                 .and_then(|value| second_body.state().linear_velocity().checked_add(value))
-                .ok_or(ClusterError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
             let scale = first_velocity
                 .abs()
                 .max_element()
@@ -1171,10 +1318,10 @@ impl PhysicsWorld {
             if first_velocity
                 .checked_sub(second_velocity)
                 .and_then(Vec3::checked_length)
-                .ok_or(ClusterError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?
                 > 128.0 * f64::EPSILON * scale
             {
-                return Err(ClusterError::IncompatibleMotion);
+                return Err(crate::Error::from(ClusterError::IncompatibleMotion));
             }
             let first_omega = first_body.state().angular_velocity();
             let second_omega = second_body.state().angular_velocity();
@@ -1186,10 +1333,10 @@ impl PhysicsWorld {
             if first_omega
                 .checked_sub(second_omega)
                 .and_then(Vec3::checked_length)
-                .ok_or(ClusterError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?
                 > 128.0 * f64::EPSILON * omega_scale
             {
-                return Err(ClusterError::IncompatibleMotion);
+                return Err(crate::Error::from(ClusterError::IncompatibleMotion));
             }
         }
 
@@ -1201,7 +1348,7 @@ impl PhysicsWorld {
         for &part in &second_parts {
             let entry = self
                 .cluster_part(part)
-                .ok_or(ClusterError::InvalidTopology)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             let local_transform = relative
                 .compose(&entry.local_transform())
                 .map_err(ClusterError::Transform)?;
@@ -1211,9 +1358,9 @@ impl PhysicsWorld {
                     .colliders
                     .get(collider.dense)
                     .filter(|entry| entry.body == second)
-                    .ok_or(ClusterError::InvalidTopology)?;
+                    .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
                 if first_type == BodyType::Dynamic && !collider_entry.collider.shape().is_convex() {
-                    return Err(ClusterError::UnsupportedGeometry);
+                    return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
                 }
                 self.validate_collider_rebind(collider, first)?;
                 let local_transform = relative
@@ -1230,13 +1377,13 @@ impl PhysicsWorld {
         for &part in &first_parts {
             let entry = self
                 .cluster_part(part)
-                .ok_or(ClusterError::InvalidTopology)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             values.push((entry.mass(), entry.local_transform()));
         }
         for &(part, local_transform) in &transformed_parts {
             let entry = self
                 .cluster_part(part)
-                .ok_or(ClusterError::InvalidTopology)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             values.push((entry.mass(), local_transform));
         }
         let aggregate = aggregate_mass(values.iter().map(|(mass, transform)| (mass, transform)))?;
@@ -1245,21 +1392,21 @@ impl PhysicsWorld {
             let first_mass = first_body
                 .physics()
                 .mass()
-                .ok_or(ClusterError::InvalidMass)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidMass))?;
             let second_mass = second_body
                 .physics()
                 .mass()
-                .ok_or(ClusterError::InvalidMass)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidMass))?;
             let origin = first_body
                 .world_center_of_mass()
-                .map_err(ClusterError::Body)?
-                .ok_or(ClusterError::InvalidMass)?;
+                .map_err(map_body_to_cluster)?
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidMass))?;
             let (second_center, second_inertia) = world_properties(second_mass, second_pose)?;
             let second_p = second_body
                 .state()
                 .linear_velocity()
                 .checked_mul_scalar(second_mass.mass())
-                .ok_or(ClusterError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
             let second_h = second_inertia
                 .checked_mul_vector(second_body.state().angular_velocity())
                 .and_then(|spin| {
@@ -1268,7 +1415,7 @@ impl PhysicsWorld {
                         .and_then(|offset| offset.checked_cross(second_p))
                         .and_then(|orbital| spin.checked_add(orbital))
                 })
-                .ok_or(ClusterError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
             let (velocity, omega) = transfer_motion(
                 first_mass,
                 first_pose,
@@ -1286,7 +1433,7 @@ impl PhysicsWorld {
                 .forces()
                 .force()
                 .checked_add(second_body.forces().force())
-                .ok_or(ClusterError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
             let torque = first_body
                 .forces()
                 .torque()
@@ -1303,21 +1450,21 @@ impl PhysicsWorld {
                         .and_then(|offset| offset.checked_cross(second_body.forces().force()))
                         .and_then(|shift| value.checked_add(shift))
                 })
-                .ok_or(ClusterError::ArithmeticOverflow)?;
-            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
+            prepared.set_mass(aggregate).map_err(map_body_to_cluster)?;
             prepared
                 .set_linear_velocity(velocity)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             prepared
                 .set_angular_velocity(omega)
-                .map_err(ClusterError::Body)?;
-            prepared.apply_force(force).map_err(ClusterError::Body)?;
-            prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
+            prepared.apply_force(force).map_err(map_body_to_cluster)?;
+            prepared.apply_torque(torque).map_err(map_body_to_cluster)?;
         }
 
         for &(part, _) in &transformed_parts {
             if self.parts.get(part.dense).is_none() {
-                return Err(ClusterError::InvalidTopology);
+                return Err(crate::Error::from(ClusterError::InvalidTopology));
             }
         }
         if self
@@ -1326,7 +1473,7 @@ impl PhysicsWorld {
             .and_then(|entry| entry.cluster.as_ref())
             .is_none()
         {
-            return Err(ClusterError::NotClustered);
+            return Err(crate::Error::from(ClusterError::NotClustered));
         }
         let mut joint_updates = Vec::new();
         for (dense, entry) in self.joints.iter() {
@@ -1379,14 +1526,14 @@ impl PhysicsWorld {
         self.bodies
             .get_mut(first.dense)
             .and_then(|entry| entry.cluster.as_mut())
-            .ok_or(ClusterError::NotClustered)?
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?
             .parts
             .try_reserve(second_parts.len())
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         self.bodies
             .get_mut(first.dense)
             .and_then(|entry| entry.cluster.as_mut())
-            .ok_or(ClusterError::NotClustered)?
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?
             .welds
             .try_reserve(second_welds.len() + 1)
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
@@ -1475,7 +1622,7 @@ impl PhysicsWorld {
         &mut self,
         body: BodyId,
         removed_welds: &[WeldId],
-    ) -> Result<Vec<BodyId>, ClusterError> {
+    ) -> Result<Vec<BodyId>, crate::Error> {
         let prepared = self.prepare_weld_split(body, removed_welds)?;
         self.commit_weld_split(prepared)
     }
@@ -1486,8 +1633,11 @@ impl PhysicsWorld {
         &self,
         body: BodyId,
         removed_welds: &[WeldId],
-    ) -> Result<PreparedWeldSplit, ClusterError> {
-        let motion = self.body(body).ok_or(ClusterError::InvalidBodyId)?.motion();
+    ) -> Result<PreparedWeldSplit, crate::Error> {
+        let motion = self
+            .body(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
+            .motion();
         self.prepare_weld_split_for_motion(body, removed_welds, motion)
     }
 
@@ -1500,8 +1650,10 @@ impl PhysicsWorld {
         body: BodyId,
         removed_welds: &[WeldId],
         original: BodyMotion,
-    ) -> Result<PreparedWeldSplit, ClusterError> {
-        let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+    ) -> Result<PreparedWeldSplit, crate::Error> {
+        let cluster = self
+            .cluster(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
         let original_root = cluster.root();
         let removed_set = removed_welds.iter().copied().collect::<HashSet<_>>();
         if removed_set.len() != removed_welds.len()
@@ -1509,7 +1661,7 @@ impl PhysicsWorld {
                 .iter()
                 .any(|weld| !cluster.welds().contains(weld))
         {
-            return Err(ClusterError::InvalidWeldId);
+            return Err(crate::Error::from(ClusterError::InvalidWeldId));
         }
         let mut adjacency = HashMap::<PartId, Vec<PartId>>::new();
         for &part in cluster.parts() {
@@ -1517,18 +1669,20 @@ impl PhysicsWorld {
         }
         let mut remaining_welds = Vec::new();
         for &weld_id in cluster.welds() {
-            let weld = self.weld(weld_id).ok_or(ClusterError::InvalidTopology)?;
+            let weld = self
+                .weld(weld_id)
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             if removed_set.contains(&weld_id) {
                 continue;
             }
             let (a, b) = weld.parts();
             adjacency
                 .get_mut(&a)
-                .ok_or(ClusterError::InvalidTopology)?
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?
                 .push(b);
             adjacency
                 .get_mut(&b)
-                .ok_or(ClusterError::InvalidTopology)?
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?
                 .push(a);
             remaining_welds.push(weld_id);
         }
@@ -1561,7 +1715,7 @@ impl PhysicsWorld {
         let root_index = components
             .iter()
             .position(|component| component.contains(&original_root))
-            .ok_or(ClusterError::InvalidTopology)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         components.swap(0, root_index);
 
         let mut prepared_bodies = Vec::new();
@@ -1576,17 +1730,17 @@ impl PhysicsWorld {
             for &part in component {
                 let entry = self
                     .cluster_part(part)
-                    .ok_or(ClusterError::InvalidTopology)?;
+                    .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
                 for &collider in entry.colliders() {
                     let collider_entry = self
                         .colliders
                         .get(collider.dense)
                         .filter(|entry| entry.body == body)
-                        .ok_or(ClusterError::InvalidTopology)?;
+                        .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
                     if original.physics().body_type() == BodyType::Dynamic
                         && !collider_entry.collider.shape().is_convex()
                     {
-                        return Err(ClusterError::UnsupportedGeometry);
+                        return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
                     }
                 }
                 values.push((entry.mass(), entry.local_transform()));
@@ -1597,14 +1751,14 @@ impl PhysicsWorld {
             if original.physics().body_type() == BodyType::Dynamic {
                 let old_center = original
                     .world_center_of_mass()
-                    .map_err(ClusterError::Body)?
-                    .ok_or(ClusterError::InvalidMass)?;
+                    .map_err(map_body_to_cluster)?
+                    .ok_or_else(|| crate::Error::from(ClusterError::InvalidMass))?;
                 let new_center = original
                     .state()
                     .transform()
                     .transform_point(aggregate.center_of_mass());
                 if !new_center.is_finite() {
-                    return Err(ClusterError::ArithmeticOverflow);
+                    return Err(crate::Error::from(ClusterError::ArithmeticOverflow));
                 }
                 let (velocity, omega) = velocity_field(
                     old_center,
@@ -1612,13 +1766,13 @@ impl PhysicsWorld {
                     original.state().angular_velocity(),
                     new_center,
                 )?;
-                prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+                prepared.set_mass(aggregate).map_err(map_body_to_cluster)?;
                 prepared
                     .set_linear_velocity(velocity)
-                    .map_err(ClusterError::Body)?;
+                    .map_err(map_body_to_cluster)?;
                 prepared
                     .set_angular_velocity(omega)
-                    .map_err(ClusterError::Body)?;
+                    .map_err(map_body_to_cluster)?;
             }
             prepared_bodies.push(prepared);
         }
@@ -1628,14 +1782,14 @@ impl PhysicsWorld {
             for &part in component {
                 let colliders = self
                     .cluster_part(part)
-                    .ok_or(ClusterError::InvalidTopology)?
+                    .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?
                     .colliders()
                     .to_vec();
                 let mut collider_transforms = Vec::with_capacity(colliders.len());
                 for collider in colliders {
                     let local_transform = self
                         .collider(collider)
-                        .ok_or(ClusterError::InvalidTopology)?
+                        .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?
                         .local_transform();
                     self.validate_collider_source(collider)?;
                     collider_transforms.push((collider, local_transform));
@@ -1661,12 +1815,14 @@ impl PhysicsWorld {
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         component_welds.resize_with(components.len(), Vec::new);
         for &weld_id in &remaining_welds {
-            let weld = self.weld(weld_id).ok_or(ClusterError::InvalidTopology)?;
+            let weld = self
+                .weld(weld_id)
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             let index = *part_components
                 .get(&weld.part_a())
-                .ok_or(ClusterError::InvalidTopology)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             if part_components.get(&weld.part_b()) != Some(&index) {
-                return Err(ClusterError::InvalidTopology);
+                return Err(crate::Error::from(ClusterError::InvalidTopology));
             }
             component_welds[index]
                 .try_reserve(1)
@@ -1682,7 +1838,7 @@ impl PhysicsWorld {
             prepared_clusters.push(RigidCluster { root, parts, welds });
         }
         if prepared_clusters.is_empty() {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         let original_aerodynamics = self.cluster_aerodynamic_surfaces(body)?;
         let mut component_aerodynamics = vec![Vec::new(); prepared_clusters.len()];
@@ -1700,7 +1856,7 @@ impl PhysicsWorld {
                 AerodynamicTarget::Part(part) => (
                     *part_components
                         .get(&part)
-                        .ok_or(ClusterError::InvalidTopology)?,
+                        .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?,
                     surface,
                 ),
             };
@@ -1714,7 +1870,7 @@ impl PhysicsWorld {
         let collider_tessellation = self
             .bodies
             .get(body.dense)
-            .ok_or(ClusterError::InvalidBodyId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
             .collider_tessellation;
         let entries = prepared_bodies
             .iter()
@@ -1739,7 +1895,9 @@ impl PhysicsWorld {
             .try_reserve_exact(prepared_clusters.len())
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         let mut clusters = prepared_clusters.into_iter();
-        let root_cluster = clusters.next().ok_or(ClusterError::InvalidTopology)?;
+        let root_cluster = clusters
+            .next()
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         let mut removed = Vec::new();
         removed
             .try_reserve_exact(removed_welds.len())
@@ -1761,14 +1919,16 @@ impl PhysicsWorld {
 
     /// Commits a plan before any other world mutation. Batch insertion fails
     /// without mutation; subsequent operations rely on preparation invariants.
-    fn commit_weld_split(&mut self, plan: PreparedWeldSplit) -> Result<Vec<BodyId>, ClusterError> {
+    fn commit_weld_split(&mut self, plan: PreparedWeldSplit) -> Result<Vec<BodyId>, crate::Error> {
         let mut plans = Vec::new();
         plans
             .try_reserve_exact(1)
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         plans.push(plan);
         let mut results = self.commit_weld_splits(plans)?;
-        results.pop().ok_or(ClusterError::InvalidTopology)
+        results
+            .pop()
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))
     }
 
     /// Plans must refer to distinct clusters prepared against the same unchanged
@@ -1776,7 +1936,7 @@ impl PhysicsWorld {
     fn commit_weld_splits(
         &mut self,
         plans: Vec<PreparedWeldSplit>,
-    ) -> Result<Vec<Vec<BodyId>>, ClusterError> {
+    ) -> Result<Vec<Vec<BodyId>>, crate::Error> {
         let staged = self.insert_weld_split_bodies(plans)?;
         Ok(self.finish_weld_splits(staged))
     }
@@ -1784,7 +1944,7 @@ impl PhysicsWorld {
     pub(super) fn insert_weld_split_bodies(
         &mut self,
         mut plans: Vec<PreparedWeldSplit>,
-    ) -> Result<InsertedWeldSplits, ClusterError> {
+    ) -> Result<InsertedWeldSplits, crate::Error> {
         let mut bodies = HashSet::new();
         bodies
             .try_reserve(plans.len())
@@ -1792,11 +1952,11 @@ impl PhysicsWorld {
         let mut count = 0usize;
         for plan in &plans {
             if !bodies.insert(plan.body) {
-                return Err(ClusterError::InvalidTopology);
+                return Err(crate::Error::from(ClusterError::InvalidTopology));
             }
             count = count
                 .checked_add(plan.entries.len())
-                .ok_or(ClusterError::StorageCapacityExceeded)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::StorageCapacityExceeded))?;
         }
         let mut entries = Vec::new();
         entries
@@ -1928,9 +2088,17 @@ impl PhysicsWorld {
         part: PartId,
         mass: MassProperties,
         mode: MassChangeMode,
-    ) -> Result<(), ClusterError> {
+    ) -> Result<(), Error> {
+        self.set_part_mass_checked(part, mass, mode)
+    }
+    fn set_part_mass_checked(
+        &mut self,
+        part: PartId,
+        mass: MassProperties,
+        mode: MassChangeMode,
+    ) -> Result<(), crate::Error> {
         if mode == MassChangeMode::ConserveRemainingMomentum {
-            return Err(ClusterError::InvalidMotion);
+            return Err(crate::Error::from(ClusterError::InvalidMotion));
         }
         self.set_part_mass_inner(part, mass, None)
     }
@@ -1941,7 +2109,15 @@ impl PhysicsWorld {
         part: PartId,
         mass: MassProperties,
         transfer: MassTransfer,
-    ) -> Result<(), ClusterError> {
+    ) -> Result<(), Error> {
+        self.set_part_mass_with_transfer_inner(part, mass, transfer)
+    }
+    fn set_part_mass_with_transfer_inner(
+        &mut self,
+        part: PartId,
+        mass: MassProperties,
+        transfer: MassTransfer,
+    ) -> Result<(), crate::Error> {
         transfer.validate()?;
         self.set_part_mass_inner(part, mass, Some(transfer))
     }
@@ -1951,34 +2127,41 @@ impl PhysicsWorld {
         part: PartId,
         mass: MassProperties,
         transfer: Option<MassTransfer>,
-    ) -> Result<(), ClusterError> {
+    ) -> Result<(), crate::Error> {
         let body = self
             .cluster_part(part)
-            .ok_or(ClusterError::InvalidPartId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidPartId))?
             .body();
-        let cluster = self.cluster(body).ok_or(ClusterError::NotClustered)?;
+        let cluster = self
+            .cluster(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::NotClustered))?;
         if !cluster.parts().contains(&part) {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         let mut values = Vec::new();
         values
             .try_reserve(cluster.parts().len())
             .map_err(|_| ClusterError::StorageCapacityExceeded)?;
         for &id in cluster.parts() {
-            let entry = self.cluster_part(id).ok_or(ClusterError::InvalidTopology)?;
+            let entry = self
+                .cluster_part(id)
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
             values.push((
                 if id == part { mass } else { entry.mass() },
                 entry.local_transform(),
             ));
         }
         let aggregate = aggregate_mass(values.iter().map(|(mass, transform)| (mass, transform)))?;
-        let original = self.body(body).ok_or(ClusterError::InvalidBodyId)?.motion();
+        let original = self
+            .body(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?
+            .motion();
         let new_center = original
             .state()
             .transform()
             .transform_point(aggregate.center_of_mass());
         if !new_center.is_finite() {
-            return Err(ClusterError::ArithmeticOverflow);
+            return Err(crate::Error::from(ClusterError::ArithmeticOverflow));
         }
         if transfer.is_none()
             && self
@@ -1988,16 +2171,19 @@ impl PhysicsWorld {
             return Ok(());
         }
         if transfer.is_some() && original.physics().body_type() != BodyType::Dynamic {
-            return Err(ClusterError::IncompatibleMotion);
+            return Err(crate::Error::from(ClusterError::IncompatibleMotion));
         }
         let mut prepared = original;
         if original.physics().body_type() == BodyType::Dynamic {
             let old_center = original
                 .world_center_of_mass()
-                .map_err(ClusterError::Body)?
-                .ok_or(ClusterError::InvalidMass)?;
+                .map_err(map_body_to_cluster)?
+                .ok_or_else(|| crate::Error::from(ClusterError::InvalidMass))?;
             let (velocity, omega) = if let Some(transfer) = transfer {
-                let old_mass = original.physics().mass().ok_or(ClusterError::InvalidMass)?;
+                let old_mass = original
+                    .physics()
+                    .mass()
+                    .ok_or_else(|| crate::Error::from(ClusterError::InvalidMass))?;
                 let pose = original.state().transform();
                 transfer_motion(
                     old_mass,
@@ -2023,29 +2209,29 @@ impl PhysicsWorld {
                 .checked_sub(new_center)
                 .and_then(|offset| offset.checked_cross(force))
                 .and_then(|shift| original.forces().torque().checked_add(shift))
-                .ok_or(ClusterError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
             let aggregate_changed = original.physics().mass() != Some(aggregate);
-            prepared.set_mass(aggregate).map_err(ClusterError::Body)?;
+            prepared.set_mass(aggregate).map_err(map_body_to_cluster)?;
             prepared
                 .set_linear_velocity(velocity)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             prepared
                 .set_angular_velocity(omega)
-                .map_err(ClusterError::Body)?;
+                .map_err(map_body_to_cluster)?;
             if aggregate_changed {
-                prepared.apply_force(force).map_err(ClusterError::Body)?;
-                prepared.apply_torque(torque).map_err(ClusterError::Body)?;
+                prepared.apply_force(force).map_err(map_body_to_cluster)?;
+                prepared.apply_torque(torque).map_err(map_body_to_cluster)?;
             }
         }
         let prepared_surfaces = self.prepare_cluster_surface_rebase(body, &original, &prepared)?;
         let target = self
             .parts
             .get_mut(part.dense)
-            .ok_or(ClusterError::InvalidTopology)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         let entry = self
             .bodies
             .get_mut(body.dense)
-            .ok_or(ClusterError::InvalidBodyId)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?;
         target.mass = mass;
         Self::commit_cluster_surface_rebase(&mut entry.body, prepared_surfaces);
         entry.body.set_motion(prepared);
@@ -2075,8 +2261,10 @@ impl PhysicsWorld {
     fn cluster_aerodynamic_surfaces(
         &self,
         body: BodyId,
-    ) -> Result<Vec<AerodynamicSurface>, ClusterError> {
-        let body = self.body(body).ok_or(ClusterError::InvalidBodyId)?;
+    ) -> Result<Vec<AerodynamicSurface>, crate::Error> {
+        let body = self
+            .body(body)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?;
         let primary = match body.aerodynamics() {
             Aerodynamics::None => None,
             Aerodynamics::Simple(properties) => Some(AerodynamicSurface::new(*properties)),
@@ -2086,7 +2274,7 @@ impl PhysicsWorld {
             | Aerodynamics::Wing(_)
             | Aerodynamics::Wings(_)
             | Aerodynamics::Hull(_) => {
-                return Err(ClusterError::UnsupportedGeometry);
+                return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
             }
         };
         let mut surfaces = Vec::new();
@@ -2107,7 +2295,7 @@ impl PhysicsWorld {
         body: BodyId,
         original: &BodyMotion,
         prepared: &BodyMotion,
-    ) -> Result<Vec<AerodynamicSurface>, ClusterError> {
+    ) -> Result<Vec<AerodynamicSurface>, crate::Error> {
         let mut surfaces = self.cluster_aerodynamic_surfaces(body)?;
         if original.physics().body_type() == BodyType::Dynamic {
             for surface in &mut surfaces {
@@ -2124,27 +2312,27 @@ impl PhysicsWorld {
         collider: ColliderId,
         body: BodyId,
         local_transform: Transform,
-    ) -> Result<(), ClusterError> {
+    ) -> Result<(), crate::Error> {
         self.validate_collider_rebind(collider, body)?;
         self.rebind_collider_prepared(collider, body, local_transform);
         Ok(())
     }
 
-    fn validate_collider_source(&self, collider: ColliderId) -> Result<(), ClusterError> {
+    fn validate_collider_source(&self, collider: ColliderId) -> Result<(), crate::Error> {
         if collider.world != self.world_id {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         let entry = self
             .colliders
             .get(collider.dense)
-            .ok_or(ClusterError::InvalidTopology)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         let old = entry.body;
         let prev = entry.prev;
         let next = entry.next;
         let old_body = self
             .bodies
             .get(old.dense)
-            .ok_or(ClusterError::InvalidTopology)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         if old.world != self.world_id
             || (prev.is_none() && old_body.first_collider != Some(collider))
             || prev.is_some_and(|id| {
@@ -2158,7 +2346,7 @@ impl PhysicsWorld {
                     .is_none_or(|other| other.body != old || other.prev != Some(collider))
             })
         {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         Ok(())
     }
@@ -2167,23 +2355,23 @@ impl PhysicsWorld {
         &self,
         collider: ColliderId,
         body: BodyId,
-    ) -> Result<(), ClusterError> {
+    ) -> Result<(), crate::Error> {
         if collider.world != self.world_id || body.world != self.world_id {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         let target = self
             .bodies
             .get(body.dense)
-            .ok_or(ClusterError::InvalidBodyId)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidBodyId))?;
         let target_first = target.first_collider;
         let entry = self
             .colliders
             .get(collider.dense)
-            .ok_or(ClusterError::InvalidTopology)?;
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
         if target.body.physics().body_type() == BodyType::Dynamic
             && !entry.collider.shape().is_convex()
         {
-            return Err(ClusterError::UnsupportedGeometry);
+            return Err(crate::Error::from(ClusterError::UnsupportedGeometry));
         }
         self.validate_collider_source(collider)?;
         if target_first.is_some_and(|id| {
@@ -2191,7 +2379,7 @@ impl PhysicsWorld {
                 .get(id.dense)
                 .is_none_or(|other| other.body != body || other.prev.is_some())
         }) {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         Ok(())
     }
@@ -2301,10 +2489,19 @@ impl PhysicsWorld {
         &mut self,
         weld: WeldId,
         strength: Option<crate::cluster::impulse::ImpulseStrength>,
-    ) -> Result<(), ClusterError> {
-        let entry = self.weld(weld).ok_or(ClusterError::InvalidWeldId)?;
-        if let Some(value) = strength {
-            if matches!(
+    ) -> Result<(), Error> {
+        self.set_weld_impulse_strength_inner(weld, strength)
+    }
+    fn set_weld_impulse_strength_inner(
+        &mut self,
+        weld: WeldId,
+        strength: Option<crate::cluster::impulse::ImpulseStrength>,
+    ) -> Result<(), crate::Error> {
+        let entry = self
+            .weld(weld)
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidWeldId))?;
+        if let Some(value) = strength
+            && (matches!(
                 entry.desc().strength,
                 crate::cluster::WeldStrength::Unbreakable
             ) || value
@@ -2312,17 +2509,16 @@ impl PhysicsWorld {
                     linear: Vec3::ZERO,
                     angular: Vec3::ZERO,
                 })
-                .is_err()
-            {
-                return Err(ClusterError::InvalidWeld);
-            }
+                .is_err())
+        {
+            return Err(crate::Error::from(ClusterError::InvalidWeld));
         }
         if entry.impulse_strength() == strength {
             return Ok(());
         }
         self.welds
             .get_mut(weld.dense)
-            .ok_or(ClusterError::InvalidWeldId)?
+            .ok_or_else(|| crate::Error::from(ClusterError::InvalidWeldId))?
             .impulse_strength = strength;
         self.body_revision = self.body_revision.wrapping_add(1);
         Ok(())
@@ -2332,7 +2528,10 @@ impl PhysicsWorld {
         Some(self.cluster_part(part)?.body())
     }
 
-    pub fn validate_clusters(&self) -> Result<(), ClusterError> {
+    pub fn validate_clusters(&self) -> Result<(), Error> {
+        self.validate_clusters_inner()
+    }
+    fn validate_clusters_inner(&self) -> Result<(), crate::Error> {
         let mut all_parts = HashSet::new();
         let mut all_welds = HashSet::new();
         let mut all_colliders = HashSet::new();
@@ -2349,26 +2548,28 @@ impl PhysicsWorld {
             for &part_id in cluster.parts() {
                 let part = self
                     .cluster_part(part_id)
-                    .ok_or(ClusterError::InvalidTopology)?;
+                    .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
                 if part.body() != body || !all_parts.insert(part_id) {
-                    return Err(ClusterError::InvalidTopology);
+                    return Err(crate::Error::from(ClusterError::InvalidTopology));
                 }
                 adjacency.insert(part_id, Vec::new());
                 for &collider in part.colliders() {
                     if self.collider_body(collider) != Some(body) || !all_colliders.insert(collider)
                     {
-                        return Err(ClusterError::InvalidTopology);
+                        return Err(crate::Error::from(ClusterError::InvalidTopology));
                     }
                     if !part_colliders.insert(collider) {
-                        return Err(ClusterError::InvalidTopology);
+                        return Err(crate::Error::from(ClusterError::InvalidTopology));
                     }
                 }
             }
             if !adjacency.contains_key(&cluster.root()) {
-                return Err(ClusterError::InvalidTopology);
+                return Err(crate::Error::from(ClusterError::InvalidTopology));
             }
             for &weld_id in cluster.welds() {
-                let weld = self.weld(weld_id).ok_or(ClusterError::InvalidTopology)?;
+                let weld = self
+                    .weld(weld_id)
+                    .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
                 weld.desc().validate()?;
                 let (a, b) = weld.parts();
                 if a == b
@@ -2376,7 +2577,7 @@ impl PhysicsWorld {
                     || !adjacency.contains_key(&a)
                     || !adjacency.contains_key(&b)
                 {
-                    return Err(ClusterError::InvalidTopology);
+                    return Err(crate::Error::from(ClusterError::InvalidTopology));
                 }
                 if let Some(edges) = adjacency.get_mut(&a) {
                     edges.push(b);
@@ -2395,31 +2596,31 @@ impl PhysicsWorld {
                 }
             }
             if visited.len() != adjacency.len() {
-                return Err(ClusterError::InvalidTopology);
+                return Err(crate::Error::from(ClusterError::InvalidTopology));
             }
             let mut collider = entry.first_collider;
             let mut previous = None;
             let mut linked_colliders = HashSet::new();
             while let Some(id) = collider {
                 if !all_colliders.contains(&id) || !linked_colliders.insert(id) {
-                    return Err(ClusterError::InvalidTopology);
+                    return Err(crate::Error::from(ClusterError::InvalidTopology));
                 }
                 let collider_entry = self
                     .colliders
                     .get(id.dense)
-                    .ok_or(ClusterError::InvalidTopology)?;
+                    .ok_or_else(|| crate::Error::from(ClusterError::InvalidTopology))?;
                 if collider_entry.body != body || collider_entry.prev != previous {
-                    return Err(ClusterError::InvalidTopology);
+                    return Err(crate::Error::from(ClusterError::InvalidTopology));
                 }
                 previous = Some(id);
                 collider = collider_entry.next;
             }
             if part_colliders != linked_colliders {
-                return Err(ClusterError::InvalidTopology);
+                return Err(crate::Error::from(ClusterError::InvalidTopology));
             }
         }
         if all_parts.len() != self.parts.len() || all_welds.len() != self.welds.len() {
-            return Err(ClusterError::InvalidTopology);
+            return Err(crate::Error::from(ClusterError::InvalidTopology));
         }
         Ok(())
     }
@@ -2429,7 +2630,7 @@ fn validate_weld_frames(
     transform_a: Transform,
     transform_b: Transform,
     weld: crate::cluster::WeldDesc,
-) -> Result<(), ClusterError> {
+) -> Result<(), crate::Error> {
     let frame_a =
         super::transform_joint_frame(transform_a, weld.frame_a).map_err(ClusterError::Transform)?;
     let frame_b =
@@ -2437,7 +2638,7 @@ fn validate_weld_frames(
     let anchor_delta = frame_a
         .local_anchor
         .checked_sub(frame_b.local_anchor)
-        .ok_or(ClusterError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(ClusterError::ArithmeticOverflow))?;
     let anchor_scale = frame_a
         .local_anchor
         .abs()
@@ -2446,7 +2647,7 @@ fn validate_weld_frames(
         .max(1.0);
     let tolerance = 128.0 * f64::EPSILON * anchor_scale;
     if anchor_delta.length() > tolerance {
-        return Err(ClusterError::IncompatibleAnchors);
+        return Err(crate::Error::from(ClusterError::IncompatibleAnchors));
     }
     let rotation_dot = frame_a.local_rotation.x.mul_add(
         frame_b.local_rotation.x,
@@ -2459,23 +2660,20 @@ fn validate_weld_frames(
         ),
     );
     if (rotation_dot.abs() - 1.0).abs() > 128.0 * f64::EPSILON {
-        return Err(ClusterError::IncompatibleAnchors);
+        return Err(crate::Error::from(ClusterError::IncompatibleAnchors));
     }
     Ok(())
-}
-
-fn map_cluster_world_error(error: super::WorldError) -> ClusterError {
-    match error {
-        super::WorldError::Collision(error) => ClusterError::Collision(error),
-        super::WorldError::DensePoolCapacityExceeded
-        | super::WorldError::DensePoolIndexOverflow
-        | super::WorldError::DensePoolInvalidFreeList
-        | super::WorldError::WorldIdExhausted => ClusterError::StorageCapacityExceeded,
-        super::WorldError::InvalidBodyId => ClusterError::InvalidBodyId,
-        _ => ClusterError::InvalidTopology,
-    }
 }
 
 #[cfg(test)]
 #[path = "cluster_tests.rs"]
 mod tests;
+
+fn map_body_to_cluster(error: crate::Error) -> ClusterError {
+    match error.downcast_ref::<crate::rigid_body::BodyError>() {
+        Some(error) => ClusterError::Body(crate::Error::from(*error)),
+        None => ClusterError::Body(crate::Error::from(
+            crate::rigid_body::BodyError::NonFiniteValue,
+        )),
+    }
+}

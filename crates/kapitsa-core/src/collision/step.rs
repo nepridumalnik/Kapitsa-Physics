@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::{
-    CollisionError, CollisionEvent, CollisionInteraction, CollisionPair, CollisionProxy,
+    CollisionEvent, CollisionInteraction, CollisionPair, CollisionProxy,
     ccd::CcdCandidateToi,
     manifold::ContactManifold,
     solver::{SolverBody, SolverManifold, SolverWorkspace},
@@ -55,7 +55,7 @@ pub(crate) struct CcdIslandResult {
     pub(crate) impact: Option<CcdIslandImpactResult>,
     pub(crate) handled: bool,
     pub(crate) work_cost: usize,
-    pub(crate) worker_error: Option<CollisionError>,
+    pub(crate) worker_error: Option<crate::Error>,
     pub(crate) solver: SolverWorkspace,
 }
 

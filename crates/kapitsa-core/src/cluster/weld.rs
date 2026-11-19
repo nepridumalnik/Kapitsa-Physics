@@ -27,7 +27,7 @@ pub struct WeldDesc {
 }
 
 impl WeldDesc {
-    pub(crate) fn validate(&self) -> Result<(), crate::world::ClusterError> {
+    pub(crate) fn validate(&self) -> Result<(), crate::Error> {
         use crate::world::ClusterError;
         self.frame_a
             .validate()
@@ -40,7 +40,7 @@ impl WeldDesc {
             || !self.stiffness.angular.is_finite()
             || self.stiffness.angular <= 0.0
         {
-            return Err(ClusterError::InvalidWeld);
+            return Err(crate::Error::from(ClusterError::InvalidWeld));
         }
         if let WeldStrength::Breakable {
             max_force,
@@ -48,14 +48,14 @@ impl WeldDesc {
         } = self.strength
         {
             if max_force.is_none() && max_torque.is_none() {
-                return Err(ClusterError::InvalidWeld);
+                return Err(crate::Error::from(ClusterError::InvalidWeld));
             }
             if [max_force, max_torque]
                 .into_iter()
                 .flatten()
                 .any(|limit| !limit.is_finite() || limit <= 0.0)
             {
-                return Err(ClusterError::InvalidWeld);
+                return Err(crate::Error::from(ClusterError::InvalidWeld));
             }
         }
         Ok(())

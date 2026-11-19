@@ -1,8 +1,14 @@
 [package]
 name = "kapitsa-math"
+description = "f64 vector, matrix, and quaternion primitives used by the Kapitsa physics engine."
 edition = "2024"
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["math", "linear-algebra", "physics", "geometry"]
+categories = ["mathematics", "science"]
 
 [[bench]]
 name = "math_baseline"

@@ -1,4 +1,39 @@
+// Scene matrices intentionally flatten independent axes into rstest case arguments.
+#![allow(clippy::too_many_arguments)]
+
+use crate::Error;
+
+#[test]
+fn weld_balance_failure_preserves_its_source() {
+    let cause = Error::from(super::WeldBalanceError::InvalidTolerance);
+    let error = super::StepError::WeldBalance(cause.clone());
+    assert_eq!(
+        std::error::Error::source(&error).map(ToString::to_string),
+        Some(cause.to_string())
+    );
+}
+
+#[test]
+fn world_storage_errors_are_classified_as_resource_exhaustion() {
+    assert_eq!(
+        Error::from(super::WorldError::DensePoolIdentifierExhausted).kind(),
+        crate::ErrorKind::ResourceExhausted
+    );
+    assert_eq!(
+        Error::from(super::WorldError::DensePoolCapacityExceeded).kind(),
+        crate::ErrorKind::ResourceExhausted
+    );
+    assert_eq!(
+        Error::from(super::WorldError::InvalidBodyId).kind(),
+        crate::ErrorKind::Validation
+    );
+}
+
 use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
+
+fn step_cause(result: &Result<(), crate::Error>) -> Option<&crate::world::StepError> {
+    result.as_ref().err().and_then(|error| error.downcast_ref())
+}
 
 use super::{
     BodyId, BodyStep, ColliderId, ForceSourceError, ForceSourceId, PhysicsWorld, StepError,
@@ -821,6 +856,7 @@ fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // rstest cases deliberately exercise seven independent scene parameters.
 #[rstest::rstest]
 #[case::linear_break(1.0, false, false, false, false, false)]
 #[case::linear_intact(100.0, false, false, false, false, false)]
@@ -959,7 +995,10 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
     } else {
         world.step(dt)
     };
-    assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+    assert!(matches!(
+        step_cause(&rejected),
+        Some(StepError::WeldBalance(_))
+    ));
     assert_eq!(world.body(body).ok_or("body")?.motion(), before);
     assert!(world.weld(weld).is_some());
     assert!(world.contact_impulses().is_empty());
@@ -977,7 +1016,10 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
         } else {
             world.step(dt)
         };
-        assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
+        assert!(matches!(
+            step_cause(&rejected),
+            Some(StepError::WeldBalance(_))
+        ));
         assert_eq!(world.body(body).ok_or("body")?.motion(), before);
         assert!(world.weld(weld).is_some());
         assert!(world.contact_impulses().is_empty());
@@ -1467,7 +1509,7 @@ impl StepExecutor for FailingExecutor {
     }
 }
 
-fn step_with_shards(world: &mut PhysicsWorld, dt: f64) -> Result<(), StepError> {
+fn step_with_shards(world: &mut PhysicsWorld, dt: f64) -> Result<(), Error> {
     let mut shards: [Vec<BodyStep>; 4] = std::array::from_fn(|_| Vec::new());
     world.step_with_shards(dt, &mut shards, &ScopedThreadExecutor, 4)
 }
@@ -1987,8 +2029,8 @@ fn physics_step_metrics_are_empty_after_a_failed_step() {
         .expect("finite velocity");
 
     assert!(matches!(
-        world.step(2.0),
-        Err(StepError::BodyIntegration { .. })
+        step_cause(&world.step(2.0)),
+        Some(StepError::BodyIntegration { .. })
     ));
     let metrics = world.physics_step_metrics();
     assert_eq!(
@@ -2025,7 +2067,7 @@ fn joint_ids_validate_world_and_generation_and_body_removal_cascades() {
         .expect("foreign body");
     assert_eq!(
         world.add_joint(body_a, foreign_body, joint),
-        Err(WorldError::InvalidJointBodies)
+        Err(Error::from(WorldError::InvalidJointBodies))
     );
     assert_eq!(other_world.joint(joint_id), None);
 
@@ -2392,11 +2434,11 @@ fn central_gravity_errors_are_reported_without_partial_body_changes() {
     ));
 
     assert!(matches!(
-        world.step(1.0),
-        Err(StepError::BodyIntegration {
-            body_id,
-            cause: IntegrationError::ArithmeticOverflow,
-        }) if body_id == second
+        step_cause(&world.step(1.0)),
+        Some(StepError::BodyIntegration { body_id, cause })
+            if *body_id == second
+                && cause.downcast_ref::<IntegrationError>()
+                    == Some(&IntegrationError::ArithmeticOverflow)
     ));
     let first = world.body(first).expect("first body");
     assert_eq!(first.state().linear_velocity(), Vec3::ZERO);
@@ -2411,10 +2453,10 @@ fn central_gravity_errors_are_reported_without_partial_body_changes() {
     ));
     assert_eq!(
         at_center.step(0.1),
-        Err(StepError::Gravity {
+        Err(crate::Error::from(StepError::Gravity {
             body_id: center_body,
-            cause: GravityError::AtFieldCenter,
-        })
+            cause: crate::Error::from(GravityError::AtFieldCenter),
+        }))
     );
     assert_eq!(
         at_center
@@ -2591,7 +2633,7 @@ fn interaction_index_preserves_duplicate_merge_rules_and_resets_with_step_scratc
                 impact: false,
             },
         ),
-        Err(CollisionError::InvalidContact)
+        Err(crate::Error::from(CollisionError::InvalidContact))
     );
     assert_eq!(interactions.len(), 2);
 
@@ -2947,16 +2989,16 @@ fn world_sets_skin_pose_and_rejects_non_skin_colliders() {
     let sphere_id = world.add_collider(body, collider(1.0)).unwrap();
     assert_eq!(
         world.set_skin_pose(sphere_id, &[]),
-        Err(CollisionError::InvalidSkinPose)
+        Err(Error::from(CollisionError::InvalidSkinPose))
     );
     assert_eq!(
         world.set_skin_pose(skinned_id, &[]),
-        Err(CollisionError::InvalidSkinPose)
+        Err(Error::from(CollisionError::InvalidSkinPose))
     );
 }
 
 #[test]
-fn stores_each_body_type_and_assigns_ids() -> Result<(), WorldError> {
+fn stores_each_body_type_and_assigns_ids() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let static_id = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let kinematic_id = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
@@ -2983,7 +3025,7 @@ fn stores_each_body_type_and_assigns_ids() -> Result<(), WorldError> {
 }
 
 #[test]
-fn body_and_collider_ids_are_scoped_to_their_worlds() -> Result<(), WorldError> {
+fn body_and_collider_ids_are_scoped_to_their_worlds() -> Result<(), Error> {
     let mut first_world = PhysicsWorld::new();
     let mut second_world = PhysicsWorld::new();
     let first_body = first_world.add_body(RigidBody::new_static(Transform::identity()))?;
@@ -3003,7 +3045,7 @@ fn body_and_collider_ids_are_scoped_to_their_worlds() -> Result<(), WorldError> 
     assert!(second_world.colliders_of(first_body).is_none());
     assert_eq!(
         second_world.add_collider(first_body, collider(3.0)),
-        Err(WorldError::InvalidBodyId)
+        Err(Error::from(WorldError::InvalidBodyId))
     );
     assert!(second_world.remove_body(first_body).is_none());
     assert_eq!(second_world.body_count(), 1);
@@ -3038,14 +3080,14 @@ fn material_ids_are_scoped_to_world_storage_and_in_use_materials_are_retained() 
         .expect("insert collider");
     assert_eq!(
         first_world.set_collider_material(collider_id, Some(other_material_id)),
-        Err(WorldError::InvalidMaterialId)
+        Err(Error::from(WorldError::InvalidMaterialId))
     );
     first_world
         .set_collider_material(collider_id, Some(material_id))
         .expect("assign valid material");
     assert_eq!(
         first_world.remove_material(material_id),
-        Err(WorldError::MaterialInUse)
+        Err(Error::from(WorldError::MaterialInUse))
     );
     assert_eq!(first_world.material(material_id), Some(&material));
     first_world
@@ -3054,7 +3096,7 @@ fn material_ids_are_scoped_to_world_storage_and_in_use_materials_are_retained() 
     assert_eq!(first_world.remove_material(material_id), Ok(material));
     assert_eq!(
         first_world.remove_material(material_id),
-        Err(WorldError::InvalidMaterialId)
+        Err(Error::from(WorldError::InvalidMaterialId))
     );
 }
 
@@ -3073,7 +3115,7 @@ fn add_collider_rejects_a_material_from_another_world_before_insertion() {
 
     assert_eq!(
         world.add_collider(body, prepared),
-        Err(WorldError::InvalidMaterialId)
+        Err(Error::from(WorldError::InvalidMaterialId))
     );
     assert_eq!(world.collider_count(), 0);
 
@@ -3098,9 +3140,9 @@ fn dynamic_bodies_reject_surface_geometry_but_allow_convex_shapes() {
     );
     assert_eq!(
         world.add_collider(dynamic, Collider::new(triangle, Transform::identity())),
-        Err(WorldError::Collision(
+        Err(Error::from(WorldError::Collision(crate::Error::from(
             crate::collision::CollisionError::UnsupportedDynamicGeometry
-        ))
+        ))))
     );
     assert!(world.add_collider(dynamic, collider(1.0)).is_ok());
 
@@ -3138,7 +3180,9 @@ fn invalid_material_fails_step_without_changing_body_or_forces() {
 
     assert_eq!(
         world.step(0.1),
-        Err(StepError::Collision(CollisionError::InvalidMaterial))
+        Err(crate::Error::from(StepError::Collision(
+            crate::Error::from(CollisionError::InvalidMaterial)
+        )))
     );
     assert_eq!(world.body(body_id).map(RigidBody::motion), Some(original));
     assert!(world.collision_events().is_empty());
@@ -3166,13 +3210,15 @@ fn invalid_material_fails_shard_commit_before_any_body_changes() {
 
     assert_eq!(
         world.commit_step_shards(&shards),
-        Err(StepError::Collision(CollisionError::InvalidMaterial))
+        Err(crate::Error::from(StepError::Collision(
+            crate::Error::from(CollisionError::InvalidMaterial)
+        )))
     );
     assert_eq!(world.body(body_id).map(RigidBody::motion), Some(original));
 }
 
 #[test]
-fn world_id_survives_moves_and_removing_all_bodies() -> Result<(), WorldError> {
+fn world_id_survives_moves_and_removing_all_bodies() -> Result<(), Error> {
     fn move_world(world: PhysicsWorld) -> PhysicsWorld {
         world
     }
@@ -3199,13 +3245,13 @@ fn world_id_allocator_reports_exhaustion_without_wrapping() {
     assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), u64::MAX);
     assert_eq!(
         allocate_world_id(&counter),
-        Err(WorldError::WorldIdExhausted)
+        Err(crate::Error::from(WorldError::WorldIdExhausted))
     );
     assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), u64::MAX);
 }
 
 #[test]
-fn body_mut_updates_the_stored_body() -> Result<(), WorldError> {
+fn body_mut_updates_the_stored_body() -> Result<(), Error> {
     let mut world = PhysicsWorld::default();
     let id = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
     let body = world.body_mut(id).ok_or(WorldError::InvalidBodyId)?;
@@ -3220,7 +3266,7 @@ fn body_mut_updates_the_stored_body() -> Result<(), WorldError> {
 }
 
 #[test]
-fn unknown_body_id_is_rejected() -> Result<(), DensePoolError> {
+fn unknown_body_id_is_rejected() -> Result<(), crate::Error> {
     let mut source = DensePool::new();
     let id = BodyId {
         world: u64::MAX,
@@ -3249,7 +3295,7 @@ fn dense_pool_errors_preserve_their_variant() {
 }
 
 #[test]
-fn adds_multiple_colliders_and_tracks_each_owner() -> Result<(), WorldError> {
+fn adds_multiple_colliders_and_tracks_each_owner() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let first_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let second_body = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
@@ -3266,7 +3312,7 @@ fn adds_multiple_colliders_and_tracks_each_owner() -> Result<(), WorldError> {
 }
 
 #[test]
-fn collider_mut_changes_only_the_collider() -> Result<(), WorldError> {
+fn collider_mut_changes_only_the_collider() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
     let original_body = world
@@ -3292,7 +3338,7 @@ fn collider_mut_changes_only_the_collider() -> Result<(), WorldError> {
 }
 
 #[test]
-fn invalid_body_rejects_collider_without_changing_world() -> Result<(), DensePoolError> {
+fn invalid_body_rejects_collider_without_changing_world() -> Result<(), crate::Error> {
     let mut stale_ids = DensePool::new();
     let first = stale_ids.insert(())?;
     let _ = stale_ids.remove(first);
@@ -3307,7 +3353,7 @@ fn invalid_body_rejects_collider_without_changing_world() -> Result<(), DensePoo
 
     assert_eq!(
         world.add_collider(stale_body, collider(1.0)),
-        Err(WorldError::InvalidBodyId)
+        Err(Error::from(WorldError::InvalidBodyId))
     );
     assert_eq!(world.body_count(), 1);
     assert_eq!(world.collider_count(), 0);
@@ -3315,7 +3361,7 @@ fn invalid_body_rejects_collider_without_changing_world() -> Result<(), DensePoo
 }
 
 #[test]
-fn removing_colliders_in_arbitrary_order_updates_body_links() -> Result<(), WorldError> {
+fn removing_colliders_in_arbitrary_order_updates_body_links() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let first = world.add_collider(body, collider(1.0))?;
@@ -3336,7 +3382,7 @@ fn removing_colliders_in_arbitrary_order_updates_body_links() -> Result<(), Worl
 }
 
 #[test]
-fn removed_collider_slot_reuses_generation_without_reviving_old_id() -> Result<(), WorldError> {
+fn removed_collider_slot_reuses_generation_without_reviving_old_id() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let stale = world.add_collider(body, collider(1.0))?;
@@ -3353,7 +3399,7 @@ fn removed_collider_slot_reuses_generation_without_reviving_old_id() -> Result<(
 }
 
 #[test]
-fn body_state_is_unchanged_when_colliders_are_added_or_removed() -> Result<(), WorldError> {
+fn body_state_is_unchanged_when_colliders_are_added_or_removed() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(dynamic_body())?;
     let original_body = world
@@ -3371,7 +3417,7 @@ fn body_state_is_unchanged_when_colliders_are_added_or_removed() -> Result<(), W
 }
 
 #[test]
-fn invalid_collider_ids_are_rejected() -> Result<(), DensePoolError> {
+fn invalid_collider_ids_are_rejected() -> Result<(), crate::Error> {
     let mut source = DensePool::new();
     let id = ColliderId {
         world: u64::MAX,
@@ -3387,7 +3433,7 @@ fn invalid_collider_ids_are_rejected() -> Result<(), DensePoolError> {
 }
 
 #[test]
-fn removing_body_without_colliders_returns_it_and_invalidates_its_id() -> Result<(), WorldError> {
+fn removing_body_without_colliders_returns_it_and_invalidates_its_id() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let body_id = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let original = world
@@ -3409,7 +3455,7 @@ fn removing_body_without_colliders_returns_it_and_invalidates_its_id() -> Result
 }
 
 #[test]
-fn removing_body_cascades_one_and_many_colliders() -> Result<(), WorldError> {
+fn removing_body_cascades_one_and_many_colliders() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let single_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let many_body = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
@@ -3439,7 +3485,7 @@ fn removing_body_cascades_one_and_many_colliders() -> Result<(), WorldError> {
 }
 
 #[test]
-fn iterators_cover_empty_and_populated_worlds() -> Result<(), WorldError> {
+fn iterators_cover_empty_and_populated_worlds() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     assert_eq!(world.bodies().count(), 0);
     assert_eq!(world.colliders().count(), 0);
@@ -3479,7 +3525,7 @@ fn iterators_cover_empty_and_populated_worlds() -> Result<(), WorldError> {
 }
 
 #[test]
-fn colliders_of_iterates_only_the_requested_body_list() -> Result<(), WorldError> {
+fn colliders_of_iterates_only_the_requested_body_list() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let first_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let second_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
@@ -3506,7 +3552,7 @@ fn colliders_of_iterates_only_the_requested_body_list() -> Result<(), WorldError
 }
 
 #[test]
-fn bodies_mut_visits_each_body_once() -> Result<(), WorldError> {
+fn bodies_mut_visits_each_body_once() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let first = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
     let second = world.add_body(RigidBody::new_kinematic(Transform::identity()))?;
@@ -3530,7 +3576,7 @@ fn bodies_mut_visits_each_body_once() -> Result<(), WorldError> {
 }
 
 #[test]
-fn deleting_body_and_reusing_slots_does_not_revive_old_ids() -> Result<(), WorldError> {
+fn deleting_body_and_reusing_slots_does_not_revive_old_ids() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let old_body = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let old_collider = world.add_collider(old_body, collider(1.0))?;
@@ -3555,7 +3601,7 @@ fn deleting_body_and_reusing_slots_does_not_revive_old_ids() -> Result<(), World
 }
 
 #[test]
-fn step_advances_each_body_type_and_clears_accumulated_forces() -> Result<(), WorldError> {
+fn step_advances_each_body_type_and_clears_accumulated_forces() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let static_id = world.add_body(RigidBody::new_static(Transform::identity()))?;
     let mut kinematic = RigidBody::new_kinematic(Transform::identity());
@@ -3690,7 +3736,7 @@ fn indexed_force_sources_preserve_first_touch_and_accumulation_order() {
     assert_eq!(world.force_source(stale_source), None);
     assert_eq!(
         world.add_force_source(bodies[1], Vec3::ZERO, Vec3::X),
-        Err(ForceSourceError::InvalidBodyId)
+        Err(Error::from(ForceSourceError::InvalidBodyId))
     );
     let replacement = world.add_body(dynamic_body()).expect("replacement body");
     assert_eq!(replacement.index(), bodies[1].index());
@@ -3779,11 +3825,11 @@ fn indexed_force_source_step_failure_rolls_back_and_keeps_capacity() {
         .collect::<Vec<_>>();
 
     assert!(matches!(
-        world.step(2.0),
-        Err(StepError::BodyIntegration {
-            body_id,
-            cause: IntegrationError::ArithmeticOverflow,
-        }) if body_id == bodies[0]
+        step_cause(&world.step(2.0)),
+        Some(StepError::BodyIntegration { body_id, cause })
+            if *body_id == bodies[0]
+                && cause.downcast_ref::<IntegrationError>()
+                    == Some(&IntegrationError::ArithmeticOverflow)
     ));
     assert!(
         originals
@@ -3837,10 +3883,10 @@ fn sharded_force_source_preparation_error_leaves_world_unchanged_and_can_retry()
 
     assert_eq!(
         step_with_shards(&mut world, 0.1),
-        Err(StepError::ForceSource {
+        Err(crate::Error::from(StepError::ForceSource {
             source_id: invalid_source,
             cause: ForceSourceError::InvalidBodyId,
-        })
+        }))
     );
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -3876,7 +3922,7 @@ fn sharded_fill_error_rolls_back_force_sources_and_can_retry() {
 
     assert_eq!(
         world.step_with_shards(0.1, &mut no_shards, &ScopedThreadExecutor, 4),
-        Err(StepError::InvalidStepResults)
+        Err(crate::Error::from(StepError::InvalidStepResults))
     );
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -3905,10 +3951,10 @@ fn sharded_gravity_error_rolls_back_force_sources_and_can_retry() {
 
     assert_eq!(
         step_with_shards(&mut world, 0.1),
-        Err(StepError::Gravity {
+        Err(crate::Error::from(StepError::Gravity {
             body_id: bodies[0],
-            cause: GravityError::AtFieldCenter,
-        })
+            cause: crate::Error::from(GravityError::AtFieldCenter),
+        }))
     );
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -3960,7 +4006,13 @@ fn sharded_collision_preparation_error_rolls_back_force_sources_and_can_retry() 
         .collect::<Vec<_>>();
 
     let error = step_with_shards(&mut world, 0.1).expect_err("invalid spatial bounds");
-    assert!(matches!(error, StepError::Collision(_)), "{error:?}");
+    assert!(
+        matches!(
+            error.downcast_ref::<StepError>(),
+            Some(StepError::Collision(_))
+        ),
+        "{error:?}"
+    );
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
     assert!(world.gravity_body_updates.is_empty());
@@ -3996,11 +4048,11 @@ fn sharded_integration_error_rolls_back_force_sources_and_can_retry() {
         .collect::<Vec<_>>();
 
     assert!(matches!(
-        step_with_shards(&mut world, 1.0),
-        Err(StepError::BodyIntegration {
-            body_id,
-            cause: IntegrationError::ArithmeticOverflow,
-        }) if body_id == bodies[3]
+        step_cause(&step_with_shards(&mut world, 1.0)),
+        Some(StepError::BodyIntegration { body_id, cause })
+            if *body_id == bodies[3]
+                && cause.downcast_ref::<IntegrationError>()
+                    == Some(&IntegrationError::ArithmeticOverflow)
     ));
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -4042,7 +4094,9 @@ fn sharded_executor_error_rolls_back_force_sources_and_can_retry() {
 
     assert_eq!(
         world.step_with_shards(0.1, &mut shards, &failing_executor, 4),
-        Err(StepError::Collision(CollisionError::WorkerFailed))
+        Err(crate::Error::from(StepError::Collision(
+            crate::Error::from(CollisionError::WorkerFailed)
+        )))
     );
     assert_bodies_match(&world, &bodies, &originals);
     assert!(world.force_source_body_updates.is_empty());
@@ -4083,7 +4137,9 @@ fn sharded_collision_solver_error_rolls_back_force_sources_and_can_retry() {
 
     assert_eq!(
         world.step_with_shards(0.1, &mut shards, &failing_executor, 4),
-        Err(StepError::Collision(CollisionError::WorkerFailed))
+        Err(crate::Error::from(StepError::Collision(
+            crate::Error::from(CollisionError::WorkerFailed)
+        )))
     );
     assert_eq!(failing_executor.calls.load(Ordering::Relaxed), 2);
     assert_bodies_match(&world, &bodies, &originals);
@@ -4131,7 +4187,7 @@ fn body_removal_invalidates_its_force_sources_and_disable_stops_force() {
     assert_eq!(world.force_source(source), None);
     assert_eq!(
         world.remove_force_source(source),
-        Err(ForceSourceError::InvalidForceSourceId)
+        Err(crate::Error::from(ForceSourceError::InvalidForceSourceId))
     );
 }
 
@@ -4143,13 +4199,13 @@ fn force_source_setup_rejects_static_bodies_and_non_finite_values() {
         .expect("body");
     assert_eq!(
         world.add_force_source(static_body, Vec3::ZERO, Vec3::X),
-        Err(ForceSourceError::BodyMustBeDynamic)
+        Err(Error::from(ForceSourceError::BodyMustBeDynamic))
     );
 
     let dynamic = world.add_body(dynamic_body()).expect("dynamic body");
     assert_eq!(
         world.add_force_source(dynamic, Vec3::ZERO, Vec3::splat(f64::NAN)),
-        Err(ForceSourceError::NonFiniteValue)
+        Err(Error::from(ForceSourceError::NonFiniteValue))
     );
 }
 
@@ -4168,10 +4224,10 @@ fn force_source_step_error_preserves_existing_body_forces() {
 
     assert_eq!(
         world.step(0.1),
-        Err(StepError::ForceSource {
+        Err(crate::Error::from(StepError::ForceSource {
             source_id: source,
             cause: ForceSourceError::ArithmeticOverflow,
-        })
+        }))
     );
     assert_eq!(
         world.body(body).expect("body").forces().force(),
@@ -4180,7 +4236,7 @@ fn force_source_step_error_preserves_existing_body_forces() {
 }
 
 #[test]
-fn invalid_timestep_preserves_all_body_state_and_forces() -> Result<(), WorldError> {
+fn invalid_timestep_preserves_all_body_state_and_forces() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let mut body = dynamic_body();
     body.set_linear_velocity(Vec3::X).expect("finite velocity");
@@ -4189,14 +4245,17 @@ fn invalid_timestep_preserves_all_body_state_and_forces() -> Result<(), WorldErr
     let original = world.body(id).ok_or(WorldError::InvalidBodyId)?.motion();
 
     for dt in [0.0, -0.1, f64::NAN, f64::INFINITY] {
-        assert_eq!(world.step(dt), Err(StepError::InvalidDeltaTime));
+        assert_eq!(
+            world.step(dt),
+            Err(crate::Error::from(StepError::InvalidDeltaTime))
+        );
         assert_eq!(world.body(id).map(RigidBody::motion), Some(original));
     }
     Ok(())
 }
 
 #[test]
-fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), WorldError> {
+fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let mut first = dynamic_body();
     first.set_linear_velocity(Vec3::Y).expect("finite velocity");
@@ -4219,10 +4278,10 @@ fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), World
 
     assert_eq!(
         world.step(2.0),
-        Err(StepError::BodyIntegration {
+        Err(crate::Error::from(StepError::BodyIntegration {
             body_id: failing_id,
-            cause: IntegrationError::ArithmeticOverflow,
-        })
+            cause: crate::Error::from(IntegrationError::ArithmeticOverflow),
+        }))
     );
     assert_eq!(
         world.body(first_id).map(RigidBody::motion),
@@ -4253,8 +4312,8 @@ fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), World
 }
 
 #[test]
-fn repeated_steps_are_deterministic_and_reuse_the_scratch_buffer() -> Result<(), WorldError> {
-    fn make_world() -> Result<(PhysicsWorld, BodyId), WorldError> {
+fn repeated_steps_are_deterministic_and_reuse_the_scratch_buffer() -> Result<(), Error> {
+    fn make_world() -> Result<(PhysicsWorld, BodyId), Error> {
         let mut world = PhysicsWorld::new();
         let mut body = dynamic_body();
         body.set_linear_velocity(Vec3::new(1.0, -2.0, 0.5))
@@ -4321,7 +4380,7 @@ fn ccd_swept_bounds_cover_offset_com_rotation_arcs() {
 }
 
 #[test]
-fn skinned_mesh_bounds_track_pose_for_static_and_kinematic_bodies() -> Result<(), WorldError> {
+fn skinned_mesh_bounds_track_pose_for_static_and_kinematic_bodies() -> Result<(), Error> {
     for body_type in [BodyType::Static, BodyType::Kinematic] {
         let mut world = PhysicsWorld::new();
         let mesh_body = match body_type {
@@ -4425,7 +4484,7 @@ fn step_shards_are_balanced_and_commit_the_same_states() -> Result<(), Box<dyn s
     }
     assert_eq!(
         sequential_world.commit_step_shards(&shards),
-        Err(StepError::InvalidStepResults)
+        Err(crate::Error::from(StepError::InvalidStepResults))
     );
     parallel_world.commit_step_shards(&shards)?;
     sequential_world.step(0.125)?;
@@ -4701,7 +4760,9 @@ fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn
     }
     assert_eq!(
         world.commit_step_shards_with_executor(&shards, &ScopedThreadExecutor, 4),
-        Err(StepError::Collision(CollisionError::CcdLimitExceeded))
+        Err(crate::Error::from(StepError::Collision(
+            crate::Error::from(CollisionError::CcdLimitExceeded)
+        )))
     );
 
     for (&id, expected) in body_ids.iter().zip(before) {
@@ -4737,7 +4798,7 @@ fn incomplete_step_shards_do_not_change_the_world() -> Result<(), Box<dyn std::e
 
     assert_eq!(
         world.commit_step_shards(&shards),
-        Err(StepError::InvalidStepResults)
+        Err(crate::Error::from(StepError::InvalidStepResults))
     );
     assert_eq!(
         world.body(first_id).map(RigidBody::motion),
@@ -4751,7 +4812,7 @@ fn incomplete_step_shards_do_not_change_the_world() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn step_errors_expose_the_integration_cause() -> Result<(), WorldError> {
+fn step_errors_expose_the_integration_cause() -> Result<(), Error> {
     let mut world = PhysicsWorld::new();
     let mut body = dynamic_body();
     body.apply_force(Vec3::X * f64::MAX).expect("finite force");
@@ -5123,7 +5184,7 @@ fn benchmark_force_source_update_scaling() {
     }
 }
 #[test]
-fn step_diagnostics_publish_only_on_success() -> Result<(), super::StepError> {
+fn step_diagnostics_publish_only_on_success() -> Result<(), crate::Error> {
     use super::{PhysicsWorld, StepDiagnostics, StepError};
 
     let mut world = PhysicsWorld::new();
@@ -5138,11 +5199,14 @@ fn step_diagnostics_publish_only_on_success() -> Result<(), super::StepError> {
     })?;
     assert!(world.step_diagnostics().used_fallback());
     assert_eq!(world.step_diagnostics(), clipped);
-    let failed: Result<(), StepError> = world.with_force_source_updates(|world| {
+    let failed: Result<(), crate::Error> = world.with_force_source_updates(|world| {
         world.pending_step_diagnostics = StepDiagnostics::default();
-        Err(StepError::InvalidStepResults)
+        Err(crate::Error::from(StepError::InvalidStepResults))
     });
-    assert_eq!(failed, Err(StepError::InvalidStepResults));
+    assert_eq!(
+        failed,
+        Err(crate::Error::from(StepError::InvalidStepResults))
+    );
     assert_eq!(world.step_diagnostics(), clipped);
     world.step(0.01)?;
     assert_eq!(world.step_diagnostics(), StepDiagnostics::default());

@@ -11,7 +11,7 @@ use kapitsa_core::{
     rigid_body::RigidBody,
     shape::{BoneInfluence, Cuboid, Plane, Shape, SkinnedTriangleMesh, Sphere, TriangleMesh},
     transform::Transform,
-    world::{BodyStep, ColliderId, PhysicsWorld, StepError},
+    world::{BodyStep, ColliderId, PhysicsWorld},
 };
 use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
 
@@ -543,7 +543,7 @@ fn run_filled_shard_step(
                 for step in shard {
                     step.integrate(DT)?;
                 }
-                Ok::<(), StepError>(())
+                Ok::<(), kapitsa_core::Error>(())
             }));
         }
         for worker in workers {

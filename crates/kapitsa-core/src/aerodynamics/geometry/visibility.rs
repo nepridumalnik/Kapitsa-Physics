@@ -18,11 +18,11 @@ struct PredicateFrame {
     shift: i32,
 }
 impl PredicateFrame {
-    fn new(points: &[Vec3]) -> Result<Self, GeometryError> {
+    fn new(points: &[Vec3]) -> Result<Self, crate::Error> {
         let mut bounds: Option<(i32, i32)> = None;
         for point in points {
             if !point.is_finite() {
-                return Err(GeometryError::ArithmeticOverflow);
+                return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
             }
             for value in [point.x, point.y, point.z] {
                 if value == 0.0 {
@@ -44,14 +44,14 @@ impl PredicateFrame {
             return Ok(Self { shift: 0 });
         };
         if high - low > MAX_EXPONENT_SPAN {
-            return Err(GeometryError::PrecisionLoss);
+            return Err(crate::Error::from(GeometryError::PrecisionLoss));
         }
         Ok(Self {
             shift: -((low + high) / 2),
         })
     }
 
-    fn point(&self, point: Vec3) -> Result<Coord3D<f64>, GeometryError> {
+    fn point(&self, point: Vec3) -> Result<Coord3D<f64>, crate::Error> {
         let point = Vec3::new(
             scale(point.x, self.shift)?,
             scale(point.y, self.shift)?,
@@ -64,7 +64,7 @@ impl PredicateFrame {
         })
     }
 
-    fn orientation(&self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> Result<f64, GeometryError> {
+    fn orientation(&self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> Result<f64, crate::Error> {
         finite(orient3d(
             self.point(a)?,
             self.point(b)?,
@@ -74,15 +74,15 @@ impl PredicateFrame {
     }
 }
 
-fn scale(mut value: f64, mut shift: i32) -> Result<f64, GeometryError> {
+fn scale(mut value: f64, mut shift: i32) -> Result<f64, crate::Error> {
     while shift != 0 {
         let step = shift.clamp(-512, 512);
         let scaled = value * 2.0_f64.powi(step);
         if !scaled.is_finite() {
-            return Err(GeometryError::ArithmeticOverflow);
+            return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
         }
         if value != 0.0 && scaled == 0.0 {
-            return Err(GeometryError::PrecisionLoss);
+            return Err(crate::Error::from(GeometryError::PrecisionLoss));
         }
         value = scaled;
         shift -= step;
@@ -90,27 +90,27 @@ fn scale(mut value: f64, mut shift: i32) -> Result<f64, GeometryError> {
     Ok(value)
 }
 
-fn finite(value: f64) -> Result<f64, GeometryError> {
+fn finite(value: f64) -> Result<f64, crate::Error> {
     if value.is_finite() {
         Ok(value)
     } else {
-        Err(GeometryError::ArithmeticOverflow)
+        Err(crate::Error::from(GeometryError::ArithmeticOverflow))
     }
 }
 
 // Called only for strictly opposite signs. Check the smaller edge ratio so
 // underflow detection is independent of endpoint order. A ratio can still
 // round to one; rejecting that requires separate geometric analysis.
-pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, GeometryError> {
+pub(super) fn crossing_fraction(a: f64, b: f64) -> Result<f64, crate::Error> {
     let denominator = finite(a - b)?;
     if (a.abs().min(b.abs()) / denominator.abs()) == 0.0 {
-        return Err(GeometryError::PrecisionLoss);
+        return Err(crate::Error::from(GeometryError::PrecisionLoss));
     }
     let fraction = finite(a / denominator)?;
     Ok(fraction)
 }
 
-pub(super) fn crossing_point(a: Vec3, b: Vec3, da: f64, db: f64) -> Result<Vec3, GeometryError> {
+pub(super) fn crossing_point(a: Vec3, b: Vec3, da: f64, db: f64) -> Result<Vec3, crate::Error> {
     let (near, far, d_near, d_far) = if da.abs() < db.abs() || (da.abs() == db.abs() && da > 0.0) {
         (a, b, da, db)
     } else {
@@ -119,12 +119,12 @@ pub(super) fn crossing_point(a: Vec3, b: Vec3, da: f64, db: f64) -> Result<Vec3,
     let fraction = crossing_fraction(d_near, d_far)?;
     let point = near + (far - near) * fraction;
     if !point.is_finite() {
-        return Err(GeometryError::ArithmeticOverflow);
+        return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
     }
     Ok(point)
 }
 
-fn normalize(values: [f64; 3]) -> Result<[f64; 3], GeometryError> {
+fn normalize(values: [f64; 3]) -> Result<[f64; 3], crate::Error> {
     let maximum = values.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     if maximum == 0.0 {
         return Ok(values);
@@ -135,12 +135,12 @@ fn normalize(values: [f64; 3]) -> Result<[f64; 3], GeometryError> {
         .zip(&scaled)
         .any(|(a, b)| *a != 0.0 && *b == 0.0)
     {
-        return Err(GeometryError::PrecisionLoss);
+        return Err(crate::Error::from(GeometryError::PrecisionLoss));
     }
     Ok(scaled)
 }
 
-pub(super) fn distance(values: [f64; 3], point: Vec3) -> Result<f64, GeometryError> {
+pub(super) fn distance(values: [f64; 3], point: Vec3) -> Result<f64, crate::Error> {
     // Evaluate the barycentric form with compensated products and sums.
     // This reduces cancellation but does not establish an exact sign bound.
     let x = values[1] - values[0];
@@ -152,7 +152,7 @@ pub(super) fn distance(values: [f64; 3], point: Vec3) -> Result<f64, GeometryErr
     let checked_product = |a: f64, b: f64| {
         let product = a * b;
         if a != 0.0 && b != 0.0 && product == 0.0 {
-            Err(GeometryError::PrecisionLoss)
+            Err(crate::Error::from(GeometryError::PrecisionLoss))
         } else {
             Ok(product)
         }
@@ -179,7 +179,7 @@ impl Shadow {
         source_index: usize,
         blocker_index: usize,
         upstream: Vec3,
-    ) -> Result<Option<Self>, GeometryError> {
+    ) -> Result<Option<Self>, crate::Error> {
         if source.vertices == blocker.vertices {
             return Ok(
                 (blocker_index < source_index && blocker.normal.dot(upstream) > 0.0).then_some(
@@ -195,7 +195,7 @@ impl Shadow {
         let other = c - a;
         let size = edge.abs().max_element().max(other.abs().max_element());
         if !size.is_finite() || size == 0.0 {
-            return Err(GeometryError::InvalidGeometry);
+            return Err(crate::Error::from(GeometryError::InvalidGeometry));
         }
         // Direction may be positively rescaled without changing a shadow plane.
         let direction = upstream * size;
@@ -205,7 +205,7 @@ impl Shadow {
                 .zip([direction.x, direction.y, direction.z])
                 .any(|(a, b)| *a != 0.0 && b == 0.0)
         {
-            return Err(GeometryError::PrecisionLoss);
+            return Err(crate::Error::from(GeometryError::PrecisionLoss));
         }
         let frame = PredicateFrame::new(&[Vec3::ZERO, edge, other, direction])?;
         let denominator = -frame.orientation(Vec3::ZERO, edge, other, direction)?;
@@ -254,7 +254,7 @@ impl Shadow {
             ])?;
             let reference = frame.orientation(Vec3::ZERO, edge, direction, opposite)?;
             if reference == 0.0 {
-                return Err(GeometryError::PrecisionLoss);
+                return Err(crate::Error::from(GeometryError::PrecisionLoss));
             }
             for (value, offset) in plane.iter_mut().zip(offsets) {
                 *value =
@@ -268,7 +268,7 @@ impl Shadow {
         Ok(Some(Self { planes, coplanar }))
     }
 
-    pub fn covers(&self, point: Vec3) -> Result<bool, GeometryError> {
+    pub fn covers(&self, point: Vec3) -> Result<bool, crate::Error> {
         for plane in &self.planes[..3] {
             if distance(*plane, point)? < 0.0 {
                 return Ok(false);
@@ -283,12 +283,12 @@ impl Shadow {
 pub(super) fn windward_triangle(
     normal: Vec3,
     velocities: [Vec3; 3],
-) -> Result<Option<Vec<Vec3>>, GeometryError> {
+) -> Result<Option<Vec<Vec3>>, crate::Error> {
     let mut values = [0.0; 3];
     for (value, velocity) in values.iter_mut().zip(velocities) {
         *value = normal
             .checked_dot(velocity)
-            .ok_or(GeometryError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(GeometryError::ArithmeticOverflow))?;
     }
     if !values.iter().any(|value| *value > 0.0) {
         return Ok(None);
@@ -298,7 +298,7 @@ pub(super) fn windward_triangle(
     let mut positive = Vec::new();
     positive
         .try_reserve_exact(4)
-        .map_err(|_| GeometryError::AllocationFailed)?;
+        .map_err(|_| crate::Error::from(GeometryError::AllocationFailed))?;
     for index in 0..3 {
         let next = (index + 1) % 3;
         let (a, b) = (values[index], values[next]);
@@ -311,7 +311,7 @@ pub(super) fn windward_triangle(
         }
     }
     if positive.len() < 3 {
-        return Err(GeometryError::PrecisionLoss);
+        return Err(crate::Error::from(GeometryError::PrecisionLoss));
     }
     Ok(Some(positive))
 }
@@ -336,7 +336,7 @@ impl AreaSum {
     }
 }
 
-pub(super) fn polygon_fraction(points: &[Vec3]) -> Result<f64, GeometryError> {
+pub(super) fn polygon_fraction(points: &[Vec3]) -> Result<f64, crate::Error> {
     let mut area = AreaSum::default();
     for index in 1..points.len().saturating_sub(1) {
         area.add(triangle_fraction([
@@ -348,7 +348,7 @@ pub(super) fn polygon_fraction(points: &[Vec3]) -> Result<f64, GeometryError> {
     finite(area.value())
 }
 
-pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, GeometryError> {
+pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, crate::Error> {
     if points[0] == points[1] || points[1] == points[2] || points[2] == points[0] {
         return Ok(0.0);
     }
@@ -406,11 +406,11 @@ mod tests {
         assert_eq!(crossing_fraction(smallest, -1.0), Ok(smallest));
         assert_eq!(
             crossing_fraction(smallest, -2.0),
-            Err(GeometryError::PrecisionLoss)
+            Err(crate::Error::from(GeometryError::PrecisionLoss))
         );
         assert_eq!(
             crossing_fraction(-2.0, smallest),
-            Err(GeometryError::PrecisionLoss)
+            Err(crate::Error::from(GeometryError::PrecisionLoss))
         );
         assert_eq!(crossing_fraction(-1.0, smallest), Ok(1.0));
         assert_eq!(crossing_fraction(1.0, -1.0), Ok(0.5));
@@ -445,11 +445,11 @@ mod tests {
         let smallest = f64::from_bits(1);
         assert_eq!(
             distance([0.0, smallest, 0.0], Vec3::X * 0.5),
-            Err(GeometryError::PrecisionLoss)
+            Err(crate::Error::from(GeometryError::PrecisionLoss))
         );
         assert_eq!(
             distance([0.0, 0.0, smallest], Vec3::Y * 0.5),
-            Err(GeometryError::PrecisionLoss)
+            Err(crate::Error::from(GeometryError::PrecisionLoss))
         );
         assert_eq!(distance([0.0, smallest, 0.0], Vec3::X), Ok(smallest));
     }
@@ -461,7 +461,7 @@ mod tests {
         // product with one half cannot be represented in binary64.
         assert_eq!(
             distance([smallest, 1.0, 0.0], Vec3::X * 0.5),
-            Err(GeometryError::PrecisionLoss)
+            Err(crate::Error::from(GeometryError::PrecisionLoss))
         );
     }
 
@@ -473,7 +473,7 @@ mod tests {
         };
         assert_eq!(
             shadow.covers(Vec3::X),
-            Err(GeometryError::ArithmeticOverflow)
+            Err(crate::Error::from(GeometryError::ArithmeticOverflow))
         );
     }
 
@@ -511,7 +511,7 @@ mod tests {
         let velocities = [Vec3::X * smallest, Vec3::X * -f64::MAX, Vec3::ZERO];
         assert_eq!(
             windward_triangle(Vec3::X, velocities),
-            Err(GeometryError::PrecisionLoss)
+            Err(crate::Error::from(GeometryError::PrecisionLoss))
         );
     }
 
@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn affine_shadow_matches_scalar_rays_away_from_boundaries() -> Result<(), GeometryError> {
+    fn affine_shadow_matches_scalar_rays_away_from_boundaries() -> Result<(), crate::Error> {
         let source = SurfaceTriangle {
             vertices: [Vec3::ZERO, Vec3::Y, Vec3::Z],
             normal: Vec3::X,
@@ -615,7 +615,7 @@ mod tests {
                 for direction in [Vec3::X, Vec3::new(1.0, 0.2, 0.1)] {
                     let direction = direction
                         .try_normalize()
-                        .ok_or(GeometryError::InvalidGeometry)?;
+                        .ok_or_else(|| crate::Error::from(GeometryError::InvalidGeometry))?;
                     let shadow = Shadow::new(&source, &blocker, 0, 1, direction)?;
                     for u in [0.13, 0.27, 0.51, 0.73] {
                         for v in [0.11, 0.29, 0.53] {
@@ -655,7 +655,7 @@ mod tests {
         };
         assert!(matches!(
             Shadow::new(&source, &blocker, 0, 1, Vec3::X),
-            Err(GeometryError::PrecisionLoss)
+            Err(error) if error.downcast_ref::<GeometryError>() == Some(&GeometryError::PrecisionLoss)
         ));
     }
 }

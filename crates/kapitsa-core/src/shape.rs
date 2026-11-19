@@ -42,6 +42,7 @@ pub use tapered_cylinder::TaperedCylinder;
 pub use triangle::Triangle;
 pub use triangle_mesh::TriangleMesh;
 
+#[non_exhaustive]
 pub enum Shape {
     Sphere(Sphere),
     Cuboid(Cuboid),
@@ -77,7 +78,7 @@ impl Shape {
     /// `Ok(None)` means the shape has no finite AABB. `Err` reports a bounds
     /// calculation error or a shape whose bounds are not implemented. In
     /// particular, `NotImplemented` does not mean that the shape has no collisions.
-    pub fn local_bounds(&self) -> Result<Option<Aabb>, BoundsError> {
+    pub fn local_bounds(&self) -> Result<Option<Aabb>, crate::Error> {
         match self {
             Self::Sphere(shape) => shape.local_bounds().map(Some),
             Self::Cuboid(shape) => shape.local_bounds().map(Some),
@@ -98,7 +99,7 @@ impl Shape {
     /// Computes world-space bounds using the supplied rigid transform.
     ///
     /// `Ok(None)` means the shape has no finite bounds.
-    pub fn world_bounds(&self, transform: &Transform) -> Result<Option<Aabb>, BoundsError> {
+    pub fn world_bounds(&self, transform: &Transform) -> Result<Option<Aabb>, crate::Error> {
         if let Self::Sphere(sphere) = self {
             let center = transform.translation();
             let radius = sphere.radius();
@@ -106,24 +107,26 @@ impl Shape {
             let min = |value: f64| numeric::round_down(value).ok_or(AabbError::TransformOverflow);
             let max = |value: f64| numeric::round_up(value).ok_or(AabbError::TransformOverflow);
 
-            let bounds = Aabb::new(
-                Vec3::new(
-                    min(center.x - radius)?,
-                    min(center.y - radius)?,
-                    min(center.z - radius)?,
-                ),
-                Vec3::new(
-                    max(center.x + radius)?,
-                    max(center.y + radius)?,
-                    max(center.z + radius)?,
-                ),
-            )?;
+            let bounds = (|| {
+                Aabb::new(
+                    Vec3::new(
+                        min(center.x - radius)?,
+                        min(center.y - radius)?,
+                        min(center.z - radius)?,
+                    ),
+                    Vec3::new(
+                        max(center.x + radius)?,
+                        max(center.y + radius)?,
+                        max(center.z + radius)?,
+                    ),
+                )
+            })()?;
 
             return Ok(Some(bounds));
         }
 
         self.local_bounds()?
-            .map(|bounds| bounds.transformed(transform).map_err(BoundsError::from))
+            .map(|bounds| bounds.transformed(transform))
             .transpose()
     }
 }

@@ -40,208 +40,6 @@ pub struct FlightReference {
     pub specific_energy: f64,
 }
 
-#[cfg(test)]
-mod aerodynamic_flight_tests {
-    use super::*;
-    use kapitsa_core::aerodynamics::{
-        Aerodynamics, Atmosphere, DensityProfile, SphericalAtmosphere,
-        hull::{HullSection, MachCurve, MachKnot},
-        wing::{FiniteWing, WingCoefficients, WingPolar, WingSurface},
-    };
-    use kapitsa_math::{Quat, Vec3};
-    use std::sync::Arc;
-
-    // Synthetic coefficients exercise integration, not an aircraft polar or validation.
-    fn configure(flight: &mut HeadlessFlight) -> MissionResult<()> {
-        flight.world.set_atmosphere(Atmosphere::Sphere(
-            SphericalAtmosphere::builder()
-                .reference_radius(PLANET_RADIUS)
-                .reference_density(1.2)
-                .height(100_000.0)
-                .profile(DensityProfile::Exponential {
-                    scale_height: 8_000.0,
-                })
-                .wind(-Vec3::Y * 10.0)
-                .build()?,
-        ));
-        let curve = MachCurve::new(vec![
-            MachKnot {
-                mach: 0.0,
-                axial_cd: 0.3,
-                crossflow_cd: 0.8,
-            },
-            MachKnot {
-                mach: 2.0,
-                axial_cd: 0.5,
-                crossflow_cd: 1.0,
-            },
-        ])?;
-        let polar = Arc::new(WingPolar::new(
-            vec![0.0, 2.0],
-            vec![-std::f64::consts::PI, std::f64::consts::PI],
-            vec![
-                WingCoefficients {
-                    lift: 0.1,
-                    drag: 0.1
-                };
-                4
-            ],
-        )?);
-        for (index, id) in [flight.stage_one_body, flight.stage_two_body]
-            .into_iter()
-            .enumerate()
-        {
-            let id = id.ok_or("stage missing")?;
-            let hull = HullSection::new(
-                kapitsa_core::transform::Transform::identity(),
-                Vec3::Y,
-                4.0,
-                1.0,
-                4.0,
-                0.0,
-                0.3,
-                0.8,
-                None,
-            )?
-            .with_mach_curve(curve.clone());
-            let wing = WingSurface::new(
-                FiniteWing::new(6.0, 0.8, 0.02, 0.0, 0.2)?,
-                kapitsa_core::transform::Transform::new(
-                    Vec3::Y,
-                    Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_2)
-                        .ok_or("wing rotation")?,
-                )?,
-                1.0,
-            )?
-            .with_polar(Arc::clone(&polar));
-            let model = if index == 0 {
-                Aerodynamics::Hull(vec![hull])
-            } else {
-                Aerodynamics::Wing(wing)
-            };
-            flight.world.set_aerodynamics(id, model)?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn atmosphere_hull_and_wing_affect_both_stages_across_separation() -> MissionResult<()> {
-        let mut aero = HeadlessFlight::new()?;
-        let mut vacuum = HeadlessFlight::new()?;
-        configure(&mut aero)?;
-        let lower = aero.stage_one_body.ok_or("lower")?;
-        let upper = aero.stage_two_body.ok_or("upper")?;
-        let mut saw_separation = false;
-        for _ in 0..(3 * TICK_RATE) {
-            let action = aero.step_once()?;
-            assert_eq!(action, vacuum.step_once()?);
-            saw_separation |= action == FlightAction::Separate;
-        }
-        assert!(saw_separation);
-        for (id, reference_id) in [
-            (lower, vacuum.stage_one_body),
-            (upper, vacuum.stage_two_body),
-        ] {
-            let body = aero.world.body(id).ok_or("aero stage")?;
-            let reference = vacuum
-                .world
-                .body(reference_id.ok_or("reference id")?)
-                .ok_or("vacuum stage")?;
-            let difference = body.state().linear_velocity() - reference.state().linear_velocity();
-            assert!(
-                difference.length() > 1e-4,
-                "velocity difference {difference:?}"
-            );
-            assert!(
-                difference.y < 0.0 && difference.z > 0.0,
-                "velocity difference {difference:?}"
-            );
-            assert!(body.state().angular_velocity().length() > 1e-7);
-            println!(
-                "stage velocity_delta={difference:?} angular_velocity={:?}",
-                body.state().angular_velocity()
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn stage_models_apply_one_wrench_with_expected_force_and_moment() -> MissionResult<()> {
-        use kapitsa_core::{aerodynamics::pressure::PressureFlow, transform::Transform};
-        const DT: f64 = 1e-5;
-        let mut configured = HeadlessFlight::new()?;
-        configure(&mut configured)?;
-        let atmosphere = configured.world.atmosphere();
-        for (stage, configured_id) in [
-            (Stage::One, configured.stage_one_body),
-            (Stage::Two, configured.stage_two_body),
-        ] {
-            let configured_body = configured
-                .world
-                .body(configured_id.ok_or("stage id")?)
-                .ok_or("stage body")?;
-            let model = configured_body.aerodynamics();
-            let mut body = spec::stage_body(stage)?;
-            body.set_linear_velocity(Vec3::Y * 30.0)?;
-            let point = match model {
-                Aerodynamics::Hull(sections) => sections[0].local_transform().translation(),
-                Aerodynamics::Wing(wing) => wing.local_transform().translation(),
-                _ => return Err("unexpected stage model".into()),
-            };
-            let state = atmosphere.state_at(body.state().transform().transform_point(point))?;
-            let mass = body.physics().mass().ok_or("mass")?;
-            let flow = PressureFlow {
-                atmosphere: state,
-                sound_speed: state.sound_speed().unwrap_or(340.0),
-                transform: body.state().transform(),
-                center_of_mass: mass.center_of_mass(),
-                linear_velocity: body.state().linear_velocity(),
-                angular_velocity: body.state().angular_velocity(),
-            };
-            let wrench = match model {
-                Aerodynamics::Hull(sections) => sections[0].evaluate(flow)?,
-                Aerodynamics::Wing(wing) => wing.evaluate(flow)?,
-                _ => return Err("unexpected stage model".into()),
-            };
-            assert!(wrench.force.y < 0.0);
-            match stage {
-                Stage::One => {
-                    assert!(wrench.force.z.abs() < 1e-12);
-                    assert!(wrench.moment.length() < 1e-12);
-                }
-                Stage::Two => {
-                    assert!(wrench.force.z > 0.0 && wrench.moment.x > 0.0);
-                    assert!((wrench.moment - Vec3::Y.cross(wrench.force)).length() < 1e-12);
-                }
-            }
-            let copy = match model {
-                Aerodynamics::Hull(sections) => Aerodynamics::Hull(sections.clone()),
-                Aerodynamics::Wing(wing) => Aerodynamics::Wing(wing.clone()),
-                _ => return Err("unexpected stage model".into()),
-            };
-            body.set_aerodynamics(copy);
-            let mut world = PhysicsWorld::new();
-            world.set_atmosphere(atmosphere);
-            let id = world.add_body(body)?;
-            world.step(DT)?;
-            let after = world.body(id).ok_or("stepped body")?.state();
-            let expected_velocity = flow.linear_velocity + wrench.force * (DT / mass.mass());
-            let expected_angular = wrench.moment * (DT / 1.0e5);
-            assert!((after.linear_velocity() - expected_velocity).length() < 1e-12);
-            assert!((after.angular_velocity() - expected_angular).length() < 1e-12);
-            assert_eq!(flow.transform.rotation(), Transform::identity().rotation());
-            println!(
-                "stage={stage:?} force={:?} moment={:?} velocity={:?} angular={:?}",
-                wrench.force,
-                wrench.moment,
-                after.linear_velocity(),
-                after.angular_velocity()
-            );
-        }
-        Ok(())
-    }
-}
-
 impl HeadlessFlight {
     pub fn new() -> MissionResult<Self> {
         let mut world = PhysicsWorld::new();
@@ -463,4 +261,206 @@ fn has_planet_impact(
 
 fn pair_contains(pair: CollisionPair, collider: ColliderId) -> bool {
     pair.a == collider || pair.b == collider
+}
+
+#[cfg(test)]
+mod aerodynamic_flight_tests {
+    use super::*;
+    use kapitsa_core::aerodynamics::{
+        Aerodynamics, Atmosphere, DensityProfile, SphericalAtmosphere,
+        hull::{HullSection, MachCurve, MachKnot},
+        wing::{FiniteWing, WingCoefficients, WingPolar, WingSurface},
+    };
+    use kapitsa_math::{Quat, Vec3};
+    use std::sync::Arc;
+
+    // Synthetic coefficients exercise integration, not an aircraft polar or validation.
+    fn configure(flight: &mut HeadlessFlight) -> MissionResult<()> {
+        flight.world.set_atmosphere(Atmosphere::Sphere(
+            SphericalAtmosphere::builder()
+                .reference_radius(PLANET_RADIUS)
+                .reference_density(1.2)
+                .height(100_000.0)
+                .profile(DensityProfile::Exponential {
+                    scale_height: 8_000.0,
+                })
+                .wind(-Vec3::Y * 10.0)
+                .build()?,
+        ));
+        let curve = MachCurve::new(vec![
+            MachKnot {
+                mach: 0.0,
+                axial_cd: 0.3,
+                crossflow_cd: 0.8,
+            },
+            MachKnot {
+                mach: 2.0,
+                axial_cd: 0.5,
+                crossflow_cd: 1.0,
+            },
+        ])?;
+        let polar = Arc::new(WingPolar::new(
+            vec![0.0, 2.0],
+            vec![-std::f64::consts::PI, std::f64::consts::PI],
+            vec![
+                WingCoefficients {
+                    lift: 0.1,
+                    drag: 0.1
+                };
+                4
+            ],
+        )?);
+        for (index, id) in [flight.stage_one_body, flight.stage_two_body]
+            .into_iter()
+            .enumerate()
+        {
+            let id = id.ok_or("stage missing")?;
+            let hull = HullSection::new(
+                kapitsa_core::transform::Transform::identity(),
+                Vec3::Y,
+                4.0,
+                1.0,
+                4.0,
+                0.0,
+                0.3,
+                0.8,
+                None,
+            )?
+            .with_mach_curve(curve.clone());
+            let wing = WingSurface::new(
+                FiniteWing::new(6.0, 0.8, 0.02, 0.0, 0.2)?,
+                kapitsa_core::transform::Transform::new(
+                    Vec3::Y,
+                    Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_2)
+                        .ok_or("wing rotation")?,
+                )?,
+                1.0,
+            )?
+            .with_polar(Arc::clone(&polar));
+            let model = if index == 0 {
+                Aerodynamics::Hull(vec![hull])
+            } else {
+                Aerodynamics::Wing(wing)
+            };
+            flight.world.set_aerodynamics(id, model)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn atmosphere_hull_and_wing_affect_both_stages_across_separation() -> MissionResult<()> {
+        let mut aero = HeadlessFlight::new()?;
+        let mut vacuum = HeadlessFlight::new()?;
+        configure(&mut aero)?;
+        let lower = aero.stage_one_body.ok_or("lower")?;
+        let upper = aero.stage_two_body.ok_or("upper")?;
+        let mut saw_separation = false;
+        for _ in 0..(3 * TICK_RATE) {
+            let action = aero.step_once()?;
+            assert_eq!(action, vacuum.step_once()?);
+            saw_separation |= action == FlightAction::Separate;
+        }
+        assert!(saw_separation);
+        for (id, reference_id) in [
+            (lower, vacuum.stage_one_body),
+            (upper, vacuum.stage_two_body),
+        ] {
+            let body = aero.world.body(id).ok_or("aero stage")?;
+            let reference = vacuum
+                .world
+                .body(reference_id.ok_or("reference id")?)
+                .ok_or("vacuum stage")?;
+            let difference = body.state().linear_velocity() - reference.state().linear_velocity();
+            assert!(
+                difference.length() > 1e-4,
+                "velocity difference {difference:?}"
+            );
+            assert!(
+                difference.y < 0.0 && difference.z > 0.0,
+                "velocity difference {difference:?}"
+            );
+            assert!(body.state().angular_velocity().length() > 1e-7);
+            println!(
+                "stage velocity_delta={difference:?} angular_velocity={:?}",
+                body.state().angular_velocity()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stage_models_apply_one_wrench_with_expected_force_and_moment() -> MissionResult<()> {
+        use kapitsa_core::{aerodynamics::pressure::PressureFlow, transform::Transform};
+        const DT: f64 = 1e-5;
+        let mut configured = HeadlessFlight::new()?;
+        configure(&mut configured)?;
+        let atmosphere = configured.world.atmosphere();
+        for (stage, configured_id) in [
+            (Stage::One, configured.stage_one_body),
+            (Stage::Two, configured.stage_two_body),
+        ] {
+            let configured_body = configured
+                .world
+                .body(configured_id.ok_or("stage id")?)
+                .ok_or("stage body")?;
+            let model = configured_body.aerodynamics();
+            let mut body = spec::stage_body(stage)?;
+            body.set_linear_velocity(Vec3::Y * 30.0)?;
+            let point = match model {
+                Aerodynamics::Hull(sections) => sections[0].local_transform().translation(),
+                Aerodynamics::Wing(wing) => wing.local_transform().translation(),
+                _ => return Err("unexpected stage model".into()),
+            };
+            let state = atmosphere.state_at(body.state().transform().transform_point(point))?;
+            let mass = body.physics().mass().ok_or("mass")?;
+            let flow = PressureFlow {
+                atmosphere: state,
+                sound_speed: state.sound_speed().unwrap_or(340.0),
+                transform: body.state().transform(),
+                center_of_mass: mass.center_of_mass(),
+                linear_velocity: body.state().linear_velocity(),
+                angular_velocity: body.state().angular_velocity(),
+            };
+            let wrench = match model {
+                Aerodynamics::Hull(sections) => sections[0].evaluate(flow)?,
+                Aerodynamics::Wing(wing) => wing.evaluate(flow)?,
+                _ => return Err("unexpected stage model".into()),
+            };
+            assert!(wrench.force.y < 0.0);
+            match stage {
+                Stage::One => {
+                    assert!(wrench.force.z.abs() < 1e-12);
+                    assert!(wrench.moment.length() < 1e-12);
+                }
+                Stage::Two => {
+                    assert!(wrench.force.z > 0.0 && wrench.moment.x > 0.0);
+                    assert!((wrench.moment - Vec3::Y.cross(wrench.force)).length() < 1e-12);
+                }
+            }
+            let copy = match model {
+                Aerodynamics::Hull(sections) => Aerodynamics::Hull(sections.clone()),
+                Aerodynamics::Wing(wing) => Aerodynamics::Wing(wing.clone()),
+                _ => return Err("unexpected stage model".into()),
+            };
+            body.set_aerodynamics(copy);
+            let mut world = PhysicsWorld::new();
+            world.set_atmosphere(atmosphere);
+            let id = world.add_body(body)?;
+            world.step(DT)?;
+            let after = world.body(id).ok_or("stepped body")?.state();
+            let expected_velocity = flow.linear_velocity + wrench.force * (DT / mass.mass());
+            let expected_angular = wrench.moment * (DT / 1.0e5);
+            assert!((after.linear_velocity() - expected_velocity).length() < 1e-12);
+            assert!((after.angular_velocity() - expected_angular).length() < 1e-12);
+            assert_eq!(flow.transform.rotation(), Transform::identity().rotation());
+            println!(
+                "stage={stage:?} force={:?} moment={:?} velocity={:?} angular={:?}",
+                wrench.force,
+                wrench.moment,
+                after.linear_velocity(),
+                after.angular_velocity()
+            );
+        }
+        Ok(())
+    }
 }

@@ -8,11 +8,11 @@ For a project within the workspace:
 
 ```toml
 [dependencies]
-kapitsa = { path = "../kapitsa" }
+kapitsa = { path = "../kapitsa", features = ["service"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Set the path to `crates/kapitsa` according to your project's location. The example below requires a Tokio runtime.
+Set the path to `crates/kapitsa` according to your project's location. The example below requires a Tokio runtime and the `service` feature.
 
 ## Creating and Controlling a Simulation
 
@@ -62,9 +62,9 @@ With this approach, the calling code does not need a Tokio runtime: the engine u
 
 Under heavy load, the engine reduces the rate at which simulation time advances based on the measured step duration, down to 30% of the requested speed. With fixed time stepping, `dt` remains unchanged. If steps still cannot keep up, lag accumulates. In adaptive mode, the selected policy determines `dt`; measurements and speed may fluctuate as the workload changes.
 
-Advanced configuration (`Simulation::new_from_config`) is available when the builder's options are insufficient:
+Advanced configuration (`Simulation::new_from_config`) is available when the builder's options are insufficient. `SimulationConfig` is constructed with `SimulationConfig::builder()` and exposes read-only getters; `Default` keeps the documented defaults:
 
-| `SimulationConfig` field | Default | Description |
+| Builder setting | Default | Description |
 | --- | --- | --- |
 | `tick_rate` | `60` | Base frequency, Hz |
 | `max_catch_up_steps` | `4` | Maximum number of consecutive steps per scheduler iteration |
@@ -75,7 +75,8 @@ Advanced configuration (`Simulation::new_from_config`) is available when the bui
 | `workers.scale_up_at` | `0.70` | Fraction of the step budget at which to try increasing the worker count |
 | `workers.scale_down_at` | `0.30` | Threshold for reducing the worker count |
 | `workers.smoothing` | `0.20` | Weight of a new step-duration measurement in smoothing |
-| `central_gravity` | `None` | Single central gravity source retained for compatibility with the previous API |
+
+Central gravity is configured on the world rather than in `SimulationConfig`: use `Simulation::builder().central_gravity(...)` before startup, or `PhysicsClient::set_central_gravity` while running.
 
 In `AdaptiveTimeStepConfig`, the defaults are `minimum_step = 10 µs`, `maximum_step = 500 ms`, and `relative_error_tolerance = 0.01`. These settings do not guarantee a particular error bound for every scene.
 
@@ -236,13 +237,13 @@ client.update_gravity(gravity, UniformGravity::new(Vec3::new(0.0, -3.71, 0.0))?)
 client.remove_gravity(gravity).await?;
 ```
 
-`UniformGravity` provides constant acceleration throughout space. `CentralGravity` is a point source with a center and parameter `μ = GM`, acting at any distance. `SphericalGravity` uses the same point-source model within a specified radius; acceleration is zero outside it. At the center of a nonzero point source, acceleration is undefined and the step returns an error. This is not a model of distributed mass inside a planet. For backward compatibility, `SimulationConfig::central_gravity` also supports a single central source, whose contribution is added to the configured gravity fields.
+`UniformGravity` provides constant acceleration throughout space. `CentralGravity` is a point source with a center and parameter `μ = GM`, acting at any distance. `SphericalGravity` uses the same point-source model within a specified radius; acceleration is zero outside it. At the center of a nonzero point source, acceleration is undefined and the step returns an error. This is not a model of distributed mass inside a planet. Configure a single central source before startup with `Simulation::builder().central_gravity(...)`, or update it at runtime through `PhysicsClient::set_central_gravity`; its contribution is added to the configured gravity fields.
 
 ## Queries, Events, and Batches
 
 `client.raycast`, `sweep`, and `overlaps` perform spatial queries. `QueryFilter` restricts the candidates. State queries and spatial queries are processed at their position in the queue before integration of the corresponding step. Creating and updating materials and clusters also works while paused.
 
-`subscribe_collision_events()` and `subscribe_joint_break_events()` create subscriptions. The streams are bounded: a slow consumer receives a `Lagged` error with the number of skipped batches.
+`subscribe_collision_events()` and `subscribe_joint_break_events()` create subscriptions. The streams are bounded: a slow consumer receives an `Error` whose `lagged_batches()` reports the number of skipped batches.
 
 `client.commands()` creates a command buffer; `try_submit` enqueues it without waiting and returns a batch ID. The queue is bounded, so when full, it returns the batch with an error, allowing it to be resubmitted. Results are available through `subscribe_batch_results`. The buffer supports the body, force, and joint operations listed in `PhysicsCommandBuffer`; newer material and cluster operations are executed as separate commands. Regular client methods wait for confirmation that changes have been applied and state has been published.
 

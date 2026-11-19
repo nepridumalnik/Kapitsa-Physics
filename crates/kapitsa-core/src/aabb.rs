@@ -13,12 +13,12 @@ pub struct Aabb {
 }
 
 impl Aabb {
-    pub fn new(min: Vec3, max: Vec3) -> Result<Self, AabbError> {
+    pub fn new(min: Vec3, max: Vec3) -> Result<Self, crate::Error> {
         if !min.is_finite() || !max.is_finite() {
-            return Err(AabbError::NonFiniteBounds);
+            return Err(crate::Error::from(AabbError::NonFiniteBounds));
         }
         if min.x > max.x || min.y > max.y || min.z > max.z {
-            return Err(AabbError::InvertedBounds);
+            return Err(crate::Error::from(AabbError::InvertedBounds));
         }
 
         Ok(Self { min, max })
@@ -36,12 +36,12 @@ impl Aabb {
         self.min * 0.5 + self.max * 0.5
     }
 
-    pub fn size(&self) -> Result<Vec3, AabbError> {
+    pub fn size(&self) -> Result<Vec3, crate::Error> {
         let size = self.max - self.min;
         if size.is_finite() {
             Ok(size)
         } else {
-            Err(AabbError::SizeOverflow)
+            Err(crate::Error::from(AabbError::SizeOverflow))
         }
     }
 
@@ -72,24 +72,26 @@ impl Aabb {
 
     /// Transforms these local-space bounds by a rigid transform and rounds
     /// the result outward to keep it conservative.
-    pub fn transformed(&self, transform: &Transform) -> Result<Self, AabbError> {
+    pub fn transformed(&self, transform: &Transform) -> Result<Self, crate::Error> {
         let translation = transform.translation();
         let rotation = transform.rotation();
 
         if is_identity_rotation(rotation) {
             let min = translated(self.min, translation, false)?;
             let max = translated(self.max, translation, true)?;
-            return Self::new(min, max).map_err(|_| AabbError::TransformOverflow);
+            return Self::new(min, max)
+                .map_err(|_| crate::Error::from(AabbError::TransformOverflow));
         }
 
         if self.min == Vec3::ZERO && self.max == Vec3::ZERO {
-            return Self::new(translation, translation).map_err(|_| AabbError::TransformOverflow);
+            return Self::new(translation, translation)
+                .map_err(|_| crate::Error::from(AabbError::TransformOverflow));
         }
 
         let center = self.center();
         let half_extents = self.max * 0.5 - self.min * 0.5;
         if !center.is_finite() || !half_extents.is_finite() {
-            return Err(AabbError::TransformOverflow);
+            return Err(crate::Error::from(AabbError::TransformOverflow));
         }
 
         let rotation = rotation.to_mat3().ok_or(AabbError::TransformOverflow)?;
@@ -110,7 +112,7 @@ impl Aabb {
         let error = numeric::roundoff_bound(scale, 64).ok_or(AabbError::TransformOverflow)?
             + 64.0 * f64::from_bits(1);
         if !error.is_finite() {
-            return Err(AabbError::TransformOverflow);
+            return Err(crate::Error::from(AabbError::TransformOverflow));
         }
 
         let error = Vec3::splat(error);
@@ -125,7 +127,7 @@ impl Aabb {
         let min = round_down_vec3(min)?;
         let max = round_up_vec3(max)?;
 
-        Self::new(min, max).map_err(|_| AabbError::TransformOverflow)
+        Self::new(min, max).map_err(|_| crate::Error::from(AabbError::TransformOverflow))
     }
 }
 

@@ -54,12 +54,17 @@ async fn failed_step_preserves_applied_ids_and_removed_geometry() -> Result<(), 
     queue
         .pending_results
         .push(DeferredCommandResult::Chunk { reply, outcome });
-    publish_failed_command_results(&mut queue, &events, 7, StepError::InvalidDeltaTime);
+    publish_failed_command_results(
+        &mut queue,
+        &events,
+        7,
+        kapitsa_core::Error::from(StepError::InvalidDeltaTime),
+    );
     let id = match receive.await? {
         ChunkReply::Completed {
             outcome: ChunkOutcome::Add(Ok(id)),
-            step_failure: Some((7, StepError::InvalidDeltaTime)),
-        } => id,
+            step_failure: Some((7, cause)),
+        } if cause.downcast_ref::<StepError>() == Some(&StepError::InvalidDeltaTime) => id,
         _ => return Err("missing applied chunk ID or failed step".into()),
     };
     assert_eq!(world.chunk_body(id), Some(body));
@@ -68,12 +73,19 @@ async fn failed_step_preserves_applied_ids_and_removed_geometry() -> Result<(), 
     queue
         .pending_results
         .push(DeferredCommandResult::Chunk { reply, outcome });
-    publish_failed_command_results(&mut queue, &events, 8, StepError::InvalidDeltaTime);
+    publish_failed_command_results(
+        &mut queue,
+        &events,
+        8,
+        kapitsa_core::Error::from(StepError::InvalidDeltaTime),
+    );
     match receive.await? {
         ChunkReply::Completed {
             outcome: ChunkOutcome::Remove(Some(chunk)),
-            step_failure: Some((8, StepError::InvalidDeltaTime)),
-        } => assert_eq!(chunk.colliders().len(), 1),
+            step_failure: Some((8, cause)),
+        } if cause.downcast_ref::<StepError>() == Some(&StepError::InvalidDeltaTime) => {
+            assert_eq!(chunk.colliders().len(), 1);
+        }
         _ => return Err("removed geometry was not preserved".into()),
     }
     assert!(world.chunk_body(id).is_none());
@@ -100,8 +112,8 @@ async fn stopping_before_application_returns_chunk_to_caller() -> Result<(), Box
                     body: returned,
                     chunk,
                 },
-            cause: crate::PhysicsClientError::NotRunning,
-        } => {
+            cause,
+        } if cause.to_string().contains("not running") => {
             assert_eq!(returned, body);
             assert_eq!(chunk.colliders().len(), 1);
         }
@@ -134,7 +146,12 @@ async fn failed_step_does_not_turn_empty_batch_or_query_into_applied_errors()
         reply: query_reply,
         outcome: apply_chunk(&mut world, ChunkCommand::Count),
     });
-    publish_failed_command_results(&mut queue, &events(), 3, StepError::InvalidDeltaTime);
+    publish_failed_command_results(
+        &mut queue,
+        &events(),
+        3,
+        kapitsa_core::Error::from(StepError::InvalidDeltaTime),
+    );
     assert!(
         matches!(add_result.await?, ChunkReply::Completed { outcome: ChunkOutcome::AddBatch(Ok(ids)), step_failure: None } if ids.is_empty())
     );

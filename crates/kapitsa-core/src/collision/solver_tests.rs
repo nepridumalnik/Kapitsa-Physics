@@ -683,7 +683,7 @@ fn solve_colored(
     manifolds: &mut [SolverManifold],
     joints: &[JointConstraint],
     config: super::CollisionConfig,
-) -> Result<(), crate::collision::CollisionError> {
+) -> Result<(), crate::Error> {
     let mut workspace = SolverWorkspace::new();
     prepare_colored_workspace(&mut workspace, bodies, manifolds, joints);
     let mut joint_workspace = JointWorkspace::new();
@@ -1383,7 +1383,9 @@ fn invalid_contact_material_leaves_solver_bodies_unchanged() {
             &mut manifolds,
             super::CollisionConfig::default()
         ),
-        Err(crate::collision::CollisionError::InvalidMaterial)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::InvalidMaterial
+        ))
     );
     assert_eq!(bodies[1].body().state().linear_velocity(), initial);
 }

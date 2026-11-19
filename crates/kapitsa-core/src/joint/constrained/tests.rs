@@ -700,9 +700,9 @@ fn constrained_failure_rolls_back_other_eligible_and_legacy_islands() {
     let original: Vec<_> = world.bodies().map(|(_, body)| body.motion()).collect();
     assert_eq!(
         world.step(1.0),
-        Err(crate::world::StepError::Collision(
-            crate::collision::CollisionError::NonConvergent
-        ))
+        Err(crate::Error::from(crate::world::StepError::Collision(
+            crate::Error::from(crate::collision::CollisionError::NonConvergent)
+        )))
     );
     assert_eq!(
         world
@@ -725,9 +725,9 @@ fn constrained_geometric_degeneracy_is_an_explicit_atomic_error() {
     let original: Vec<_> = world.bodies().map(|(_, body)| body.motion()).collect();
     assert_eq!(
         world.step(1.0 / 120.0),
-        Err(crate::world::StepError::Collision(
-            crate::collision::CollisionError::NonConvergent
-        ))
+        Err(crate::Error::from(crate::world::StepError::Collision(
+            crate::Error::from(crate::collision::CollisionError::NonConvergent)
+        )))
     );
     assert_eq!(
         world

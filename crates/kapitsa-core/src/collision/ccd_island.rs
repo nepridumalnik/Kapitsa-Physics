@@ -47,7 +47,7 @@ impl CcdIslandLayout {
         continuous_bodies: &[bool],
         candidate_bodies: &[(usize, usize)],
         force_single_island: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         self.build_inner(
             body_types,
             continuous_bodies,
@@ -64,7 +64,7 @@ impl CcdIslandLayout {
         candidate_bodies: &[(usize, usize)],
         active_candidates: &[bool],
         force_single_island: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         self.build_inner(
             body_types,
             continuous_bodies,
@@ -81,18 +81,18 @@ impl CcdIslandLayout {
         candidate_bodies: &[(usize, usize)],
         active_candidates: Option<&[bool]>,
         force_single_island: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if body_types.len() != continuous_bodies.len() {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         if active_candidates.is_some_and(|active| active.len() != candidate_bodies.len()) {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
 
         self.parents.clear();
         self.parents
             .try_reserve(body_types.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.parents.extend(0..body_types.len());
         resize_with_reserve(&mut self.root_islands, body_types.len(), None)?;
         resize_with_reserve(&mut self.body_islands, body_types.len(), None)?;
@@ -107,15 +107,15 @@ impl CcdIslandLayout {
         for (candidate_index, &(body_a, body_b)) in candidate_bodies.iter().enumerate() {
             let type_a = *body_types
                 .get(body_a)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let type_b = *body_types
                 .get(body_b)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             if body_a == body_b
                 || (continuous_bodies[body_a] && type_a != BodyType::Dynamic)
                 || (continuous_bodies[body_b] && type_b != BodyType::Dynamic)
             {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             if !active_candidates.is_none_or(|active| active[candidate_index])
                 || (!continuous_bodies[body_a] && !continuous_bodies[body_b])
@@ -165,9 +165,11 @@ impl CcdIslandLayout {
                 .flatten();
             let island_index = match (island_a, island_b) {
                 (Some(a), Some(b)) if a == b => a,
-                (Some(_), Some(_)) => return Err(CollisionError::InvalidContact),
+                (Some(_), Some(_)) => {
+                    return Err(crate::Error::from(CollisionError::InvalidContact));
+                }
                 (Some(island_index), None) | (None, Some(island_index)) => island_index,
-                (None, None) => return Err(CollisionError::InvalidContact),
+                (None, None) => return Err(crate::Error::from(CollisionError::InvalidContact)),
             };
             self.candidate_islands[candidate_index] = Some(island_index);
         }
@@ -188,17 +190,17 @@ impl CcdIslandLayout {
         for island in self.body_islands.iter().flatten().copied() {
             self.island_body_offsets[island + 1] = self.island_body_offsets[island + 1]
                 .checked_add(1)
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         for island in 0..self.island_count {
             self.island_body_offsets[island + 1] = self.island_body_offsets[island + 1]
                 .checked_add(self.island_body_offsets[island])
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         let island_body_count = *self
             .island_body_offsets
             .last()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         resize_with_reserve(&mut self.island_body_indices, island_body_count, 0)?;
         resize_with_reserve(&mut self.write_offsets, self.island_count, 0)?;
         self.write_offsets
@@ -218,20 +220,20 @@ impl CcdIslandLayout {
             let count = self
                 .candidate_offsets
                 .get_mut(island_index + 1)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             *count = count
                 .checked_add(1)
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         for island_index in 0..self.island_count {
             self.candidate_offsets[island_index + 1] = self.candidate_offsets[island_index + 1]
                 .checked_add(self.candidate_offsets[island_index])
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         let candidate_count = *self
             .candidate_offsets
             .last()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         resize_with_reserve(&mut self.candidate_indices, candidate_count, 0)?;
         resize_with_reserve(&mut self.write_offsets, self.island_count, 0)?;
         self.write_offsets
@@ -254,23 +256,27 @@ impl CcdIslandLayout {
             if body_types[body_a] == BodyType::Dynamic {
                 self.body_candidate_offsets[body_a + 1] = self.body_candidate_offsets[body_a + 1]
                     .checked_add(1)
-                    .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                    .ok_or_else(|| {
+                        crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
             }
             if body_types[body_b] == BodyType::Dynamic {
                 self.body_candidate_offsets[body_b + 1] = self.body_candidate_offsets[body_b + 1]
                     .checked_add(1)
-                    .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                    .ok_or_else(|| {
+                        crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
             }
         }
         for body in 0..body_types.len() {
             self.body_candidate_offsets[body + 1] = self.body_candidate_offsets[body + 1]
                 .checked_add(self.body_candidate_offsets[body])
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         let body_candidate_count = *self
             .body_candidate_offsets
             .last()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         resize_with_reserve(&mut self.body_candidate_indices, body_candidate_count, 0)?;
         resize_with_reserve(&mut self.write_offsets, body_types.len(), 0)?;
         self.write_offsets
@@ -345,11 +351,11 @@ fn resize_with_reserve<T: Copy>(
     values: &mut Vec<T>,
     len: usize,
     value: T,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if len > values.len() {
         values
             .try_reserve(len - values.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     }
     values.resize(len, value);
     Ok(())

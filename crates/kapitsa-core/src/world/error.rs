@@ -1,16 +1,14 @@
 use std::fmt;
 
-use crate::aerodynamics::AerodynamicsError;
 use crate::collision::CollisionError;
 use crate::containers::DensePoolError;
-use crate::gravity::GravityError;
-use crate::rigid_body::{BodyError, IntegrationError};
+use crate::rigid_body::BodyError;
 
 use super::{BodyId, ForceSourceId};
 use crate::joint::JointError;
 
 /// Failure while configuring or editing a rigid cluster.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClusterError {
     InvalidBodyId,
     InvalidPartId,
@@ -28,10 +26,10 @@ pub enum ClusterError {
     ManagedMass,
     ArithmeticOverflow,
     StorageCapacityExceeded,
-    Mass(crate::mass::MassError),
-    Body(BodyError),
-    Transform(crate::transform::TransformError),
-    Collision(CollisionError),
+    Mass(crate::Error),
+    Body(crate::Error),
+    Transform(crate::Error),
+    Collision(crate::Error),
 }
 
 impl fmt::Display for ClusterError {
@@ -101,18 +99,18 @@ impl From<BodyError> for ForceSourceError {
 }
 
 /// Failure returned when a world timestep cannot be completed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StepError {
     InvalidDeltaTime,
     InvalidStepResults,
     /// Automatic weld failure could not certify or balance this step.
-    WeldBalance(super::WeldBalanceError),
+    WeldBalance(crate::Error),
     /// Preparing or committing a weld split failed.
-    WeldSplit(ClusterError),
-    Collision(CollisionError),
+    WeldSplit(crate::Error),
+    Collision(crate::Error),
     BodyIntegration {
         body_id: BodyId,
-        cause: IntegrationError,
+        cause: crate::Error,
     },
     ForceSource {
         source_id: ForceSourceId,
@@ -120,11 +118,11 @@ pub enum StepError {
     },
     Gravity {
         body_id: BodyId,
-        cause: GravityError,
+        cause: crate::Error,
     },
     Aerodynamics {
         body_id: BodyId,
-        cause: AerodynamicsError,
+        cause: crate::Error,
     },
 }
 
@@ -158,7 +156,8 @@ impl std::error::Error for StepError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Collision(error) => Some(error),
-            Self::InvalidDeltaTime | Self::InvalidStepResults | Self::WeldBalance(_) => None,
+            Self::InvalidDeltaTime | Self::InvalidStepResults => None,
+            Self::WeldBalance(error) => Some(error),
             Self::WeldSplit(error) => Some(error),
             Self::BodyIntegration { cause, .. } => Some(cause),
             Self::ForceSource { cause, .. } => Some(cause),
@@ -169,11 +168,12 @@ impl std::error::Error for StepError {
 }
 
 /// Reason an object could not be added or a world ID could not be resolved.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorldError {
     DensePoolIndexOverflow,
     DensePoolCapacityExceeded,
     DensePoolInvalidFreeList,
+    DensePoolIdentifierExhausted,
     WorldIdExhausted,
     InvalidBodyId,
     InvalidAerodynamicSurface,
@@ -185,7 +185,7 @@ pub enum WorldError {
     InvalidJointTarget,
     InvalidMaterialId,
     MaterialInUse,
-    Collision(CollisionError),
+    Collision(crate::Error),
     Joint(JointError),
 }
 
@@ -195,6 +195,9 @@ impl fmt::Display for WorldError {
             Self::DensePoolIndexOverflow => formatter.write_str("world storage index exceeds u32"),
             Self::DensePoolCapacityExceeded => {
                 formatter.write_str("world storage capacity could not be reserved")
+            }
+            Self::DensePoolIdentifierExhausted => {
+                formatter.write_str("world storage identifier space is exhausted")
             }
             Self::DensePoolInvalidFreeList => {
                 formatter.write_str("world storage free list is invalid")
@@ -234,6 +237,7 @@ impl std::error::Error for WorldError {
             Self::DensePoolIndexOverflow
             | Self::DensePoolCapacityExceeded
             | Self::DensePoolInvalidFreeList
+            | Self::DensePoolIdentifierExhausted
             | Self::WorldIdExhausted
             | Self::InvalidBodyId
             | Self::InvalidAerodynamicSurface
@@ -255,14 +259,14 @@ impl From<DensePoolError> for WorldError {
             DensePoolError::IndexOverflow => Self::DensePoolIndexOverflow,
             DensePoolError::CapacityExceeded => Self::DensePoolCapacityExceeded,
             DensePoolError::InvalidFreeList => Self::DensePoolInvalidFreeList,
-            DensePoolError::IdentifierExhausted => Self::DensePoolCapacityExceeded,
+            DensePoolError::IdentifierExhausted => Self::DensePoolIdentifierExhausted,
         }
     }
 }
 
 impl From<CollisionError> for WorldError {
     fn from(error: CollisionError) -> Self {
-        Self::Collision(error)
+        Self::Collision(crate::Error::from(error))
     }
 }
 
