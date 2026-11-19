@@ -41,7 +41,7 @@ impl BroadPhase {
         &mut self,
         mut index: Option<&mut SpatialIndex>,
         proxies: &[CollisionProxy],
-    ) -> Result<&[CollisionPair], CollisionError> {
+    ) -> Result<&[CollisionPair], crate::Error> {
         self.candidates.clear();
         if proxies.is_empty() {
             return Ok(&self.candidates);
@@ -50,10 +50,10 @@ impl BroadPhase {
         lookup.clear();
         lookup
             .try_reserve(proxies.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         for (position, proxy) in proxies.iter().enumerate() {
             if lookup.insert(proxy.collider, position).is_some() {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
         }
 
@@ -61,7 +61,9 @@ impl BroadPhase {
         for proxy in proxies {
             if let Some(bounds) = proxy.bounds {
                 finite_count += 1;
-                let index = index.as_deref_mut().ok_or(CollisionError::InvalidContact)?;
+                let index = index
+                    .as_deref_mut()
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 index.query(bounds, &mut self.query_results)?;
                 for candidate_id in self.query_results.iter().copied() {
                     if proxy.collider >= candidate_id {
@@ -70,10 +72,10 @@ impl BroadPhase {
                     let position = lookup
                         .get(&candidate_id)
                         .copied()
-                        .ok_or(CollisionError::InvalidContact)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                     let other = proxies
                         .get(position)
-                        .ok_or(CollisionError::InvalidContact)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                     if Self::allows_pair(proxy, other) {
                         Self::push_pair(&mut self.candidates, proxy.collider, other.collider)?;
                     }
@@ -105,14 +107,14 @@ impl BroadPhase {
         self.lookup.as_ref()?.get(&collider).copied()
     }
 
-    pub(crate) fn add_candidate(&mut self, pair: CollisionPair) -> Result<bool, CollisionError> {
+    pub(crate) fn add_candidate(&mut self, pair: CollisionPair) -> Result<bool, crate::Error> {
         let position = match self.candidates.binary_search(&pair) {
             Ok(_) => return Ok(false),
             Err(position) => position,
         };
         self.candidates
             .try_reserve(1)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.candidates.insert(position, pair);
         Ok(true)
     }
@@ -143,11 +145,12 @@ impl BroadPhase {
         candidates: &mut Vec<CollisionPair>,
         a: ColliderId,
         b: ColliderId,
-    ) -> Result<(), CollisionError> {
-        let pair = CollisionPair::new(a, b).ok_or(CollisionError::InvalidContact)?;
+    ) -> Result<(), crate::Error> {
+        let pair = CollisionPair::new(a, b)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         candidates
             .try_reserve(1)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         candidates.push(pair);
         Ok(())
     }

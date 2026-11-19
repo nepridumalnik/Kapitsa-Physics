@@ -21,7 +21,7 @@ pub(crate) struct LevelSetCell {
 pub(crate) fn sample(
     level_set: &LevelSet,
     point: Vec3,
-) -> Result<Option<LevelSetSample>, CollisionError> {
+) -> Result<Option<LevelSetSample>, crate::Error> {
     let origin = level_set.origin();
     let spacing = level_set.grid_spacing();
     let dimensions = level_set.dimensions();
@@ -33,7 +33,7 @@ pub(crate) fn sample(
                 (dimensions[2] - 1) as f64,
             );
     if !point.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if point.x < origin.x
         || point.y < origin.y
@@ -83,7 +83,7 @@ pub(crate) fn sample(
         lerp(lerp(dz00, dz10, tx)?, lerp(dz01, dz11, tx)?, ty)?,
     );
     if !gradient.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(Some(LevelSetSample {
         value,
@@ -96,7 +96,7 @@ pub(crate) fn query_surface_cells(
     level_set: &LevelSet,
     local_bounds: Aabb,
     output: &mut Vec<LevelSetCell>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     output.clear();
     let dimensions = level_set.dimensions();
     let origin = level_set.origin();
@@ -127,9 +127,9 @@ pub(crate) fn query_surface_cells(
                 if minimum > 0.0 || maximum < 0.0 {
                     continue;
                 }
-                output
-                    .try_reserve(1)
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                output.try_reserve(1).map_err(|_| {
+                    crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                })?;
                 output.push(LevelSetCell {
                     index: cell_index(level_set, x, y, z)?,
                     bounds,
@@ -146,28 +146,26 @@ pub(crate) fn query_world_cells(
     world_transform: &Transform,
     world_bounds: Aabb,
     output: &mut Vec<LevelSetCell>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let local_bounds = super::mesh::local_query_bounds(world_bounds, world_transform)?;
     query_surface_cells(level_set, local_bounds, output)
 }
 
-pub(crate) fn cell_lipschitz_bound(
-    level_set: &LevelSet,
-    index: u64,
-) -> Result<f64, CollisionError> {
+pub(crate) fn cell_lipschitz_bound(level_set: &LevelSet, index: u64) -> Result<f64, crate::Error> {
     let dimensions = level_set.dimensions();
     let columns = dimensions[0] - 1;
     let rows = dimensions[1] - 1;
     let cells_per_plane = columns
         .checked_mul(rows)
-        .ok_or(CollisionError::GeometryBounds)?;
-    let index = usize::try_from(index).map_err(|_| CollisionError::GeometryBounds)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
+    let index =
+        usize::try_from(index).map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?;
     let z = index / cells_per_plane;
     let in_plane = index % cells_per_plane;
     let y = in_plane / columns;
     let x = in_plane % columns;
     if z >= dimensions[2] - 1 {
-        return Err(CollisionError::GeometryBounds);
+        return Err(crate::Error::from(CollisionError::GeometryBounds));
     }
 
     let dx = [
@@ -241,7 +239,7 @@ pub(crate) fn cell_lipschitz_bound(
     bound
         .is_finite()
         .then_some(bound)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 fn locate_axis(
@@ -249,10 +247,10 @@ fn locate_axis(
     origin: f64,
     spacing: f64,
     dimension: usize,
-) -> Result<(usize, f64), CollisionError> {
+) -> Result<(usize, f64), crate::Error> {
     let coordinate = (point - origin) / spacing;
     if !coordinate.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let last_node = (dimension - 1) as f64;
     let coordinate = coordinate.clamp(0.0, last_node);
@@ -261,19 +259,19 @@ fn locate_axis(
     Ok((cell, fraction))
 }
 
-fn value_at(level_set: &LevelSet, x: usize, y: usize, z: usize) -> Result<f64, CollisionError> {
+fn value_at(level_set: &LevelSet, x: usize, y: usize, z: usize) -> Result<f64, crate::Error> {
     let dimensions = level_set.dimensions();
     let index = z
         .checked_mul(dimensions[1])
         .and_then(|index| index.checked_add(y))
         .and_then(|index| index.checked_mul(dimensions[0]))
         .and_then(|index| index.checked_add(x))
-        .ok_or(CollisionError::GeometryBounds)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
     level_set
         .signed_distances()
         .get(index)
         .copied()
-        .ok_or(CollisionError::GeometryBounds)
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))
 }
 
 fn cell_range(
@@ -298,7 +296,7 @@ fn cell_range(
     Some((first.min(last), last))
 }
 
-fn cell_bounds(level_set: &LevelSet, x: usize, y: usize, z: usize) -> Result<Aabb, CollisionError> {
+fn cell_bounds(level_set: &LevelSet, x: usize, y: usize, z: usize) -> Result<Aabb, crate::Error> {
     let origin = level_set.origin();
     let spacing = level_set.grid_spacing();
     let x0 = origin.x + x as f64 * spacing.x;
@@ -308,7 +306,7 @@ fn cell_bounds(level_set: &LevelSet, x: usize, y: usize, z: usize) -> Result<Aab
     let z0 = origin.z + z as f64 * spacing.z;
     let z1 = origin.z + (z + 1) as f64 * spacing.z;
     Aabb::new(Vec3::new(x0, y0, z0), Vec3::new(x1, y1, z1))
-        .map_err(|_| CollisionError::GeometryBounds)
+        .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))
 }
 
 fn corner_value_range(
@@ -316,7 +314,7 @@ fn corner_value_range(
     x: usize,
     y: usize,
     z: usize,
-) -> Result<(f64, f64), CollisionError> {
+) -> Result<(f64, f64), crate::Error> {
     let values = [
         value_at(level_set, x, y, z)?,
         value_at(level_set, x + 1, y, z)?,
@@ -333,7 +331,7 @@ fn corner_value_range(
     ))
 }
 
-fn cell_index(level_set: &LevelSet, x: usize, y: usize, z: usize) -> Result<u64, CollisionError> {
+fn cell_index(level_set: &LevelSet, x: usize, y: usize, z: usize) -> Result<u64, crate::Error> {
     let dimensions = level_set.dimensions();
     let columns = dimensions[0] - 1;
     let rows = dimensions[1] - 1;
@@ -342,24 +340,24 @@ fn cell_index(level_set: &LevelSet, x: usize, y: usize, z: usize) -> Result<u64,
         .and_then(|index| index.checked_add(y))
         .and_then(|index| index.checked_mul(columns))
         .and_then(|index| index.checked_add(x))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    u64::try_from(index).map_err(|_| CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
+    u64::try_from(index).map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
-fn lerp(a: f64, b: f64, amount: f64) -> Result<f64, CollisionError> {
+fn lerp(a: f64, b: f64, amount: f64) -> Result<f64, crate::Error> {
     let value = a * (1.0 - amount) + b * amount;
     value
         .is_finite()
         .then_some(value)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
-fn checked_difference(a: f64, b: f64) -> Result<f64, CollisionError> {
+fn checked_difference(a: f64, b: f64) -> Result<f64, crate::Error> {
     let difference = a - b;
     difference
         .is_finite()
         .then_some(difference)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 #[cfg(test)]

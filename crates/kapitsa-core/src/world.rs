@@ -690,7 +690,7 @@ fn swept_bounds_for_trajectory(
     collider: &Collider,
     trajectory: &CcdTrajectory,
     end: BodyState,
-) -> Result<Option<crate::aabb::Aabb>, CollisionError> {
+) -> Result<Option<crate::aabb::Aabb>, crate::Error> {
     let local_bounds = collider.local_bounds()?;
     let start_transform = trajectory.transform_at(0.0)?;
     let end_transform = end
@@ -1900,9 +1900,7 @@ impl PhysicsWorld {
     }
 
     pub fn set_collision_config(&mut self, config: CollisionConfig) -> Result<(), Error> {
-        self.collision_system
-            .set_config(config)
-            .map_err(Error::from)
+        self.collision_system.set_config(config)
     }
 
     pub fn collision_events(&self) -> &[CollisionEvent] {
@@ -2566,9 +2564,9 @@ impl PhysicsWorld {
                 self.rollback_gravity_updates();
                 self.rollback_aerodynamics_updates();
                 self.rollback_force_source_updates();
-                Err(Error::from(StepError::Collision(
+                Err(Error::from(StepError::Collision(crate::Error::from(
                     CollisionError::WorkerFailed,
-                )))
+                ))))
             }
         }
     }
@@ -2607,15 +2605,27 @@ impl PhysicsWorld {
             .count();
         self.cluster_load_states_pending
             .try_reserve(cluster_count)
-            .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+            .map_err(|_| {
+                StepError::Collision(crate::Error::from(
+                    CollisionError::SpatialIndexCapacityExceeded,
+                ))
+            })?;
         self.cluster_load_parts_pending.clear();
         self.cluster_load_parts_pending
             .try_reserve(self.parts.iter().count())
-            .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+            .map_err(|_| {
+                StepError::Collision(crate::Error::from(
+                    CollisionError::SpatialIndexCapacityExceeded,
+                ))
+            })?;
         self.cluster_load_welds_pending.clear();
         self.cluster_load_welds_pending
             .try_reserve(self.welds.iter().count())
-            .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+            .map_err(|_| {
+                StepError::Collision(crate::Error::from(
+                    CollisionError::SpatialIndexCapacityExceeded,
+                ))
+            })?;
         let no_world_load_paths =
             self.joints.iter().next().is_none() && self.chunks.iter().next().is_none();
         for (dense, entry) in self.bodies.iter() {
@@ -2822,9 +2832,9 @@ impl PhysicsWorld {
                 self.rollback_gravity_updates();
                 self.rollback_aerodynamics_updates();
                 self.rollback_force_source_updates();
-                Err(Error::from(StepError::Collision(
+                Err(Error::from(StepError::Collision(crate::Error::from(
                     CollisionError::WorkerFailed,
-                )))
+                ))))
             }
         }
     }
@@ -2859,7 +2869,9 @@ impl PhysicsWorld {
                         }
                     }
                 })
-                .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
+                .map_err(|_| {
+                    StepError::Collision(crate::Error::from(CollisionError::WorkerFailed))
+                })?;
             world.commit_step_shards_inner(shards, executor, worker_count, true)
         })
     }
@@ -2945,7 +2957,7 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn stage_contact_impulses(&mut self) -> Result<(), CollisionError> {
+    fn stage_contact_impulses(&mut self) -> Result<(), crate::Error> {
         self.contact_impulses_pending.clear();
         self.contact_impulses_omitted_pending = 0;
         let context = &self.collision_system.context;
@@ -3011,7 +3023,7 @@ impl PhysicsWorld {
             .iter()
             .chain(&context.manifolds)
             .try_fold(0usize, |count, manifold| count.checked_add(manifold.len()))
-            .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.contact_impulses_pending
             .try_reserve(count)
             .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
@@ -3047,10 +3059,10 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn prepare_joint_break_commit(&mut self) -> Result<(), CollisionError> {
+    fn prepare_joint_break_commit(&mut self) -> Result<(), crate::Error> {
         self.joint_events
             .try_reserve(self.collision_system.joint_break_events().len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))
     }
 
     fn commit_joint_breaks(&mut self) {
@@ -4391,7 +4403,7 @@ impl PhysicsWorld {
                     }
                 },
             )
-            .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
+            .map_err(|_| StepError::Collision(crate::Error::from(CollisionError::WorkerFailed)))?;
         if let Some(error) = self
             .aerodynamics_body_updates
             .iter()
@@ -4692,7 +4704,7 @@ impl PhysicsWorld {
                         Self::apply_gravity(gravity, fields, update.id, &mut update.prepared).err();
                 }
             })
-            .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
+            .map_err(|_| StepError::Collision(crate::Error::from(CollisionError::WorkerFailed)))?;
         if let Some(error) = self
             .gravity_body_updates
             .iter()
@@ -4815,7 +4827,7 @@ impl PhysicsWorld {
         self.clear_force_source_updates();
     }
 
-    fn stage_spatial_proxies(&mut self, dt: f64) -> Result<(), CollisionError> {
+    fn stage_spatial_proxies(&mut self, dt: f64) -> Result<(), crate::Error> {
         for ((body_dense, body_entry), (predicted_id, predicted_state)) in self.bodies.iter().zip(
             self.collision_system
                 .context
@@ -4828,20 +4840,20 @@ impl PhysicsWorld {
                 dense: body_dense,
             };
             if predicted_id != body_id {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             let body_type = body_entry.body.physics().body_type();
             let mut next = body_entry.first_collider;
             while let Some(collider_id) = next {
                 if collider_id.world != self.world_id {
-                    return Err(CollisionError::InvalidContact);
+                    return Err(crate::Error::from(CollisionError::InvalidContact));
                 }
                 let collider_entry = self
                     .colliders
                     .get(collider_id.dense)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 if collider_entry.body != body_id {
-                    return Err(CollisionError::InvalidContact);
+                    return Err(crate::Error::from(CollisionError::InvalidContact));
                 }
                 let bounds = if body_type != BodyType::Static {
                     let trajectory = CcdTrajectory::new(
@@ -4939,7 +4951,7 @@ impl PhysicsWorld {
         dt: f64,
         worker_count: usize,
         executor: &impl StepExecutor,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
         self.stage_spatial_proxies(dt)?;
@@ -4962,7 +4974,7 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn prepare_joint_collision_pairs(&mut self) -> Result<(), CollisionError> {
+    fn prepare_joint_collision_pairs(&mut self) -> Result<(), crate::Error> {
         let pairs = &mut self.collision_system.context.joint_collision_pairs;
         pairs.clear();
         pairs
@@ -4987,7 +4999,7 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn prepare_joint_constraints(&mut self) -> Result<(), CollisionError> {
+    fn prepare_joint_constraints(&mut self) -> Result<(), crate::Error> {
         self.collision_system.context.joint_constraints.clear();
         self.collision_system
             .context
@@ -5010,12 +5022,12 @@ impl PhysicsWorld {
                 .get(body_a_id.dense)
                 .filter(|_| body_a_id.world == world_id)
                 .map(|body| body.body.physics().body_type())
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let body_type_b = bodies
                 .get(body_b_id.dense)
                 .filter(|_| body_b_id.world == world_id)
                 .map(|body| body.body.physics().body_type())
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             if body_type_a != BodyType::Dynamic && body_type_b != BodyType::Dynamic {
                 continue;
             }
@@ -5052,7 +5064,7 @@ impl PhysicsWorld {
         Ok(())
     }
 
-    fn stage_collision_events(&mut self) -> Result<(), CollisionError> {
+    fn stage_collision_events(&mut self) -> Result<(), crate::Error> {
         #[cfg(feature = "bench-internals")]
         let started = Instant::now();
         let result = self.collision_system.stage_lifecycle_events();
@@ -5209,19 +5221,21 @@ impl PhysicsWorld {
         energy
     }
 
-    fn required_body_index_slots(context: &StepContext) -> Result<usize, CollisionError> {
+    fn required_body_index_slots(context: &StepContext) -> Result<usize, crate::Error> {
         context
             .predicted_states
             .iter()
             .try_fold(0_usize, |required, (body_id, _)| {
                 let slot =
                     usize::try_from(body_id.index()).map_err(|_| CollisionError::GeometryBounds)?;
-                let end = slot.checked_add(1).ok_or(CollisionError::GeometryBounds)?;
+                let end = slot
+                    .checked_add(1)
+                    .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
                 Ok(required.max(end))
             })
     }
 
-    fn rebuild_body_indices(context: &mut StepContext) -> Result<(), CollisionError> {
+    fn rebuild_body_indices(context: &mut StepContext) -> Result<(), crate::Error> {
         if context.body_indices_ready {
             return Ok(());
         }
@@ -5243,13 +5257,14 @@ impl PhysicsWorld {
             *context
                 .body_indices
                 .get_mut(slot)
-                .ok_or(CollisionError::InvalidContact)? = Some((body_id, index));
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? =
+                Some((body_id, index));
         }
         context.body_indices_ready = true;
         Ok(())
     }
 
-    fn prepare_solver_body_indices(context: &mut StepContext) -> Result<(), CollisionError> {
+    fn prepare_solver_body_indices(context: &mut StepContext) -> Result<(), crate::Error> {
         let required_slots = Self::required_body_index_slots(context)?;
         if context.solver_body_indices.len() < required_slots {
             context
@@ -5274,7 +5289,7 @@ impl PhysicsWorld {
         worker_count: usize,
         executor: &impl StepExecutor,
         dt: f64,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let candidate_count = self.collision_system.candidate_count();
         let has_active_joints = self
             .joints
@@ -5328,17 +5343,17 @@ impl PhysicsWorld {
             let pair = self
                 .collision_system
                 .candidate(candidate_index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let collider_a = self
                 .colliders
                 .get(pair.a.dense)
                 .filter(|_| pair.a.world == self.world_id)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let collider_b = self
                 .colliders
                 .get(pair.b.dense)
                 .filter(|_| pair.b.world == self.world_id)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             if self
                 .collision_system
                 .context
@@ -5361,7 +5376,7 @@ impl PhysicsWorld {
                 .context
                 .predicted_states
                 .get(body_a_index)
-                .ok_or(CollisionError::InvalidContact)?
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                 .1
                 .transform();
             let body_b = self
@@ -5369,7 +5384,7 @@ impl PhysicsWorld {
                 .context
                 .predicted_states
                 .get(body_b_index)
-                .ok_or(CollisionError::InvalidContact)?
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                 .1
                 .transform();
             let transform_a = body_a
@@ -5434,12 +5449,12 @@ impl PhysicsWorld {
                     .colliders
                     .get(manifold.pair.a.dense)
                     .filter(|_| manifold.pair.a.world == self.world_id)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let collider_b = self
                     .colliders
                     .get(manifold.pair.b.dense)
                     .filter(|_| manifold.pair.b.world == self.world_id)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 (
                     collider_a.body,
                     collider_b.body,
@@ -5464,20 +5479,20 @@ impl PhysicsWorld {
                 .get(body_id_a.dense)
                 .filter(|_| body_id_a.world == self.world_id)
                 .map(|entry| entry.body.physics().body_type())
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let type_b = self
                 .bodies
                 .get(body_id_b.dense)
                 .filter(|_| body_id_b.world == self.world_id)
                 .map(|entry| entry.body.physics().body_type())
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             if type_a != BodyType::Dynamic && type_b != BodyType::Dynamic {
                 continue;
             }
             if mode_a == crate::collider::CollisionMode::Sensor
                 || mode_b == crate::collider::CollisionMode::Sensor
             {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             let material = self.combined_solver_material(material_a, material_b)?;
             let body_a = self.solver_body_index(body_id_a, prediction_a)?;
@@ -5500,12 +5515,12 @@ impl PhysicsWorld {
                 .colliders
                 .get(manifold.pair.a.dense)
                 .filter(|_| manifold.pair.a.world == self.world_id)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let collider_b = self
                 .colliders
                 .get(manifold.pair.b.dense)
                 .filter(|_| manifold.pair.b.world == self.world_id)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let body_a_index = Self::predicted_body_index(
                 &self.collision_system.context.body_indices,
                 self.world_id,
@@ -5521,7 +5536,7 @@ impl PhysicsWorld {
                 .context
                 .predicted_states
                 .get(body_a_index)
-                .ok_or(CollisionError::InvalidContact)?
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                 .1
                 .transform();
             let body_b = self
@@ -5529,7 +5544,7 @@ impl PhysicsWorld {
                 .context
                 .predicted_states
                 .get(body_b_index)
-                .ok_or(CollisionError::InvalidContact)?
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                 .1
                 .transform();
             let mut deepest = None;
@@ -5538,7 +5553,7 @@ impl PhysicsWorld {
             for point in manifold.points().iter().copied() {
                 total_impulse += point.normal_impulse;
                 if !total_impulse.is_finite() {
-                    return Err(CollisionError::ArithmeticOverflow);
+                    return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                 }
                 impact |= point.normal_impulse_increase_sum > 0.0;
                 if deepest.is_none_or(|current: crate::collision::ContactPoint| {
@@ -5550,12 +5565,13 @@ impl PhysicsWorld {
             // Solver updates can add and then completely cancel an impulse.
             // Such a manifold has no resultant impact to publish.
             impact &= total_impulse > 0.0;
-            let deepest = deepest.ok_or(CollisionError::InvalidContact)?;
+            let deepest =
+                deepest.ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let point_a = body_a.transform_point(deepest.local_a);
             let point_b = body_b.transform_point(deepest.local_b);
             let point = point_a * 0.5 + point_b * 0.5;
             if !point.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             upsert_interaction(
                 &mut self.collision_system.context.interactions,
@@ -5582,9 +5598,9 @@ impl PhysicsWorld {
         body_indices: &[Option<(BodyId, usize)>],
         world_id: u64,
         id: BodyId,
-    ) -> Result<usize, CollisionError> {
+    ) -> Result<usize, crate::Error> {
         if id.world != world_id {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         let slot = usize::try_from(id.index()).map_err(|_| CollisionError::InvalidContact)?;
         body_indices
@@ -5592,14 +5608,14 @@ impl PhysicsWorld {
             .and_then(|entry| *entry)
             .filter(|(current, _)| *current == id)
             .map(|(_, index)| index)
-            .ok_or(CollisionError::InvalidContact)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))
     }
 
     fn solver_body_index(
         &mut self,
         body_id: BodyId,
         prediction_index: usize,
-    ) -> Result<usize, CollisionError> {
+    ) -> Result<usize, crate::Error> {
         Self::solver_body_index_in_context(
             &self.bodies,
             self.world_id,
@@ -5615,7 +5631,7 @@ impl PhysicsWorld {
         context: &mut StepContext,
         body_id: BodyId,
         prediction_index: usize,
-    ) -> Result<usize, CollisionError> {
+    ) -> Result<usize, crate::Error> {
         let slot = usize::try_from(body_id.index()).map_err(|_| CollisionError::InvalidContact)?;
         if let Some((current, index)) = context.solver_body_indices.get(slot).copied().flatten()
             && current == body_id
@@ -5625,7 +5641,7 @@ impl PhysicsWorld {
         let entry = bodies
             .get(body_id.dense)
             .filter(|_| body_id.world == world_id)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let body = entry.body.motion();
         let constrained_start = (entry.first_collider.is_none()
             && entry.cluster.is_none()
@@ -5636,7 +5652,7 @@ impl PhysicsWorld {
             .get(prediction_index)
             .filter(|(current, _)| *current == body_id)
             .map(|(_, state)| *state)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let index = context.solver_bodies.len();
         context
             .solver_bodies
@@ -5653,7 +5669,8 @@ impl PhysicsWorld {
         *context
             .solver_body_indices
             .get_mut(slot)
-            .ok_or(CollisionError::InvalidContact)? = Some((body_id, index));
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? =
+            Some((body_id, index));
         context
             .solver_bodies
             .push(SolverBody::from_prediction(body, state));
@@ -5671,7 +5688,7 @@ impl PhysicsWorld {
         &self,
         material_a: Option<MaterialId>,
         material_b: Option<MaterialId>,
-    ) -> Result<SolverMaterial, CollisionError> {
+    ) -> Result<SolverMaterial, crate::Error> {
         let fallback = PhysicsMaterial::default();
         let material_a = material_a
             .and_then(|id| self.materials.get(id))
@@ -5685,7 +5702,7 @@ impl PhysicsWorld {
         let static_friction =
             material_a.static_friction().sqrt() * material_b.static_friction().sqrt();
         if !dynamic_friction.is_finite() || !static_friction.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         Ok(SolverMaterial {
             restitution: material_a.restitution().max(material_b.restitution()),
@@ -5694,7 +5711,7 @@ impl PhysicsWorld {
         })
     }
 
-    fn validate_collision_inputs(&self) -> Result<(), CollisionError> {
+    fn validate_collision_inputs(&self) -> Result<(), crate::Error> {
         self.collision_system.config().validate()?;
         for (_, entry) in self.colliders.iter() {
             if entry
@@ -5702,17 +5719,19 @@ impl PhysicsWorld {
                 .material()
                 .is_some_and(|id| !self.materials.contains(id))
             {
-                return Err(CollisionError::InvalidMaterial);
+                return Err(crate::Error::from(CollisionError::InvalidMaterial));
             }
             let body = self
                 .bodies
                 .get(entry.body.dense)
                 .filter(|_| entry.body.world == self.world_id)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             if body.body.physics().body_type() == crate::rigid_body::BodyType::Dynamic
                 && !entry.collider.shape().is_convex()
             {
-                return Err(CollisionError::UnsupportedDynamicGeometry);
+                return Err(crate::Error::from(
+                    CollisionError::UnsupportedDynamicGeometry,
+                ));
             }
         }
         Ok(())
@@ -5753,9 +5772,11 @@ impl PhysicsWorld {
         let remainder = self.body_count() % shards.len();
         for (index, shard) in shards.iter_mut().enumerate() {
             let required = base_size + usize::from(index < remainder);
-            shard
-                .try_reserve(required)
-                .map_err(|_| StepError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+            shard.try_reserve(required).map_err(|_| {
+                StepError::Collision(crate::Error::from(
+                    CollisionError::SpatialIndexCapacityExceeded,
+                ))
+            })?;
         }
         let mut shard_index = 0;
         let mut shard_remaining = base_size + usize::from(remainder > 0);
@@ -5896,7 +5917,9 @@ impl PhysicsWorld {
                         }
                     }
                 })
-                .map_err(|_| StepError::Collision(CollisionError::WorkerFailed))?;
+                .map_err(|_| {
+                    StepError::Collision(crate::Error::from(CollisionError::WorkerFailed))
+                })?;
             if let Some(error) = shards.iter().flatten().find_map(|step| step.error.clone()) {
                 return Err(error);
             }
@@ -6077,9 +6100,9 @@ impl PhysicsWorld {
             entry.body.physics().body_type() == crate::rigid_body::BodyType::Dynamic
                 && !collider.shape().is_convex()
         }) {
-            return Err(Error::from(WorldError::Collision(
+            return Err(Error::from(WorldError::Collision(crate::Error::from(
                 CollisionError::UnsupportedDynamicGeometry,
-            )));
+            ))));
         }
         if first.is_some_and(|id| self.colliders.get(id.dense).is_none()) {
             return Err(Error::from(WorldError::InvalidColliderId));
@@ -6087,9 +6110,11 @@ impl PhysicsWorld {
         collider.prepare_query_geometry()?;
         let has_finite_bounds = collider.local_bounds().ok().flatten().is_some();
         if !has_finite_bounds {
-            self.unbounded_query_colliders
-                .try_reserve(1)
-                .map_err(|_| WorldError::Collision(CollisionError::SpatialIndexCapacityExceeded))?;
+            self.unbounded_query_colliders.try_reserve(1).map_err(|_| {
+                crate::Error::from(WorldError::Collision(crate::Error::from(
+                    CollisionError::SpatialIndexCapacityExceeded,
+                )))
+            })?;
         }
 
         let dense = self
@@ -6423,7 +6448,7 @@ fn body_point_velocity(
     mut body: BodyMotion,
     state: BodyState,
     point: Vec3,
-) -> Result<Vec3, CollisionError> {
+) -> Result<Vec3, crate::Error> {
     body.set_state_preserving_forces(state);
     let center = body
         .world_center_of_mass()
@@ -6434,13 +6459,13 @@ fn body_point_velocity(
         .checked_cross(
             point
                 .checked_sub(center)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     state
         .linear_velocity()
         .checked_add(angular_velocity)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 fn collider_entries_of<'a>(
@@ -6467,16 +6492,16 @@ fn update_query_index_for_body(
     world_id: u64,
     body_id: BodyId,
     body: &BodyEntry,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let mut next = body.first_collider;
     while let Some(collider_id) = next {
         if collider_id.world != world_id {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         let entry = colliders
             .get(collider_id.dense)
             .filter(|entry| entry.body == body_id)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         if let Some(bounds) = entry
             .collider
             .world_bounds(&body.body.state().transform())
@@ -6493,30 +6518,30 @@ fn update_query_index_for_body(
     Ok(())
 }
 
-fn expanded_query_bounds(bounds: Aabb) -> Result<Aabb, CollisionError> {
+fn expanded_query_bounds(bounds: Aabb) -> Result<Aabb, crate::Error> {
     const MARGIN: f64 = 0.1;
     let margin = Vec3::splat(MARGIN);
     let min = bounds
         .min()
         .checked_sub(margin)
-        .ok_or(CollisionError::GeometryBounds)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
     let max = bounds
         .max()
         .checked_add(margin)
-        .ok_or(CollisionError::GeometryBounds)?;
-    Aabb::new(min, max).map_err(|_| CollisionError::GeometryBounds)
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
+    Aabb::new(min, max).map_err(|_| crate::Error::from(CollisionError::GeometryBounds))
 }
 
 fn upsert_interaction(
     interactions: &mut Vec<CollisionInteraction>,
     indices: &mut Option<HashMap<CollisionPair, usize>>,
     interaction: CollisionInteraction,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let indices = indices.get_or_insert_with(HashMap::new);
     if let Some(&index) = indices.get(&interaction.pair) {
         let existing = interactions
             .get_mut(index)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         merge_interaction(existing, interaction)?;
         return Ok(());
     }
@@ -6536,7 +6561,7 @@ fn remove_transient_sensor_interaction(
     interactions: &mut Vec<CollisionInteraction>,
     indices: &mut Option<HashMap<CollisionPair, usize>>,
     pair: CollisionPair,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let Some(index) = indices
         .as_ref()
         .and_then(|indices| indices.get(&pair).copied())
@@ -6545,19 +6570,21 @@ fn remove_transient_sensor_interaction(
     };
     let interaction = interactions
         .get(index)
-        .ok_or(CollisionError::InvalidContact)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     if !interaction.sensor || !interaction.transient {
         return Ok(());
     }
     interactions.remove(index);
-    let indices = indices.as_mut().ok_or(CollisionError::InvalidContact)?;
+    let indices = indices
+        .as_mut()
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     indices.clear();
     indices
         .try_reserve(interactions.len())
         .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
     for (index, interaction) in interactions.iter().enumerate() {
         if indices.insert(interaction.pair, index).is_some() {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
     }
     Ok(())
@@ -6567,7 +6594,7 @@ fn remove_interactions_for_pairs(
     interactions: &mut Vec<CollisionInteraction>,
     indices: &mut Option<HashMap<CollisionPair, usize>>,
     pairs: &[CollisionPair],
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     interactions.retain(|interaction| pairs.binary_search(&interaction.pair).is_err());
     let Some(indices) = indices else {
         return Ok(());
@@ -6578,7 +6605,7 @@ fn remove_interactions_for_pairs(
         .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
     for (index, interaction) in interactions.iter().enumerate() {
         if indices.insert(interaction.pair, index).is_some() {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
     }
     Ok(())
@@ -6587,9 +6614,9 @@ fn remove_interactions_for_pairs(
 fn merge_interaction(
     existing: &mut CollisionInteraction,
     incoming: CollisionInteraction,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if existing.sensor != incoming.sensor {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     existing.transient &= incoming.transient;
     if let Some(contact) = incoming.contact

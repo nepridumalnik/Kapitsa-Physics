@@ -117,7 +117,9 @@ fn synchronization_rejects_duplicate_proxy_ids_without_clearing_live_tree() {
     ];
     assert_eq!(
         index.synchronize(&duplicate),
-        Err(crate::collision::CollisionError::InvalidContact)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::InvalidContact
+        ))
     );
     let mut output = Vec::new();
     index

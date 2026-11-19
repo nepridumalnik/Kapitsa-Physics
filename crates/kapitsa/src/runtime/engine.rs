@@ -218,9 +218,9 @@ impl<E: StepExecutor> StepEngine<E> {
             self.bucket_buffers
                 .try_reserve(bucket_count - self.bucket_buffers.len())
                 .map_err(|_| {
-                    Error::from(StepError::Collision(
+                    Error::from(StepError::Collision(crate::Error::from(
                         CollisionError::SpatialIndexCapacityExceeded,
-                    ))
+                    )))
                 })?;
             self.bucket_buffers.resize_with(bucket_count, Vec::new);
         }

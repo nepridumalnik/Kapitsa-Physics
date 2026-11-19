@@ -4,32 +4,36 @@ use kapitsa_math::Vec3;
 pub(super) fn closest_point_on_triangle(
     point: Vec3,
     vertices: [Vec3; 3],
-) -> Result<Vec3, CollisionError> {
+) -> Result<Vec3, crate::Error> {
     let [a, b, c] = vertices;
-    let ab = b.checked_sub(a).ok_or(CollisionError::ArithmeticOverflow)?;
-    let ac = c.checked_sub(a).ok_or(CollisionError::ArithmeticOverflow)?;
+    let ab = b
+        .checked_sub(a)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
+    let ac = c
+        .checked_sub(a)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let ap = point
         .checked_sub(a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d1 = ab
         .checked_dot(ap)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d2 = ac
         .checked_dot(ap)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if d1 <= 0.0 && d2 <= 0.0 {
         return Ok(a);
     }
 
     let bp = point
         .checked_sub(b)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d3 = ab
         .checked_dot(bp)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d4 = ac
         .checked_dot(bp)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if d3 >= 0.0 && d4 <= d3 {
         return Ok(b);
     }
@@ -42,13 +46,13 @@ pub(super) fn closest_point_on_triangle(
 
     let cp = point
         .checked_sub(c)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d5 = ab
         .checked_dot(cp)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d6 = ac
         .checked_dot(cp)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if d6 >= 0.0 && d5 <= d6 {
         return Ok(c);
     }
@@ -61,14 +65,16 @@ pub(super) fn closest_point_on_triangle(
 
     let va = d3 * d6 - d5 * d4;
     if va.is_finite() && va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
-        let edge = c.checked_sub(b).ok_or(CollisionError::ArithmeticOverflow)?;
+        let edge = c
+            .checked_sub(b)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
         return interpolate(b, edge, w);
     }
 
     let denominator = va + vb + vc;
     if !denominator.is_finite() || denominator.abs() <= f64::MIN_POSITIVE {
-        return Err(CollisionError::NonConvergent);
+        return Err(crate::Error::from(CollisionError::NonConvergent));
     }
     let inverse = 1.0 / denominator;
     let v = vb * inverse;
@@ -77,18 +83,18 @@ pub(super) fn closest_point_on_triangle(
     result
         .is_finite()
         .then_some(result)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
-fn interpolate(origin: Vec3, edge: Vec3, amount: f64) -> Result<Vec3, CollisionError> {
+fn interpolate(origin: Vec3, edge: Vec3, amount: f64) -> Result<Vec3, crate::Error> {
     let result = origin
         .checked_add(
             edge.checked_mul_scalar(amount)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     result
         .is_finite()
         .then_some(result)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }

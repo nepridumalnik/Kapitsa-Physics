@@ -50,27 +50,27 @@ impl ContactPoint {
         normal: Vec3,
         penetration: f64,
         feature_id: u64,
-    ) -> Result<Self, CollisionError> {
+    ) -> Result<Self, crate::Error> {
         if !point_a.is_finite()
             || !point_b.is_finite()
             || !penetration.is_finite()
             || penetration < 0.0
         {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         let normal = normal
             .try_normalize()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let inverse_a = body_a
             .inverse()
-            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let inverse_b = body_b
             .inverse()
-            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let local_a = inverse_a.transform_point(point_a);
         let local_b = inverse_b.transform_point(point_b);
         if !local_a.is_finite() || !local_b.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         Ok(Self {
             local_a,
@@ -140,21 +140,21 @@ impl ContactManifold {
         index: usize,
         point: ContactPoint,
         world_position: Vec3,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if !world_position.is_finite() {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         let active_count = usize::from(self.count);
         let point_slot = self
             .points
             .get_mut(..active_count)
             .and_then(|points| points.get_mut(index))
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let position_slot = self
             .world_points
             .get_mut(..active_count)
             .and_then(|points| points.get_mut(index))
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         *point_slot = point;
         *position_slot = world_position;
         Ok(())
@@ -164,7 +164,7 @@ impl ContactManifold {
         &mut self,
         point: ContactPoint,
         world_position: Vec3,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if !world_position.is_finite()
             || !point.local_a.is_finite()
             || !point.local_b.is_finite()
@@ -172,13 +172,13 @@ impl ContactManifold {
             || !point.penetration.is_finite()
             || point.penetration < 0.0
         {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         for index in 0..usize::from(self.count) {
             let existing = self
                 .points
                 .get(index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             if existing.feature_id == point.feature_id {
                 let mut updated = point;
                 updated.normal_impulse = existing.normal_impulse;
@@ -192,11 +192,12 @@ impl ContactManifold {
             *self
                 .points
                 .get_mut(index)
-                .ok_or(CollisionError::InvalidContact)? = point;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = point;
             *self
                 .world_points
                 .get_mut(index)
-                .ok_or(CollisionError::InvalidContact)? = world_position;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? =
+                world_position;
             self.count += 1;
             return Ok(());
         }
@@ -208,7 +209,7 @@ impl ContactManifold {
         &mut self,
         point: ContactPoint,
         world_position: Vec3,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let mut candidates = [(ContactPoint::EMPTY, Vec3::ZERO); 5];
         let mut deepest = 0;
         let mut deepest_penetration = f64::NEG_INFINITY;
@@ -216,11 +217,11 @@ impl ContactManifold {
             let contact = *self
                 .points
                 .get(index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let position = *self
                 .world_points
                 .get(index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             *candidate = (contact, position);
             if contact.penetration > deepest_penetration {
                 deepest = index;
@@ -229,7 +230,8 @@ impl ContactManifold {
         }
         *candidates
             .get_mut(4)
-            .ok_or(CollisionError::InvalidContact)? = (point, world_position);
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? =
+            (point, world_position);
         if point.penetration > deepest_penetration {
             deepest = 4;
         }
@@ -246,7 +248,8 @@ impl ContactManifold {
                 excluded = Some(omitted);
             }
         }
-        let excluded = excluded.ok_or(CollisionError::InvalidContact)?;
+        let excluded =
+            excluded.ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let mut destination = 0;
         for (index, (candidate, position)) in candidates.iter().copied().enumerate() {
             if index == excluded {
@@ -254,11 +257,11 @@ impl ContactManifold {
             }
             *self
                 .point_mut(destination)
-                .ok_or(CollisionError::InvalidContact)? = candidate;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = candidate;
             *self
                 .world_points
                 .get_mut(destination)
-                .ok_or(CollisionError::InvalidContact)? = position;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = position;
             destination += 1;
         }
         self.count = 4;
@@ -269,7 +272,7 @@ impl ContactManifold {
 fn patch_spread(
     candidates: &[(ContactPoint, Vec3); 5],
     omitted: usize,
-) -> Result<f64, CollisionError> {
+) -> Result<f64, crate::Error> {
     let mut maximum_distance = 0.0_f64;
     for left in 0..5 {
         if left == omitted {
@@ -282,10 +285,10 @@ fn patch_spread(
             let delta = candidates[left]
                 .1
                 .checked_sub(candidates[right].1)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let distance = delta
                 .checked_length()
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             maximum_distance = maximum_distance.max(distance);
         }
     }
@@ -305,10 +308,10 @@ fn patch_spread(
             let delta = candidates[left]
                 .1
                 .checked_sub(candidates[right].1)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let distance = delta
                 .checked_length()
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let normalized = distance / maximum_distance;
             spread += normalized * normalized;
         }
@@ -316,7 +319,7 @@ fn patch_spread(
     spread
         .is_finite()
         .then_some(spread)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 pub(crate) fn combine_feature_ids(feature_a: u64, feature_b: u64) -> u64 {

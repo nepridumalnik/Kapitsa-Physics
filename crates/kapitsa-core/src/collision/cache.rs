@@ -51,9 +51,9 @@ impl ContactCache {
         manifolds: &mut [SolverManifold],
         dt: f64,
         contact_offset: f64,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if !dt.is_finite() || dt <= 0.0 || !contact_offset.is_finite() || contact_offset < 0.0 {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let impulse_scale = match self.current_dt {
             None => 1.0,
@@ -64,7 +64,7 @@ impl ContactCache {
                 }
                 ratio
             }
-            Some(_) => return Err(CollisionError::ArithmeticOverflow),
+            Some(_) => return Err(crate::Error::from(CollisionError::ArithmeticOverflow)),
         };
         for manifold in manifolds {
             self.warm_start_manifold(manifold, impulse_scale, contact_offset)?;
@@ -77,7 +77,7 @@ impl ContactCache {
         solver_manifold: &mut SolverManifold,
         impulse_scale: f64,
         contact_offset: f64,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let pair = solver_manifold.manifold.pair;
         for index in 0..solver_manifold.manifold.len() {
             let Some(contact) = solver_manifold.manifold.point_mut(index) else {
@@ -115,39 +115,39 @@ impl ContactCache {
             let tangent_world_cached = cached
                 .tangent_world
                 .checked_mul_scalar(impulse_scale)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             if !normal_impulse.is_finite() || normal_impulse < 0.0 {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             let normal_component = tangent_world_cached
                 .checked_dot(normal)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let tangent_world = tangent_world_cached
                 .checked_sub(
                     normal
                         .checked_mul_scalar(normal_component)
-                        .ok_or(CollisionError::ArithmeticOverflow)?,
+                        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 )
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let mut tangent_impulse = [
                 tangent_world
                     .checked_dot(tangent_a)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 tangent_world
                     .checked_dot(tangent_b)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             ];
             let friction = solver_manifold
                 .material
                 .static_friction
                 .max(solver_manifold.material.dynamic_friction);
             if !friction.is_finite() || friction < 0.0 {
-                return Err(CollisionError::InvalidMaterial);
+                return Err(crate::Error::from(CollisionError::InvalidMaterial));
             }
             let limit = normal_impulse * friction;
             let magnitude = tangent_impulse[0].hypot(tangent_impulse[1]);
             if !limit.is_finite() || !magnitude.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             if magnitude > limit && magnitude > 0.0 {
                 let scale = limit / magnitude;
@@ -164,17 +164,17 @@ impl ContactCache {
         &mut self,
         manifolds: &[ContactManifold],
         dt: f64,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         self.next.clear();
         self.next_dt = None;
         let contact_count = manifolds.iter().try_fold(0_usize, |count, manifold| {
             count
                 .checked_add(manifold.len())
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))
         })?;
         self.next
             .try_reserve(contact_count)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         for manifold in manifolds {
             for contact in manifold.points() {
                 if !contact.normal.is_finite()
@@ -188,11 +188,11 @@ impl ContactCache {
                         .any(|impulse| !impulse.is_finite())
                 {
                     self.next.clear();
-                    return Err(CollisionError::InvalidContact);
+                    return Err(crate::Error::from(CollisionError::InvalidContact));
                 }
                 let Some(normal) = contact.normal.try_normalize() else {
                     self.next.clear();
-                    return Err(CollisionError::InvalidContact);
+                    return Err(crate::Error::from(CollisionError::InvalidContact));
                 };
                 let (tangent_a, tangent_b) = match tangent_basis(normal) {
                     Ok(basis) => basis,
@@ -210,7 +210,7 @@ impl ContactCache {
                     })
                 else {
                     self.next.clear();
-                    return Err(CollisionError::ArithmeticOverflow);
+                    return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                 };
                 self.next.insert(
                     ContactKey {

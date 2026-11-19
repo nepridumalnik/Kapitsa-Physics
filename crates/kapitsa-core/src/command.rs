@@ -89,7 +89,7 @@ impl CommandError {
     /// Converts a unified error, recovering a typed command variant when possible.
     pub fn from_unified(error: Error) -> Self {
         if let Some(error) = error.downcast_ref::<WorldError>() {
-            return Self::World(*error);
+            return Self::World(error.clone());
         }
         if let Some(error) = error.downcast_ref::<BodyError>() {
             return Self::Body(*error);

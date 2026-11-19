@@ -77,20 +77,20 @@ impl SpatialIndex {
         &mut self,
         collider: ColliderId,
         bounds: Aabb,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if self.leaves.contains_key(&collider) {
             self.update(collider, bounds)?;
             return Ok(());
         }
         self.nodes
             .try_reserve(2)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.free_nodes
             .try_reserve(1)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.leaves
             .try_reserve(1)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         let leaf = self.allocate_node(Node::leaf(collider, bounds))?;
         self.leaves.insert(collider, leaf);
         if let Err(error) = self.insert_leaf(leaf) {
@@ -105,13 +105,13 @@ impl SpatialIndex {
         Ok(())
     }
 
-    pub(crate) fn remove(&mut self, collider: ColliderId) -> Result<bool, CollisionError> {
+    pub(crate) fn remove(&mut self, collider: ColliderId) -> Result<bool, crate::Error> {
         let Some(leaf) = self.leaves.get(&collider).copied() else {
             return Ok(false);
         };
         self.free_nodes
             .try_reserve(2)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.detach_leaf(leaf)?;
         self.free_node(leaf)?;
         self.leaves.remove(&collider);
@@ -123,7 +123,7 @@ impl SpatialIndex {
         &mut self,
         collider: ColliderId,
         bounds: Aabb,
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         let Some(leaf) = self.leaves.get(&collider).copied() else {
             self.insert(collider, bounds)?;
             return Ok(true);
@@ -133,7 +133,7 @@ impl SpatialIndex {
         }
         self.free_nodes
             .try_reserve(1)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.detach_leaf(leaf)?;
         self.node_mut(leaf)?.bounds = bounds;
         self.insert_leaf(leaf)?;
@@ -145,7 +145,7 @@ impl SpatialIndex {
         &self,
         collider: ColliderId,
         bounds: Aabb,
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         let Some(leaf) = self.leaves.get(&collider).copied() else {
             return Ok(false);
         };
@@ -162,13 +162,13 @@ impl SpatialIndex {
         &mut self,
         bounds: Aabb,
         output: &mut Vec<ColliderId>,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         output.clear();
         self.query_stack.clear();
         if let Some(root) = self.root {
             self.query_stack
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.query_stack.push(root);
         }
         while let Some(index) = self.query_stack.pop() {
@@ -177,16 +177,20 @@ impl SpatialIndex {
                 continue;
             }
             if let Some(collider) = node.collider {
-                output
-                    .try_reserve(1)
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                output.try_reserve(1).map_err(|_| {
+                    crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                })?;
                 output.push(collider);
             } else {
-                let left = node.left.ok_or(CollisionError::InvalidContact)?;
-                let right = node.right.ok_or(CollisionError::InvalidContact)?;
-                self.query_stack
-                    .try_reserve(2)
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                let left = node
+                    .left
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+                let right = node
+                    .right
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+                self.query_stack.try_reserve(2).map_err(|_| {
+                    crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                })?;
                 self.query_stack.push(right);
                 self.query_stack.push(left);
             }
@@ -199,13 +203,13 @@ impl SpatialIndex {
         bounds: Aabb,
         stack: &mut Vec<usize>,
         output: &mut Vec<ColliderId>,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         stack.clear();
         output.clear();
         if let Some(root) = self.root {
             stack
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             stack.push(root);
         }
         while let Some(index) = stack.pop() {
@@ -214,16 +218,20 @@ impl SpatialIndex {
                 continue;
             }
             if let Some(collider) = node.collider {
-                output
-                    .try_reserve(1)
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                output.try_reserve(1).map_err(|_| {
+                    crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                })?;
                 output.push(collider);
             } else {
-                let left = node.left.ok_or(CollisionError::InvalidContact)?;
-                let right = node.right.ok_or(CollisionError::InvalidContact)?;
-                stack
-                    .try_reserve(2)
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                let left = node
+                    .left
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+                let right = node
+                    .right
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+                stack.try_reserve(2).map_err(|_| {
+                    crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                })?;
                 stack.push(right);
                 stack.push(left);
             }
@@ -241,12 +249,8 @@ impl SpatialIndex {
     ) -> Result<(), crate::Error> {
         stack.clear();
         if let Some(root) = self.root
-            && let Some(entry) = ray_aabb_entry(
-                self.node(root).map_err(QueryError::Geometry)?.bounds,
-                origin,
-                direction,
-                max_distance,
-            )
+            && let Some(entry) =
+                ray_aabb_entry(self.node(root)?.bounds, origin, direction, max_distance)
         {
             stack
                 .try_reserve(1)
@@ -257,7 +261,7 @@ impl SpatialIndex {
             if entry > max_distance {
                 continue;
             }
-            let node = *self.node(index).map_err(QueryError::Geometry)?;
+            let node = *self.node(index)?;
             if let Some(collider) = node.collider {
                 if let Some(hit_distance) = visit(collider)? {
                     if !hit_distance.is_finite()
@@ -277,18 +281,10 @@ impl SpatialIndex {
             let right = node
                 .right
                 .ok_or(QueryError::Geometry(CollisionError::InvalidContact))?;
-            let left_entry = ray_aabb_entry(
-                self.node(left).map_err(QueryError::Geometry)?.bounds,
-                origin,
-                direction,
-                max_distance,
-            );
-            let right_entry = ray_aabb_entry(
-                self.node(right).map_err(QueryError::Geometry)?.bounds,
-                origin,
-                direction,
-                max_distance,
-            );
+            let left_entry =
+                ray_aabb_entry(self.node(left)?.bounds, origin, direction, max_distance);
+            let right_entry =
+                ray_aabb_entry(self.node(right)?.bounds, origin, direction, max_distance);
             match (left_entry, right_entry) {
                 (Some(left_entry), Some(right_entry)) => {
                     stack.try_reserve(2).map_err(|_| {
@@ -323,14 +319,14 @@ impl SpatialIndex {
     pub(crate) fn synchronize(
         &mut self,
         proxies: &[(ColliderId, Aabb)],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         self.present.clear();
         self.present
             .try_reserve(proxies.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         for (collider, _) in proxies {
             if !self.present.insert(*collider) {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
         }
 
@@ -338,7 +334,7 @@ impl SpatialIndex {
         if self.dirty || self.leaves.len() != self.present.len() {
             self.stale
                 .try_reserve(self.leaves.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.stale.extend(
                 self.leaves
                     .keys()
@@ -348,26 +344,26 @@ impl SpatialIndex {
         }
         self.free_nodes
             .try_reserve(self.stale.len().saturating_mul(2))
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         let new_count = proxies
             .iter()
             .filter(|(id, _)| !self.leaves.contains_key(id))
             .count();
         self.nodes
             .try_reserve(new_count.saturating_mul(2))
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.free_nodes
             .try_reserve(new_count)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.leaves
             .try_reserve(new_count)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         for position in 0..self.stale.len() {
             let collider = self
                 .stale
                 .get(position)
                 .copied()
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             self.remove(collider)?;
         }
         for (collider, bounds) in proxies.iter().copied() {
@@ -377,52 +373,52 @@ impl SpatialIndex {
         Ok(())
     }
 
-    fn allocate_node(&mut self, node: Node) -> Result<usize, CollisionError> {
+    fn allocate_node(&mut self, node: Node) -> Result<usize, crate::Error> {
         if let Some(index) = self.free_nodes.pop() {
             let slot = self
                 .nodes
                 .get_mut(index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             if slot.replace(node).is_some() {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             return Ok(index);
         }
         self.nodes
             .try_reserve(1)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         let index = self.nodes.len();
         self.nodes.push(Some(node));
         Ok(index)
     }
 
-    fn free_node(&mut self, index: usize) -> Result<(), CollisionError> {
+    fn free_node(&mut self, index: usize) -> Result<(), crate::Error> {
         let slot = self
             .nodes
             .get_mut(index)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         if slot.take().is_none() {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         self.free_nodes.push(index);
         Ok(())
     }
 
-    fn node(&self, index: usize) -> Result<&Node, CollisionError> {
+    fn node(&self, index: usize) -> Result<&Node, crate::Error> {
         self.nodes
             .get(index)
             .and_then(Option::as_ref)
-            .ok_or(CollisionError::InvalidContact)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))
     }
 
-    fn node_mut(&mut self, index: usize) -> Result<&mut Node, CollisionError> {
+    fn node_mut(&mut self, index: usize) -> Result<&mut Node, crate::Error> {
         self.nodes
             .get_mut(index)
             .and_then(Option::as_mut)
-            .ok_or(CollisionError::InvalidContact)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))
     }
 
-    fn insert_leaf(&mut self, leaf: usize) -> Result<(), CollisionError> {
+    fn insert_leaf(&mut self, leaf: usize) -> Result<(), crate::Error> {
         let Some(root) = self.root else {
             self.root = Some(leaf);
             self.node_mut(leaf)?.parent = None;
@@ -436,8 +432,12 @@ impl SpatialIndex {
             if node.is_leaf() {
                 break;
             }
-            let left = node.left.ok_or(CollisionError::InvalidContact)?;
-            let right = node.right.ok_or(CollisionError::InvalidContact)?;
+            let left = node
+                .left
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+            let right = node
+                .right
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let left_center = self.node(left)?.bounds.center();
             let right_center = self.node(right)?.bounds.center();
             let left_distance = (left_center - leaf_center).abs().max_element();
@@ -462,7 +462,7 @@ impl SpatialIndex {
         self.refit_upwards(Some(parent))
     }
 
-    fn detach_leaf(&mut self, leaf: usize) -> Result<(), CollisionError> {
+    fn detach_leaf(&mut self, leaf: usize) -> Result<(), crate::Error> {
         let Some(parent) = self.node(leaf)?.parent else {
             self.root = None;
             return Ok(());
@@ -471,7 +471,7 @@ impl SpatialIndex {
         let sibling = match (parent_node.left, parent_node.right) {
             (Some(left), Some(right)) if left == leaf => right,
             (Some(left), Some(right)) if right == leaf => left,
-            _ => return Err(CollisionError::InvalidContact),
+            _ => return Err(crate::Error::from(CollisionError::InvalidContact)),
         };
         let grandparent = parent_node.parent;
         if let Some(grandparent) = grandparent {
@@ -486,24 +486,19 @@ impl SpatialIndex {
         }
     }
 
-    fn replace_child(
-        &mut self,
-        parent: usize,
-        old: usize,
-        new: usize,
-    ) -> Result<(), CollisionError> {
+    fn replace_child(&mut self, parent: usize, old: usize, new: usize) -> Result<(), crate::Error> {
         let node = self.node_mut(parent)?;
         if node.left == Some(old) {
             node.left = Some(new);
         } else if node.right == Some(old) {
             node.right = Some(new);
         } else {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         Ok(())
     }
 
-    fn refit_upwards(&mut self, mut current: Option<usize>) -> Result<(), CollisionError> {
+    fn refit_upwards(&mut self, mut current: Option<usize>) -> Result<(), crate::Error> {
         while let Some(index) = current {
             let balanced = self.balance(index)?;
             current = self.node(balanced)?.parent;
@@ -511,19 +506,27 @@ impl SpatialIndex {
         Ok(())
     }
 
-    fn balance(&mut self, index: usize) -> Result<usize, CollisionError> {
+    fn balance(&mut self, index: usize) -> Result<usize, crate::Error> {
         let node = *self.node(index)?;
         if node.is_leaf() {
             return Ok(index);
         }
-        let left = node.left.ok_or(CollisionError::InvalidContact)?;
-        let right = node.right.ok_or(CollisionError::InvalidContact)?;
+        let left = node
+            .left
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+        let right = node
+            .right
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let left_height = self.node(left)?.height;
         let right_height = self.node(right)?.height;
         if right_height > left_height.saturating_add(1) {
             let right_node = *self.node(right)?;
-            let first = right_node.left.ok_or(CollisionError::InvalidContact)?;
-            let second = right_node.right.ok_or(CollisionError::InvalidContact)?;
+            let first = right_node
+                .left
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+            let second = right_node
+                .right
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let first_height = self.node(first)?.height;
             let second_height = self.node(second)?.height;
             self.replace_parent(index, right, node.parent)?;
@@ -547,8 +550,12 @@ impl SpatialIndex {
         }
         if left_height > right_height.saturating_add(1) {
             let left_node = *self.node(left)?;
-            let first = left_node.left.ok_or(CollisionError::InvalidContact)?;
-            let second = left_node.right.ok_or(CollisionError::InvalidContact)?;
+            let first = left_node
+                .left
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+            let second = left_node
+                .right
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let first_height = self.node(first)?.height;
             let second_height = self.node(second)?.height;
             self.replace_parent(index, left, node.parent)?;
@@ -579,7 +586,7 @@ impl SpatialIndex {
         old_child: usize,
         new_child: usize,
         parent: Option<usize>,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if let Some(parent) = parent {
             self.replace_child(parent, old_child, new_child)
         } else {
@@ -588,19 +595,25 @@ impl SpatialIndex {
         }
     }
 
-    fn recompute(&mut self, index: usize) -> Result<(), CollisionError> {
+    fn recompute(&mut self, index: usize) -> Result<(), crate::Error> {
         let node = *self.node(index)?;
         if node.is_leaf() {
             return Ok(());
         }
-        let left = self.node(node.left.ok_or(CollisionError::InvalidContact)?)?;
-        let right = self.node(node.right.ok_or(CollisionError::InvalidContact)?)?;
+        let left = self.node(
+            node.left
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
+        )?;
+        let right = self.node(
+            node.right
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?,
+        )?;
         let bounds = left.bounds.union(&right.bounds);
         let height = left
             .height
             .max(right.height)
             .checked_add(1)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let node = self.node_mut(index)?;
         node.bounds = bounds;
         node.height = height;

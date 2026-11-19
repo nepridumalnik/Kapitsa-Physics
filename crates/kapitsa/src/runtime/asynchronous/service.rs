@@ -1194,9 +1194,9 @@ fn step_error_for_result(error: &StepRunnerError) -> kapitsa_core::Error {
         | StepRunnerError::InvalidWorkerConfig(_)
         | StepRunnerError::RayonPool(_)
         | StepRunnerError::WorldUnavailable
-        | StepRunnerError::WorldLost => {
-            kapitsa_core::Error::from(StepError::Collision(CollisionError::WorkerFailed))
-        }
+        | StepRunnerError::WorldLost => kapitsa_core::Error::from(StepError::Collision(
+            crate::Error::from(CollisionError::WorkerFailed),
+        )),
     }
 }
 

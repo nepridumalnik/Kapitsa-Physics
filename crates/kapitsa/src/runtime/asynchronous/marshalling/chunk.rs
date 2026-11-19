@@ -154,7 +154,7 @@ pub(crate) fn apply_chunk(world: &mut PhysicsWorld, command: ChunkCommand) -> Ch
 fn chunk_operation_error(error: kapitsa_core::Error) -> ChunkOperationError {
     error
         .downcast_ref::<ChunkOperationError>()
-        .copied()
+        .cloned()
         .unwrap_or(ChunkOperationError::World(
             WorldError::DensePoolCapacityExceeded,
         ))

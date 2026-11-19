@@ -22,22 +22,22 @@ pub(crate) fn support_world(
     shape: &Shape,
     transform: &Transform,
     direction: Vec3,
-) -> Result<(Vec3, u64), CollisionError> {
+) -> Result<(Vec3, u64), crate::Error> {
     if !direction.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let direction = direction.try_normalize().unwrap_or(Vec3::X);
     let local_direction = transform
         .rotation()
         .conjugate()
         .rotate_vector(direction)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let local = support_local(shape, local_direction, true)?;
     let world = transform.transform_point(local.point);
     if world.is_finite() {
         Ok((world, local.feature))
     } else {
-        Err(CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(CollisionError::ArithmeticOverflow))
     }
 }
 
@@ -47,13 +47,13 @@ pub(crate) fn support_pair(
     shape_b: &Shape,
     transform_b: &Transform,
     direction: Vec3,
-) -> Result<SupportPoint, CollisionError> {
+) -> Result<SupportPoint, crate::Error> {
     if !matches!(shape_a, Shape::Triangle(_)) && !matches!(shape_b, Shape::Triangle(_)) {
         let (point_a, feature_a) = support_world(shape_a, transform_a, direction)?;
         let (point_b, feature_b) = support_world(shape_b, transform_b, -direction)?;
         let difference = point_a
             .checked_sub(point_b)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         return Ok(SupportPoint {
             difference,
             point_a,
@@ -69,11 +69,11 @@ pub(crate) fn support_pair(
     support.point_a = support
         .point_a
         .checked_add(transform_a.translation())
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     support.point_b = support
         .point_b
         .checked_add(transform_a.translation())
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     Ok(support)
 }
 
@@ -83,7 +83,7 @@ pub(crate) fn support_pair_core(
     shape_b: &Shape,
     transform_b: &Transform,
     direction: Vec3,
-) -> Result<SupportPoint, CollisionError> {
+) -> Result<SupportPoint, crate::Error> {
     support_pair_relative(shape_a, transform_a, shape_b, transform_b, direction, false)
 }
 
@@ -94,44 +94,44 @@ fn support_pair_relative(
     transform_b: &Transform,
     direction: Vec3,
     include_radius: bool,
-) -> Result<SupportPoint, CollisionError> {
+) -> Result<SupportPoint, crate::Error> {
     if !direction.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let direction = direction.try_normalize().unwrap_or(Vec3::X);
     let local_direction_a = transform_a
         .rotation()
         .conjugate()
         .rotate_vector(direction)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let local_direction_b = transform_b
         .rotation()
         .conjugate()
         .rotate_vector(-direction)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let local_a = support_local(shape_a, local_direction_a, include_radius)?;
     let local_b = support_local(shape_b, local_direction_b, include_radius)?;
     let relative_translation = transform_b
         .translation()
         .checked_sub(transform_a.translation())
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let relative_a = transform_a
         .rotation()
         .rotate_vector(local_a.point)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let relative_b = relative_translation
         .checked_add(
             transform_b
                 .rotation()
                 .rotate_vector(local_b.point)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let difference = relative_a
         .checked_sub(relative_b)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if !relative_a.is_finite() || !relative_b.is_finite() || !difference.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(SupportPoint {
         difference,
@@ -153,13 +153,13 @@ fn support_local(
     shape: &Shape,
     direction: Vec3,
     include_radius: bool,
-) -> Result<LocalSupport, CollisionError> {
+) -> Result<LocalSupport, crate::Error> {
     let support = match shape {
         Shape::Sphere(shape) => {
             let point = if include_radius {
                 direction
                     .checked_mul_scalar(shape.radius())
-                    .ok_or(CollisionError::ArithmeticOverflow)?
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
             } else {
                 Vec3::ZERO
             };
@@ -182,10 +182,10 @@ fn support_local(
         Shape::Capsule(shape) => {
             let start_score = direction
                 .checked_dot(shape.start())
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let end_score = direction
                 .checked_dot(shape.end())
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let (center, feature) = if end_score > start_score {
                 (shape.end(), 1)
             } else {
@@ -193,11 +193,11 @@ fn support_local(
             };
             let radial = direction
                 .checked_mul_scalar(shape.radius())
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             LocalSupport {
                 point: center
                     .checked_add(radial)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 feature,
             }
         }
@@ -211,11 +211,11 @@ fn support_local(
             let radial_direction = radial.try_normalize().unwrap_or(Vec3::ZERO);
             let radial = radial_direction
                 .checked_mul_scalar(shape.radius())
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             LocalSupport {
                 point: center
                     .checked_add(radial)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 feature: u64::from(axial > 0.0),
             }
         }
@@ -231,11 +231,11 @@ fn support_local(
             LocalSupport {
                 point: center
                     .checked_add(
-                        direction
-                            .checked_mul_scalar(radius)
-                            .ok_or(CollisionError::ArithmeticOverflow)?,
+                        direction.checked_mul_scalar(radius).ok_or_else(|| {
+                            crate::Error::from(CollisionError::ArithmeticOverflow)
+                        })?,
                     )
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 feature,
             }
         }
@@ -243,7 +243,7 @@ fn support_local(
             let (_, radial, _) = decompose_axis(direction, shape.start(), shape.end())?;
             let radial_length = radial
                 .checked_length()
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let start_score = weighted_cylinder_score(
                 direction,
                 shape.start(),
@@ -260,24 +260,26 @@ fn support_local(
             let radial_direction = radial.try_normalize().unwrap_or(Vec3::ZERO);
             let radial = radial_direction
                 .checked_mul_scalar(radius)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             LocalSupport {
                 point: center
                     .checked_add(radial)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 feature,
             }
         }
         Shape::Convex(shape) => {
             let mut vertices = shape.vertices().iter().copied().enumerate();
-            let (mut feature, mut point) = vertices.next().ok_or(CollisionError::InvalidContact)?;
+            let (mut feature, mut point) = vertices
+                .next()
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let mut best_score = direction
                 .checked_dot(point)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             for (index, candidate) in vertices {
                 let score = direction
                     .checked_dot(candidate)
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                 if score > best_score {
                     feature = index;
                     point = candidate;
@@ -286,7 +288,8 @@ fn support_local(
             }
             LocalSupport {
                 point,
-                feature: u64::try_from(feature).map_err(|_| CollisionError::ArithmeticOverflow)?,
+                feature: u64::try_from(feature)
+                    .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             }
         }
         Shape::Triangle(shape) => {
@@ -295,11 +298,11 @@ fn support_local(
             let mut point = vertices[0];
             let mut best_score = direction
                 .checked_dot(point)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             for (index, candidate) in vertices.into_iter().enumerate().skip(1) {
                 let score = direction
                     .checked_dot(candidate)
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                 if score > best_score {
                     feature = index;
                     point = candidate;
@@ -308,7 +311,8 @@ fn support_local(
             }
             LocalSupport {
                 point,
-                feature: u64::try_from(feature).map_err(|_| CollisionError::ArithmeticOverflow)?,
+                feature: u64::try_from(feature)
+                    .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             }
         }
         Shape::Plane(_)
@@ -316,13 +320,13 @@ fn support_local(
         | Shape::HeightField(_)
         | Shape::LevelSet(_)
         | Shape::SkinnedTriangleMesh(_) => {
-            return Err(CollisionError::UnsupportedGeometryPair);
+            return Err(crate::Error::from(CollisionError::UnsupportedGeometryPair));
         }
     };
     if support.point.is_finite() {
         Ok(support)
     } else {
-        Err(CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(CollisionError::ArithmeticOverflow))
     }
 }
 
@@ -330,17 +334,17 @@ fn decompose_axis(
     direction: Vec3,
     start: Vec3,
     end: Vec3,
-) -> Result<(Vec3, Vec3, f64), CollisionError> {
+) -> Result<(Vec3, Vec3, f64), crate::Error> {
     let axis = end
         .checked_sub(start)
         .and_then(Vec3::try_normalize)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let axial = direction
         .checked_dot(axis)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let radial = direction
         .checked_sub(axis * axial)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     Ok((axis, radial, axial))
 }
 
@@ -348,18 +352,18 @@ fn weighted_endpoint_score(
     direction: Vec3,
     center: Vec3,
     radius: f64,
-) -> Result<f64, CollisionError> {
+) -> Result<f64, crate::Error> {
     let value = direction
         .checked_dot(center)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let length = direction
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let score = value + radius * length;
     score
         .is_finite()
         .then_some(score)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 fn weighted_cylinder_score(
@@ -367,15 +371,15 @@ fn weighted_cylinder_score(
     center: Vec3,
     radial_length: f64,
     radius: f64,
-) -> Result<f64, CollisionError> {
+) -> Result<f64, crate::Error> {
     let value = direction
         .checked_dot(center)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let score = value + radius * radial_length;
     score
         .is_finite()
         .then_some(score)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 #[cfg(test)]

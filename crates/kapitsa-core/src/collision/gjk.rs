@@ -44,11 +44,11 @@ impl Simplex {
         self.count = 3;
     }
 
-    fn push(&mut self, point: SupportPoint) -> Result<(), CollisionError> {
+    fn push(&mut self, point: SupportPoint) -> Result<(), crate::Error> {
         let slot = self
             .points
             .get_mut(self.count)
-            .ok_or(CollisionError::NonConvergent)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::NonConvergent))?;
         *slot = point;
         self.count += 1;
         Ok(())
@@ -85,11 +85,11 @@ pub(crate) fn distance(
     transform_a: &Transform,
     shape_b: &Shape,
     transform_b: &Transform,
-) -> Result<GjkDistance, CollisionError> {
+) -> Result<GjkDistance, crate::Error> {
     let direction = transform_b
         .translation()
         .checked_sub(transform_a.translation())
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     distance_with_support(direction, |direction| {
         support_pair(shape_a, transform_a, shape_b, transform_b, direction)
     })
@@ -100,11 +100,11 @@ pub(crate) fn distance_core(
     transform_a: &Transform,
     shape_b: &Shape,
     transform_b: &Transform,
-) -> Result<GjkDistance, CollisionError> {
+) -> Result<GjkDistance, crate::Error> {
     let direction = transform_b
         .translation()
         .checked_sub(transform_a.translation())
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     distance_with_support(direction, |direction| {
         support_pair_core(shape_a, transform_a, shape_b, transform_b, direction)
     })
@@ -114,18 +114,18 @@ pub(crate) fn distance_to_point(
     shape: &Shape,
     transform: &Transform,
     point: Vec3,
-) -> Result<GjkDistance, CollisionError> {
+) -> Result<GjkDistance, crate::Error> {
     if !point.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let direction = point
         .checked_sub(transform.translation())
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     distance_with_support(direction, |direction| {
         let (point_a, feature_a) = super::support::support_world(shape, transform, direction)?;
         let difference = point_a
             .checked_sub(point)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         Ok(SupportPoint {
             difference,
             point_a,
@@ -138,8 +138,8 @@ pub(crate) fn distance_to_point(
 
 fn distance_with_support(
     mut direction: Vec3,
-    mut support_at: impl FnMut(Vec3) -> Result<SupportPoint, CollisionError>,
-) -> Result<GjkDistance, CollisionError> {
+    mut support_at: impl FnMut(Vec3) -> Result<SupportPoint, crate::Error>,
+) -> Result<GjkDistance, crate::Error> {
     if direction.try_normalize().is_none() {
         direction = Vec3::X;
     }
@@ -159,23 +159,23 @@ fn distance_with_support(
         let tolerance = scale * f64::EPSILON * 128.0;
         let distance = closest.distance_squared.sqrt();
         if !distance.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         if closest.simplex.count == 4 || distance <= tolerance {
             return distance_result(closest, true, 0.0, tolerance);
         }
         let search_direction = (-closest.point)
             .try_normalize()
-            .ok_or(CollisionError::NonConvergent)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::NonConvergent))?;
         let support = support_at(search_direction)?;
         let support_projection = support
             .difference
             .checked_dot(search_direction)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let closest_projection = closest
             .point
             .checked_dot(search_direction)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         lower_bound = (-support_projection).clamp(0.0, distance);
         if support_projection - closest_projection <= tolerance {
             return distance_result(closest, false, lower_bound, tolerance);
@@ -193,7 +193,7 @@ fn distance_with_support(
             if distance <= scale * f64::EPSILON.sqrt() * 2.0 {
                 return distance_result(closest, true, 0.0, tolerance);
             }
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         simplex = closest.simplex;
         simplex.push(support)?;
@@ -213,7 +213,7 @@ fn distance_with_support(
     if closest.distance_squared.sqrt() <= scale * f64::EPSILON.sqrt() * 2.0 {
         return distance_result(closest, true, 0.0, tolerance);
     }
-    Err(CollisionError::NonConvergent)
+    Err(crate::Error::from(CollisionError::NonConvergent))
 }
 
 fn distance_result(
@@ -221,17 +221,17 @@ fn distance_result(
     intersects: bool,
     lower_bound: f64,
     tolerance: f64,
-) -> Result<GjkDistance, CollisionError> {
+) -> Result<GjkDistance, crate::Error> {
     let distance = if intersects {
         0.0
     } else {
         closest.distance_squared.sqrt()
     };
     if !distance.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if !lower_bound.is_finite() || lower_bound < 0.0 || lower_bound > distance + tolerance {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let center_direction = closest
         .point_b
@@ -255,9 +255,9 @@ fn distance_result(
     })
 }
 
-fn closest_simplex(simplex: &Simplex) -> Result<ClosestSimplex, CollisionError> {
+fn closest_simplex(simplex: &Simplex) -> Result<ClosestSimplex, crate::Error> {
     if simplex.count == 0 || simplex.count > 4 {
-        return Err(CollisionError::NonConvergent);
+        return Err(crate::Error::from(CollisionError::NonConvergent));
     }
     let mut best = None;
     for index in 0..simplex.count {
@@ -271,16 +271,16 @@ fn closest_simplex(simplex: &Simplex) -> Result<ClosestSimplex, CollisionError> 
             let edge = simplex.points[right]
                 .difference
                 .checked_sub(a)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let denominator = edge
                 .checked_dot(edge)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             if denominator <= f64::MIN_POSITIVE {
                 continue;
             }
             let amount = (-a
                 .checked_dot(edge)
-                .ok_or(CollisionError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
                 / denominator)
                 .clamp(0.0, 1.0);
             let mut weights = [0.0; 4];
@@ -299,56 +299,60 @@ fn closest_simplex(simplex: &Simplex) -> Result<ClosestSimplex, CollisionError> 
     if simplex.count == 4 {
         consider_tetrahedron(simplex, &mut best)?;
     }
-    best.ok_or(CollisionError::NonConvergent)
+    best.ok_or_else(|| crate::Error::from(CollisionError::NonConvergent))
 }
 
 fn consider_triangle(
     simplex: &Simplex,
     indices: [usize; 3],
     best: &mut Option<ClosestSimplex>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let [ia, ib, ic] = indices;
     let a = simplex.points[ia].difference;
     let b = simplex.points[ib].difference;
     let c = simplex.points[ic].difference;
-    let ab = b.checked_sub(a).ok_or(CollisionError::ArithmeticOverflow)?;
-    let ac = c.checked_sub(a).ok_or(CollisionError::ArithmeticOverflow)?;
+    let ab = b
+        .checked_sub(a)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
+    let ac = c
+        .checked_sub(a)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let normal = ab
         .checked_cross(ac)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let normal_squared = normal
         .checked_dot(normal)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if normal_squared <= f64::MIN_POSITIVE {
         return Ok(());
     }
     let projection = normal
         .checked_mul_scalar(
             -a.checked_dot(normal)
-                .ok_or(CollisionError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
                 / normal_squared,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let v0 = ab;
     let v1 = ac;
     let v2 = projection
         .checked_sub(a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d00 = v0
         .checked_dot(v0)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d01 = v0
         .checked_dot(v1)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d11 = v1
         .checked_dot(v1)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d20 = v2
         .checked_dot(v0)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let d21 = v2
         .checked_dot(v1)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let denominator = d00 * d11 - d01 * d01;
     if !denominator.is_finite() || denominator <= f64::MIN_POSITIVE {
         return Ok(());
@@ -374,26 +378,26 @@ fn consider_triangle(
 fn consider_tetrahedron(
     simplex: &Simplex,
     best: &mut Option<ClosestSimplex>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let a = simplex.points[0].difference;
     let ab = simplex.points[1]
         .difference
         .checked_sub(a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let ac = simplex.points[2]
         .difference
         .checked_sub(a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let ad = simplex.points[3]
         .difference
         .checked_sub(a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let determinant = ab
         .checked_dot(
             ac.checked_cross(ad)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if !determinant.is_finite() || determinant.abs() <= f64::MIN_POSITIVE {
         return Ok(());
     }
@@ -401,24 +405,24 @@ fn consider_tetrahedron(
     let wb = origin
         .checked_dot(
             ac.checked_cross(ad)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
         / determinant;
     let wc = ab
         .checked_dot(
             origin
                 .checked_cross(ad)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
         / determinant;
     let wd = ab
         .checked_dot(
             ac.checked_cross(origin)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
         / determinant;
     let wa = 1.0 - wb - wc - wd;
     let tolerance = f64::EPSILON * 128.0;
@@ -436,10 +440,10 @@ fn consider_tetrahedron(
     consider_weights(simplex, weights, best)
 }
 
-fn normalize_weights(weights: &mut [f64; 4]) -> Result<(), CollisionError> {
+fn normalize_weights(weights: &mut [f64; 4]) -> Result<(), crate::Error> {
     let sum: f64 = weights.iter().sum();
     if !sum.is_finite() || sum <= f64::MIN_POSITIVE {
-        return Err(CollisionError::NonConvergent);
+        return Err(crate::Error::from(CollisionError::NonConvergent));
     }
     for weight in weights {
         *weight /= sum;
@@ -451,7 +455,7 @@ fn consider_weights(
     simplex: &Simplex,
     weights: [f64; 4],
     best: &mut Option<ClosestSimplex>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let mut point = Vec3::ZERO;
     let mut point_a = Vec3::ZERO;
     let mut point_b = Vec3::ZERO;
@@ -461,7 +465,7 @@ fn consider_weights(
     };
     for (index, weight) in weights.iter().copied().enumerate().take(simplex.count) {
         if !weight.is_finite() || weight < 0.0 {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         if weight == 0.0 {
             continue;
@@ -472,32 +476,32 @@ fn consider_weights(
                 support
                     .difference
                     .checked_mul_scalar(weight)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             )
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         point_a = point_a
             .checked_add(
                 support
                     .point_a
                     .checked_mul_scalar(weight)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             )
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         point_b = point_b
             .checked_add(
                 support
                     .point_b
                     .checked_mul_scalar(weight)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             )
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         reduced.push(support)?;
     }
     let distance_squared = point
         .checked_dot(point)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if !distance_squared.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if best.is_none_or(|candidate| distance_squared < candidate.distance_squared) {
         *best = Some(ClosestSimplex {
@@ -516,11 +520,11 @@ pub(crate) fn intersect(
     transform_a: &Transform,
     shape_b: &Shape,
     transform_b: &Transform,
-) -> Result<GjkResult, CollisionError> {
+) -> Result<GjkResult, crate::Error> {
     let mut direction = transform_b
         .translation()
         .checked_sub(transform_a.translation())
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     if direction.try_normalize().is_none() {
         direction = Vec3::X;
     }
@@ -539,7 +543,7 @@ pub(crate) fn intersect(
         let advance = point
             .difference
             .checked_dot(unit_direction)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let tolerance = scale_tolerance(point.difference);
         if advance <= tolerance {
             return Ok(GjkResult {
@@ -555,10 +559,10 @@ pub(crate) fn intersect(
             });
         }
     }
-    Err(CollisionError::NonConvergent)
+    Err(crate::Error::from(CollisionError::NonConvergent))
 }
 
-fn update_simplex(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool, CollisionError> {
+fn update_simplex(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool, crate::Error> {
     match simplex.count {
         1 => {
             let a = simplex.points[0];
@@ -568,11 +572,11 @@ fn update_simplex(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool, C
         2 => process_line(simplex, direction),
         3 => process_triangle(simplex, direction),
         4 => process_tetrahedron(simplex, direction),
-        _ => Err(CollisionError::NonConvergent),
+        _ => Err(crate::Error::from(CollisionError::NonConvergent)),
     }
 }
 
-fn process_line(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool, CollisionError> {
+fn process_line(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool, crate::Error> {
     let a = simplex.points[1];
     let b = simplex.points[0];
     let ab = b.difference - a.difference;
@@ -588,12 +592,12 @@ fn process_line(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool, Col
         *direction = ao;
     }
     if !direction.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(false)
 }
 
-fn process_triangle(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool, CollisionError> {
+fn process_triangle(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool, crate::Error> {
     let a = simplex.points[2];
     let b = simplex.points[1];
     let c = simplex.points[0];
@@ -602,7 +606,7 @@ fn process_triangle(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool,
     let ao = -a.difference;
     let abc = ab.cross(ac);
     if !abc.is_finite() || abc.try_normalize().is_none() {
-        return Err(CollisionError::NonConvergent);
+        return Err(crate::Error::from(CollisionError::NonConvergent));
     }
 
     if abc.cross(ac).dot(ao) > 0.0 {
@@ -632,15 +636,12 @@ fn process_triangle(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool,
     }
 
     if direction.try_normalize().is_none() && *direction != Vec3::ZERO {
-        return Err(CollisionError::NonConvergent);
+        return Err(crate::Error::from(CollisionError::NonConvergent));
     }
     Ok(false)
 }
 
-fn process_tetrahedron(
-    simplex: &mut Simplex,
-    direction: &mut Vec3,
-) -> Result<bool, CollisionError> {
+fn process_tetrahedron(simplex: &mut Simplex, direction: &mut Vec3) -> Result<bool, crate::Error> {
     let a = simplex.points[3];
     let b = simplex.points[2];
     let c = simplex.points[1];
@@ -651,14 +652,14 @@ fn process_tetrahedron(
         let ac = face[2].difference - face[0].difference;
         let mut normal = ab.cross(ac);
         if !normal.is_finite() || normal.try_normalize().is_none() {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         if normal.dot(opposite.difference - face[0].difference) > 0.0 {
             normal = -normal;
         }
         let outside = normal
             .checked_dot(ao)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         if outside > scale_tolerance(normal) {
             simplex.set3(face[2], face[1], face[0]);
             return process_triangle(simplex, direction);

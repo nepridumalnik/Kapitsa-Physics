@@ -90,7 +90,7 @@ impl CollisionSystem {
         self.config
     }
 
-    pub(crate) fn set_config(&mut self, config: CollisionConfig) -> Result<(), CollisionError> {
+    pub(crate) fn set_config(&mut self, config: CollisionConfig) -> Result<(), crate::Error> {
         config.validate()?;
         self.config = config;
         if let Some(cache) = self.contact_cache.as_mut() {
@@ -603,7 +603,7 @@ impl CollisionSystem {
         self.context.predicted_states.push((body_id, state));
     }
 
-    pub(crate) fn synchronize_spatial_index(&mut self) -> Result<(), CollisionError> {
+    pub(crate) fn synchronize_spatial_index(&mut self) -> Result<(), crate::Error> {
         if self.spatial_index.is_none() && self.context.spatial_proxies.is_empty() {
             return Ok(());
         }
@@ -617,7 +617,7 @@ impl CollisionSystem {
         }
     }
 
-    pub(crate) fn generate_candidates(&mut self) -> Result<(), CollisionError> {
+    pub(crate) fn generate_candidates(&mut self) -> Result<(), crate::Error> {
         let result = self
             .broad_phase
             .generate(self.spatial_index.as_mut(), &self.context.colliders);
@@ -639,13 +639,13 @@ impl CollisionSystem {
     pub(crate) fn build_ccd_islands(
         &mut self,
         force_single_island: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         #[cfg(feature = "bench-internals")]
         let started = std::time::Instant::now();
         if self.context.ccd_toi_cache.len() != self.context.ccd_candidate_bodies.len()
             || self.context.ccd_candidate_active.len() != self.context.ccd_candidate_bodies.len()
         {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         self.ccd_islands.build_active(
             &self.context.ccd_body_types,
@@ -660,7 +660,7 @@ impl CollisionSystem {
                 .ccd_island_candidates(island)
                 .is_none_or(<[usize]>::is_empty)
             {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
         }
         #[cfg(feature = "bench-internals")]
@@ -683,23 +683,23 @@ impl CollisionSystem {
     pub(crate) fn append_ccd_island_bodies_to_replay(
         &mut self,
         island: usize,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let (layout, context) = (&self.ccd_islands, &mut self.context);
         let bodies = layout
             .bodies(island)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         context
             .ccd_replay_bodies
             .try_reserve(bodies.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         context.ccd_replay_bodies.extend_from_slice(bodies);
         Ok(())
     }
 
-    pub(crate) fn ccd_island_completed(&self, island: usize) -> Result<bool, CollisionError> {
+    pub(crate) fn ccd_island_completed(&self, island: usize) -> Result<bool, crate::Error> {
         let bodies = self
             .ccd_island_bodies(island)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         Ok(bodies.iter().all(|body| {
             self.context
                 .ccd_completed_bodies
@@ -709,53 +709,47 @@ impl CollisionSystem {
         }))
     }
 
-    pub(crate) fn mark_ccd_island_completed(
-        &mut self,
-        island: usize,
-    ) -> Result<(), CollisionError> {
+    pub(crate) fn mark_ccd_island_completed(&mut self, island: usize) -> Result<(), crate::Error> {
         let bodies = self
             .ccd_islands
             .bodies(island)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         for body in bodies {
             *self
                 .context
                 .ccd_completed_bodies
                 .get_mut(*body)
-                .ok_or(CollisionError::InvalidContact)? = true;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = true;
         }
         Ok(())
     }
 
-    pub(crate) fn mark_ccd_island_incomplete(
-        &mut self,
-        island: usize,
-    ) -> Result<(), CollisionError> {
+    pub(crate) fn mark_ccd_island_incomplete(&mut self, island: usize) -> Result<(), crate::Error> {
         let bodies = self
             .ccd_islands
             .bodies(island)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         for body in bodies {
             *self
                 .context
                 .ccd_completed_bodies
                 .get_mut(*body)
-                .ok_or(CollisionError::InvalidContact)? = false;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = false;
         }
         Ok(())
     }
 
-    pub(crate) fn collect_ccd_replay_candidates(&mut self) -> Result<(), CollisionError> {
+    pub(crate) fn collect_ccd_replay_candidates(&mut self) -> Result<(), crate::Error> {
         let (layout, context) = (&self.ccd_islands, &mut self.context);
         let candidates = &mut context.ccd_resweep_candidates;
         candidates.clear();
         for body in context.ccd_replay_bodies.iter().copied() {
             let body_candidates = layout
                 .body_candidates(body)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             candidates
                 .try_reserve(body_candidates.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             candidates.extend_from_slice(body_candidates);
         }
         candidates.sort_unstable();
@@ -773,7 +767,7 @@ impl CollisionSystem {
         body_a_changed: bool,
         body_b: usize,
         body_b_changed: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let context = &mut self.context;
         context.ccd_resweep_candidates.clear();
         for (body, changed) in [(body_a, body_a_changed), (body_b, body_b_changed)] {
@@ -783,11 +777,11 @@ impl CollisionSystem {
             let candidates = self
                 .ccd_islands
                 .body_candidates(body)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             context
                 .ccd_resweep_candidates
                 .try_reserve(candidates.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             context.ccd_resweep_candidates.extend_from_slice(candidates);
         }
         context.ccd_resweep_candidates.sort_unstable();
@@ -796,7 +790,7 @@ impl CollisionSystem {
             let cache = context
                 .ccd_toi_cache
                 .get_mut(candidate)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             cache.evaluated = false;
             cache.hit = None;
         }
@@ -811,12 +805,12 @@ impl CollisionSystem {
         &mut self,
         candidate: usize,
         active: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         *self
             .context
             .ccd_candidate_active
             .get_mut(candidate)
-            .ok_or(CollisionError::InvalidContact)? = active;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))? = active;
         Ok(())
     }
 
@@ -849,7 +843,7 @@ impl CollisionSystem {
         &self,
         collider_a: ColliderId,
         collider_b: ColliderId,
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         let proxy_a = self.ccd_proxy(collider_a)?;
         let proxy_b = self.ccd_proxy(collider_b)?;
         Ok(BroadPhase::allows_pair(&proxy_a, &proxy_b))
@@ -858,16 +852,16 @@ impl CollisionSystem {
     pub(crate) fn ccd_proxy(
         &self,
         collider: ColliderId,
-    ) -> Result<super::CollisionProxy, CollisionError> {
+    ) -> Result<super::CollisionProxy, crate::Error> {
         let index = self
             .broad_phase
             .proxy_index(collider)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         self.context
             .colliders
             .get(index)
             .copied()
-            .ok_or(CollisionError::InvalidContact)
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))
     }
 
     pub(crate) fn prepare_ccd_resweep_proxy(
@@ -875,15 +869,15 @@ impl CollisionSystem {
         collider: ColliderId,
         bounds: Option<Aabb>,
         unbounded_query_colliders: &[ColliderId],
-    ) -> Result<(usize, usize), CollisionError> {
+    ) -> Result<(usize, usize), crate::Error> {
         let proxy_index = self
             .broad_phase
             .proxy_index(collider)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         self.context
             .colliders
             .get_mut(proxy_index)
-            .ok_or(CollisionError::InvalidContact)?
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
             .bounds = bounds;
 
         let (spatial_index, context, broad_phase) = (
@@ -901,16 +895,15 @@ impl CollisionSystem {
             for collider in unbounded_query_colliders.iter().copied() {
                 let proxy_index = broad_phase
                     .proxy_index(collider)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let proxy = context
                     .colliders
                     .get(proxy_index)
                     .filter(|proxy| proxy.collider == collider && proxy.bounds.is_none())
-                    .ok_or(CollisionError::InvalidContact)?;
-                context
-                    .ccd_query_results
-                    .try_reserve(1)
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+                context.ccd_query_results.try_reserve(1).map_err(|_| {
+                    crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                })?;
                 context.ccd_query_results.push(proxy.collider);
             }
         } else if let Some(index) = spatial_index.as_mut() {
@@ -924,12 +917,12 @@ impl CollisionSystem {
         pair: CollisionPair,
         body_a: usize,
         body_b: usize,
-    ) -> Result<(bool, bool), CollisionError> {
+    ) -> Result<(bool, bool), crate::Error> {
         let already_present = self
             .context
             .ccd_candidate_pair_set
             .as_ref()
-            .ok_or(CollisionError::InvalidContact)?
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
             .contains(&pair);
         if already_present {
             return Ok((false, false));
@@ -939,12 +932,12 @@ impl CollisionSystem {
             .context
             .ccd_continuous_bodies
             .get(body_a)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let continuous_b = *self
             .context
             .ccd_continuous_bodies
             .get(body_b)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let ccd_candidate = continuous_a || continuous_b;
 
         if ccd_candidate {
@@ -952,23 +945,23 @@ impl CollisionSystem {
             self.context
                 .ccd_candidate_pairs
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.context
                 .ccd_candidate_bodies
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.context
                 .ccd_toi_cache
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.context
                 .ccd_candidate_active
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.context
                 .ccd_resweep_candidates
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.context.ccd_candidate_pairs.push(pair);
             self.context.ccd_candidate_bodies.push((body_a, body_b));
             self.context
@@ -981,10 +974,10 @@ impl CollisionSystem {
             .context
             .ccd_candidate_pair_set
             .as_mut()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         candidate_set
             .try_reserve(1)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         candidate_set.insert(pair);
         self.broad_phase.add_candidate(pair)?;
         #[cfg(feature = "bench-internals")]
@@ -1013,7 +1006,7 @@ impl CollisionSystem {
         mode_b: CollisionMode,
         bvh_b: Option<&TriangleBvh>,
         vertices_b: Option<&[kapitsa_math::Vec3]>,
-    ) -> Result<Option<ContactManifold>, CollisionError> {
+    ) -> Result<Option<ContactManifold>, crate::Error> {
         self.narrow_phase.detect_with_geometry(
             pair,
             shape_a,
@@ -1044,7 +1037,7 @@ impl CollisionSystem {
         bvh_b: Option<&TriangleBvh>,
         vertices_b: Option<&[kapitsa_math::Vec3]>,
         sensor: bool,
-    ) -> Result<Option<CcdHit>, CollisionError> {
+    ) -> Result<Option<CcdHit>, crate::Error> {
         let result = self.narrow_phase.time_of_impact(
             shape_a, motion_a, bvh_a, vertices_a, shape_b, motion_b, bvh_b, vertices_b, sensor,
         );
@@ -1059,7 +1052,7 @@ impl CollisionSystem {
         executor: &impl StepExecutor,
         dt: f64,
         gravity: Option<crate::gravity::CentralGravity>,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         self.context.joint_break_events.clear();
         if let Some(cache) = self.contact_cache.as_ref() {
             cache.warm_start_solver(
@@ -1085,7 +1078,7 @@ impl CollisionSystem {
         if self.solver_islands.len() < island_count {
             self.solver_islands
                 .try_reserve(island_count - self.solver_islands.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.solver_islands
                 .resize_with(island_count, SolverIsland::new);
         }
@@ -1099,16 +1092,16 @@ impl CollisionSystem {
             let island = self
                 .solver_islands
                 .get_mut(island_index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             island
                 .manifold_indices
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             island.manifold_indices.push(manifold_index);
             island
                 .body_indices
                 .try_reserve(2)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             island.body_indices.push(manifold.body_a);
             island.body_indices.push(manifold.body_b);
         }
@@ -1119,16 +1112,16 @@ impl CollisionSystem {
             let island = self
                 .solver_islands
                 .get_mut(island_index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             island
                 .joint_indices
                 .try_reserve(1)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             island.joint_indices.push(joint_index);
             island
                 .body_indices
                 .try_reserve(2)
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             island.body_indices.push(joint.body_a);
             island.body_indices.push(joint.body_b);
         }
@@ -1138,11 +1131,11 @@ impl CollisionSystem {
             island
                 .bodies
                 .try_reserve(island.body_indices.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             island
                 .constrained_starts
                 .try_reserve(island.body_indices.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             for body_index in island.body_indices.iter().copied() {
                 if let Some(Some(start)) = self.context.constrained_starts.get(body_index) {
                     island.constrained_starts.push(*start);
@@ -1153,7 +1146,7 @@ impl CollisionSystem {
                     .context
                     .solver_bodies
                     .get(body_index)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let solver_body = SolverBody::from_prediction(*body.body(), body.state());
                 #[cfg(feature = "bench-internals")]
                 {
@@ -1165,13 +1158,13 @@ impl CollisionSystem {
             island
                 .manifolds
                 .try_reserve(island.manifold_indices.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             for manifold_index in island.manifold_indices.iter().copied() {
                 let mut manifold = *self
                     .context
                     .solver_manifolds
                     .get(manifold_index)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 #[cfg(feature = "bench-internals")]
                 {
                     self.benchmark_metrics.solver_manifold_copies = self
@@ -1182,31 +1175,31 @@ impl CollisionSystem {
                 manifold.body_a = island
                     .body_indices
                     .binary_search(&manifold.body_a)
-                    .map_err(|_| CollisionError::InvalidContact)?;
+                    .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
                 manifold.body_b = island
                     .body_indices
                     .binary_search(&manifold.body_b)
-                    .map_err(|_| CollisionError::InvalidContact)?;
+                    .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
                 island.manifolds.push(manifold);
             }
             island
                 .joints
                 .try_reserve(island.joint_indices.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             for joint_index in island.joint_indices.iter().copied() {
                 let mut joint = *self
                     .context
                     .joint_constraints
                     .get(joint_index)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 joint.body_a = island
                     .body_indices
                     .binary_search(&joint.body_a)
-                    .map_err(|_| CollisionError::InvalidContact)?;
+                    .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
                 joint.body_b = island
                     .body_indices
                     .binary_search(&joint.body_b)
-                    .map_err(|_| CollisionError::InvalidContact)?;
+                    .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
                 island.joints.push(joint);
             }
             island.constrained_eligible &=
@@ -1330,13 +1323,13 @@ impl CollisionSystem {
                 )
             }));
             if !matches!(solved, Ok(Ok(()))) {
-                return Err(CollisionError::WorkerFailed);
+                return Err(crate::Error::from(CollisionError::WorkerFailed));
             }
             if let Some(error) = self
                 .solver_islands
                 .iter()
                 .take(island_count)
-                .find_map(|island| island.worker_error)
+                .find_map(|island| island.worker_error.clone())
             {
                 return Err(error);
             }
@@ -1416,7 +1409,7 @@ impl CollisionSystem {
             self.context
                 .joint_break_events
                 .try_reserve(island.joint_workspace.break_events().len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.context
                 .joint_break_events
                 .extend_from_slice(island.joint_workspace.break_events());
@@ -1453,15 +1446,15 @@ impl CollisionSystem {
                     let body = island
                         .bodies
                         .get(local_index)
-                        .ok_or(CollisionError::InvalidContact)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                     let prediction_index = *context
                         .solver_body_predictions
                         .get(global_index)
-                        .ok_or(CollisionError::InvalidContact)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                     let predicted = context
                         .predicted_states
                         .get_mut(prediction_index)
-                        .ok_or(CollisionError::InvalidContact)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                     predicted.1 = body.state();
                 }
             }
@@ -1469,11 +1462,11 @@ impl CollisionSystem {
                 let solved = island
                     .manifolds
                     .get(local_index)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let original = context
                     .solver_manifolds
                     .get_mut(global_index)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 original.manifold = solved.manifold;
                 // An isolated two-body discrete island without position projection has
                 // one simultaneous velocity-solver event. Preserve its input
@@ -1487,30 +1480,30 @@ impl CollisionSystem {
                     let global_a = *island
                         .body_indices
                         .get(solved.body_a)
-                        .ok_or(CollisionError::InvalidContact)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                     let global_b = *island
                         .body_indices
                         .get(solved.body_b)
-                        .ok_or(CollisionError::InvalidContact)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                     let before_a = context
                         .solver_bodies
                         .get(global_a)
-                        .ok_or(CollisionError::InvalidContact)?
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                         .state();
                     let before_b = context
                         .solver_bodies
                         .get(global_b)
-                        .ok_or(CollisionError::InvalidContact)?
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                         .state();
                     let after_a = island
                         .bodies
                         .get(solved.body_a)
-                        .ok_or(CollisionError::InvalidContact)?
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                         .state();
                     let after_b = island
                         .bodies
                         .get(solved.body_b)
-                        .ok_or(CollisionError::InvalidContact)?
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                         .state();
                     if before_a.transform() == after_a.transform()
                         && before_b.transform() == after_b.transform()
@@ -1525,7 +1518,7 @@ impl CollisionSystem {
                             original
                                 .manifold
                                 .point_mut(index)
-                                .ok_or(CollisionError::InvalidContact)?
+                                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                                 .isolated_velocity_states =
                                 Some([[before_a, before_b], [after_a, after_b]]);
                         }
@@ -1571,7 +1564,7 @@ impl CollisionSystem {
         state_b: BodyState,
         manifold: ContactManifold,
         material: SolverMaterial,
-    ) -> Result<(BodyState, BodyState, ContactManifold), CollisionError> {
+    ) -> Result<(BodyState, BodyState, ContactManifold), crate::Error> {
         Self::solve_ccd_contact_with_workspace(
             &mut self.ccd_solver,
             body_a,
@@ -1594,7 +1587,7 @@ impl CollisionSystem {
         manifold: ContactManifold,
         material: SolverMaterial,
         config: CollisionConfig,
-    ) -> Result<(BodyState, BodyState, ContactManifold), CollisionError> {
+    ) -> Result<(BodyState, BodyState, ContactManifold), crate::Error> {
         let mut bodies = [
             SolverBody::from_prediction(body_a, state_a),
             SolverBody::from_prediction(body_b, state_b),
@@ -1609,7 +1602,7 @@ impl CollisionSystem {
         Ok((bodies[0].state(), bodies[1].state(), manifolds[0].manifold))
     }
 
-    pub(crate) fn stage_lifecycle_events(&mut self) -> Result<(), CollisionError> {
+    pub(crate) fn stage_lifecycle_events(&mut self) -> Result<(), crate::Error> {
         self.lifecycle
             .stage(&mut self.context.interactions, &mut self.context.events)?;
         self.lifecycle_staged = true;
@@ -1689,7 +1682,7 @@ fn solve_island_group(
     executor: &impl StepExecutor,
     workers: [usize; 2],
     skip: Option<usize>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let [workers, inner_workers] = workers;
     let solve =
         |island: &mut SolverIsland| island.solve(config, step, gravity, executor, inner_workers);
@@ -1715,9 +1708,12 @@ fn solve_island_group(
             })
         }));
         if !matches!(result, Ok(Ok(()))) {
-            return Err(CollisionError::WorkerFailed);
+            return Err(crate::Error::from(CollisionError::WorkerFailed));
         }
-        if let Some(error) = islands.iter().find_map(|island| island.worker_error) {
+        if let Some(error) = islands
+            .iter()
+            .find_map(|island| island.worker_error.clone())
+        {
             return Err(error);
         }
     }

@@ -77,7 +77,7 @@ impl Collider {
     /// thread before the collider is inserted into a world. Prepared mesh
     /// geometry remains available when the collider is removed from the world.
     pub fn prepare(&mut self) -> Result<(), Error> {
-        self.prepare_query_geometry().map_err(Error::from)
+        self.prepare_query_geometry()
     }
 
     pub fn new(shape: Shape, local_transform: Transform) -> Self {
@@ -169,33 +169,33 @@ impl Collider {
         self.shape.world_bounds(&transform)
     }
 
-    pub(crate) fn local_bounds(&self) -> Result<Option<Aabb>, CollisionError> {
+    pub(crate) fn local_bounds(&self) -> Result<Option<Aabb>, crate::Error> {
         if let Some(pose) = &self.skin_pose {
             return Ok(Some(pose.bounds));
         }
         self.shape
             .local_bounds()
-            .map_err(|_| CollisionError::GeometryBounds)
+            .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))
     }
 
     /// Sets the skin pose used for collision during subsequent physics steps.
     ///
     /// Physics treats each pose as fixed for the duration of a step. Changes
     /// between steps are discrete; CCD does not interpolate unknown bone paths.
-    pub(crate) fn set_skin_pose(&mut self, matrices: &[Affine3]) -> Result<(), CollisionError> {
+    pub(crate) fn set_skin_pose(&mut self, matrices: &[Affine3]) -> Result<(), crate::Error> {
         let Shape::SkinnedTriangleMesh(skinned_mesh) = &self.shape else {
-            return Err(CollisionError::InvalidSkinPose);
+            return Err(crate::Error::from(CollisionError::InvalidSkinPose));
         };
         if matrices.len() != skinned_mesh.bone_names().len()
             || matrices.iter().any(|matrix| !matrix.is_finite())
         {
-            return Err(CollisionError::InvalidSkinPose);
+            return Err(crate::Error::from(CollisionError::InvalidSkinPose));
         }
 
         if let Some(pose) = &mut self.skin_pose {
             fill_deformed_vertices(skinned_mesh, matrices, &mut pose.staging_vertices)?;
             let bounds = points_bounds(&pose.staging_vertices)
-                .map_err(|_| CollisionError::InvalidSkinPose)?;
+                .map_err(|_| crate::Error::from(CollisionError::InvalidSkinPose))?;
             pose.bvh.prepare_refit(
                 skinned_mesh.mesh(),
                 &pose.staging_vertices,
@@ -211,19 +211,19 @@ impl Collider {
         let mut vertices = Vec::new();
         vertices
             .try_reserve_exact(vertex_count)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         let mut staging_vertices = Vec::new();
         staging_vertices
             .try_reserve_exact(vertex_count)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         fill_deformed_vertices(skinned_mesh, matrices, &mut staging_vertices)?;
-        let bounds =
-            points_bounds(&staging_vertices).map_err(|_| CollisionError::InvalidSkinPose)?;
+        let bounds = points_bounds(&staging_vertices)
+            .map_err(|_| crate::Error::from(CollisionError::InvalidSkinPose))?;
         let mut refit_scratch = BvhRefitScratch::default();
         let bvh = if let Some(bvh) = self.mesh_bvh.as_deref() {
             bvh.prepare_refit(skinned_mesh.mesh(), &staging_vertices, &mut refit_scratch)?;
             let Some(mut bvh) = self.mesh_bvh.take() else {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             };
             bvh.commit_refit(&mut refit_scratch);
             bvh
@@ -244,7 +244,7 @@ impl Collider {
         Ok(())
     }
 
-    pub(crate) fn prepare_query_geometry(&mut self) -> Result<(), CollisionError> {
+    pub(crate) fn prepare_query_geometry(&mut self) -> Result<(), crate::Error> {
         let mesh = match &self.shape {
             Shape::TriangleMesh(mesh) => Some(mesh),
             Shape::SkinnedTriangleMesh(mesh) => Some(mesh.mesh()),
@@ -286,36 +286,36 @@ fn fill_deformed_vertices(
     skinned_mesh: &SkinnedTriangleMesh,
     matrices: &[Affine3],
     output: &mut Vec<Vec3>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let reference_vertices = skinned_mesh.mesh().vertices();
     let influences = skinned_mesh.vertex_influences();
     if reference_vertices.len() != influences.len() {
-        return Err(CollisionError::InvalidSkinPose);
+        return Err(crate::Error::from(CollisionError::InvalidSkinPose));
     }
     output.clear();
     output
         .try_reserve_exact(reference_vertices.len())
-        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+        .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     for (reference, influences) in reference_vertices.iter().zip(influences) {
         let mut deformed = Vec3::ZERO;
         for influence in influences {
             let matrix = matrices
                 .get(influence.bone_index())
-                .ok_or(CollisionError::InvalidSkinPose)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidSkinPose))?;
             let transformed = matrix
                 .linear()
                 .checked_mul_vector(*reference)
                 .and_then(|point| point.checked_add(matrix.translation()))
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let weighted = transformed
                 .checked_mul_scalar(influence.weight())
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             deformed = deformed
                 .checked_add(weighted)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         }
         if !deformed.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         output.push(deformed);
     }

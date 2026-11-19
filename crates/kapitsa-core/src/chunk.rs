@@ -52,7 +52,7 @@ pub struct ChunkBuilder {
 pub enum ChunkBuildError {
     Empty,
     Bounds(crate::Error),
-    Preparation(CollisionError),
+    Preparation(crate::Error),
     CapacityExceeded,
 }
 
@@ -108,7 +108,7 @@ impl ChunkBuilder {
                     .downcast_ref::<CollisionError>()
                     .copied()
                     .unwrap_or(CollisionError::GeometryBounds);
-                ChunkBuildError::Preparation(cause)
+                ChunkBuildError::Preparation(crate::Error::from(cause))
             })?;
             colliders.push(collider);
         }

@@ -79,7 +79,7 @@ impl CollisionLifecycle {
         &mut self,
         interactions: &mut [CollisionInteraction],
         events: &mut Vec<CollisionEvent>,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         interactions.sort_by_key(|interaction| interaction.pair);
         self.next.clear();
         events.clear();
@@ -87,11 +87,11 @@ impl CollisionLifecycle {
             .windows(2)
             .any(|pair| pair[0].pair == pair[1].pair)
         {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         for interaction in interactions.iter().copied() {
             if interaction.transient && (!interaction.sensor || interaction.impact) {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             if interaction.impact
                 && (interaction.sensor
@@ -99,7 +99,7 @@ impl CollisionLifecycle {
                         .contact
                         .is_none_or(|contact| contact.normal_impulse <= 0.0))
             {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             if let Some(contact) = interaction.contact
                 && (!contact.point.is_finite()
@@ -110,25 +110,22 @@ impl CollisionLifecycle {
                     || contact.normal_impulse < 0.0
                     || contact.normal.try_normalize().is_none())
             {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
         }
         self.next
             .try_reserve(interactions.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
-        let event_capacity = self
-            .active
-            .len()
-            .checked_add(
-                interactions
-                    .len()
-                    .checked_mul(2)
-                    .ok_or(CollisionError::SpatialIndexCapacityExceeded)?,
-            )
-            .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
+        let event_capacity =
+            self.active
+                .len()
+                .checked_add(interactions.len().checked_mul(2).ok_or_else(|| {
+                    crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                })?)
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         events
             .try_reserve(event_capacity)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
 
         let mut old_index = 0;
         let mut new_index = 0;

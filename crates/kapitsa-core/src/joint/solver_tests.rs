@@ -152,7 +152,7 @@ fn test_joint_id() -> crate::world::JointId {
 }
 
 #[test]
-fn fixed_joint_geometry_is_reused_until_a_body_pose_changes() -> Result<(), CollisionError> {
+fn fixed_joint_geometry_is_reused_until_a_body_pose_changes() -> Result<(), crate::Error> {
     let constraint = JointConstraint {
         id: test_joint_id(),
         body_a: 0,
@@ -181,7 +181,7 @@ fn fixed_joint_geometry_is_reused_until_a_body_pose_changes() -> Result<(), Coll
         workspace.begin_prepare();
         prepare_joint_rows(bodies, workspace, &constraints, 0.01)?;
         workspace.finish_prepare();
-        Ok::<(), CollisionError>(())
+        Ok::<(), crate::Error>(())
     };
 
     prepare(&bodies, &mut workspace)?;

@@ -48,7 +48,7 @@ impl ConstraintColoring {
         &mut self,
         dynamic_bodies: &[bool],
         endpoints: &[[usize; 2]],
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         if self.dynamic_bodies == dynamic_bodies && self.endpoints == endpoints {
             return Ok(false);
         }
@@ -56,7 +56,7 @@ impl ConstraintColoring {
             .iter()
             .any(|[a, b]| a == b || *a >= dynamic_bodies.len() || *b >= dynamic_bodies.len())
         {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
 
         reserve(&mut self.dynamic_bodies, dynamic_bodies.len())?;
@@ -120,7 +120,7 @@ impl ConstraintColoring {
             + self.constraint_body_positions.capacity() * size_of::<[usize; 2]>()
     }
 
-    fn rebuild(&mut self) -> Result<(), CollisionError> {
+    fn rebuild(&mut self) -> Result<(), crate::Error> {
         let body_count = self.dynamic_bodies.len();
         let constraint_count = self.endpoints.len();
         reserve(&mut self.body_offsets, body_count.saturating_add(1))?;
@@ -129,21 +129,22 @@ impl ConstraintColoring {
         for [a, b] in self.endpoints.iter().copied() {
             for body in [a, b] {
                 if self.dynamic_bodies[body] {
-                    self.body_offsets[body + 1] = self.body_offsets[body + 1]
-                        .checked_add(1)
-                        .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                    self.body_offsets[body + 1] =
+                        self.body_offsets[body + 1].checked_add(1).ok_or_else(|| {
+                            crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                        })?;
                 }
             }
         }
         for body in 0..body_count {
             self.body_offsets[body + 1] = self.body_offsets[body + 1]
                 .checked_add(self.body_offsets[body])
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         let adjacency_count = *self
             .body_offsets
             .last()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         reserve(&mut self.body_constraints, adjacency_count)?;
         self.body_constraints.resize(adjacency_count, 0);
         reserve(&mut self.scratch_offsets, body_count)?;
@@ -184,7 +185,7 @@ impl ConstraintColoring {
             }
             let color = (0..=color_count)
                 .find(|color| self.color_stamps[*color] != stamp)
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.constraint_colors[constraint] = color;
             color_count = color_count.max(color + 1);
         }
@@ -195,12 +196,12 @@ impl ConstraintColoring {
         for color in self.constraint_colors.iter().copied() {
             self.color_offsets[color + 1] = self.color_offsets[color + 1]
                 .checked_add(1)
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         for color in 0..color_count {
             self.color_offsets[color + 1] = self.color_offsets[color + 1]
                 .checked_add(self.color_offsets[color])
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         reserve(&mut self.colored_constraints, constraint_count)?;
         self.colored_constraints.resize(constraint_count, 0);
@@ -232,17 +233,17 @@ impl ConstraintColoring {
             self.constraint_body_positions[constraint] = [
                 bodies
                     .binary_search(&a)
-                    .map_err(|_| CollisionError::InvalidContact)?,
+                    .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?,
                 bodies
                     .binary_search(&b)
-                    .map_err(|_| CollisionError::InvalidContact)?,
+                    .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?,
             ];
         }
 
         // This check is unconditional because the solver's concurrent body access
         // relies on each dynamic body having exactly one owner per color.
         if !self.has_unique_dynamic_body_ownership(body_count)? {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         Ok(())
     }
@@ -250,7 +251,7 @@ impl ConstraintColoring {
     /// Reusable index-only ownership plan for the safe binding phase.
     /// References are intentionally not stored: they must be materialized
     /// while one color exclusively borrows the solver-body slice.
-    fn rebuild_color_body_plan(&mut self, body_count: usize) -> Result<(), CollisionError> {
+    fn rebuild_color_body_plan(&mut self, body_count: usize) -> Result<(), crate::Error> {
         reserve(
             &mut self.color_body_offsets,
             self.color_count.saturating_add(1),
@@ -298,7 +299,7 @@ impl ConstraintColoring {
     fn has_unique_dynamic_body_ownership(
         &mut self,
         body_count: usize,
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         reserve(&mut self.body_stamps, body_count)?;
         self.body_stamps.resize(body_count, 0);
         self.body_stamps.fill(0);
@@ -323,11 +324,11 @@ impl ConstraintColoring {
     }
 }
 
-fn reserve<T>(values: &mut Vec<T>, target_len: usize) -> Result<(), CollisionError> {
+fn reserve<T>(values: &mut Vec<T>, target_len: usize) -> Result<(), crate::Error> {
     if values.capacity() < target_len {
         values
             .try_reserve(target_len - values.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     }
     Ok(())
 }

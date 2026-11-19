@@ -343,8 +343,7 @@ pub(crate) fn sweep_shape_with_scratch(
             target_transform,
         ),
         _ => return Err(crate::Error::from(QueryError::UnsupportedQueryShape)),
-    }
-    .map_err(crate::Error::from)?;
+    }?;
     Ok(hit)
 }
 
@@ -426,7 +425,6 @@ fn overlaps_convex(
         &target_transform,
     )
     .map(|result| result.intersects)
-    .map_err(crate::Error::from)
 }
 
 fn overlaps_plane(
@@ -440,12 +438,8 @@ fn overlaps_plane(
         .try_normalize()
         .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
     let point = plane_transform.transform_point(plane.normal() * plane.distance());
-    let minimum = super::support::support_world(query_shape, &query_transform, -normal)
-        .map_err(crate::Error::from)?
-        .0;
-    let maximum = super::support::support_world(query_shape, &query_transform, normal)
-        .map_err(crate::Error::from)?
-        .0;
+    let minimum = super::support::support_world(query_shape, &query_transform, -normal)?.0;
+    let maximum = super::support::support_world(query_shape, &query_transform, normal)?.0;
     let minimum = (minimum - point)
         .checked_dot(normal)
         .ok_or_else(|| crate::Error::from(QueryError::ArithmeticOverflow))?;
@@ -470,10 +464,8 @@ fn overlaps_mesh(
         )));
     }
     let world_bounds = query_world_bounds(query_shape, query_transform)?;
-    let local_bounds = super::mesh::local_query_bounds(world_bounds, &target_transform)
-        .map_err(crate::Error::from)?;
-    bvh.query(local_bounds, &mut scratch.mesh, &mut scratch.candidates)
-        .map_err(crate::Error::from)?;
+    let local_bounds = super::mesh::local_query_bounds(world_bounds, &target_transform)?;
+    bvh.query(local_bounds, &mut scratch.mesh, &mut scratch.candidates)?;
     for triangle_id in scratch.candidates.iter().copied() {
         let [a, b, c] = *mesh.triangles().get(triangle_id).ok_or_else(|| {
             crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
@@ -507,8 +499,7 @@ fn overlaps_height_field(
     candidates: &mut Vec<HeightFieldTriangle>,
 ) -> Result<bool, crate::Error> {
     let world_bounds = query_world_bounds(query_shape, query_transform)?;
-    height_field::query_world_bounds(field, &target_transform, world_bounds, candidates)
-        .map_err(crate::Error::from)?;
+    height_field::query_world_bounds(field, &target_transform, world_bounds, candidates)?;
     for candidate in candidates.iter().copied() {
         let triangle = Shape::Triangle(
             Triangle::from_vertices(candidate.vertices)
@@ -529,9 +520,8 @@ fn overlaps_level_set(
     candidates: &mut Vec<LevelSetCell>,
 ) -> Result<bool, crate::Error> {
     let world_bounds = query_world_bounds(query_shape, query_transform)?;
-    let local_bounds = super::mesh::local_query_bounds(world_bounds, &target_transform)
-        .map_err(crate::Error::from)?;
-    level_set::query_surface_cells(field, local_bounds, candidates).map_err(crate::Error::from)?;
+    let local_bounds = super::mesh::local_query_bounds(world_bounds, &target_transform)?;
+    level_set::query_surface_cells(field, local_bounds, candidates)?;
     if candidates.is_empty() {
         return Ok(false);
     }
@@ -548,12 +538,8 @@ fn overlaps_level_set(
     );
     let mut signs = [false; 2];
     for direction in support_directions() {
-        let point = super::support::support_world(query_shape, &query_transform, direction)
-            .map_err(crate::Error::from)?
-            .0;
-        if let Some(sample) =
-            level_set::sample(field, inverse.transform_point(point)).map_err(crate::Error::from)?
-        {
+        let point = super::support::support_world(query_shape, &query_transform, direction)?.0;
+        if let Some(sample) = level_set::sample(field, inverse.transform_point(point))? {
             signs[usize::from(sample.value >= 0.0)] = true;
             if sample.value == 0.0 {
                 return Ok(true);
@@ -574,8 +560,7 @@ fn overlaps_level_set(
                 query_shape,
                 &query_transform,
                 target_transform.transform_point(surface),
-            )
-            .map_err(crate::Error::from)?
+            )?
             .intersects
         {
             return Ok(true);
@@ -620,16 +605,12 @@ fn cell_edge_root_inside(
         (2, 6),
         (3, 7),
     ] {
-        let first = level_set::sample(field, corners[left])
-            .map_err(crate::Error::from)?
-            .ok_or_else(|| {
-                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
-            })?;
-        let second = level_set::sample(field, corners[right])
-            .map_err(crate::Error::from)?
-            .ok_or_else(|| {
-                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
-            })?;
+        let first = level_set::sample(field, corners[left])?.ok_or_else(|| {
+            crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+        })?;
+        let second = level_set::sample(field, corners[right])?.ok_or_else(|| {
+            crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+        })?;
         if first.value == 0.0
             && level_set_point_inside(
                 query_shape,
@@ -669,9 +650,7 @@ fn level_set_point_inside(
     transform: Transform,
     point: Vec3,
 ) -> Result<bool, crate::Error> {
-    gjk::distance_to_point(shape, &transform, point)
-        .map(|distance| distance.intersects)
-        .map_err(crate::Error::from)
+    gjk::distance_to_point(shape, &transform, point).map(|distance| distance.intersects)
 }
 
 fn project_level_set_point(
@@ -680,11 +659,9 @@ fn project_level_set_point(
     mut point: Vec3,
 ) -> Result<Option<Vec3>, crate::Error> {
     for _ in 0..24 {
-        let sample = level_set::sample(field, point)
-            .map_err(crate::Error::from)?
-            .ok_or_else(|| {
-                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
-            })?;
+        let sample = level_set::sample(field, point)?.ok_or_else(|| {
+            crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+        })?;
         let tolerance = point.abs().max_element().max(1.0) * f64::EPSILON * 128.0;
         if sample.value.abs() <= tolerance {
             return Ok(Some(point));
@@ -743,8 +720,7 @@ fn raycast_convex(
     let mut previous_normal = None;
     for _ in 0..128 {
         let point = ray.origin() + ray.direction() * distance;
-        let result =
-            gjk::distance_to_point(shape, &transform, point).map_err(crate::Error::from)?;
+        let result = gjk::distance_to_point(shape, &transform, point)?;
         if result.intersects {
             let normal = previous_normal.unwrap_or(-ray.direction());
             let position = if distance == 0.0 {
@@ -876,8 +852,7 @@ fn ray_mesh(
     }
     let segment_bounds = Aabb::new(origin.min(end), origin.max(end))
         .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?;
-    bvh.query(segment_bounds, &mut scratch.mesh, &mut scratch.candidates)
-        .map_err(crate::Error::from)?;
+    bvh.query(segment_bounds, &mut scratch.mesh, &mut scratch.candidates)?;
     let mut best = None;
     for triangle in scratch.candidates.iter().copied() {
         let [a, b, c] = *mesh.triangles().get(triangle).ok_or_else(|| {
@@ -917,7 +892,7 @@ fn ray_height_field(
     }
     let bounds = Aabb::new(origin.min(end), origin.max(end))
         .map_err(|_| QueryError::Geometry(CollisionError::GeometryBounds))?;
-    height_field::query_triangles(field, bounds, candidates).map_err(crate::Error::from)?;
+    height_field::query_triangles(field, bounds, candidates)?;
     let mut best = None;
     for triangle in candidates.iter().copied() {
         let (normal, distance) = ray_triangle(origin, direction, max_distance, triangle.vertices)?;
@@ -957,11 +932,9 @@ fn ray_level_set(
         let indices = ray_cell_indices(field, point, direction)?;
         let next = next_cell_boundary(field, current, point, direction, indices, exit)?;
         if next <= current {
-            let sample = level_set::sample(field, point)
-                .map_err(crate::Error::from)?
-                .ok_or_else(|| {
-                    crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
-                })?;
+            let sample = level_set::sample(field, point)?.ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?;
             if sample.value == 0.0 {
                 let normal = sample
                     .gradient
@@ -974,8 +947,7 @@ fn ray_level_set(
         let end = next.min(exit);
         let values = [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0].map(|fraction| {
             let sample_point = origin + direction * (current + (end - current) * fraction);
-            level_set::sample(field, sample_point)
-                .map_err(crate::Error::from)?
+            level_set::sample(field, sample_point)?
                 .map(|sample| sample.value)
                 .ok_or_else(|| {
                     crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
@@ -986,11 +958,9 @@ fn ray_level_set(
         if let Some(fraction) = first_cubic_root(y0, y1, y2, y3)? {
             let distance = current + (end - current) * fraction;
             let hit_point = origin + direction * distance;
-            let sample = level_set::sample(field, hit_point)
-                .map_err(crate::Error::from)?
-                .ok_or_else(|| {
-                    crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
-                })?;
+            let sample = level_set::sample(field, hit_point)?.ok_or_else(|| {
+                crate::Error::from(QueryError::Geometry(CollisionError::GeometryBounds))
+            })?;
             let normal = sample
                 .gradient
                 .try_normalize()

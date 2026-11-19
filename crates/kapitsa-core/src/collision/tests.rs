@@ -70,7 +70,7 @@ fn config_rejects_invalid_values() {
             ..defaults
         }
         .validate(),
-        Err(CollisionError::InvalidConfig)
+        Err(crate::Error::from(CollisionError::InvalidConfig))
     );
     assert_eq!(
         CollisionConfig {
@@ -78,7 +78,7 @@ fn config_rejects_invalid_values() {
             ..defaults
         }
         .validate(),
-        Err(CollisionError::InvalidConfig)
+        Err(crate::Error::from(CollisionError::InvalidConfig))
     );
     assert_eq!(
         CollisionConfig {
@@ -86,7 +86,7 @@ fn config_rejects_invalid_values() {
             ..defaults
         }
         .validate(),
-        Err(CollisionError::InvalidConfig)
+        Err(crate::Error::from(CollisionError::InvalidConfig))
     );
 }
 
@@ -862,7 +862,7 @@ fn continuous_rebound_replays_an_already_completed_island() {
     assert_eq!(
         world.step(0.01),
         Err(crate::Error::from(crate::world::StepError::Collision(
-            CollisionError::CcdLimitExceeded
+            crate::Error::from(CollisionError::CcdLimitExceeded)
         )))
     );
     assert_eq!(*world.body(completed).unwrap().state(), before_completed);
@@ -1679,7 +1679,7 @@ fn ccd_impact_limit_failure_preserves_the_world_state_and_events() {
     assert_eq!(
         world.step(0.01),
         Err(crate::Error::from(crate::world::StepError::Collision(
-            CollisionError::CcdLimitExceeded
+            crate::Error::from(CollisionError::CcdLimitExceeded)
         )))
     );
 

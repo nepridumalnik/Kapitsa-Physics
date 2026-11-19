@@ -2607,7 +2607,7 @@ fn interaction_index_preserves_duplicate_merge_rules_and_resets_with_step_scratc
                 impact: false,
             },
         ),
-        Err(CollisionError::InvalidContact)
+        Err(crate::Error::from(CollisionError::InvalidContact))
     );
     assert_eq!(interactions.len(), 2);
 
@@ -3114,9 +3114,9 @@ fn dynamic_bodies_reject_surface_geometry_but_allow_convex_shapes() {
     );
     assert_eq!(
         world.add_collider(dynamic, Collider::new(triangle, Transform::identity())),
-        Err(Error::from(WorldError::Collision(
+        Err(Error::from(WorldError::Collision(crate::Error::from(
             crate::collision::CollisionError::UnsupportedDynamicGeometry
-        )))
+        ))))
     );
     assert!(world.add_collider(dynamic, collider(1.0)).is_ok());
 
@@ -3155,7 +3155,7 @@ fn invalid_material_fails_step_without_changing_body_or_forces() {
     assert_eq!(
         world.step(0.1),
         Err(crate::Error::from(StepError::Collision(
-            CollisionError::InvalidMaterial
+            crate::Error::from(CollisionError::InvalidMaterial)
         )))
     );
     assert_eq!(world.body(body_id).map(RigidBody::motion), Some(original));
@@ -3185,7 +3185,7 @@ fn invalid_material_fails_shard_commit_before_any_body_changes() {
     assert_eq!(
         world.commit_step_shards(&shards),
         Err(crate::Error::from(StepError::Collision(
-            CollisionError::InvalidMaterial
+            crate::Error::from(CollisionError::InvalidMaterial)
         )))
     );
     assert_eq!(world.body(body_id).map(RigidBody::motion), Some(original));
@@ -4069,7 +4069,7 @@ fn sharded_executor_error_rolls_back_force_sources_and_can_retry() {
     assert_eq!(
         world.step_with_shards(0.1, &mut shards, &failing_executor, 4),
         Err(crate::Error::from(StepError::Collision(
-            CollisionError::WorkerFailed
+            crate::Error::from(CollisionError::WorkerFailed)
         )))
     );
     assert_bodies_match(&world, &bodies, &originals);
@@ -4112,7 +4112,7 @@ fn sharded_collision_solver_error_rolls_back_force_sources_and_can_retry() {
     assert_eq!(
         world.step_with_shards(0.1, &mut shards, &failing_executor, 4),
         Err(crate::Error::from(StepError::Collision(
-            CollisionError::WorkerFailed
+            crate::Error::from(CollisionError::WorkerFailed)
         )))
     );
     assert_eq!(failing_executor.calls.load(Ordering::Relaxed), 2);
@@ -4735,7 +4735,7 @@ fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn
     assert_eq!(
         world.commit_step_shards_with_executor(&shards, &ScopedThreadExecutor, 4),
         Err(crate::Error::from(StepError::Collision(
-            CollisionError::CcdLimitExceeded
+            crate::Error::from(CollisionError::CcdLimitExceeded)
         )))
     );
 

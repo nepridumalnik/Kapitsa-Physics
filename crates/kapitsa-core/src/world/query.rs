@@ -265,8 +265,7 @@ impl PhysicsWorld {
             .ok_or_else(|| {
                 crate::Error::from(QueryError::Geometry(CollisionError::InvalidContact))
             })?
-            .query_readonly(bounds, &mut scratch.tree_stack, candidates)
-            .map_err(QueryError::Geometry)?;
+            .query_readonly(bounds, &mut scratch.tree_stack, candidates)?;
         candidates
             .try_reserve(self.unbounded_query_colliders.len())
             .map_err(|_| QueryError::Geometry(CollisionError::SpatialIndexCapacityExceeded))?;
@@ -344,21 +343,21 @@ impl PhysicsWorld {
     fn committed_collider_bounds(
         &self,
         collider_id: ColliderId,
-    ) -> Result<Option<Aabb>, CollisionError> {
+    ) -> Result<Option<Aabb>, crate::Error> {
         let entry = self
             .colliders
             .get(collider_id.dense)
             .filter(|_| collider_id.world == self.world_id)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let body = self
             .bodies
             .get(entry.body.dense)
             .filter(|_| entry.body.world == self.world_id)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         entry
             .collider
             .world_bounds(&body.body.state().transform())
-            .map_err(|_| CollisionError::GeometryBounds)
+            .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))
     }
 
     pub(super) fn update_query_index_for_collider(&mut self, collider_id: ColliderId) {
@@ -403,20 +402,20 @@ impl PhysicsWorld {
                     .bodies
                     .get(entry.body.dense)
                     .filter(|_| entry.body.world == self.world_id)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let bounds = entry
                     .collider
                     .world_bounds(&body.body.state().transform())
-                    .map_err(|_| CollisionError::GeometryBounds)?;
+                    .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?;
                 if let Some(bounds) = bounds {
-                    self.query_proxies
-                        .try_reserve(1)
-                        .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    self.query_proxies.try_reserve(1).map_err(|_| {
+                        crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
                     self.query_proxies
                         .push((collider_id, expanded_query_bounds(bounds)?));
                 }
             }
-            Ok::<(), CollisionError>(())
+            Ok::<(), crate::Error>(())
         })();
         if build_result.is_err() {
             self.mark_query_index_dirty();

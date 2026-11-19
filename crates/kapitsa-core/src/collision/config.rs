@@ -115,7 +115,7 @@ impl CollisionConfig {
         }
     }
 
-    pub(crate) fn validate(self) -> Result<(), CollisionError> {
+    pub(crate) fn validate(self) -> Result<(), crate::Error> {
         if self.velocity_iterations == 0
             || self.position_iterations == 0
             || self.max_ccd_impacts == 0
@@ -127,7 +127,7 @@ impl CollisionConfig {
             || self.restitution_threshold < 0.0
             || self.penetration_slop > self.contact_offset
         {
-            return Err(CollisionError::InvalidConfig);
+            return Err(crate::Error::from(CollisionError::InvalidConfig));
         }
         Ok(())
     }

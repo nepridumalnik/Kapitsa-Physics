@@ -123,7 +123,7 @@ struct SolverPoint {
 impl SolverPoint {
     /// Reconstructs the accumulated world-space impulse on body B, including
     /// warm-start and both tangent components. Body A receives its negative.
-    fn accumulated_impulse(self, contact: ContactPoint) -> Result<Vec3, CollisionError> {
+    fn accumulated_impulse(self, contact: ContactPoint) -> Result<Vec3, crate::Error> {
         self.normal
             .checked_mul_scalar(contact.normal_impulse)
             .and_then(|normal| {
@@ -136,7 +136,7 @@ impl SolverPoint {
                     .checked_mul_scalar(contact.tangent_impulse[1])
                     .and_then(|tangent| impulse.checked_add(tangent))
             })
-            .ok_or(CollisionError::ArithmeticOverflow)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
     }
 }
 
@@ -184,7 +184,7 @@ impl ColoredConstraintTask {
         constraint_index: usize,
         manifolds: &[SolverManifold],
         joints: &[JointConstraint],
-    ) -> Result<Self, CollisionError> {
+    ) -> Result<Self, crate::Error> {
         let (body_indices, kind) = if let Some(manifold) = manifolds.get(constraint_index).copied()
         {
             (
@@ -194,10 +194,10 @@ impl ColoredConstraintTask {
         } else {
             let joint_index = constraint_index
                 .checked_sub(manifolds.len())
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let joint = *joints
                 .get(joint_index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             (
                 [joint.body_a, joint.body_b],
                 ColoredConstraintKind::Joint(joint),
@@ -217,7 +217,7 @@ impl ColoredConstraintTask {
         &mut self,
         manifolds: &[SolverManifold],
         joints: &[JointConstraint],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         self.kind = if let Some(manifold) = manifolds.get(self.constraint_index).copied() {
             self.body_indices = [manifold.body_a, manifold.body_b];
             ColoredConstraintKind::Contact(manifold)
@@ -225,10 +225,10 @@ impl ColoredConstraintTask {
             let joint_index = self
                 .constraint_index
                 .checked_sub(manifolds.len())
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let joint = *joints
                 .get(joint_index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             self.body_indices = [joint.body_a, joint.body_b];
             ColoredConstraintKind::Joint(joint)
         };
@@ -246,7 +246,7 @@ struct ColoredConstraintBatch {
     joint_workspace: JointWorkspace,
     contact_points: Vec<SolverPoint>,
     contact_task_count: usize,
-    error: Option<CollisionError>,
+    error: Option<crate::Error>,
 }
 
 struct BoundConstraint<'a> {
@@ -258,14 +258,14 @@ struct BoundColoredBatch<'a> {
     tasks: Vec<BoundConstraint<'a>>,
     joint_workspace: &'a mut JointWorkspace,
     contact_points: &'a mut Vec<SolverPoint>,
-    error: &'a mut Option<CollisionError>,
+    error: &'a mut Option<crate::Error>,
 }
 
 fn bind_colored_batches<'a>(
     batches: &'a mut [ColoredConstraintBatch],
     bodies: &'a mut [SolverBody],
     indices: &[usize],
-) -> Result<Vec<BoundColoredBatch<'a>>, CollisionError> {
+) -> Result<Vec<BoundColoredBatch<'a>>, crate::Error> {
     let mut binding = colored_bodies::BodyBinding::bind(bodies, indices)?;
     let mut result = Vec::with_capacity(batches.len());
     for batch in batches.iter_mut() {
@@ -381,25 +381,26 @@ fn measure_joint_residual(
     joints: &[JointConstraint],
     dt: f64,
     full_diagnostics: bool,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     #[cfg(feature = "bench-internals")]
     if !full_diagnostics {
-        return JointSolver::measure_residual_light(joint_workspace, bodies, joints, dt);
+        return JointSolver::measure_residual_light(joint_workspace, bodies, joints, dt)
+            .map_err(crate::Error::from);
     }
     #[cfg(not(feature = "bench-internals"))]
     let _ = full_diagnostics;
-    JointSolver::measure_residual(joint_workspace, bodies, joints, dt)
+    JointSolver::measure_residual(joint_workspace, bodies, joints, dt).map_err(crate::Error::from)
 }
 
 #[cfg(feature = "bench-internals")]
 fn snapshot_velocities(
     bodies: &[SolverBody],
     snapshots: &mut Vec<VelocitySnapshot>,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     if snapshots.capacity() < bodies.len() {
         snapshots
             .try_reserve(bodies.len().saturating_sub(snapshots.len()))
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
     }
     snapshots.clear();
     snapshots.extend(bodies.iter().map(|solver_body| {
@@ -416,9 +417,9 @@ fn snapshot_velocities(
 fn velocity_projection_work(
     before: &[VelocitySnapshot],
     bodies: &[SolverBody],
-) -> Result<(f64, f64), CollisionError> {
+) -> Result<(f64, f64), crate::Error> {
     if before.len() != bodies.len() {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     let mut impulse_work = 0.0;
     let mut quadratic_work = 0.0;
@@ -432,21 +433,21 @@ fn velocity_projection_work(
         let linear_delta = state
             .linear_velocity()
             .checked_sub(before.linear)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let angular_delta = state
             .angular_velocity()
             .checked_sub(before.angular)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let linear_impulse = linear_delta
             .checked_mul_scalar(mass.mass())
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let local_angular_delta = rotation
             .conjugate()
             .rotate_vector(angular_delta)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let angular_impulse = rotation
             .rotate_vector(mass.inertia() * local_angular_delta)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         impulse_work += before.linear.dot(linear_impulse) + before.angular.dot(angular_impulse);
         quadratic_work +=
             0.5 * (linear_delta.dot(linear_impulse) + angular_delta.dot(angular_impulse));
@@ -454,7 +455,7 @@ fn velocity_projection_work(
     if impulse_work.is_finite() && quadratic_work.is_finite() {
         Ok((impulse_work, quadratic_work))
     } else {
-        Err(CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(CollisionError::ArithmeticOverflow))
     }
 }
 
@@ -513,7 +514,7 @@ pub(crate) struct SolverIsland {
     pub(crate) joints: Vec<JointConstraint>,
     pub(crate) workspace: SolverWorkspace,
     pub(crate) joint_workspace: JointWorkspace,
-    pub(crate) worker_error: Option<CollisionError>,
+    pub(crate) worker_error: Option<crate::Error>,
     pub(crate) constrained_starts: Vec<SolverBody>,
     pub(crate) constrained_eligible: bool,
     pub(crate) constrained_workspace: crate::joint::constrained::ConstrainedWorkspace,
@@ -557,7 +558,7 @@ impl SolverIsland {
         gravity: Option<CentralGravity>,
         executor: &impl crate::execution::StepExecutor,
         workers: usize,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         if self.constrained_eligible {
             crate::joint::constrained::ConstrainedIntegrator::solve(
                 &mut self.constrained_starts,
@@ -741,7 +742,7 @@ impl SolverWorkspace {
         manifolds: &mut [SolverManifold],
         joints: &[JointConstraint],
         config: CollisionConfig,
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         self.reduced_fixed_tree_dynamic_indices.clear();
         self.reduced_fixed_tree_dynamic_indices
             .extend(bodies.iter().enumerate().filter_map(|(index, body)| {
@@ -844,7 +845,7 @@ impl SolverWorkspace {
             self.reduced_fixed_tree_offsets.clear();
             self.reduced_fixed_tree_offsets
                 .try_reserve(bodies.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
             self.reduced_fixed_tree_offsets
                 .resize(bodies.len(), Transform::identity());
             self.reduced_fixed_tree_assigned.clear();
@@ -879,22 +880,22 @@ impl SolverWorkspace {
                             fixed.common.frame_a.local_anchor,
                             fixed.common.frame_a.local_rotation,
                         )
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                         let frame_b = Transform::new(
                             fixed.common.frame_b.local_anchor,
                             fixed.common.frame_b.local_rotation,
                         )
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                         let frame_b_inverse = frame_b
                             .inverse()
-                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                         let relative = frame_a
                             .compose(&frame_b_inverse)
-                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                         self.reduced_fixed_tree_offsets[constraint.body_b] = self
                             .reduced_fixed_tree_offsets[constraint.body_a]
                             .compose(&relative)
-                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                         self.reduced_fixed_tree_assigned[local_b] = true;
                         assigned_count += 1;
                         progress = true;
@@ -905,22 +906,22 @@ impl SolverWorkspace {
                             fixed.common.frame_a.local_anchor,
                             fixed.common.frame_a.local_rotation,
                         )
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                         let frame_b = Transform::new(
                             fixed.common.frame_b.local_anchor,
                             fixed.common.frame_b.local_rotation,
                         )
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                         let frame_a_inverse = frame_a
                             .inverse()
-                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                         let relative = frame_b
                             .compose(&frame_a_inverse)
-                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                         self.reduced_fixed_tree_offsets[constraint.body_a] = self
                             .reduced_fixed_tree_offsets[constraint.body_b]
                             .compose(&relative)
-                            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                         self.reduced_fixed_tree_assigned[local_a] = true;
                         assigned_count += 1;
                         progress = true;
@@ -942,7 +943,7 @@ impl SolverWorkspace {
         let root_transform = bodies[root_index].state().transform();
         let root_inverse = root_transform
             .inverse()
-            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let mut total_mass = 0.0;
         let mut center_numerator = Vec3::ZERO;
         for &body_index in &self.reduced_fixed_tree_dynamic_indices {
@@ -950,14 +951,14 @@ impl SolverWorkspace {
                 .body()
                 .physics()
                 .mass()
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let center =
                 self.reduced_fixed_tree_offsets[body_index].transform_point(mass.center_of_mass());
             total_mass += mass.mass();
             center_numerator += center * mass.mass();
         }
         if !total_mass.is_finite() || total_mass <= 0.0 {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let center_of_mass = center_numerator / total_mass;
         let mut inertia_about_root = Mat3::ZERO;
@@ -966,12 +967,12 @@ impl SolverWorkspace {
                 .body()
                 .physics()
                 .mass()
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let offset = self.reduced_fixed_tree_offsets[body_index];
             let rotation = offset
                 .rotation()
                 .to_mat3()
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let center = offset.transform_point(mass.center_of_mass());
             let inertia = rotation * mass.inertia() * rotation.transpose();
             inertia_about_root = inertia_about_root + inertia + parallel_axis(center, mass.mass());
@@ -979,11 +980,11 @@ impl SolverWorkspace {
         let inertia_about_com = inertia_about_root - parallel_axis(center_of_mass, total_mass);
         self.reduced_fixed_tree_mass = Some(
             MassProperties::new(total_mass, center_of_mass, inertia_about_com)
-                .map_err(|_| CollisionError::ArithmeticOverflow)?,
+                .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         );
         let aggregate_mass = self
             .reduced_fixed_tree_mass
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         let mut total_momentum = Vec3::ZERO;
         let mut current_com_numerator = Vec3::ZERO;
         self.reduced_fixed_tree_centers.clear();
@@ -993,12 +994,12 @@ impl SolverWorkspace {
                 .body()
                 .physics()
                 .mass()
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let center = body
                 .body()
                 .world_center_of_mass()
-                .map_err(|_| CollisionError::ArithmeticOverflow)?
-                .ok_or(CollisionError::InvalidContact)?;
+                .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             total_momentum += body.state().linear_velocity() * mass.mass();
             current_com_numerator += center * mass.mass();
             self.reduced_fixed_tree_centers.push(center);
@@ -1014,13 +1015,13 @@ impl SolverWorkspace {
                 .body()
                 .physics()
                 .mass()
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let rotation_matrix = body
                 .state()
                 .transform()
                 .rotation()
                 .to_mat3()
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let inertia_world = rotation_matrix * mass.inertia() * rotation_matrix.transpose();
             angular_momentum += inertia_world * body.state().angular_velocity();
             angular_momentum += (self.reduced_fixed_tree_centers[index] - current_com)
@@ -1030,25 +1031,25 @@ impl SolverWorkspace {
         let root_rotation = root_transform
             .rotation()
             .to_mat3()
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let aggregate_inertia_world =
             root_rotation * aggregate_mass.inertia() * root_rotation.transpose();
         let angular_velocity = aggregate_inertia_world
             .solve_spd(angular_momentum)
-            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let mut aggregate_body = BodyMotion::new_dynamic(root_transform, aggregate_mass)
-            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         aggregate_body
             .set_linear_velocity(linear_velocity)
-            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         aggregate_body
             .set_angular_velocity(angular_velocity)
-            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
 
         self.reduced_contact_bodies.clear();
         self.reduced_contact_bodies
             .try_reserve(1)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         self.reduced_contact_bodies
             .push(SolverBody::from_prediction(
                 aggregate_body,
@@ -1057,7 +1058,7 @@ impl SolverWorkspace {
         if self.reduced_contact_body_map.len() < bodies.len() {
             self.reduced_contact_body_map
                 .try_reserve(bodies.len() - self.reduced_contact_body_map.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         self.reduced_contact_body_map.clear();
         self.reduced_contact_body_map
@@ -1068,7 +1069,7 @@ impl SolverWorkspace {
         self.reduced_contact_manifolds.clear();
         self.reduced_contact_manifolds
             .try_reserve(manifolds.len())
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         for source in manifolds.iter().copied() {
             if source.body_a >= bodies.len() || source.body_b >= bodies.len() {
                 return Ok(false);
@@ -1097,18 +1098,18 @@ impl SolverWorkspace {
                 let point = reduced
                     .manifold
                     .point_mut(point_index)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 if self.reduced_contact_body_map[source.body_a] == 0 {
                     let target_transform = root_transform
                         .compose(&self.reduced_fixed_tree_offsets[source.body_a])
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                     let world_point = target_transform.transform_point(point.local_a);
                     point.local_a = root_inverse.transform_point(world_point);
                 }
                 if self.reduced_contact_body_map[source.body_b] == 0 {
                     let target_transform = root_transform
                         .compose(&self.reduced_fixed_tree_offsets[source.body_b])
-                        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                     let world_point = target_transform.transform_point(point.local_b);
                     point.local_b = root_inverse.transform_point(world_point);
                 }
@@ -1128,12 +1129,12 @@ impl SolverWorkspace {
             {
                 for point_index in 0..source.manifold.len() {
                     let Some(source_point) = source.manifold.point_mut(point_index) else {
-                        return Err(CollisionError::InvalidContact);
+                        return Err(crate::Error::from(CollisionError::InvalidContact));
                     };
                     let solved_point = solved
                         .manifold
                         .point(point_index)
-                        .ok_or(CollisionError::InvalidContact)?;
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                     source_point.normal_impulse = solved_point.normal_impulse;
                     source_point.normal_impulse_increase_sum =
                         solved_point.normal_impulse_increase_sum;
@@ -1153,14 +1154,14 @@ impl SolverWorkspace {
             let transform = aggregate_state
                 .transform()
                 .compose(&self.reduced_fixed_tree_offsets[body_index])
-                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             self.reduced_fixed_tree_target_centers.push(
                 transform.transform_point(
                     bodies[body_index]
                         .body()
                         .physics()
                         .mass()
-                        .ok_or(CollisionError::InvalidContact)?
+                        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                         .center_of_mass(),
                 ),
             );
@@ -1170,13 +1171,13 @@ impl SolverWorkspace {
             let transform = aggregate_state
                 .transform()
                 .compose(&self.reduced_fixed_tree_offsets[body_index])
-                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let velocity = aggregate_state.linear_velocity()
                 + aggregate_state
                     .angular_velocity()
                     .cross(self.reduced_fixed_tree_target_centers[index] - target_com);
             body.set_rigid_state(transform, velocity, aggregate_state.angular_velocity())
-                .map_err(|_| CollisionError::ArithmeticOverflow)?;
+                .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         }
         Ok(true)
     }
@@ -1186,15 +1187,15 @@ impl SolverWorkspace {
         bodies: &[SolverBody],
         manifolds: &[SolverManifold],
         joints: &[JointConstraint],
-    ) -> Result<bool, CollisionError> {
+    ) -> Result<bool, crate::Error> {
         let constraint_count = manifolds
             .len()
             .checked_add(joints.len())
-            .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         if self.coloring_dynamic_bodies.capacity() < bodies.len() {
             self.coloring_dynamic_bodies
                 .try_reserve(bodies.len() - self.coloring_dynamic_bodies.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         self.coloring_dynamic_bodies.clear();
         self.coloring_dynamic_bodies.extend(
@@ -1205,7 +1206,7 @@ impl SolverWorkspace {
         if self.coloring_endpoints.capacity() < constraint_count {
             self.coloring_endpoints
                 .try_reserve(constraint_count - self.coloring_endpoints.len())
-                .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
         }
         self.coloring_endpoints.clear();
         self.coloring_endpoints.extend(
@@ -1224,7 +1225,7 @@ impl SolverWorkspace {
         manifolds: &[SolverManifold],
         joints: &[JointConstraint],
         graph_rebuilt: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let rebuild_batches = graph_rebuilt
             || self.active_colored_batches == 0
             || self.colored_batch_manifold_count != manifolds.len()
@@ -1236,7 +1237,9 @@ impl SolverWorkspace {
             if self.color_batch_offsets.capacity() < group_count + 1 {
                 self.color_batch_offsets
                     .try_reserve(group_count + 1 - self.color_batch_offsets.len())
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    .map_err(|_| {
+                        crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
             }
             self.color_batch_offsets.clear();
             self.color_batch_offsets.resize(group_count + 1, 0);
@@ -1245,15 +1248,19 @@ impl SolverWorkspace {
                 let constraints = self
                     .constraint_coloring
                     .constraints_in_schedule_group(group)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 required_batches = required_batches
                     .checked_add(constraints.len().div_ceil(LARGE_ISLAND_BATCH_SIZE))
-                    .ok_or(CollisionError::SpatialIndexCapacityExceeded)?;
+                    .ok_or_else(|| {
+                        crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
             }
             if self.colored_batches.capacity() < required_batches {
                 self.colored_batches
                     .try_reserve(required_batches - self.colored_batches.len())
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    .map_err(|_| {
+                        crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
             }
             for batch in &mut self.colored_batches {
                 batch.tasks.clear();
@@ -1265,14 +1272,16 @@ impl SolverWorkspace {
             if self.joint_task_locations.capacity() < joints.len() {
                 self.joint_task_locations
                     .try_reserve(joints.len() - self.joint_task_locations.len())
-                    .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                    .map_err(|_| {
+                        crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                    })?;
             }
             self.joint_task_locations.resize(joints.len(), [0, 0]);
             for group in 0..group_count {
                 let constraints = self
                     .constraint_coloring
                     .constraints_in_schedule_group(group)
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 for chunk in constraints.chunks(LARGE_ISLAND_BATCH_SIZE) {
                     if self.active_colored_batches == self.colored_batches.len() {
                         self.colored_batches.push(ColoredConstraintBatch::new());
@@ -1282,7 +1291,9 @@ impl SolverWorkspace {
                         batch
                             .tasks
                             .try_reserve(chunk.len() - batch.tasks.len())
-                            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+                            .map_err(|_| {
+                                crate::Error::from(CollisionError::SpatialIndexCapacityExceeded)
+                            })?;
                     }
                     for constraint_index in chunk.iter().copied() {
                         let task_slot = batch.tasks.len();
@@ -1294,12 +1305,12 @@ impl SolverWorkspace {
                         let task = batch
                             .tasks
                             .last_mut()
-                            .ok_or(CollisionError::InvalidContact)?;
+                            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                         let global_constraint = task.constraint_index;
                         let positions = self
                             .constraint_coloring
                             .body_positions_for_constraint(global_constraint)
-                            .ok_or(CollisionError::InvalidContact)?;
+                            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                         task.set_binding_positions(positions);
                         if constraint_index < manifolds.len() {
                             batch.contact_task_count += 1;
@@ -1414,7 +1425,7 @@ impl SolverWorkspace {
         gravity: Option<CentralGravity>,
         executor: &impl crate::execution::StepExecutor,
         worker_count: usize,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         #[cfg(not(feature = "bench-internals"))]
         let _ = gravity;
         #[cfg(feature = "bench-internals")]
@@ -1597,7 +1608,7 @@ impl SolverWorkspace {
         phase: ColoredConstraintPhase,
         executor: &impl crate::execution::StepExecutor,
         worker_count: usize,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let contact_only = phase.is_contact_only();
         let group_count = self.color_batch_offsets.len().saturating_sub(1);
         for group in 0..group_count {
@@ -1645,7 +1656,7 @@ impl SolverWorkspace {
             let indices = self
                 .constraint_coloring
                 .bodies_in_schedule_group(group)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             #[cfg(feature = "bench-detailed-timing")]
             let binding_started = std::time::Instant::now();
             let mut bound_batches = bind_colored_batches(
@@ -1750,7 +1761,7 @@ impl SolverWorkspace {
                         started.load(std::sync::atomic::Ordering::Relaxed);
                 }
                 if batch_result.is_err() {
-                    return Err(CollisionError::WorkerFailed);
+                    return Err(crate::Error::from(CollisionError::WorkerFailed));
                 }
                 if let Some(error) = bound_batches
                     .iter_mut()
@@ -1766,9 +1777,10 @@ impl SolverWorkspace {
                 for batch in &self.colored_batches[start..end] {
                     for task in &batch.tasks {
                         if let ColoredConstraintKind::Contact(manifold) = &task.kind {
-                            let destination = manifolds
-                                .get_mut(task.constraint_index)
-                                .ok_or(CollisionError::InvalidContact)?;
+                            let destination =
+                                manifolds.get_mut(task.constraint_index).ok_or_else(|| {
+                                    crate::Error::from(CollisionError::InvalidContact)
+                                })?;
                             *destination = SolverManifold {
                                 body_a: task.body_indices[0],
                                 body_b: task.body_indices[1],
@@ -1787,7 +1799,7 @@ impl SolverWorkspace {
         config: CollisionConfig,
         joint_solver_step: JointSolverStep<'_>,
         phase: ColoredConstraintPhase,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let dt = joint_solver_step.dt();
         let options = joint_solver_step.options();
         let contact_only = phase.is_contact_only();
@@ -1815,7 +1827,7 @@ impl SolverWorkspace {
                                 config,
                             )?;
                             if batch.contact_points.len() > task.points.len() {
-                                return Err(CollisionError::InvalidContact);
+                                return Err(crate::Error::from(CollisionError::InvalidContact));
                             }
                             task.point_count = batch.contact_points.len();
                             task.points[..task.point_count].copy_from_slice(batch.contact_points);
@@ -1901,16 +1913,16 @@ impl SolverWorkspace {
         &self,
         destination: &mut JointWorkspace,
         joints: &[JointConstraint],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         for (joint_index, joint) in joints.iter().copied().enumerate() {
             let [batch_index, task_slot] = *self
                 .joint_task_locations
                 .get(joint_index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let batch = self
                 .colored_batches
                 .get(batch_index)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             destination.merge_colored_joint_from(
                 &batch.joint_workspace,
                 task_slot,
@@ -1927,7 +1939,7 @@ impl SolverWorkspace {
         destination: &mut JointWorkspace,
         joints: &[JointConstraint],
         manifold_count: usize,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         self.merge_colored_joint_rows(destination, joints)?;
         for batch in self
             .colored_batches
@@ -1937,7 +1949,7 @@ impl SolverWorkspace {
             destination.accumulate_colored_metrics_from(&batch.joint_workspace);
         }
         if joints.len() + manifold_count != self.coloring_endpoints.len() {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         Ok(())
     }
@@ -1968,7 +1980,7 @@ impl SolverWorkspace {
         bodies: &mut [SolverBody],
         manifolds: &mut [SolverManifold],
         config: CollisionConfig,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         config.validate()?;
         self.prepare_points(bodies, manifolds, config)?;
         self.warm_start(bodies, manifolds)?;
@@ -1990,7 +2002,7 @@ impl SolverWorkspace {
         gravity: Option<CentralGravity>,
         executor: &impl crate::execution::StepExecutor,
         worker_count: usize,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         #[cfg(not(feature = "bench-internals"))]
         let _ = gravity;
         #[cfg(feature = "bench-internals")]
@@ -1999,7 +2011,7 @@ impl SolverWorkspace {
         let dt = joint_solver_step.dt();
         let joint_solver_options = joint_solver_step.options();
         if !dt.is_finite() || dt <= 0.0 || !joint_solver_options.iterations().validate() {
-            return Err(CollisionError::InvalidConfig);
+            return Err(crate::Error::from(CollisionError::InvalidConfig));
         }
         #[cfg(feature = "bench-internals")]
         self.reset_colored_dispatch_metrics();
@@ -2447,7 +2459,7 @@ impl SolverWorkspace {
         position: IterationRange,
         velocity: IterationRange,
         tolerance: JointTolerance,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         let dt = joint_solver_step.dt();
         #[cfg(feature = "bench-internals")]
         let full_diagnostics = !joint_solver_step.light_diagnostics();
@@ -2570,7 +2582,7 @@ impl SolverWorkspace {
         joint_solver_step: JointSolverStep<'_>,
         first_velocity_iteration: bool,
         reverse_joint_order: bool,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         for offset in 0..joints.len() {
             let joint_index = if reverse_joint_order {
                 joints.len() - 1 - offset
@@ -2596,7 +2608,7 @@ impl SolverWorkspace {
         joints: &[JointConstraint],
         dt: f64,
         options: JointSolverOptions,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         for (joint_index, joint) in joints.iter().copied().enumerate() {
             JointSolver::solve_position_joint(
                 joint_workspace,
@@ -2615,7 +2627,7 @@ impl SolverWorkspace {
         bodies: &[SolverBody],
         manifolds: &[SolverManifold],
         config: CollisionConfig,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         Self::prepare_points_into(&mut self.points, bodies, manifolds, config)
     }
 
@@ -2624,37 +2636,37 @@ impl SolverWorkspace {
         bodies: &B,
         manifolds: &[SolverManifold],
         config: CollisionConfig,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         points.clear();
         let count = manifolds.iter().try_fold(0_usize, |count, manifold| {
             count
                 .checked_add(manifold.manifold.len())
-                .ok_or(CollisionError::SpatialIndexCapacityExceeded)
+                .ok_or_else(|| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))
         })?;
         points
             .try_reserve(count)
-            .map_err(|_| CollisionError::SpatialIndexCapacityExceeded)?;
+            .map_err(|_| crate::Error::from(CollisionError::SpatialIndexCapacityExceeded))?;
 
         for (manifold_index, manifold) in manifolds.iter().enumerate() {
             if manifold.body_a == manifold.body_b
                 || manifold.body_a >= bodies.len()
                 || manifold.body_b >= bodies.len()
             {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             validate_material(manifold.material)?;
             let body_a = bodies
                 .get(manifold.body_a)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             let body_b = bodies
                 .get(manifold.body_b)
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             for (point_index, contact) in manifold.manifold.points().iter().enumerate() {
                 validate_contact(*contact)?;
                 let normal = contact
                     .normal
                     .try_normalize()
-                    .ok_or(CollisionError::InvalidContact)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
                 let (tangent_a, tangent_b) = tangent_basis(normal)?;
                 let position_a = body_a
                     .body
@@ -2670,7 +2682,7 @@ impl SolverWorkspace {
                     relative_velocity(&body_a.body, &body_b.body, position_a, position_b)?;
                 let normal_speed = relative_velocity
                     .checked_dot(normal)
-                    .ok_or(CollisionError::ArithmeticOverflow)?;
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
                 let restitution_target = if normal_speed <= -config.restitution_threshold {
                     manifold.material.restitution * -normal_speed
                 } else {
@@ -2680,7 +2692,7 @@ impl SolverWorkspace {
                     || !position_b.is_finite()
                     || !restitution_target.is_finite()
                 {
-                    return Err(CollisionError::ArithmeticOverflow);
+                    return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                 }
                 points.push(SolverPoint {
                     manifold: manifold_index,
@@ -2703,7 +2715,7 @@ impl SolverWorkspace {
         &self,
         bodies: &mut [SolverBody],
         manifolds: &[SolverManifold],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         Self::warm_start_points(&self.points, bodies, manifolds)
     }
 
@@ -2711,7 +2723,7 @@ impl SolverWorkspace {
         points: &[SolverPoint],
         bodies: &mut B,
         manifolds: &[SolverManifold],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         for point in points.iter().copied() {
             let contact = contact_at(manifolds, point)?;
             let impulse = point.accumulated_impulse(*contact)?;
@@ -2735,7 +2747,7 @@ impl SolverWorkspace {
         &self,
         bodies: &mut [SolverBody],
         manifolds: &mut [SolverManifold],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         Self::solve_velocity_points(&self.points, bodies, manifolds)
     }
 
@@ -2743,7 +2755,7 @@ impl SolverWorkspace {
         points: &[SolverPoint],
         bodies: &mut B,
         manifolds: &mut [SolverManifold],
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         for point in points.iter().copied() {
             contact_mut(manifolds, point)?.velocity_points =
                 Some([point.position_a, point.position_b]);
@@ -2759,7 +2771,7 @@ impl SolverWorkspace {
                 point.normal,
             )?;
             if denominator <= f64::MIN_POSITIVE {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             let velocity = relative_velocity(
                 &body_a.body,
@@ -2769,10 +2781,10 @@ impl SolverWorkspace {
             )?;
             let normal_speed = velocity
                 .checked_dot(point.normal)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let delta = (point.restitution_target - normal_speed) / denominator;
             if !delta.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             let next_normal_impulse = (contact.normal_impulse + delta).max(0.0);
             let normal_delta = next_normal_impulse - contact.normal_impulse;
@@ -2790,7 +2802,7 @@ impl SolverWorkspace {
                 if normal_delta > 0.0 {
                     let total_delta = contact.normal_impulse_increase_sum + normal_delta;
                     if !total_delta.is_finite() {
-                        return Err(CollisionError::ArithmeticOverflow);
+                        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
                     }
                     contact.normal_impulse_increase_sum = total_delta;
                 }
@@ -2799,7 +2811,7 @@ impl SolverWorkspace {
             let contact = *contact_at(manifolds, point)?;
             let material = manifolds
                 .get(point.manifold)
-                .ok_or(CollisionError::InvalidContact)?
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                 .material;
             let (body_a, body_b) = bodies_at(bodies, point.body_a, point.body_b)?;
             let velocity = relative_velocity(
@@ -2838,7 +2850,7 @@ impl SolverWorkspace {
         bodies: &mut [SolverBody],
         manifolds: &[SolverManifold],
         config: CollisionConfig,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         for _ in 0..config.position_iterations {
             self.solve_position_iteration(bodies, manifolds, config)?;
         }
@@ -2850,7 +2862,7 @@ impl SolverWorkspace {
         bodies: &mut [SolverBody],
         manifolds: &[SolverManifold],
         config: CollisionConfig,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         Self::solve_position_points(&self.points, bodies, manifolds, config)
     }
 
@@ -2859,7 +2871,7 @@ impl SolverWorkspace {
         bodies: &mut B,
         manifolds: &[SolverManifold],
         config: CollisionConfig,
-    ) -> Result<(), CollisionError> {
+    ) -> Result<(), crate::Error> {
         for point in points.iter().copied() {
             let contact = contact_at(manifolds, point)?;
             let (body_a, body_b) = bodies_at(bodies, point.body_a, point.body_b)?;
@@ -2876,7 +2888,7 @@ impl SolverWorkspace {
             let separation = position_b
                 .checked_sub(position_a)
                 .and_then(|delta| delta.checked_dot(point.normal))
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let correction =
                 (-separation - config.penetration_slop).max(0.0) * POSITION_CORRECTION_FRACTION;
             if correction == 0.0 {
@@ -2890,7 +2902,7 @@ impl SolverWorkspace {
                 point.normal,
             )?;
             if denominator <= f64::MIN_POSITIVE {
-                return Err(CollisionError::InvalidContact);
+                return Err(crate::Error::from(CollisionError::InvalidContact));
             }
             let impulse = point.normal * (correction / denominator);
             apply_pair_position_impulse(
@@ -2936,7 +2948,7 @@ fn solve_tangent_impulse(
     contact: ContactPoint,
     material: SolverMaterial,
     velocity: Vec3,
-) -> Result<([f64; 2], Vec3), CollisionError> {
+) -> Result<([f64; 2], Vec3), crate::Error> {
     let k11 = effective_cross_mass(
         body_a,
         body_b,
@@ -2966,7 +2978,7 @@ fn solve_tangent_impulse(
     // error into an arbitrarily large friction impulse.
     let scale = k11.abs().max(k12.abs()).max(k22.abs());
     if !scale.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if scale == 0.0 {
         return Ok((contact.tangent_impulse, Vec3::ZERO));
@@ -2980,17 +2992,17 @@ fn solve_tangent_impulse(
     }
     let determinant = k11 * k22 - k12 * k12;
     if !determinant.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if determinant <= 0.0 {
         return Ok((contact.tangent_impulse, Vec3::ZERO));
     }
     let speed_a = velocity
         .checked_dot(point.tangent_a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let speed_b = velocity
         .checked_dot(point.tangent_b)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let delta_a = (-k22 * speed_a + k12 * speed_b) / determinant;
     let delta_b = (k12 * speed_a - k11 * speed_b) / determinant;
     let candidate = [
@@ -2998,19 +3010,19 @@ fn solve_tangent_impulse(
         contact.tangent_impulse[1] + delta_b,
     ];
     if !candidate[0].is_finite() || !candidate[1].is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let candidate_length = candidate[0].hypot(candidate[1]);
     let static_limit = material.static_friction * contact.normal_impulse;
     if !candidate_length.is_finite() || !static_limit.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let (next_a, next_b) = if candidate_length <= static_limit {
         (candidate[0], candidate[1])
     } else if candidate_length > 0.0 {
         let dynamic_limit = material.dynamic_friction * contact.normal_impulse;
         if !dynamic_limit.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let scale = dynamic_limit.min(candidate_length) / candidate_length;
         (candidate[0] * scale, candidate[1] * scale)
@@ -3021,7 +3033,7 @@ fn solve_tangent_impulse(
     let change_b = next_b - contact.tangent_impulse[1];
     let impulse = point.tangent_a * change_a + point.tangent_b * change_b;
     if !impulse.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(([next_a, next_b], impulse))
 }
@@ -3032,7 +3044,7 @@ fn effective_mass(
     position_a: Vec3,
     position_b: Vec3,
     direction: Vec3,
-) -> Result<f64, CollisionError> {
+) -> Result<f64, crate::Error> {
     effective_cross_mass(body_a, body_b, position_a, position_b, direction, direction)
 }
 
@@ -3043,7 +3055,7 @@ fn effective_cross_mass(
     position_b: Vec3,
     measurement: Vec3,
     impulse: Vec3,
-) -> Result<f64, CollisionError> {
+) -> Result<f64, crate::Error> {
     constraint::effective_cross_mass_at(
         body_a,
         body_b,
@@ -3052,7 +3064,7 @@ fn effective_cross_mass(
         measurement,
         impulse,
     )
-    .map_err(map_constraint_error)
+    .map_err(|error| crate::Error::from(map_constraint_error(error)))
 }
 
 fn relative_velocity(
@@ -3060,9 +3072,9 @@ fn relative_velocity(
     body_b: &BodyMotion,
     position_a: Vec3,
     position_b: Vec3,
-) -> Result<Vec3, CollisionError> {
+) -> Result<Vec3, crate::Error> {
     constraint::relative_velocity_at(body_a, body_b, position_a, position_b)
-        .map_err(map_constraint_error)
+        .map_err(|error| crate::Error::from(map_constraint_error(error)))
 }
 
 fn apply_pair_impulse<B: SolverBodyAccess + ?Sized>(
@@ -3072,17 +3084,17 @@ fn apply_pair_impulse<B: SolverBodyAccess + ?Sized>(
     point_a: Vec3,
     point_b: Vec3,
     impulse: Vec3,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let dynamic_a = bodies
         .get(body_a)
-        .ok_or(CollisionError::InvalidContact)?
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
         .body()
         .physics()
         .body_type()
         == crate::rigid_body::BodyType::Dynamic;
     let dynamic_b = bodies
         .get(body_b)
-        .ok_or(CollisionError::InvalidContact)?
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
         .body()
         .physics()
         .body_type()
@@ -3090,14 +3102,14 @@ fn apply_pair_impulse<B: SolverBodyAccess + ?Sized>(
     if dynamic_a {
         let body = bodies
             .get_dynamic_mut(body_a)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         constraint::apply_point_impulse(&mut body.body, point_a, -impulse)
             .map_err(map_constraint_error)?;
     }
     if dynamic_b {
         let body = bodies
             .get_dynamic_mut(body_b)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         constraint::apply_point_impulse(&mut body.body, point_b, impulse)
             .map_err(map_constraint_error)?;
     }
@@ -3111,17 +3123,17 @@ fn apply_pair_position_impulse<B: SolverBodyAccess + ?Sized>(
     point_a: Vec3,
     point_b: Vec3,
     impulse: Vec3,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let dynamic_a = bodies
         .get(body_a)
-        .ok_or(CollisionError::InvalidContact)?
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
         .body()
         .physics()
         .body_type()
         == crate::rigid_body::BodyType::Dynamic;
     let dynamic_b = bodies
         .get(body_b)
-        .ok_or(CollisionError::InvalidContact)?
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
         .body()
         .physics()
         .body_type()
@@ -3129,14 +3141,14 @@ fn apply_pair_position_impulse<B: SolverBodyAccess + ?Sized>(
     if dynamic_a {
         let body = bodies
             .get_dynamic_mut(body_a)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         constraint::apply_point_position_impulse(&mut body.body, point_a, -impulse)
             .map_err(map_constraint_error)?;
     }
     if dynamic_b {
         let body = bodies
             .get_dynamic_mut(body_b)
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         constraint::apply_point_position_impulse(&mut body.body, point_b, impulse)
             .map_err(map_constraint_error)?;
     }
@@ -3147,11 +3159,15 @@ fn bodies_at<B: SolverBodyAccess + ?Sized>(
     bodies: &B,
     body_a: usize,
     body_b: usize,
-) -> Result<(&SolverBody, &SolverBody), CollisionError> {
-    let a = bodies.get(body_a).ok_or(CollisionError::InvalidContact)?;
-    let b = bodies.get(body_b).ok_or(CollisionError::InvalidContact)?;
+) -> Result<(&SolverBody, &SolverBody), crate::Error> {
+    let a = bodies
+        .get(body_a)
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
+    let b = bodies
+        .get(body_b)
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     if body_a == body_b {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     Ok((a, b))
 }
@@ -3159,28 +3175,29 @@ fn bodies_at<B: SolverBodyAccess + ?Sized>(
 fn contact_at(
     manifolds: &[SolverManifold],
     point: SolverPoint,
-) -> Result<&ContactPoint, CollisionError> {
+) -> Result<&ContactPoint, crate::Error> {
     manifolds
         .get(point.manifold)
         .and_then(|manifold| manifold.manifold.point(point.point))
-        .ok_or(CollisionError::InvalidContact)
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))
 }
 
 fn contact_mut(
     manifolds: &mut [SolverManifold],
     point: SolverPoint,
-) -> Result<&mut ContactPoint, CollisionError> {
+) -> Result<&mut ContactPoint, crate::Error> {
     manifolds
         .get_mut(point.manifold)
         .and_then(|manifold| manifold.manifold.point_mut(point.point))
-        .ok_or(CollisionError::InvalidContact)
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))
 }
 
-pub(crate) fn tangent_basis(normal: Vec3) -> Result<(Vec3, Vec3), CollisionError> {
-    constraint::tangent_basis(normal).ok_or(CollisionError::InvalidContact)
+pub(crate) fn tangent_basis(normal: Vec3) -> Result<(Vec3, Vec3), crate::Error> {
+    constraint::tangent_basis(normal)
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))
 }
 
-fn validate_material(material: SolverMaterial) -> Result<(), CollisionError> {
+fn validate_material(material: SolverMaterial) -> Result<(), crate::Error> {
     if !material.restitution.is_finite()
         || !(0.0..=1.0).contains(&material.restitution)
         || !material.static_friction.is_finite()
@@ -3188,12 +3205,12 @@ fn validate_material(material: SolverMaterial) -> Result<(), CollisionError> {
         || !material.dynamic_friction.is_finite()
         || material.dynamic_friction < 0.0
     {
-        return Err(CollisionError::InvalidMaterial);
+        return Err(crate::Error::from(CollisionError::InvalidMaterial));
     }
     Ok(())
 }
 
-fn validate_contact(contact: ContactPoint) -> Result<(), CollisionError> {
+fn validate_contact(contact: ContactPoint) -> Result<(), crate::Error> {
     if !contact.local_a.is_finite()
         || !contact.local_b.is_finite()
         || !contact.normal.is_finite()
@@ -3206,7 +3223,7 @@ fn validate_contact(contact: ContactPoint) -> Result<(), CollisionError> {
             .iter()
             .any(|impulse| !impulse.is_finite())
     {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     Ok(())
 }

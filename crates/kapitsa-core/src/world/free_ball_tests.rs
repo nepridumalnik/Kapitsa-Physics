@@ -114,7 +114,9 @@ fn free_ball_pair_numerical_failures_are_atomic() {
             if !overflow {
                 assert_eq!(
                     error,
-                    crate::Error::from(StepError::Collision(CollisionError::NonConvergent))
+                    crate::Error::from(StepError::Collision(crate::Error::from(
+                        CollisionError::NonConvergent
+                    )))
                 );
             }
             assert_eq!(ids.map(|id| world.body(id).unwrap().motion()), original);
@@ -260,7 +262,7 @@ fn free_ball_pair_preserves_pending_collision_events_across_failure_and_commit()
         assert_eq!(
             step_route(&mut world, route, 1.0),
             Err(crate::Error::from(StepError::Collision(
-                CollisionError::NonConvergent
+                crate::Error::from(CollisionError::NonConvergent)
             )))
         );
         assert_eq!(world.collision_events(), events);

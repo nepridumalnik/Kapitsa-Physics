@@ -49,13 +49,13 @@ impl CcdTrajectory {
         }
     }
 
-    pub(crate) fn transform_at(&self, amount: f64) -> Result<Transform, CollisionError> {
+    pub(crate) fn transform_at(&self, amount: f64) -> Result<Transform, crate::Error> {
         if self.frozen {
             return self
                 .base_state
                 .transform()
                 .compose(&self.local_transform)
-                .map_err(|_| CollisionError::ArithmeticOverflow);
+                .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let sample_time =
             self.sample_start_time + (self.end_time - self.sample_start_time) * amount;
@@ -64,38 +64,38 @@ impl CcdTrajectory {
             self.base_state
         } else {
             predict_from_state(&self.body, self.base_state, duration)
-                .map_err(|_| CollisionError::ArithmeticOverflow)?
+                .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?
         };
         state
             .transform()
             .compose(&self.local_transform)
-            .map_err(|_| CollisionError::ArithmeticOverflow)
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))
     }
 
-    pub(crate) fn path_bounds(&self, end: BodyState) -> Result<(f64, f64, bool), CollisionError> {
+    pub(crate) fn path_bounds(&self, end: BodyState) -> Result<(f64, f64, bool), crate::Error> {
         if self.frozen {
             return Ok((0.0, 0.0, true));
         }
         let base_duration = self.end_time - self.base_time;
         if base_duration <= 0.0 {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         let bounds = trajectory_bounds(&self.body, self.base_state, end, base_duration)
-            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let linear_origin = self.has_linear_collider_origin(end);
         let segment_ratio = (self.end_time - self.sample_start_time) / base_duration;
         if !segment_ratio.is_finite() || segment_ratio < 0.0 || segment_ratio > 1.0 {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         let local_offset = self
             .local_transform
             .translation()
             .checked_length()
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let rotation = bounds.rotation * segment_ratio;
         let translation = (bounds.translation + local_offset * bounds.rotation) * segment_ratio;
         if !translation.is_finite() || !rotation.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         Ok((translation, rotation, linear_origin))
     }
@@ -164,7 +164,7 @@ pub(crate) struct CcdMotion {
 }
 
 impl CcdMotion {
-    pub(crate) fn linear(start: Transform, end: Transform) -> Result<Self, CollisionError> {
+    pub(crate) fn linear(start: Transform, end: Transform) -> Result<Self, crate::Error> {
         Ok(Self {
             start,
             end,
@@ -182,13 +182,13 @@ impl CcdMotion {
         linear_translation: bool,
         rotation_bound: f64,
         trajectory: CcdTrajectory,
-    ) -> Result<CcdMotion, CollisionError> {
+    ) -> Result<CcdMotion, crate::Error> {
         if !translation_bound.is_finite()
             || translation_bound < 0.0
             || !rotation_bound.is_finite()
             || rotation_bound < 0.0
         {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         Ok(CcdMotion {
             start,
@@ -200,7 +200,7 @@ impl CcdMotion {
         })
     }
 
-    fn at(&self, amount: f64) -> Result<Transform, CollisionError> {
+    fn at(&self, amount: f64) -> Result<Transform, crate::Error> {
         if let Some(trajectory) = self.trajectory {
             trajectory.transform_at(amount)
         } else {
@@ -213,27 +213,27 @@ impl CcdMotion {
     }
 
     /// Bounds collider-origin travel projected on a fixed separating axis.
-    fn projected_translation_bound(&self, normal: Vec3) -> Result<f64, CollisionError> {
+    fn projected_translation_bound(&self, normal: Vec3) -> Result<f64, crate::Error> {
         let Some((linear, quadratic)) = self.translation_polynomial()? else {
             return Ok(self.translation_bound);
         };
         let bound = linear
             .checked_dot(normal)
-            .ok_or(CollisionError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
             .abs()
             + 2.0
                 * quadratic
                     .checked_dot(normal)
-                    .ok_or(CollisionError::ArithmeticOverflow)?
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
                     .abs();
         bound
             .is_finite()
             .then_some(bound)
-            .ok_or(CollisionError::ArithmeticOverflow)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
     }
 
     /// Exact origin polynomial for centered, non-offset collider trajectories.
-    fn translation_polynomial(&self) -> Result<Option<(Vec3, Vec3)>, CollisionError> {
+    fn translation_polynomial(&self) -> Result<Option<(Vec3, Vec3)>, crate::Error> {
         if self.linear_translation {
             return Ok(Some((translation_delta(self.start, self.end)?, Vec3::ZERO)));
         }
@@ -255,7 +255,7 @@ impl CcdMotion {
                     .body
                     .physics()
                     .mass()
-                    .ok_or(CollisionError::InvalidContact)?
+                    .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?
                     .mass()
         } else {
             Vec3::ZERO
@@ -265,10 +265,10 @@ impl CcdMotion {
             .checked_mul_scalar(2.0 * (path.sample_start_time - path.base_time))
             .and_then(|delta| path.base_state.linear_velocity().checked_add(delta))
             .and_then(|velocity| velocity.checked_mul_scalar(duration))
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let quadratic = acceleration
             .checked_mul_scalar(duration * duration)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         Ok(Some((linear, quadratic)))
     }
 }
@@ -281,7 +281,7 @@ pub(crate) fn convex_toi(
     shape_b: &Shape,
     start_b: Transform,
     end_b: Transform,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let motion_a = CcdMotion::linear(start_a, end_a)?;
     let motion_b = CcdMotion::linear(start_b, end_b)?;
     convex_toi_motion(shape_a, &motion_a, shape_b, &motion_b)
@@ -292,9 +292,9 @@ pub(crate) fn convex_toi_motion(
     motion_a: &CcdMotion,
     shape_b: &Shape,
     motion_b: &CcdMotion,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     if !shape_a.is_convex() || !(shape_b.is_convex() || matches!(shape_b, Shape::Triangle(_))) {
-        return Err(CollisionError::UnsupportedGeometryPair);
+        return Err(crate::Error::from(CollisionError::UnsupportedGeometryPair));
     }
     if motion_a.linear_translation
         && motion_b.linear_translation
@@ -342,7 +342,7 @@ pub(crate) fn convex_toi_motion(
     let translation_bound = if motion_a.linear_translation && motion_b.linear_translation {
         translation_delta(motion_b.start, motion_b.end)?
             .checked_sub(translation_delta(motion_a.start, motion_a.end)?)
-            .ok_or(CollisionError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
             .length()
     } else {
         motion_a.translation_bound + motion_b.translation_bound
@@ -350,7 +350,7 @@ pub(crate) fn convex_toi_motion(
     let motion_bound =
         translation_bound + motion_a.rotation_bound * radius_a + motion_b.rotation_bound * radius_b;
     if !motion_bound.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     let mut toi = 0.0;
@@ -359,7 +359,10 @@ pub(crate) fn convex_toi_motion(
         let transform_b = motion_b.at(toi)?;
         let distance = match gjk::distance(shape_a, &transform_a, shape_b, &transform_b) {
             Ok(distance) => distance,
-            Err(CollisionError::NonConvergent) => {
+            Err(error)
+                if error.downcast_ref::<CollisionError>()
+                    == Some(&CollisionError::NonConvergent) =>
+            {
                 let intersection = gjk::intersect(shape_a, &transform_a, shape_b, &transform_b)?;
                 if intersection.intersects {
                     return Ok(Some(intersection_hit(
@@ -370,7 +373,7 @@ pub(crate) fn convex_toi_motion(
                         transform_b,
                     )?));
                 }
-                return Err(CollisionError::NonConvergent);
+                return Err(crate::Error::from(CollisionError::NonConvergent));
             }
             Err(error) => return Err(error),
         };
@@ -383,18 +386,18 @@ pub(crate) fn convex_toi_motion(
         let remaining = 1.0 - toi;
         let advance = distance.lower_bound / motion_bound;
         if !advance.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         if advance > remaining {
             return Ok(None);
         }
         let next_toi = toi + advance;
         if next_toi <= toi {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         toi = next_toi.min(1.0);
     }
-    Err(CollisionError::NonConvergent)
+    Err(crate::Error::from(CollisionError::NonConvergent))
 }
 
 fn sphere_sphere_toi(
@@ -404,30 +407,30 @@ fn sphere_sphere_toi(
     radius_b: f64,
     start_b: Transform,
     end_b: Transform,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let relative_start = start_b
         .translation()
         .checked_sub(start_a.translation())
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let motion_a = translation_delta(start_a, end_a)?;
     let motion_b = translation_delta(start_b, end_b)?;
     let relative_motion = motion_b
         .checked_sub(motion_a)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let radius = radius_a + radius_b;
     let a = relative_motion
         .checked_dot(relative_motion)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let b = 2.0
         * relative_start
             .checked_dot(relative_motion)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let c = relative_start
         .checked_dot(relative_start)
-        .ok_or(CollisionError::ArithmeticOverflow)?
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
         - radius * radius;
     if !radius.is_finite() || !a.is_finite() || !b.is_finite() || !c.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     let toi = if c <= 0.0 {
@@ -438,7 +441,7 @@ fn sphere_sphere_toi(
         }
         let discriminant = b * b - 4.0 * a * c;
         if !discriminant.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let tolerance = (b * b).max((4.0 * a * c).abs()).max(1.0) * f64::EPSILON * 128.0;
         if discriminant < -tolerance {
@@ -456,17 +459,17 @@ fn sphere_sphere_toi(
         .checked_add(
             motion_a
                 .checked_mul_scalar(toi)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let center_b = start_b
         .translation()
         .checked_add(
             motion_b
                 .checked_mul_scalar(toi)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let normal = center_b
         .checked_sub(center_a)
         .and_then(Vec3::try_normalize)
@@ -475,16 +478,16 @@ fn sphere_sphere_toi(
         .checked_add(
             normal
                 .checked_mul_scalar(radius_a)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let point_b = center_b
         .checked_sub(
             normal
                 .checked_mul_scalar(radius_b)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     Ok(Some(CcdHit {
         toi,
         normal,
@@ -507,21 +510,21 @@ fn sphere_cuboid_toi(
     sphere_motion: &CcdMotion,
     cuboid: &crate::shape::Cuboid,
     cuboid_motion: &CcdMotion,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let inverse_start = cuboid_motion
         .start
         .inverse()
-        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let relative_start = inverse_start.transform_point(sphere_motion.start.translation());
     let sphere_delta = translation_delta(sphere_motion.start, sphere_motion.end)?;
     let cuboid_delta = translation_delta(cuboid_motion.start, cuboid_motion.end)?;
     let relative_delta = inverse_start.transform_vector(
         sphere_delta
             .checked_sub(cuboid_delta)
-            .ok_or(CollisionError::ArithmeticOverflow)?,
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
     );
     if !relative_start.is_finite() || !relative_delta.is_finite() || !radius.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let half = cuboid.half_extents();
     let start = [relative_start.x, relative_start.y, relative_start.z];
@@ -529,7 +532,7 @@ fn sphere_cuboid_toi(
     let half = [half.x, half.y, half.z];
     let radius_squared = radius * radius;
     if !radius_squared.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     let mut boundaries = [0.0; 8];
@@ -541,7 +544,7 @@ fn sphere_cuboid_toi(
         for face in [-half[axis], half[axis]] {
             let crossing = (face - start[axis]) / delta[axis];
             if !crossing.is_finite() {
-                return Err(CollisionError::ArithmeticOverflow);
+                return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
             }
             if crossing > 0.0 && crossing < 1.0 {
                 boundaries[boundary_count] = crossing;
@@ -597,14 +600,14 @@ fn sphere_cuboid_toi(
             c += offset * offset;
         }
         if !a.is_finite() || !b.is_finite() || !c.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         if a <= f64::MIN_POSITIVE {
             continue;
         }
         let discriminant = b * b - 4.0 * a * c;
         if !discriminant.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let tolerance = (b * b).max((4.0 * a * c).abs()).max(1.0) * f64::EPSILON * 128.0;
         if discriminant < -tolerance {
@@ -638,11 +641,11 @@ fn sphere_cuboid_toi_sampled(
     sphere_motion: &CcdMotion,
     cuboid: &crate::shape::Cuboid,
     cuboid_motion: &CcdMotion,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let motion_bound = sphere_motion.translation_bound + cuboid_motion.translation_bound;
     let radius_squared = radius * radius;
     if !motion_bound.is_finite() || !radius.is_finite() || !radius_squared.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let half = cuboid.half_extents();
     let half = [half.x, half.y, half.z];
@@ -652,10 +655,10 @@ fn sphere_cuboid_toi_sampled(
         let cuboid_transform = cuboid_motion.at(toi)?;
         let inverse = cuboid_transform
             .inverse()
-            .map_err(|_| CollisionError::ArithmeticOverflow)?;
+            .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let center = inverse.transform_point(sphere_transform.translation());
         if !center.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let center = [center.x, center.y, center.z];
         let closest = [
@@ -670,11 +673,11 @@ fn sphere_cuboid_toi_sampled(
         );
         let distance_squared = difference
             .checked_dot(difference)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let tolerance = distance_squared.max(radius_squared).max(1.0) * f64::EPSILON * 128.0;
         if distance_squared <= radius_squared + tolerance {
             let contact = sphere_cuboid_contact(center, half, radius_squared)?
-                .ok_or(CollisionError::InvalidContact)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             return sphere_cuboid_hit(toi, contact, radius, sphere_motion, cuboid_motion).map(Some);
         }
         if motion_bound == 0.0 {
@@ -683,7 +686,7 @@ fn sphere_cuboid_toi_sampled(
         let distance = distance_squared.sqrt();
         let advance = (distance - radius) / motion_bound;
         if !advance.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let remaining = 1.0 - toi;
         if advance > remaining {
@@ -691,18 +694,14 @@ fn sphere_cuboid_toi_sampled(
         }
         let next_toi = toi + advance;
         if next_toi <= toi {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         toi = next_toi.min(1.0);
     }
-    Err(CollisionError::NonConvergent)
+    Err(crate::Error::from(CollisionError::NonConvergent))
 }
 
-fn point_on_segment(
-    start: [f64; 3],
-    delta: [f64; 3],
-    time: f64,
-) -> Result<[f64; 3], CollisionError> {
+fn point_on_segment(start: [f64; 3], delta: [f64; 3], time: f64) -> Result<[f64; 3], crate::Error> {
     let point = [
         start[0] + delta[0] * time,
         start[1] + delta[1] * time,
@@ -712,14 +711,14 @@ fn point_on_segment(
         .iter()
         .all(|coordinate| coordinate.is_finite())
         .then_some(point)
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 fn sphere_cuboid_contact(
     center: [f64; 3],
     half: [f64; 3],
     radius_squared: f64,
-) -> Result<Option<(Vec3, Vec3)>, CollisionError> {
+) -> Result<Option<(Vec3, Vec3)>, crate::Error> {
     let closest = [
         center[0].clamp(-half[0], half[0]),
         center[1].clamp(-half[1], half[1]),
@@ -732,7 +731,7 @@ fn sphere_cuboid_contact(
     );
     let distance_squared = difference
         .checked_dot(difference)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let tolerance = distance_squared.max(radius_squared).max(1.0) * f64::EPSILON * 128.0;
     if distance_squared > radius_squared + tolerance {
         return Ok(None);
@@ -740,7 +739,7 @@ fn sphere_cuboid_contact(
     if distance_squared > f64::MIN_POSITIVE {
         let normal = -difference
             .try_normalize()
-            .ok_or(CollisionError::InvalidContact)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
         return Ok(Some((
             normal,
             Vec3::new(closest[0], closest[1], closest[2]),
@@ -758,7 +757,7 @@ fn sphere_cuboid_contact(
     let (face_distance, normal) = face_distances
         .into_iter()
         .min_by(|left, right| left.0.total_cmp(&right.0))
-        .ok_or(CollisionError::InvalidContact)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     let point = Vec3::new(
         if normal.x < 0.0 {
             -half[0]
@@ -783,7 +782,7 @@ fn sphere_cuboid_contact(
         },
     );
     if face_distance < 0.0 {
-        return Err(CollisionError::InvalidContact);
+        return Err(crate::Error::from(CollisionError::InvalidContact));
     }
     Ok(Some((normal, point)))
 }
@@ -794,24 +793,24 @@ fn sphere_cuboid_hit(
     radius: f64,
     sphere_motion: &CcdMotion,
     cuboid_motion: &CcdMotion,
-) -> Result<CcdHit, CollisionError> {
+) -> Result<CcdHit, crate::Error> {
     let sphere_transform = sphere_motion.at(toi)?;
     let cuboid_transform = cuboid_motion.at(toi)?;
     let normal = cuboid_transform
         .transform_vector(normal_local)
         .try_normalize()
-        .ok_or(CollisionError::InvalidContact)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
     let point_a = sphere_transform
         .translation()
         .checked_add(
             normal
                 .checked_mul_scalar(radius)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let point_b = cuboid_transform.transform_point(point_local);
     if !point_a.is_finite() || !point_b.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(CcdHit {
         toi,
@@ -832,7 +831,7 @@ pub(crate) fn plane_toi(
     end_plane: Transform,
     two_sided: bool,
     plane_is_a: bool,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let convex_motion = CcdMotion::linear(start_convex, end_convex)?;
     let plane_motion = CcdMotion::linear(start_plane, end_plane)?;
     plane_toi_motion(
@@ -852,9 +851,9 @@ pub(crate) fn plane_toi_motion(
     plane_motion: &CcdMotion,
     two_sided: bool,
     plane_is_a: bool,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     if !convex.is_convex() {
-        return Err(CollisionError::UnsupportedGeometryPair);
+        return Err(crate::Error::from(CollisionError::UnsupportedGeometryPair));
     }
     let radius = shape_radius(convex)?;
     let relative_center = convex_motion
@@ -862,7 +861,7 @@ pub(crate) fn plane_toi_motion(
         .translation()
         .checked_sub(plane_motion.start.translation())
         .and_then(Vec3::checked_length)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let plane_pivot_radius = relative_center
         + radius
         + plane.distance().abs()
@@ -873,7 +872,7 @@ pub(crate) fn plane_toi_motion(
         + convex_motion.rotation_bound * radius
         + plane_motion.rotation_bound * plane_pivot_radius;
     if !motion_bound.is_finite() || !plane_pivot_radius.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     let initial = plane_gap(
@@ -910,18 +909,18 @@ pub(crate) fn plane_toi_motion(
         let advance = gap.separation / motion_bound;
         let remaining = 1.0 - toi;
         if !advance.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         if advance > remaining {
             return Ok(None);
         }
         let next_toi = toi + advance;
         if next_toi <= toi {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         toi = next_toi.min(1.0);
     }
-    Err(CollisionError::NonConvergent)
+    Err(crate::Error::from(CollisionError::NonConvergent))
 }
 
 /// Searches a mesh BVH using the swept convex's conservative local-space envelope.
@@ -937,7 +936,7 @@ pub(crate) fn triangle_mesh_toi(
     end_mesh: Transform,
     workspace: &mut MeshQueryWorkspace,
     candidates: &mut Vec<usize>,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let convex_motion = CcdMotion::linear(start_convex, end_convex)?;
     let mesh_motion = CcdMotion::linear(start_mesh, end_mesh)?;
     triangle_mesh_toi_motion(
@@ -962,10 +961,10 @@ pub(crate) fn triangle_mesh_toi_motion(
     mesh_motion: &CcdMotion,
     workspace: &mut MeshQueryWorkspace,
     candidates: &mut Vec<usize>,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let vertices = deformed_vertices.unwrap_or_else(|| mesh.vertices());
     if vertices.len() != mesh.vertices().len() || bvh.triangle_count() != mesh.triangles().len() {
-        return Err(CollisionError::GeometryBounds);
+        return Err(crate::Error::from(CollisionError::GeometryBounds));
     }
     let query_bounds = relative_swept_bounds(convex, convex_motion, mesh_motion)?;
     bvh.query(query_bounds, workspace, candidates)?;
@@ -974,13 +973,19 @@ pub(crate) fn triangle_mesh_toi_motion(
         let [a, b, c] = *mesh
             .triangles()
             .get(triangle_id)
-            .ok_or(CollisionError::GeometryBounds)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
         let triangle = Triangle::from_vertices([
-            *vertices.get(a).ok_or(CollisionError::GeometryBounds)?,
-            *vertices.get(b).ok_or(CollisionError::GeometryBounds)?,
-            *vertices.get(c).ok_or(CollisionError::GeometryBounds)?,
+            *vertices
+                .get(a)
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
+            *vertices
+                .get(b)
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
+            *vertices
+                .get(c)
+                .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
         ])
-        .map_err(|_| CollisionError::InvalidContact)?;
+        .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
         consider_triangle_toi(&mut best, convex, convex_motion, triangle, mesh_motion)?;
     }
     Ok(best)
@@ -995,7 +1000,7 @@ pub(crate) fn height_field_toi(
     start_field: Transform,
     end_field: Transform,
     candidates: &mut Vec<HeightFieldTriangle>,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let convex_motion = CcdMotion::linear(start_convex, end_convex)?;
     let field_motion = CcdMotion::linear(start_field, end_field)?;
     height_field_toi_motion(convex, &convex_motion, field, &field_motion, candidates)
@@ -1007,13 +1012,13 @@ pub(crate) fn height_field_toi_motion(
     field: &HeightField,
     field_motion: &CcdMotion,
     candidates: &mut Vec<HeightFieldTriangle>,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let query_bounds = relative_swept_bounds(convex, convex_motion, field_motion)?;
     height_field::query_triangles(field, query_bounds, candidates)?;
     let mut best = None;
     for candidate in candidates.iter().copied() {
         let triangle = Triangle::from_vertices(candidate.vertices)
-            .map_err(|_| CollisionError::InvalidContact)?;
+            .map_err(|_| crate::Error::from(CollisionError::InvalidContact))?;
         consider_triangle_toi(&mut best, convex, convex_motion, triangle, field_motion)?;
     }
     Ok(best)
@@ -1028,7 +1033,7 @@ pub(crate) fn level_set_toi(
     start_field: Transform,
     end_field: Transform,
     candidates: &mut Vec<LevelSetCell>,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let convex_motion = CcdMotion::linear(start_convex, end_convex)?;
     let field_motion = CcdMotion::linear(start_field, end_field)?;
     level_set_toi_motion(convex, &convex_motion, field, &field_motion, candidates)
@@ -1040,7 +1045,7 @@ pub(crate) fn level_set_toi_motion(
     field: &LevelSet,
     field_motion: &CcdMotion,
     candidates: &mut Vec<LevelSetCell>,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     let query_bounds = relative_swept_bounds(convex, convex_motion, field_motion)?;
     level_set::query_surface_cells(field, query_bounds, candidates)?;
     if candidates.is_empty() {
@@ -1049,14 +1054,14 @@ pub(crate) fn level_set_toi_motion(
     let convex_radius = shape_radius(convex)?;
     let field_bounds = field
         .local_bounds()
-        .map_err(|_| CollisionError::GeometryBounds)?;
+        .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?;
     let field_radius = bounds_radius(field_bounds)?;
     let motion_bound = convex_motion.translation_bound
         + field_motion.translation_bound
         + convex_motion.rotation_bound * convex_radius
         + field_motion.rotation_bound * field_radius;
     if !motion_bound.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
 
     let mut toi = 0.0;
@@ -1070,7 +1075,7 @@ pub(crate) fn level_set_toi_motion(
                 closest = Some(candidate);
             }
         }
-        let closest = closest.ok_or(CollisionError::GeometryBounds)?;
+        let closest = closest.ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
         if closest.gap <= f64::EPSILON * 128.0 {
             let hit = level_cell_hit(convex, convex_transform, field, field_transform, closest)?;
             return Ok(Some(CcdHit { toi, ..hit }));
@@ -1081,18 +1086,18 @@ pub(crate) fn level_set_toi_motion(
         let advance = closest.gap / motion_bound;
         let remaining = 1.0 - toi;
         if !advance.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         if advance > remaining {
             return Ok(None);
         }
         let next_toi = toi + advance;
         if next_toi <= toi {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         toi = next_toi.min(1.0);
     }
-    Err(CollisionError::NonConvergent)
+    Err(crate::Error::from(CollisionError::NonConvergent))
 }
 
 #[derive(Clone, Copy)]
@@ -1109,29 +1114,30 @@ fn level_cell_gap(
     field: &LevelSet,
     field_transform: Transform,
     cell: LevelSetCell,
-) -> Result<LevelSetCandidateGap, CollisionError> {
+) -> Result<LevelSetCandidateGap, crate::Error> {
     let center = convex_transform.translation();
     let world_bounds = cell
         .bounds
         .transformed(&field_transform)
-        .map_err(|_| CollisionError::GeometryBounds)?;
+        .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?;
     let separation = point_aabb_distance(center, world_bounds)?;
     let radius = shape_radius(convex)?;
     let center_local = field_transform
         .inverse()
-        .map_err(|_| CollisionError::ArithmeticOverflow)?
+        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?
         .transform_point(center);
     let nearest_local = center_local.max(cell.bounds.min()).min(cell.bounds.max());
-    let sample = level_set::sample(field, nearest_local)?.ok_or(CollisionError::GeometryBounds)?;
+    let sample = level_set::sample(field, nearest_local)?
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
     let gradient_bound = level_set::cell_lipschitz_bound(field, cell.index)?;
     let nearest_world = field_transform.transform_point(nearest_local);
     if !nearest_world.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let center_to_cell = center
         .checked_sub(nearest_world)
         .and_then(Vec3::checked_length)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let field_gap = if gradient_bound > 0.0 {
         sample.value.abs() / gradient_bound - center_to_cell - radius
     } else if sample.value == 0.0 {
@@ -1141,7 +1147,7 @@ fn level_cell_gap(
     };
     let gap = (separation - radius).max(field_gap).max(0.0);
     if !gap.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(LevelSetCandidateGap {
         gap,
@@ -1157,11 +1163,11 @@ fn level_cell_hit(
     field: &LevelSet,
     field_transform: Transform,
     candidate: LevelSetCandidateGap,
-) -> Result<CcdHit, CollisionError> {
+) -> Result<CcdHit, crate::Error> {
     let gradient = field_transform
         .transform_vector(candidate.sample.gradient)
         .try_normalize()
-        .ok_or(CollisionError::NonConvergent)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::NonConvergent))?;
     let side = if candidate.sample.value < 0.0 {
         -1.0
     } else {
@@ -1173,7 +1179,7 @@ fn level_cell_hit(
         project_to_level_set(field, candidate.cell.bounds, candidate.nearest_local)?;
     let surface_point = field_transform.transform_point(surface_local);
     if !surface_point.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(CcdHit {
         toi: 0.0,
@@ -1187,39 +1193,41 @@ fn project_to_level_set(
     field: &LevelSet,
     cell_bounds: Aabb,
     mut point: Vec3,
-) -> Result<Vec3, CollisionError> {
+) -> Result<Vec3, crate::Error> {
     for _ in 0..16 {
-        let sample = level_set::sample(field, point)?.ok_or(CollisionError::GeometryBounds)?;
+        let sample = level_set::sample(field, point)?
+            .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
         if sample.value.abs() <= f64::EPSILON * point.abs().max_element().max(1.0) * 128.0 {
             return Ok(point);
         }
         let gradient_squared = sample
             .gradient
             .checked_dot(sample.gradient)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         if gradient_squared <= f64::MIN_POSITIVE {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         point = point
             .checked_sub(
                 sample
                     .gradient
                     .checked_mul_scalar(sample.value / gradient_squared)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             )
-            .ok_or(CollisionError::ArithmeticOverflow)?
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
             .max(cell_bounds.min())
             .min(cell_bounds.max());
     }
-    let sample = level_set::sample(field, point)?.ok_or(CollisionError::GeometryBounds)?;
+    let sample = level_set::sample(field, point)?
+        .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
     if sample.value.abs() <= f64::EPSILON * point.abs().max_element().max(1.0) * 128.0 {
         Ok(point)
     } else {
-        Err(CollisionError::NonConvergent)
+        Err(crate::Error::from(CollisionError::NonConvergent))
     }
 }
 
-fn point_aabb_distance(point: Vec3, bounds: Aabb) -> Result<f64, CollisionError> {
+fn point_aabb_distance(point: Vec3, bounds: Aabb) -> Result<f64, crate::Error> {
     let min = bounds.min();
     let max = bounds.max();
     let offset = Vec3::new(
@@ -1229,7 +1237,7 @@ fn point_aabb_distance(point: Vec3, bounds: Aabb) -> Result<f64, CollisionError>
     );
     offset
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 fn sphere_triangle_toi_motion(
@@ -1237,13 +1245,13 @@ fn sphere_triangle_toi_motion(
     sphere_motion: &CcdMotion,
     triangle: &Triangle,
     triangle_motion: &CcdMotion,
-) -> Result<Option<CcdHit>, CollisionError> {
+) -> Result<Option<CcdHit>, crate::Error> {
     // The sphere is invariant under rotation. Its collider-origin path bound
     // already includes any rotation around an offset body center of mass.
     let triangle_radius = bounds_radius(
         triangle
             .local_bounds()
-            .map_err(|_| CollisionError::GeometryBounds)?,
+            .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?,
     )?;
     let polynomial = if triangle_motion.rotation_bound == 0.0 {
         match (
@@ -1252,9 +1260,9 @@ fn sphere_triangle_toi_motion(
         ) {
             (Some((va, aa)), Some((vb, ab))) => Some((
                 va.checked_sub(vb)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 aa.checked_sub(ab)
-                    .ok_or(CollisionError::ArithmeticOverflow)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             )),
             _ => None,
         }
@@ -1269,15 +1277,15 @@ fn sphere_triangle_toi_motion(
             .vertices()
             .map(|point| transform.transform_point(point));
         if !vertices.iter().all(|point| point.is_finite()) {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         let point = super::triangle::closest_point_on_triangle(center, vertices)?;
         let radial = center
             .checked_sub(point)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let distance = radial
             .checked_length()
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let gap = distance - radius;
         if gap <= tolerance(distance) {
             let outward = match radial.try_normalize() {
@@ -1290,15 +1298,15 @@ fn sphere_triangle_toi_motion(
                             .and_then(|ac| ab.checked_cross(ac))
                     })
                     .and_then(Vec3::try_normalize)
-                    .ok_or(CollisionError::GeometryBounds)?,
+                    .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?,
             };
             let point_a = center
                 .checked_sub(
                     outward
                         .checked_mul_scalar(radius)
-                        .ok_or(CollisionError::ArithmeticOverflow)?,
+                        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
                 )
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             return Ok(Some(CcdHit {
                 toi,
                 normal: -outward,
@@ -1308,14 +1316,14 @@ fn sphere_triangle_toi_motion(
         }
         let normal = radial
             .try_normalize()
-            .ok_or(CollisionError::GeometryBounds)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::GeometryBounds))?;
         if let Some((linear, quadratic)) = polynomial {
             let acceleration = quadratic
                 .checked_dot(normal)
-                .ok_or(CollisionError::ArithmeticOverflow)?;
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
             let speed = linear
                 .checked_dot(normal)
-                .ok_or(CollisionError::ArithmeticOverflow)?
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
                 + 2.0 * acceleration * toi;
             // The closest-point normal defines a separating support plane of
             // the rounded triangle. Advance to its exact first crossing; large
@@ -1325,7 +1333,7 @@ fn sphere_triangle_toi_motion(
             };
             let next = toi + advance;
             if next <= toi {
-                return Err(CollisionError::NonConvergent);
+                return Err(crate::Error::from(CollisionError::NonConvergent));
             }
             toi = next.min(1.0);
             continue;
@@ -1338,7 +1346,7 @@ fn sphere_triangle_toi_motion(
                         triangle_motion.end,
                     )?)
                     .and_then(|delta| delta.checked_dot(normal))
-                    .ok_or(CollisionError::ArithmeticOverflow)?
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?
                     .abs()
             } else {
                 sphere_motion.projected_translation_bound(normal)?
@@ -1346,7 +1354,7 @@ fn sphere_triangle_toi_motion(
             };
         let motion_bound = translation_bound + triangle_motion.rotation_bound * triangle_radius;
         if !motion_bound.is_finite() {
-            return Err(CollisionError::ArithmeticOverflow);
+            return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
         }
         if motion_bound == 0.0 {
             return Ok(None);
@@ -1357,11 +1365,11 @@ fn sphere_triangle_toi_motion(
         }
         let next = toi + advance;
         if next <= toi {
-            return Err(CollisionError::NonConvergent);
+            return Err(crate::Error::from(CollisionError::NonConvergent));
         }
         toi = next.min(1.0);
     }
-    Err(CollisionError::NonConvergent)
+    Err(crate::Error::from(CollisionError::NonConvergent))
 }
 
 fn first_plane_crossing(
@@ -1369,9 +1377,9 @@ fn first_plane_crossing(
     speed: f64,
     acceleration: f64,
     remaining: f64,
-) -> Result<Option<f64>, CollisionError> {
+) -> Result<Option<f64>, crate::Error> {
     if !gap.is_finite() || !speed.is_finite() || !acceleration.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if acceleration == 0.0 {
         if speed >= 0.0 {
@@ -1406,7 +1414,7 @@ fn consider_triangle_toi(
     convex_motion: &CcdMotion,
     triangle: Triangle,
     triangle_motion: &CcdMotion,
-) -> Result<(), CollisionError> {
+) -> Result<(), crate::Error> {
     let triangle = Shape::Triangle(triangle);
     if let Some(hit) = convex_toi_motion(convex, convex_motion, &triangle, triangle_motion)?
         && best.is_none_or(|current| hit.toi < current.toi)
@@ -1420,15 +1428,15 @@ fn relative_swept_bounds(
     convex: &Shape,
     convex_motion: &CcdMotion,
     target_motion: &CcdMotion,
-) -> Result<Aabb, CollisionError> {
+) -> Result<Aabb, crate::Error> {
     let inverse = target_motion
         .start
         .inverse()
-        .map_err(|_| CollisionError::ArithmeticOverflow)?;
+        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let local_center = inverse.transform_point(convex_motion.start.translation());
     let relative_length = local_center
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let convex_delta = convex_motion.translation_bound;
     let target_delta = target_motion.translation_bound;
     let radius = shape_radius(convex)?;
@@ -1438,27 +1446,33 @@ fn relative_swept_bounds(
         + target_delta
         + target_rotation * (relative_length + convex_delta + target_delta);
     if !local_center.is_finite() || !expansion.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let extent = Vec3::splat(expansion);
     let min = local_center
         .checked_sub(extent)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let max = local_center
         .checked_add(extent)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let margin = local_center.abs().max_element().max(expansion).max(1.0) * f64::EPSILON * 128.0;
     let min = Vec3::new(
-        numeric::round_down(min.x - margin).ok_or(CollisionError::ArithmeticOverflow)?,
-        numeric::round_down(min.y - margin).ok_or(CollisionError::ArithmeticOverflow)?,
-        numeric::round_down(min.z - margin).ok_or(CollisionError::ArithmeticOverflow)?,
+        numeric::round_down(min.x - margin)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        numeric::round_down(min.y - margin)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        numeric::round_down(min.z - margin)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
     );
     let max = Vec3::new(
-        numeric::round_up(max.x + margin).ok_or(CollisionError::ArithmeticOverflow)?,
-        numeric::round_up(max.y + margin).ok_or(CollisionError::ArithmeticOverflow)?,
-        numeric::round_up(max.z + margin).ok_or(CollisionError::ArithmeticOverflow)?,
+        numeric::round_up(max.x + margin)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        numeric::round_up(max.y + margin)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        numeric::round_up(max.z + margin)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
     );
-    Aabb::new(min, max).map_err(|_| CollisionError::GeometryBounds)
+    Aabb::new(min, max).map_err(|_| crate::Error::from(CollisionError::GeometryBounds))
 }
 
 /// Conservative bounds for a shape over any rotation between two poses.
@@ -1466,7 +1480,7 @@ pub(crate) fn swept_bounds(
     bounds: Option<Aabb>,
     start: Transform,
     end: Transform,
-) -> Result<Option<Aabb>, CollisionError> {
+) -> Result<Option<Aabb>, crate::Error> {
     let Some(bounds) = bounds else {
         return Ok(None);
     };
@@ -1475,29 +1489,36 @@ pub(crate) fn swept_bounds(
         .abs()
         .max(bounds.max().abs())
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    let radius = numeric::round_up(radius).ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
+    let radius = numeric::round_up(radius)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let center_min = start.translation().min(end.translation());
     let center_max = start.translation().max(end.translation());
     let min = Vec3::new(
-        numeric::round_down(center_min.x - radius).ok_or(CollisionError::ArithmeticOverflow)?,
-        numeric::round_down(center_min.y - radius).ok_or(CollisionError::ArithmeticOverflow)?,
-        numeric::round_down(center_min.z - radius).ok_or(CollisionError::ArithmeticOverflow)?,
+        numeric::round_down(center_min.x - radius)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        numeric::round_down(center_min.y - radius)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        numeric::round_down(center_min.z - radius)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
     );
     let max = Vec3::new(
-        numeric::round_up(center_max.x + radius).ok_or(CollisionError::ArithmeticOverflow)?,
-        numeric::round_up(center_max.y + radius).ok_or(CollisionError::ArithmeticOverflow)?,
-        numeric::round_up(center_max.z + radius).ok_or(CollisionError::ArithmeticOverflow)?,
+        numeric::round_up(center_max.x + radius)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        numeric::round_up(center_max.y + radius)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+        numeric::round_up(center_max.z + radius)
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
     );
     Aabb::new(min, max)
         .map(Some)
-        .map_err(|_| CollisionError::GeometryBounds)
+        .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))
 }
 
 pub(crate) fn swept_bounds_motion(
     bounds: Option<Aabb>,
     motion: &CcdMotion,
-) -> Result<Option<Aabb>, CollisionError> {
+) -> Result<Option<Aabb>, crate::Error> {
     if motion.is_linear() {
         return swept_bounds(bounds, motion.start, motion.end);
     }
@@ -1506,9 +1527,9 @@ pub(crate) fn swept_bounds_motion(
     };
     let radius = bounds_radius(bounds)?;
     let segment_travel = numeric::round_up(motion.translation_bound / 16.0)
-        .ok_or(CollisionError::ArithmeticOverflow)?;
-    let extent =
-        numeric::round_up(radius + segment_travel).ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
+    let extent = numeric::round_up(radius + segment_travel)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let extent = Vec3::splat(extent);
     let mut combined = None;
     for segment in 0..16 {
@@ -1516,23 +1537,29 @@ pub(crate) fn swept_bounds_motion(
         let center = motion.at(amount)?.translation();
         let min = center
             .checked_sub(extent)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let max = center
             .checked_add(extent)
-            .ok_or(CollisionError::ArithmeticOverflow)?;
+            .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
         let bounds = Aabb::new(
             Vec3::new(
-                numeric::round_down(min.x).ok_or(CollisionError::ArithmeticOverflow)?,
-                numeric::round_down(min.y).ok_or(CollisionError::ArithmeticOverflow)?,
-                numeric::round_down(min.z).ok_or(CollisionError::ArithmeticOverflow)?,
+                numeric::round_down(min.x)
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+                numeric::round_down(min.y)
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+                numeric::round_down(min.z)
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             ),
             Vec3::new(
-                numeric::round_up(max.x).ok_or(CollisionError::ArithmeticOverflow)?,
-                numeric::round_up(max.y).ok_or(CollisionError::ArithmeticOverflow)?,
-                numeric::round_up(max.z).ok_or(CollisionError::ArithmeticOverflow)?,
+                numeric::round_up(max.x)
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+                numeric::round_up(max.y)
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
+                numeric::round_up(max.z)
+                    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
             ),
         )
-        .map_err(|_| CollisionError::GeometryBounds)?;
+        .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?;
         combined = Some(combined.map_or(bounds, |current: Aabb| current.union(&bounds)));
     }
     Ok(combined)
@@ -1552,26 +1579,26 @@ fn plane_gap(
     plane: &Plane,
     plane_transform: Transform,
     two_sided: bool,
-) -> Result<PlaneGap, CollisionError> {
+) -> Result<PlaneGap, crate::Error> {
     let normal = plane_transform
         .transform_vector(plane.normal())
         .try_normalize()
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let plane_point = plane_transform.transform_point(plane.normal() * plane.distance());
     let center = convex_transform.transform_point(
         convex
             .local_bounds()
-            .map_err(|_| CollisionError::GeometryBounds)?
-            .ok_or(CollisionError::UnsupportedGeometryPair)?
+            .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?
+            .ok_or_else(|| crate::Error::from(CollisionError::UnsupportedGeometryPair))?
             .center(),
     );
     if !plane_point.is_finite() || !center.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     let center_side = center
         .checked_sub(plane_point)
         .and_then(|offset| offset.checked_dot(normal))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let side_normal = if two_sided && center_side < 0.0 {
         -normal
     } else {
@@ -1581,14 +1608,14 @@ fn plane_gap(
     let separation = convex_point
         .checked_sub(plane_point)
         .and_then(|offset| offset.checked_dot(side_normal))
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let projected = convex_point
         .checked_sub(
             side_normal
                 .checked_mul_scalar(separation)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     Ok(PlaneGap {
         separation,
         center_side,
@@ -1622,7 +1649,7 @@ fn intersection_hit(
     transform_a: Transform,
     shape_b: &Shape,
     transform_b: Transform,
-) -> Result<CcdHit, CollisionError> {
+) -> Result<CcdHit, crate::Error> {
     let direction = transform_b
         .translation()
         .checked_sub(transform_a.translation())
@@ -1637,18 +1664,18 @@ fn intersection_hit(
     })
 }
 
-fn shape_radius(shape: &Shape) -> Result<f64, CollisionError> {
+fn shape_radius(shape: &Shape) -> Result<f64, crate::Error> {
     if let Shape::Sphere(sphere) = shape {
         return Ok(sphere.radius());
     }
     let bounds = shape
         .local_bounds()
-        .map_err(|_| CollisionError::GeometryBounds)?
-        .ok_or(CollisionError::UnsupportedGeometryPair)?;
+        .map_err(|_| crate::Error::from(CollisionError::GeometryBounds))?
+        .ok_or_else(|| crate::Error::from(CollisionError::UnsupportedGeometryPair))?;
     bounds_radius(bounds)
 }
 
-fn rotation_radius(shape: &Shape) -> Result<f64, CollisionError> {
+fn rotation_radius(shape: &Shape) -> Result<f64, crate::Error> {
     if matches!(shape, Shape::Sphere(_)) {
         Ok(0.0)
     } else {
@@ -1656,25 +1683,25 @@ fn rotation_radius(shape: &Shape) -> Result<f64, CollisionError> {
     }
 }
 
-fn bounds_radius(bounds: Aabb) -> Result<f64, CollisionError> {
+fn bounds_radius(bounds: Aabb) -> Result<f64, crate::Error> {
     bounds
         .min()
         .abs()
         .max(bounds.max().abs())
         .checked_length()
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
-fn translation_delta(start: Transform, end: Transform) -> Result<Vec3, CollisionError> {
+fn translation_delta(start: Transform, end: Transform) -> Result<Vec3, crate::Error> {
     end.translation()
         .checked_sub(start.translation())
-        .ok_or(CollisionError::ArithmeticOverflow)
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
-fn rotation_angle(start: Quat, end: Quat) -> Result<f64, CollisionError> {
+fn rotation_angle(start: Quat, end: Quat) -> Result<f64, crate::Error> {
     let dot = start.x * end.x + start.y * end.y + start.z * end.z + start.w * end.w;
     if !dot.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     Ok(2.0 * dot.abs().clamp(0.0, 1.0).acos())
 }
@@ -1683,15 +1710,15 @@ pub(crate) fn interpolate(
     start: Transform,
     end: Transform,
     amount: f64,
-) -> Result<Transform, CollisionError> {
+) -> Result<Transform, crate::Error> {
     let translation = start
         .translation()
         .checked_add(
             translation_delta(start, end)?
                 .checked_mul_scalar(amount)
-                .ok_or(CollisionError::ArithmeticOverflow)?,
+                .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?,
         )
-        .ok_or(CollisionError::ArithmeticOverflow)?;
+        .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
     let mut end_rotation = end.rotation();
     let start_rotation = start.rotation();
     let dot = start_rotation.x * end_rotation.x
@@ -1699,7 +1726,7 @@ pub(crate) fn interpolate(
         + start_rotation.z * end_rotation.z
         + start_rotation.w * end_rotation.w;
     if !dot.is_finite() {
-        return Err(CollisionError::ArithmeticOverflow);
+        return Err(crate::Error::from(CollisionError::ArithmeticOverflow));
     }
     if dot < 0.0 {
         end_rotation = Quat::new(
@@ -1732,8 +1759,9 @@ pub(crate) fn interpolate(
         .try_normalize()
     }
     .filter(|rotation| rotation.is_normalized())
-    .ok_or(CollisionError::ArithmeticOverflow)?;
-    Transform::new(translation, rotation).map_err(|_| CollisionError::ArithmeticOverflow)
+    .ok_or_else(|| crate::Error::from(CollisionError::ArithmeticOverflow))?;
+    Transform::new(translation, rotation)
+        .map_err(|_| crate::Error::from(CollisionError::ArithmeticOverflow))
 }
 
 fn tolerance(value: f64) -> f64 {

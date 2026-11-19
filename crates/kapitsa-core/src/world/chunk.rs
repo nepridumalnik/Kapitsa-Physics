@@ -10,7 +10,7 @@ pub(super) struct ChunkEntry {
 }
 
 /// Reason a chunk operation was rejected before changing registered geometry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChunkOperationError {
     World(WorldError),
     InvalidChunkId,
@@ -226,7 +226,10 @@ impl PhysicsWorld {
             return Err(WorldError::InvalidBodyId.into());
         }
         if entry.body.physics().body_type() == BodyType::Dynamic {
-            return Err(WorldError::Collision(CollisionError::UnsupportedDynamicGeometry).into());
+            return Err(WorldError::Collision(crate::Error::from(
+                CollisionError::UnsupportedDynamicGeometry,
+            ))
+            .into());
         }
         if let Some(first) = entry.first_collider {
             let first = self
@@ -246,7 +249,11 @@ impl PhysicsWorld {
             }
             collider
                 .world_bounds(&entry.body.state().transform())
-                .map_err(|_| WorldError::Collision(CollisionError::GeometryBounds))?;
+                .map_err(|_| {
+                    ChunkOperationError::from(WorldError::Collision(crate::Error::from(
+                        CollisionError::GeometryBounds,
+                    )))
+                })?;
         }
         Ok(())
     }

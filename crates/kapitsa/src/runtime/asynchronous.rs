@@ -309,9 +309,9 @@ impl StepRunner {
                     engine.step_with_dt(Duration::ZERO, physics_dt)
                 })) {
                     Ok(result) => result,
-                    Err(_) => Err(Error::from(StepError::Collision(
+                    Err(_) => Err(Error::from(StepError::Collision(crate::Error::from(
                         CollisionError::WorkerFailed,
-                    ))),
+                    )))),
                 };
                 let _ = result_sender.send(StepOutput { engine, result });
             })?;

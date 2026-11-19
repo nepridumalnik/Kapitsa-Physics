@@ -107,7 +107,7 @@ pub enum StepError {
     WeldBalance(super::WeldBalanceError),
     /// Preparing or committing a weld split failed.
     WeldSplit(crate::Error),
-    Collision(CollisionError),
+    Collision(crate::Error),
     BodyIntegration {
         body_id: BodyId,
         cause: crate::Error,
@@ -167,7 +167,7 @@ impl std::error::Error for StepError {
 }
 
 /// Reason an object could not be added or a world ID could not be resolved.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorldError {
     DensePoolIndexOverflow,
     DensePoolCapacityExceeded,
@@ -183,7 +183,7 @@ pub enum WorldError {
     InvalidJointTarget,
     InvalidMaterialId,
     MaterialInUse,
-    Collision(CollisionError),
+    Collision(crate::Error),
     Joint(JointError),
 }
 
@@ -260,7 +260,7 @@ impl From<DensePoolError> for WorldError {
 
 impl From<CollisionError> for WorldError {
     fn from(error: CollisionError) -> Self {
-        Self::Collision(error)
+        Self::Collision(crate::Error::from(error))
     }
 }
 

@@ -375,7 +375,9 @@ fn skinned_pose_updates_bounds_and_keeps_the_last_valid_pose_on_error() {
     );
     assert_eq!(
         collider.set_skin_pose(&[overflowing_pose]),
-        Err(crate::collision::CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::ArithmeticOverflow
+        ))
     );
     assert!(collider.mesh_bvh.is_some());
     assert!(collider.skin_pose.is_none());
@@ -400,7 +402,9 @@ fn skinned_pose_updates_bounds_and_keeps_the_last_valid_pose_on_error() {
 
     assert_eq!(
         collider.set_skin_pose(&[]),
-        Err(crate::collision::CollisionError::InvalidSkinPose)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::InvalidSkinPose
+        ))
     );
     assert_eq!(
         collider.world_bounds(&Transform::identity()),
@@ -409,14 +413,18 @@ fn skinned_pose_updates_bounds_and_keeps_the_last_valid_pose_on_error() {
 
     assert_eq!(
         collider.set_skin_pose(&[Affine3::from_translation(Vec3::splat(f64::NAN))]),
-        Err(crate::collision::CollisionError::InvalidSkinPose)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::InvalidSkinPose
+        ))
     );
     assert_eq!(
         collider.set_skin_pose(&[Affine3::new(
             kapitsa_math::Mat3::from_diagonal(Vec3::splat(f64::MAX)),
             Vec3::splat(f64::MAX),
         )]),
-        Err(crate::collision::CollisionError::ArithmeticOverflow)
+        Err(crate::Error::from(
+            crate::collision::CollisionError::ArithmeticOverflow
+        ))
     );
     assert_eq!(
         collider.world_bounds(&Transform::identity()),

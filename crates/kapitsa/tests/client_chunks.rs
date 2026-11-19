@@ -135,12 +135,13 @@ async fn rejection_and_stopped_service_return_prepared_chunks() -> Result<(), Bo
         .collect();
     let recovered = match client.add_chunk_batch(dynamic, input).await {
         Err(ChunkClientError::Rejected {
-            cause:
-                kapitsa::ChunkOperationError::World(WorldError::Collision(
-                    kapitsa::CollisionError::UnsupportedDynamicGeometry,
-                )),
+            cause: kapitsa::ChunkOperationError::World(WorldError::Collision(cause)),
             input,
-        }) => input,
+        }) if cause.downcast_ref::<kapitsa::CollisionError>()
+            == Some(&kapitsa::CollisionError::UnsupportedDynamicGeometry) =>
+        {
+            input
+        }
         _ => return Err("dynamic mesh batch was not rejected".into()),
     };
     assert_eq!(recovered.len(), 2);

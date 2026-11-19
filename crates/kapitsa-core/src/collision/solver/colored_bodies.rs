@@ -49,18 +49,20 @@ impl<'a> BodyBinding<'a> {
     pub(super) fn bind(
         bodies: &'a mut [SolverBody],
         indices: &[usize],
-    ) -> Result<Self, CollisionError> {
+    ) -> Result<Self, crate::Error> {
         if indices.windows(2).any(|pair| pair[0] >= pair[1])
             || indices.last().is_some_and(|index| *index >= bodies.len())
         {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         let mut remaining = bodies;
         let mut base = 0;
         let mut slots = Vec::with_capacity(indices.len());
         for &index in indices {
             let (prefix, tail) = remaining.split_at_mut(index - base + 1);
-            let body = prefix.last_mut().ok_or(CollisionError::InvalidContact)?;
+            let body = prefix
+                .last_mut()
+                .ok_or_else(|| crate::Error::from(CollisionError::InvalidContact))?;
             slots.push(
                 if body.body().physics().body_type() == crate::rigid_body::BodyType::Dynamic {
                     BodySlot::Dynamic(Some(body))
@@ -77,9 +79,9 @@ impl<'a> BodyBinding<'a> {
     pub(super) fn pair_at(
         &mut self,
         [a, b]: [usize; 2],
-    ) -> Result<[BoundBodyRef<'a>; 2], CollisionError> {
+    ) -> Result<[BoundBodyRef<'a>; 2], crate::Error> {
         if a == b || a >= self.slots.len() || b >= self.slots.len() {
-            return Err(CollisionError::InvalidContact);
+            return Err(crate::Error::from(CollisionError::InvalidContact));
         }
         let (lo, hi, reversed) = if a < b { (a, b, false) } else { (b, a, true) };
         let (left, right) = self.slots.split_at_mut(hi);
@@ -93,11 +95,13 @@ impl<'a> BodyBinding<'a> {
     }
 }
 
-fn take_body<'a>(slot: &mut BodySlot<'a>) -> Result<BoundBodyRef<'a>, CollisionError> {
+fn take_body<'a>(slot: &mut BodySlot<'a>) -> Result<BoundBodyRef<'a>, crate::Error> {
     match slot {
-        BodySlot::Dynamic(body) => Ok(BoundBodyRef::Dynamic(
-            body.take().ok_or(CollisionError::InvalidContact)?,
-        )),
+        BodySlot::Dynamic(body) => {
+            Ok(BoundBodyRef::Dynamic(body.take().ok_or_else(|| {
+                crate::Error::from(CollisionError::InvalidContact)
+            })?))
+        }
         BodySlot::ReadOnly(body) => Ok(BoundBodyRef::ReadOnly(body)),
     }
 }
