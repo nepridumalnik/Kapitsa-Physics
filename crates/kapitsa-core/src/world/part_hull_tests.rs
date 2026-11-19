@@ -1,5 +1,4 @@
 use super::*;
-use crate::world::WorldStepTyped;
 use crate::{
     aerodynamics::hull::HullSection,
     aerodynamics::{Aerodynamics, AtmosphericState},
@@ -145,7 +144,7 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
                 2,
             )?;
         } else {
-            world.step_typed(DT)?;
+            world.step(DT)?;
         }
         let snapshot = world.part_hull_wrenches().to_vec();
         let reactions = world
@@ -285,7 +284,7 @@ fn equal_net_drag_on_tree_can_imply_different_internal_loads()
                 2,
             )
         } else {
-            world.step_typed(DT)
+            world.step(DT)
         };
         assert!(failed.is_err());
         assert_eq!(world.part_hull_wrenches(), snapshot.as_slice());
@@ -353,7 +352,7 @@ fn automatic_failure_certifies_only_uncorrected_part_surfaces()
                     2,
                 )
             } else {
-                world.step_typed(dt)
+                world.step(dt)
             }
         };
         let before = *world.body(body).ok_or("body")?.state();
@@ -452,7 +451,7 @@ fn automatic_weld_failure_uses_pending_part_hull_loads() -> Result<(), Box<dyn s
                 2,
             )?;
         } else {
-            world.step_typed(1e-4)?;
+            world.step(1e-4)?;
         }
         assert!(world.weld(weld).is_none());
         assert_ne!(world.part_body(child), Some(body));
@@ -517,7 +516,7 @@ fn automatic_weld_failure_multiple_clusters_is_atomic_on_rejection()
                     2,
                 )
             } else {
-                world.step_typed(0.01)
+                world.step(0.01)
             }
         };
         assert!(matches!(step(&mut world), Err(StepError::WeldBalance(_))));
@@ -638,7 +637,7 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
                 2,
             )
         } else {
-            world.step_typed(0.01)
+            world.step(0.01)
         };
         assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
         assert_eq!(*world.body(body).ok_or("body")?.state(), before);
@@ -659,7 +658,7 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
                 2,
             )
         } else {
-            world.step_typed(0.01)
+            world.step(0.01)
         };
         assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
         assert!(world.weld(weld).is_some());
@@ -673,7 +672,7 @@ fn automatic_weld_failure_splits_for_sequential_and_sharded_steps()
                 2,
             )?;
         } else {
-            world.step_typed(0.01)?;
+            world.step(0.01)?;
         }
         assert!(world.weld(weld).is_none());
         let child_body = world.part_body(child).ok_or("child")?;
@@ -765,7 +764,7 @@ fn collider_cluster_fractures_in_contact_free_step() -> Result<(), Box<dyn std::
                 2,
             )?;
         } else {
-            world.step_typed(0.01)?;
+            world.step(0.01)?;
         }
         assert!(world.weld(weld).is_none());
         assert!(
@@ -859,12 +858,12 @@ fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn
                 2,
             )?;
         } else {
-            world.step_typed(0.01)?;
+            world.step(0.01)?;
         }
         assert!(world.weld(weld).is_some());
         assert_eq!(world.step_diagnostics().weld_incomplete_load_clusters, 1);
         assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 0);
-        assert!(world.step_typed(-1.0).is_err());
+        assert!(world.step(-1.0).is_err());
         assert_eq!(world.step_diagnostics().weld_incomplete_load_clusters, 1);
         assert!(matches!(
             world.part_aerodynamic_weld_reactions(body, 1e-9, 1e-9),
@@ -891,7 +890,7 @@ fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn
                 2,
             )?;
         } else {
-            world.step_typed(0.01)?;
+            world.step(0.01)?;
         }
         assert!(world.weld(weld).is_some());
         assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
@@ -906,7 +905,7 @@ fn realtime_skips_uncertified_weld_without_hiding_errors() -> Result<(), Box<dyn
             world.part_aerodynamic_weld_reactions(body, 1e-9, 1e-9),
             Err(super::WeldBalanceError::IncompleteLoads)
         ));
-        assert!(world.step_typed(-1.0).is_err());
+        assert!(world.step(-1.0).is_err());
         assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
     }
     Ok(())
@@ -944,7 +943,7 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
             },
         },
     )?;
-    world.step_typed(0.01)?;
+    world.step(0.01)?;
     let reactions = world
         .force_free_weld_reactions(body, 0.0, 0.0)
         .map_err(|error| format!("{error:?}"))?;
@@ -968,7 +967,7 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
             .map_err(|error| format!("{error:?}"))?
             .is_empty()
     );
-    world.step_typed(0.01)?;
+    world.step(0.01)?;
     let reactions = world
         .part_source_weld_reactions(body, 1e-12, 1e-12)
         .map_err(|error| format!("{error:?}"))?;
@@ -996,7 +995,7 @@ fn force_free_snapshot_is_certified_but_aerodynamic_snapshot_is_not()
         Err(BalanceError::IncompleteLoads)
     ));
     world.set_part_aerodynamic_hull(root, vec![section(Vec3::ZERO)])?;
-    world.step_typed(0.01)?;
+    world.step(0.01)?;
     assert!(matches!(
         world.force_free_weld_reactions(body, 0.0, 0.0),
         Err(BalanceError::IncompleteLoads)
@@ -1047,7 +1046,7 @@ fn rotating_force_free_cluster_has_centripetal_weld_reaction()
             },
         },
     )?;
-    world.step_typed(1e-4)?;
+    world.step(1e-4)?;
     let reactions = world
         .force_free_weld_reactions(body, 1e-10, 1e-10)
         .map_err(|error| format!("{error:?}"))?;
@@ -1081,7 +1080,7 @@ fn part_hull_snapshot_preserves_offset_moment() -> Result<(), Box<dyn std::error
             None,
         )?],
     )?;
-    world.step_typed(1e-6)?;
+    world.step(1e-6)?;
     let loads = world.part_hull_wrenches();
     assert_eq!(loads.len(), 1);
     assert_eq!(loads[0].part, part);
@@ -1144,7 +1143,7 @@ fn part_simple_surfaces_share_body_level_drag_limit() -> Result<(), Box<dyn std:
                     2,
                 )?;
             } else {
-                world.step_typed(1.0)?;
+                world.step(1.0)?;
             }
             let state = world.body(id).ok_or("body")?.state();
             assert!(state.linear_velocity().length() < 1e-12);
@@ -1200,14 +1199,14 @@ fn part_simple_surfaces_share_body_level_drag_limit() -> Result<(), Box<dyn std:
                     2,
                 )
             } else {
-                world.step_typed(1.0)
+                world.step(1.0)
             };
             assert!(failed.is_err());
             assert_eq!(world.simple_surface_corrections(), snapshot.as_slice());
             assert_eq!(world.raw_simple_surface_wrenches(), raw.as_slice());
             world.remove_gravity(bad).ok_or("gravity")?;
             world.set_atmosphere(crate::aerodynamics::Atmosphere::Vacuum);
-            world.step_typed(1.0)?;
+            world.step(1.0)?;
             assert!(world.simple_surface_corrections().is_empty());
             assert!(world.raw_simple_surface_wrenches().is_empty());
         }
@@ -1239,7 +1238,7 @@ fn simple_surface_attribution_accepts_only_complete_uncorrected_part_loads()
                 2,
             )?;
         } else {
-            world.step_typed(1e-6)?;
+            world.step(1e-6)?;
         }
         let correction = *world
             .simple_surface_corrections()
@@ -1285,7 +1284,7 @@ fn simple_surface_zero_aggregate_has_explicit_snapshot() -> Result<(), Box<dyn s
                 2,
             )?;
         } else {
-            world.step_typed(1e-4)?;
+            world.step(1e-4)?;
         }
         let correction = world
             .simple_surface_corrections()

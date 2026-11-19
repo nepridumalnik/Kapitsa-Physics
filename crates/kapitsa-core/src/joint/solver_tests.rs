@@ -1,7 +1,6 @@
 use super::*;
 use crate::joint::row::RowDimension;
 use crate::joint::workspace::JointSolverCall;
-use crate::world::WorldStepTyped;
 use crate::{
     joint::{
         BallJoint, ConeTwistJoint, CylindricalJoint, D6Joint, HingeJoint, Joint, JointCommon,
@@ -1238,13 +1237,9 @@ fn fixed_joint_position_order_reports_anchor_rotation_coupling() {
             }
         };
         let initial = measure(&world);
-        world
-            .step_typed(0.01)
-            .expect("first force-free physics step");
+        world.step(0.01).expect("first force-free physics step");
         let first = measure(&world);
-        world
-            .step_typed(0.01)
-            .expect("second force-free physics step");
+        world.step(0.01).expect("second force-free physics step");
         [initial, first, measure(&world)]
     }
 
@@ -1699,7 +1694,7 @@ fn loaded_fixed_joint_prediction_precedes_velocity_projection() {
                     outputs.push((pre_position, post_position));
                 }
                 if projection == super::super::JointProjection::ScalarGaussSeidel {
-                    world.step_typed(dt).expect("world step");
+                    world.step(dt).expect("world step");
                     let positions = ids
                         .iter()
                         .map(|id| {
@@ -1916,7 +1911,7 @@ fn diagnose_loaded_graph_integration_order_trajectory() {
                                 .expect("root")
                                 .apply_force_at_point(Vec3::X * 1200.0, Vec3::ZERO)
                                 .expect("force");
-                            world.step_typed(dt).expect("world step");
+                            world.step(dt).expect("world step");
                         }
                         for (id, body) in ids.iter().zip(&bodies) {
                             let state = world.body(*id).expect("body").state();
@@ -1969,7 +1964,7 @@ fn loaded_fixed_joint_chain_stays_close_after_root_force() {
         .expect("root")
         .apply_force_at_point(Vec3::X * 1200.0, Vec3::ZERO)
         .expect("force");
-    world.step_typed(1.0 / 120.0).expect("step");
+    world.step(1.0 / 120.0).expect("step");
     let positions = ids
         .iter()
         .map(|id| {

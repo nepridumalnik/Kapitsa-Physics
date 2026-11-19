@@ -4,7 +4,6 @@ use super::{
 };
 #[cfg(feature = "bench-internals")]
 use crate::execution::{ExecutionError, StepExecutor};
-use crate::world::WorldStepTyped;
 #[cfg(feature = "bench-internals")]
 use crate::{
     collider::Collider,
@@ -167,7 +166,7 @@ fn fixed_hub_with_144_bodies_converges_from_pose_perturbations() {
     let initial = max_joint_errors(&world);
     let mut peak_energy = 0.0_f64;
     for _ in 0..20 {
-        world.step_typed(DT).unwrap();
+        world.step(DT).unwrap();
         peak_energy = peak_energy.max(kinetic_energy(&world));
         assert_finite_body_states(&world);
     }
@@ -182,7 +181,7 @@ fn fixed_hub_with_144_bodies_converges_from_pose_perturbations() {
 #[test]
 fn fixed_hub_with_14400_bodies_survives_the_original_stress_step() {
     let mut world = fixed_hub_world(14_400);
-    world.step_typed(DT).unwrap();
+    world.step(DT).unwrap();
     assert_finite_body_states(&world);
     let errors = max_joint_errors(&world);
     assert!(errors.0 < 0.002, "anchor error: {errors:?}");
@@ -337,7 +336,7 @@ fn fixed_joint_handles_mass_ratios_and_off_center_thrust() {
                 .unwrap()
                 .apply_force_at_point(force, point)
                 .unwrap();
-            world.step_typed(DT).unwrap();
+            world.step(DT).unwrap();
             peak_energy = peak_energy.max(kinetic_energy(&world));
             assert_finite_body_states(&world);
         }
@@ -398,7 +397,7 @@ fn fixed_joint_chain_and_branch_sizes_report_residual_by_step() {
         let mut by_step = Vec::with_capacity(11);
         by_step.push(initial);
         for _ in 0..10 {
-            world.step_typed(DT).unwrap();
+            world.step(DT).unwrap();
             assert_finite_body_states(&world);
             by_step.push(max_joint_errors(&world));
         }
@@ -533,7 +532,7 @@ fn diagnose_free_asymmetric_fixed_joint_velocity_projection_work() {
                 let mut first_metrics = None;
                 let mut last_metrics = None;
                 for _ in 0..steps {
-                    world.step_typed(dt).unwrap();
+                    world.step(dt).unwrap();
                     let metrics = world.physics_step_metrics().joints;
                     integration_delta.add_assign(
                         metrics
@@ -895,9 +894,7 @@ fn colored_solver_failure_rolls_back_direct_body_updates() {
     for (id, state) in original_states {
         assert_eq!(world.body(id).unwrap().state(), &state);
     }
-    world
-        .step_typed(DT)
-        .expect("retry after colored solver error");
+    world.step(DT).expect("retry after colored solver error");
 }
 
 #[cfg(feature = "bench-internals")]
@@ -935,7 +932,7 @@ fn diagnose_colored_constraint_batch_scaling() {
                         .unwrap();
                     let started = Instant::now();
                     if worker_count == 1 {
-                        world.step_typed(DT).unwrap();
+                        world.step(DT).unwrap();
                     } else {
                         world
                             .step_with_executor(DT, &ScopedPcgTestExecutor, worker_count)
@@ -1000,7 +997,7 @@ fn diagnose_colored_large_island_iteration_requirements() {
                     .apply_force_at_point(Vec3::Y * 30_000.0, point)
                     .unwrap();
                 if worker_count == 1 {
-                    world.step_typed(DT).unwrap();
+                    world.step(DT).unwrap();
                 } else {
                     world
                         .step_with_executor(DT, &ScopedPcgTestExecutor, worker_count)
@@ -1039,7 +1036,7 @@ fn velocity_pcg_reports_iteration_limit_without_claiming_convergence() {
         .apply_force_at_point(Vec3::Y * 30_000.0, point)
         .unwrap();
 
-    world.step_typed(DT).unwrap();
+    world.step(DT).unwrap();
 
     let metrics = world.physics_step_metrics().joints;
     assert!(metrics.velocity_pcg_iteration_limit_calls > 0);
@@ -1058,7 +1055,7 @@ fn position_pcg_reports_iteration_limit_without_claiming_convergence() {
         .set_linear_velocity(Vec3::Y * 30.0)
         .unwrap();
 
-    world.step_typed(DT).unwrap();
+    world.step(DT).unwrap();
 
     let metrics = world.physics_step_metrics().joints;
     assert!(metrics.position_pcg_iteration_limit_calls > 0);
@@ -1107,7 +1104,7 @@ fn diagnose_parallel_velocity_pcg_scaling() {
                     .unwrap();
                 let started = Instant::now();
                 if worker_count == 1 {
-                    world.step_typed(DT).unwrap();
+                    world.step(DT).unwrap();
                 } else {
                     world
                         .step_with_executor(DT, &ScopedPcgTestExecutor, worker_count)
@@ -1211,7 +1208,7 @@ fn diagnose_equal_mass_graph_against_analytic_projection() {
                     if pcg {
                         world.set_joint_global_velocity_pcg_for_bench(64, true);
                     }
-                    world.step_typed(DT).unwrap();
+                    world.step(DT).unwrap();
                     let mut momentum = Vec3::ZERO;
                     let mut energy = 0.0;
                     let mut max_error = 0.0_f64;
@@ -1276,10 +1273,10 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
                 .unwrap();
 
             let started = Instant::now();
-            world.step_typed(DT).unwrap();
+            world.step(DT).unwrap();
             let first_elapsed = started.elapsed();
             let first = world.physics_step_metrics().joints;
-            world.step_typed(DT).unwrap();
+            world.step(DT).unwrap();
             let second_elapsed = started.elapsed().saturating_sub(first_elapsed);
             let second = world.physics_step_metrics().joints;
             println!(
@@ -1331,7 +1328,7 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
                     .unwrap()
                     .apply_force_at_point(Vec3::Y * force, point)
                     .unwrap();
-                world.step_typed(DT).unwrap();
+                world.step(DT).unwrap();
                 let metrics = world.physics_step_metrics().joints;
                 println!(
                     "graph={name} joint_order={} velocity_iterations={} linear_residual={:.6e}m/s angular_residual={:.6e}rad/s",
@@ -1371,9 +1368,9 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
                 .unwrap()
                 .apply_force_at_point(Vec3::Y * force, point)
                 .unwrap();
-            world.step_typed(DT).unwrap();
+            world.step(DT).unwrap();
             let first = world.physics_step_metrics().joints;
-            world.step_typed(DT).unwrap();
+            world.step(DT).unwrap();
             let second = world.physics_step_metrics().joints;
             println!(
                 "graph={name} joint_order=alternating velocity_iterations={} linear_residual={:.6e}m/s angular_residual={:.6e}rad/s next_predicted_anchor={:.6e}m",
@@ -1410,7 +1407,7 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
                 .unwrap();
 
             let started = Instant::now();
-            world.step_typed(DT).unwrap();
+            world.step(DT).unwrap();
             let metrics = world.physics_step_metrics().joints;
             println!(
                 "graph={name} adaptive_velocity_max={} actual_sweeps={} elapsed_us={} residual={:.6e}m/s/{:.6e}rad/s geometry_post={:.6e}m/{:.6e}rad",
@@ -1449,9 +1446,9 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
                 .apply_force_at_point(Vec3::Y * force, point)
                 .unwrap();
             let started = Instant::now();
-            world.step_typed(DT).unwrap();
+            world.step(DT).unwrap();
             let metrics = world.physics_step_metrics().joints;
-            world.step_typed(DT).unwrap();
+            world.step(DT).unwrap();
             let next = world.physics_step_metrics().joints;
             println!(
                 "graph={name} solver=relaxed_gs relaxation={relaxation:.2} elapsed_us={} residual={:.6e}m/s/{:.6e}rad/s next_predicted_anchor={:.6e}m",
@@ -1500,9 +1497,9 @@ fn diagnose_loaded_fixed_joint_graph_velocity_convergence() {
                     .unwrap();
 
                 let started = Instant::now();
-                world.step_typed(DT).unwrap();
+                world.step(DT).unwrap();
                 let first = world.physics_step_metrics().joints;
-                world.step_typed(DT).unwrap();
+                world.step(DT).unwrap();
                 let second = world.physics_step_metrics().joints;
                 println!(
                     "graph={name} solver=global_pcg preconditioner={preconditioner} max_iterations={max_pcg_iterations} actual_iterations={} converged/iteration_limit={}/{} pcg_residual={:.6e}m/s/{:.6e}rad/s elapsed_us={} velocity_residual={:.6e}m/s/{:.6e}rad/s next_predicted_anchor={:.6e}m",
@@ -1980,12 +1977,12 @@ fn run_articulated_graph(
     let start = std::time::Instant::now();
     for _ in 0..warmup_steps {
         load(&mut world);
-        world.step_typed(dt).unwrap();
+        world.step(dt).unwrap();
         assert_finite_body_states(&world);
         peak_energy = peak_energy.max(graph_metrics(&world).kinetic_energy);
     }
     for _ in 0..settle_steps {
-        world.step_typed(dt).unwrap();
+        world.step(dt).unwrap();
         assert_finite_body_states(&world);
         peak_energy = peak_energy.max(graph_metrics(&world).kinetic_energy);
     }
@@ -2599,7 +2596,7 @@ fn consistent_free_system_conservation() {
             assert!(initial.linear_velocity_residual_max < 1.0e-14);
             let steps = 300 * subdivision;
             for step in 1..=steps {
-                world.step_typed(dt).unwrap();
+                world.step(dt).unwrap();
                 assert_finite_body_states(&world);
                 if step == 1 || step == 300 || step == steps {
                     let current = graph_metrics(&world);
@@ -2804,7 +2801,7 @@ fn reproduce_ball_projection_orbital_drift(options: super::JointSolverOptions, l
         }
         // The staged legacy projection above must still reproduce its orbital
         // defect. The public free-pair step instead uses constrained integration.
-        world.step_typed(DT).unwrap();
+        world.step(DT).unwrap();
         let committed = graph_metrics(&world);
         report(&case, "constrained production", initial, committed);
         assert!((committed.linear_momentum - initial.linear_momentum).length() < 1.0e-13);
@@ -2931,7 +2928,7 @@ fn articulated_residual_profile_tracks_actual_joints() {
                 if step <= 60 {
                     apply_root_force(&mut world, force);
                 }
-                world.step_typed(DT).unwrap();
+                world.step(DT).unwrap();
                 if step == 60 || step == 300 {
                     let mut joint_metrics: Vec<_> = world
                         .joints()
@@ -3082,7 +3079,7 @@ fn slider_velocity_residual_localizes_to_joint_coupling() {
         if step < 60 {
             apply_root_force(&mut world, Vec3::new(0.0, 5.0, 20.0));
         }
-        world.step_typed(DT).unwrap();
+        world.step(DT).unwrap();
     }
     let (index, (id, a, b, joint)) = world
         .joints()
@@ -3341,7 +3338,7 @@ fn coupled_constraint_solve_corrects_a_real_hinge_chain_snapshot() {
         if step < 60 {
             apply_root_force(&mut world, Vec3::Y * 40.0);
         }
-        world.step_typed(DT).unwrap();
+        world.step(DT).unwrap();
     }
     let original = graph_metrics(&world);
     let (result, residual) = coupled_hard_constraint_snapshot(&world, true);
@@ -3363,7 +3360,7 @@ fn coupled_velocity_solve_reduces_slider_residual_without_external_impulse() {
         if step < 60 {
             apply_root_force(&mut world, Vec3::new(0.0, 5.0, 20.0));
         }
-        world.step_typed(DT).unwrap();
+        world.step(DT).unwrap();
     }
     let original = graph_metrics(&world);
     let (result, residual) = coupled_hard_constraint_snapshot(&world, false);
@@ -3518,7 +3515,7 @@ fn direct_velocity_solver_falls_back_without_mutation_for_unsupported_or_singula
 #[test]
 fn direct_velocity_solve_is_included_in_solver_metrics() {
     let mut world = slider_chain(3);
-    world.step_typed(DT).unwrap();
+    world.step(DT).unwrap();
     let metrics = world.physics_step_metrics().joints;
     assert_eq!(metrics.velocity_sweeps, 1);
     assert_eq!(
@@ -3612,7 +3609,7 @@ fn consistent_free_hinge_and_slider_chains_have_convergent_energy() {
             assert!(initial.linear_velocity_residual_max < 1.0e-14);
             assert!(initial.angular_velocity_residual_max < 1.0e-14);
             for _ in 0..300 * subdivision {
-                world.step_typed(dt).unwrap();
+                world.step(dt).unwrap();
                 assert_finite_body_states(&world);
             }
             let final_metrics = graph_metrics(&world);

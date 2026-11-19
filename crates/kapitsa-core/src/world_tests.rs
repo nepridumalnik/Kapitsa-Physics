@@ -3,8 +3,6 @@
 
 use crate::Error;
 
-use crate::world::WorldStepTyped;
-
 use kapitsa_math::{Affine3, Mat3, Quat, Vec3};
 
 use super::{
@@ -72,7 +70,7 @@ fn kinematic_part_contact_impulse_matches_dynamic_part_momentum()
         let body = world.add_body(moving)?;
         let part = world.enable_cluster(body)?;
         let sphere = world.add_part_collider(part, collider(0.5))?;
-        world.step_typed(dt)?;
+        world.step(dt)?;
         let mut total = Vec3::ZERO;
         let mut count = 0;
         for entry in world.contact_impulses() {
@@ -153,7 +151,7 @@ fn ccd_clipping_flag_survives_local_replay() -> Result<(), Box<dyn std::error::E
         ccd_limit_policy: crate::collision::CcdLimitPolicy::ClipIsland,
         ..world.collision_config()
     })?;
-    world.step_typed(0.025)?;
+    world.step(0.025)?;
     assert!(world.collision_step_metrics().ccd_local_replay_count > 0);
     assert!(world.collision_step_metrics().ccd_clipped_body_count > 0);
     assert!(world.contact_impulses_ccd_clipped());
@@ -199,7 +197,7 @@ fn clipped_ccd_contact_snapshot_reports_unrecorded_velocity_change()
         if sharded {
             world.step_with_shards(0.01, &mut shards, &crate::execution::SequentialExecutor, 1)?;
         } else {
-            world.step_typed(0.01)?;
+            world.step(0.01)?;
         }
         assert!(world.contact_impulses_ccd_clipped());
         let diagnostics = world.step_diagnostics();
@@ -225,7 +223,7 @@ fn clipped_ccd_contact_snapshot_reports_unrecorded_velocity_change()
             .linear_velocity();
         assert_eq!(velocity, Vec3::ZERO);
         assert!((total - (velocity + Vec3::X * 2000.0)).length() > 1.0);
-        assert!(world.step_typed(-1.0).is_err());
+        assert!(world.step(-1.0).is_err());
         assert!(world.contact_impulses_ccd_clipped());
         assert_eq!(world.step_diagnostics(), diagnostics);
         assert!(
@@ -234,7 +232,7 @@ fn clipped_ccd_contact_snapshot_reports_unrecorded_velocity_change()
                 .is_err()
         );
         assert_eq!(world.step_diagnostics(), diagnostics);
-        world.step_typed(0.001)?;
+        world.step(0.001)?;
         assert!(!world.contact_impulses_ccd_clipped());
         assert!(!world.step_diagnostics().used_fallback());
     }
@@ -280,7 +278,7 @@ fn off_center_part_contact_impulse_matches_linear_and_angular_momentum()
         for collider in [wall, sphere] {
             world.set_collider_material(collider, Some(material))?;
         }
-        world.step_typed(dt)?;
+        world.step(dt)?;
         assert_eq!(world.contact_impulses_omitted_points(), 0);
         let mut linear = Vec3::ZERO;
         let mut angular = Vec3::ZERO;
@@ -353,7 +351,7 @@ fn persistent_friction_contact_impulse_matches_step_momentum_change()
             .state()
             .linear_velocity();
         crate::collision::solver::take_nonzero_contact_warm_starts();
-        world.step_typed(DT)?;
+        world.step(DT)?;
         let applied_warm_starts = crate::collision::solver::take_nonzero_contact_warm_starts();
         if step == 0 {
             assert_eq!(applied_warm_starts, 0);
@@ -428,7 +426,7 @@ fn fixed_tree_with_contact_falls_back_and_preserves_impulse_balance()
         bodies[1].0,
         Joint::Fixed(FixedJoint::new(common)),
     )?;
-    world.step_typed(0.02)?;
+    world.step(0.02)?;
     assert_ne!(
         world.collision_step_metrics().colored_schedule.rejection,
         "reduced-fixed-tree"
@@ -548,7 +546,7 @@ fn repeated_ccd_pair_after_local_replay_matches_momentum() -> Result<(), Box<dyn
         world.set_collider_material(collider, Some(material))?;
         bodies.push((body, part, collider, Vec3::X * velocity));
     }
-    world.step_typed(0.025)?;
+    world.step(0.025)?;
     assert!(world.collision_step_metrics().ccd_local_replay_count > 0);
     assert_eq!(world.contact_impulses_omitted_points(), 0);
     let pair = CollisionPair::new(bodies[0].2, bodies[1].2).ok_or("pair")?;
@@ -627,7 +625,7 @@ fn repeated_ccd_pair_impulses_match_momentum_change() -> Result<(), Box<dyn std:
     let part = world.enable_cluster(body)?;
     let sphere = world.add_part_collider(part, collider(0.5))?;
     world.set_collider_material(sphere, Some(material))?;
-    world.step_typed(0.012)?;
+    world.step(0.012)?;
     let pairs = [
         CollisionPair::new(walls[0], sphere).ok_or("left pair")?,
         CollisionPair::new(walls[1], sphere).ok_or("right pair")?,
@@ -701,7 +699,7 @@ fn ccd_replay_publishes_each_accepted_impact_once() -> Result<(), Box<dyn std::e
     for collider in [wall, bodies[0].2, bodies[1].2, bodies[2].2] {
         world.set_collider_material(collider, Some(material))?;
     }
-    world.step_typed(0.01)?;
+    world.step(0.01)?;
     assert!(world.collision_step_metrics().ccd_local_replay_count > 0);
     assert_eq!(world.contact_impulses_omitted_points(), 0);
     let expected_pairs = [
@@ -776,7 +774,7 @@ fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
                 (world.add_collider(wall, collider(0.5))?, part_collider)
             };
 
-            world.step_typed(dt)?;
+            world.step(dt)?;
             let mut impulse = Vec3::ZERO;
             let mut count = 0;
             for entry in world.contact_impulses() {
@@ -821,7 +819,7 @@ fn part_contact_impulse_matches_velocity_change_in_discrete_and_ccd_steps()
                 "impulse={impulse:?}, momentum change={momentum_change:?}, ccd={ccd}"
             );
             let snapshot = world.contact_impulses().to_vec();
-            assert!(world.step_typed(-1.0).is_err());
+            assert!(world.step(-1.0).is_err());
             assert_eq!(world.contact_impulses(), snapshot);
         }
     }
@@ -965,7 +963,7 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
             1,
         )
     } else {
-        world.step_typed(dt)
+        world.step(dt)
     };
     assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
     assert_eq!(world.body(body).ok_or("body")?.motion(), before);
@@ -983,7 +981,7 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
                 1,
             )
         } else {
-            world.step_typed(dt)
+            world.step(dt)
         };
         assert!(matches!(rejected, Err(StepError::WeldBalance(_))));
         assert_eq!(world.body(body).ok_or("body")?.motion(), before);
@@ -998,7 +996,7 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
                 1,
             )?;
         } else {
-            world.step_typed(dt)?;
+            world.step(dt)?;
         }
         assert!(world.weld(weld).is_some());
         assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
@@ -1029,7 +1027,7 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
             assert!((impulse - delta * 2.0).length() < 1e-8);
         }
         let published = world.contact_impulses().to_vec();
-        assert!(world.step_typed(f64::NAN).is_err());
+        assert!(world.step(f64::NAN).is_err());
         assert_eq!(world.contact_impulses(), published);
         assert_eq!(world.step_diagnostics().weld_collision_load_clusters, 1);
         return Ok(());
@@ -1042,7 +1040,7 @@ fn isolated_contact_breaks_weld_by_impulse_in_full_step_paths(
             1,
         )?;
     } else {
-        world.step_typed(dt)?;
+        world.step(dt)?;
     }
     let should_break = if limit == 2.0 {
         let first = world.contact_impulses().first().ok_or("contact")?;
@@ -1298,7 +1296,7 @@ fn contact_snapshot_counts_missing_velocity_data_without_publishing_early()
     assert_eq!(world.contact_impulses_omitted_points(), 0);
     world.collision_system.abort_step();
     assert_eq!(world.contact_impulses_omitted_points(), 0);
-    world.step_typed(0.01)?;
+    world.step(0.01)?;
     assert_eq!(world.contact_impulses_omitted_points(), 0);
     Ok(())
 }
@@ -1556,7 +1554,7 @@ fn add_fixed_pair(world: &mut PhysicsWorld, offset: f64) -> (BodyId, BodyId) {
 #[test]
 fn physics_step_metrics_are_zero_for_a_world_without_joints() {
     let mut world = PhysicsWorld::new();
-    world.step_typed(1.0 / 60.0).expect("step without joints");
+    world.step(1.0 / 60.0).expect("step without joints");
 
     let metrics = world.physics_step_metrics();
     assert_eq!(
@@ -1573,7 +1571,7 @@ fn physics_step_metrics_report_fixed_joint_solver_work() {
     let mut world = PhysicsWorld::new();
     add_fixed_pair(&mut world, 0.0);
 
-    world.step_typed(1.0 / 60.0).expect("fixed-joint step");
+    world.step(1.0 / 60.0).expect("fixed-joint step");
 
     let metrics = world.physics_step_metrics();
     assert_eq!(metrics.joints.prepared_rows, 27);
@@ -1595,9 +1593,7 @@ fn physics_step_metrics_report_fixed_joint_solver_work() {
 fn joint_mass_cache_is_enabled_by_default_and_can_be_disabled_for_comparison() {
     let mut cached = PhysicsWorld::new();
     add_fixed_pair(&mut cached, 0.0);
-    cached
-        .step_typed(1.0 / 60.0)
-        .expect("cached fixed-joint step");
+    cached.step(1.0 / 60.0).expect("cached fixed-joint step");
     let cached_metrics = cached.physics_step_metrics().joints;
     assert!(cached_metrics.solver_mass_cache_hits > 0);
     assert!(cached_metrics.solver_mass_cache_misses > 0);
@@ -1639,7 +1635,7 @@ fn light_joint_diagnostics_preserve_state_and_break_events()
         common.break_force = break_force;
         world.add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))?;
         for _ in 0..6 {
-            world.step_typed(1.0 / 60.0)?;
+            world.step(1.0 / 60.0)?;
         }
         let states = world
             .bodies()
@@ -1692,12 +1688,10 @@ fn joint_warm_start_uses_committed_impulses_once_and_clears_disabled_joints() {
         .expect("legacy-path collider");
     world.set_joint_warm_start_for_bench(true);
 
-    world.step_typed(1.0 / 60.0).expect("seed joint impulses");
+    world.step(1.0 / 60.0).expect("seed joint impulses");
     assert_eq!(world.physics_step_metrics().joints.velocity_warm_starts, 0);
 
-    world
-        .step_typed(1.0 / 60.0)
-        .expect("warm-start joint impulses");
+    world.step(1.0 / 60.0).expect("warm-start joint impulses");
     let warm_starts = world.physics_step_metrics().joints.velocity_warm_starts;
     assert!(warm_starts > 0);
     assert!(
@@ -1714,23 +1708,19 @@ fn joint_warm_start_uses_committed_impulses_once_and_clears_disabled_joints() {
             ))),
         )
         .expect("replace fixed joint with ball joint");
-    world
-        .step_typed(1.0 / 60.0)
-        .expect("step with replacement joint");
+    world.step(1.0 / 60.0).expect("step with replacement joint");
     assert_eq!(world.physics_step_metrics().joints.velocity_warm_starts, 0);
 
     world
         .set_joint_enabled(joint, false)
         .expect("disable fixed joint");
-    world
-        .step_typed(1.0 / 60.0)
-        .expect("step with disabled joint");
+    world.step(1.0 / 60.0).expect("step with disabled joint");
     assert_eq!(world.physics_step_metrics().joints.velocity_warm_starts, 0);
 
     world
         .set_joint_enabled(joint, true)
         .expect("enable fixed joint");
-    world.step_typed(1.0 / 60.0).expect("reseed enabled joint");
+    world.step(1.0 / 60.0).expect("reseed enabled joint");
     assert_eq!(world.physics_step_metrics().joints.velocity_warm_starts, 0);
 }
 
@@ -1797,8 +1787,8 @@ fn joint_mass_cache_matches_legacy_for_anisotropic_fixed_joint() {
     let mut cached = make_world();
     legacy.set_joint_mass_cache_for_bench(false);
     for _ in 0..12 {
-        legacy.step_typed(1.0 / 120.0).expect("legacy step");
-        cached.step_typed(1.0 / 120.0).expect("cached step");
+        legacy.step(1.0 / 120.0).expect("legacy step");
+        cached.step(1.0 / 120.0).expect("cached step");
     }
 
     for ((_, actual), (_, expected)) in cached.bodies().zip(legacy.bodies()) {
@@ -1858,7 +1848,7 @@ fn joint_mass_cache_preserves_kinematic_trajectory() {
         .expect("fixed joint");
     world.set_joint_mass_cache_for_bench(true);
 
-    world.step_typed(0.1).expect("cached joint step");
+    world.step(0.1).expect("cached joint step");
 
     let state = world.body(kinematic).expect("kinematic body state").state();
     assert!((state.transform().translation().x - 0.1).abs() <= 1.0e-12);
@@ -1901,9 +1891,7 @@ fn physics_step_metrics_keep_contact_and_joint_work_separate() {
         )
         .expect("fixed joint");
 
-    world
-        .step_typed(1.0 / 60.0)
-        .expect("contact and joint step");
+    world.step(1.0 / 60.0).expect("contact and joint step");
 
     let metrics = world.physics_step_metrics();
     assert!(metrics.collision.contact_count > 0);
@@ -1917,7 +1905,7 @@ fn physics_step_metrics_sum_independent_islands_in_stable_order() {
     add_fixed_pair(&mut world, 0.0);
     add_fixed_pair(&mut world, 10.0);
 
-    world.step_typed(1.0 / 60.0).expect("multiple-island step");
+    world.step(1.0 / 60.0).expect("multiple-island step");
 
     let metrics = world.physics_step_metrics().joints;
     assert_eq!(metrics.prepared_rows, 2 * 27);
@@ -1932,10 +1920,10 @@ fn physics_step_metrics_reset_for_each_step() {
     let mut world = PhysicsWorld::new();
     add_fixed_pair(&mut world, 0.0);
 
-    world.step_typed(1.0 / 60.0).expect("first step");
+    world.step(1.0 / 60.0).expect("first step");
     let first = world.physics_step_metrics().joints;
     assert_eq!(first.prepared_rows, 27);
-    world.step_typed(1.0 / 60.0).expect("second step");
+    world.step(1.0 / 60.0).expect("second step");
 
     let second = world.physics_step_metrics().joints;
     assert_eq!(second.prepared_rows, 24);
@@ -1962,7 +1950,7 @@ fn physics_step_metrics_ignore_disabled_joints() {
         .set_joint_enabled(joint_id, false)
         .expect("disable fixed joint");
 
-    world.step_typed(1.0 / 60.0).expect("disabled-joint step");
+    world.step(1.0 / 60.0).expect("disabled-joint step");
 
     let metrics = world.physics_step_metrics().joints;
     assert_eq!(metrics.prepared_rows, 0);
@@ -1996,9 +1984,7 @@ fn physics_step_joint_metrics_match_sequential_and_parallel_island_solves() {
 fn physics_step_metrics_are_empty_after_a_failed_step() {
     let mut world = PhysicsWorld::new();
     let (body_a, _) = add_fixed_pair(&mut world, 0.0);
-    world
-        .step_typed(1.0 / 60.0)
-        .expect("successful baseline step");
+    world.step(1.0 / 60.0).expect("successful baseline step");
     assert!(world.physics_step_metrics().joints.prepared_rows > 0);
     world
         .body_mut(body_a)
@@ -2007,7 +1993,7 @@ fn physics_step_metrics_are_empty_after_a_failed_step() {
         .expect("finite velocity");
 
     assert!(matches!(
-        world.step_typed(2.0),
+        world.step(2.0),
         Err(StepError::BodyIntegration { .. })
     ));
     let metrics = world.physics_step_metrics();
@@ -2095,7 +2081,7 @@ fn fixed_pair_with_relative_velocity(
     world
         .add_joint(body_a, body_b, Joint::Fixed(FixedJoint::new(common)))
         .expect("fixed joint");
-    world.step_typed(dt).expect("break step");
+    world.step(dt).expect("break step");
     world
 }
 
@@ -2156,7 +2142,7 @@ fn fixed_joint_breaks_from_differential_aerodynamic_drag() -> Result<(), Box<dyn
         let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
         common.break_force = Some(threshold);
         world.add_joint(a, b, Joint::Fixed(FixedJoint::new(common)))?;
-        world.step_typed(1e-4)?;
+        world.step(1e-4)?;
         assert_eq!(world.joint_count(), usize::from(!should_break));
         assert_eq!(world.joint_events().len(), usize::from(should_break));
         if should_break {
@@ -2206,7 +2192,7 @@ fn fixed_joint_breaks_from_offset_aerodynamic_torque() -> Result<(), Box<dyn std
         let mut common = JointCommon::new(JointFrame::IDENTITY, JointFrame::IDENTITY);
         common.break_torque = Some(threshold);
         world.add_joint(a, b, Joint::Fixed(FixedJoint::new(common)))?;
-        world.step_typed(1e-4)?;
+        world.step(1e-4)?;
         assert_eq!(world.joint_count(), usize::from(!should_break));
         assert_eq!(world.joint_events().len(), usize::from(should_break));
         if should_break {
@@ -2236,7 +2222,7 @@ fn broken_joint_releases_bodies_and_does_not_break_again() {
     assert_eq!(world.joint_count(), 0);
     assert_eq!(world.joint_events().len(), 1);
 
-    world.step_typed(1.0 / 60.0).expect("post-break step");
+    world.step(1.0 / 60.0).expect("post-break step");
 
     assert_eq!(world.joint_count(), 0);
     assert!(
@@ -2270,7 +2256,7 @@ fn joint_break_torque_uses_newton_meters() {
         )
         .expect("hinge joint");
 
-    world.step_typed(1.0 / 60.0).expect("torque break step");
+    world.step(1.0 / 60.0).expect("torque break step");
 
     assert_eq!(
         world.joint_count(),
@@ -2330,7 +2316,7 @@ fn central_gravity_accelerates_dynamic_bodies_and_ignores_static_bodies() {
         CentralGravity::new(Vec3::ZERO, 100.0).expect("valid gravity"),
     ));
 
-    world.step_typed(0.1).expect("gravity step");
+    world.step(0.1).expect("gravity step");
 
     let dynamic = world.body(dynamic).expect("dynamic body");
     assert!((dynamic.state().linear_velocity().y + 0.1).abs() < 1.0e-12);
@@ -2382,7 +2368,7 @@ fn central_gravity_preserves_orbital_energy_over_a_fixed_step_arc() {
     ));
 
     for _ in 0..10_000 {
-        world.step_typed(0.001).expect("orbital step");
+        world.step(0.001).expect("orbital step");
     }
 
     let body = world.body(id).expect("orbiter");
@@ -2412,7 +2398,7 @@ fn central_gravity_errors_are_reported_without_partial_body_changes() {
     ));
 
     assert!(matches!(
-        world.step_typed(1.0),
+        world.step(1.0),
         Err(StepError::BodyIntegration {
             body_id,
             cause: IntegrationError::ArithmeticOverflow,
@@ -2430,7 +2416,7 @@ fn central_gravity_errors_are_reported_without_partial_body_changes() {
         CentralGravity::new(Vec3::ZERO, 1.0).expect("valid gravity"),
     ));
     assert_eq!(
-        at_center.step_typed(0.1),
+        at_center.step(0.1),
         Err(StepError::Gravity {
             body_id: center_body,
             cause: GravityError::AtFieldCenter,
@@ -2888,7 +2874,7 @@ fn committed_query_index_matches_full_scan_across_queries_and_world_mutations() 
             .any(|hit| hit.collider == mesh_collider)
     );
 
-    world.step_typed(0.001).unwrap();
+    world.step(0.001).unwrap();
     let small_move_ray = Ray::new(Vec3::new(0.0, 20.0, 0.0), Vec3::X, 30.0).unwrap();
     assert_world_queries_match_full_scan(
         &mut world,
@@ -2907,7 +2893,7 @@ fn committed_query_index_matches_full_scan_across_queries_and_world_mutations() 
         moving
     );
 
-    world.step_typed(0.1).unwrap();
+    world.step(0.1).unwrap();
     let moved_ray = Ray::new(Vec3::new(0.0, 20.0, 0.0), Vec3::X, 30.0).unwrap();
     assert_world_queries_match_full_scan(
         &mut world,
@@ -3157,7 +3143,7 @@ fn invalid_material_fails_step_without_changing_body_or_forces() {
     let original = world.body(body_id).expect("body").motion();
 
     assert_eq!(
-        world.step_typed(0.1),
+        world.step(0.1),
         Err(StepError::Collision(CollisionError::InvalidMaterial))
     );
     assert_eq!(world.body(body_id).map(RigidBody::motion), Some(original));
@@ -3599,7 +3585,7 @@ fn step_advances_each_body_type_and_clears_accumulated_forces() -> Result<(), Er
         .ok_or(WorldError::InvalidBodyId)?
         .state();
 
-    world.step_typed(0.5).expect("valid physics step");
+    world.step(0.5).expect("valid physics step");
 
     assert_eq!(
         world
@@ -3633,7 +3619,7 @@ fn persistent_force_source_uses_current_body_rotation_each_step() {
         .add_force_source(body, Vec3::ZERO, Vec3::X)
         .expect("source");
 
-    world.step_typed(0.1).expect("first step");
+    world.step(0.1).expect("first step");
     let rotation =
         Quat::from_axis_angle(Vec3::Z, std::f64::consts::FRAC_PI_2).expect("valid rotation");
     world
@@ -3641,7 +3627,7 @@ fn persistent_force_source_uses_current_body_rotation_each_step() {
         .expect("body")
         .set_transform(Transform::new(Vec3::ZERO, rotation).expect("valid transform"))
         .expect("rotate body");
-    world.step_typed(0.1).expect("second step");
+    world.step(0.1).expect("second step");
 
     let body = world.body(body).expect("body");
     assert!((body.state().linear_velocity().x - 0.1).abs() < 1.0e-12);
@@ -3660,7 +3646,7 @@ fn persistent_force_source_applies_torque_from_its_local_point() {
         .add_force_source(body, Vec3::Y, Vec3::X)
         .expect("source");
 
-    world.step_typed(0.1).expect("physics step");
+    world.step(0.1).expect("physics step");
 
     let body = world.body(body).expect("body");
     assert_eq!(body.state().linear_velocity(), Vec3::X * 0.1);
@@ -3691,7 +3677,7 @@ fn indexed_force_sources_preserve_first_touch_and_accumulation_order() {
             .expect("repeated source");
     }
 
-    world.step_typed(1.0).expect("indexed mixed-source step");
+    world.step(1.0).expect("indexed mixed-source step");
     let velocity = world
         .body(bodies[0])
         .expect("first body")
@@ -3718,7 +3704,7 @@ fn indexed_force_sources_preserve_first_touch_and_accumulation_order() {
     world
         .add_force_source(replacement, Vec3::ZERO, Vec3::Y)
         .expect("replacement source");
-    world.step_typed(0.1).expect("step after slot reuse");
+    world.step(0.1).expect("step after slot reuse");
     assert_eq!(
         world
             .body(replacement)
@@ -3799,7 +3785,7 @@ fn indexed_force_source_step_failure_rolls_back_and_keeps_capacity() {
         .collect::<Vec<_>>();
 
     assert!(matches!(
-        world.step_typed(2.0),
+        world.step(2.0),
         Err(StepError::BodyIntegration {
             body_id,
             cause: IntegrationError::ArithmeticOverflow,
@@ -3820,7 +3806,7 @@ fn indexed_force_source_step_failure_rolls_back_and_keeps_capacity() {
     world
         .remove_force_source(overflow_source)
         .expect("remove overflow source");
-    world.step_typed(0.1).expect("retry after rollback");
+    world.step(0.1).expect("retry after rollback");
     assert!(
         world
             .force_source_body_indices
@@ -4133,7 +4119,7 @@ fn body_removal_invalidates_its_force_sources_and_disable_stops_force() {
     world
         .set_force_source_enabled(source, false)
         .expect("disable source");
-    world.step_typed(0.1).expect("step without source");
+    world.step(0.1).expect("step without source");
     assert_eq!(
         world.body(body).expect("body").state().linear_velocity(),
         Vec3::ZERO
@@ -4141,7 +4127,7 @@ fn body_removal_invalidates_its_force_sources_and_disable_stops_force() {
     world
         .set_force_source_enabled(source, true)
         .expect("enable source");
-    world.step_typed(0.1).expect("step with source");
+    world.step(0.1).expect("step with source");
     assert_eq!(
         world.body(body).expect("body").state().linear_velocity(),
         Vec3::X * 0.1
@@ -4187,7 +4173,7 @@ fn force_source_step_error_preserves_existing_body_forces() {
         .expect("source");
 
     assert_eq!(
-        world.step_typed(0.1),
+        world.step(0.1),
         Err(StepError::ForceSource {
             source_id: source,
             cause: ForceSourceError::ArithmeticOverflow,
@@ -4209,7 +4195,7 @@ fn invalid_timestep_preserves_all_body_state_and_forces() -> Result<(), Error> {
     let original = world.body(id).ok_or(WorldError::InvalidBodyId)?.motion();
 
     for dt in [0.0, -0.1, f64::NAN, f64::INFINITY] {
-        assert_eq!(world.step_typed(dt), Err(StepError::InvalidDeltaTime));
+        assert_eq!(world.step(dt), Err(StepError::InvalidDeltaTime));
         assert_eq!(world.body(id).map(RigidBody::motion), Some(original));
     }
     Ok(())
@@ -4238,7 +4224,7 @@ fn body_integration_failure_is_atomic_and_preserves_forces() -> Result<(), Error
         .motion();
 
     assert_eq!(
-        world.step_typed(2.0),
+        world.step(2.0),
         Err(StepError::BodyIntegration {
             body_id: failing_id,
             cause: IntegrationError::ArithmeticOverflow,
@@ -4292,15 +4278,15 @@ fn repeated_steps_are_deterministic_and_reuse_the_scratch_buffer() -> Result<(),
     let (mut first, first_id) = make_world()?;
     let (mut second, second_id) = make_world()?;
     for _ in 0..8 {
-        first.step_typed(1.0 / 120.0).expect("valid step");
-        second.step_typed(1.0 / 120.0).expect("valid step");
+        first.step(1.0 / 120.0).expect("valid step");
+        second.step(1.0 / 120.0).expect("valid step");
         assert_eq!(
             first.body(first_id).map(RigidBody::motion),
             second.body(second_id).map(RigidBody::motion)
         );
     }
     let capacity = first.collision_system.context.predicted_states.capacity();
-    first.step_typed(1.0 / 120.0).expect("valid step");
+    first.step(1.0 / 120.0).expect("valid step");
     assert_eq!(
         first.collision_system.context.predicted_states.capacity(),
         capacity
@@ -4391,7 +4377,7 @@ fn skinned_mesh_bounds_track_pose_for_static_and_kinematic_bodies() -> Result<()
                 .set_linear_velocity(Vec3::ZERO)
                 .expect("valid velocity");
 
-            world.step_typed(1.0 / 60.0).expect("contact step");
+            world.step(1.0 / 60.0).expect("contact step");
 
             let pair = crate::collision::CollisionPair::new(mesh_collider, sphere_collider)
                 .expect("distinct colliders");
@@ -4448,7 +4434,7 @@ fn step_shards_are_balanced_and_commit_the_same_states() -> Result<(), Box<dyn s
         Err(StepError::InvalidStepResults)
     );
     parallel_world.commit_step_shards(&shards)?;
-    sequential_world.step_typed(0.125)?;
+    sequential_world.step(0.125)?;
 
     for ((parallel_id, parallel), (sequential_id, sequential)) in
         parallel_world.bodies().zip(sequential_world.bodies())
@@ -4466,7 +4452,7 @@ fn independent_single_pair_ccd_islands_resolve_across_workers()
 -> Result<(), Box<dyn std::error::Error>> {
     let dt = 0.01;
     let mut sequential = independent_wall_ccd_world()?;
-    sequential.step_typed(dt)?;
+    sequential.step(dt)?;
     let expected_impacts = sequential
         .collision_events()
         .iter()
@@ -4540,7 +4526,7 @@ fn full_step_publishes_ccd_impulses_and_preserves_them_on_error()
         if parallel {
             world.step_with_executor(0.01, &ScopedThreadExecutor, 2)?;
         } else {
-            world.step_typed(0.01)?;
+            world.step(0.01)?;
         }
         let snapshot = world.contact_impulses().to_vec();
         assert_eq!(snapshot.iter().filter(|entry| entry.ccd).count(), 128);
@@ -4551,7 +4537,7 @@ fn full_step_publishes_ccd_impulses_and_preserves_them_on_error()
                 .all(|entry| entry.impulse_on_b.length() > 0.0
                     && entry.points.iter().all(|point| point.is_finite()))
         );
-        assert!(world.step_typed(-1.0).is_err());
+        assert!(world.step(-1.0).is_err());
         assert_eq!(world.contact_impulses(), snapshot.as_slice());
     }
     Ok(())
@@ -4564,7 +4550,7 @@ fn seeded_independent_ccd_stress_matches_across_worker_counts()
     const DT: f64 = 1.0 / 60.0;
 
     let mut sequential = seeded_independent_ccd_world(SEED)?;
-    sequential.step_typed(DT)?;
+    sequential.step(DT)?;
     let expected_impacts = sequential
         .collision_events()
         .iter()
@@ -4638,7 +4624,7 @@ fn parallel_ccd_abort_does_not_publish_completed_islands() -> Result<(), Box<dyn
     seed.set_ccd_mode(CcdMode::Continuous);
     let seed = world.add_body(seed)?;
     world.add_collider(seed, collider(0.5))?;
-    world.step_typed(0.01)?;
+    world.step(0.01)?;
     let previous_impulses = world.contact_impulses().to_vec();
     let previous_omitted = world.contact_impulses_omitted_points();
     let previous_events = world.collision_events().to_vec();
@@ -4777,7 +4763,7 @@ fn step_errors_expose_the_integration_cause() -> Result<(), Error> {
     body.apply_force(Vec3::X * f64::MAX).expect("finite force");
     world.add_body(body)?;
 
-    let error = world.step_typed(2.0).expect_err("integration overflows");
+    let error = world.step(2.0).expect_err("integration overflows");
     assert!(error.to_string().contains("integration failed"));
     assert!(std::error::Error::source(&error).is_some());
     Ok(())
@@ -4992,11 +4978,11 @@ fn allocation_check_joint_chain(body_count: usize, pcg_enabled: bool) -> Physics
 #[cfg(feature = "bench-internals")]
 fn warm_step_allocations(world: &mut PhysicsWorld, samples: usize) -> (usize, usize) {
     for _ in 0..2 {
-        world.step_typed(1.0 / 120.0).expect("warm solver step");
+        world.step(1.0 / 120.0).expect("warm solver step");
     }
     tracked_world_allocations(|| {
         for _ in 0..samples {
-            world.step_typed(1.0 / 120.0).expect("measured solver step");
+            world.step(1.0 / 120.0).expect("measured solver step");
         }
     })
 }
@@ -5068,18 +5054,18 @@ fn full_force_source_step_samples(
 ) -> ([f64; 5], usize, usize, usize) {
     const DT: f64 = 1.0 / 60.0;
     let mut pilot = force_source_bench_world(scenario, source_count);
-    pilot.step_typed(DT).expect("warm full step");
+    pilot.step(DT).expect("warm full step");
     let started = std::time::Instant::now();
-    pilot.step_typed(DT).expect("pilot full step");
+    pilot.step(DT).expect("pilot full step");
     let repeats = calibrated_force_source_repeats(started.elapsed());
 
     let mut samples = [0.0; 5];
     for sample in &mut samples {
         let mut world = force_source_bench_world(scenario, source_count);
-        world.step_typed(DT).expect("warm full step");
+        world.step(DT).expect("warm full step");
         let started = std::time::Instant::now();
         for _ in 0..repeats {
-            world.step_typed(DT).expect("benchmark full step");
+            world.step(DT).expect("benchmark full step");
         }
         *sample = started.elapsed().as_nanos() as f64 / repeats as f64;
         std::hint::black_box(world.body(world.bodies().next().expect("body").0));
@@ -5087,7 +5073,7 @@ fn full_force_source_step_samples(
     samples.sort_by(f64::total_cmp);
 
     let mut allocation_world = force_source_bench_world(scenario, source_count);
-    allocation_world.step_typed(DT).expect("warm full step");
+    allocation_world.step(DT).expect("warm full step");
     let (allocations, bytes) = tracked_world_allocations(|| {
         for _ in 0..32 {
             allocation_world
@@ -5164,7 +5150,7 @@ fn step_diagnostics_publish_only_on_success() -> Result<(), super::StepError> {
     });
     assert_eq!(failed, Err(StepError::InvalidStepResults));
     assert_eq!(world.step_diagnostics(), clipped);
-    world.step_typed(0.01)?;
+    world.step(0.01)?;
     assert_eq!(world.step_diagnostics(), StepDiagnostics::default());
     Ok(())
 }

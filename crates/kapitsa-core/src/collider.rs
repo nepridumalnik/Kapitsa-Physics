@@ -154,7 +154,7 @@ impl Collider {
 
     pub fn world_bounds(&self, parent_transform: &Transform) -> Result<Option<Aabb>, Error> {
         let transform = parent_transform
-            .compose_typed(&self.local_transform)
+            .compose(&self.local_transform)
             .map_err(|error| Error::from(ColliderError::Transform(error)))?;
         if let Some(pose) = &self.skin_pose {
             return pose

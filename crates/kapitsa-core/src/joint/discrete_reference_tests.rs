@@ -1,5 +1,4 @@
 use crate::mass::MassProperties;
-use crate::world::WorldStepTyped;
 use kapitsa_math::{Mat3, Quat, Vec3};
 
 // A reference for a free two-body Ball step. The two kicks are the only
@@ -319,7 +318,7 @@ fn two_body_constrained_reference_conserves_momentum_and_converges_in_time() {
                 assert!(initial.4 > 0.1);
             }
             bodies = constrained_step(bodies, dt);
-            world.step_typed(dt).unwrap();
+            world.step(dt).unwrap();
             let first_production = production_metrics(&world, fixture);
             let mut max_anchor = first_production.3;
             let mut max_velocity = first_production.4;
@@ -330,7 +329,7 @@ fn two_body_constrained_reference_conserves_momentum_and_converges_in_time() {
             }
             for _ in 1..300 * subdivision {
                 bodies = constrained_step(bodies, dt);
-                world.step_typed(dt).unwrap();
+                world.step(dt).unwrap();
                 let current = production_metrics(&world, fixture);
                 max_anchor = max_anchor.max(current.3);
                 max_velocity = max_velocity.max(current.4);
@@ -397,7 +396,7 @@ fn free_ball_pair_conserves_invariants_with_full_inertia_tensors() {
     for frequency in [60, 120, 240] {
         let mut world = production_world(initial_bodies);
         for _ in 0..5 * frequency {
-            world.step_typed(1.0 / f64::from(frequency)).unwrap();
+            world.step(1.0 / f64::from(frequency)).unwrap();
             let current = production_metrics(&world, initial_bodies);
             assert!((current.0 - initial.0).length() <= 1.0e-10);
             assert!((current.1 - initial.1).length() <= 1.0e-10);
@@ -728,7 +727,7 @@ fn ball_trees_constrained_reference_preserves_momentum_and_converges() {
             // Five fixed physical seconds, independent of dt.
             for _ in 0..300 * subdivision {
                 bodies = tree_constrained_step(&bodies, &links, dt);
-                world.step_typed(dt).unwrap();
+                world.step(dt).unwrap();
                 let current = tree_invariants(&tree_production_state(&world, &template), &links);
                 max_anchor = max_anchor.max(current.3);
                 max_velocity = max_velocity.max(current.4);

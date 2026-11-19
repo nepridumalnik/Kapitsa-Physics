@@ -11,11 +11,7 @@ pub struct Transform {
 }
 
 impl Transform {
-    pub fn new(translation: Vec3, rotation: Quat) -> Result<Self, crate::Error> {
-        Self::new_typed(translation, rotation).map_err(crate::Error::from)
-    }
-
-    pub(crate) fn new_typed(translation: Vec3, rotation: Quat) -> Result<Self, TransformError> {
+    pub fn new(translation: Vec3, rotation: Quat) -> Result<Self, TransformError> {
         if !translation.is_finite() {
             return Err(TransformError::NonFiniteTranslation);
         }
@@ -59,11 +55,7 @@ impl Transform {
     }
 
     /// Composes this transform with a local transform applied before it.
-    pub fn compose(&self, local: &Self) -> Result<Self, crate::Error> {
-        self.compose_typed(local).map_err(crate::Error::from)
-    }
-
-    pub(crate) fn compose_typed(&self, local: &Self) -> Result<Self, TransformError> {
+    pub fn compose(&self, local: &Self) -> Result<Self, TransformError> {
         let Some(rotation_matrix) = self.rotation.to_mat3() else {
             return Err(TransformError::CompositionOverflow);
         };
@@ -83,11 +75,7 @@ impl Transform {
         })
     }
 
-    pub fn inverse(&self) -> Result<Self, crate::Error> {
-        self.inverse_typed().map_err(crate::Error::from)
-    }
-
-    pub(crate) fn inverse_typed(&self) -> Result<Self, TransformError> {
+    pub fn inverse(&self) -> Result<Self, TransformError> {
         let rotation = self.rotation.conjugate();
         let Some(rotation_matrix) = rotation.to_mat3() else {
             return Err(TransformError::InverseOverflow);

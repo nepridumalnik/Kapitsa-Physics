@@ -2152,10 +2152,7 @@ fn run_scenario(
         #[cfg(feature = "bench-internals")]
         let result =
             if let (Some(executor), Some(workers)) = (&experiment_executor, partial_workers) {
-                rocket
-                    .world
-                    .step_with_executor(DT, executor, workers)
-                    .map_err(kapitsa_core::Error::from)
+                rocket.world.step_with_executor(DT, executor, workers)
             } else {
                 rocket.world.step(DT)
             };

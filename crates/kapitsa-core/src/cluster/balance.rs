@@ -256,7 +256,7 @@ pub(crate) fn prepare_tree(
         let pose = state
             .state
             .transform()
-            .compose_typed(&part.local_transform)
+            .compose(&part.local_transform)
             .map_err(|error| BalanceError::Physics(ClusterError::Transform(error)))?;
         result.push(TreePart {
             part: part.part,

@@ -2178,7 +2178,7 @@ impl PhysicsWorld {
         if body_a == body_b || self.body(body_a).is_none() || self.body(body_b).is_none() {
             return Err(Error::from(WorldError::InvalidJointBodies));
         }
-        joint.validate_typed()?;
+        joint.validate()?;
         let dense = self
             .joints
             .insert(JointEntry {
@@ -2207,7 +2207,7 @@ impl PhysicsWorld {
         if target_a == target_b {
             return Err(Error::from(WorldError::InvalidJointBodies));
         }
-        joint.validate_typed()?;
+        joint.validate()?;
         let frame_a = transform_joint_frame(frame_a, joint.common().frame_a)
             .map_err(|_| WorldError::InvalidJointTarget)?;
         let frame_b = transform_joint_frame(frame_b, joint.common().frame_b)
@@ -2276,7 +2276,7 @@ impl PhysicsWorld {
 
     /// Replaces a joint's settings while retaining its ID and attached bodies.
     pub fn update_joint(&mut self, id: JointId, joint: Joint) -> Result<(), Error> {
-        joint.validate_typed()?;
+        joint.validate()?;
         if id.world != self.world_id {
             return Err(Error::from(WorldError::InvalidJointId));
         }
@@ -2291,7 +2291,7 @@ impl PhysicsWorld {
 
     /// Replaces a joint using frames expressed in the current target spaces.
     pub fn update_joint_targets(&mut self, id: JointId, joint: Joint) -> Result<(), Error> {
-        joint.validate_typed()?;
+        joint.validate()?;
         if id.world != self.world_id {
             return Err(Error::from(WorldError::InvalidJointId));
         }
@@ -2504,7 +2504,7 @@ impl PhysicsWorld {
     ///
     /// This is the convenience form of [`Self::simulate`] followed by
     /// [`Self::fetch_results`].
-    pub fn step(&mut self, dt: f64) -> Result<(), Error> {
+    pub fn step(&mut self, dt: f64) -> Result<(), StepError> {
         self.simulate(dt);
         self.fetch_results().map(|_| ())
     }
@@ -2526,11 +2526,9 @@ impl PhysicsWorld {
     /// events, joint-break events, diagnostics, and contact impulses. A failed
     /// staged step returns its error and publishes no new result view. Calling
     /// this without a preceding `simulate` returns the current committed view.
-    pub fn fetch_results(&mut self) -> Result<StepResults<'_>, Error> {
+    pub fn fetch_results(&mut self) -> Result<StepResults<'_>, StepError> {
         let staged = self.staged_step_result.take().unwrap_or(Ok(()));
-        staged
-            .map(|()| StepResults { world: self })
-            .map_err(Error::from)
+        staged.map(|()| StepResults { world: self })
     }
 
     /// Advances one step using the supplied statically dispatched task executor.
@@ -6322,24 +6320,6 @@ impl Default for PhysicsWorld {
     }
 }
 
-/// Test helper that keeps typed step expectations after the public step surface
-/// moved to the unified error.
-#[cfg(test)]
-pub(crate) trait WorldStepTyped {
-    fn step_typed(&mut self, dt: f64) -> Result<(), StepError>;
-}
-
-#[cfg(test)]
-impl WorldStepTyped for PhysicsWorld {
-    fn step_typed(&mut self, dt: f64) -> Result<(), StepError> {
-        self.step(dt)
-            .map_err(|error| match error.downcast_ref::<StepError>() {
-                Some(error) => *error,
-                None => StepError::InvalidDeltaTime,
-            })
-    }
-}
-
 fn validate_force_source_values(
     local_point: Vec3,
     local_force: Vec3,
@@ -6355,8 +6335,8 @@ pub(crate) fn transform_joint_frame(
     frame: JointFrame,
 ) -> Result<JointFrame, crate::transform::TransformError> {
     let frame_transform =
-        crate::transform::Transform::new_typed(frame.local_anchor, frame.local_rotation)?;
-    let transformed = target_transform.compose_typed(&frame_transform)?;
+        crate::transform::Transform::new(frame.local_anchor, frame.local_rotation)?;
+    let transformed = target_transform.compose(&frame_transform)?;
     Ok(JointFrame::new(
         transformed.translation(),
         transformed.rotation(),
