@@ -184,3 +184,24 @@ were 608 ns and 431 ns respectively. Both runs used seven samples on the same
 machine and sequential execution. Untimed checks in the benchmark passed. The
 extreme-value fallback is covered separately by unit tests and is not measured
 by this ordinary-flight workload. These timings are observations, not thresholds.
+
+﻿
+## Surface visibility hardening
+
+Local Windows x64 run on production commit `e534657`. Both benchmark targets
+completed. The workspace test suite was active during this measurement.
+
+```powershell
+cargo bench -p kapitsa-core --bench aerodynamics --bench wing_shielding
+```
+
+| Partial-visibility fixture | Source triangles | Exposed patches | Median | Min/max |
+| --- | ---: | ---: | ---: | ---: |
+| Small | 6 | 5 | 25.78 us | 25.25 to 26.97 us |
+| Moderate | 96 | 80 | 3.059 ms | 3.030 to 3.094 ms |
+
+The wing-shielding benchmark measured medians of 8.44 and 2.24 us/step for
+one wing without and with a footprint, respectively. For 32 wings the
+medians were 21.09 and 12.71 us/step. These are workload timings. They do
+not establish peak allocation or an isolated speedup over the historical
+baseline.
