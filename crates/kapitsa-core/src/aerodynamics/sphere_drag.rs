@@ -233,6 +233,58 @@ fn stokes_multiplier(reynolds: f64) -> Result<f64, SphereDragError> {
             * (reynolds / (reynolds + BROWN_LAWLER_TRANSITION_REYNOLDS)))
 }
 
+/// Compression-dominated, precritical drag coefficient of an isolated spherical
+/// particle, referenced to frontal area. Uses Loth et al. (2021), equations
+/// 6–8, as reproduced by Palmer and Sahai (2023), equations 19–22.
+///
+/// Accepts Mach 0.25–10 and diameter Reynolds number `45 < Re < 200_000`.
+/// This is the compression-dominated branch, excluding the rarefaction branch
+/// and drag crisis. At each piecewise breakpoint the lower-Mach formula applies.
+/// <https://doi.org/10.2514/1.J060153>
+pub fn compression_dominated_particle_drag_coefficient(
+    mach: f64,
+    reynolds: f64,
+) -> Result<f64, crate::Error> {
+    const MIN_MACH: f64 = 0.25;
+    const MAX_MACH: f64 = 10.0;
+    const MIN_REYNOLDS: f64 = 45.0;
+    const MAX_REYNOLDS: f64 = 200_000.0;
+
+    if !mach.is_finite() || mach <= 0.0 || !reynolds.is_finite() || reynolds <= 0.0 {
+        return Err(SphereDragError::InvalidInput.into());
+    }
+    if !(MIN_MACH..=MAX_MACH).contains(&mach)
+        || reynolds <= MIN_REYNOLDS
+        || reynolds >= MAX_REYNOLDS
+    {
+        return Err(SphereDragError::UnsupportedDomain.into());
+    }
+    // Empirical Mach functions C_M, G_M and H_M from the published fit.
+    let pressure_scale = if mach <= 1.5 {
+        1.65 + 0.65 * (4.0 * mach - 3.4).tanh()
+    } else {
+        2.18 - 0.13 * (0.9 * mach - 2.7).tanh()
+    };
+    let pressure_reynolds_correction = if mach <= 0.8 {
+        ((166.0 * mach + 3.29) * mach - 10.9) * mach + 20.0
+    } else {
+        5.0 + 40.0 / mach.powi(3)
+    };
+    let viscous_scale = if mach <= 1.0 {
+        ((0.0239 * mach + 0.212) * mach - 0.074) * mach + 1.0
+    } else {
+        0.93 + 1.0 / (3.5 + mach.powi(5))
+    };
+    // The bounded inputs keep every intermediate finite and positive where
+    // used as a denominator or power base.
+    let viscous = STOKES_FACTOR / reynolds * (1.0 + 0.15 * reynolds.powf(0.687)) * viscous_scale;
+    let pressure = 0.42 * pressure_scale
+        / (1.0
+            + 42_500.0 / reynolds.powf(1.16 * pressure_scale)
+            + pressure_reynolds_correction / reynolds.sqrt());
+    Ok(viscous + pressure)
+}
+
 /// Continuum drag coefficient, referenced to the sphere's frontal area.
 ///
 /// Inputs are freestream Mach and diameter-based Reynolds numbers. Only air
@@ -286,6 +338,30 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compression_dominated_particle_fit_covers_published_mach_branches()
+    -> Result<(), crate::Error> {
+        // Equation values, not measurements.
+        for (mach, expected) in [
+            (0.25, 0.573_600_708_844_753_6),
+            (0.8, 0.716_824_977_946_283),
+            (1.0, 0.930_324_194_486_603_4),
+            (1.5, 1.122_263_737_312_958_7),
+            (2.0, 1.197_339_242_085_612_4),
+            (10.0, 1.216_732_110_402_699_1),
+        ] {
+            let cd = compression_dominated_particle_drag_coefficient(mach, 500.0)?;
+            assert!((cd - expected).abs() < 1e-13);
+        }
+        for (mach, re) in [(0.24, 500.0), (10.01, 500.0), (1.0, 45.0), (1.0, 200_000.0)] {
+            assert_eq!(
+                compression_dominated_particle_drag_coefficient(mach, re),
+                Err(SphereDragError::UnsupportedDomain.into())
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn continuum_force_matches_frontal_area_drag_through_mach_one() -> Result<(), crate::Error> {

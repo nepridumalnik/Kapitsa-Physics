@@ -547,6 +547,15 @@ the same study's finer-grid drag by 8.26–9.36% at these Reynolds numbers.
 Table 3 starts at Mach 0.3 and does not establish a transition law between
 the two world models.
 
+`sphere_drag::compression_dominated_particle_drag_coefficient` is a separate
+frontal-area coefficient for isolated spherical particles. It implements the
+compression-dominated precritical branch of [Loth et al. (2021), equations
+6–8](https://doi.org/10.2514/1.J060153), transcribed from [Palmer and Sahai
+(2023), equations 19–22](https://ntrs.nasa.gov/api/citations/20220018430/downloads/AIAA_2023_Palmer_Drag_Model_Paper_v2.pdf).
+Its domain is Mach 0.25–10 and diameter-based `45 < Re < 200,000`. At the fit's
+internal breakpoints the lower-Mach expression takes precedence. This evaluator
+does not change either world sphere model or provide the rarefaction branch.
+
 ## Skin friction
 
 For a laminar flat plate, the local Blasius relation is `c_f(x) = 0.664 / sqrt(Re_x)`. Integrating from the leading edge to plate length `L` gives the streamwise average `C_f = 1.328 / sqrt(Re_L)`. The distinction between local and averaged coefficients matters when summing sections.
