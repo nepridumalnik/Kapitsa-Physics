@@ -573,6 +573,14 @@ the center of mass during stepping. It uses the same atmospheric sampling,
 constant viscosity and nonrotating sphere assumptions as the other sphere
 variants. Selecting the variant is explicit.
 
+`sphere_drag::creeping_particle_drag_ratio` gives the ratio to Stokes drag
+from [the Maxwell–Epstein interpolation, equations (2.1) and (2.7) and
+section 2.2](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/correction-tensor-for-approximating-drag-on-slowmoving-particles-of-arbitrary-shape-and-knudsen-number/24A36A6C4A6CB3301E18A6A596756095).
+It spans continuum, transitional and free-molecular conditions for slowly
+translating spheres with diffuse molecular reflection. Its Knudsen number
+uses particle **radius**, so it is twice the diameter-based value used by
+the preceding particle correlations. The caller establishes creeping flow.
+
 ## Skin friction
 
 For a laminar flat plate, the local Blasius relation is `c_f(x) = 0.664 / sqrt(Re_x)`. Integrating from the leading edge to plate length `L` gives the streamwise average `C_f = 1.328 / sqrt(Re_L)`. The distinction between local and averaged coefficients matters when summing sections.

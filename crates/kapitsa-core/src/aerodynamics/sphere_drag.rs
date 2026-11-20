@@ -310,6 +310,30 @@ fn air_knudsen(mach: f64, reynolds: f64) -> f64 {
     mach / reynolds * (GAMMA * std::f64::consts::PI / 2.0).sqrt()
 }
 
+/// Ratio of drag to Stokes drag for a slowly translating isolated sphere with
+/// diffuse molecular reflection. `radius_knudsen` is the gas mean free path
+/// divided by particle radius, and must be finite and nonnegative.
+///
+/// Implements equations (2.1), (2.7) and section 2.2 of
+/// [A correction tensor for approximating drag on slow-moving particles](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/correction-tensor-for-approximating-drag-on-slowmoving-particles-of-arbitrary-shape-and-knudsen-number/24A36A6C4A6CB3301E18A6A596756095).
+/// This heuristic joins the continuum and free-molecular limits in creeping
+/// flow. The caller establishes negligible inertia and compressibility.
+pub fn creeping_particle_drag_ratio(radius_knudsen: f64) -> Result<f64, crate::Error> {
+    const MAXWELL_SLIP: f64 = 1.0;
+    const EPSTEIN_LIMIT: f64 = 18.0 / (8.0 + std::f64::consts::PI);
+    if !radius_knudsen.is_finite() || radius_knudsen < 0.0 {
+        return Err(SphereDragError::InvalidInput.into());
+    }
+    let continuum_term = (-(EPSTEIN_LIMIT - MAXWELL_SLIP) * radius_knudsen).exp();
+    // Divide before multiplying by Kn when the denominator could overflow.
+    let ratio = if radius_knudsen > 1.0 {
+        radius_knudsen.recip() / (EPSTEIN_LIMIT + continuum_term / radius_knudsen)
+    } else {
+        (continuum_term + EPSTEIN_LIMIT * radius_knudsen).recip()
+    };
+    Ok(ratio)
+}
+
 /// Compression-dominated, precritical drag coefficient of an isolated spherical
 /// particle, referenced to frontal area. Uses Loth et al. (2021), equations
 /// 6–8, as reproduced by Palmer and Sahai (2023), equations 19–22.
@@ -415,6 +439,27 @@ pub fn continuum_drag_coefficient(mach: f64, reynolds: f64) -> Result<f64, crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creeping_particle_drag_recovers_continuum_and_free_molecular_limits()
+    -> Result<(), crate::Error> {
+        assert_eq!(creeping_particle_drag_ratio(0.0)?, 1.0);
+        let low_kn = 1e-5;
+        let slip_slope = (1.0 - creeping_particle_drag_ratio(low_kn)?) / low_kn;
+        assert!((slip_slope - 1.0).abs() < 1e-4);
+        let transition = creeping_particle_drag_ratio(1.0)?;
+        assert!(transition < 1.0 && transition > creeping_particle_drag_ratio(10.0)?);
+        let high_kn = f64::MAX;
+        let scaled_drag = creeping_particle_drag_ratio(high_kn)? * high_kn;
+        assert!((scaled_drag - (8.0 + std::f64::consts::PI) / 18.0).abs() < 1e-14);
+        for kn in [-1.0, f64::INFINITY, f64::NAN] {
+            assert_eq!(
+                creeping_particle_drag_ratio(kn),
+                Err(SphereDragError::InvalidInput.into())
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn slip_correction_recovers_continuum_limit_and_rejects_transitional_flow()
