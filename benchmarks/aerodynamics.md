@@ -268,3 +268,8 @@ The erased-endpoint check on `b449468` measured medians of 22.18 us
 (21.69 to 24.09 us) and 1.381 ms (1.376 to 1.383 ms) on the small and
 moderate fixtures. The wide projected-edge fixture measured 6.09 us
 (6.01 to 6.31 us).
+
+The zero-determinant recheck on `e3cb8b5` measured medians of
+21.98 us (21.68 to 23.29 us) and 1.380 ms (1.375 to 1.384 ms)
+on the small and moderate fixtures. The wide projected-edge fixture
+measured 5.99 us (5.95 to 6.08 us).

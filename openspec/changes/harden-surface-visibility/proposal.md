@@ -9,7 +9,8 @@ linear-work shadow-grid bucket construction without sorting entries, plus
 `8cf7271` for measured clipping split reservations and `0337ef5` for bounded
 exact inclined depth fallback, `aec8f8d` for absolute-scale triangle-area
 fallback, `d5624ae` for exact projection from original vertex coordinates, and
-`b449468` for early exact projection when subtraction erases a nonzero operand.
+`b449468` for early exact projection when subtraction erases a nonzero operand,
+and `e3cb8b5` for selective exact rechecks of zero projected determinants.
 
 ## Scope
 
@@ -38,7 +39,20 @@ This change covers:
 - selecting precharged exact projection before direction or projected-edge
   frame evaluation when a component difference `a-b` equals `a` with nonzero
   `b`, or equals `-b` with nonzero `a`; other cases retain the rounded
-  floating-point edge and offset fast path;
+  floating-point edge and offset fast path, subject to the zero recheck below;
+- rechecking a zero fast direction or edge-reference determinant with precharged
+  exact projection only when a nonzero determinant product can contain an
+  inexact subtraction, detected by an error-free subtraction residual; this
+  occurs before tangent classification or degenerate-reference rejection;
+  an exact edge reference also selects exact edge coefficients;
+- retaining the limitation that this zero check does not bound the error of
+  nonzero fast determinants;
+- recording `e3cb8b5` synthetic regression
+  `partially_rounded_projection_does_not_hide_thin_blocker`: neighboring
+  coordinates `x = 0.1` and `x.next_up()` produce a zero rounded edge cross
+  product despite passing endpoint-retention checks, but the thin blocker
+  still casts a covering shadow; this is not test execution evidence or
+  independent physical validation;
 - rescaling the projection direction by a power of two to preserve component
   ratios, retaining exact fallback for unsafe scaling;
 - recording `b449468` synthetic regression

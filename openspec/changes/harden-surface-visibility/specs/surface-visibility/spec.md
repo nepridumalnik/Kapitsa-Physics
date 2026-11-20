@@ -128,7 +128,7 @@ Non-finite original inputs SHALL return `ArithmeticOverflow`.
 - **THEN** original endpoints select precharged exact projection before the
   direction or projected-edge frame can mistake a thin blocker for tangent
 - **AND** other differences retain the rounded fast path, subject to existing
-  frame-span and direction-scaling fallback checks
+  frame-span, direction-scaling and zero-determinant fallback checks
 
 #### Scenario: Synthetic thin non-tangent blocker survives rounded edges
 
@@ -155,6 +155,32 @@ Non-finite original inputs SHALL return `ArithmeticOverflow`.
   uses `s = X*f64::MAX`, `e = -s`, direction `Z`, and points `[Y, -Y*0.5, 0]`
 - **THEN** `e-s` is non-finite but exact coefficients succeed: the first is
   negative, the second is minus half the first, and the third is zero
+- **AND** this is a synthetic assertion, not execution evidence or independent
+  physical validation
+
+### Requirement: Recheck selectively rounded zero projections
+
+Zero fast direction or edge-reference determinants SHALL select precharged exact
+projection only if a nonzero product can contain an inexact subtraction, detected
+by an error-free residual, before tangent/degenerate classification. An exact edge
+reference SHALL select exact coefficients. This check does not bound nonzero
+fast-determinant error.
+
+#### Scenario: A zero determinant has no participating inexact subtraction
+
+- **WHEN** the fast direction or edge-reference determinant is zero but no
+  nonzero product can contain an inexact subtraction
+- **THEN** the zero recheck does not select exact projection
+
+#### Scenario: Synthetic neighboring decimal coordinates hide a thin blocker
+
+- **WHEN** `partially_rounded_projection_does_not_hide_thin_blocker` uses
+  `x = 0.1_f64`, blocker vertices `[(x, x.next_up(), 0), X + Y, 2*(X + Y)]`,
+  normal `Z`, area `(x.next_up() - x)/2`, source vertices translated by `-Z`,
+  and flow `Z`
+- **THEN** both edges pass endpoint-retention checks and their rounded cross
+  product is zero, but shadow construction succeeds and covers source-affine
+  point `(0.25, 0.25, 0)`
 - **AND** this is a synthetic assertion, not execution evidence or independent
   physical validation
 
