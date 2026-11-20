@@ -8,23 +8,23 @@ pub(super) struct Shadow {
     coplanar: bool,
 }
 
-// After a common power-of-two scale, this span keeps coordinates within
+// After a power-of-two scale per axis, this span keeps coordinates within
 // [2^-127, 2^128). Including 53-bit significands, degree-three orientation
 // expansions stay well inside the normal f64 range (roughly 2^-540..2^400).
 // Unrepresentable cases are errors, never a distance epsilon or a missed hit.
 const MAX_EXPONENT_SPAN: i32 = 254;
 
 struct PredicateFrame {
-    shift: i32,
+    shifts: [i32; 3],
 }
 impl PredicateFrame {
     fn new(points: &[Vec3]) -> Result<Self, crate::Error> {
-        let mut bounds: Option<(i32, i32)> = None;
+        let mut bounds: [Option<(i32, i32)>; 3] = [None; 3];
         for point in points {
             if !point.is_finite() {
                 return Err(crate::Error::from(GeometryError::ArithmeticOverflow));
             }
-            for value in [point.x, point.y, point.z] {
+            for (bound, value) in bounds.iter_mut().zip([point.x, point.y, point.z]) {
                 if value == 0.0 {
                     continue;
                 }
@@ -35,27 +35,30 @@ impl PredicateFrame {
                 } else {
                     biased - 1023
                 };
-                bounds = Some(bounds.map_or((exponent, exponent), |(low, high)| {
+                *bound = Some(bound.map_or((exponent, exponent), |(low, high)| {
                     (low.min(exponent), high.max(exponent))
                 }));
             }
         }
-        let Some((low, high)) = bounds else {
-            return Ok(Self { shift: 0 });
-        };
-        if high - low > MAX_EXPONENT_SPAN {
-            return Err(crate::Error::from(GeometryError::PrecisionLoss));
+        let mut shifts = [0; 3];
+        for (shift, bound) in shifts.iter_mut().zip(bounds) {
+            if let Some((low, high)) = bound {
+                if high - low > MAX_EXPONENT_SPAN {
+                    return Err(crate::Error::from(GeometryError::PrecisionLoss));
+                }
+                *shift = -((low + high) / 2);
+            }
         }
-        Ok(Self {
-            shift: -((low + high) / 2),
-        })
+        // All orientations in this frame share the same positive determinant
+        // factor, including those compared as affine distances.
+        Ok(Self { shifts })
     }
 
     fn point(&self, point: Vec3) -> Result<Coord3D<f64>, crate::Error> {
         let point = Vec3::new(
-            scale(point.x, self.shift)?,
-            scale(point.y, self.shift)?,
-            scale(point.z, self.shift)?,
+            scale(point.x, self.shifts[0])?,
+            scale(point.y, self.shifts[1])?,
+            scale(point.z, self.shifts[2])?,
         );
         Ok(Coord3D {
             x: point.x,
@@ -382,7 +385,7 @@ pub(super) fn triangle_fraction(points: [Vec3; 3]) -> Result<f64, crate::Error> 
         Coord { x: b.x, y: b.y },
         Coord { x: c.x, y: c.y },
     ))?;
-    scale(value.abs(), -2 * frame.shift)
+    scale(value.abs(), -frame.shifts[0] - frame.shifts[1])
 }
 
 #[cfg(test)]
@@ -675,6 +678,32 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn triangle_fraction_preserves_area_across_axis_scales() -> Result<(), crate::Error> {
+        let points = [Vec3::ZERO, Vec3::X * 2.0_f64.powi(-500), Vec3::Y];
+        assert_eq!(triangle_fraction(points)?, 2.0_f64.powi(-500));
+        Ok(())
+    }
+
+    #[test]
+    fn shadow_covers_thin_source_across_axis_scales() -> Result<(), crate::Error> {
+        let width = 2.0_f64.powi(-500);
+        let source = SurfaceTriangle {
+            vertices: [Vec3::ZERO, Vec3::Y * width, Vec3::Z],
+            normal: Vec3::X,
+            area: width * 0.5,
+            owner: GeometryOwner::Body,
+        };
+        let blocker = SurfaceTriangle {
+            vertices: source.vertices.map(|point| point + Vec3::X),
+            ..source
+        };
+        let shadow =
+            Shadow::new(&source, &blocker, 0, 1, Vec3::X)?.ok_or(GeometryError::PrecisionLoss)?;
+        assert!(shadow.covers(Vec3::new(0.25, 0.25, 0.0))?);
         Ok(())
     }
 

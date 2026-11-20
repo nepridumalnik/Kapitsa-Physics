@@ -514,6 +514,12 @@ For nonzero density, patch area and relative speed, the default unmodified model
 
 The shadow construction uses adaptive orientation predicates from the MIT/Apache-2.0 `robust` crate. Clipping is performed in the source triangle's affine domain, with an area-partition consistency check. Its heuristic tolerance uses work charged for the current source partition, starting after the candidate query, plus one unit for the initial triangle. It does not depend on prior triangles or global preprocessing and is not a proven error bound. Unsupported predicate ranges and inconsistent partitions return `PrecisionLoss`. Crossing ratios and endpoint interpolation avoid overflow in differences between finite values when the intersection remains representable. Constructed intersections still use floating-point arithmetic; this is not an exact computational-geometry kernel. `epsilon` remains an API compatibility parameter and never offsets rays or ignores nearby blockers. The work budget checks a preprocessing estimate, instance preparation, grid construction, sorting comparisons and swaps, visited grid cells and entries, candidate shadow construction, clipping polygon and vertex visits, partition output and final shadow tests. Exceeding it rejects the result, rather than returning partial loads. Vector growth uses fallible reservation. The two polygon lists and vertex-distance scratch buffer reuse their allocations across clipping planes within each source partition. Grid sorting entries and the final index coexist during copying; their element counts are budgeted, but the budget does not bound allocator overhead or exact bytes. Work units are accounting weights, not a bound on processor instructions or elapsed time. A complete bound for every intermediate operation still requires audit before this preparation can be accepted as production-complete.
 
+Adaptive orientation predicates scale each coordinate axis independently by
+a power of two. Orientation comparisons within a frame share one positive
+determinant factor. Barycentric areas undo the product of the two in-plane
+scales. The existing exponent-span bound applies within each axis, so large
+differences between axis scales alone do not reject a thin triangle.
+
 Visibility preprocessing counts source triangles once and reuses that count
 when collecting the transformed triangles. The grid receives the portion of
 the shared 100,000,000-unit maximum that remains after preprocessing. Each
