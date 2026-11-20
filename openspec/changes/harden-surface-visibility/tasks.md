@@ -15,6 +15,9 @@
   non-proven precision allowance.
 - [x] Record clipping scratch reuse and the propagation of remaining hard
   work budget.
+- [x] Record `d4dbf07` projected-edge axial-coordinate omission for exactly
+  axial flow and its `1e-100` depth-separation regression across both signs
+  of all three axes.
 - [x] Record that work accounting does not provide an exact byte budget or
   exact instruction/elapsed-time bound.
 - [x] Keep the retrospective change limited to

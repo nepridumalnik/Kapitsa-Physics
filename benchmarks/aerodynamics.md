@@ -217,3 +217,9 @@ benchmark procedure were unchanged.
 
 Wing-shielding medians without and with a footprint were 8.27 and
 2.18 us/step for one wing, and 20.82 and 12.56 us/step for 32 wings.
+
+The axial projection follow-up on `d4dbf07` measured 25.61 us
+(25.07 to 28.51 us) for the small partial-visibility fixture and 2.076 ms
+(2.069 to 2.083 ms) for the moderate fixture. Wing-shielding medians without
+and with a footprint were 8.17 and 2.15 us/step for one wing, and 20.73 and
+12.51 us/step for 32 wings.

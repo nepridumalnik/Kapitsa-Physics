@@ -17,6 +17,8 @@ This change covers:
   retaining exponent-span validation within each axis;
 - recording the two synthetic regressions in `07c7285`: barycentric area
   preservation across axis scales and shadow coverage of a thin source;
+- dropping the axial coordinate only from projected edge tests for exactly axial
+  flow, while retaining three-dimensional depth signs for close blockers;
 - preserving representable shadow intersections when finite floating-point
   distance or coordinate differences would overflow during intersection
   arithmetic;

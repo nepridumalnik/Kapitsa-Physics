@@ -28,6 +28,20 @@ Barycentric area calculations SHALL undo both in-plane scales.
 - **WHEN** the nonzero coordinates on one axis span more than 254 binary exponents
 - **THEN** predicate preparation returns `PrecisionLoss`
 
+### Requirement: Omit axial depth only from projected edge tests
+
+For flow exactly along one coordinate axis, projected edge tests SHALL omit
+only that axial coordinate. Depth tests SHALL retain the original 3D
+coordinates and distinguish both depth signs.
+
+#### Scenario: Axial shadow preserves both close depth signs
+
+- **WHEN** `axial_shadow_preserves_small_representable_depth` tests a `1e-100`
+  blocker separation along both signs of each of the X, Y, and Z axes
+- **THEN** the blocker on the flow-facing side remains covered while the
+  opposite-depth blocker is rejected, without dropping the non-axial depth
+  sign
+
 ### Requirement: Preserve representable numeric intersections
 
 The surface-visibility intersection calculations SHALL handle finite endpoint
