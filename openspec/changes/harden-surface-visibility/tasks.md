@@ -30,6 +30,14 @@
   units and rejection at 66; record the updated 117-unit boundary in
   `unshadowed_patch_replacement_has_budget_boundary`, without claiming test
   execution or independent physical validation.
+- [x] Record `8cf7271`: charge `1 + 16*n` before scratch growth and distance
+  evaluation; make one exact reservation request per split side from measured
+  counts.
+- [x] Record inclusive half-space boundaries, strict opposite-sign crossings
+  including the closing edge, logical bounds of `4*n` output vertex slots and
+  `n` distance slots, and no new vertex buffer for an unsplit polygon.
+- [x] Distinguish logical reservation requests from allocator capacity and
+  bytes, without claiming test execution or closing the remaining work audit.
 - [x] Keep the retrospective change limited to
   `openspec/changes/harden-surface-visibility/`.
 - [ ] Audit and complete the remaining hard work budget coverage for every

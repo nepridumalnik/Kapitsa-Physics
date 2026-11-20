@@ -230,3 +230,9 @@ The direct bucket construction on `7d6e5a6` measured 25.44 us
 index per triangle-to-cell entry, two cell-sized arrays, and one additional
 prefix offset during construction. This is a logical storage count. The
 measurement does not include allocator overhead or process peak memory.
+
+The split-buffer reservation change on `8cf7271` measured 25.65 us
+(25.23 to 27.05 us) for the small fixture and 2.068 ms (2.061 to
+2.093 ms) for the moderate fixture. These ranges overlap the preceding
+measurements. The change bounds the requested split storage; the timing
+run provides no evidence of a speedup.

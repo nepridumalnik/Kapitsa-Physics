@@ -5,7 +5,8 @@
 Document the surface-visibility hardening on `feat/aero_rest` since
 `ccb5487`, including committed change `07c7285` for independent per-axis
 predicate scaling in generic surface geometry and `7d6e5a6` for stable,
-linear-work shadow-grid bucket construction without sorting entries.
+linear-work shadow-grid bucket construction without sorting entries, plus
+`8cf7271` for measured clipping split reservations.
 
 ## Scope
 
@@ -28,6 +29,12 @@ This change covers:
   that source partition;
 - reusing clipping polygon lists and the vertex-distance scratch buffer within
   a source partition;
+- charging `1 + 16*n` before scratch growth or distance evaluation, then making
+  one exact reservation request per split side from retained vertices and
+  strict crossings, including the closing edge;
+- retaining boundary vertices in both half-spaces, bounding logical requests
+  by `4*n` output vertex slots and `n` distance slots, and moving an unsplit
+  polygon without a new vertex buffer; these are not allocator-capacity bounds;
 - reusing the triangle count obtained during visibility preflight;
 - preflighting grid entry counts, constructing per-cell counts and prefix
   offsets, and populating a single entry-sized final index in input triangle

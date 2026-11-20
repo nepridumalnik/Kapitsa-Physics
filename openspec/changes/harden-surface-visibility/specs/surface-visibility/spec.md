@@ -48,9 +48,10 @@ The surface-visibility intersection calculations SHALL handle finite endpoint
 values whose direct difference overflows when the intersection remains
 representable. Crossing fractions SHALL use a ratio-preserving rescaling in
 that case, and coordinate interpolation SHALL avoid an overflowing endpoint
-difference where the alternative weighted form is representable. Genuine
-non-finite results and precision loss SHALL remain errors rather than being
-silently converted into a missed intersection.
+difference where the alternative weighted form is representable.
+
+Genuine non-finite results and precision loss SHALL remain errors rather than
+being silently converted into a missed intersection.
 
 #### Scenario: Finite distances have an overflowing difference
 
@@ -99,6 +100,28 @@ fallible allocation handling or work accounting.
 - **WHEN** a clipping plane is applied after a prior plane
 - **THEN** polygon buffers are exchanged and the distance buffer is cleared
   and reused rather than recreated for every polygon or plane
+
+### Requirement: Reserve split outputs from measured vertex counts
+
+For each clipping polygon of `n` vertices, preparation SHALL charge
+`1 + 16*n` before evaluating distances or growing scratch. A split SHALL
+reserve each side once using retained vertex and strict crossing counts.
+Boundary vertices SHALL be retained on both sides. The unsplit polygon
+SHALL reuse its vertex buffer. Reservation failure SHALL return
+`AllocationFailed`.
+
+#### Scenario: Split reservations include boundary vertices and the closing edge
+
+- **WHEN** cyclic vertex distances are `[1, 0, -1]`
+- **THEN** `p = 1`, `m = 1` and `c = 1`, with the crossing on the closing edge
+- **AND** each output requests exactly three slots once before emission,
+  retaining the zero-distance vertex and adding the crossing point
+
+#### Scenario: A polygon does not require splitting
+
+- **WHEN** all distances are nonnegative, all are nonpositive, or all are zero
+- **THEN** the polygon is moved onward without allocating a new vertex buffer
+- **AND** distance scratch may still be reserved and reused after the charge
 
 ### Requirement: Construct stable grid buckets with linear work
 
