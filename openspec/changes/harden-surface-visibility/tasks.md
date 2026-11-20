@@ -20,6 +20,16 @@
   of all three axes.
 - [x] Record that work accounting does not provide an exact byte budget or
   exact instruction/elapsed-time bound.
+- [x] Record `7d6e5a6` stable grid bucket construction from preflight entry
+  counts, per-cell counts and prefix offsets, with input-order population of
+  a single entry-sized index instead of sorting temporary entry pairs.
+- [x] Record linear grid construction work: four source-triangle scans plus
+  three units per entry, three per cell and one extra prefix offset.
+- [x] Document `triangle_grid_scatter_preserves_bucket_membership_and_order`:
+  exact synthetic dimensions, offsets and index contents, success at 67 work
+  units and rejection at 66; record the updated 117-unit boundary in
+  `unshadowed_patch_replacement_has_budget_boundary`, without claiming test
+  execution or independent physical validation.
 - [x] Keep the retrospective change limited to
   `openspec/changes/harden-surface-visibility/`.
 - [ ] Audit and complete the remaining hard work budget coverage for every

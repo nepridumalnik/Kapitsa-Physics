@@ -4,7 +4,8 @@
 
 Document the surface-visibility hardening on `feat/aero_rest` since
 `ccb5487`, including committed change `07c7285` for independent per-axis
-predicate scaling in generic surface geometry.
+predicate scaling in generic surface geometry and `7d6e5a6` for stable,
+linear-work shadow-grid bucket construction without sorting entries.
 
 ## Scope
 
@@ -28,6 +29,13 @@ This change covers:
 - reusing clipping polygon lists and the vertex-distance scratch buffer within
   a source partition;
 - reusing the triangle count obtained during visibility preflight;
+- preflighting grid entry counts, constructing per-cell counts and prefix
+  offsets, and populating a single entry-sized final index in input triangle
+  order, preserving canonical order within each bucket without a temporary
+  entry-pair array or grid-entry sorting;
+- recording linear grid construction work in source triangles, cells and
+  triangle-to-cell entries, including the exact synthetic grid layout and
+  budget boundary regression in `7d6e5a6`;
 - carrying the remaining hard surface-work budget into grid operations and
   subsequent charged operations, subject to the existing hard cap; and
 - documenting that work units are heuristic accounting weights, not an exact

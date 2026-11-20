@@ -100,6 +100,35 @@ fallible allocation handling or work accounting.
 - **THEN** polygon buffers are exchanged and the distance buffer is cleared
   and reused rather than recreated for every polygon or plane
 
+### Requirement: Construct stable grid buckets with linear work
+
+Grid construction SHALL preflight entry counts and use per-cell counts and
+prefix offsets to populate the final index in input triangle order. Work
+SHALL scale linearly with source triangles, cells and triangle-to-cell
+entries. Construction SHALL budget `4*T + 3*C + 3*E + 1` units for those
+counts.
+
+#### Scenario: Synthetic grid preserves exact bucket membership and order
+
+- **WHEN** `triangle_grid_scatter_preserves_bucket_membership_and_order`
+  constructs its three synthetic triangles, with the middle triangle's AABB
+  spanning all eight cells
+- **THEN** grid dimensions are `[2, 2, 2]`, prefix offsets are
+  `[0, 2, 3, 4, 5, 6, 7, 8, 10]`, and the final triangle index is
+  `[0, 1, 1, 1, 1, 1, 1, 1, 1, 2]`
+- **AND** construction succeeds with reported build work exactly
+  `4*3 + 3*8 + 3*10 + 1 = 67` at budget 67, while budget 66 returns
+  `WorkBudgetExceeded`
+- **AND** these are synthetic layout and accounting assertions, not test
+  execution evidence, experimental validation or exact allocator-byte bounds
+
+#### Scenario: Patch replacement reflects revised grid accounting
+
+- **WHEN** `unshadowed_patch_replacement_has_budget_boundary` checks its
+  synthetic preparation budget boundary
+- **THEN** its required work is 117 units, including one unit for partition
+  replacement and one for frame conversion, rather than the prior 116
+
 ### Requirement: Charge and propagate the remaining hard work budget
 
 Surface preparation SHALL enforce the shared hard cap and pass the remaining
